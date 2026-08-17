@@ -1,284 +1,656 @@
+// main.c - Clay markdown reader.
+//
+// Usage: clay_markdown_reader <file.md>
+//
+// The file is parsed once with md4c into a block-based IR (markdown.c) and
+// rendered every frame with Clay. Paragraphs with inline styles are
+// pre-wrapped by richtext.c. The file is re-parsed when it changes on disk.
+
 #define CLAY_IMPLEMENTATION
 #include "../clay/clay.h"
 #include "../clay/renderers/raylib/clay_renderer_raylib.c"
 
-const uint32_t FONT_ID_BODY_24 = 0;
-const uint32_t FONT_ID_BODY_16 = 1;
-#define COLOR_ORANGE (Clay_Color){225, 138, 50, 255}
-#define COLOR_BLUE (Clay_Color){111, 173, 162, 255}
-#define COLOR_WHITE (Clay_Color){255, 255, 255, 255}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
-Texture2D profilePicture;
-#define RAYLIB_VECTOR2_TO_CLAY_VECTOR2(vector) \
-    (Clay_Vector2) { .x = vector.x, .y = vector.y }
+#include "markdown.h"
+#include "richtext.h"
 
-Clay_String profileText = CLAY_STRING_CONST("Profile Page one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen");
-Clay_TextElementConfig headerTextConfig = {.fontId = 1, .letterSpacing = 5, .fontSize = 16, .textColor = {0, 0, 0, 255}};
+// ---------------------------------------------------------------------------
+// Fonts and theme
 
-void HandleHeaderButtonInteraction(Clay_ElementId elementId, Clay_PointerData pointerData, intptr_t userData)
+enum {
+    FONT_REGULAR = 0,
+    FONT_BOLD,
+    FONT_ITALIC,
+    FONT_BOLD_ITALIC,
+    FONT_MONO,
+    FONT_COUNT,
+};
+
+#define COLOR_BG (Clay_Color){24, 24, 28, 255}
+#define COLOR_CONTENT_BG (Clay_Color){30, 30, 36, 255}
+#define COLOR_TEXT (Clay_Color){222, 222, 228, 255}
+#define COLOR_MUTED (Clay_Color){140, 140, 150, 255}
+#define COLOR_LINK (Clay_Color){120, 160, 255, 255}
+#define COLOR_LINK_HOVER (Clay_Color){170, 200, 255, 255}
+#define COLOR_CODE_BG (Clay_Color){42, 42, 52, 255}
+#define COLOR_CODE_TEXT (Clay_Color){230, 200, 140, 255}
+#define COLOR_QUOTE_BG (Clay_Color){36, 38, 48, 255}
+#define COLOR_QUOTE_BORDER (Clay_Color){120, 160, 255, 255}
+#define COLOR_HR (Clay_Color){64, 64, 74, 255}
+#define COLOR_SCROLLBAR (Clay_Color){120, 120, 160, 150}
+#define COLOR_SCROLLBAR_HOVER (Clay_Color){100, 100, 140, 150}
+#define COLOR_ERROR_BG (Clay_Color){70, 40, 40, 255}
+
+#define CONTENT_PADDING 32
+#define SCROLLBAR_WIDTH 14
+#define BLOCK_SPACING 14
+
+static uint16_t HeadingSizes[7] = {0, 32, 27, 23, 20, 17, 15};
+
+static RichTextStyle BaseStyle = {
+    .font_regular = FONT_REGULAR,
+    .font_bold = FONT_BOLD,
+    .font_italic = FONT_ITALIC,
+    .font_bold_italic = FONT_BOLD_ITALIC,
+    .font_mono = FONT_MONO,
+    .font_size = 18,
+    .text_color = COLOR_TEXT,
+    .code_text_color = COLOR_CODE_TEXT,
+    .code_bg_color = COLOR_CODE_BG,
+    .link_color = COLOR_LINK,
+    .link_hover_color = COLOR_LINK_HOVER,
+};
+
+// ---------------------------------------------------------------------------
+// App state
+
+static MdDocument doc = {0};
+static const char *md_path = NULL;
+static char md_dir[4096] = {0};
+static time_t md_mtime = 0;
+static double last_poll_time = 0;
+
+static const char *hovered_link = NULL;
+
+static bool reinitialize_clay = false;
+static bool debug_enabled = false;
+
+typedef struct {
+    Clay_Vector2 click_origin;
+    Clay_Vector2 position_origin;
+    bool mouse_down;
+} ScrollbarDragData;
+
+static ScrollbarDragData scrollbar_drag = {0};
+
+// ---------------------------------------------------------------------------
+// Image cache
+
+typedef struct {
+    char path[8192];
+    Texture2D texture;
+    bool loaded;
+} CachedImage;
+
+static CachedImage image_cache[64];
+static int image_cache_count = 0;
+
+static const char *ResolveImagePath(const char *src)
 {
-    if (pointerData.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME)
+    static char resolved[8192];
+    if (strncmp(src, "http://", 7) == 0 || strncmp(src, "https://", 8) == 0 ||
+        src[0] == '/')
     {
-        // Do some click handling
+        return src;
+    }
+    snprintf(resolved, sizeof(resolved), "%s/%s", md_dir, src);
+    return resolved;
+}
+
+static CachedImage *GetCachedImage(const char *path)
+{
+    for (int i = 0; i < image_cache_count; i++)
+    {
+        if (strcmp(image_cache[i].path, path) == 0)
+        {
+            return &image_cache[i];
+        }
+    }
+    if (image_cache_count >= 64)
+    {
+        return NULL;
+    }
+    CachedImage *entry = &image_cache[image_cache_count++];
+    snprintf(entry->path, sizeof(entry->path), "%s", path);
+    entry->texture = LoadTexture(path);
+    entry->loaded = entry->texture.id != 0;
+    return entry;
+}
+
+static void ClearImageCache(void)
+{
+    for (int i = 0; i < image_cache_count; i++)
+    {
+        if (image_cache[i].loaded)
+        {
+            UnloadTexture(image_cache[i].texture);
+        }
+    }
+    image_cache_count = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Layout
+
+static float TextAreaWidth(void)
+{
+    float width = (float)GetScreenWidth() - CONTENT_PADDING * 2 - SCROLLBAR_WIDTH;
+    if (width < 50)
+    {
+        width = 50;
+    }
+    return width;
+}
+
+static void RenderBlock(int index, float available_width, RichTextEmitState *emit)
+{
+    MdBlock *block = &doc.blocks[index];
+    switch (block->type)
+    {
+        case MDB_PARAGRAPH:
+        case MDB_HEADING:
+        case MDB_LIST_ITEM:
+        case MDB_QUOTE:
+        {
+            RichTextStyle style = BaseStyle;
+            if (block->type == MDB_HEADING)
+            {
+                int level = block->heading_level;
+                if (level < 1)
+                {
+                    level = 1;
+                }
+                if (level > 6)
+                {
+                    level = 6;
+                }
+                style.font_size = HeadingSizes[level];
+            }
+
+            if (block->type == MDB_QUOTE)
+            {
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                         .padding = {16, 16, 10, 10},
+                                         .childGap = 8,
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .backgroundColor = COLOR_QUOTE_BG,
+                              .border = {.color = COLOR_QUOTE_BORDER,
+                                         .width = {.left = 4}}})
+                {
+                    RichText_RenderParagraph(block, &doc.arena, available_width, &style, emit);
+                }
+            }
+            else if (block->type == MDB_LIST_ITEM)
+            {
+                int indent = block->list_indent;
+                if (indent < 0)
+                {
+                    indent = 0;
+                }
+                CLAY(CLAY_IDI("DbgLiRow", index), {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                         .padding = {.left = (uint16_t)(indent * 24)},
+                                         .childGap = 8,
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)},
+                                         .childAlignment = {.y = CLAY_ALIGN_Y_TOP}}})
+                {
+                    if (block->list_item_task)
+                    {
+                        const char *checkbox = block->list_item_done ? "\xE2\x98\x91" : "\xE2\x98\x90";
+                        Clay_String checkbox_string = {.length = (int32_t)strlen(checkbox), .chars = checkbox};
+                        CLAY_TEXT(checkbox_string,
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                    .fontSize = style.font_size,
+                                                    .textColor = block->list_item_done ? COLOR_MUTED : COLOR_LINK,
+                                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
+                    else
+                    {
+                        Clay_String marker_string = {.length = (int32_t)strlen(block->list_marker), .chars = block->list_marker};
+                        CLAY_TEXT(marker_string,
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                    .fontSize = style.font_size,
+                                                    .textColor = COLOR_MUTED,
+                                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
+                    CLAY(CLAY_IDI("DbgLiInner", index), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    {
+                        RichText_RenderParagraph(block, &doc.arena, available_width, &style, emit);
+                    }
+                }
+            }
+            else
+            {
+                RichText_RenderParagraph(block, &doc.arena, available_width, &style, emit);
+            }
+            break;
+        }
+        case MDB_CODE:
+        case MDB_HTML:
+        {
+            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .padding = {14, 14, 12, 12},
+                                     .childGap = 2,
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                          .backgroundColor = COLOR_CODE_BG,
+                          .cornerRadius = CLAY_CORNER_RADIUS(6)})
+            {
+                char *line = block->raw_text;
+                int line_count = 0;
+                if (strlen(block->raw_text) == 0)
+                {
+                    line = NULL;
+                }
+                while (line)
+                {
+                    char *newline = strchr(line, '\n');
+                    int length = newline ? (int)(newline - line) : (int)strlen(line);
+                    Clay_String text = {.length = length, .chars = line};
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    {
+                        CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                          .fontSize = 16,
+                                                          .textColor = COLOR_CODE_TEXT,
+                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
+                    line = newline ? newline + 1 : NULL;
+                    line_count++;
+                }
+                if (line_count == 0)
+                {
+                    CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                                  .fontSize = 16,
+                                                                  .textColor = COLOR_CODE_TEXT,
+                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+            }
+            break;
+        }
+        case MDB_IMAGE:
+        {
+            const char *path = ResolveImagePath(block->image_path);
+            bool remote = strncmp(block->image_path, "http", 4) == 0;
+            CachedImage *image = (!remote && FileExists(path)) ? GetCachedImage(path) : NULL;
+            if (image && image->loaded)
+            {
+                float width = (float)image->texture.width;
+                if (width > available_width)
+                {
+                    width = available_width;
+                }
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                {
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(width)}},
+                                  .aspectRatio = (float)image->texture.width / (float)image->texture.height,
+                                  .image = {.imageData = &image->texture}})
+                    {
+                    }
+                }
+            }
+            else
+            {
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                         .padding = {12, 12, 8, 8},
+                                         .childGap = 8,
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .backgroundColor = COLOR_CODE_BG,
+                              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                {
+                    char message[2400];
+                    if (remote)
+                    {
+                        snprintf(message, sizeof(message), "[image unavailable, remote URLs are not loaded] %s",
+                                 block->image_alt);
+                    }
+                    else
+                    {
+                        snprintf(message, sizeof(message), "[image not found] %s", block->image_alt);
+                    }
+                    Clay_String message_string = {.length = (int32_t)strlen(message), .chars = message};
+                    CLAY_TEXT(message_string, CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
+                                                                .fontSize = 15,
+                                                                .textColor = COLOR_MUTED}));
+                }
+            }
+            break;
+        }
+        case MDB_HR:
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                .height = CLAY_SIZING_FIXED(2)}},
+                          .backgroundColor = COLOR_HR})
+            {
+            }
+            break;
+        }
     }
 }
 
-Clay_ElementDeclaration HeaderButtonStyle(bool hovered, bool clicked)
-{
-    return (Clay_ElementDeclaration){
-        .layout = {.padding = {16, 16, 8, 8}},
-        .backgroundColor = clicked ? COLOR_WHITE : hovered ? COLOR_ORANGE
-                                                           : COLOR_BLUE,
-        .cornerRadius = 4,
-    };
-}
-
-// Examples of re-usable "Components"
-void RenderHeaderButton(Clay_String text)
-{
-    CLAY_AUTO_ID(HeaderButtonStyle(Clay_Hovered(), Clay_Hovered() && IsMouseButtonDown(0)))
-    {
-        CLAY_TEXT(text, CLAY_TEXT_CONFIG(headerTextConfig));
-    }
-}
-
-Clay_LayoutConfig dropdownTextItemLayout = {.padding = {8, 8, 4, 4}};
-Clay_TextElementConfig dropdownTextElementConfig = {.fontSize = 24, .textColor = {255, 255, 255, 255}};
-
-void RenderDropdownTextItem(int index)
-{
-    CLAY_AUTO_ID({.layout = dropdownTextItemLayout, .backgroundColor = {180, 180, 180, 255}})
-    {
-        CLAY_TEXT(CLAY_STRING("I'm a text field in a scroll container."), dropdownTextElementConfig);
-    }
-}
-
-Clay_RenderCommandArray CreateLayout(void)
+static Clay_RenderCommandArray CreateLayout(void)
 {
     Clay_BeginLayout();
-    CLAY(CLAY_ID("OuterContainer"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}, .padding = {16, 16, 16, 16}, .childGap = 16}, .backgroundColor = {200, 200, 200, 255}})
+    RichText_BeginLayout();
+    hovered_link = NULL;
+
+    CLAY(CLAY_ID("Root"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                 .height = CLAY_SIZING_GROW(0)},
+                                      .padding = {CONTENT_PADDING, CONTENT_PADDING, CONTENT_PADDING, CONTENT_PADDING}},
+                           .backgroundColor = COLOR_BG})
     {
-        CLAY(CLAY_ID("SideBar"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .sizing = {.width = CLAY_SIZING_FIXED(300), .height = CLAY_SIZING_GROW(0)}, .padding = {16, 16, 16, 16}, .childGap = 16}, .backgroundColor = {150, 150, 255, 255}})
+        CLAY(CLAY_ID("DocumentScroll"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                                    .sizing = {.width = CLAY_SIZING_GROW(0),
+                                                               .height = CLAY_SIZING_GROW(0)}},
+                                         .clip = {.vertical = true,
+                                                  .horizontal = true,
+                                                  .childOffset = Clay_GetScrollOffset()}})
         {
-            CLAY(CLAY_ID("ProfilePictureOuter"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}, .padding = {8, 8, 8, 8}, .childGap = 8, .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}, .backgroundColor = {130, 130, 255, 255}})
+            CLAY(CLAY_ID("DocumentContent"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                                         .childGap = BLOCK_SPACING,
+                                                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
-                CLAY(CLAY_ID("ProfilePicture"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(60), .height = CLAY_SIZING_FIXED(60)}}, .image = {.imageData = &profilePicture}}) {}
-                CLAY_TEXT(profileText, CLAY_TEXT_CONFIG({.fontSize = 24, .textColor = {0, 0, 0, 255}, .textAlignment = CLAY_TEXT_ALIGN_RIGHT}));
-            }
-            CLAY(CLAY_ID("SidebarBlob1"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(50)}}, .backgroundColor = {110, 110, 255, 255}}) {}
-            CLAY(CLAY_ID("SidebarBlob2"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(50)}}, .backgroundColor = {110, 110, 255, 255}}) {}
-            CLAY(CLAY_ID("SidebarBlob3"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(50)}}, .backgroundColor = {110, 110, 255, 255}}) {}
-            CLAY(CLAY_ID("SidebarBlob4"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(50)}}, .backgroundColor = {110, 110, 255, 255}}) {}
-        }
-
-        CLAY(CLAY_ID("RightPanel"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}, .childGap = 16}})
-        {
-            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}, .childAlignment = {.x = CLAY_ALIGN_X_RIGHT}, .padding = {8, 8, 8, 8}, .childGap = 8}, .backgroundColor = {180, 180, 180, 255}})
-            {
-                RenderHeaderButton(CLAY_STRING("Header Item 1"));
-                RenderHeaderButton(CLAY_STRING("Header Item 2"));
-                RenderHeaderButton(CLAY_STRING("Header Item 3"));
-            }
-            CLAY(CLAY_ID("MainContent"), {
-                                             .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = {16, 16, 16, 16}, .childGap = 16, .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                                             .backgroundColor = {200, 200, 255, 255},
-                                             .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()},
-                                         })
-            {
-                CLAY_TEXT(CLAY_STRING("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt."),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_ID_BODY_24, .fontSize = 24, .textColor = {0, 0, 0, 255}}));
-
-                CLAY(CLAY_ID("Photos2"), {.layout = {.childGap = 16, .padding = {16, 16, 16, 16}}, .backgroundColor = {180, 180, 220, Clay_Hovered() ? 120 : 255}})
+                if (doc.load_error)
                 {
-                    CLAY(CLAY_ID("Picture4"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(120), .height = CLAY_SIZING_FIXED(120)}}, .image = {.imageData = &profilePicture}}) {}
-                    CLAY(CLAY_ID("Picture5"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(120), .height = CLAY_SIZING_FIXED(120)}}, .image = {.imageData = &profilePicture}}) {}
-                    CLAY(CLAY_ID("Picture6"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(120), .height = CLAY_SIZING_FIXED(120)}}, .image = {.imageData = &profilePicture}}) {}
-                }
-
-                CLAY_TEXT(CLAY_STRING("Faucibus purus in massa tempor nec. Nec ullamcorper sit amet risus nullam eget felis eget nunc. Diam vulputate ut pharetra sit amet aliquam id diam. Lacus suspendisse faucibus interdum posuere lorem. A diam sollicitudin tempor id. Amet massa vitae tortor condimentum lacinia. Aliquet nibh praesent tristique magna."),
-                          CLAY_TEXT_CONFIG({.fontSize = 24, .lineHeight = 60, .textColor = {0, 0, 0, 255}, .textAlignment = CLAY_TEXT_ALIGN_CENTER}));
-
-                CLAY_TEXT(CLAY_STRING("Suspendisse in est ante in nibh. Amet venenatis urna cursus eget nunc scelerisque viverra. Elementum sagittis vitae et leo duis ut diam quam nulla. Enim nulla aliquet porttitor lacus. Pellentesque habitant morbi tristique senectus et. Facilisi nullam vehicula ipsum a arcu cursus vitae.\nSem fringilla ut morbi tincidunt. Euismod quis viverra nibh cras pulvinar mattis nunc sed. Velit sed ullamcorper morbi tincidunt ornare massa. Varius quam quisque id diam vel quam. Nulla pellentesque dignissim enim sit amet venenatis. Enim lobortis scelerisque fermentum dui faucibus in. Pretium viverra suspendisse potenti nullam ac tortor vitae. Lectus vestibulum mattis ullamcorper velit sed. Eget mauris pharetra et ultrices neque ornare aenean euismod elementum. Habitant morbi tristique senectus et. Integer vitae justo eget magna fermentum iaculis eu. Semper quis lectus nulla at volutpat diam. Enim praesent elementum facilisis leo. Massa vitae tortor condimentum lacinia quis vel."),
-                          CLAY_TEXT_CONFIG({.fontSize = 24, .textColor = {0, 0, 0, 255}}));
-
-                CLAY(CLAY_ID("Photos"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}, .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}, .childGap = 16, .padding = {16, 16, 16, 16}}, .backgroundColor = {180, 180, 220, 255}})
-                {
-                    CLAY(CLAY_ID("Picture2"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(120)}}, .aspectRatio = 0.5, .image = {.imageData = &profilePicture}}) {}
-                    CLAY(CLAY_ID("Picture1"), {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = {8, 8, 8, 8}}, .backgroundColor = {170, 170, 220, 255}})
+                    CLAY(CLAY_ID("LoadError"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                                           .padding = {16, 16, 12, 12},
+                                                           .childGap = 8,
+                                                           .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                                                .backgroundColor = COLOR_ERROR_BG,
+                                                .cornerRadius = CLAY_CORNER_RADIUS(6)})
                     {
-                        CLAY(CLAY_ID("ProfilePicture2"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(60), .height = CLAY_SIZING_FIXED(60)}}, .image = {.imageData = &profilePicture}}) {}
-                        CLAY_TEXT(CLAY_STRING("Image caption below"), CLAY_TEXT_CONFIG({.fontSize = 24, .textColor = {0, 0, 0, 255}}));
+                        CLAY_TEXT(CLAY_STRING("Could not display this markdown file."),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                        Clay_String error_string = {.length = (int32_t)strlen(doc.load_error), .chars = doc.load_error};
+                        CLAY_TEXT(error_string,
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 16, .textColor = COLOR_MUTED}));
                     }
-                    CLAY(CLAY_ID("Picture3"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(120)}}, .aspectRatio = 2, .image = {.imageData = &profilePicture}}) {}
                 }
 
-                CLAY_TEXT(CLAY_STRING("Amet cursus sit amet dictum sit amet justo donec. Et malesuada fames ac turpis egestas maecenas. A lacus vestibulum sed arcu non odio euismod lacinia. Gravida neque convallis a cras. Dui nunc mattis enim ut tellus elementum sagittis vitae et. Orci sagittis eu volutpat odio facilisis mauris. Neque gravida in fermentum et sollicitudin ac orci. Ultrices dui sapien eget mi proin sed libero. Euismod quis viverra nibh cras pulvinar mattis. Diam volutpat commodo sed egestas egestas. In fermentum posuere urna nec tincidunt praesent semper. Integer eget aliquet nibh praesent tristique magna.\nId cursus metus aliquam eleifend mi in. Sed pulvinar proin gravida hendrerit lectus a. Etiam tempor orci eu lobortis elementum nibh tellus. Nullam vehicula ipsum a arcu cursus vitae. Elit scelerisque mauris pellentesque pulvinar pellentesque habitant morbi tristique senectus. Condimentum lacinia quis vel eros donec ac odio. Mattis pellentesque id nibh tortor id aliquet lectus. Turpis egestas integer eget aliquet nibh praesent tristique. Porttitor massa id neque aliquam vestibulum morbi. Mauris commodo quis imperdiet massa tincidunt nunc pulvinar sapien et. Nunc scelerisque viverra mauris in aliquam sem fringilla. Suspendisse ultrices gravida dictum fusce ut placerat orci nulla.\nLacus laoreet non curabitur gravida arcu ac tortor dignissim. Urna nec tincidunt praesent semper feugiat nibh sed pulvinar. Tristique senectus et netus et malesuada fames ac. Nunc aliquet bibendum enim facilisis gravida. Egestas maecenas pharetra convallis posuere morbi leo urna molestie. Sapien nec sagittis aliquam malesuada bibendum arcu vitae elementum curabitur. Ac turpis egestas maecenas pharetra convallis posuere morbi leo urna. Viverra vitae congue eu consequat. Aliquet enim tortor at auctor urna. Ornare massa eget egestas purus viverra accumsan in nisl nisi. Elit pellentesque habitant morbi tristique senectus et netus et malesuada.\nSuspendisse ultrices gravida dictum fusce ut placerat orci nulla pellentesque. Lobortis feugiat vivamus at augue eget arcu. Vitae justo eget magna fermentum iaculis eu. Gravida rutrum quisque non tellus orci. Ipsum faucibus vitae aliquet nec. Nullam non nisi est sit amet. Nunc consequat interdum varius sit amet mattis vulputate enim. Sem fringilla ut morbi tincidunt augue interdum. Vitae purus faucibus ornare suspendisse. Massa tincidunt nunc pulvinar sapien et. Fringilla ut morbi tincidunt augue interdum velit euismod in. Donec massa sapien faucibus et. Est placerat in egestas erat imperdiet. Gravida rutrum quisque non tellus. Morbi non arcu risus quis varius quam quisque id diam. Habitant morbi tristique senectus et netus et malesuada fames ac. Eget lorem dolor sed viverra.\nOrnare massa eget egestas purus viverra. Varius vel pharetra vel turpis nunc eget lorem. Consectetur purus ut faucibus pulvinar elementum. Placerat in egestas erat imperdiet sed euismod nisi. Interdum velit euismod in pellentesque massa placerat duis ultricies lacus. Aliquam nulla facilisi cras fermentum odio eu. Est pellentesque elit ullamcorper dignissim cras tincidunt. Nunc sed id semper risus in hendrerit gravida rutrum. A pellentesque sit amet porttitor eget dolor morbi. Pellentesque habitant morbi tristique senectus et netus et malesuada fames. Nisl nunc mi ipsum faucibus vitae aliquet nec ullamcorper. Sed id semper risus in hendrerit gravida. Tincidunt praesent semper feugiat nibh. Aliquet lectus proin nibh nisl condimentum id venenatis a. Enim sit amet venenatis urna cursus eget. In egestas erat imperdiet sed euismod nisi porta lorem mollis. Lacinia quis vel eros donec ac odio tempor orci. Donec pretium vulputate sapien nec sagittis aliquam malesuada bibendum arcu. Erat pellentesque adipiscing commodo elit at.\nEgestas sed sed risus pretium quam vulputate. Vitae congue mauris rhoncus aenean vel elit scelerisque mauris pellentesque. Aliquam malesuada bibendum arcu vitae elementum. Congue mauris rhoncus aenean vel elit scelerisque mauris. Pellentesque dignissim enim sit amet venenatis urna cursus. Et malesuada fames ac turpis egestas sed tempus urna. Vel fringilla est ullamcorper eget nulla facilisi etiam dignissim. Nibh cras pulvinar mattis nunc sed blandit libero. Fringilla est ullamcorper eget nulla facilisi etiam dignissim. Aenean euismod elementum nisi quis eleifend quam adipiscing vitae proin. Mauris pharetra et ultrices neque ornare aenean euismod elementum. Ornare quam viverra orci sagittis eu. Odio ut sem nulla pharetra diam sit amet nisl suscipit. Ornare lectus sit amet est. Ullamcorper sit amet risus nullam eget. Tincidunt lobortis feugiat vivamus at augue eget arcu dictum.\nUrna nec tincidunt praesent semper feugiat nibh. Ut venenatis tellus in metus vulputate eu scelerisque felis. Cursus risus at ultrices mi tempus. In pellentesque massa placerat duis ultricies lacus sed turpis. Platea dictumst quisque sagittis purus. Cras adipiscing enim eu turpis egestas. Egestas sed tempus urna et pharetra pharetra. Netus et malesuada fames ac turpis egestas integer eget aliquet. Ac turpis egestas sed tempus. Sed lectus vestibulum mattis ullamcorper velit sed. Ante metus dictum at tempor commodo ullamcorper a. Augue neque gravida in fermentum et sollicitudin ac. Praesent semper feugiat nibh sed pulvinar proin gravida. Metus aliquam eleifend mi in nulla posuere sollicitudin aliquam ultrices. Neque gravida in fermentum et sollicitudin ac orci phasellus egestas.\nRidiculus mus mauris vitae ultricies. Morbi quis commodo odio aenean. Duis ultricies lacus sed turpis. Non pulvinar neque laoreet suspendisse interdum consectetur. Scelerisque eleifend donec pretium vulputate sapien nec sagittis aliquam. Volutpat est velit egestas dui id ornare arcu odio ut. Viverra tellus in hac habitasse platea dictumst vestibulum rhoncus est. Vestibulum lectus mauris ultrices eros. Sed blandit libero volutpat sed cras ornare. Id leo in vitae turpis massa sed elementum tempus. Gravida dictum fusce ut placerat orci nulla pellentesque. Pretium quam vulputate dignissim suspendisse in. Nisl suscipit adipiscing bibendum est ultricies integer quis auctor. Risus viverra adipiscing at in tellus. Turpis nunc eget lorem dolor sed viverra ipsum. Senectus et netus et malesuada fames ac. Habitasse platea dictumst vestibulum rhoncus est. Nunc sed id semper risus in hendrerit gravida. Felis eget velit aliquet sagittis id. Eget felis eget nunc lobortis.\nMaecenas pharetra convallis posuere morbi leo. Maecenas volutpat blandit aliquam etiam. A condimentum vitae sapien pellentesque habitant morbi tristique senectus et. Pulvinar mattis nunc sed blandit libero volutpat sed. Feugiat in ante metus dictum at tempor commodo ullamcorper. Vel pharetra vel turpis nunc eget lorem dolor. Est placerat in egestas erat imperdiet sed euismod. Quisque non tellus orci ac auctor augue mauris augue. Placerat vestibulum lectus mauris ultrices eros in cursus turpis. Enim nunc faucibus a pellentesque sit. Adipiscing vitae proin sagittis nisl. Iaculis at erat pellentesque adipiscing commodo elit at imperdiet. Aliquam sem fringilla ut morbi.\nArcu odio ut sem nulla pharetra diam sit amet nisl. Non diam phasellus vestibulum lorem sed. At erat pellentesque adipiscing commodo elit at. Lacus luctus accumsan tortor posuere ac ut consequat. Et malesuada fames ac turpis egestas integer. Tristique magna sit amet purus. A condimentum vitae sapien pellentesque habitant. Quis varius quam quisque id diam vel quam. Est ullamcorper eget nulla facilisi etiam dignissim diam quis. Augue interdum velit euismod in pellentesque massa. Elit scelerisque mauris pellentesque pulvinar pellentesque habitant. Vulputate eu scelerisque felis imperdiet. Nibh tellus molestie nunc non blandit massa. Velit euismod in pellentesque massa placerat. Sed cras ornare arcu dui. Ut sem viverra aliquet eget sit. Eu lobortis elementum nibh tellus molestie nunc non. Blandit libero volutpat sed cras ornare arcu dui vivamus.\nSit amet aliquam id diam maecenas. Amet risus nullam eget felis eget nunc lobortis mattis aliquam. Magna sit amet purus gravida. Egestas purus viverra accumsan in nisl nisi. Leo duis ut diam quam. Ante metus dictum at tempor commodo ullamcorper. Ac turpis egestas integer eget. Fames ac turpis egestas integer eget aliquet nibh. Sem integer vitae justo eget magna fermentum. Semper auctor neque vitae tempus quam pellentesque nec nam aliquam. Vestibulum mattis ullamcorper velit sed. Consectetur adipiscing elit duis tristique sollicitudin nibh. Massa id neque aliquam vestibulum morbi blandit cursus risus.\nCursus sit amet dictum sit amet justo donec enim diam. Egestas erat imperdiet sed euismod. Nullam vehicula ipsum a arcu cursus vitae congue mauris. Habitasse platea dictumst vestibulum rhoncus est pellentesque elit. Duis ultricies lacus sed turpis tincidunt id aliquet risus feugiat. Faucibus ornare suspendisse sed nisi lacus sed viverra. Pretium fusce id velit ut tortor pretium viverra. Fermentum odio eu feugiat pretium nibh ipsum consequat nisl vel. Senectus et netus et malesuada. Tellus pellentesque eu tincidunt tortor aliquam. Aenean sed adipiscing diam donec adipiscing tristique risus nec feugiat. Quis vel eros donec ac odio. Id interdum velit laoreet id donec ultrices tincidunt.\nMassa id neque aliquam vestibulum morbi blandit cursus risus at. Enim tortor at auctor urna nunc id cursus metus. Lorem ipsum dolor sit amet consectetur. At quis risus sed vulputate odio. Facilisis mauris sit amet massa vitae tortor condimentum lacinia quis. Et malesuada fames ac turpis egestas maecenas. Bibendum arcu vitae elementum curabitur vitae nunc sed velit dignissim. Viverra orci sagittis eu volutpat odio facilisis mauris. Adipiscing bibendum est ultricies integer quis auctor elit sed. Neque viverra justo nec ultrices dui sapien. Elementum nibh tellus molestie nunc non blandit massa enim. Euismod elementum nisi quis eleifend quam adipiscing vitae proin sagittis. Faucibus ornare suspendisse sed nisi. Quis viverra nibh cras pulvinar mattis nunc sed blandit. Tristique senectus et netus et. Magnis dis parturient montes nascetur ridiculus mus.\nDolor magna eget est lorem ipsum dolor. Nibh sit amet commodo nulla. Donec pretium vulputate sapien nec sagittis aliquam malesuada. Cras adipiscing enim eu turpis egestas pretium. Cras ornare arcu dui vivamus arcu felis bibendum ut tristique. Mus mauris vitae ultricies leo integer. In nulla posuere sollicitudin aliquam ultrices sagittis orci. Quis hendrerit dolor magna eget. Nisl tincidunt eget nullam non. Vitae congue eu consequat ac felis donec et odio. Vivamus at augue eget arcu dictum varius duis at. Ornare quam viverra orci sagittis.\nErat nam at lectus urna duis convallis. Massa placerat duis ultricies lacus sed turpis tincidunt id aliquet. Est ullamcorper eget nulla facilisi etiam dignissim diam. Arcu vitae elementum curabitur vitae nunc sed velit dignissim sodales. Tortor vitae purus faucibus ornare suspendisse sed nisi lacus. Neque viverra justo nec ultrices dui sapien eget mi proin. Viverra accumsan in nisl nisi scelerisque eu ultrices. Consequat interdum varius sit amet mattis. In aliquam sem fringilla ut morbi. Eget arcu dictum varius duis at. Nulla aliquet porttitor lacus luctus accumsan tortor posuere. Arcu bibendum at varius vel pharetra vel turpis. Hac habitasse platea dictumst quisque sagittis purus sit amet. Sapien eget mi proin sed libero enim sed. Quam elementum pulvinar etiam non quam lacus suspendisse faucibus interdum. Semper viverra nam libero justo. Fusce ut placerat orci nulla pellentesque dignissim enim sit amet. Et malesuada fames ac turpis egestas maecenas pharetra convallis posuere.\nTurpis egestas sed tempus urna et pharetra pharetra massa. Gravida in fermentum et sollicitudin ac orci phasellus. Ornare suspendisse sed nisi lacus sed viverra tellus in. Fames ac turpis egestas maecenas pharetra convallis posuere. Mi proin sed libero enim sed faucibus turpis. Sit amet mauris commodo quis imperdiet massa tincidunt nunc. Ut etiam sit amet nisl purus in mollis nunc. Habitasse platea dictumst quisque sagittis purus sit amet volutpat consequat. Eget aliquet nibh praesent tristique magna. Sit amet est placerat in egestas erat. Commodo sed egestas egestas fringilla. Enim nulla aliquet porttitor lacus luctus accumsan tortor posuere ac. Et molestie ac feugiat sed lectus vestibulum mattis ullamcorper. Dignissim convallis aenean et tortor at risus viverra. Morbi blandit cursus risus at ultrices mi. Ac turpis egestas integer eget aliquet nibh praesent tristique magna.\nVolutpat sed cras ornare arcu dui. Egestas erat imperdiet sed euismod nisi porta lorem mollis aliquam. Viverra justo nec ultrices dui sapien. Amet risus nullam eget felis eget nunc lobortis. Metus aliquam eleifend mi in. Ut eu sem integer vitae. Auctor elit sed vulputate mi sit amet. Nisl nisi scelerisque eu ultrices. Dictum fusce ut placerat orci nulla. Pellentesque habitant morbi tristique senectus et. Auctor elit sed vulputate mi sit. Tincidunt arcu non sodales neque. Mi in nulla posuere sollicitudin aliquam. Morbi non arcu risus quis varius quam quisque id diam. Cras adipiscing enim eu turpis egestas pretium aenean pharetra magna. At auctor urna nunc id cursus metus aliquam. Mauris a diam maecenas sed enim ut sem viverra. Nunc scelerisque viverra mauris in. In iaculis nunc sed augue lacus viverra vitae congue eu. Volutpat blandit aliquam etiam erat velit scelerisque in dictum non."),
-                          CLAY_TEXT_CONFIG({.fontSize = 24, .textColor = {0, 0, 0, 255}}));
+                float available_width = TextAreaWidth();
+                RichTextEmitState emit = {.hovered_link = NULL};
+                for (int i = 0; i < doc.block_count; i++)
+                {
+                    // Add breathing room above headings (but not the first block).
+                    bool heading = doc.blocks[i].type == MDB_HEADING;
+                    int spacing_above = i > 0 ? (heading ? BLOCK_SPACING : 0) : 0;
+                    if (spacing_above > 0)
+                    {
+                        CLAY(CLAY_IDI("HeadingSpacer", i),
+                             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                    .height = CLAY_SIZING_FIXED((float)spacing_above)}}})
+                        {
+                        }
+                    }
+                    RenderBlock(i, available_width, &emit);
+                }
+                hovered_link = emit.hovered_link;
             }
         }
 
-        CLAY(CLAY_ID("Blob4Floating2"), {.floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID, .zIndex = 1, .parentId = Clay_GetElementId(CLAY_STRING("SidebarBlob4")).id}})
+        // Scrollbar indicator (positioned from the previous frame's scroll
+        // data, same approach as the clay sidebar demo). Declared after the
+        // scroll container so clay can resolve the attach target.
+        Clay_ScrollContainerData scroll_data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("DocumentScroll")));
+        if (scroll_data.found && scroll_data.contentDimensions.height > 0)
         {
-            CLAY(CLAY_ID("ScrollContainer"), {.layout = {.sizing = {.height = CLAY_SIZING_FIXED(200)}, .childGap = 2}, .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}})
+            float thumb_height = (scroll_data.scrollContainerDimensions.height / scroll_data.contentDimensions.height) * scroll_data.scrollContainerDimensions.height;
+            CLAY(CLAY_ID("ScrollBar"), {.floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+                                                     .offset = {.y = -(scroll_data.scrollPosition->y / scroll_data.contentDimensions.height) * scroll_data.scrollContainerDimensions.height},
+                                                     .zIndex = 1,
+                                                     .parentId = Clay_GetElementId(CLAY_STRING("DocumentScroll")).id,
+                                                     .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP,
+                                                                      .parent = CLAY_ATTACH_POINT_RIGHT_TOP}}})
             {
-                CLAY(CLAY_ID("FloatingContainer2"), {.layout.sizing.height = CLAY_SIZING_GROW(), .floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .zIndex = 1}})
+                CLAY(CLAY_ID("ScrollBarHandle"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(SCROLLBAR_WIDTH),
+                                                                        .height = CLAY_SIZING_FIXED(thumb_height)}},
+                                                  .backgroundColor = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ScrollBar"))) ? COLOR_SCROLLBAR_HOVER : COLOR_SCROLLBAR,
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(SCROLLBAR_WIDTH / 2)})
                 {
-                    CLAY(CLAY_ID("FloatingContainerInner"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(300), .height = CLAY_SIZING_GROW()}, .padding = {16, 16, 16, 16}}, .backgroundColor = {140, 80, 200, 200}})
-                    {
-                        CLAY_TEXT(CLAY_STRING("I'm an inline floating container."), CLAY_TEXT_CONFIG({.fontSize = 24, .textColor = {255, 255, 255, 255}}));
-                    }
                 }
-                CLAY(CLAY_ID("ScrollContainerInner"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM}, .backgroundColor = {160, 160, 160, 255}})
-                {
-                    for (int i = 0; i < 100; i++)
-                    {
-                        RenderDropdownTextItem(i);
-                    }
-                }
-            }
-        }
-        Clay_ScrollContainerData scrollData = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("MainContent")));
-        if (scrollData.found)
-        {
-            CLAY(CLAY_ID("ScrollBar"), {.floating = {
-                                            .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
-                                            .offset = {.y = -(scrollData.scrollPosition->y / scrollData.contentDimensions.height) * scrollData.scrollContainerDimensions.height},
-                                            .zIndex = 1,
-                                            .parentId = Clay_GetElementId(CLAY_STRING("MainContent")).id,
-                                            .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP, .parent = CLAY_ATTACH_POINT_RIGHT_TOP}}})
-            {
-                CLAY(CLAY_ID("ScrollBarButton"), {.layout = {.sizing = {CLAY_SIZING_FIXED(12), CLAY_SIZING_FIXED((scrollData.scrollContainerDimensions.height / scrollData.contentDimensions.height) * scrollData.scrollContainerDimensions.height)}},
-                                                  .backgroundColor = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ScrollBar"))) ? (Clay_Color){100, 100, 140, 150} : (Clay_Color){120, 120, 160, 150},
-                                                  .cornerRadius = CLAY_CORNER_RADIUS(6)}) {}
             }
         }
     }
     return Clay_EndLayout(GetFrameTime());
 }
 
-typedef struct
+// ---------------------------------------------------------------------------
+// File watching
+
+static bool FileChanged(void)
 {
-    Clay_Vector2 clickOrigin;
-    Clay_Vector2 positionOrigin;
-    bool mouseDown;
-} ScrollbarData;
+    struct stat st;
+    if (stat(md_path, &st) != 0)
+    {
+        return false;
+    }
+    return st.st_mtime != md_mtime;
+}
 
-ScrollbarData scrollbarData = {0};
-
-bool debugEnabled = false;
-
-void UpdateDrawFrame(Font *fonts)
+static void ReloadDocument(void)
 {
-    Vector2 mouseWheelDelta = GetMouseWheelMoveV();
-    float mouseWheelX = mouseWheelDelta.x;
-    float mouseWheelY = mouseWheelDelta.y;
+    MdDocument_Free(&doc);
+    ClearImageCache();
+    doc = MdDocument_LoadFile(md_path);
+    if (!doc.load_error)
+    {
+        struct stat st;
+        md_mtime = stat(md_path, &st) == 0 ? st.st_mtime : 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame
+
+static void UpdateDrawFrame(Font *fonts)
+{
+    Vector2 mouse_delta = GetMouseWheelMoveV();
 
     if (IsKeyPressed(KEY_D))
     {
-        debugEnabled = !debugEnabled;
-        Clay_SetDebugModeEnabled(debugEnabled);
+        debug_enabled = !debug_enabled;
+        Clay_SetDebugModeEnabled(debug_enabled);
     }
-    //----------------------------------------------------------------------------------
-    // Handle scroll containers
-    Clay_Vector2 mousePosition = RAYLIB_VECTOR2_TO_CLAY_VECTOR2(GetMousePosition());
-    Clay_SetPointerState(mousePosition, IsMouseButtonDown(0) && !scrollbarData.mouseDown);
-    Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
-    if (!IsMouseButtonDown(0))
+    if (IsKeyPressed(KEY_F12))
     {
-        scrollbarData.mouseDown = false;
+        TakeScreenshot("clay_markdown_reader_screenshot.png");
     }
 
-    if (IsMouseButtonDown(0) && !scrollbarData.mouseDown && Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ScrollBar"))))
+    Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
+    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !scrollbar_drag.mouse_down);
+    Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
+
+    if (!IsMouseButtonDown(0))
     {
-        Clay_ScrollContainerData scrollContainerData = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("MainContent")));
-        scrollbarData.clickOrigin = mousePosition;
-        scrollbarData.positionOrigin = *scrollContainerData.scrollPosition;
-        scrollbarData.mouseDown = true;
+        scrollbar_drag.mouse_down = false;
     }
-    else if (scrollbarData.mouseDown)
+
+    if (IsMouseButtonDown(0) && !scrollbar_drag.mouse_down &&
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ScrollBar"))))
     {
-        Clay_ScrollContainerData scrollContainerData = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("MainContent")));
-        if (scrollContainerData.contentDimensions.height > 0)
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("DocumentScroll")));
+        if (data.found)
         {
-            Clay_Vector2 ratio = (Clay_Vector2){
-                scrollContainerData.contentDimensions.width / scrollContainerData.scrollContainerDimensions.width,
-                scrollContainerData.contentDimensions.height / scrollContainerData.scrollContainerDimensions.height,
-            };
-            if (scrollContainerData.config.vertical)
-            {
-                scrollContainerData.scrollPosition->y = scrollbarData.positionOrigin.y + (scrollbarData.clickOrigin.y - mousePosition.y) * ratio.y;
-            }
-            if (scrollContainerData.config.horizontal)
-            {
-                scrollContainerData.scrollPosition->x = scrollbarData.positionOrigin.x + (scrollbarData.clickOrigin.x - mousePosition.x) * ratio.x;
-            }
+            scrollbar_drag.click_origin = mouse_position;
+            scrollbar_drag.position_origin = *data.scrollPosition;
+            scrollbar_drag.mouse_down = true;
+        }
+    }
+    else if (scrollbar_drag.mouse_down)
+    {
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("DocumentScroll")));
+        if (data.found && data.contentDimensions.height > 0)
+        {
+            float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;
+            data.scrollPosition->y = scrollbar_drag.position_origin.y +
+                                     (scrollbar_drag.click_origin.y - mouse_position.y) * ratio;
         }
     }
 
-    Clay_UpdateScrollContainers(true, (Clay_Vector2){mouseWheelX, mouseWheelY}, GetFrameTime());
-    // Generate the auto layout for rendering
-    double currentTime = GetTime();
-    Clay_RenderCommandArray renderCommands = CreateLayout();
-    printf("layout time: %f microseconds\n", (GetTime() - currentTime) * 1000 * 1000);
-    // RENDERING ---------------------------------
-    //    currentTime = GetTime();
-    BeginDrawing();
-    ClearBackground(BLACK);
-    Clay_Raylib_Render(renderCommands, fonts);
-    EndDrawing();
-    //    printf("render time: %f ms\n", (GetTime() - currentTime) * 1000);
+    Clay_UpdateScrollContainers(true, (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
 
-    //----------------------------------------------------------------------------------
+    // Reload the document at most twice a second.
+    double now = GetTime();
+    if (now - last_poll_time > 0.5)
+    {
+        last_poll_time = now;
+        if (FileChanged())
+        {
+            ReloadDocument();
+        }
+    }
+
+    Clay_RenderCommandArray render_commands = CreateLayout();
+    static int dbg = 0;
+    if (dbg++ < 3) fprintf(stderr, "DBG blocks=%d commands=%d screen=%dx%d\n", doc.block_count, render_commands.length, GetScreenWidth(), GetScreenHeight());
+    if (dbg <= 4) {
+        for (int k = 0; k < doc.block_count; k++) {
+            Clay_ElementData d = Clay_GetElementData(CLAY_IDI("DbgLiRow", k));
+            if (!d.found) continue;
+            Clay_ElementData m = Clay_GetElementData(CLAY_IDI("DbgLiInner", k));
+            fprintf(stderr, "LI %d row=(%.0f,%.0f,%.0fx%.0f) inner=(%.0f,%.0f,%.0fx%.0f)\n", k, d.boundingBox.x, d.boundingBox.y, d.boundingBox.width, d.boundingBox.height, m.found ? m.boundingBox.x : -1, m.found ? m.boundingBox.y : -1, m.found ? m.boundingBox.width : -1, m.found ? m.boundingBox.height : -1);
+        }
+    }
+
+    if (hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        OpenURL(hovered_link);
+    }
+
+    BeginDrawing();
+    ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
+    Clay_Raylib_Render(render_commands, fonts);
+    EndDrawing();
 }
 
-bool reinitializeClay = false;
+// ---------------------------------------------------------------------------
+// Clay error handling
 
-void HandleClayErrors(Clay_ErrorData errorData)
+static void HandleClayErrors(Clay_ErrorData error_data)
 {
-    printf("%s", errorData.errorText.chars);
-    if (errorData.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED)
+    printf("%s\n", error_data.errorText.chars);
+    if (error_data.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED)
     {
-        reinitializeClay = true;
+        reinitialize_clay = true;
         Clay_SetMaxElementCount(Clay_GetMaxElementCount() * 2);
     }
-    else if (errorData.errorType == CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED)
+    else if (error_data.errorType == CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED)
     {
-        reinitializeClay = true;
+        reinitialize_clay = true;
         Clay_SetMaxMeasureTextCacheWordCount(Clay_GetMaxMeasureTextCacheWordCount() * 2);
     }
 }
 
-int main(void)
+// Load a font with the default ASCII glyphs plus the extra Unicode glyphs
+// used for list bullets, task checkboxes, em dashes and the entity sample.
+// Note: raylib loads ONLY the provided codepoints when the array is non-NULL,
+// so the ASCII range must be included explicitly.
+static void LoadFontWithGlyphs(const char *path, Font *out)
 {
-    uint64_t totalMemorySize = Clay_MinMemorySize();
-    Clay_Arena clayMemory = Clay_CreateArenaWithCapacityAndMemory(totalMemorySize, malloc(totalMemorySize));
-    Clay_Initialize(clayMemory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()}, (Clay_ErrorHandler){HandleClayErrors, 0});
-    Clay_Raylib_Initialize(1024, 768, "Clay - Raylib Renderer Example", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
-    ChangeDirectory(GetApplicationDirectory());
-    profilePicture = LoadTexture("resources/profile-picture.png");
-
-    Font fonts[2];
-    fonts[FONT_ID_BODY_24] = LoadFontEx("resources/Roboto-Regular.ttf", 48, 0, 400);
-    SetTextureFilter(fonts[FONT_ID_BODY_24].texture, TEXTURE_FILTER_BILINEAR);
-    fonts[FONT_ID_BODY_16] = LoadFontEx("resources/Roboto-Regular.ttf", 32, 0, 400);
-    SetTextureFilter(fonts[FONT_ID_BODY_16].texture, TEXTURE_FILTER_BILINEAR);
-    Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
-
-    //--------------------------------------------------------------------------------------
-
-    // Main game loop
-    while (!WindowShouldClose()) // Detect window close button or ESC key
+    static int codepoints[256];
+    static int count = 0;
+    if (count == 0)
     {
-        if (reinitializeClay)
+        for (int c = 32; c < 127; c++)
         {
-            Clay_SetMaxElementCount(8192);
-            totalMemorySize = Clay_MinMemorySize();
-            clayMemory = Clay_CreateArenaWithCapacityAndMemory(totalMemorySize, malloc(totalMemorySize));
-            Clay_Initialize(clayMemory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()}, (Clay_ErrorHandler){HandleClayErrors, 0});
-            reinitializeClay = false;
+            codepoints[count++] = c;
+        }
+        for (int c = 160; c < 256; c++)
+        {
+            codepoints[count++] = c;
+        }
+        int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x2603, 0x2610, 0x2611};
+        for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
+        {
+            codepoints[count++] = extra[i];
+        }
+    }
+    *out = LoadFontEx(path, 48, codepoints, count);
+    SetTextureFilter(out->texture, TEXTURE_FILTER_BILINEAR);
+}
+
+// ---------------------------------------------------------------------------
+// Entry
+
+int main(int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        fprintf(stderr, "usage: %s <markdown-file>\n", argv[0]);
+        return 1;
+    }
+    md_path = argv[1];
+
+    // Remember the directory of the markdown file so relative image paths
+    // resolve correctly regardless of where the app was started from.
+    snprintf(md_dir, sizeof(md_dir), "%s", md_path);
+    char *last_slash = strrchr(md_dir, '/');
+    if (last_slash)
+    {
+        *last_slash = '\0';
+    }
+    else
+    {
+        strcpy(md_dir, ".");
+    }
+
+    uint64_t total_memory_size = Clay_MinMemorySize();
+    Clay_Arena clay_memory = Clay_CreateArenaWithCapacityAndMemory(total_memory_size, malloc(total_memory_size));
+    Clay_Initialize(clay_memory, (Clay_Dimensions){1280, 800}, (Clay_ErrorHandler){HandleClayErrors, 0});
+    Clay_Raylib_Initialize(1280, 800, "Clay Markdown Reader", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    ChangeDirectory(GetApplicationDirectory());
+
+    Font fonts[FONT_COUNT];
+    LoadFontWithGlyphs("resources/Roboto-Regular.ttf", &fonts[FONT_REGULAR]);
+    LoadFontWithGlyphs("resources/Roboto-Bold.ttf", &fonts[FONT_BOLD]);
+    LoadFontWithGlyphs("resources/Roboto-Italic.ttf", &fonts[FONT_ITALIC]);
+    LoadFontWithGlyphs("resources/Roboto-BoldItalic.ttf", &fonts[FONT_BOLD_ITALIC]);
+    LoadFontWithGlyphs("resources/RobotoMono-Medium.ttf", &fonts[FONT_MONO]);
+    Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
+    RichText_SetMeasureFunction(Raylib_MeasureText, fonts);
+
+    ReloadDocument();
+
+    // Temporary test hook: with CLAY_MD_FRAMES=N set, render N frames,
+    // screenshot the last one and exit. Remove before release.
+    const char *frames_env = getenv("CLAY_MD_FRAMES");
+    int frame_limit = frames_env ? atoi(frames_env) : 0;
+    int frame_count = 0;
+
+    while (!WindowShouldClose())
+    {
+        if (frame_limit > 0 && frame_count >= frame_limit)
+        {
+            TakeScreenshot("clay_markdown_reader_screenshot.png");
+            break;
+        }
+        frame_count++;
+        if (reinitialize_clay)
+        {
+            uint64_t size = Clay_MinMemorySize();
+            Clay_Arena memory = Clay_CreateArenaWithCapacityAndMemory(size, malloc(size));
+            Clay_Initialize(memory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()},
+                            (Clay_ErrorHandler){HandleClayErrors, 0});
+            reinitialize_clay = false;
         }
         UpdateDrawFrame(fonts);
     }
+
+    MdDocument_Free(&doc);
+    ClearImageCache();
     Clay_Raylib_Close();
     return 0;
 }

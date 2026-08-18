@@ -203,7 +203,11 @@ void PicoApp_Free(PicoApp *app)
     for (int i = 0; i < app->message_count; i++)
     {
         free(app->messages[i].source);
-        free(app->messages[i].thinking);
+        for (int t = 0; t < app->messages[i].trace_count; t++)
+        {
+            free(app->messages[i].trace[t].text);
+        }
+        free(app->messages[i].trace);
         MdDocument_Free(&app->messages[i].doc);
     }
     free(app->messages);

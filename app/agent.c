@@ -495,7 +495,11 @@ static void PopLastMessage(PicoApp *app)
     }
     int i = --app->message_count;
     free(app->messages[i].source);
-    free(app->messages[i].thinking);
+    for (int t = 0; t < app->messages[i].trace_count; t++)
+    {
+        free(app->messages[i].trace[t].text);
+    }
+    free(app->messages[i].trace);
     MdDocument_Free(&app->messages[i].doc);
     memset(&app->messages[i], 0, sizeof(app->messages[i]));
 }
@@ -528,7 +532,124 @@ static bool MessageEmpty(const PicoApp *app, int idx)
     {
         return true;
     }
-    return Blank(app->messages[idx].source) && Blank(app->messages[idx].thinking);
+    if (!Blank(app->messages[idx].source))
+    {
+        return false;
+    }
+    for (int t = 0; t < app->messages[idx].trace_count; t++)
+    {
+        if (!Blank(app->messages[idx].trace[t].text))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool HasThinkTrace(const PicoMessage *m)
+{
+    for (int t = 0; t < m->trace_count; t++)
+    {
+        if (!m->trace[t].is_tool && !Blank(m->trace[t].text))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
+{
+    PicoTraceLine *next =
+        (PicoTraceLine *)realloc(m->trace, (size_t)(m->trace_count + 1) * sizeof(PicoTraceLine));
+    if (!next)
+    {
+        return NULL;
+    }
+    m->trace = next;
+    PicoTraceLine *line = &m->trace[m->trace_count++];
+    line->text = NULL;
+    line->is_tool = is_tool;
+    return line;
+}
+
+static void TraceAppendThink(PicoApp *app, int idx, const char *s, size_t n)
+{
+    if (idx < 0 || idx >= app->message_count || !s || n == 0)
+    {
+        return;
+    }
+    PicoMessage *m = &app->messages[idx];
+    PicoTraceLine *line = NULL;
+    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool)
+    {
+        line = &m->trace[m->trace_count - 1];
+    }
+    else
+    {
+        line = TracePush(m, false);
+    }
+    if (!line)
+    {
+        return;
+    }
+    size_t old = line->text ? strlen(line->text) : 0;
+    char *next = (char *)realloc(line->text, old + n + 1);
+    if (!next)
+    {
+        return;
+    }
+    memcpy(next + old, s, n);
+    next[old + n] = '\0';
+    line->text = next;
+}
+
+static void TraceAddTool(PicoApp *app, int idx, const char *text)
+{
+    if (idx < 0 || idx >= app->message_count || !text)
+    {
+        return;
+    }
+    PicoTraceLine *line = TracePush(&app->messages[idx], true);
+    if (!line)
+    {
+        return;
+    }
+    line->text = Dup(text);
+}
+
+static char *FormatToolLine(const char *name, const char *args_json)
+{
+    char *detail = NULL;
+    if (args_json && args_json[0])
+    {
+        JsonDoc doc;
+        if (JsonParse(&doc, args_json, strlen(args_json)) == 0)
+        {
+            detail = JsonObjStr(&doc, 0, "command");
+            JsonFree(&doc);
+        }
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "Running ");
+    JsonBuf_Puts(&b, name && name[0] ? name : "tool");
+    if (detail && detail[0])
+    {
+        JsonBuf_Puts(&b, ": ");
+        for (const char *p = detail; *p; p++)
+        {
+            char c = (*p == '\n' || *p == '\r' || *p == '\t') ? ' ' : *p;
+            JsonBuf_Putc(&b, c);
+            if (b.len > 200)
+            {
+                JsonBuf_Puts(&b, "...");
+                break;
+            }
+        }
+    }
+    free(detail);
+    return JsonBuf_Steal(&b);
 }
 
 static char *ContentText(const JsonDoc *doc, int content)
@@ -657,24 +778,6 @@ static void AbortRemainingCalls(PicoAgentRt *rt)
     ClearPending(rt);
 }
 
-static void AppendThinking(PicoApp *app, int idx, const char *s, size_t n)
-{
-    if (idx < 0 || idx >= app->message_count || !s || n == 0)
-    {
-        return;
-    }
-    PicoMessage *m = &app->messages[idx];
-    size_t old = m->thinking ? strlen(m->thinking) : 0;
-    char *next = (char *)realloc(m->thinking, old + n + 1);
-    if (!next)
-    {
-        return;
-    }
-    memcpy(next + old, s, n);
-    next[old + n] = '\0';
-    m->thinking = next;
-}
-
 static void GoIdle(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
@@ -737,19 +840,15 @@ static void StartNextTool(PicoApp *app)
     }
     PicoPendingCall *call = &rt->pending[rt->pending_next];
     app->agent_state = PICO_AGENT_TOOL_WAIT;
-    char line[192];
-    snprintf(line, sizeof(line), "Running `%s`…", call->name ? call->name : "tool");
+    char *line = FormatToolLine(call->name, call->arguments);
     SetActivity(app, line);
     if (rt->stream_msg >= 0)
     {
-        PicoMessage *m = &app->messages[rt->stream_msg];
-        const char *prefix = Blank(m->thinking) ? "" : "\n\n";
-        char block[200];
-        snprintf(block, sizeof(block), "%s%s", prefix, line);
-        AppendThinking(app, rt->stream_msg, block, strlen(block));
+        TraceAddTool(app, rt->stream_msg, line);
         app->chat_follow_bottom = true;
     }
     QueueTool(rt, call->name, call->arguments, call->call_id, FindTool(app, call->name));
+    free(line);
 }
 
 static void StartLlm(PicoApp *app)
@@ -869,18 +968,14 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
         }
         free(text);
     }
-    if (rt->stream_msg >= 0 && Blank(app->messages[rt->stream_msg].thinking))
+    if (rt->stream_msg >= 0 && !HasThinkTrace(&app->messages[rt->stream_msg]))
     {
         char *think = ThinkingTextFromItems(ev->payload);
         if (think && think[0])
         {
-            free(app->messages[rt->stream_msg].thinking);
-            app->messages[rt->stream_msg].thinking = think;
+            TraceAppendThink(app, rt->stream_msg, think, strlen(think));
         }
-        else
-        {
-            free(think);
-        }
+        free(think);
     }
     FinishAssistantHistory(app, ev->payload);
     IngestOutputItems(app, ev->payload);
@@ -1077,7 +1172,7 @@ void PicoAgent_Pump(PicoApp *app)
 
     if (think && think_len && rt->stream_msg >= 0)
     {
-        AppendThinking(app, rt->stream_msg, think, think_len);
+        TraceAppendThink(app, rt->stream_msg, think, think_len);
         app->chat_follow_bottom = true;
     }
     free(think);

@@ -43,10 +43,16 @@ typedef enum PicoHook {
     PICO_HOOK_COUNT,
 } PicoHook;
 
+typedef struct PicoTraceLine {
+    char *text;
+    bool is_tool;
+} PicoTraceLine;
+
 typedef struct PicoMessage {
     PicoRole role;
     char *source;
-    char *thinking;
+    PicoTraceLine *trace;
+    int trace_count;
     MdDocument doc;
 } PicoMessage;
 

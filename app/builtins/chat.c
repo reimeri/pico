@@ -60,21 +60,25 @@ void PicoChat_Render(PicoApp *app)
                                                                            .width = {1, 1, 1, 1, 0}})
                                              : ((Clay_BorderElementConfig){0})})
                     {
-                        bool has_think = msg->thinking && msg->thinking[0];
+                        bool has_trace = msg->trace_count > 0;
                         bool has_source = msg->source && msg->source[0];
                         bool live = !user && i == app->message_count - 1 &&
                                     (app->agent_state == PICO_AGENT_LLM_WAIT ||
                                      app->agent_state == PICO_AGENT_TOOL_WAIT);
-                        if (has_think)
+                        for (int t = 0; t < msg->trace_count; t++)
                         {
-                            Clay_String think = {.length = (int32_t)strlen(msg->thinking),
-                                                 .chars = msg->thinking};
+                            const char *line = msg->trace[t].text;
+                            if (!line || !line[0])
+                            {
+                                continue;
+                            }
+                            Clay_String think = {.length = (int32_t)strlen(line), .chars = line};
                             CLAY_TEXT(think, CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
                                                                .fontSize = 15,
                                                                .textColor = COLOR_MUTED,
                                                                .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                         }
-                        else if (live && !has_source)
+                        if (!has_trace && live && !has_source)
                         {
                             const char *label =
                                 app->agent_activity[0] ? app->agent_activity : "Thinking…";

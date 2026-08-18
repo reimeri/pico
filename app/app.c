@@ -1,5 +1,7 @@
 #include "pico/plugin.h"
 #include "pico/md_view.h"
+#include "agent.h"
+#include "settings.h"
 
 #include "clay/clay.h"
 
@@ -116,6 +118,12 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
 
 void PicoApp_Submit(PicoApp *app)
 {
+    if (app->agent_state == PICO_AGENT_LLM_WAIT || app->agent_state == PICO_AGENT_TOOL_WAIT ||
+        app->agent_state == PICO_AGENT_COMPACT_WAIT)
+    {
+        return;
+    }
+
     PicoComposer *c = &app->composer;
     int start = 0;
     int end = c->length;
@@ -134,15 +142,10 @@ void PicoApp_Submit(PicoApp *app)
 
     char saved = c->text[end];
     c->text[end] = '\0';
-    PicoApp_AddMessage(app, PICO_ROLE_USER, c->text + start);
+    const char *user = c->text + start;
+    PicoApp_AddMessage(app, PICO_ROLE_USER, user);
+    PicoAgent_StartTurn(app, user);
     c->text[end] = saved;
-
-    char reply[4096];
-    snprintf(reply, sizeof(reply),
-             "Got it — this slice has **no LLM**. Dummy reply to:\n\n> %s\n\n"
-             "Enter more markdown in the composer to try the renderer. `Shift+Enter` adds a newline.",
-             c->text + start);
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, reply);
 
     c->length = 0;
     c->cursor = 0;
@@ -154,41 +157,15 @@ void PicoApp_Submit(PicoApp *app)
     pico_run_hooks(app, PICO_HOOK_ON_SUBMIT);
 }
 
-static const char *kDummyUser1 = "What is Pico?";
-
-static const char *kDummyAssistant1 =
-    "Pico is a **small C agent harness**. Clay is only the layout library.\n\n"
-    "UI is extensions. Drop a `.c` file in `~/.config/pico/extensions/` or "
-    "`.pico/extensions/` in this workspace — nested folders are fine, so an extension "
-    "can live next to a README. **F5** reloads. `--safe` loads only builtins.\n\n"
-    "```c\n"
-    "#include \"pico/plugin.h\"\n"
-    "PicoExt pico_ext(void) { return (PicoExt){ .abi = PICO_EXT_ABI, .name = \"hi\", .init = init }; }\n"
-    "```";
-
-static const char *kDummyUser2 = "Show me a list and a quote.";
-
-static const char *kDummyAssistant2 =
-    "> Extensions will do the interesting work. The core stays tiny.\n\n"
-    "- **Ctrl+A / Ctrl+E** — line start / end\n"
-    "- **Ctrl+W** — delete previous word\n"
-    "- **Ctrl+K** — kill to end of line\n"
-    "- **Ctrl+V** — paste (long clips go to `/tmp/pico-paste-…`)\n"
-    "- **F5** — reload extensions\n"
-    "- **F3** — Clay debug overlay";
-
-void PicoApp_RequestReload(PicoApp *app)
+void PicoApp_Cancel(PicoApp *app)
 {
-    PicoPlugins_Reload(app);
+    PicoAgent_Cancel(app);
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode)
 {
     memset(app, 0, sizeof(*app));
     app->fonts = fonts;
-    app->model_name = "dummy-model";
-    app->tokens_used = 0;
-    app->tokens_limit = 128000;
     app->agent_state = PICO_AGENT_IDLE;
     app->selected_message = -1;
     app->chat_overflow = true;
@@ -208,16 +185,19 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
         app->composer.text[0] = '\0';
     }
 
+    PicoSettings_Load(app);
+    PicoAgent_Init(app);
     PicoPlugins_Load(app);
+}
 
-    PicoApp_AddMessage(app, PICO_ROLE_USER, kDummyUser1);
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, kDummyAssistant1);
-    PicoApp_AddMessage(app, PICO_ROLE_USER, kDummyUser2);
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, kDummyAssistant2);
+void PicoApp_RequestReload(PicoApp *app)
+{
+    PicoPlugins_Reload(app);
 }
 
 void PicoApp_Free(PicoApp *app)
 {
+    PicoAgent_Shutdown(app);
     PicoPlugins_Shutdown(app);
     for (int i = 0; i < app->message_count; i++)
     {
@@ -227,6 +207,7 @@ void PicoApp_Free(PicoApp *app)
     free(app->messages);
     free(app->composer.text);
     free(app->status_warn);
+    free(app->agent_error);
     memset(app, 0, sizeof(*app));
 }
 
@@ -327,12 +308,25 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     PicoPlugins_Poll(app);
-    if (app->reload_queued && app->agent_state != PICO_AGENT_TOOL_WAIT)
+    PicoAgent_Pump(app);
+    if (app->reload_queued && !PicoAgent_BlocksReload(app))
     {
         PicoPlugins_Reload(app);
     }
 
+    bool had_warn = app->status_warn != NULL;
     PicoPlugins_OnFrame(app, GetFrameTime());
+    if (!had_warn && IsKeyPressed(KEY_ESCAPE))
+    {
+        if (PicoAgent_BlocksReload(app))
+        {
+            PicoApp_Cancel(app);
+        }
+        else if (app->agent_state == PICO_AGENT_ERROR)
+        {
+            PicoAgent_DismissError(app);
+        }
+    }
 
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
     bool composer_bar_drag = app->composer_scrollbar.mouse_down;

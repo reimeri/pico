@@ -18,5 +18,6 @@ PicoExt pico_ext_chat(void);
 PicoExt pico_ext_composer(void);
 PicoExt pico_ext_footer(void);
 PicoExt pico_ext_overlay(void);
+PicoExt pico_ext_shell(void);
 
 #endif

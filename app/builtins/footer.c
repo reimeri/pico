@@ -26,9 +26,18 @@ static const char *AgentStateName(PicoAgentState state)
 
 void PicoFooter_Render(PicoApp *app)
 {
-    snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens",
-             AgentStateName(app->agent_state), app->model_name ? app->model_name : "dummy-model", app->tokens_used,
-             app->tokens_limit);
+    const char *extra = "";
+    if (app->agent_state == PICO_AGENT_LLM_WAIT || app->agent_state == PICO_AGENT_TOOL_WAIT)
+    {
+        extra = "  ·  Esc to cancel";
+    }
+    else if (app->agent_state == PICO_AGENT_ERROR)
+    {
+        extra = "  ·  Esc to dismiss";
+    }
+    snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens%s",
+             AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", app->tokens_used,
+             app->tokens_limit, extra);
     Clay_String text = {.length = (int32_t)strlen(app->footer_text), .chars = app->footer_text};
 
     CLAY(CLAY_ID("Footer"),

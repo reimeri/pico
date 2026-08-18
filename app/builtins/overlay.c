@@ -7,12 +7,18 @@
 
 void PicoOverlay_Render(PicoApp *app)
 {
-    if (!app->status_warn || !app->status_warn[0])
+    const char *warn = app->status_warn;
+    const char *agent = (!warn || !warn[0]) ? app->agent_error : NULL;
+    if ((!warn || !warn[0]) && (!agent || !agent[0]))
     {
         return;
     }
 
-    Clay_String text = {.length = (int32_t)strlen(app->status_warn), .chars = app->status_warn};
+    const char *title = warn && warn[0] ? "Extension error  (Esc to dismiss, F5 to reload)"
+                                        : "Agent error  (Esc to dismiss)";
+    const char *body = warn && warn[0] ? warn : agent;
+    Clay_String title_s = {.length = (int32_t)strlen(title), .chars = title};
+    Clay_String text = {.length = (int32_t)strlen(body), .chars = body};
     CLAY(CLAY_ID("ExtWarn"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
                        .zIndex = 20,
@@ -26,33 +32,49 @@ void PicoOverlay_Render(PicoApp *app)
           .backgroundColor = COLOR_ERROR_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        CLAY_TEXT(CLAY_STRING("Extension error  (Esc to dismiss, F5 to reload)"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
-        CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_MONO, .fontSize = 13, .textColor = COLOR_MUTED}));
+        CLAY_TEXT(title_s, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
+        CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                          .fontSize = 13,
+                                          .textColor = COLOR_MUTED,
+                                          .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
 }
 
 void PicoOverlay_OnFrame(PicoApp *app, float dt)
 {
     (void)dt;
-    if (app->status_warn && IsKeyPressed(KEY_ESCAPE))
+    if (!IsKeyPressed(KEY_ESCAPE))
+    {
+        return;
+    }
+    if (app->status_warn)
     {
         free(app->status_warn);
         app->status_warn = NULL;
+        return;
     }
 }
 
 static void OverlayAfterLayout(PicoApp *app)
 {
-    if (!app->status_warn)
+    if (!app->status_warn && !app->agent_error)
     {
         return;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ExtWarn"))))
     {
-        free(app->status_warn);
-        app->status_warn = NULL;
+        if (app->status_warn)
+        {
+            free(app->status_warn);
+            app->status_warn = NULL;
+        }
+        else if (app->agent_error && app->agent_state == PICO_AGENT_ERROR)
+        {
+            free(app->agent_error);
+            app->agent_error = NULL;
+            app->agent_state = PICO_AGENT_IDLE;
+        }
     }
 }
 

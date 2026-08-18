@@ -34,10 +34,13 @@
             gcc
             gdb
             git
+            curl
           ];
 
           # Native libraries used when CMake builds Raylib 5.5 via FetchContent.
           buildInputs = with pkgs; [
+            curl
+            openssl
             glfw
             libGL
             libx11

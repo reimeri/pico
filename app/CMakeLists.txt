@@ -30,12 +30,20 @@ add_executable(pico
     md_view.c
     markdown.c
     richtext.c
+    json.c
+    settings.c
+    llm.c
+    agent.c
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
-    builtins/overlay.c)
+    builtins/overlay.c
+    builtins/shell.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
+
+find_package(CURL REQUIRED)
+find_package(Threads REQUIRED)
 
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -50,7 +58,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
     "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
 
-target_link_libraries(pico PUBLIC raylib md4c ${CMAKE_DL_LIBS})
+target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
 
 add_custom_command(

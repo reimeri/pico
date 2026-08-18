@@ -17,7 +17,14 @@ static void PrintUsage(const char *argv0)
     fprintf(stderr,
             "usage: %s [--safe]\n"
             "  --safe   load builtin UI only (skip ~/.config/pico/extensions and .pico/extensions)\n"
-            "  -h       this help\n",
+            "  -h       this help\n"
+            "\n"
+            "Auth (Responses API):\n"
+            "  PICO_API_KEY / OPENAI_API_KEY     Bearer token\n"
+            "  PICO_BASE_URL / OPENAI_BASE_URL   default https://api.openai.com/v1\n"
+            "  PICO_MODEL                        default gpt-4o\n"
+            "  ~/.config/pico/settings.json      {api_key, base_url, model, context_limit}\n"
+            "  ~/.config/pico/SYSTEM.md          optional system prompt\n",
             argv0);
 }
 

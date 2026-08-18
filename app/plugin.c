@@ -51,6 +51,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_composer,
     pico_ext_footer,
     pico_ext_overlay,
+    pico_ext_shell,
 };
 
 static void WarnClear(PicoApp *app)
@@ -474,7 +475,8 @@ void PicoPlugins_Load(PicoApp *app)
 
 void PicoPlugins_Reload(PicoApp *app)
 {
-    if (app->agent_state == PICO_AGENT_TOOL_WAIT)
+    if (app->agent_state == PICO_AGENT_TOOL_WAIT || app->agent_state == PICO_AGENT_LLM_WAIT ||
+        app->agent_state == PICO_AGENT_COMPACT_WAIT)
     {
         app->reload_queued = true;
         return;

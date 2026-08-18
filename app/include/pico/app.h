@@ -87,15 +87,28 @@ typedef struct PicoTool {
     PicoToolFn run;
 } PicoTool;
 
+typedef struct PicoSettings {
+    char api_key[512];
+    char base_url[512];
+    char model[128];
+    int context_limit;
+} PicoSettings;
+
+struct PicoAgentRt;
+typedef struct PicoAgentRt PicoAgentRt;
+
 typedef struct PicoApp {
     PicoMessage *messages;
     int message_count;
     int message_capacity;
     PicoComposer composer;
     PicoAgentState agent_state;
+    PicoAgentRt *agent;
+    PicoSettings settings;
     const char *model_name;
     int tokens_used;
     int tokens_limit;
+    char *agent_error;
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
@@ -130,6 +143,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
 void PicoApp_Free(PicoApp *app);
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown);
 void PicoApp_Submit(PicoApp *app);
+void PicoApp_Cancel(PicoApp *app);
 void PicoApp_Frame(PicoApp *app);
 void PicoApp_RequestReload(PicoApp *app);
 

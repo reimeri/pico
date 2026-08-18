@@ -9,6 +9,15 @@
 #include <unistd.h>
 
 #define PASTE_TEMP_THRESHOLD 4096
+#define COMPOSER_PAD_X 14
+#define COMPOSER_PAD_Y 10
+#define COMPOSER_FONT_SIZE 16
+#define COMPOSER_MAX_LINES 64
+
+typedef struct CompLine {
+    int start;
+    int length;
+} CompLine;
 
 static bool IsCtrlDown(void)
 {
@@ -28,11 +37,7 @@ static int Utf8Next(const char *s, int length, int pos)
     }
     unsigned char c = (unsigned char)s[pos];
     int step = 1;
-    if ((c & 0x80) == 0)
-    {
-        step = 1;
-    }
-    else if ((c & 0xE0) == 0xC0)
+    if ((c & 0xE0) == 0xC0)
     {
         step = 2;
     }
@@ -45,11 +50,7 @@ static int Utf8Next(const char *s, int length, int pos)
         step = 4;
     }
     pos += step;
-    if (pos > length)
-    {
-        pos = length;
-    }
-    return pos;
+    return pos > length ? length : pos;
 }
 
 static int Utf8Prev(const char *s, int pos)
@@ -130,6 +131,197 @@ static int LineEnd(const char *s, int length, int pos)
     return pos;
 }
 
+static float MeasureSlice(Font font, const char *s, int start, int length, float font_size)
+{
+    if (length <= 0)
+    {
+        return 0;
+    }
+    char saved = ((char *)s)[start + length];
+    ((char *)s)[start + length] = '\0';
+    Vector2 size = MeasureTextEx(font, s + start, font_size, 0);
+    ((char *)s)[start + length] = saved;
+    return size.x;
+}
+
+static int WrapComposer(const PicoComposer *c, Font font, float max_width, CompLine *lines, int max_lines,
+                        float *line_height)
+{
+    Vector2 sample = MeasureTextEx(font, "Hg", COMPOSER_FONT_SIZE, 0);
+    *line_height = sample.y > 1 ? sample.y : (float)COMPOSER_FONT_SIZE;
+    if (!c->text || c->length == 0)
+    {
+        lines[0].start = 0;
+        lines[0].length = 0;
+        return 1;
+    }
+
+    int line_count = 0;
+    int i = 0;
+    while (i < c->length && line_count < max_lines)
+    {
+        int line_start = i;
+        if (c->text[i] == '\n')
+        {
+            lines[line_count].start = line_start;
+            lines[line_count].length = 0;
+            line_count++;
+            i++;
+            continue;
+        }
+
+        float width = 0;
+        int break_at = -1;
+        int break_resume = -1;
+        int wrapped = 0;
+        while (i < c->length && c->text[i] != '\n')
+        {
+            int next = Utf8Next(c->text, c->length, i);
+            float ch_w = MeasureSlice(font, c->text, i, next - i, COMPOSER_FONT_SIZE);
+            if (width + ch_w > max_width && i > line_start)
+            {
+                if (break_at > line_start)
+                {
+                    lines[line_count].start = line_start;
+                    lines[line_count].length = break_at - line_start;
+                    line_count++;
+                    i = break_resume;
+                }
+                else
+                {
+                    lines[line_count].start = line_start;
+                    lines[line_count].length = i - line_start;
+                    line_count++;
+                }
+                wrapped = 1;
+                break;
+            }
+            width += ch_w;
+            if (c->text[i] == ' ' || c->text[i] == '\t')
+            {
+                break_at = i;
+                break_resume = next;
+            }
+            i = next;
+        }
+        if (!wrapped)
+        {
+            lines[line_count].start = line_start;
+            lines[line_count].length = i - line_start;
+            line_count++;
+            if (i < c->length && c->text[i] == '\n')
+            {
+                i++;
+            }
+        }
+    }
+    if (line_count == 0)
+    {
+        lines[0].start = 0;
+        lines[0].length = c->length;
+        return 1;
+    }
+    return line_count;
+}
+
+static int OffsetAtPoint(PicoApp *app, float x, float y)
+{
+    PicoComposer *c = &app->composer;
+    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
+    if (!box.found)
+    {
+        return c->cursor;
+    }
+    float local_x = x - box.boundingBox.x - COMPOSER_PAD_X;
+    float local_y = y - box.boundingBox.y - COMPOSER_PAD_Y;
+    float max_width = box.boundingBox.width - COMPOSER_PAD_X * 2;
+    if (max_width < 10)
+    {
+        max_width = 10;
+    }
+
+    CompLine lines[COMPOSER_MAX_LINES];
+    float line_height = COMPOSER_FONT_SIZE;
+    int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], max_width, lines, COMPOSER_MAX_LINES, &line_height);
+    if (local_y < 0)
+    {
+        return 0;
+    }
+    int line_i = (int)(local_y / line_height);
+    if (line_i >= line_count)
+    {
+        return c->length;
+    }
+    if (line_i < 0)
+    {
+        line_i = 0;
+    }
+    CompLine line = lines[line_i];
+    if (local_x <= 0)
+    {
+        return line.start;
+    }
+    float width = 0;
+    int pos = line.start;
+    int end = line.start + line.length;
+    while (pos < end)
+    {
+        int next = Utf8Next(c->text, c->length, pos);
+        float ch_w = MeasureSlice(app->fonts[FONT_REGULAR], c->text, pos, next - pos, COMPOSER_FONT_SIZE);
+        if (width + ch_w * 0.5f >= local_x)
+        {
+            return pos;
+        }
+        width += ch_w;
+        pos = next;
+    }
+    if (line_i < line_count - 1)
+    {
+        return end;
+    }
+    return end;
+}
+
+static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
+{
+    PicoComposer *c = &app->composer;
+    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
+    *out_x = box.boundingBox.x + COMPOSER_PAD_X;
+    *out_y = box.boundingBox.y + COMPOSER_PAD_Y;
+    *out_h = (float)COMPOSER_FONT_SIZE;
+    if (!box.found)
+    {
+        return;
+    }
+    float max_width = box.boundingBox.width - COMPOSER_PAD_X * 2;
+    CompLine lines[COMPOSER_MAX_LINES];
+    float line_height = COMPOSER_FONT_SIZE;
+    int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], max_width, lines, COMPOSER_MAX_LINES, &line_height);
+    *out_h = line_height;
+    int cursor = c->cursor;
+    int line_i = 0;
+    for (int i = 0; i < line_count; i++)
+    {
+        if (cursor >= lines[i].start)
+        {
+            line_i = i;
+        }
+    }
+    int start = lines[line_i].start;
+    int take = cursor - start;
+    if (take > lines[line_i].length)
+    {
+        take = lines[line_i].length;
+    }
+    if (take < 0)
+    {
+        take = 0;
+    }
+    *out_y = box.boundingBox.y + COMPOSER_PAD_Y + (float)line_i * line_height;
+    *out_x = box.boundingBox.x + COMPOSER_PAD_X +
+             MeasureSlice(app->fonts[FONT_REGULAR], c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
+}
+
 static void ComposerReserve(PicoComposer *c, int extra)
 {
     int needed = c->length + extra + 1;
@@ -149,25 +341,23 @@ static void ComposerReserve(PicoComposer *c, int extra)
         c->capacity = 0;
         c->length = 0;
         c->cursor = 0;
+        c->sel_anchor = 0;
     }
 }
 
-static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
+static int SelFrom(const PicoComposer *c)
 {
-    if (nbytes <= 0)
-    {
-        return;
-    }
-    ComposerReserve(c, nbytes);
-    if (!c->text)
-    {
-        return;
-    }
-    memmove(c->text + c->cursor + nbytes, c->text + c->cursor, (size_t)(c->length - c->cursor));
-    memcpy(c->text + c->cursor, bytes, (size_t)nbytes);
-    c->length += nbytes;
-    c->cursor += nbytes;
-    c->text[c->length] = '\0';
+    return c->sel_anchor < c->cursor ? c->sel_anchor : c->cursor;
+}
+
+static int SelTo(const PicoComposer *c)
+{
+    return c->sel_anchor > c->cursor ? c->sel_anchor : c->cursor;
+}
+
+bool PicoComposer_HasSelection(const PicoApp *app)
+{
+    return app->composer.sel_anchor != app->composer.cursor;
 }
 
 static void ComposerDeleteRange(PicoComposer *c, int from, int to)
@@ -187,7 +377,53 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     memmove(c->text + from, c->text + to, (size_t)(c->length - to));
     c->length -= (to - from);
     c->cursor = from;
+    c->sel_anchor = from;
     c->text[c->length] = '\0';
+}
+
+static void DeleteSelection(PicoComposer *c)
+{
+    if (c->sel_anchor != c->cursor)
+    {
+        ComposerDeleteRange(c, SelFrom(c), SelTo(c));
+    }
+}
+
+static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
+{
+    if (nbytes <= 0)
+    {
+        return;
+    }
+    DeleteSelection(c);
+    ComposerReserve(c, nbytes);
+    if (!c->text)
+    {
+        return;
+    }
+    memmove(c->text + c->cursor + nbytes, c->text + c->cursor, (size_t)(c->length - c->cursor));
+    memcpy(c->text + c->cursor, bytes, (size_t)nbytes);
+    c->length += nbytes;
+    c->cursor += nbytes;
+    c->sel_anchor = c->cursor;
+    c->text[c->length] = '\0';
+}
+
+static void MoveCursor(PicoComposer *c, int pos, bool extend)
+{
+    if (pos < 0)
+    {
+        pos = 0;
+    }
+    if (pos > c->length)
+    {
+        pos = c->length;
+    }
+    c->cursor = pos;
+    if (!extend)
+    {
+        c->sel_anchor = pos;
+    }
 }
 
 static int Utf8Encode(int cp, char out[4])
@@ -215,6 +451,27 @@ static int Utf8Encode(int cp, char out[4])
     out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
     out[3] = (char)(0x80 | (cp & 0x3F));
     return 4;
+}
+
+void PicoComposer_Copy(PicoApp *app)
+{
+    PicoComposer *c = &app->composer;
+    if (c->sel_anchor == c->cursor || !c->text)
+    {
+        return;
+    }
+    int from = SelFrom(c);
+    int to = SelTo(c);
+    int n = to - from;
+    char *copy = (char *)malloc((size_t)n + 1);
+    if (!copy)
+    {
+        return;
+    }
+    memcpy(copy, c->text + from, (size_t)n);
+    copy[n] = '\0';
+    SetClipboardText(copy);
+    free(copy);
 }
 
 static void PasteClipboard(PicoComposer *c)
@@ -247,67 +504,92 @@ void PicoComposer_HandleInput(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
     bool ctrl = IsCtrlDown();
+    bool shift = IsShiftDown();
+    const char *text = c->text ? c->text : "";
     bool repeat_left = IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT);
     bool repeat_right = IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT);
     bool repeat_back = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
     bool repeat_del = IsKeyPressed(KEY_DELETE) || IsKeyPressedRepeat(KEY_DELETE);
 
+    if (ctrl && IsKeyPressed(KEY_C))
+    {
+        if (PicoComposer_HasSelection(app))
+        {
+            PicoComposer_Copy(app);
+        }
+        else if (app->selected_message >= 0 && app->selected_message < app->message_count)
+        {
+            const char *src = app->messages[app->selected_message].source;
+            if (src)
+            {
+                SetClipboardText(src);
+            }
+        }
+        return;
+    }
+    if (ctrl && IsKeyPressed(KEY_X))
+    {
+        PicoComposer_Copy(app);
+        DeleteSelection(c);
+        return;
+    }
+
     if (ctrl && (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_HOME)))
     {
-        c->cursor = LineStart(c->text ? c->text : "", c->cursor);
+        MoveCursor(c, LineStart(text, c->cursor), shift);
     }
     else if (IsKeyPressed(KEY_HOME))
     {
-        c->cursor = LineStart(c->text ? c->text : "", c->cursor);
+        MoveCursor(c, LineStart(text, c->cursor), shift);
     }
 
     if (ctrl && (IsKeyPressed(KEY_E) || IsKeyPressed(KEY_END)))
     {
-        c->cursor = LineEnd(c->text ? c->text : "", c->length, c->cursor);
+        MoveCursor(c, LineEnd(text, c->length, c->cursor), shift);
     }
     else if (IsKeyPressed(KEY_END))
     {
-        c->cursor = LineEnd(c->text ? c->text : "", c->length, c->cursor);
+        MoveCursor(c, LineEnd(text, c->length, c->cursor), shift);
     }
 
     if (repeat_left)
     {
-        if (ctrl)
-        {
-            c->cursor = PrevWord(c->text ? c->text : "", c->cursor);
-        }
-        else
-        {
-            c->cursor = Utf8Prev(c->text ? c->text : "", c->cursor);
-        }
+        int pos = ctrl ? PrevWord(text, c->cursor) : Utf8Prev(text, c->cursor);
+        MoveCursor(c, pos, shift);
     }
     if (repeat_right)
     {
-        if (ctrl)
-        {
-            c->cursor = NextWord(c->text ? c->text : "", c->length, c->cursor);
-        }
-        else
-        {
-            c->cursor = Utf8Next(c->text ? c->text : "", c->length, c->cursor);
-        }
+        int pos = ctrl ? NextWord(text, c->length, c->cursor) : Utf8Next(text, c->length, c->cursor);
+        MoveCursor(c, pos, shift);
     }
 
     if (ctrl && (IsKeyPressed(KEY_W) || IsKeyPressedRepeat(KEY_W)))
     {
-        int from = PrevWord(c->text ? c->text : "", c->cursor);
-        ComposerDeleteRange(c, from, c->cursor);
+        if (PicoComposer_HasSelection(app))
+        {
+            DeleteSelection(c);
+        }
+        else
+        {
+            ComposerDeleteRange(c, PrevWord(text, c->cursor), c->cursor);
+        }
     }
     else if (repeat_back)
     {
-        int from = Utf8Prev(c->text ? c->text : "", c->cursor);
-        ComposerDeleteRange(c, from, c->cursor);
+        if (PicoComposer_HasSelection(app))
+        {
+            DeleteSelection(c);
+        }
+        else
+        {
+            ComposerDeleteRange(c, Utf8Prev(text, c->cursor), c->cursor);
+        }
     }
 
     if (ctrl && IsKeyPressed(KEY_K))
     {
-        int to = LineEnd(c->text ? c->text : "", c->length, c->cursor);
-        if (to == c->cursor && to < c->length && (c->text ? c->text[to] : 0) == '\n')
+        int to = LineEnd(text, c->length, c->cursor);
+        if (to == c->cursor && to < c->length && text[to] == '\n')
         {
             to++;
         }
@@ -315,22 +597,28 @@ void PicoComposer_HandleInput(PicoApp *app)
     }
     else if (repeat_del)
     {
-        int to = Utf8Next(c->text ? c->text : "", c->length, c->cursor);
-        ComposerDeleteRange(c, c->cursor, to);
+        if (PicoComposer_HasSelection(app))
+        {
+            DeleteSelection(c);
+        }
+        else
+        {
+            ComposerDeleteRange(c, c->cursor, Utf8Next(text, c->length, c->cursor));
+        }
     }
 
     if (ctrl && IsKeyPressed(KEY_V))
     {
-        PasteClipboard(app->composer.text ? &app->composer : c);
+        PasteClipboard(c);
     }
 
-    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && !IsShiftDown())
+    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && !shift)
     {
         PicoApp_Submit(app);
         return;
     }
 
-    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && IsShiftDown())
+    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && shift)
     {
         ComposerInsert(c, "\n", 1);
     }
@@ -356,73 +644,95 @@ void PicoComposer_HandleInput(PicoApp *app)
     }
 }
 
+void PicoComposer_HandlePointer(PicoApp *app)
+{
+    PicoComposer *c = &app->composer;
+    Vector2 mouse = GetMousePosition();
+    bool over = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over)
+    {
+        int pos = OffsetAtPoint(app, mouse.x, mouse.y);
+        MoveCursor(c, pos, IsShiftDown());
+        c->mouse_selecting = true;
+        app->selected_message = -1;
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+    {
+        c->mouse_selecting = false;
+    }
+    else if (c->mouse_selecting)
+    {
+        MoveCursor(c, OffsetAtPoint(app, mouse.x, mouse.y), true);
+    }
+}
+
 void PicoComposer_Render(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
-    static char display[1 << 16];
-    const char *shown;
-    int shown_len;
-
-    bool blink = ((int)(GetTime() * 2.0) & 1) == 0;
-    if (c->length == 0)
-    {
-        if (blink)
-        {
-            snprintf(display, sizeof(display), "|");
-            shown = display;
-            shown_len = 1;
-        }
-        else
-        {
-            shown = "Message Pico…  (Enter to send, Shift+Enter for newline)";
-            shown_len = (int)strlen(shown);
-        }
-    }
-    else
-    {
-        int cursor = c->cursor;
-        if (cursor < 0)
-        {
-            cursor = 0;
-        }
-        if (cursor > c->length)
-        {
-            cursor = c->length;
-        }
-        if (c->length + 2 < (int)sizeof(display))
-        {
-            memcpy(display, c->text, (size_t)cursor);
-            int n = 0;
-            if (blink)
-            {
-                display[cursor] = '|';
-                n = 1;
-            }
-            memcpy(display + cursor + n, c->text + cursor, (size_t)(c->length - cursor));
-            shown_len = c->length + n;
-            display[shown_len] = '\0';
-            shown = display;
-        }
-        else
-        {
-            shown = c->text;
-            shown_len = c->length;
-        }
-    }
-
-    Clay_Color text_color = (c->length == 0 && !blink) ? COLOR_MUTED : COLOR_TEXT;
+    const char *placeholder = "Message Pico…  (Enter to send, Shift+Enter for newline)";
+    bool empty = c->length == 0;
+    const char *shown = empty ? placeholder : (c->text ? c->text : "");
+    int shown_len = empty ? (int)strlen(placeholder) : c->length;
+    Clay_Color text_color = empty ? COLOR_MUTED : COLOR_TEXT;
+    Clay_String text = {.length = shown_len, .chars = shown};
 
     CLAY(CLAY_ID("Composer"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .padding = {14, 14, 10, 10},
+                     .padding = {COMPOSER_PAD_X, COMPOSER_PAD_X, COMPOSER_PAD_Y, COMPOSER_PAD_Y},
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(56, 160)}},
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        Clay_String text = {.length = shown_len, .chars = shown};
         CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                          .fontSize = 16,
+                                          .fontSize = COMPOSER_FONT_SIZE,
                                           .textColor = text_color,
                                           .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+    }
+}
+
+void PicoComposer_DrawOverlay(PicoApp *app)
+{
+    PicoComposer *c = &app->composer;
+    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
+    if (!box.found)
+    {
+        return;
+    }
+
+    if (PicoComposer_HasSelection(app) && c->text)
+    {
+        float max_width = box.boundingBox.width - COMPOSER_PAD_X * 2;
+        CompLine lines[COMPOSER_MAX_LINES];
+        float line_height = COMPOSER_FONT_SIZE;
+        int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], max_width, lines, COMPOSER_MAX_LINES, &line_height);
+        int sel_from = SelFrom(c);
+        int sel_to = SelTo(c);
+        Color fill = {(unsigned char)COLOR_SELECTION.r, (unsigned char)COLOR_SELECTION.g, (unsigned char)COLOR_SELECTION.b,
+                      (unsigned char)COLOR_SELECTION.a};
+        for (int i = 0; i < line_count; i++)
+        {
+            int start = lines[i].start;
+            int end = start + lines[i].length;
+            int a = sel_from > start ? sel_from : start;
+            int b = sel_to < end ? sel_to : end;
+            if (a >= b)
+            {
+                continue;
+            }
+            float x0 = MeasureSlice(app->fonts[FONT_REGULAR], c->text, start, a - start, COMPOSER_FONT_SIZE);
+            float x1 = MeasureSlice(app->fonts[FONT_REGULAR], c->text, start, b - start, COMPOSER_FONT_SIZE);
+            DrawRectangle((int)(box.boundingBox.x + COMPOSER_PAD_X + x0),
+                          (int)(box.boundingBox.y + COMPOSER_PAD_Y + (float)i * line_height),
+                          (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)line_height, fill);
+        }
+    }
+
+    if (((int)(GetTime() * 2.0) & 1) == 0)
+    {
+        float x, y, h;
+        CaretPos(app, &x, &y, &h);
+        Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g, (unsigned char)COLOR_CURSOR.b, 255};
+        DrawRectangle((int)x, (int)y, 2, (int)h, caret);
     }
 }

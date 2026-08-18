@@ -41,7 +41,9 @@ typedef struct PicoComposer {
     char *text;
     int length;
     int capacity;
-    int cursor; // byte offset
+    int cursor;     // byte offset
+    int sel_anchor; // byte offset; equals cursor when there is no selection
+    bool mouse_selecting;
 } PicoComposer;
 
 typedef struct PicoScrollbar {
@@ -67,9 +69,12 @@ typedef struct PicoApp {
     PicoViewFn views[PICO_SLOT_COUNT];
     PicoScrollbar chat_scrollbar;
     bool chat_follow_bottom;
+    bool chat_overflow;
+    int selected_message; // -1 if none
     bool reinitialize_clay;
     bool debug_enabled;
     const char *hovered_link;
+    char footer_text[256];
 } PicoApp;
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, PicoViewFn render);
@@ -81,8 +86,13 @@ void PicoApp_Submit(PicoApp *app);
 void PicoApp_Frame(PicoApp *app);
 
 void PicoChat_Render(PicoApp *app);
+void PicoChat_HandlePointer(PicoApp *app);
 void PicoComposer_HandleInput(PicoApp *app);
+void PicoComposer_HandlePointer(PicoApp *app);
 void PicoComposer_Render(PicoApp *app);
+void PicoComposer_DrawOverlay(PicoApp *app);
+bool PicoComposer_HasSelection(const PicoApp *app);
+void PicoComposer_Copy(PicoApp *app);
 void PicoFooter_Render(PicoApp *app);
 
 #endif

@@ -26,10 +26,10 @@ static const char *AgentStateName(PicoAgentState state)
 
 void PicoFooter_Render(PicoApp *app)
 {
-    char line[256];
-    snprintf(line, sizeof(line), "%s  ·  %s  ·  %d / %d tokens", AgentStateName(app->agent_state),
-             app->model_name ? app->model_name : "dummy-model", app->tokens_used, app->tokens_limit);
-    Clay_String text = {.length = (int32_t)strlen(line), .chars = line};
+    snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens",
+             AgentStateName(app->agent_state), app->model_name ? app->model_name : "dummy-model", app->tokens_used,
+             app->tokens_limit);
+    Clay_String text = {.length = (int32_t)strlen(app->footer_text), .chars = app->footer_text};
 
     CLAY(CLAY_ID("Footer"),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,

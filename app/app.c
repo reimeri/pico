@@ -75,6 +75,7 @@ void PicoApp_Submit(PicoApp *app)
 
     c->length = 0;
     c->cursor = 0;
+    c->sel_anchor = 0;
     if (c->text)
     {
         c->text[0] = '\0';
@@ -112,6 +113,8 @@ void PicoApp_Init(PicoApp *app, Font *fonts)
     app->tokens_used = 0;
     app->tokens_limit = 128000;
     app->agent_state = PICO_AGENT_IDLE;
+    app->selected_message = -1;
+    app->chat_overflow = true;
     app->composer.capacity = 256;
     app->composer.text = (char *)malloc((size_t)app->composer.capacity);
     if (app->composer.text)
@@ -149,7 +152,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
     CLAY(CLAY_ID("Root"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
-                     .padding = {CONTENT_PADDING, CONTENT_PADDING, 16, 12},
+                     .padding = {CONTENT_PADDING, 12, 16, 12},
                      .childGap = 12},
           .backgroundColor = COLOR_BG})
     {
@@ -193,7 +196,7 @@ static void UpdateChatScrollbarDrag(PicoApp *app, Clay_Vector2 mouse)
         drag->mouse_down = false;
     }
     if (IsMouseButtonDown(0) && !drag->mouse_down &&
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBar"))))
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
     {
         Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
         if (data.found)
@@ -241,6 +244,26 @@ void PicoApp_Frame(PicoApp *app)
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);
 
+    Clay_ScrollContainerData scroll_data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    app->chat_overflow =
+        scroll_data.found && scroll_data.contentDimensions.height > scroll_data.scrollContainerDimensions.height + 0.5f;
+
+    PicoComposer_HandlePointer(app);
+    PicoChat_HandlePointer(app);
+
+    if (app->hovered_link)
+    {
+        SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+    }
+    else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))))
+    {
+        SetMouseCursor(MOUSE_CURSOR_IBEAM);
+    }
+    else
+    {
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+    }
+
     if (app->chat_follow_bottom)
     {
         Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
@@ -261,5 +284,6 @@ void PicoApp_Frame(PicoApp *app)
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
+    PicoComposer_DrawOverlay(app);
     EndDrawing();
 }

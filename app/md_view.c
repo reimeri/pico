@@ -312,7 +312,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
         return;
     }
 
-    for (int i = 0; i < doc->block_count; i++)
+    for (int i = 0; i < doc->block_count; )
     {
         bool heading = doc->blocks[i].type == MDB_HEADING;
         int spacing_above = i > 0 ? (heading ? BLOCK_SPACING : 0) : 0;
@@ -324,7 +324,31 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
             {
             }
         }
+
+        if (doc->blocks[i].type == MDB_LIST_ITEM)
+        {
+            int start = i;
+            int end = i + 1;
+            while (end < doc->block_count && doc->blocks[end].type == MDB_LIST_ITEM)
+            {
+                end++;
+            }
+            CLAY(CLAY_IDI("MdList", id_base + start),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 2,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+            {
+                for (int j = start; j < end; j++)
+                {
+                    RenderBlock(doc, j, available_width, &emit);
+                }
+            }
+            i = end;
+            continue;
+        }
+
         RenderBlock(doc, i, available_width, &emit);
+        i++;
     }
     if (emit.hovered_link)
     {

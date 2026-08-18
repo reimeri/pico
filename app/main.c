@@ -19,6 +19,47 @@
 #include "markdown.h"
 #include "richtext.h"
 
+
+// ---------------------------------------------------------------------------
+// UTF-8 aware text measurement.
+//
+// The stock Raylib_MeasureText from the clay renderer indexes glyphs as
+// (char - 32), which only works for ASCII: multi-byte UTF-8 (list bullets,
+// checkboxes, em dashes, decoded entities) reads out-of-bounds glyph slots
+// and produces garbage widths. This version copies the (non-NUL-terminated)
+// slice into a temp buffer and defers to raylib's MeasureTextEx, which
+// decodes UTF-8 codepoints properly.
+
+static Clay_Dimensions MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
+{
+    static char *buffer = NULL;
+    static size_t buffer_capacity = 0;
+
+    Font *fonts = (Font *)userData;
+    Font font = fonts[config->fontId];
+    if (!font.glyphs)
+    {
+        font = GetFontDefault();
+    }
+
+    if ((size_t)text.length + 1 > buffer_capacity)
+    {
+        size_t new_capacity = buffer_capacity == 0 ? 256 : buffer_capacity;
+        while (new_capacity < (size_t)text.length + 1)
+        {
+            new_capacity *= 2;
+        }
+        free(buffer);
+        buffer = (char *)malloc(new_capacity);
+        buffer_capacity = new_capacity;
+    }
+    memcpy(buffer, text.chars, (size_t)text.length);
+    buffer[text.length] = '\0';
+
+    Vector2 size = MeasureTextEx(font, buffer, (float)config->fontSize, (float)config->letterSpacing);
+    return (Clay_Dimensions){.width = size.x, .height = size.y};
+}
+
 // ---------------------------------------------------------------------------
 // Fonts and theme
 
@@ -79,6 +120,7 @@ static const char *hovered_link = NULL;
 
 static bool reinitialize_clay = false;
 static bool debug_enabled = false;
+static float pending_scroll_y = 0; // applied to the scroll container on the next frame
 
 typedef struct {
     Clay_Vector2 click_origin;
@@ -202,7 +244,7 @@ static void RenderBlock(int index, float available_width, RichTextEmitState *emi
                 {
                     indent = 0;
                 }
-                CLAY(CLAY_IDI("DbgLiRow", index), {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                CLAY_AUTO_ID( {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                          .padding = {.left = (uint16_t)(indent * 24)},
                                          .childGap = 8,
                                          .sizing = {.width = CLAY_SIZING_GROW(0)},
@@ -227,7 +269,7 @@ static void RenderBlock(int index, float available_width, RichTextEmitState *emi
                                                     .textColor = COLOR_MUTED,
                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
                     }
-                    CLAY(CLAY_IDI("DbgLiInner", index), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                    CLAY_AUTO_ID( {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                     {
                         RichText_RenderParagraph(block, &doc.arena, available_width, &style, emit);
@@ -502,6 +544,16 @@ static void UpdateDrawFrame(Font *fonts)
 
     Clay_UpdateScrollContainers(true, (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
 
+    if (pending_scroll_y != 0)
+    {
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("DocumentScroll")));
+        if (data.found)
+        {
+            data.scrollPosition->y = pending_scroll_y;
+            pending_scroll_y = 0;
+        }
+    }
+
     // Reload the document at most twice a second.
     double now = GetTime();
     if (now - last_poll_time > 0.5)
@@ -514,17 +566,6 @@ static void UpdateDrawFrame(Font *fonts)
     }
 
     Clay_RenderCommandArray render_commands = CreateLayout();
-    static int dbg = 0;
-    if (dbg++ < 3) fprintf(stderr, "DBG blocks=%d commands=%d screen=%dx%d\n", doc.block_count, render_commands.length, GetScreenWidth(), GetScreenHeight());
-    if (dbg <= 4) {
-        for (int k = 0; k < doc.block_count; k++) {
-            Clay_ElementData d = Clay_GetElementData(CLAY_IDI("DbgLiRow", k));
-            if (!d.found) continue;
-            Clay_ElementData m = Clay_GetElementData(CLAY_IDI("DbgLiInner", k));
-            fprintf(stderr, "LI %d row=(%.0f,%.0f,%.0fx%.0f) inner=(%.0f,%.0f,%.0fx%.0f)\n", k, d.boundingBox.x, d.boundingBox.y, d.boundingBox.width, d.boundingBox.height, m.found ? m.boundingBox.x : -1, m.found ? m.boundingBox.y : -1, m.found ? m.boundingBox.width : -1, m.found ? m.boundingBox.height : -1);
-        }
-    }
-
     if (hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         OpenURL(hovered_link);
@@ -619,8 +660,8 @@ int main(int argc, char **argv)
     LoadFontWithGlyphs("resources/Roboto-Italic.ttf", &fonts[FONT_ITALIC]);
     LoadFontWithGlyphs("resources/Roboto-BoldItalic.ttf", &fonts[FONT_BOLD_ITALIC]);
     LoadFontWithGlyphs("resources/RobotoMono-Medium.ttf", &fonts[FONT_MONO]);
-    Clay_SetMeasureTextFunction(Raylib_MeasureText, fonts);
-    RichText_SetMeasureFunction(Raylib_MeasureText, fonts);
+    Clay_SetMeasureTextFunction(MeasureTextUtf8, fonts);
+    RichText_SetMeasureFunction(MeasureTextUtf8, fonts);
 
     ReloadDocument();
 
@@ -629,6 +670,14 @@ int main(int argc, char **argv)
     const char *frames_env = getenv("CLAY_MD_FRAMES");
     int frame_limit = frames_env ? atoi(frames_env) : 0;
     int frame_count = 0;
+
+    // Optional initial scroll offset (pixels) for capturing below-the-fold
+    // sections in screenshots, e.g. CLAY_MD_SCROLL=1400.
+    const char *scroll_env = getenv("CLAY_MD_SCROLL");
+    if (scroll_env)
+    {
+        pending_scroll_y = -(float)atof(scroll_env);
+    }
 
     while (!WindowShouldClose())
     {

@@ -42,6 +42,7 @@ typedef struct RtWord {
     bool code;
     char *link_url; // arena owned, stable for the document lifetime
     bool hard_break; // length is 0; forces a line break
+    bool space_before; // the source had whitespace before this word
     float width;
 } RtWord;
 
@@ -51,6 +52,7 @@ typedef struct RtRun {
     bool italic;
     bool code;
     char *link_url;
+    bool space_before; // emit a space before this run (source had whitespace)
 } RtRun;
 
 typedef struct RtLine {
@@ -127,6 +129,10 @@ static void PushWord(WordArray *words, RtWord word)
 static void SplitChunksIntoWords(MdBlock *block, const RichTextStyle *style, WordArray *words)
 {
     bool heading = block->type == MDB_HEADING;
+    // Tracks whether whitespace preceded the next word; carries across chunk
+    // boundaries so a space at the end of one chunk separates the first word
+    // of the next.
+    bool pending_space = false;
     for (int c = 0; c < block->chunk_count; c++)
     {
         MdChunk *chunk = &block->chunks[c];
@@ -145,9 +151,11 @@ static void SplitChunksIntoWords(MdBlock *block, const RichTextStyle *style, Wor
                     word.italic = chunk->italic;
                     word.code = chunk->code;
                     word.link_url = chunk->link_url;
+                    word.space_before = pending_space;
                     PushWord(words, word);
                     start = NULL;
                 }
+                pending_space = true;
                 if (ch == '\n')
                 {
                     RtWord br = {0};
@@ -194,6 +202,7 @@ typedef struct ScratchRun {
     bool italic;
     bool code;
     char *link_url;
+    bool space_before;
 } ScratchRun;
 
 typedef struct ScratchLine {
@@ -284,7 +293,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
         }
 
         ScratchRun *last_run = current_line.run_count > 0 ? &current_line.runs[current_line.run_count - 1] : NULL;
-        bool fits = line_x + word->width + (line_x > 0 ? space_width : 0) <= available_width;
+        bool gap = line_x > 0 && word->space_before;
+        bool fits = line_x + word->width + (gap ? space_width : 0) <= available_width;
 
         if (line_x == 0)
         {
@@ -308,8 +318,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
                  last_run->code == word->code && last_run->link_url == word->link_url)
         {
             // Extend the current run.
-            ScratchRunAppendWord(last_run, word, true);
-            line_x += space_width + word->width;
+            ScratchRunAppendWord(last_run, word, word->space_before);
+            line_x += (word->space_before ? space_width : 0) + word->width;
         }
         else if (fits)
         {
@@ -325,9 +335,10 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.italic = word->italic;
             new_run.code = word->code;
             new_run.link_url = word->link_url;
+            new_run.space_before = word->space_before;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
-            line_x += space_width + word->width;
+            line_x += (word->space_before ? space_width : 0) + word->width;
         }
         else
         {
@@ -371,6 +382,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             dst->italic = src->italic;
             dst->code = src->code;
             dst->link_url = src->link_url;
+            dst->space_before = src->space_before;
         }
     }
 
@@ -417,7 +429,6 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
     }
 }
 
-static int s_emit_dbg = 0;
 static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitState *emit)
 {
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
@@ -434,13 +445,13 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
             }
             else
             {
-                { fprintf(stderr, "LINE runs=%d:", line->run_count); for (int r = 0; r < line->run_count; r++) fprintf(stderr, " [%s]", line->runs[r].text); fprintf(stderr, "\n"); }
                 for (int r = 0; r < line->run_count; r++)
                 {
-                    if (r > 0)
+                    if (r > 0 && line->runs[r].space_before)
                     {
-                        // Inter-run space: the wrap accounting reserved
-                        // space_width between runs, so emit it explicitly.
+                        // Inter-run space, only where the source actually had
+                        // whitespace (the wrap accounting reserved room for
+                        // exactly these spaces).
                         CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
                     }
                     EmitRun(&line->runs[r], style, emit);

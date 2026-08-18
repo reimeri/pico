@@ -167,6 +167,65 @@ static size_t DecodeEntity(const char *text, MD_SIZE size, char out[9])
     {
         return 0;
     }
+    if (text[1] == '#')
+    {
+        // Numeric character reference: &#65; or &#x2603; (md4c only passes
+        // these through; the entity table covers named entities only).
+        unsigned long codepoint = 0;
+        if (size >= 4 && (text[2] == 'x' || text[2] == 'X'))
+        {
+            for (MD_SIZE i = 3; i < size - 1; i++)
+            {
+                char ch = text[i];
+                unsigned int digit;
+                if (ch >= '0' && ch <= '9')
+                {
+                    digit = (unsigned int)(ch - '0');
+                }
+                else if (ch >= 'a' && ch <= 'f')
+                {
+                    digit = (unsigned int)(ch - 'a') + 10;
+                }
+                else if (ch >= 'A' && ch <= 'F')
+                {
+                    digit = (unsigned int)(ch - 'A') + 10;
+                }
+                else
+                {
+                    return 0;
+                }
+                codepoint = codepoint * 16 + digit;
+                if (codepoint > 0x10FFFF)
+                {
+                    return 0;
+                }
+            }
+        }
+        else
+        {
+            for (MD_SIZE i = 2; i < size - 1; i++)
+            {
+                char ch = text[i];
+                if (ch < '0' || ch > '9')
+                {
+                    return 0;
+                }
+                codepoint = codepoint * 10 + (unsigned long)(ch - '0');
+                if (codepoint > 0x10FFFF)
+                {
+                    return 0;
+                }
+            }
+        }
+        // CommonMark maps NUL, noncharacters and other out-of-range values
+        // to U+FFFD; UTF-8 surrogates cannot be encoded either.
+        if (codepoint == 0 || codepoint > 0x10FFFF ||
+            (codepoint >= 0xD800 && codepoint <= 0xDFFF))
+        {
+            codepoint = 0xFFFD;
+        }
+        return (size_t)Utf8Encode((unsigned int)codepoint, out);
+    }
     const ENTITY *entity = entity_lookup(text + 1, (size_t)size - 2);
     if (!entity)
     {

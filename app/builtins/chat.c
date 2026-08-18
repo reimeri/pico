@@ -50,19 +50,13 @@ void PicoChat_Render(PicoApp *app)
                     CLAY(CLAY_IDI("Msg", i),
                          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                      .padding = {16, 16, 12, 12},
-                                     .childGap = 8,
                                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
                           .backgroundColor = bg,
-                          .cornerRadius = CLAY_CORNER_RADIUS(8),
+                          .cornerRadius = user || selected ? CLAY_CORNER_RADIUS(8) : CLAY_CORNER_RADIUS(0),
                           .border = selected ? ((Clay_BorderElementConfig){.color = COLOR_LINK,
                                                                            .width = {1, 1, 1, 1, 0}})
                                              : ((Clay_BorderElementConfig){0})})
                     {
-                        CLAY_TEXT(user ? CLAY_STRING("You") : CLAY_STRING("Pico"),
-                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                    .fontSize = 13,
-                                                    .textColor = COLOR_MUTED,
-                                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
                         MdView_RenderDocument(&msg->doc, (i + 1) * 4096, available_width);
                     }
                 }

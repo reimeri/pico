@@ -46,6 +46,7 @@ typedef enum PicoHook {
 typedef struct PicoMessage {
     PicoRole role;
     char *source;
+    char *thinking;
     MdDocument doc;
 } PicoMessage;
 
@@ -92,6 +93,7 @@ typedef struct PicoSettings {
     char base_url[512];
     char model[128];
     int context_limit;
+    bool reasoning_summary;
 } PicoSettings;
 
 struct PicoAgentRt;
@@ -130,6 +132,7 @@ typedef struct PicoApp {
     char footer_text[256];
     char workspace[4096];
     char *status_warn;
+    char agent_activity[256];
 } PicoApp;
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);

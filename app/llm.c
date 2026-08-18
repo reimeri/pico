@@ -140,6 +140,14 @@ static char *ContentText(const JsonDoc *doc, int content)
     return JsonStrDup(doc, content);
 }
 
+static void EmitDelta(LlmCtx *c, PicoLlmDeltaKind kind, const char *s, size_t n)
+{
+    if (c->on_delta && s && n)
+    {
+        c->on_delta(c->user, kind, s, n);
+    }
+}
+
 static void EmitMessageText(LlmCtx *c, const JsonDoc *doc, int items)
 {
     if (!c->on_delta || !JsonIsArray(doc, items))
@@ -157,7 +165,7 @@ static void EmitMessageText(LlmCtx *c, const JsonDoc *doc, int items)
         char *text = ContentText(doc, JsonObjGet(doc, item, "content"));
         if (text && text[0])
         {
-            c->on_delta(c->user, text, strlen(text));
+            EmitDelta(c, PICO_LLM_DELTA_TEXT, text, strlen(text));
         }
         free(text);
     }
@@ -187,11 +195,34 @@ static void HandleJson(LlmCtx *c, const char *json, size_t len)
     if (type && strcmp(type, "response.output_text.delta") == 0)
     {
         char *delta = JsonObjStr(&doc, 0, "delta");
-        if (delta && delta[0] && c->on_delta)
+        if (delta)
         {
-            c->on_delta(c->user, delta, strlen(delta));
+            EmitDelta(c, PICO_LLM_DELTA_TEXT, delta, strlen(delta));
+            free(delta);
         }
-        free(delta);
+    }
+    else if (type && (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
+                      strcmp(type, "response.reasoning_text.delta") == 0))
+    {
+        char *delta = JsonObjStr(&doc, 0, "delta");
+        if (delta)
+        {
+            EmitDelta(c, PICO_LLM_DELTA_THINKING, delta, strlen(delta));
+            free(delta);
+        }
+    }
+    else if (type && strcmp(type, "response.output_item.added") == 0)
+    {
+        int item = JsonObjGet(&doc, 0, "item");
+        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "function_call"))
+        {
+            char *name = JsonObjStr(&doc, item, "name");
+            if (name)
+            {
+                EmitDelta(c, PICO_LLM_DELTA_STATUS, name, strlen(name));
+                free(name);
+            }
+        }
     }
     else if (type && strcmp(type, "response.output_item.done") == 0)
     {

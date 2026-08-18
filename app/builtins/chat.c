@@ -3,6 +3,8 @@
 
 #include "clay/clay.h"
 
+#include <string.h>
+
 static float ChatWidth(PicoApp *app)
 {
     float width = (float)GetScreenWidth() - CONTENT_PADDING - 12;
@@ -50,6 +52,7 @@ void PicoChat_Render(PicoApp *app)
                     CLAY(CLAY_IDI("Msg", i),
                          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                      .padding = {16, 16, 12, 12},
+                                     .childGap = 8,
                                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
                           .backgroundColor = bg,
                           .cornerRadius = user || selected ? CLAY_CORNER_RADIUS(8) : CLAY_CORNER_RADIUS(0),
@@ -57,7 +60,34 @@ void PicoChat_Render(PicoApp *app)
                                                                            .width = {1, 1, 1, 1, 0}})
                                              : ((Clay_BorderElementConfig){0})})
                     {
-                        MdView_RenderDocument(&msg->doc, (i + 1) * 4096, available_width);
+                        bool has_think = msg->thinking && msg->thinking[0];
+                        bool has_source = msg->source && msg->source[0];
+                        bool live = !user && i == app->message_count - 1 &&
+                                    (app->agent_state == PICO_AGENT_LLM_WAIT ||
+                                     app->agent_state == PICO_AGENT_TOOL_WAIT);
+                        if (has_think)
+                        {
+                            Clay_String think = {.length = (int32_t)strlen(msg->thinking),
+                                                 .chars = msg->thinking};
+                            CLAY_TEXT(think, CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
+                                                               .fontSize = 15,
+                                                               .textColor = COLOR_MUTED,
+                                                               .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                        }
+                        else if (live && !has_source)
+                        {
+                            const char *label =
+                                app->agent_activity[0] ? app->agent_activity : "Thinking…";
+                            Clay_String think = {.length = (int32_t)strlen(label), .chars = label};
+                            CLAY_TEXT(think, CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
+                                                               .fontSize = 15,
+                                                               .textColor = COLOR_MUTED,
+                                                               .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                        }
+                        if (has_source)
+                        {
+                            MdView_RenderDocument(&msg->doc, (i + 1) * 4096, available_width);
+                        }
                     }
                 }
             }

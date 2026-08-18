@@ -103,6 +103,7 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
         app->message_capacity = capacity;
     }
     PicoMessage *msg = &app->messages[app->message_count++];
+    memset(msg, 0, sizeof(*msg));
     msg->role = role;
     size_t len = markdown ? strlen(markdown) : 0;
     msg->source = (char *)malloc(len + 1);
@@ -202,6 +203,7 @@ void PicoApp_Free(PicoApp *app)
     for (int i = 0; i < app->message_count; i++)
     {
         free(app->messages[i].source);
+        free(app->messages[i].thinking);
         MdDocument_Free(&app->messages[i].doc);
     }
     free(app->messages);

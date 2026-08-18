@@ -13,6 +13,8 @@
 
 #define PICO_MAX_PENDING_CALLS 16
 
+static const char kReasoningField[] = ",\"reasoning\":{\"summary\":\"auto\"}";
+
 typedef struct PicoInputItem {
     char *json;
 } PicoInputItem;
@@ -66,6 +68,10 @@ struct PicoAgentRt {
     char *stream;
     size_t stream_len;
     size_t stream_cap;
+    char *think;
+    size_t think_len;
+    size_t think_cap;
+    char status[128];
 
     PicoAgentEv *events;
     int event_count;
@@ -156,7 +162,57 @@ static bool CancelCb(void *user)
     return c;
 }
 
-static void DeltaCb(void *user, const char *s, size_t n)
+static void BufAppend(char **buf, size_t *len, size_t *cap, const char *s, size_t n)
+{
+    if (!s || n == 0)
+    {
+        return;
+    }
+    if (*len + n + 1 > *cap)
+    {
+        size_t next_cap = *cap ? *cap : 256;
+        while (next_cap < *len + n + 1)
+        {
+            next_cap *= 2;
+        }
+        char *next = (char *)realloc(*buf, next_cap);
+        if (!next)
+        {
+            return;
+        }
+        *buf = next;
+        *cap = next_cap;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+}
+
+static void SetActivity(PicoApp *app, const char *msg)
+{
+    snprintf(app->agent_activity, sizeof(app->agent_activity), "%s", msg ? msg : "");
+}
+
+static char *BodyWithoutReasoning(const char *body)
+{
+    if (!body)
+    {
+        return NULL;
+    }
+    const char *found = strstr(body, kReasoningField);
+    if (!found)
+    {
+        return NULL;
+    }
+    size_t skip = strlen(kReasoningField);
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Append(&b, body, (size_t)(found - body));
+    JsonBuf_Puts(&b, found + skip);
+    return JsonBuf_Steal(&b);
+}
+
+static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
 {
     PicoAgentRt *rt = (PicoAgentRt *)user;
     if (!s || n == 0)
@@ -164,25 +220,20 @@ static void DeltaCb(void *user, const char *s, size_t n)
         return;
     }
     pthread_mutex_lock(&rt->mu);
-    if (rt->stream_len + n + 1 > rt->stream_cap)
+    if (kind == PICO_LLM_DELTA_THINKING)
     {
-        size_t cap = rt->stream_cap ? rt->stream_cap : 256;
-        while (cap < rt->stream_len + n + 1)
-        {
-            cap *= 2;
-        }
-        char *next = (char *)realloc(rt->stream, cap);
-        if (!next)
-        {
-            pthread_mutex_unlock(&rt->mu);
-            return;
-        }
-        rt->stream = next;
-        rt->stream_cap = cap;
+        BufAppend(&rt->think, &rt->think_len, &rt->think_cap, s, n);
     }
-    memcpy(rt->stream + rt->stream_len, s, n);
-    rt->stream_len += n;
-    rt->stream[rt->stream_len] = '\0';
+    else if (kind == PICO_LLM_DELTA_STATUS)
+    {
+        size_t copy = n < sizeof(rt->status) - 1 ? n : sizeof(rt->status) - 1;
+        memcpy(rt->status, s, copy);
+        rt->status[copy] = '\0';
+    }
+    else
+    {
+        BufAppend(&rt->stream, &rt->stream_len, &rt->stream_cap, s, n);
+    }
     pthread_mutex_unlock(&rt->mu);
 }
 
@@ -225,6 +276,19 @@ static void *WorkerMain(void *arg)
             char *err = NULL;
             int tokens = 0;
             int rc = PicoLlm_Stream(url, key, body, CancelCb, DeltaCb, rt, &items, &tokens, &err);
+            if (rc == PICO_LLM_FAIL && err && strstr(err, "easoning"))
+            {
+                char *stripped = BodyWithoutReasoning(body);
+                if (stripped)
+                {
+                    free(items);
+                    items = NULL;
+                    free(err);
+                    err = NULL;
+                    rc = PicoLlm_Stream(url, key, stripped, CancelCb, DeltaCb, rt, &items, &tokens, &err);
+                    free(stripped);
+                }
+            }
             if (rc == PICO_LLM_CANCEL)
             {
                 PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0);
@@ -372,6 +436,10 @@ static char *BuildRequest(PicoApp *app)
         }
         JsonBuf_Putc(&b, ']');
     }
+    if (app->settings.reasoning_summary)
+    {
+        JsonBuf_Puts(&b, kReasoningField);
+    }
     JsonBuf_Putc(&b, '}');
     free(instructions);
     return JsonBuf_Steal(&b);
@@ -427,22 +495,40 @@ static void PopLastMessage(PicoApp *app)
     }
     int i = --app->message_count;
     free(app->messages[i].source);
+    free(app->messages[i].thinking);
     MdDocument_Free(&app->messages[i].doc);
     memset(&app->messages[i], 0, sizeof(app->messages[i]));
 }
 
-static bool MessageEmpty(const PicoApp *app, int idx)
+static bool Blank(const char *s)
 {
-    if (idx < 0 || idx >= app->message_count || !app->messages[idx].source)
+    if (!s)
     {
         return true;
     }
-    const char *s = app->messages[idx].source;
     while (*s == ' ' || *s == '\n' || *s == '\t' || *s == '\r')
     {
         s++;
     }
     return *s == '\0';
+}
+
+static bool MessageSourceEmpty(const PicoApp *app, int idx)
+{
+    if (idx < 0 || idx >= app->message_count)
+    {
+        return true;
+    }
+    return Blank(app->messages[idx].source);
+}
+
+static bool MessageEmpty(const PicoApp *app, int idx)
+{
+    if (idx < 0 || idx >= app->message_count)
+    {
+        return true;
+    }
+    return Blank(app->messages[idx].source) && Blank(app->messages[idx].thinking);
 }
 
 static char *ContentText(const JsonDoc *doc, int content)
@@ -504,6 +590,52 @@ static char *MessageTextFromItems(const char *items_json)
     return JsonBuf_Steal(&b);
 }
 
+static char *ThinkingTextFromItems(const char *items_json)
+{
+    if (!items_json)
+    {
+        return NULL;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, items_json, strlen(items_json)) != 0)
+    {
+        return NULL;
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    int n = JsonArrayLen(&doc, 0);
+    for (int i = 0; i < n; i++)
+    {
+        int item = JsonArrayAt(&doc, 0, i);
+        if (!JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
+        {
+            continue;
+        }
+        char *text = ContentText(&doc, JsonObjGet(&doc, item, "summary"));
+        if (!text || !text[0])
+        {
+            free(text);
+            text = ContentText(&doc, JsonObjGet(&doc, item, "content"));
+        }
+        if (text && text[0])
+        {
+            if (b.len)
+            {
+                JsonBuf_Puts(&b, "\n\n");
+            }
+            JsonBuf_Puts(&b, text);
+        }
+        free(text);
+    }
+    JsonFree(&doc);
+    if (!b.len)
+    {
+        JsonBuf_Free(&b);
+        return NULL;
+    }
+    return JsonBuf_Steal(&b);
+}
+
 static void PushFunctionOutput(PicoAgentRt *rt, const char *call_id, const char *output)
 {
     JsonBuf b;
@@ -525,12 +657,31 @@ static void AbortRemainingCalls(PicoAgentRt *rt)
     ClearPending(rt);
 }
 
+static void AppendThinking(PicoApp *app, int idx, const char *s, size_t n)
+{
+    if (idx < 0 || idx >= app->message_count || !s || n == 0)
+    {
+        return;
+    }
+    PicoMessage *m = &app->messages[idx];
+    size_t old = m->thinking ? strlen(m->thinking) : 0;
+    char *next = (char *)realloc(m->thinking, old + n + 1);
+    if (!next)
+    {
+        return;
+    }
+    memcpy(next + old, s, n);
+    next[old + n] = '\0';
+    m->thinking = next;
+}
+
 static void GoIdle(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
     app->agent_state = PICO_AGENT_IDLE;
     rt->stream_msg = -1;
     rt->stream_dirty = false;
+    app->agent_activity[0] = '\0';
 }
 
 static void SetErrorState(PicoApp *app, const char *msg)
@@ -546,6 +697,7 @@ static void SetErrorState(PicoApp *app, const char *msg)
     rt->stream_msg = -1;
     rt->stream_dirty = false;
     ClearPending(rt);
+    app->agent_activity[0] = '\0';
 }
 
 static char *BuildMessageItem(const char *role, const char *text, bool assistant)
@@ -585,16 +737,37 @@ static void StartNextTool(PicoApp *app)
     }
     PicoPendingCall *call = &rt->pending[rt->pending_next];
     app->agent_state = PICO_AGENT_TOOL_WAIT;
+    char line[192];
+    snprintf(line, sizeof(line), "Running `%s`…", call->name ? call->name : "tool");
+    SetActivity(app, line);
+    if (rt->stream_msg >= 0)
+    {
+        PicoMessage *m = &app->messages[rt->stream_msg];
+        const char *prefix = Blank(m->thinking) ? "" : "\n\n";
+        char block[200];
+        snprintf(block, sizeof(block), "%s%s", prefix, line);
+        AppendThinking(app, rt->stream_msg, block, strlen(block));
+        app->chat_follow_bottom = true;
+    }
     QueueTool(rt, call->name, call->arguments, call->call_id, FindTool(app, call->name));
 }
 
 static void StartLlm(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, "");
-    rt->stream_msg = app->message_count - 1;
+    int last = app->message_count - 1;
+    if (last >= 0 && app->messages[last].role == PICO_ROLE_ASSISTANT && MessageSourceEmpty(app, last))
+    {
+        rt->stream_msg = last;
+    }
+    else
+    {
+        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, "");
+        rt->stream_msg = app->message_count - 1;
+    }
     rt->stream_dirty = false;
     app->agent_state = PICO_AGENT_LLM_WAIT;
+    SetActivity(app, "Thinking…");
     free(app->agent_error);
     app->agent_error = NULL;
 
@@ -674,7 +847,7 @@ static void FinishAssistantHistory(PicoApp *app, const char *items_json)
             JsonFree(&doc);
         }
     }
-    if (!have_message_item && rt->stream_msg >= 0 && !MessageEmpty(app, rt->stream_msg))
+    if (!have_message_item && rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
     {
         PushInput(rt, BuildAssistantItem(app->messages[rt->stream_msg].source));
     }
@@ -687,7 +860,7 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
     {
         app->tokens_used = ev->tokens;
     }
-    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
+    if (rt->stream_msg >= 0 && MessageSourceEmpty(app, rt->stream_msg))
     {
         char *text = MessageTextFromItems(ev->payload);
         if (text && text[0])
@@ -696,15 +869,23 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
         }
         free(text);
     }
+    if (rt->stream_msg >= 0 && Blank(app->messages[rt->stream_msg].thinking))
+    {
+        char *think = ThinkingTextFromItems(ev->payload);
+        if (think && think[0])
+        {
+            free(app->messages[rt->stream_msg].thinking);
+            app->messages[rt->stream_msg].thinking = think;
+        }
+        else
+        {
+            free(think);
+        }
+    }
     FinishAssistantHistory(app, ev->payload);
     IngestOutputItems(app, ev->payload);
     if (rt->pending_count > 0)
     {
-        if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
-        {
-            PopLastMessage(app);
-            rt->stream_msg = -1;
-        }
         rt->pending_next = 0;
         StartNextTool(app);
         return;
@@ -796,6 +977,7 @@ void PicoAgent_Shutdown(PicoApp *app)
     free(rt->input);
     ClearPending(rt);
     free(rt->stream);
+    free(rt->think);
     free(rt->work_url);
     free(rt->work_key);
     free(rt->work_body);
@@ -870,6 +1052,14 @@ void PicoAgent_Pump(PicoApp *app)
     rt->stream = NULL;
     rt->stream_len = 0;
     rt->stream_cap = 0;
+    char *think = rt->think;
+    size_t think_len = rt->think_len;
+    rt->think = NULL;
+    rt->think_len = 0;
+    rt->think_cap = 0;
+    char status[128];
+    memcpy(status, rt->status, sizeof(status));
+    rt->status[0] = '\0';
     PicoAgentEv *events = rt->events;
     int event_count = rt->event_count;
     rt->events = NULL;
@@ -884,6 +1074,21 @@ void PicoAgent_Pump(PicoApp *app)
         app->chat_follow_bottom = true;
     }
     free(stream);
+
+    if (think && think_len && rt->stream_msg >= 0)
+    {
+        AppendThinking(app, rt->stream_msg, think, think_len);
+        app->chat_follow_bottom = true;
+    }
+    free(think);
+
+    if (status[0])
+    {
+        char line[192];
+        snprintf(line, sizeof(line), "Calling `%s`…", status);
+        SetActivity(app, line);
+        app->chat_follow_bottom = true;
+    }
 
     if (rt->stream_dirty)
     {

@@ -72,6 +72,11 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     {
         s->context_limit = limit;
     }
+    int rs = JsonObjGet(doc, obj, "reasoning_summary");
+    if (rs >= 0)
+    {
+        s->reasoning_summary = JsonEq(doc, rs, "true") || JsonEq(doc, rs, "1");
+    }
     free(api_key);
     free(base_url);
     free(model);
@@ -116,6 +121,7 @@ void PicoSettings_Load(PicoApp *app)
     snprintf(s->base_url, sizeof(s->base_url), "https://api.openai.com/v1");
     snprintf(s->model, sizeof(s->model), "gpt-4o");
     s->context_limit = 128000;
+    s->reasoning_summary = true;
 
     char dir[4096];
     Pico_ConfigDir(dir, sizeof(dir));
@@ -134,6 +140,11 @@ void PicoSettings_Load(PicoApp *app)
     CopyField(s->api_key, sizeof(s->api_key), FirstEnv("PICO_API_KEY", "OPENAI_API_KEY"));
     CopyField(s->base_url, sizeof(s->base_url), FirstEnv("PICO_BASE_URL", "OPENAI_BASE_URL"));
     CopyField(s->model, sizeof(s->model), FirstEnv("PICO_MODEL", "OPENAI_MODEL"));
+    const char *rs = getenv("PICO_REASONING_SUMMARY");
+    if (rs && rs[0])
+    {
+        s->reasoning_summary = !(rs[0] == '0' || rs[0] == 'f' || rs[0] == 'F' || rs[0] == 'n' || rs[0] == 'N');
+    }
     const char *limit = getenv("PICO_CONTEXT_LIMIT");
     if (limit && limit[0])
     {

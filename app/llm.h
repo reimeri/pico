@@ -5,7 +5,14 @@
 #include <stddef.h>
 
 typedef bool (*PicoLlmCancelFn)(void *user);
-typedef void (*PicoLlmDeltaFn)(void *user, const char *s, size_t n);
+
+typedef enum PicoLlmDeltaKind {
+    PICO_LLM_DELTA_TEXT = 0,
+    PICO_LLM_DELTA_THINKING,
+    PICO_LLM_DELTA_STATUS,
+} PicoLlmDeltaKind;
+
+typedef void (*PicoLlmDeltaFn)(void *user, PicoLlmDeltaKind kind, const char *s, size_t n);
 
 enum {
     PICO_LLM_OK = 0,

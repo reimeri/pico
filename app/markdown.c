@@ -924,10 +924,66 @@ static int OnText(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *use
 // ---------------------------------------------------------------------------
 // Public API
 
-MdDocument MdDocument_LoadFile(const char *path)
+MdDocument MdDocument_Parse(const char *src, size_t length)
 {
     MdDocument doc = {0};
     doc.arena = MdArena_Init(1 << 20); // 1 MiB; grows via overflow segments
+
+    if (!src)
+    {
+        doc.load_error = MdArena_DupCstr(&doc.arena, "No markdown source.");
+        return doc;
+    }
+
+    // Strip a UTF-8 BOM if present.
+    size_t offset = 0;
+    if (length >= 3 && (unsigned char)src[0] == 0xEF && (unsigned char)src[1] == 0xBB &&
+        (unsigned char)src[2] == 0xBF)
+    {
+        offset = 3;
+    }
+
+    Builder builder = {0};
+    builder.arena = &doc.arena;
+
+    MD_PARSER parser = {0};
+    parser.flags = MD_FLAG_PERMISSIVEAUTOLINKS | MD_FLAG_NOHTMLSPANS | MD_FLAG_TASKLISTS |
+                   MD_FLAG_STRIKETHROUGH;
+    parser.enter_block = OnEnterBlock;
+    parser.leave_block = OnLeaveBlock;
+    parser.enter_span = OnEnterSpan;
+    parser.leave_span = OnLeaveSpan;
+    parser.text = OnText;
+
+    int parse_result = md_parse(src + offset, (MD_SIZE)(length - offset), &parser, &builder);
+
+    // Clean up anything left dangling (e.g. when a callback aborted parsing).
+    for (int i = 0; i < builder.collector_depth; i++)
+    {
+        free(builder.collector_stack[i].chunks);
+    }
+    free(builder.raw_buffer.data);
+
+    if (parse_result != 0)
+    {
+        for (int i = 0; i < builder.block_count; i++)
+        {
+            free(builder.blocks[i].chunks);
+        }
+        free(builder.blocks);
+        doc.load_error = MdArena_DupCstr(&doc.arena, "Markdown parsing failed.");
+        return doc;
+    }
+
+    doc.blocks = builder.blocks;
+    doc.block_count = builder.block_count;
+    return doc;
+}
+
+MdDocument MdDocument_LoadFile(const char *path)
+{
+    MdDocument doc = {0};
+    doc.arena = MdArena_Init(1 << 20);
 
     FILE *file = fopen(path, "rb");
     if (!file)
@@ -960,49 +1016,9 @@ MdDocument MdDocument_LoadFile(const char *path)
     fclose(file);
     contents[size] = '\0';
 
-    // Strip a UTF-8 BOM if present.
-    size_t offset = 0;
-    if (size >= 3 && (unsigned char)contents[0] == 0xEF && (unsigned char)contents[1] == 0xBB &&
-        (unsigned char)contents[2] == 0xBF)
-    {
-        offset = 3;
-    }
-
-    Builder builder = {0};
-    builder.arena = &doc.arena;
-
-    MD_PARSER parser = {0};
-    parser.flags = MD_FLAG_PERMISSIVEAUTOLINKS | MD_FLAG_NOHTMLSPANS | MD_FLAG_TASKLISTS |
-                   MD_FLAG_STRIKETHROUGH;
-    parser.enter_block = OnEnterBlock;
-    parser.leave_block = OnLeaveBlock;
-    parser.enter_span = OnEnterSpan;
-    parser.leave_span = OnLeaveSpan;
-    parser.text = OnText;
-
-    int parse_result = md_parse(contents + offset, (MD_SIZE)(size - offset), &parser, &builder);
-
-    // Clean up anything left dangling (e.g. when a callback aborted parsing).
-    for (int i = 0; i < builder.collector_depth; i++)
-    {
-        free(builder.collector_stack[i].chunks);
-    }
-    free(builder.raw_buffer.data);
+    MdArena_Free(&doc.arena);
+    doc = MdDocument_Parse(contents, size);
     free(contents);
-
-    if (parse_result != 0)
-    {
-        for (int i = 0; i < builder.block_count; i++)
-        {
-            free(builder.blocks[i].chunks);
-        }
-        free(builder.blocks);
-        doc.load_error = MdArena_DupCstr(&doc.arena, "Markdown parsing failed.");
-        return doc;
-    }
-
-    doc.blocks = builder.blocks;
-    doc.block_count = builder.block_count;
     return doc;
 }
 

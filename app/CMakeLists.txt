@@ -1,12 +1,11 @@
 cmake_minimum_required(VERSION 3.27)
-project(clay_markdown_reader C)
+project(pico C)
 set(CMAKE_C_STANDARD 99)
 
-# Adding Raylib
 include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE) # don't build the supplied examples
-set(BUILD_GAMES    OFF CACHE BOOL "" FORCE) # don't build the supplied example games
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     raylib
@@ -18,30 +17,31 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(raylib)
 
-# Vendored md4c markdown parser (https://github.com/mity/md4c, MIT license)
 add_library(md4c STATIC
     md4c/md4c.c
     md4c/entity.c)
 target_include_directories(md4c PUBLIC md4c)
 
-add_executable(clay_markdown_reader
+add_executable(pico
     main.c
+    app.c
+    theme.c
+    md_view.c
     markdown.c
-    richtext.c)
+    richtext.c
+    builtins/chat.c
+    builtins/composer.c
+    builtins/footer.c)
 
-target_compile_options(clay_markdown_reader PUBLIC)
-target_include_directories(clay_markdown_reader PUBLIC .)
+target_include_directories(pico PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-target_link_libraries(clay_markdown_reader PUBLIC raylib md4c)
-if(MSVC)
-  set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
-else()
-  set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
-  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
-endif()
+target_link_libraries(pico PUBLIC raylib md4c)
 
 add_custom_command(
-        TARGET clay_markdown_reader POST_BUILD
+        TARGET pico POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)

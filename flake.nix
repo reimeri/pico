@@ -25,7 +25,7 @@
     {
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
-          name = "clay-app";
+          name = "pico";
 
           packages = with pkgs; [
             cmake
@@ -63,10 +63,10 @@
           CMAKE_EXPORT_COMPILE_COMMANDS = "ON";
 
           shellHook = ''
-            echo "Clay app development shell"
+            echo "Pico development shell"
             echo "  cmake -S app -B app/build -G Ninja"
             echo "  cmake --build app/build"
-            echo "  ./app/build/clay_examples_raylib_sidebar_scrolling_container"
+            echo "  ./app/build/pico"
           '';
         };
       });

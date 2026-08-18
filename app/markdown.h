@@ -85,9 +85,13 @@ typedef struct MdDocument {
     MdArena arena;
 } MdDocument;
 
-// Parses a markdown file into the document IR.
-// Never returns NULL; on failure doc->load_error describes the problem and
+// Parses markdown from memory into the document IR.
+// `src` is not required to be NUL-terminated. Never fails to return a
+// document; on failure doc->load_error describes the problem and
 // doc->block_count == 0. The document must be freed with MdDocument_Free.
+MdDocument MdDocument_Parse(const char *src, size_t length);
+
+// Reads a file and parses it with MdDocument_Parse.
 MdDocument MdDocument_LoadFile(const char *path);
 void MdDocument_Free(MdDocument *doc);
 

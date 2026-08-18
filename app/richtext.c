@@ -97,6 +97,7 @@ static Clay_TextElementConfig TextConfigFor(const RichTextStyle *style, bool bol
     Clay_TextElementConfig config = {0};
     config.fontId = FontFor(style, bold, italic, code);
     config.fontSize = style->font_size;
+    config.lineHeight = style->line_height > 0 ? style->line_height : style->font_size;
     config.wrapMode = CLAY_TEXT_WRAP_NONE;
     config.textColor = code ? style->code_text_color : style->text_color;
     if (is_link)
@@ -402,7 +403,7 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
 
     if (run->code)
     {
-        CLAY_AUTO_ID({.layout = {.padding = {4, 4, 1, 1}},
+        CLAY_AUTO_ID({.layout = {.padding = {4, 4, 0, 0}},
                       .backgroundColor = style->code_bg_color,
                       .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
@@ -432,29 +433,32 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
 static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitState *emit)
 {
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
-    for (int l = 0; l < cache->line_count; l++)
+    uint16_t row_h = style->line_height > 0 ? style->line_height : style->font_size;
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
-        RtLine *line = &cache->lines[l];
-        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0)},
-                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}})
+        for (int l = 0; l < cache->line_count; l++)
         {
-            if (line->run_count == 0)
+            RtLine *line = &cache->lines[l];
+            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                     .sizing = {.width = CLAY_SIZING_GROW(0),
+                                                .height = CLAY_SIZING_FIXED((float)row_h)},
+                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}})
             {
-                CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
-            }
-            else
-            {
-                for (int r = 0; r < line->run_count; r++)
+                if (line->run_count == 0)
                 {
-                    if (r > 0 && line->runs[r].space_before)
+                    CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
+                }
+                else
+                {
+                    for (int r = 0; r < line->run_count; r++)
                     {
-                        // Inter-run space, only where the source actually had
-                        // whitespace (the wrap accounting reserved room for
-                        // exactly these spaces).
-                        CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
+                        if (r > 0 && line->runs[r].space_before)
+                        {
+                            CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
+                        }
+                        EmitRun(&line->runs[r], style, emit);
                     }
-                    EmitRun(&line->runs[r], style, emit);
                 }
             }
         }

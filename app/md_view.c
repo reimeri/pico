@@ -17,6 +17,7 @@ static RichTextStyle BaseStyle = {
     .font_bold_italic = FONT_BOLD_ITALIC,
     .font_mono = FONT_MONO,
     .font_size = 18,
+    .line_height = 22,
     .text_color = COLOR_TEXT,
     .code_text_color = COLOR_CODE_TEXT,
     .code_bg_color = COLOR_CODE_BG,
@@ -123,6 +124,7 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
                     level = 6;
                 }
                 style.font_size = HeadingSizes[level];
+                style.line_height = (uint16_t)(HeadingSizes[level] + HeadingSizes[level] / 5);
             }
 
             if (block->type == MDB_QUOTE)
@@ -208,6 +210,7 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
                     {
                         CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                                           .fontSize = 16,
+                                                          .lineHeight = 20,
                                                           .textColor = COLOR_CODE_TEXT,
                                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
                     }

@@ -23,6 +23,7 @@ typedef struct RichTextStyle {
     uint16_t font_bold_italic;
     uint16_t font_mono;
     uint16_t font_size;
+    uint16_t line_height; // 0 = same as font_size
     Clay_Color text_color;
     Clay_Color code_text_color;
     Clay_Color code_bg_color;

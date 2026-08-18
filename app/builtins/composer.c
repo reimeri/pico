@@ -1,4 +1,4 @@
-#include "pico/app.h"
+#include "pico/plugin.h"
 
 #include "clay/clay.h"
 
@@ -735,4 +735,27 @@ void PicoComposer_DrawOverlay(PicoApp *app)
         Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g, (unsigned char)COLOR_CURSOR.b, 255};
         DrawRectangle((int)x, (int)y, 2, (int)h, caret);
     }
+}
+
+static void ComposerFrame(PicoApp *app, float dt)
+{
+    (void)dt;
+    PicoComposer_HandleInput(app);
+}
+
+static void ComposerInit(PicoApp *app)
+{
+    pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
+    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoComposer_HandlePointer);
+    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoComposer_DrawOverlay);
+}
+
+PicoExt pico_ext_composer(void)
+{
+    return (PicoExt){
+        .abi = PICO_EXT_ABI,
+        .name = "composer",
+        .init = ComposerInit,
+        .on_frame = ComposerFrame,
+    };
 }

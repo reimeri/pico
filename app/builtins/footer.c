@@ -1,4 +1,4 @@
-#include "pico/app.h"
+#include "pico/plugin.h"
 
 #include "clay/clay.h"
 
@@ -42,4 +42,18 @@ void PicoFooter_Render(PicoApp *app)
                                           .textColor = COLOR_MUTED,
                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
+}
+
+static void FooterInit(PicoApp *app)
+{
+    pico_add_view(app, PICO_SLOT_FOOTER, 0, PicoFooter_Render);
+}
+
+PicoExt pico_ext_footer(void)
+{
+    return (PicoExt){
+        .abi = PICO_EXT_ABI,
+        .name = "footer",
+        .init = FooterInit,
+    };
 }

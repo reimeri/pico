@@ -1,4 +1,4 @@
-#include "pico/app.h"
+#include "pico/plugin.h"
 #include "pico/md_view.h"
 
 #include "clay/clay.h"
@@ -9,13 +9,82 @@
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts);
 
-void pico_add_view(PicoApp *app, PicoUiSlot slot, PicoViewFn render)
+void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render)
 {
-    if (slot < 0 || slot >= PICO_SLOT_COUNT)
+    if (slot < 0 || slot >= PICO_SLOT_COUNT || !render)
     {
         return;
     }
-    app->views[slot] = render;
+    int n = app->view_count[slot];
+    if (n >= PICO_MAX_SLOT_VIEWS)
+    {
+        return;
+    }
+    int i = n;
+    while (i > 0 && app->views[slot][i - 1].z > z)
+    {
+        app->views[slot][i] = app->views[slot][i - 1];
+        i--;
+    }
+    app->views[slot][i].render = render;
+    app->views[slot][i].z = z;
+    app->view_count[slot]++;
+}
+
+void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn)
+{
+    if (!fn || app->hook_count >= PICO_MAX_HOOKS)
+    {
+        return;
+    }
+    app->hooks[app->hook_count].hook = hook;
+    app->hooks[app->hook_count].fn = fn;
+    app->hook_count++;
+}
+
+void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json, PicoToolFn run)
+{
+    if (!name || !run || app->tool_count >= PICO_MAX_TOOLS)
+    {
+        return;
+    }
+    app->tools[app->tool_count].name = name;
+    app->tools[app->tool_count].description = description;
+    app->tools[app->tool_count].params_json = params_json;
+    app->tools[app->tool_count].run = run;
+    app->tool_count++;
+}
+
+void pico_clear_registrations(PicoApp *app)
+{
+    memset(app->views, 0, sizeof(app->views));
+    memset(app->view_count, 0, sizeof(app->view_count));
+    memset(app->hooks, 0, sizeof(app->hooks));
+    app->hook_count = 0;
+    memset(app->tools, 0, sizeof(app->tools));
+    app->tool_count = 0;
+}
+
+void pico_run_hooks(PicoApp *app, PicoHook hook)
+{
+    for (int i = 0; i < app->hook_count; i++)
+    {
+        if (app->hooks[i].hook == hook && app->hooks[i].fn)
+        {
+            app->hooks[i].fn(app);
+        }
+    }
+}
+
+static void RunSlot(PicoApp *app, PicoUiSlot slot)
+{
+    for (int i = 0; i < app->view_count[slot]; i++)
+    {
+        if (app->views[slot][i].render)
+        {
+            app->views[slot][i].render(app);
+        }
+    }
 }
 
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
@@ -41,6 +110,7 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
     }
     msg->doc = MdDocument_Parse(markdown ? markdown : "", len);
     app->chat_follow_bottom = true;
+    pico_run_hooks(app, PICO_HOOK_ON_MESSAGE);
 }
 
 void PicoApp_Submit(PicoApp *app)
@@ -80,19 +150,19 @@ void PicoApp_Submit(PicoApp *app)
     {
         c->text[0] = '\0';
     }
+    pico_run_hooks(app, PICO_HOOK_ON_SUBMIT);
 }
 
 static const char *kDummyUser1 = "What is Pico?";
 
 static const char *kDummyAssistant1 =
     "Pico is a **small C agent harness**. Clay is only the layout library.\n\n"
-    "This first slice is just the shell:\n\n"
-    "- Markdown chat bubbles (the renderer you already had)\n"
-    "- A composer with readline-ish keys\n"
-    "- A footer for status\n\n"
-    "There is no model yet. Submit text to append a dummy reply.\n\n"
+    "UI is extensions. Drop a `.c` file in `~/.config/pico/extensions/` or "
+    "`.pico/extensions/` in this workspace — nested folders are fine, so an extension "
+    "can live next to a README. **F5** reloads. `--safe` loads only builtins.\n\n"
     "```c\n"
-    "pico_add_view(app, PICO_SLOT_MAIN, PicoChat_Render);\n"
+    "#include \"pico/plugin.h\"\n"
+    "PicoExt pico_ext(void) { return (PicoExt){ .abi = PICO_EXT_ABI, .name = \"hi\", .init = init }; }\n"
     "```";
 
 static const char *kDummyUser2 = "Show me a list and a quote.";
@@ -103,9 +173,15 @@ static const char *kDummyAssistant2 =
     "- **Ctrl+W** — delete previous word\n"
     "- **Ctrl+K** — kill to end of line\n"
     "- **Ctrl+V** — paste (long clips go to `/tmp/pico-paste-…`)\n"
+    "- **F5** — reload extensions\n"
     "- **F3** — Clay debug overlay";
 
-void PicoApp_Init(PicoApp *app, Font *fonts)
+void PicoApp_RequestReload(PicoApp *app)
+{
+    PicoPlugins_Reload(app);
+}
+
+void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode)
 {
     memset(app, 0, sizeof(*app));
     app->fonts = fonts;
@@ -115,6 +191,15 @@ void PicoApp_Init(PicoApp *app, Font *fonts)
     app->agent_state = PICO_AGENT_IDLE;
     app->selected_message = -1;
     app->chat_overflow = true;
+    app->safe_mode = safe_mode;
+    if (workspace && workspace[0])
+    {
+        snprintf(app->workspace, sizeof(app->workspace), "%s", workspace);
+    }
+    else
+    {
+        snprintf(app->workspace, sizeof(app->workspace), ".");
+    }
     app->composer.capacity = 256;
     app->composer.text = (char *)malloc((size_t)app->composer.capacity);
     if (app->composer.text)
@@ -122,9 +207,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts)
         app->composer.text[0] = '\0';
     }
 
-    pico_add_view(app, PICO_SLOT_MAIN, PicoChat_Render);
-    pico_add_view(app, PICO_SLOT_COMPOSER, PicoComposer_Render);
-    pico_add_view(app, PICO_SLOT_FOOTER, PicoFooter_Render);
+    PicoPlugins_Load(app);
 
     PicoApp_AddMessage(app, PICO_ROLE_USER, kDummyUser1);
     PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, kDummyAssistant1);
@@ -134,6 +217,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts)
 
 void PicoApp_Free(PicoApp *app)
 {
+    PicoPlugins_Shutdown(app);
     for (int i = 0; i < app->message_count; i++)
     {
         free(app->messages[i].source);
@@ -141,6 +225,7 @@ void PicoApp_Free(PicoApp *app)
     }
     free(app->messages);
     free(app->composer.text);
+    free(app->status_warn);
     memset(app, 0, sizeof(*app));
 }
 
@@ -156,33 +241,36 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
                      .childGap = 12},
           .backgroundColor = COLOR_BG})
     {
-        if (app->views[PICO_SLOT_SIDEBAR])
+        CLAY(CLAY_ID("Body"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = 12,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
         {
-            app->views[PICO_SLOT_SIDEBAR](app);
-        }
-        CLAY(CLAY_ID("MainColumn"),
-             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
-                         .childGap = 12}})
-        {
-            if (app->views[PICO_SLOT_MAIN])
+            if (app->view_count[PICO_SLOT_SIDEBAR] > 0)
             {
-                app->views[PICO_SLOT_MAIN](app);
+                CLAY(CLAY_ID("Sidebar"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .childGap = 8,
+                                 .padding = {8, 8, 8, 8},
+                                 .sizing = {.width = CLAY_SIZING_FIT(120, 280), .height = CLAY_SIZING_GROW(0)}},
+                      .backgroundColor = COLOR_CONTENT_BG,
+                      .cornerRadius = CLAY_CORNER_RADIUS(8)})
+                {
+                    RunSlot(app, PICO_SLOT_SIDEBAR);
+                }
             }
-            if (app->views[PICO_SLOT_COMPOSER])
+            CLAY(CLAY_ID("MainColumn"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
+                             .childGap = 12}})
             {
-                app->views[PICO_SLOT_COMPOSER](app);
+                RunSlot(app, PICO_SLOT_MAIN);
+                RunSlot(app, PICO_SLOT_COMPOSER);
             }
         }
-        if (app->views[PICO_SLOT_FOOTER])
-        {
-            app->views[PICO_SLOT_FOOTER](app);
-        }
+        RunSlot(app, PICO_SLOT_FOOTER);
     }
-    if (app->views[PICO_SLOT_OVERLAY])
-    {
-        app->views[PICO_SLOT_OVERLAY](app);
-    }
+    RunSlot(app, PICO_SLOT_OVERLAY);
 
     app->hovered_link = MdView_HoveredLink();
     return Clay_EndLayout(GetFrameTime());
@@ -232,8 +320,18 @@ void PicoApp_Frame(PicoApp *app)
     {
         TakeScreenshot("pico_screenshot.png");
     }
+    if (IsKeyPressed(KEY_F5))
+    {
+        PicoApp_RequestReload(app);
+    }
 
-    PicoComposer_HandleInput(app);
+    PicoPlugins_Poll(app);
+    if (app->reload_queued && app->agent_state != PICO_AGENT_TOOL_WAIT)
+    {
+        PicoPlugins_Reload(app);
+    }
+
+    PicoPlugins_OnFrame(app, GetFrameTime());
 
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
     Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down);
@@ -248,8 +346,7 @@ void PicoApp_Frame(PicoApp *app)
     app->chat_overflow =
         scroll_data.found && scroll_data.contentDimensions.height > scroll_data.scrollContainerDimensions.height + 0.5f;
 
-    PicoComposer_HandlePointer(app);
-    PicoChat_HandlePointer(app);
+    pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT);
 
     if (app->hovered_link)
     {
@@ -270,8 +367,7 @@ void PicoApp_Frame(PicoApp *app)
         if (data.found && data.scrollPosition &&
             data.contentDimensions.height > data.scrollContainerDimensions.height)
         {
-            data.scrollPosition->y =
-                data.scrollContainerDimensions.height - data.contentDimensions.height;
+            data.scrollPosition->y = data.scrollContainerDimensions.height - data.contentDimensions.height;
         }
         app->chat_follow_bottom = false;
     }
@@ -284,6 +380,6 @@ void PicoApp_Frame(PicoApp *app)
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
-    PicoComposer_DrawOverlay(app);
+    pico_run_hooks(app, PICO_HOOK_AFTER_RENDER);
     EndDrawing();
 }

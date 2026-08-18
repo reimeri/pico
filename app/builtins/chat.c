@@ -1,4 +1,4 @@
-#include "pico/app.h"
+#include "pico/plugin.h"
 #include "pico/md_view.h"
 
 #include "clay/clay.h"
@@ -111,7 +111,7 @@ void PicoChat_Render(PicoApp *app)
 
 void PicoChat_HandlePointer(PicoApp *app)
 {
-    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || app->hovered_link)
+    if (app->status_warn || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || app->hovered_link)
     {
         return;
     }
@@ -128,4 +128,19 @@ void PicoChat_HandlePointer(PicoApp *app)
             return;
         }
     }
+}
+
+static void ChatInit(PicoApp *app)
+{
+    pico_add_view(app, PICO_SLOT_MAIN, 0, PicoChat_Render);
+    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoChat_HandlePointer);
+}
+
+PicoExt pico_ext_chat(void)
+{
+    return (PicoExt){
+        .abi = PICO_EXT_ABI,
+        .name = "chat",
+        .init = ChatInit,
+    };
 }

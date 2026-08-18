@@ -9,6 +9,10 @@
 #include "markdown.h"
 #include "pico/theme.h"
 
+#define PICO_MAX_SLOT_VIEWS 8
+#define PICO_MAX_HOOKS 32
+#define PICO_MAX_TOOLS 32
+
 typedef enum PicoRole {
     PICO_ROLE_USER = 0,
     PICO_ROLE_ASSISTANT,
@@ -31,6 +35,14 @@ typedef enum PicoUiSlot {
     PICO_SLOT_COUNT,
 } PicoUiSlot;
 
+typedef enum PicoHook {
+    PICO_HOOK_AFTER_LAYOUT = 0,
+    PICO_HOOK_AFTER_RENDER,
+    PICO_HOOK_ON_SUBMIT,
+    PICO_HOOK_ON_MESSAGE,
+    PICO_HOOK_COUNT,
+} PicoHook;
+
 typedef struct PicoMessage {
     PicoRole role;
     char *source;
@@ -41,8 +53,8 @@ typedef struct PicoComposer {
     char *text;
     int length;
     int capacity;
-    int cursor;     // byte offset
-    int sel_anchor; // byte offset; equals cursor when there is no selection
+    int cursor;
+    int sel_anchor;
     bool mouse_selecting;
 } PicoComposer;
 
@@ -55,6 +67,25 @@ typedef struct PicoScrollbar {
 struct PicoApp;
 
 typedef void (*PicoViewFn)(struct PicoApp *app);
+typedef void (*PicoHookFn)(struct PicoApp *app);
+typedef void (*PicoToolFn)(struct PicoApp *app, const char *args_json, char **out);
+
+typedef struct PicoSlotView {
+    PicoViewFn render;
+    int z;
+} PicoSlotView;
+
+typedef struct PicoHookEntry {
+    PicoHook hook;
+    PicoHookFn fn;
+} PicoHookEntry;
+
+typedef struct PicoTool {
+    const char *name;
+    const char *description;
+    const char *params_json;
+    PicoToolFn run;
+} PicoTool;
 
 typedef struct PicoApp {
     PicoMessage *messages;
@@ -66,24 +97,46 @@ typedef struct PicoApp {
     int tokens_used;
     int tokens_limit;
     Font *fonts;
-    PicoViewFn views[PICO_SLOT_COUNT];
+    PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int view_count[PICO_SLOT_COUNT];
+    PicoHookEntry hooks[PICO_MAX_HOOKS];
+    int hook_count;
+    PicoTool tools[PICO_MAX_TOOLS];
+    int tool_count;
     PicoScrollbar chat_scrollbar;
     bool chat_follow_bottom;
     bool chat_overflow;
-    int selected_message; // -1 if none
+    int selected_message;
     bool reinitialize_clay;
     bool debug_enabled;
+    bool safe_mode;
+    bool reload_queued;
     const char *hovered_link;
     char footer_text[256];
+    char workspace[4096];
+    char *status_warn;
 } PicoApp;
 
-void pico_add_view(PicoApp *app, PicoUiSlot slot, PicoViewFn render);
+void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
+void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
+void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
+                   PicoToolFn run);
+void pico_clear_registrations(PicoApp *app);
+void pico_run_hooks(PicoApp *app, PicoHook hook);
 
-void PicoApp_Init(PicoApp *app, Font *fonts);
+void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode);
 void PicoApp_Free(PicoApp *app);
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown);
 void PicoApp_Submit(PicoApp *app);
 void PicoApp_Frame(PicoApp *app);
+void PicoApp_RequestReload(PicoApp *app);
+
+void PicoPlugins_Load(PicoApp *app);
+void PicoPlugins_Reload(PicoApp *app);
+void PicoPlugins_Poll(PicoApp *app);
+void PicoPlugins_OnFrame(PicoApp *app, float dt);
+void PicoPlugins_UnloadUser(PicoApp *app);
+void PicoPlugins_Shutdown(PicoApp *app);
 
 void PicoChat_Render(PicoApp *app);
 void PicoChat_HandlePointer(PicoApp *app);
@@ -94,5 +147,7 @@ void PicoComposer_DrawOverlay(PicoApp *app);
 bool PicoComposer_HasSelection(const PicoApp *app);
 void PicoComposer_Copy(PicoApp *app);
 void PicoFooter_Render(PicoApp *app);
+void PicoOverlay_Render(PicoApp *app);
+void PicoOverlay_OnFrame(PicoApp *app, float dt);
 
 #endif

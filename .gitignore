@@ -9,3 +9,4 @@ compile_commands.json
 CMakeUserPresets.json
 pico_screenshot.png
 pico_markdown_preview.png
+.pico/

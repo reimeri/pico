@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.27)
-project(pico C)
+project(pico VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 
 include(FetchContent)
@@ -25,23 +25,47 @@ target_include_directories(md4c PUBLIC md4c)
 add_executable(pico
     main.c
     app.c
+    plugin.c
     theme.c
     md_view.c
     markdown.c
     richtext.c
     builtins/chat.c
     builtins/composer.c
-    builtins/footer.c)
+    builtins/footer.c
+    builtins/overlay.c)
+
+set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
 
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-target_link_libraries(pico PUBLIC raylib md4c)
+target_compile_definitions(pico PRIVATE
+    "PICO_VERSION=\"${PROJECT_VERSION}\""
+    "PICO_CC=\"${CMAKE_C_COMPILER}\""
+    "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
+    "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
+    "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
+    "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
+
+target_link_libraries(pico PUBLIC raylib md4c ${CMAKE_DL_LIBS})
+target_link_options(pico PRIVATE "-rdynamic")
 
 add_custom_command(
         TARGET pico POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)
+
+add_custom_command(
+        TARGET pico POST_BUILD
+        COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include
+            -I${CMAKE_CURRENT_SOURCE_DIR}
+            -I${CMAKE_CURRENT_SOURCE_DIR}/..
+            -I${raylib_SOURCE_DIR}/src
+            -o ${CMAKE_CURRENT_BINARY_DIR}/hello_ext.so
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/hello.c
+        COMMENT "Compile examples/hello.c as a plugin smoke test")

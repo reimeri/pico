@@ -337,6 +337,7 @@ typedef struct {
     int collector_depth;
 
     Buffer raw_buffer; // code / html block contents
+    bool preserve_newlines;
 } Builder;
 
 static void AddBlock(Builder *b, MdBlock block)
@@ -882,7 +883,7 @@ static int OnText(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *use
         }
         case MD_TEXT_SOFTBR:
         {
-            CollectorAppendText(b, " ", 1);
+            CollectorAppendText(b, b->preserve_newlines ? "\n" : " ", 1);
             break;
         }
         case MD_TEXT_BR:
@@ -924,7 +925,89 @@ static int OnText(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *use
 // ---------------------------------------------------------------------------
 // Public API
 
+static bool LineStartsFence(const char *src, size_t len, size_t i)
+{
+    int spaces = 0;
+    while (i < len && (src[i] == ' ' || src[i] == '\t') && spaces < 4)
+    {
+        i++;
+        spaces++;
+    }
+    return i + 3 <= len && src[i] == '`' && src[i + 1] == '`' && src[i + 2] == '`';
+}
+
+// Turns extra blank lines into paragraphs that survive CommonMark collapsing,
+// so user-typed gaps stay visible. Fenced code is left unchanged.
+static char *RewritePreserveBlanks(const char *src, size_t len, size_t *out_len)
+{
+    char *out = (char *)malloc(len * 3 + 4);
+    if (!out)
+    {
+        return NULL;
+    }
+    size_t o = 0;
+    bool fence = false;
+    bool at_line_start = true;
+    size_t i = 0;
+    while (i < len)
+    {
+        if (src[i] == '\r')
+        {
+            i++;
+            continue;
+        }
+        if (at_line_start && LineStartsFence(src, len, i))
+        {
+            fence = !fence;
+        }
+        if (!fence && src[i] == '\n')
+        {
+            size_t n = 1;
+            size_t k = i + 1;
+            while (k < len)
+            {
+                if (src[k] == '\r')
+                {
+                    k++;
+                    continue;
+                }
+                if (src[k] != '\n')
+                {
+                    break;
+                }
+                n++;
+                k++;
+            }
+            out[o++] = '\n';
+            for (size_t b = 1; b < n; b++)
+            {
+                out[o++] = '\n';
+                out[o++] = (char)0xC2;
+                out[o++] = (char)0xA0;
+            }
+            if (n >= 2)
+            {
+                out[o++] = '\n';
+            }
+            i = k;
+            at_line_start = true;
+            continue;
+        }
+        out[o++] = src[i];
+        at_line_start = src[i] == '\n';
+        i++;
+    }
+    out[o] = '\0';
+    *out_len = o;
+    return out;
+}
+
 MdDocument MdDocument_Parse(const char *src, size_t length)
+{
+    return MdDocument_ParseEx(src, length, MD_PARSE_DEFAULT);
+}
+
+MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
 {
     MdDocument doc = {0};
     doc.arena = MdArena_Init(1 << 20); // 1 MiB; grows via overflow segments
@@ -945,6 +1028,7 @@ MdDocument MdDocument_Parse(const char *src, size_t length)
 
     Builder builder = {0};
     builder.arena = &doc.arena;
+    builder.preserve_newlines = (flags & MD_PARSE_PRESERVE_NEWLINES) != 0;
 
     MD_PARSER parser = {0};
     parser.flags = MD_FLAG_PERMISSIVEAUTOLINKS | MD_FLAG_NOHTMLSPANS | MD_FLAG_TASKLISTS |
@@ -955,7 +1039,20 @@ MdDocument MdDocument_Parse(const char *src, size_t length)
     parser.leave_span = OnLeaveSpan;
     parser.text = OnText;
 
-    int parse_result = md_parse(src + offset, (MD_SIZE)(length - offset), &parser, &builder);
+    const char *parse_src = src + offset;
+    size_t parse_len = length - offset;
+    char *rewritten = NULL;
+    if (builder.preserve_newlines)
+    {
+        rewritten = RewritePreserveBlanks(parse_src, parse_len, &parse_len);
+        if (rewritten)
+        {
+            parse_src = rewritten;
+        }
+    }
+
+    int parse_result = md_parse(parse_src, (MD_SIZE)parse_len, &parser, &builder);
+    free(rewritten);
 
     // Clean up anything left dangling (e.g. when a callback aborted parsing).
     for (int i = 0; i < builder.collector_depth; i++)

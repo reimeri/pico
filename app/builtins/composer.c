@@ -12,7 +12,9 @@
 #define COMPOSER_PAD_X 14
 #define COMPOSER_PAD_Y 10
 #define COMPOSER_FONT_SIZE 16
-#define COMPOSER_MAX_LINES 64
+#define COMPOSER_MAX_LINES 256
+#define COMPOSER_MIN_HEIGHT 56
+#define COMPOSER_MAX_GROW_LINES 10
 
 typedef struct CompLine {
     int start;
@@ -215,6 +217,12 @@ static int WrapComposer(const PicoComposer *c, Font font, float max_width, CompL
             }
         }
     }
+    if (c->length > 0 && c->text[c->length - 1] == '\n' && line_count < max_lines)
+    {
+        lines[line_count].start = c->length;
+        lines[line_count].length = 0;
+        line_count++;
+    }
     if (line_count == 0)
     {
         lines[0].start = 0;
@@ -224,30 +232,88 @@ static int WrapComposer(const PicoComposer *c, Font font, float max_width, CompL
     return line_count;
 }
 
+typedef struct ComposerView {
+    CompLine lines[COMPOSER_MAX_LINES];
+    int line_count;
+    float line_height;
+    float wrap_width;
+    float origin_x;
+    float origin_y;
+    float scroll_y;
+    Clay_BoundingBox clip;
+    bool found;
+} ComposerView;
+
+static float s_wrap_width = 0;
+static int s_seen_cursor = -1;
+static int s_seen_length = -1;
+
+static ComposerView GetComposerView(PicoApp *app)
+{
+    ComposerView v = {0};
+    PicoComposer *c = &app->composer;
+    Clay_ElementData scroll_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    Clay_ElementData composer_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
+    v.found = scroll_box.found || composer_box.found;
+    v.clip = scroll_box.found ? scroll_box.boundingBox : composer_box.boundingBox;
+    if (scroll_box.found)
+    {
+        v.origin_x = scroll_box.boundingBox.x;
+        v.origin_y = scroll_box.boundingBox.y;
+        v.wrap_width = scroll_box.boundingBox.width;
+    }
+    else if (composer_box.found)
+    {
+        v.origin_x = composer_box.boundingBox.x + COMPOSER_PAD_X;
+        v.origin_y = composer_box.boundingBox.y + COMPOSER_PAD_Y;
+        v.wrap_width = composer_box.boundingBox.width - COMPOSER_PAD_X * 2;
+    }
+    else
+    {
+        v.wrap_width = s_wrap_width;
+    }
+    if (v.wrap_width < 10)
+    {
+        v.wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
+    }
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    if (scroll.found && scroll.scrollPosition)
+    {
+        v.scroll_y = scroll.scrollPosition->y;
+    }
+    v.line_count = WrapComposer(c, app->fonts[FONT_REGULAR], v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
+    return v;
+}
+
+static int CaretLineIndex(const ComposerView *v, int cursor)
+{
+    int line_i = 0;
+    for (int i = 0; i < v->line_count; i++)
+    {
+        if (cursor >= v->lines[i].start)
+        {
+            line_i = i;
+        }
+    }
+    return line_i;
+}
+
 static int OffsetAtPoint(PicoApp *app, float x, float y)
 {
     PicoComposer *c = &app->composer;
-    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
-    if (!box.found)
+    ComposerView v = GetComposerView(app);
+    if (!v.found)
     {
         return c->cursor;
     }
-    float local_x = x - box.boundingBox.x - COMPOSER_PAD_X;
-    float local_y = y - box.boundingBox.y - COMPOSER_PAD_Y;
-    float max_width = box.boundingBox.width - COMPOSER_PAD_X * 2;
-    if (max_width < 10)
-    {
-        max_width = 10;
-    }
-
-    CompLine lines[COMPOSER_MAX_LINES];
-    float line_height = COMPOSER_FONT_SIZE;
-    int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], max_width, lines, COMPOSER_MAX_LINES, &line_height);
+    float local_x = x - v.origin_x;
+    float local_y = y - v.origin_y - v.scroll_y;
     if (local_y < 0)
     {
         return 0;
     }
-    int line_i = (int)(local_y / line_height);
+    int line_i = (int)(local_y / v.line_height);
+    int line_count = v.line_count;
     if (line_i >= line_count)
     {
         return c->length;
@@ -256,7 +322,7 @@ static int OffsetAtPoint(PicoApp *app, float x, float y)
     {
         line_i = 0;
     }
-    CompLine line = lines[line_i];
+    CompLine line = v.lines[line_i];
     if (local_x <= 0)
     {
         return line.start;
@@ -285,41 +351,60 @@ static int OffsetAtPoint(PicoApp *app, float x, float y)
 static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
 {
     PicoComposer *c = &app->composer;
-    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
-    *out_x = box.boundingBox.x + COMPOSER_PAD_X;
-    *out_y = box.boundingBox.y + COMPOSER_PAD_Y;
-    *out_h = (float)COMPOSER_FONT_SIZE;
-    if (!box.found)
+    ComposerView v = GetComposerView(app);
+    *out_x = v.origin_x;
+    *out_y = v.origin_y;
+    *out_h = v.line_height > 1 ? v.line_height : (float)COMPOSER_FONT_SIZE;
+    if (!v.found)
     {
         return;
     }
-    float max_width = box.boundingBox.width - COMPOSER_PAD_X * 2;
-    CompLine lines[COMPOSER_MAX_LINES];
-    float line_height = COMPOSER_FONT_SIZE;
-    int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], max_width, lines, COMPOSER_MAX_LINES, &line_height);
-    *out_h = line_height;
-    int cursor = c->cursor;
-    int line_i = 0;
-    for (int i = 0; i < line_count; i++)
+    int line_i = CaretLineIndex(&v, c->cursor);
+    int start = v.lines[line_i].start;
+    int take = c->cursor - start;
+    if (take > v.lines[line_i].length)
     {
-        if (cursor >= lines[i].start)
-        {
-            line_i = i;
-        }
-    }
-    int start = lines[line_i].start;
-    int take = cursor - start;
-    if (take > lines[line_i].length)
-    {
-        take = lines[line_i].length;
+        take = v.lines[line_i].length;
     }
     if (take < 0)
     {
         take = 0;
     }
-    *out_y = box.boundingBox.y + COMPOSER_PAD_Y + (float)line_i * line_height;
-    *out_x = box.boundingBox.x + COMPOSER_PAD_X +
+    *out_y = v.origin_y + (float)line_i * v.line_height + v.scroll_y;
+    *out_x = v.origin_x +
              MeasureSlice(app->fonts[FONT_REGULAR], c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
+}
+
+static void EnsureCaretVisible(PicoApp *app)
+{
+    PicoComposer *c = &app->composer;
+    if (c->cursor == s_seen_cursor && c->length == s_seen_length)
+    {
+        return;
+    }
+    s_seen_cursor = c->cursor;
+    s_seen_length = c->length;
+
+    ComposerView v = GetComposerView(app);
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    if (!scroll.found || !scroll.scrollPosition || v.line_height < 1)
+    {
+        return;
+    }
+    int line_i = CaretLineIndex(&v, c->cursor);
+    float caret_top = (float)line_i * v.line_height;
+    float caret_bot = caret_top + v.line_height;
+    float view_h = scroll.scrollContainerDimensions.height;
+    float vis_top = -scroll.scrollPosition->y;
+    float vis_bot = vis_top + view_h;
+    if (caret_top < vis_top)
+    {
+        scroll.scrollPosition->y = -caret_top;
+    }
+    else if (caret_bot > vis_bot)
+    {
+        scroll.scrollPosition->y = -(caret_bot - view_h);
+    }
 }
 
 static void ComposerReserve(PicoComposer *c, int extra)
@@ -618,7 +703,9 @@ void PicoComposer_HandleInput(PicoApp *app)
         return;
     }
 
-    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && shift)
+    if ((IsKeyPressed(KEY_ENTER) || IsKeyPressedRepeat(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) ||
+         IsKeyPressedRepeat(KEY_KP_ENTER)) &&
+        shift)
     {
         ComposerInsert(c, "\n", 1);
     }
@@ -672,59 +759,122 @@ void PicoComposer_Render(PicoApp *app)
     PicoComposer *c = &app->composer;
     const char *placeholder = "Message Pico…  (Enter to send, Shift+Enter for newline)";
     bool empty = c->length == 0;
-    const char *shown = empty ? placeholder : (c->text ? c->text : "");
-    int shown_len = empty ? (int)strlen(placeholder) : c->length;
-    Clay_Color text_color = empty ? COLOR_MUTED : COLOR_TEXT;
-    Clay_String text = {.length = shown_len, .chars = shown};
+    float wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
+    CompLine lines[COMPOSER_MAX_LINES];
+    float line_height = COMPOSER_FONT_SIZE;
+    int line_count = empty ? 1 : WrapComposer(c, app->fonts[FONT_REGULAR], wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
+    if (line_height < 1)
+    {
+        line_height = (float)COMPOSER_FONT_SIZE;
+    }
+
+    float content_h = (float)line_count * line_height;
+    float box_h = content_h + (float)COMPOSER_PAD_Y * 2;
+    if (box_h < (float)COMPOSER_MIN_HEIGHT)
+    {
+        box_h = (float)COMPOSER_MIN_HEIGHT;
+    }
+    float max_h = (float)COMPOSER_MAX_GROW_LINES * line_height + (float)COMPOSER_PAD_Y * 2;
+    if (box_h > max_h)
+    {
+        box_h = max_h;
+    }
 
     CLAY(CLAY_ID("Composer"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .padding = {COMPOSER_PAD_X, COMPOSER_PAD_X, COMPOSER_PAD_Y, COMPOSER_PAD_Y},
-                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(56, 160)}},
+                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(box_h)}},
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                          .fontSize = COMPOSER_FONT_SIZE,
-                                          .textColor = text_color,
-                                          .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+        CLAY(CLAY_ID("ComposerScroll"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+              .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+        {
+            CLAY(CLAY_ID("ComposerContent"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
+            {
+                if (empty)
+                {
+                    Clay_String text = {.length = (int32_t)strlen(placeholder), .chars = placeholder};
+                    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                      .fontSize = COMPOSER_FONT_SIZE,
+                                                      .textColor = COLOR_MUTED,
+                                                      .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                }
+                else
+                {
+                    for (int i = 0; i < line_count; i++)
+                    {
+                        CLAY(CLAY_IDI("CompLine", i),
+                             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                    .height = CLAY_SIZING_FIXED(line_height)}}})
+                        {
+                            if (lines[i].length > 0)
+                            {
+                                Clay_String text = {.length = (int32_t)lines[i].length,
+                                                    .chars = c->text + lines[i].start};
+                                CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                  .fontSize = COMPOSER_FONT_SIZE,
+                                                                  .textColor = COLOR_TEXT,
+                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 void PicoComposer_DrawOverlay(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
-    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
-    if (!box.found)
+    ComposerView v = GetComposerView(app);
+    if (!v.found)
     {
         return;
     }
 
+    BeginScissorMode((int)v.clip.x, (int)v.clip.y, (int)v.clip.width, (int)v.clip.height);
+
     if (PicoComposer_HasSelection(app) && c->text)
     {
-        float max_width = box.boundingBox.width - COMPOSER_PAD_X * 2;
-        CompLine lines[COMPOSER_MAX_LINES];
-        float line_height = COMPOSER_FONT_SIZE;
-        int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], max_width, lines, COMPOSER_MAX_LINES, &line_height);
         int sel_from = SelFrom(c);
         int sel_to = SelTo(c);
         Color fill = {(unsigned char)COLOR_SELECTION.r, (unsigned char)COLOR_SELECTION.g, (unsigned char)COLOR_SELECTION.b,
                       (unsigned char)COLOR_SELECTION.a};
-        for (int i = 0; i < line_count; i++)
+        for (int i = 0; i < v.line_count; i++)
         {
-            int start = lines[i].start;
-            int end = start + lines[i].length;
-            int a = sel_from > start ? sel_from : start;
-            int b = sel_to < end ? sel_to : end;
-            if (a >= b)
+            int start = v.lines[i].start;
+            int end = start + v.lines[i].length;
+            int range_lo = start;
+            int range_hi = end;
+            if (v.lines[i].length == 0 && start > 0)
+            {
+                range_lo = start - 1;
+            }
+            if (sel_from >= range_hi || sel_to <= range_lo)
             {
                 continue;
             }
+            float y = v.origin_y + (float)i * v.line_height + v.scroll_y;
+            if (v.lines[i].length == 0)
+            {
+                DrawRectangle((int)v.origin_x, (int)y, 6, (int)v.line_height, fill);
+                continue;
+            }
+            int a = sel_from > start ? sel_from : start;
+            int b = sel_to < end ? sel_to : end;
+            if (a > b)
+            {
+                a = b;
+            }
             float x0 = MeasureSlice(app->fonts[FONT_REGULAR], c->text, start, a - start, COMPOSER_FONT_SIZE);
             float x1 = MeasureSlice(app->fonts[FONT_REGULAR], c->text, start, b - start, COMPOSER_FONT_SIZE);
-            DrawRectangle((int)(box.boundingBox.x + COMPOSER_PAD_X + x0),
-                          (int)(box.boundingBox.y + COMPOSER_PAD_Y + (float)i * line_height),
-                          (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)line_height, fill);
+            DrawRectangle((int)(v.origin_x + x0), (int)y, (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)v.line_height, fill);
         }
     }
 
@@ -735,6 +885,19 @@ void PicoComposer_DrawOverlay(PicoApp *app)
         Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g, (unsigned char)COLOR_CURSOR.b, 255};
         DrawRectangle((int)x, (int)y, 2, (int)h, caret);
     }
+
+    EndScissorMode();
+}
+
+static void ComposerAfterLayout(PicoApp *app)
+{
+    ComposerView v = GetComposerView(app);
+    if (v.wrap_width > 10)
+    {
+        s_wrap_width = v.wrap_width;
+    }
+    PicoComposer_HandlePointer(app);
+    EnsureCaretVisible(app);
 }
 
 static void ComposerFrame(PicoApp *app, float dt)
@@ -746,7 +909,7 @@ static void ComposerFrame(PicoApp *app, float dt)
 static void ComposerInit(PicoApp *app)
 {
     pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoComposer_HandlePointer);
+    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ComposerAfterLayout);
     pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoComposer_DrawOverlay);
 }
 

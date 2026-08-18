@@ -108,7 +108,8 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
     {
         memcpy(msg->source, markdown ? markdown : "", len + 1);
     }
-    msg->doc = MdDocument_Parse(markdown ? markdown : "", len);
+    msg->doc = MdDocument_ParseEx(markdown ? markdown : "", len,
+                                  role == PICO_ROLE_USER ? MD_PARSE_PRESERVE_NEWLINES : MD_PARSE_DEFAULT);
     app->chat_follow_bottom = true;
     pico_run_hooks(app, PICO_HOOK_ON_MESSAGE);
 }

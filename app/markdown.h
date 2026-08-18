@@ -89,7 +89,14 @@ typedef struct MdDocument {
 // `src` is not required to be NUL-terminated. Never fails to return a
 // document; on failure doc->load_error describes the problem and
 // doc->block_count == 0. The document must be freed with MdDocument_Free.
+enum {
+    MD_PARSE_DEFAULT = 0,
+    // Keep user-typed newlines/blank lines as visible structure (chat input).
+    MD_PARSE_PRESERVE_NEWLINES = 1,
+};
+
 MdDocument MdDocument_Parse(const char *src, size_t length);
+MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags);
 
 // Reads a file and parses it with MdDocument_Parse.
 MdDocument MdDocument_LoadFile(const char *path);

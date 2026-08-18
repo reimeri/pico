@@ -247,6 +247,9 @@ typedef struct ComposerView {
 static float s_wrap_width = 0;
 static int s_seen_cursor = -1;
 static int s_seen_length = -1;
+static float s_goal_x = -1;
+
+static void MoveCursor(PicoComposer *c, int pos, bool extend);
 
 static ComposerView GetComposerView(PicoApp *app)
 {
@@ -296,6 +299,74 @@ static int CaretLineIndex(const ComposerView *v, int cursor)
         }
     }
     return line_i;
+}
+
+static int OffsetAtXOnLine(Font font, const PicoComposer *c, CompLine line, float target_x)
+{
+    if (target_x <= 0 || line.length <= 0 || !c->text)
+    {
+        return line.start;
+    }
+    float width = 0;
+    int pos = line.start;
+    int end = line.start + line.length;
+    while (pos < end)
+    {
+        int next = Utf8Next(c->text, c->length, pos);
+        float ch_w = MeasureSlice(font, c->text, pos, next - pos, COMPOSER_FONT_SIZE);
+        if (width + ch_w * 0.5f >= target_x)
+        {
+            return pos;
+        }
+        width += ch_w;
+        pos = next;
+    }
+    return end;
+}
+
+static void MoveVertical(PicoApp *app, int dir, bool extend)
+{
+    PicoComposer *c = &app->composer;
+    CompLine lines[COMPOSER_MAX_LINES];
+    float line_height = COMPOSER_FONT_SIZE;
+    float wrap = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
+    int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], wrap, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_i = 0;
+    for (int i = 0; i < line_count; i++)
+    {
+        if (c->cursor >= lines[i].start)
+        {
+            line_i = i;
+        }
+    }
+    int start = lines[line_i].start;
+    int take = c->cursor - start;
+    if (take > lines[line_i].length)
+    {
+        take = lines[line_i].length;
+    }
+    if (take < 0)
+    {
+        take = 0;
+    }
+    float x = MeasureSlice(app->fonts[FONT_REGULAR], c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
+    float goal = s_goal_x >= 0 ? s_goal_x : x;
+    int next = line_i + dir;
+    int pos;
+    if (next < 0)
+    {
+        pos = 0;
+    }
+    else if (next >= line_count)
+    {
+        pos = c->length;
+    }
+    else
+    {
+        pos = OffsetAtXOnLine(app->fonts[FONT_REGULAR], c, lines[next], goal);
+    }
+    MoveCursor(c, pos, extend);
+    s_goal_x = goal;
 }
 
 static int OffsetAtPoint(PicoApp *app, float x, float y)
@@ -464,6 +535,7 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     c->cursor = from;
     c->sel_anchor = from;
     c->text[c->length] = '\0';
+    s_goal_x = -1;
 }
 
 static void DeleteSelection(PicoComposer *c)
@@ -492,6 +564,7 @@ static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
     c->cursor += nbytes;
     c->sel_anchor = c->cursor;
     c->text[c->length] = '\0';
+    s_goal_x = -1;
 }
 
 static void MoveCursor(PicoComposer *c, int pos, bool extend)
@@ -509,6 +582,7 @@ static void MoveCursor(PicoComposer *c, int pos, bool extend)
     {
         c->sel_anchor = pos;
     }
+    s_goal_x = -1;
 }
 
 static int Utf8Encode(int cp, char out[4])
@@ -648,6 +722,17 @@ void PicoComposer_HandleInput(PicoApp *app)
         MoveCursor(c, pos, shift);
     }
 
+    bool repeat_up = IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP);
+    bool repeat_down = IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN);
+    if (repeat_up)
+    {
+        MoveVertical(app, -1, shift);
+    }
+    if (repeat_down)
+    {
+        MoveVertical(app, 1, shift);
+    }
+
     if (ctrl && (IsKeyPressed(KEY_W) || IsKeyPressedRepeat(KEY_W)))
     {
         if (PicoComposer_HasSelection(app))
@@ -735,7 +820,18 @@ void PicoComposer_HandlePointer(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
     Vector2 mouse = GetMousePosition();
-    bool over = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
+    bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
+                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack")));
+    bool over = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+
+    if (over_bar)
+    {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            c->mouse_selecting = false;
+        }
+        return;
+    }
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over)
     {
@@ -787,41 +883,83 @@ void PicoComposer_Render(PicoApp *app)
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        CLAY(CLAY_ID("ComposerScroll"),
-             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-              .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+        CLAY(CLAY_ID("ComposerRow"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = SCROLLBAR_GAP,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY(CLAY_ID("ComposerContent"),
+            CLAY(CLAY_ID("ComposerScroll"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
             {
-                if (empty)
+                CLAY(CLAY_ID("ComposerContent"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
                 {
-                    Clay_String text = {.length = (int32_t)strlen(placeholder), .chars = placeholder};
-                    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                      .fontSize = COMPOSER_FONT_SIZE,
-                                                      .textColor = COLOR_MUTED,
-                                                      .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                }
-                else
-                {
-                    for (int i = 0; i < line_count; i++)
+                    if (empty)
                     {
-                        CLAY(CLAY_IDI("CompLine", i),
-                             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
-                                                    .height = CLAY_SIZING_FIXED(line_height)}}})
+                        Clay_String text = {.length = (int32_t)strlen(placeholder), .chars = placeholder};
+                        CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                          .fontSize = COMPOSER_FONT_SIZE,
+                                                          .textColor = COLOR_MUTED,
+                                                          .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                    }
+                    else
+                    {
+                        for (int i = 0; i < line_count; i++)
                         {
-                            if (lines[i].length > 0)
+                            CLAY(CLAY_IDI("CompLine", i),
+                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                        .height = CLAY_SIZING_FIXED(line_height)}}})
                             {
-                                Clay_String text = {.length = (int32_t)lines[i].length,
-                                                    .chars = c->text + lines[i].start};
-                                CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                  .fontSize = COMPOSER_FONT_SIZE,
-                                                                  .textColor = COLOR_TEXT,
-                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                if (lines[i].length > 0)
+                                {
+                                    Clay_String text = {.length = (int32_t)lines[i].length,
+                                                        .chars = c->text + lines[i].start};
+                                    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                      .fontSize = COMPOSER_FONT_SIZE,
+                                                                      .textColor = COLOR_TEXT,
+                                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                }
                             }
                         }
+                    }
+                }
+            }
+            if (app->composer_overflow)
+            {
+                Clay_ScrollContainerData scroll_data =
+                    Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+                float track_h = scroll_data.found ? scroll_data.scrollContainerDimensions.height : 0;
+                float content_h_scroll = scroll_data.found ? scroll_data.contentDimensions.height : 1;
+                float thumb_h = content_h_scroll > 0 ? (track_h / content_h_scroll) * track_h : track_h;
+                if (thumb_h < 16)
+                {
+                    thumb_h = 16;
+                }
+                float thumb_y = 0;
+                if (scroll_data.found && scroll_data.scrollPosition && content_h_scroll > 0)
+                {
+                    thumb_y = -(scroll_data.scrollPosition->y / content_h_scroll) * track_h;
+                }
+                CLAY(CLAY_ID("CompScrollTrack"),
+                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
+                                            .height = CLAY_SIZING_GROW(0)}}})
+                {
+                    CLAY(CLAY_ID("CompScrollBarHandle"),
+                         {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                                       .offset = {.y = thumb_y},
+                                       .zIndex = 1,
+                                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
+                                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
+                          .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
+                                                .height = CLAY_SIZING_FIXED(thumb_h)}},
+                          .backgroundColor = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle")))
+                                                 ? COLOR_SCROLLBAR_HOVER
+                                                 : COLOR_SCROLLBAR,
+                          .cornerRadius = CLAY_CORNER_RADIUS((float)SCROLLBAR_WIDTH / 2.0f)})
+                    {
                     }
                 }
             }
@@ -896,14 +1034,48 @@ static void ComposerAfterLayout(PicoApp *app)
     {
         s_wrap_width = v.wrap_width;
     }
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    app->composer_overflow =
+        scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
     PicoComposer_HandlePointer(app);
     EnsureCaretVisible(app);
+}
+
+static void UpdateComposerScrollbarDrag(PicoApp *app)
+{
+    PicoScrollbar *drag = &app->composer_scrollbar;
+    Clay_Vector2 mouse = {.x = GetMousePosition().x, .y = GetMousePosition().y};
+    if (!IsMouseButtonDown(0))
+    {
+        drag->mouse_down = false;
+    }
+    if (IsMouseButtonDown(0) && !drag->mouse_down &&
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))))
+    {
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+        if (data.found && data.scrollPosition)
+        {
+            drag->click_origin = mouse;
+            drag->position_origin = *data.scrollPosition;
+            drag->mouse_down = true;
+        }
+    }
+    else if (drag->mouse_down)
+    {
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+        if (data.found && data.scrollPosition && data.contentDimensions.height > 0)
+        {
+            float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;
+            data.scrollPosition->y = drag->position_origin.y + (drag->click_origin.y - mouse.y) * ratio;
+        }
+    }
 }
 
 static void ComposerFrame(PicoApp *app, float dt)
 {
     (void)dt;
     PicoComposer_HandleInput(app);
+    UpdateComposerScrollbarDrag(app);
 }
 
 static void ComposerInit(PicoApp *app)

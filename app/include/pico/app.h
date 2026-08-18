@@ -104,8 +104,10 @@ typedef struct PicoApp {
     PicoTool tools[PICO_MAX_TOOLS];
     int tool_count;
     PicoScrollbar chat_scrollbar;
+    PicoScrollbar composer_scrollbar;
     bool chat_follow_bottom;
     bool chat_overflow;
+    bool composer_overflow;
     int selected_message;
     bool reinitialize_clay;
     bool debug_enabled;

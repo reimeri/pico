@@ -335,11 +335,15 @@ void PicoApp_Frame(PicoApp *app)
     PicoPlugins_OnFrame(app, GetFrameTime());
 
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
-    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down);
+    bool composer_bar_drag = app->composer_scrollbar.mouse_down;
+    bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
+    Clay_SetPointerState(mouse_position,
+                         IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down && !composer_bar_drag);
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
 
     UpdateChatScrollbarDrag(app, mouse_position);
-    Clay_UpdateScrollContainers(true, (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
+    Clay_UpdateScrollContainers(!over_composer && !composer_bar_drag, (Clay_Vector2){mouse_delta.x, mouse_delta.y},
+                                GetFrameTime());
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);
 
@@ -352,6 +356,11 @@ void PicoApp_Frame(PicoApp *app)
     if (app->hovered_link)
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+    }
+    else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
+             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack"))))
+    {
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
     else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))))
     {

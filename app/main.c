@@ -12,6 +12,23 @@
 #include <string.h>
 #include <unistd.h>
 
+static void FputsQuoted(FILE *out, const char *s)
+{
+    fputc('\'', out);
+    for (; s && *s; s++)
+    {
+        if (*s == '\'')
+        {
+            fputs("'\\''", out);
+        }
+        else
+        {
+            fputc(*s, out);
+        }
+    }
+    fputc('\'', out);
+}
+
 static void PrintUsage(const char *argv0)
 {
     fprintf(stderr,
@@ -105,9 +122,24 @@ int main(int argc, char **argv)
         }
         PicoApp_Frame(&app);
     }
+
+    char session_path[4096];
+    session_path[0] = '\0';
+    if (!app.session_ephemeral && app.session_path[0])
+    {
+        snprintf(session_path, sizeof(session_path), "%s", app.session_path);
+    }
     PicoApp_Free(&app);
 
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();
+    if (session_path[0])
+    {
+        fprintf(stderr, "Resume: ");
+        FputsQuoted(stderr, argv[0]);
+        fprintf(stderr, " --session ");
+        FputsQuoted(stderr, session_path);
+        fputc('\n', stderr);
+    }
     return 0;
 }

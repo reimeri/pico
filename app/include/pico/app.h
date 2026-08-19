@@ -132,6 +132,7 @@ typedef struct PicoApp {
     PicoSettings settings;
     const char *model_name;
     int tokens_used;
+    int tokens_cached;
     int tokens_limit;
     char *agent_error;
     Font *fonts;

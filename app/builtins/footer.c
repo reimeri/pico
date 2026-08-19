@@ -35,9 +35,23 @@ void PicoFooter_Render(PicoApp *app)
     {
         extra = "  ·  Esc to dismiss";
     }
-    snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens%s",
-             AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", app->tokens_used,
-             app->tokens_limit, extra);
+    if (app->tokens_used > 0)
+    {
+        int pct = (int)((long)app->tokens_cached * 100 / app->tokens_used);
+        if (pct > 100)
+        {
+            pct = 100;
+        }
+        snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens  ·  %d%% cache%s",
+                 AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", app->tokens_used,
+                 app->tokens_limit, pct, extra);
+    }
+    else
+    {
+        snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens%s",
+                 AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", app->tokens_used,
+                 app->tokens_limit, extra);
+    }
     Clay_String text = {.length = (int32_t)strlen(app->footer_text), .chars = app->footer_text};
 
     CLAY(CLAY_ID("Footer"),

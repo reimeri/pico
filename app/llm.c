@@ -37,7 +37,8 @@ typedef struct LlmCtx {
     JsonBuf acc;
     JsonBuf items;
     int item_count;
-    int tokens;
+    int input_tokens;
+    int cached_tokens;
     char *error;
     bool saw_sse;
     bool failed;
@@ -91,10 +92,17 @@ static void HandleResponseObject(LlmCtx *c, const JsonDoc *doc, int obj)
     int usage = JsonObjGet(doc, obj, "usage");
     if (JsonIsObject(doc, usage))
     {
-        int t = JsonObjInt(doc, usage, "total_tokens", 0);
-        if (t > 0)
+        int input = JsonObjInt(doc, usage, "input_tokens", 0);
+        int total = JsonObjInt(doc, usage, "total_tokens", 0);
+        int details = JsonObjGet(doc, usage, "input_tokens_details");
+        c->input_tokens = input > 0 ? input : total;
+        if (JsonIsObject(doc, details))
         {
-            c->tokens = t;
+            c->cached_tokens = JsonObjInt(doc, details, "cached_tokens", 0);
+        }
+        else
+        {
+            c->cached_tokens = JsonObjInt(doc, usage, "cached_tokens", 0);
         }
     }
     CopyOutputArray(c, doc, JsonObjGet(doc, obj, "output"));
@@ -402,17 +410,17 @@ static int OnXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_
     return 0;
 }
 
-int PicoLlm_Stream(const char *url, const char *api_key, const char *body, PicoLlmCancelFn cancel,
-                   PicoLlmDeltaFn on_delta, void *user, char **out_items_json, int *out_tokens,
-                   char **out_error)
+int PicoLlm_Stream(const char *url, const char *api_key, const char *body, const char *session_id,
+                   PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta, void *user, char **out_items_json,
+                   PicoLlmUsage *out_usage, char **out_error)
 {
     if (out_items_json)
     {
         *out_items_json = NULL;
     }
-    if (out_tokens)
+    if (out_usage)
     {
-        *out_tokens = 0;
+        memset(out_usage, 0, sizeof(*out_usage));
     }
     if (out_error)
     {
@@ -455,6 +463,12 @@ int PicoLlm_Stream(const char *url, const char *api_key, const char *body, PicoL
     {
         snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
         headers = curl_slist_append(headers, auth);
+    }
+    char session_hdr[80];
+    if (session_id && session_id[0])
+    {
+        snprintf(session_hdr, sizeof(session_hdr), "session_id: %s", session_id);
+        headers = curl_slist_append(headers, session_hdr);
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -550,9 +564,10 @@ int PicoLlm_Stream(const char *url, const char *api_key, const char *body, PicoL
     {
         JsonBuf_Free(&wrapped);
     }
-    if (out_tokens)
+    if (out_usage)
     {
-        *out_tokens = ctx.tokens;
+        out_usage->input_tokens = ctx.input_tokens;
+        out_usage->cached_tokens = ctx.cached_tokens;
     }
     JsonBuf_Free(&ctx.acc);
     JsonBuf_Free(&ctx.items);

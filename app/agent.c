@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define PICO_MAX_PENDING_CALLS 16
 
@@ -38,6 +39,7 @@ typedef struct PicoAgentEv {
     char *text;
     char *payload;
     int tokens;
+    int cached;
 } PicoAgentEv;
 
 typedef enum PicoWorkKind {
@@ -80,6 +82,8 @@ struct PicoAgentRt {
     PicoInputItem *input;
     int input_count;
     int input_cap;
+    char cache_key[33];
+    char *instructions;
 
     PicoPendingCall pending[PICO_MAX_PENDING_CALLS];
     int pending_count;
@@ -92,6 +96,35 @@ struct PicoAgentRt {
 static char *Dup(const char *s)
 {
     return JsonDup(s ? s : "");
+}
+
+static void FillCacheKey(char *out, size_t cap)
+{
+    unsigned char raw[16];
+    int got = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f)
+    {
+        got = fread(raw, 1, sizeof(raw), f) == sizeof(raw);
+        fclose(f);
+    }
+    if (!got)
+    {
+        snprintf(out, cap, "%016lx%016lx", (unsigned long)time(NULL), (unsigned long)(size_t)out);
+        return;
+    }
+    static const char kHex[] = "0123456789abcdef";
+    size_t n = (cap - 1) / 2;
+    if (n > sizeof(raw))
+    {
+        n = sizeof(raw);
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        out[i * 2] = kHex[raw[i] >> 4];
+        out[i * 2 + 1] = kHex[raw[i] & 0xf];
+    }
+    out[n * 2] = '\0';
 }
 
 static void PushInput(PicoAgentRt *rt, char *json)
@@ -128,7 +161,7 @@ static void ClearPending(PicoAgentRt *rt)
     rt->pending_next = 0;
 }
 
-static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens)
+static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens, int cached)
 {
     pthread_mutex_lock(&rt->mu);
     if (rt->event_count >= rt->event_cap)
@@ -150,6 +183,7 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
     ev->text = text;
     ev->payload = payload;
     ev->tokens = tokens;
+    ev->cached = cached;
     pthread_mutex_unlock(&rt->mu);
 }
 
@@ -274,8 +308,9 @@ static void *WorkerMain(void *arg)
         {
             char *items = NULL;
             char *err = NULL;
-            int tokens = 0;
-            int rc = PicoLlm_Stream(url, key, body, CancelCb, DeltaCb, rt, &items, &tokens, &err);
+            PicoLlmUsage usage = {0};
+            int rc = PicoLlm_Stream(url, key, body, rt->cache_key, CancelCb, DeltaCb, rt, &items, &usage,
+                                    &err);
             if (rc == PICO_LLM_FAIL && err && strstr(err, "easoning"))
             {
                 char *stripped = BodyWithoutReasoning(body);
@@ -285,24 +320,26 @@ static void *WorkerMain(void *arg)
                     items = NULL;
                     free(err);
                     err = NULL;
-                    rc = PicoLlm_Stream(url, key, stripped, CancelCb, DeltaCb, rt, &items, &tokens, &err);
+                    memset(&usage, 0, sizeof(usage));
+                    rc = PicoLlm_Stream(url, key, stripped, rt->cache_key, CancelCb, DeltaCb, rt, &items,
+                                        &usage, &err);
                     free(stripped);
                 }
             }
             if (rc == PICO_LLM_CANCEL)
             {
-                PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0);
+                PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0, 0);
                 free(items);
                 free(err);
             }
             else if (rc != PICO_LLM_OK)
             {
-                PostEvent(rt, PICO_AEV_LLM_FAIL, err, NULL, 0);
+                PostEvent(rt, PICO_AEV_LLM_FAIL, err, NULL, 0, 0);
                 free(items);
             }
             else
             {
-                PostEvent(rt, PICO_AEV_LLM_DONE, NULL, items, tokens);
+                PostEvent(rt, PICO_AEV_LLM_DONE, NULL, items, usage.input_tokens, usage.cached_tokens);
             }
         }
         else if (kind == PICO_WORK_TOOL)
@@ -319,13 +356,13 @@ static void *WorkerMain(void *arg)
                 JsonBuf_Puts(&b, "unknown tool: ");
                 JsonBuf_Puts(&b, tool_name ? tool_name : "?");
                 out = JsonBuf_Steal(&b);
-                PostEvent(rt, PICO_AEV_TOOL_FAIL, out, call_id, 0);
+                PostEvent(rt, PICO_AEV_TOOL_FAIL, out, call_id, 0, 0);
                 call_id = NULL;
                 out = NULL;
             }
             if (out || call_id)
             {
-                PostEvent(rt, PICO_AEV_TOOL_DONE, out ? out : Dup(""), call_id, 0);
+                PostEvent(rt, PICO_AEV_TOOL_DONE, out ? out : Dup(""), call_id, 0, 0);
                 call_id = NULL;
             }
         }
@@ -398,13 +435,21 @@ static PicoToolFn FindTool(PicoApp *app, const char *name)
 static char *BuildRequest(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
-    char *instructions = PicoSettings_LoadSystemPrompt(app);
+    const char *instructions = rt->instructions;
+    char *loaded = NULL;
+    if (!instructions)
+    {
+        loaded = PicoSettings_LoadSystemPrompt(app);
+        instructions = loaded ? loaded : "";
+    }
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "{\"model\":");
     JsonBuf_String(&b, app->settings.model);
+    JsonBuf_Puts(&b, ",\"prompt_cache_key\":");
+    JsonBuf_String(&b, rt->cache_key);
     JsonBuf_Puts(&b, ",\"stream\":true,\"instructions\":");
-    JsonBuf_String(&b, instructions ? instructions : "");
+    JsonBuf_String(&b, instructions);
     JsonBuf_Puts(&b, ",\"input\":[");
     for (int i = 0; i < rt->input_count; i++)
     {
@@ -441,7 +486,7 @@ static char *BuildRequest(PicoApp *app)
         JsonBuf_Puts(&b, kReasoningField);
     }
     JsonBuf_Putc(&b, '}');
-    free(instructions);
+    free(loaded);
     return JsonBuf_Steal(&b);
 }
 
@@ -1058,6 +1103,7 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
     if (ev->tokens > 0)
     {
         app->tokens_used = ev->tokens;
+        app->tokens_cached = ev->cached;
     }
     if (rt->stream_msg >= 0 && MessageSourceEmpty(app, rt->stream_msg))
     {
@@ -1139,6 +1185,7 @@ void PicoAgent_Init(PicoApp *app)
     }
     rt->app = app;
     rt->stream_msg = -1;
+    FillCacheKey(rt->cache_key, sizeof(rt->cache_key));
     pthread_mutex_init(&rt->mu, NULL);
     pthread_cond_init(&rt->cv, NULL);
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1184,6 +1231,7 @@ void PicoAgent_Shutdown(PicoApp *app)
     free(rt->work_tool_name);
     free(rt->work_tool_args);
     free(rt->work_call_id);
+    free(rt->instructions);
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
     curl_global_cleanup();
@@ -1203,6 +1251,8 @@ void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
     }
     PicoSettings_Load(app);
     PicoAgent_DismissError(app);
+    free(app->agent->instructions);
+    app->agent->instructions = PicoSettings_LoadSystemPrompt(app);
     if (!app->settings.api_key[0])
     {
         SetErrorState(app,

@@ -46,6 +46,10 @@ typedef enum PicoHook {
 typedef struct PicoTraceLine {
     char *text;
     bool is_tool;
+    char *tool_name;
+    char *tool_args;
+    char *tool_output;
+    bool expanded;
 } PicoTraceLine;
 
 typedef struct PicoMessage {
@@ -135,6 +139,7 @@ typedef struct PicoApp {
     bool safe_mode;
     bool reload_queued;
     const char *hovered_link;
+    bool hovered_tool;
     char footer_text[256];
     char workspace[4096];
     char *status_warn;

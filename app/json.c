@@ -306,6 +306,39 @@ int JsonObjGet(const JsonDoc *doc, int obj, const char *key)
     return -1;
 }
 
+int JsonObjLen(const JsonDoc *doc, int obj)
+{
+    if (!doc || obj < 0 || obj >= doc->ntoks || Toks(doc)[obj].type != JSMN_OBJECT)
+    {
+        return 0;
+    }
+    return Toks(doc)[obj].size;
+}
+
+bool JsonObjPair(const JsonDoc *doc, int obj, int index, int *key_tok, int *val_tok)
+{
+    if (index < 0 || index >= JsonObjLen(doc, obj))
+    {
+        return false;
+    }
+    int i = obj + 1;
+    for (int k = 0; k < index; k++)
+    {
+        i = JsonSkip(doc, i);
+        i = JsonSkip(doc, i);
+    }
+    if (key_tok)
+    {
+        *key_tok = i;
+    }
+    i = JsonSkip(doc, i);
+    if (val_tok)
+    {
+        *val_tok = i;
+    }
+    return true;
+}
+
 int JsonArrayLen(const JsonDoc *doc, int arr)
 {
     if (!doc || arr < 0 || arr >= doc->ntoks || Toks(doc)[arr].type != JSMN_ARRAY)

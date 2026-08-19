@@ -206,6 +206,9 @@ void PicoApp_Free(PicoApp *app)
         for (int t = 0; t < app->messages[i].trace_count; t++)
         {
             free(app->messages[i].trace[t].text);
+            free(app->messages[i].trace[t].tool_name);
+            free(app->messages[i].trace[t].tool_args);
+            free(app->messages[i].trace[t].tool_output);
         }
         free(app->messages[i].trace);
         MdDocument_Free(&app->messages[i].doc);
@@ -353,7 +356,7 @@ void PicoApp_Frame(PicoApp *app)
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT);
 
-    if (app->hovered_link)
+    if (app->hovered_link || app->hovered_tool)
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }

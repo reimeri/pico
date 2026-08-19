@@ -48,7 +48,8 @@ static void LoadFontWithGlyphs(const char *path, Font *out)
         {
             codepoints[count++] = c;
         }
-        int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x2603, 0x2610, 0x2611};
+        int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x203A, 0x25BE, 0x2603,
+                       0x2610, 0x2611};
         for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
         {
             codepoints[count++] = extra[i];

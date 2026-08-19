@@ -498,6 +498,9 @@ static void PopLastMessage(PicoApp *app)
     for (int t = 0; t < app->messages[i].trace_count; t++)
     {
         free(app->messages[i].trace[t].text);
+        free(app->messages[i].trace[t].tool_name);
+        free(app->messages[i].trace[t].tool_args);
+        free(app->messages[i].trace[t].tool_output);
     }
     free(app->messages[i].trace);
     MdDocument_Free(&app->messages[i].doc);
@@ -538,7 +541,7 @@ static bool MessageEmpty(const PicoApp *app, int idx)
     }
     for (int t = 0; t < app->messages[idx].trace_count; t++)
     {
-        if (!Blank(app->messages[idx].trace[t].text))
+        if (!Blank(app->messages[idx].trace[t].text) || !Blank(app->messages[idx].trace[t].tool_name))
         {
             return false;
         }
@@ -568,7 +571,7 @@ static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
     }
     m->trace = next;
     PicoTraceLine *line = &m->trace[m->trace_count++];
-    line->text = NULL;
+    memset(line, 0, sizeof(*line));
     line->is_tool = is_tool;
     return line;
 }
@@ -604,9 +607,87 @@ static void TraceAppendThink(PicoApp *app, int idx, const char *s, size_t n)
     line->text = next;
 }
 
-static void TraceAddTool(PicoApp *app, int idx, const char *text)
+static void FlattenPut(JsonBuf *b, const char *s, size_t max)
 {
-    if (idx < 0 || idx >= app->message_count || !text)
+    if (!s)
+    {
+        return;
+    }
+    for (; *s && b->len < max; s++)
+    {
+        char c = (*s == '\n' || *s == '\r' || *s == '\t') ? ' ' : *s;
+        JsonBuf_Putc(b, c);
+    }
+}
+
+static char *FormatToolProps(const char *args_json)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    if (!args_json || !args_json[0])
+    {
+        return JsonBuf_Steal(&b);
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, args_json, strlen(args_json)) != 0)
+    {
+        FlattenPut(&b, args_json, 240);
+        return JsonBuf_Steal(&b);
+    }
+    if (JsonIsObject(&doc, 0))
+    {
+        int n = JsonObjLen(&doc, 0);
+        for (int i = 0; i < n; i++)
+        {
+            int key_tok = -1;
+            int val_tok = -1;
+            if (!JsonObjPair(&doc, 0, i, &key_tok, &val_tok))
+            {
+                continue;
+            }
+            if (b.len)
+            {
+                JsonBuf_Puts(&b, "  ");
+            }
+            char *key = JsonStrDup(&doc, key_tok);
+            FlattenPut(&b, key, 240);
+            free(key);
+            JsonBuf_Puts(&b, ": ");
+            char *val = NULL;
+            if (JsonIsObject(&doc, val_tok) || JsonIsArray(&doc, val_tok))
+            {
+                val = JsonRawDup(&doc, val_tok);
+            }
+            else
+            {
+                val = JsonStrDup(&doc, val_tok);
+                if (!val)
+                {
+                    val = JsonRawDup(&doc, val_tok);
+                }
+            }
+            FlattenPut(&b, val, 240);
+            free(val);
+            if (b.len > 240)
+            {
+                JsonBuf_Puts(&b, "...");
+                break;
+            }
+        }
+    }
+    else
+    {
+        char *raw = JsonRawDup(&doc, 0);
+        FlattenPut(&b, raw, 240);
+        free(raw);
+    }
+    JsonFree(&doc);
+    return JsonBuf_Steal(&b);
+}
+
+static void TraceAddTool(PicoApp *app, int idx, const char *name, const char *args_json)
+{
+    if (idx < 0 || idx >= app->message_count)
     {
         return;
     }
@@ -615,7 +696,26 @@ static void TraceAddTool(PicoApp *app, int idx, const char *text)
     {
         return;
     }
-    line->text = Dup(text);
+    line->tool_name = Dup(name && name[0] ? name : "tool");
+    line->tool_args = FormatToolProps(args_json);
+}
+
+static void TraceSetLastToolOutput(PicoApp *app, int idx, const char *output)
+{
+    if (idx < 0 || idx >= app->message_count)
+    {
+        return;
+    }
+    PicoMessage *m = &app->messages[idx];
+    for (int t = m->trace_count - 1; t >= 0; t--)
+    {
+        if (m->trace[t].is_tool)
+        {
+            free(m->trace[t].tool_output);
+            m->trace[t].tool_output = Dup(output ? output : "");
+            return;
+        }
+    }
 }
 
 static char *FormatToolLine(const char *name, const char *args_json)
@@ -844,7 +944,7 @@ static void StartNextTool(PicoApp *app)
     SetActivity(app, line);
     if (rt->stream_msg >= 0)
     {
-        TraceAddTool(app, rt->stream_msg, line);
+        TraceAddTool(app, rt->stream_msg, call->name, call->arguments);
         app->chat_follow_bottom = true;
     }
     QueueTool(rt, call->name, call->arguments, call->call_id, FindTool(app, call->name));
@@ -1003,7 +1103,12 @@ static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
             call_id = rt->pending[rt->pending_next].call_id;
         }
     }
-    PushFunctionOutput(rt, call_id, ev->text ? ev->text : (failed ? "tool failed" : ""));
+    const char *output = ev->text ? ev->text : (failed ? "tool failed" : "");
+    PushFunctionOutput(rt, call_id, output);
+    if (rt->stream_msg >= 0)
+    {
+        TraceSetLastToolOutput(app, rt->stream_msg, output);
+    }
     rt->pending_next++;
     bool cancel;
     pthread_mutex_lock(&rt->mu);

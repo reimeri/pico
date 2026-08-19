@@ -30,6 +30,8 @@ int JsonParse(JsonDoc *doc, const char *src, size_t len);
 void JsonFree(JsonDoc *doc);
 int JsonSkip(const JsonDoc *doc, int tok);
 int JsonObjGet(const JsonDoc *doc, int obj, const char *key);
+int JsonObjLen(const JsonDoc *doc, int obj);
+bool JsonObjPair(const JsonDoc *doc, int obj, int index, int *key_tok, int *val_tok);
 int JsonArrayLen(const JsonDoc *doc, int arr);
 int JsonArrayAt(const JsonDoc *doc, int arr, int index);
 bool JsonEq(const JsonDoc *doc, int tok, const char *s);

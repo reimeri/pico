@@ -2,6 +2,7 @@
 // elements. See richtext.h for the approach.
 
 #include "richtext.h"
+#include "chat_sel.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -407,7 +408,7 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
                       .backgroundColor = style->code_bg_color,
                       .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
-            CLAY_TEXT(text, CLAY_TEXT_CONFIG(config));
+            PicoChatSel_Text(text, config);
         }
     }
     else if (run->link_url)
@@ -421,12 +422,12 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
         config.textColor = hovered ? style->link_hover_color : style->link_color;
         CLAY(id, {})
         {
-            CLAY_TEXT(text, CLAY_TEXT_CONFIG(config));
+            PicoChatSel_Text(text, config);
         }
     }
     else
     {
-        CLAY_TEXT(text, CLAY_TEXT_CONFIG(config));
+        PicoChatSel_Text(text, config);
     }
 }
 
@@ -447,7 +448,7 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
             {
                 if (line->run_count == 0)
                 {
-                    CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
+                    PicoChatSel_Text(CLAY_STRING(" "), space_config);
                 }
                 else
                 {
@@ -455,7 +456,7 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
                     {
                         if (r > 0 && line->runs[r].space_before)
                         {
-                            CLAY_TEXT(CLAY_STRING(" "), CLAY_TEXT_CONFIG(space_config));
+                            PicoChatSel_Text(CLAY_STRING(" "), space_config);
                         }
                         EmitRun(&line->runs[r], style, emit);
                     }

@@ -672,17 +672,13 @@ void PicoComposer_HandleInput(PicoApp *app)
 
     if (ctrl && IsKeyPressed(KEY_C))
     {
-        if (PicoComposer_HasSelection(app))
+        if (PicoChatSel_HasSelection(app))
+        {
+            PicoChatSel_Copy(app);
+        }
+        else if (PicoComposer_HasSelection(app))
         {
             PicoComposer_Copy(app);
-        }
-        else if (app->selected_message >= 0 && app->selected_message < app->message_count)
-        {
-            const char *src = app->messages[app->selected_message].source;
-            if (src)
-            {
-                SetClipboardText(src);
-            }
         }
         return;
     }
@@ -838,7 +834,7 @@ void PicoComposer_HandlePointer(PicoApp *app)
         int pos = OffsetAtPoint(app, mouse.x, mouse.y);
         MoveCursor(c, pos, IsShiftDown());
         c->mouse_selecting = true;
-        app->selected_message = -1;
+        PicoChatSel_Clear(app);
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {

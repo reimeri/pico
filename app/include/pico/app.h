@@ -60,6 +60,19 @@ typedef struct PicoMessage {
     MdDocument doc;
 } PicoMessage;
 
+typedef struct PicoChatSelect {
+    int msg;
+    int anchor;
+    int cursor;
+    bool mouse_selecting;
+    bool dragging;
+    bool pressed_tool;
+    int tool_msg;
+    int tool_idx;
+    float press_x;
+    float press_y;
+} PicoChatSelect;
+
 typedef struct PicoComposer {
     char *text;
     int length;
@@ -130,10 +143,10 @@ typedef struct PicoApp {
     int tool_count;
     PicoScrollbar chat_scrollbar;
     PicoScrollbar composer_scrollbar;
+    PicoChatSelect chat_sel;
     bool chat_follow_bottom;
     bool chat_overflow;
     bool composer_overflow;
-    int selected_message;
     bool reinitialize_clay;
     bool debug_enabled;
     bool safe_mode;
@@ -170,6 +183,11 @@ void PicoPlugins_Shutdown(PicoApp *app);
 
 void PicoChat_Render(PicoApp *app);
 void PicoChat_HandlePointer(PicoApp *app);
+void PicoChat_DrawOverlay(PicoApp *app);
+bool PicoChatSel_HasSelection(const PicoApp *app);
+void PicoChatSel_Clear(PicoApp *app);
+void PicoChatSel_Copy(PicoApp *app);
+bool PicoChatSel_PointerOverText(void);
 void PicoComposer_HandleInput(PicoApp *app);
 void PicoComposer_HandlePointer(PicoApp *app);
 void PicoComposer_Render(PicoApp *app);

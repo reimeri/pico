@@ -168,7 +168,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     memset(app, 0, sizeof(*app));
     app->fonts = fonts;
     app->agent_state = PICO_AGENT_IDLE;
-    app->selected_message = -1;
+    app->chat_sel.msg = -1;
     app->chat_overflow = true;
     app->safe_mode = safe_mode;
     if (workspace && workspace[0])
@@ -340,13 +340,15 @@ void PicoApp_Frame(PicoApp *app)
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
     bool composer_bar_drag = app->composer_scrollbar.mouse_down;
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
+    bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
     Clay_SetPointerState(mouse_position,
                          IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down && !composer_bar_drag);
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
 
     UpdateChatScrollbarDrag(app, mouse_position);
-    Clay_UpdateScrollContainers(!over_composer && !composer_bar_drag, (Clay_Vector2){mouse_delta.x, mouse_delta.y},
-                                GetFrameTime());
+    Clay_UpdateScrollContainers(!over_composer && !over_chat && !composer_bar_drag &&
+                                    !app->chat_sel.mouse_selecting,
+                                (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);
 
@@ -361,11 +363,13 @@ void PicoApp_Frame(PicoApp *app)
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }
     else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
-             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack"))))
+             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack"))) ||
+             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
     {
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
-    else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))))
+    else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))) || PicoChatSel_PointerOverText() ||
+             app->chat_sel.mouse_selecting)
     {
         SetMouseCursor(MOUSE_CURSOR_IBEAM);
     }
@@ -385,7 +389,8 @@ void PicoApp_Frame(PicoApp *app)
         app->chat_follow_bottom = false;
     }
 
-    if (app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    if (app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
+        !PicoChatSel_HasSelection(app))
     {
         OpenURL(app->hovered_link);
     }

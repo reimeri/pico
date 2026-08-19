@@ -15,6 +15,7 @@
 #define PICO_MAX_COMMANDS 64
 #define PICO_MAX_COMPLETERS 16
 #define PICO_MAX_COMPLETE_ITEMS 24
+#define PICO_MAX_PROVIDERS 16
 #define PICO_MAX_EFFORTS 16
 #define PICO_EFFORT_LEN 16
 
@@ -59,6 +60,8 @@ typedef enum PicoSessionStart {
 typedef struct PicoModel {
     char id[128];
     char name[128];
+    char provider[64];
+    char base_url[512];
     int context_limit;
     bool vision;
     char effort[PICO_MAX_EFFORTS][PICO_EFFORT_LEN];
@@ -157,9 +160,65 @@ typedef struct PicoCompleter {
     PicoCompleteAcceptFn accept;
 } PicoCompleter;
 
+typedef bool (*PicoLlmCancelFn)(void *user);
+
+typedef enum PicoLlmDeltaKind {
+    PICO_LLM_DELTA_TEXT = 0,
+    PICO_LLM_DELTA_THINKING,
+    PICO_LLM_DELTA_STATUS,
+} PicoLlmDeltaKind;
+
+typedef void (*PicoLlmDeltaFn)(void *user, PicoLlmDeltaKind kind, const char *s, size_t n);
+
+enum {
+    PICO_LLM_OK = 0,
+    PICO_LLM_FAIL = 1,
+    PICO_LLM_CANCEL = 2,
+};
+
+typedef struct PicoLlmTurn {
+    const char *model;
+    const char *base_url;
+    const char *api_key;
+    const char *instructions;
+    const char *cache_key;
+    const char *effort;
+    bool compact;
+    bool include_tools;
+    const char *const *input_json;
+    int input_count;
+    const PicoTool *tools;
+    int tool_count;
+} PicoLlmTurn;
+
+typedef struct PicoLlmToolCall {
+    char *call_id;
+    char *name;
+    char *arguments;
+} PicoLlmToolCall;
+
+typedef struct PicoLlmResult {
+    char *error;
+    int input_tokens;
+    int cached_tokens;
+    char *assistant_text;
+    char *think_text;
+    PicoLlmToolCall *calls;
+    int call_count;
+    char **raw_items;
+    int raw_count;
+} PicoLlmResult;
+
+typedef int (*PicoProviderStreamFn)(struct PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                                    PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out);
+
+typedef struct PicoProvider {
+    const char *name;
+    PicoProviderStreamFn stream;
+} PicoProvider;
+
 typedef struct PicoSettings {
     char api_key[512];
-    char base_url[512];
     char model[128];
     int context_limit;
     double compact_ratio;
@@ -195,6 +254,8 @@ typedef struct PicoApp {
     int command_count;
     PicoCompleter completers[PICO_MAX_COMPLETERS];
     int completer_count;
+    PicoProvider providers[PICO_MAX_PROVIDERS];
+    int provider_count;
     bool submit_cancel;
     char *agent_input;
     PicoScrollbar chat_scrollbar;
@@ -228,6 +289,9 @@ void pico_add_tool(PicoApp *app, const char *name, const char *description, cons
 void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run);
 void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,
                         PicoCompleteAcceptFn accept);
+void pico_add_provider(PicoApp *app, const PicoProvider *p);
+const PicoProvider *pico_find_provider(const PicoApp *app, const char *name);
+void pico_llm_result_free(PicoLlmResult *r);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook);
 void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_json);

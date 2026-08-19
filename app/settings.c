@@ -181,6 +181,8 @@ static void ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     }
     char *id = JsonObjStr(doc, obj, "id");
     char *name = JsonObjStr(doc, obj, "name");
+    char *provider = JsonObjStr(doc, obj, "provider");
+    char *base_url = JsonObjStr(doc, obj, "base_url");
     char *selected = JsonObjStr(doc, obj, "selected_effort");
     CopyField(m->id, sizeof(m->id), id);
     if (name && name[0])
@@ -191,6 +193,12 @@ static void ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     {
         CopyField(m->name, sizeof(m->name), m->id);
     }
+    CopyField(m->provider, sizeof(m->provider), provider);
+    if (!m->provider[0])
+    {
+        snprintf(m->provider, sizeof(m->provider), "%s", "openai");
+    }
+    CopyField(m->base_url, sizeof(m->base_url), base_url);
     m->context_limit = JsonObjInt(doc, obj, "context_limit", 0);
     int vis = JsonObjGet(doc, obj, "vision");
     m->vision = vis >= 0 && (JsonEq(doc, vis, "true") || JsonEq(doc, vis, "1"));
@@ -209,6 +217,8 @@ static void ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     }
     free(id);
     free(name);
+    free(provider);
+    free(base_url);
     free(selected);
 }
 
@@ -244,10 +254,8 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
         return;
     }
     char *api_key = JsonObjStr(doc, obj, "api_key");
-    char *base_url = JsonObjStr(doc, obj, "base_url");
     char *model = JsonObjStr(doc, obj, "model");
     CopyField(s->api_key, sizeof(s->api_key), api_key);
-    CopyField(s->base_url, sizeof(s->base_url), base_url);
     CopyField(s->model, sizeof(s->model), model);
     int limit = JsonObjInt(doc, obj, "context_limit", 0);
     if (limit > 0)
@@ -262,7 +270,6 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
         s->resume_last = JsonEq(doc, resume, "true") || JsonEq(doc, resume, "1");
     }
     free(api_key);
-    free(base_url);
     free(model);
 }
 
@@ -458,6 +465,7 @@ static void EnsureDefaultCatalog(PicoApp *app)
     }
     snprintf(list[0].id, sizeof(list[0].id), "%s", app->settings.model);
     snprintf(list[0].name, sizeof(list[0].name), "%s", app->settings.model);
+    snprintf(list[0].provider, sizeof(list[0].provider), "%s", "openai");
     list[0].context_limit = app->settings.context_limit;
     snprintf(list[0].selected_effort, sizeof(list[0].selected_effort), "%s", "none");
     app->models = list;
@@ -468,7 +476,6 @@ void PicoSettings_Load(PicoApp *app)
 {
     PicoSettings *s = &app->settings;
     memset(s, 0, sizeof(*s));
-    snprintf(s->base_url, sizeof(s->base_url), "https://api.openai.com/v1");
     snprintf(s->model, sizeof(s->model), "gpt-4o");
     s->context_limit = 128000;
     s->compact_enabled = true;
@@ -492,7 +499,6 @@ void PicoSettings_Load(PicoApp *app)
     }
 
     CopyField(s->api_key, sizeof(s->api_key), FirstEnv("PICO_API_KEY", "OPENAI_API_KEY"));
-    CopyField(s->base_url, sizeof(s->base_url), FirstEnv("PICO_BASE_URL", "OPENAI_BASE_URL"));
     CopyField(s->model, sizeof(s->model), FirstEnv("PICO_MODEL", "OPENAI_MODEL"));
     const char *limit = getenv("PICO_CONTEXT_LIMIT");
     if (limit && limit[0])
@@ -747,6 +753,16 @@ static void WriteModelValue(JsonBuf *b, const PicoModel *m)
     JsonBuf_String(b, m->name);
     JsonBuf_Puts(b, ",\"id\":");
     JsonBuf_String(b, m->id);
+    if (m->provider[0])
+    {
+        JsonBuf_Puts(b, ",\"provider\":");
+        JsonBuf_String(b, m->provider);
+    }
+    if (m->base_url[0])
+    {
+        JsonBuf_Puts(b, ",\"base_url\":");
+        JsonBuf_String(b, m->base_url);
+    }
     JsonBuf_Puts(b, ",\"context_limit\":");
     JsonBuf_Int(b, m->context_limit);
     JsonBuf_Puts(b, ",\"effort\":[");

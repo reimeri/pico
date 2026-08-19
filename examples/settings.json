@@ -3,17 +3,16 @@
   // Responses API bearer token. Overridden by PICO_API_KEY or OPENAI_API_KEY.
   "api_key": "",
 
-  // API root; /responses is appended if missing. Overridden by PICO_BASE_URL or OPENAI_BASE_URL.
-  "base_url": "https://api.openai.com/v1",
-
   // Active catalog id. Overridden by PICO_MODEL or OPENAI_MODEL. /model writes this key.
   "model": "gpt-5.6-sol",
 
   // Catalog used by /model and /effort. Workspace settings replace this array if present.
+  // provider names a loaded LLM extension. base_url is optional; omit for the extension default.
   "models": [
     {
       "name": "Sol",
       "id": "gpt-5.6-sol",
+      "provider": "openai",
       "context_limit": 1000000,
       "effort": ["none", "low", "medium", "high"],
       "selected_effort": "medium"

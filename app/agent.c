@@ -2,11 +2,11 @@
 
 #include "agent.h"
 #include "json.h"
-#include "llm.h"
 #include "session.h"
 #include "settings.h"
 
 #include <curl/curl.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,10 +14,6 @@
 #include <time.h>
 
 #define PICO_MAX_PENDING_CALLS 16
-
-static const char kBriefPrompt[] =
-    "Handoff brief: goals, constraints, progress, decisions, next steps, exact values; omit noise. "
-    "Return text, not a tool call.";
 
 typedef struct PicoInputItem {
     char *json;
@@ -62,9 +58,17 @@ struct PicoAgentRt {
     bool cancel;
 
     PicoWorkKind work;
-    char *work_url;
-    char *work_key;
-    char *work_body;
+    PicoProviderStreamFn work_stream;
+    char *work_model;
+    char *work_base_url;
+    char *work_api_key;
+    char *work_effort;
+    char *work_instructions;
+    char *work_cache_key;
+    char **work_input;
+    int work_input_count;
+    bool work_compact;
+    bool work_include_tools;
     char *work_tool_name;
     char *work_tool_args;
     char *work_call_id;
@@ -87,6 +91,7 @@ struct PicoAgentRt {
     int input_cap;
     char cache_key[33];
     char *instructions;
+    char *turn_provider;
     bool compacting;
     bool compact_no_tools;
 
@@ -97,6 +102,9 @@ struct PicoAgentRt {
     int stream_msg;
     bool stream_dirty;
 };
+
+static void SetErrorState(PicoApp *app, const char *msg);
+static void FinishAssistantHistory(PicoApp *app);
 
 static char *Dup(const char *s)
 {
@@ -137,6 +145,9 @@ static void ClearPending(PicoAgentRt *rt)
     rt->pending_next = 0;
 }
 
+/* Ends the work item: `busy` has to clear in the same critical section that
+ * publishes the event, or the main thread can pump the event and queue the next
+ * request while this thread still looks busy. Exactly one call per work item. */
 static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens, int cached)
 {
     pthread_mutex_lock(&rt->mu);
@@ -146,6 +157,8 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
         PicoAgentEv *next = (PicoAgentEv *)realloc(rt->events, (size_t)cap * sizeof(PicoAgentEv));
         if (!next)
         {
+            rt->busy = false;
+            pthread_cond_signal(&rt->cv);
             pthread_mutex_unlock(&rt->mu);
             free(text);
             free(payload);
@@ -160,6 +173,8 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
     ev->payload = payload;
     ev->tokens = tokens;
     ev->cached = cached;
+    rt->busy = false;
+    pthread_cond_signal(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
 }
 
@@ -203,50 +218,75 @@ static void SetActivity(PicoApp *app, const char *msg)
     snprintf(app->agent_activity, sizeof(app->agent_activity), "%s", msg ? msg : "");
 }
 
-static char *BodyWithoutReasoning(const char *body)
+static char *EncodeResult(const PicoLlmResult *r)
 {
-    if (!body)
-    {
-        return NULL;
-    }
-    const char *found = strstr(body, "\"reasoning\":");
-    if (!found)
-    {
-        return NULL;
-    }
-    const char *start = found;
-    if (start > body && start[-1] == ',')
-    {
-        start--;
-    }
-    const char *brace = strchr(found, '{');
-    if (!brace)
-    {
-        return NULL;
-    }
-    int depth = 0;
-    const char *end = brace;
-    for (; *end; end++)
-    {
-        if (*end == '{')
-        {
-            depth++;
-        }
-        else if (*end == '}')
-        {
-            depth--;
-            if (depth == 0)
-            {
-                end++;
-                break;
-            }
-        }
-    }
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Append(&b, body, (size_t)(start - body));
-    JsonBuf_Puts(&b, end);
+    JsonBuf_Puts(&b, "{\"assistant_text\":");
+    JsonBuf_String(&b, r && r->assistant_text ? r->assistant_text : "");
+    JsonBuf_Puts(&b, ",\"think_text\":");
+    JsonBuf_String(&b, r && r->think_text ? r->think_text : "");
+    JsonBuf_Puts(&b, ",\"calls\":[");
+    int n = r ? r->call_count : 0;
+    for (int i = 0; i < n; i++)
+    {
+        if (i)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_Puts(&b, "{\"call_id\":");
+        JsonBuf_String(&b, r->calls[i].call_id ? r->calls[i].call_id : "");
+        JsonBuf_Puts(&b, ",\"name\":");
+        JsonBuf_String(&b, r->calls[i].name ? r->calls[i].name : "");
+        JsonBuf_Puts(&b, ",\"arguments\":");
+        JsonBuf_String(&b, r->calls[i].arguments ? r->calls[i].arguments : "{}");
+        JsonBuf_Putc(&b, '}');
+    }
+    JsonBuf_Puts(&b, "],\"raw\":[");
+    n = r ? r->raw_count : 0;
+    for (int i = 0; i < n; i++)
+    {
+        if (i)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_Puts(&b, r->raw_items[i] && r->raw_items[i][0] ? r->raw_items[i] : "{}");
+    }
+    JsonBuf_Puts(&b, "]}");
     return JsonBuf_Steal(&b);
+}
+
+static int ResultCallCount(const char *payload)
+{
+    if (!payload)
+    {
+        return 0;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, payload, strlen(payload)) != 0)
+    {
+        return 0;
+    }
+    int arr = JsonObjGet(&doc, 0, "calls");
+    int n = JsonIsArray(&doc, arr) ? JsonArrayLen(&doc, arr) : 0;
+    JsonFree(&doc);
+    return n;
+}
+
+static char *ResultStr(const char *payload, const char *key)
+{
+    if (!payload)
+    {
+        return NULL;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, payload, strlen(payload)) != 0)
+    {
+        return NULL;
+    }
+    char *s = JsonObjStr(&doc, 0, key);
+    JsonFree(&doc);
+    return s;
 }
 
 static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
@@ -290,17 +330,33 @@ static void *WorkerMain(void *arg)
             break;
         }
         PicoWorkKind kind = rt->work;
-        char *url = rt->work_url;
-        char *key = rt->work_key;
-        char *body = rt->work_body;
+        PicoProviderStreamFn stream_fn = rt->work_stream;
+        char *model = rt->work_model;
+        char *base_url = rt->work_base_url;
+        char *api_key = rt->work_api_key;
+        char *effort = rt->work_effort;
+        char *instructions = rt->work_instructions;
+        char *cache_key = rt->work_cache_key;
+        char **input = rt->work_input;
+        int input_count = rt->work_input_count;
+        bool compact = rt->work_compact;
+        bool include_tools = rt->work_include_tools;
         char *tool_name = rt->work_tool_name;
         char *tool_args = rt->work_tool_args;
         char *call_id = rt->work_call_id;
         PicoToolFn tool_fn = rt->work_tool_fn;
         rt->work = PICO_WORK_IDLE;
-        rt->work_url = NULL;
-        rt->work_key = NULL;
-        rt->work_body = NULL;
+        rt->work_stream = NULL;
+        rt->work_model = NULL;
+        rt->work_base_url = NULL;
+        rt->work_api_key = NULL;
+        rt->work_effort = NULL;
+        rt->work_instructions = NULL;
+        rt->work_cache_key = NULL;
+        rt->work_input = NULL;
+        rt->work_input_count = 0;
+        rt->work_compact = false;
+        rt->work_include_tools = false;
         rt->work_tool_name = NULL;
         rt->work_tool_args = NULL;
         rt->work_call_id = NULL;
@@ -309,40 +365,42 @@ static void *WorkerMain(void *arg)
 
         if (kind == PICO_WORK_LLM)
         {
-            char *items = NULL;
-            char *err = NULL;
-            PicoLlmUsage usage = {0};
-            int rc = PicoLlm_Stream(url, key, body, rt->cache_key, CancelCb, DeltaCb, rt, &items, &usage,
-                                    &err);
-            if (rc == PICO_LLM_FAIL && err && strstr(err, "easoning"))
-            {
-                char *stripped = BodyWithoutReasoning(body);
-                if (stripped)
-                {
-                    free(items);
-                    items = NULL;
-                    free(err);
-                    err = NULL;
-                    memset(&usage, 0, sizeof(usage));
-                    rc = PicoLlm_Stream(url, key, stripped, rt->cache_key, CancelCb, DeltaCb, rt, &items,
-                                        &usage, &err);
-                    free(stripped);
-                }
-            }
+            PicoLlmTurn turn;
+            memset(&turn, 0, sizeof(turn));
+            turn.model = model;
+            turn.base_url = base_url;
+            turn.api_key = api_key;
+            turn.instructions = instructions;
+            turn.cache_key = cache_key;
+            turn.effort = effort;
+            turn.compact = compact;
+            turn.include_tools = include_tools;
+            turn.input_json = (const char *const *)input;
+            turn.input_count = input_count;
+            /* Safe to read from this thread only because PicoPlugins_Reload
+             * defers itself while the agent is busy. */
+            turn.tools = rt->app->tools;
+            turn.tool_count = include_tools ? rt->app->tool_count : 0;
+            PicoLlmResult result;
+            memset(&result, 0, sizeof(result));
+            int rc = stream_fn ? stream_fn(rt->app, &turn, CancelCb, DeltaCb, rt, &result) : PICO_LLM_FAIL;
             if (rc == PICO_LLM_CANCEL)
             {
                 PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0, 0);
-                free(items);
-                free(err);
+                pico_llm_result_free(&result);
             }
             else if (rc != PICO_LLM_OK)
             {
-                PostEvent(rt, PICO_AEV_LLM_FAIL, err, NULL, 0, 0);
-                free(items);
+                PostEvent(rt, PICO_AEV_LLM_FAIL, result.error ? result.error : Dup("LLM request failed"), NULL,
+                          0, 0);
+                result.error = NULL;
+                pico_llm_result_free(&result);
             }
             else
             {
-                PostEvent(rt, PICO_AEV_LLM_DONE, NULL, items, usage.input_tokens, usage.cached_tokens);
+                char *payload = EncodeResult(&result);
+                PostEvent(rt, PICO_AEV_LLM_DONE, NULL, payload, result.input_tokens, result.cached_tokens);
+                pico_llm_result_free(&result);
             }
         }
         else if (kind == PICO_WORK_TOOL)
@@ -370,44 +428,98 @@ static void *WorkerMain(void *arg)
             }
         }
 
-        free(url);
-        free(key);
-        free(body);
+        free(model);
+        free(base_url);
+        free(api_key);
+        free(effort);
+        free(instructions);
+        free(cache_key);
+        for (int i = 0; i < input_count; i++)
+        {
+            free(input[i]);
+        }
+        free(input);
         free(tool_name);
         free(tool_args);
         free(call_id);
-
-        pthread_mutex_lock(&rt->mu);
-        rt->busy = false;
-        pthread_cond_signal(&rt->cv);
-        pthread_mutex_unlock(&rt->mu);
     }
     return NULL;
 }
 
-static void QueueLlm(PicoAgentRt *rt, const char *url, const char *key, char *body)
+static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
 {
-    pthread_mutex_lock(&rt->mu);
-    while (rt->busy && !rt->stop)
+    PicoAgentRt *rt = app->agent;
+    PicoModel *m = PicoSettings_ActiveModel(app);
+    if (!m || !m->provider[0])
     {
-        pthread_cond_wait(&rt->cv, &rt->mu);
+        SetErrorState(app, "Active model has no provider. Set `provider` on the model in settings.json.");
+        return false;
+    }
+    const PicoProvider *p = pico_find_provider(app, m->provider);
+    if (!p || !p->stream)
+    {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "No provider `%s` for model `%s`.", m->provider,
+                 m->id[0] ? m->id : "?");
+        SetErrorState(app, buf);
+        return false;
+    }
+
+    char **input = NULL;
+    int input_count = rt->input_count;
+    if (input_count > 0)
+    {
+        input = (char **)calloc((size_t)input_count, sizeof(char *));
+        if (!input)
+        {
+            SetErrorState(app, "out of memory");
+            return false;
+        }
+        for (int i = 0; i < input_count; i++)
+        {
+            input[i] = Dup(rt->input[i].json);
+        }
+    }
+
+    pthread_mutex_lock(&rt->mu);
+    if (rt->busy || rt->stop)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        for (int i = 0; i < input_count; i++)
+        {
+            free(input[i]);
+        }
+        free(input);
+        return false;
     }
     rt->work = PICO_WORK_LLM;
-    rt->work_url = Dup(url);
-    rt->work_key = Dup(key ? key : "");
-    rt->work_body = body;
+    rt->work_stream = p->stream;
+    free(rt->turn_provider);
+    rt->turn_provider = Dup(p->name);
+    rt->work_model = Dup(m->id);
+    rt->work_base_url = Dup(m->base_url);
+    rt->work_api_key = Dup(app->settings.api_key);
+    rt->work_effort = Dup(PicoSettings_ActiveEffort(app));
+    rt->work_instructions = Dup(rt->instructions ? rt->instructions : "");
+    rt->work_cache_key = Dup(rt->cache_key);
+    rt->work_compact = compact;
+    rt->work_include_tools = include_tools;
+    rt->work_input = input;
+    rt->work_input_count = input_count;
     rt->busy = true;
     rt->cancel = false;
     pthread_cond_signal(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    return true;
 }
 
-static void QueueTool(PicoAgentRt *rt, const char *name, const char *args, const char *call_id, PicoToolFn fn)
+static bool QueueTool(PicoAgentRt *rt, const char *name, const char *args, const char *call_id, PicoToolFn fn)
 {
     pthread_mutex_lock(&rt->mu);
-    while (rt->busy && !rt->stop)
+    if (rt->busy || rt->stop)
     {
-        pthread_cond_wait(&rt->cv, &rt->mu);
+        pthread_mutex_unlock(&rt->mu);
+        return false;
     }
     rt->work = PICO_WORK_TOOL;
     rt->work_tool_name = Dup(name);
@@ -417,6 +529,7 @@ static void QueueTool(PicoAgentRt *rt, const char *name, const char *args, const
     rt->busy = true;
     pthread_cond_signal(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    return true;
 }
 
 static PicoToolFn FindTool(PicoApp *app, const char *name)
@@ -435,80 +548,61 @@ static PicoToolFn FindTool(PicoApp *app, const char *name)
     return NULL;
 }
 
-static char *BuildUserItem(const char *text);
-
-static char *BuildRequest(PicoApp *app, bool compact, bool include_tools)
+static char *BuildUserItem(const char *text)
 {
-    PicoAgentRt *rt = app->agent;
-    const char *instructions = rt->instructions;
-    char *loaded = NULL;
-    if (!instructions)
-    {
-        loaded = PicoSettings_LoadSystemPrompt(app);
-        instructions = loaded ? loaded : "";
-    }
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"model\":");
-    JsonBuf_String(&b, app->settings.model);
-    JsonBuf_Puts(&b, ",\"prompt_cache_key\":");
-    JsonBuf_String(&b, rt->cache_key);
-    JsonBuf_Puts(&b, ",\"stream\":true,\"instructions\":");
-    JsonBuf_String(&b, instructions);
-    JsonBuf_Puts(&b, ",\"input\":[");
-    for (int i = 0; i < rt->input_count; i++)
-    {
-        if (i)
-        {
-            JsonBuf_Putc(&b, ',');
-        }
-        JsonBuf_Puts(&b, rt->input[i].json);
-    }
-    if (compact)
-    {
-        if (rt->input_count)
-        {
-            JsonBuf_Putc(&b, ',');
-        }
-        char *brief = BuildUserItem(kBriefPrompt);
-        JsonBuf_Puts(&b, brief);
-        free(brief);
-    }
-    JsonBuf_Puts(&b, "]");
-    if (include_tools && app->tool_count > 0)
-    {
-        JsonBuf_Puts(&b, ",\"tools\":[");
-        for (int i = 0; i < app->tool_count; i++)
-        {
-            if (i)
-            {
-                JsonBuf_Putc(&b, ',');
-            }
-            JsonBuf_Puts(&b, "{\"type\":\"function\",\"name\":");
-            JsonBuf_String(&b, app->tools[i].name ? app->tools[i].name : "");
-            JsonBuf_Puts(&b, ",\"description\":");
-            JsonBuf_String(&b, app->tools[i].description ? app->tools[i].description : "");
-            JsonBuf_Puts(&b, ",\"parameters\":");
-            JsonBuf_Puts(&b, app->tools[i].params_json && app->tools[i].params_json[0]
-                                 ? app->tools[i].params_json
-                                 : "{\"type\":\"object\",\"properties\":{}}");
-            JsonBuf_Putc(&b, '}');
-        }
-        JsonBuf_Putc(&b, ']');
-    }
-    if (compact)
-    {
-        JsonBuf_Puts(&b, ",\"tool_choice\":\"none\"");
-    }
-    const char *effort = PicoSettings_ActiveEffort(app);
-    if (effort && effort[0] && strcmp(effort, "none") != 0 && strcmp(effort, "off") != 0)
-    {
-        JsonBuf_Puts(&b, ",\"reasoning\":{\"effort\":");
-        JsonBuf_String(&b, effort);
-        JsonBuf_Puts(&b, ",\"summary\":\"auto\"}");
-    }
+    JsonBuf_Puts(&b, "{\"type\":\"user\",\"text\":");
+    JsonBuf_String(&b, text ? text : "");
     JsonBuf_Putc(&b, '}');
-    free(loaded);
+    return JsonBuf_Steal(&b);
+}
+
+static char *BuildAssistantItem(const char *text)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"assistant\",\"text\":");
+    JsonBuf_String(&b, text ? text : "");
+    JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
+}
+
+static char *BuildToolCall(const char *call_id, const char *name, const char *args)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"tool_call\",\"call_id\":");
+    JsonBuf_String(&b, call_id ? call_id : "");
+    JsonBuf_Puts(&b, ",\"name\":");
+    JsonBuf_String(&b, name ? name : "");
+    JsonBuf_Puts(&b, ",\"arguments\":");
+    JsonBuf_String(&b, args ? args : "{}");
+    JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
+}
+
+static char *BuildToolResult(const char *call_id, const char *output)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"tool_result\",\"call_id\":");
+    JsonBuf_String(&b, call_id ? call_id : "");
+    JsonBuf_Puts(&b, ",\"output\":");
+    JsonBuf_String(&b, output ? output : "");
+    JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
+}
+
+static char *BuildRawItem(const char *provider, const char *json)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"raw\",\"provider\":");
+    JsonBuf_String(&b, provider ? provider : "");
+    JsonBuf_Puts(&b, ",\"json\":");
+    JsonBuf_Puts(&b, json && json[0] ? json : "{}");
+    JsonBuf_Putc(&b, '}');
     return JsonBuf_Steal(&b);
 }
 
@@ -819,121 +913,9 @@ static char *FormatToolLine(const char *name, const char *args_json)
     return JsonBuf_Steal(&b);
 }
 
-static char *ContentText(const JsonDoc *doc, int content)
-{
-    if (JsonIsArray(doc, content))
-    {
-        JsonBuf b;
-        JsonBuf_Init(&b);
-        int n = JsonArrayLen(doc, content);
-        for (int i = 0; i < n; i++)
-        {
-            int part = JsonArrayAt(doc, content, i);
-            char *text = JsonObjStr(doc, part, "text");
-            if (text)
-            {
-                JsonBuf_Puts(&b, text);
-                free(text);
-            }
-        }
-        return JsonBuf_Steal(&b);
-    }
-    return JsonStrDup(doc, content);
-}
-
-static char *MessageTextFromItems(const char *items_json)
-{
-    if (!items_json)
-    {
-        return NULL;
-    }
-    JsonDoc doc;
-    if (JsonParse(&doc, items_json, strlen(items_json)) != 0)
-    {
-        return NULL;
-    }
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    int n = JsonArrayLen(&doc, 0);
-    for (int i = 0; i < n; i++)
-    {
-        int item = JsonArrayAt(&doc, 0, i);
-        if (!JsonEq(&doc, JsonObjGet(&doc, item, "type"), "message"))
-        {
-            continue;
-        }
-        char *text = ContentText(&doc, JsonObjGet(&doc, item, "content"));
-        if (text && text[0])
-        {
-            JsonBuf_Puts(&b, text);
-        }
-        free(text);
-    }
-    JsonFree(&doc);
-    if (!b.len)
-    {
-        JsonBuf_Free(&b);
-        return NULL;
-    }
-    return JsonBuf_Steal(&b);
-}
-
-static char *ThinkingTextFromItems(const char *items_json)
-{
-    if (!items_json)
-    {
-        return NULL;
-    }
-    JsonDoc doc;
-    if (JsonParse(&doc, items_json, strlen(items_json)) != 0)
-    {
-        return NULL;
-    }
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    int n = JsonArrayLen(&doc, 0);
-    for (int i = 0; i < n; i++)
-    {
-        int item = JsonArrayAt(&doc, 0, i);
-        if (!JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
-        {
-            continue;
-        }
-        char *text = ContentText(&doc, JsonObjGet(&doc, item, "summary"));
-        if (!text || !text[0])
-        {
-            free(text);
-            text = ContentText(&doc, JsonObjGet(&doc, item, "content"));
-        }
-        if (text && text[0])
-        {
-            if (b.len)
-            {
-                JsonBuf_Puts(&b, "\n\n");
-            }
-            JsonBuf_Puts(&b, text);
-        }
-        free(text);
-    }
-    JsonFree(&doc);
-    if (!b.len)
-    {
-        JsonBuf_Free(&b);
-        return NULL;
-    }
-    return JsonBuf_Steal(&b);
-}
-
 static void PushFunctionOutput(PicoAgentRt *rt, const char *call_id, const char *output)
 {
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"function_call_output\",\"call_id\":");
-    JsonBuf_String(&b, call_id ? call_id : "");
-    JsonBuf_Puts(&b, ",\"output\":");
-    JsonBuf_String(&b, output ? output : "");
-    JsonBuf_Putc(&b, '}');
-    PushInput(rt, JsonBuf_Steal(&b));
+    PushInput(rt, BuildToolResult(call_id, output));
 }
 
 static void AbortRemainingCalls(PicoAgentRt *rt)
@@ -955,6 +937,27 @@ static void GoIdle(PicoApp *app)
     rt->compacting = false;
     rt->compact_no_tools = false;
     app->agent_activity[0] = '\0';
+}
+
+static void ApplyCancel(PicoApp *app)
+{
+    PicoAgentRt *rt = app->agent;
+    if (rt->compacting)
+    {
+        GoIdle(app);
+        return;
+    }
+    FinishAssistantHistory(app);
+    if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+    {
+        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, 0, 0);
+    }
+    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
+    {
+        PopLastMessage(app);
+    }
+    AbortRemainingCalls(rt);
+    GoIdle(app);
 }
 
 static int CompactThreshold(const PicoApp *app)
@@ -985,31 +988,6 @@ static void ApplyCompaction(PicoApp *app, const char *summary)
     app->compact_summary = NULL;
 }
 
-static bool ItemsHaveFunctionCall(const char *items_json)
-{
-    if (!items_json)
-    {
-        return false;
-    }
-    JsonDoc doc;
-    if (JsonParse(&doc, items_json, strlen(items_json)) != 0)
-    {
-        return false;
-    }
-    bool found = false;
-    int n = JsonArrayLen(&doc, 0);
-    for (int i = 0; i < n; i++)
-    {
-        if (JsonEq(&doc, JsonObjGet(&doc, JsonArrayAt(&doc, 0, i), "type"), "function_call"))
-        {
-            found = true;
-            break;
-        }
-    }
-    JsonFree(&doc);
-    return found;
-}
-
 static void StartCompact(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
@@ -1028,9 +1006,10 @@ static void StartCompact(PicoApp *app)
     }
     rt->compacting = true;
     rt->compact_no_tools = false;
-    char url[1024];
-    PicoLlm_ResolveUrl(app->settings.base_url, url, sizeof(url));
-    QueueLlm(rt, url, app->settings.api_key, BuildRequest(app, true, true));
+    if (!QueueLlm(app, true, true))
+    {
+        SetErrorState(app, "Failed to start compaction");
+    }
 }
 
 static void FinishTurn(PicoApp *app)
@@ -1066,30 +1045,6 @@ static void SetErrorState(PicoApp *app, const char *msg)
     app->agent_activity[0] = '\0';
 }
 
-static char *BuildMessageItem(const char *role, const char *text, bool assistant)
-{
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"message\",\"role\":");
-    JsonBuf_String(&b, role ? role : "user");
-    JsonBuf_Puts(&b, ",\"content\":[{\"type\":");
-    JsonBuf_String(&b, assistant ? "output_text" : "input_text");
-    JsonBuf_Puts(&b, ",\"text\":");
-    JsonBuf_String(&b, text ? text : "");
-    JsonBuf_Puts(&b, "}]}");
-    return JsonBuf_Steal(&b);
-}
-
-static char *BuildUserItem(const char *text)
-{
-    return BuildMessageItem("user", text, false);
-}
-
-static char *BuildAssistantItem(const char *text)
-{
-    return BuildMessageItem("assistant", text, true);
-}
-
 static void StartLlm(PicoApp *app);
 
 static void StartNextTool(PicoApp *app)
@@ -1110,7 +1065,10 @@ static void StartNextTool(PicoApp *app)
         TraceAddTool(app, rt->stream_msg, call->name, call->arguments);
         app->chat_follow_bottom = true;
     }
-    QueueTool(rt, call->name, call->arguments, call->call_id, FindTool(app, call->name));
+    if (!QueueTool(rt, call->name, call->arguments, call->call_id, FindTool(app, call->name)))
+    {
+        SetErrorState(app, "Failed to start tool");
+    }
     free(line);
 }
 
@@ -1132,87 +1090,78 @@ static void StartLlm(PicoApp *app)
     SetActivity(app, "Thinking…");
     free(app->agent_error);
     app->agent_error = NULL;
-
-    char url[1024];
-    PicoLlm_ResolveUrl(app->settings.base_url, url, sizeof(url));
-    QueueLlm(rt, url, app->settings.api_key, BuildRequest(app, false, true));
-}
-
-static bool ItemIsNonEmptyMessage(const JsonDoc *doc, int item)
-{
-    if (!JsonEq(doc, JsonObjGet(doc, item, "type"), "message"))
+    if (!QueueLlm(app, false, true))
     {
-        return false;
+        SetErrorState(app, "Failed to start model request");
     }
-    char *text = ContentText(doc, JsonObjGet(doc, item, "content"));
-    bool ok = text && text[0];
-    free(text);
-    return ok;
 }
 
-static void IngestOutputItems(PicoApp *app, const char *items_json)
+static void FinishAssistantHistory(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
-    if (!items_json)
+    if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
     {
+        PushInput(rt, BuildAssistantItem(app->messages[rt->stream_msg].source));
+    }
+}
+
+static void IngestResult(PicoApp *app, const char *payload)
+{
+    PicoAgentRt *rt = app->agent;
+    if (!payload)
+    {
+        FinishAssistantHistory(app);
         return;
     }
     JsonDoc doc;
-    if (JsonParse(&doc, items_json, strlen(items_json)) != 0)
+    if (JsonParse(&doc, payload, strlen(payload)) != 0)
     {
+        FinishAssistantHistory(app);
         return;
     }
-    int n = JsonArrayLen(&doc, 0);
-    for (int i = 0; i < n; i++)
+
+    char *assistant = JsonObjStr(&doc, 0, "assistant_text");
+    if (rt->stream_msg >= 0 && MessageSourceEmpty(app, rt->stream_msg) && assistant && assistant[0])
     {
-        int item = JsonArrayAt(&doc, 0, i);
-        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "message") && !ItemIsNonEmptyMessage(&doc, item))
+        SetMessageText(app, rt->stream_msg, assistant);
+    }
+
+    char *think = JsonObjStr(&doc, 0, "think_text");
+    if (think && think[0] && rt->stream_msg >= 0 && !HasThinkTrace(&app->messages[rt->stream_msg]))
+    {
+        TraceAppendThink(app, rt->stream_msg, think, strlen(think));
+    }
+
+    const char *prov = rt->turn_provider ? rt->turn_provider : "";
+    int raw = JsonObjGet(&doc, 0, "raw");
+    if (JsonIsArray(&doc, raw))
+    {
+        int n = JsonArrayLen(&doc, raw);
+        for (int i = 0; i < n; i++)
         {
-            continue;
+            char *item = JsonRawDup(&doc, JsonArrayAt(&doc, raw, i));
+            PushInput(rt, BuildRawItem(prov, item));
+            free(item);
         }
-        char *raw = JsonRawDup(&doc, item);
-        PushInput(rt, raw);
-        if (!JsonEq(&doc, JsonObjGet(&doc, item, "type"), "function_call"))
-        {
-            continue;
-        }
-        if (rt->pending_count >= PICO_MAX_PENDING_CALLS)
-        {
-            continue;
-        }
+    }
+
+    FinishAssistantHistory(app);
+
+    int calls = JsonObjGet(&doc, 0, "calls");
+    int n = JsonIsArray(&doc, calls) ? JsonArrayLen(&doc, calls) : 0;
+    for (int i = 0; i < n && rt->pending_count < PICO_MAX_PENDING_CALLS; i++)
+    {
+        int item = JsonArrayAt(&doc, calls, i);
         PicoPendingCall *call = &rt->pending[rt->pending_count++];
         call->call_id = JsonObjStr(&doc, item, "call_id");
         call->name = JsonObjStr(&doc, item, "name");
         call->arguments = JsonObjStr(&doc, item, "arguments");
+        PushInput(rt, BuildToolCall(call->call_id, call->name, call->arguments));
     }
-    JsonFree(&doc);
-}
 
-static void FinishAssistantHistory(PicoApp *app, const char *items_json)
-{
-    PicoAgentRt *rt = app->agent;
-    bool have_message_item = false;
-    if (items_json)
-    {
-        JsonDoc doc;
-        if (JsonParse(&doc, items_json, strlen(items_json)) == 0)
-        {
-            int n = JsonArrayLen(&doc, 0);
-            for (int i = 0; i < n; i++)
-            {
-                if (ItemIsNonEmptyMessage(&doc, JsonArrayAt(&doc, 0, i)))
-                {
-                    have_message_item = true;
-                    break;
-                }
-            }
-            JsonFree(&doc);
-        }
-    }
-    if (!have_message_item && rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
-    {
-        PushInput(rt, BuildAssistantItem(app->messages[rt->stream_msg].source));
-    }
+    free(assistant);
+    free(think);
+    JsonFree(&doc);
 }
 
 static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
@@ -1225,15 +1174,21 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
     }
     if (rt->compacting)
     {
-        if (ItemsHaveFunctionCall(ev->payload) && !rt->compact_no_tools)
+        if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
             rt->compact_no_tools = true;
-            char url[1024];
-            PicoLlm_ResolveUrl(app->settings.base_url, url, sizeof(url));
-            QueueLlm(rt, url, app->settings.api_key, BuildRequest(app, true, false));
+            if (!QueueLlm(app, true, false))
+            {
+                SetErrorState(app, "Failed to start compaction");
+            }
             return;
         }
-        char *text = MessageTextFromItems(ev->payload);
+        char *text = ResultStr(ev->payload, "assistant_text");
+        if ((!text || !text[0]) && rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+        {
+            free(text);
+            text = Dup(app->messages[rt->stream_msg].source);
+        }
         if (text && text[0])
         {
             ApplyCompaction(app, text);
@@ -1246,26 +1201,7 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
         SetErrorState(app, "Compaction failed");
         return;
     }
-    if (rt->stream_msg >= 0 && MessageSourceEmpty(app, rt->stream_msg))
-    {
-        char *text = MessageTextFromItems(ev->payload);
-        if (text && text[0])
-        {
-            SetMessageText(app, rt->stream_msg, text);
-        }
-        free(text);
-    }
-    if (rt->stream_msg >= 0 && !HasThinkTrace(&app->messages[rt->stream_msg]))
-    {
-        char *think = ThinkingTextFromItems(ev->payload);
-        if (think && think[0])
-        {
-            TraceAppendThink(app, rt->stream_msg, think, strlen(think));
-        }
-        free(think);
-    }
-    FinishAssistantHistory(app, ev->payload);
-    IngestOutputItems(app, ev->payload);
+    IngestResult(app, ev->payload);
     if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
     {
         PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, ev->tokens, ev->cached);
@@ -1361,7 +1297,27 @@ void PicoAgent_Shutdown(PicoApp *app)
     rt->stop = true;
     rt->cancel = true;
     pthread_cond_signal(&rt->cv);
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 1;
+    while (rt->busy)
+    {
+        if (pthread_cond_timedwait(&rt->cv, &rt->mu, &until) == ETIMEDOUT)
+        {
+            break;
+        }
+    }
+    bool done = !rt->busy;
     pthread_mutex_unlock(&rt->mu);
+    if (!done)
+    {
+        if (rt->started)
+        {
+            pthread_detach(rt->thread);
+        }
+        app->agent = NULL;
+        return;
+    }
     if (rt->started)
     {
         pthread_join(rt->thread, NULL);
@@ -1380,13 +1336,22 @@ void PicoAgent_Shutdown(PicoApp *app)
     ClearPending(rt);
     free(rt->stream);
     free(rt->think);
-    free(rt->work_url);
-    free(rt->work_key);
-    free(rt->work_body);
+    free(rt->work_model);
+    free(rt->work_base_url);
+    free(rt->work_api_key);
+    free(rt->work_effort);
+    free(rt->work_instructions);
+    free(rt->work_cache_key);
+    for (int i = 0; i < rt->work_input_count; i++)
+    {
+        free(rt->work_input[i]);
+    }
+    free(rt->work_input);
     free(rt->work_tool_name);
     free(rt->work_tool_args);
     free(rt->work_call_id);
     free(rt->instructions);
+    free(rt->turn_provider);
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
     curl_global_cleanup();
@@ -1408,15 +1373,6 @@ void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
     PicoAgent_DismissError(app);
     free(app->agent->instructions);
     app->agent->instructions = PicoSettings_LoadSystemPrompt(app);
-    if (!app->settings.api_key[0])
-    {
-        SetErrorState(app,
-                      "No API key. Set `PICO_API_KEY` or `OPENAI_API_KEY`, or put `api_key` in "
-                      "`~/.config/pico/settings.json`. Optional: `PICO_BASE_URL` / `base_url` "
-                      "(default `https://api.openai.com/v1`) and `PICO_MODEL` / `model`.");
-        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, app->agent_error);
-        return;
-    }
     PushInput(app->agent, BuildUserItem(user_text));
     StartLlm(app);
 }
@@ -1513,21 +1469,7 @@ void PicoAgent_Pump(PicoApp *app)
             SetErrorState(app, ev->text ? ev->text : "LLM request failed");
             break;
         case PICO_AEV_LLM_CANCEL:
-            if (rt->compacting)
-            {
-                GoIdle(app);
-                break;
-            }
-            FinishAssistantHistory(app, NULL);
-            if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
-            {
-                PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, 0, 0);
-            }
-            if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
-            {
-                PopLastMessage(app);
-            }
-            GoIdle(app);
+            ApplyCancel(app);
             break;
         case PICO_AEV_TOOL_DONE:
             OnToolDone(app, ev, false);
@@ -1604,16 +1546,7 @@ void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const 
     {
         return;
     }
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"function_call\",\"name\":");
-    JsonBuf_String(&b, name ? name : "");
-    JsonBuf_Puts(&b, ",\"arguments\":");
-    JsonBuf_String(&b, args ? args : "{}");
-    JsonBuf_Puts(&b, ",\"call_id\":");
-    JsonBuf_String(&b, call_id ? call_id : "");
-    JsonBuf_Putc(&b, '}');
-    PushInput(app->agent, JsonBuf_Steal(&b));
+    PushInput(app->agent, BuildToolCall(call_id, name, args));
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *output)

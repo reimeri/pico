@@ -39,12 +39,13 @@ static void PrintUsage(const char *argv0)
             "  --session F   open an existing session file\n"
             "  -h            this help\n"
             "\n"
-            "Auth (Responses API):\n"
-            "  PICO_API_KEY / OPENAI_API_KEY     Bearer token\n"
-            "  PICO_BASE_URL / OPENAI_BASE_URL   default https://api.openai.com/v1\n"
+            "Auth:\n"
+            "  PICO_API_KEY / OPENAI_API_KEY     Bearer token (openai provider)\n"
             "  PICO_MODEL                        default gpt-4o\n"
             "  PICO_EFFORT                       override selected_effort of the active model\n"
-            "  ~/.config/pico/settings.json      {api_key, base_url, model, models, compact_at, resume_last}\n"
+            "  ~/.config/pico/settings.json      {api_key, model, models, compact_at, resume_last}\n"
+            "  models[].provider                 LLM extension name (e.g. openai)\n"
+            "  models[].base_url                 optional; omit to use the extension default\n"
             "  ~/.config/pico/SYSTEM.md          optional system prompt\n"
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n",
             argv0);

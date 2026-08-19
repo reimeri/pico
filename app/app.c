@@ -88,6 +88,56 @@ void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQ
     app->completer_count++;
 }
 
+void pico_add_provider(PicoApp *app, const PicoProvider *p)
+{
+    if (!app || !p || !p->name || !p->name[0] || !p->stream || app->provider_count >= PICO_MAX_PROVIDERS)
+    {
+        return;
+    }
+    app->providers[app->provider_count] = *p;
+    app->provider_count++;
+}
+
+const PicoProvider *pico_find_provider(const PicoApp *app, const char *name)
+{
+    if (!app || !name || !name[0])
+    {
+        return NULL;
+    }
+    for (int i = 0; i < app->provider_count; i++)
+    {
+        if (app->providers[i].name && strcmp(app->providers[i].name, name) == 0)
+        {
+            return &app->providers[i];
+        }
+    }
+    return NULL;
+}
+
+void pico_llm_result_free(PicoLlmResult *r)
+{
+    if (!r)
+    {
+        return;
+    }
+    free(r->error);
+    free(r->assistant_text);
+    free(r->think_text);
+    for (int i = 0; i < r->call_count; i++)
+    {
+        free(r->calls[i].call_id);
+        free(r->calls[i].name);
+        free(r->calls[i].arguments);
+    }
+    free(r->calls);
+    for (int i = 0; i < r->raw_count; i++)
+    {
+        free(r->raw_items[i]);
+    }
+    free(r->raw_items);
+    memset(r, 0, sizeof(*r));
+}
+
 void pico_clear_registrations(PicoApp *app)
 {
     memset(app->views, 0, sizeof(app->views));
@@ -100,6 +150,8 @@ void pico_clear_registrations(PicoApp *app)
     app->command_count = 0;
     memset(app->completers, 0, sizeof(app->completers));
     app->completer_count = 0;
+    memset(app->providers, 0, sizeof(app->providers));
+    app->provider_count = 0;
 }
 
 void pico_run_hooks(PicoApp *app, PicoHook hook)

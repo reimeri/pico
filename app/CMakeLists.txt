@@ -32,7 +32,7 @@ add_executable(pico
     richtext.c
     json.c
     settings.c
-    llm.c
+    http.c
     agent.c
     session.c
     chat_sel.c
@@ -43,7 +43,8 @@ add_executable(pico
     builtins/shell.c
     builtins/complete.c
     builtins/commands.c
-    builtins/files.c)
+    builtins/files.c
+    builtins/openai.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
 

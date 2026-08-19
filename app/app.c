@@ -323,6 +323,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
         app->composer.text[0] = '\0';
     }
 
+    app->session_ephemeral = true;
     PicoSettings_Load(app);
     PicoAgent_Init(app);
     PicoPlugins_Load(app);

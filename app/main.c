@@ -125,7 +125,7 @@ int main(int argc, char **argv)
 
     char session_path[4096];
     session_path[0] = '\0';
-    if (!app.session_ephemeral && app.session_path[0])
+    if (!app.session_ephemeral && app.session_path[0] && access(app.session_path, F_OK) == 0)
     {
         snprintf(session_path, sizeof(session_path), "%s", app.session_path);
     }

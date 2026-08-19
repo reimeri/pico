@@ -83,12 +83,8 @@ static int FindLatest(const char *dir, char *out, size_t cap)
     return 0;
 }
 
-static void AppendLine(PicoApp *app, const char *json)
+static void WriteLine(PicoApp *app, const char *json)
 {
-    if (!app || app->session_ephemeral || !app->session_path[0] || !json || !json[0])
-    {
-        return;
-    }
     FILE *f = fopen(app->session_path, "ab");
     if (!f)
     {
@@ -148,9 +144,26 @@ static int CreateNew(PicoApp *app)
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, line);
+    WriteLine(app, line);
     free(line);
     return 0;
+}
+
+static void AppendLine(PicoApp *app, const char *json)
+{
+    if (!app || app->session_ephemeral || !json || !json[0])
+    {
+        return;
+    }
+    if (!app->session_path[0] && CreateNew(app) != 0)
+    {
+        return;
+    }
+    if (!app->session_path[0])
+    {
+        return;
+    }
+    WriteLine(app, json);
 }
 
 static void ApplyHeader(PicoApp *app, const JsonDoc *doc, int obj)
@@ -395,10 +408,7 @@ void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session
     app->session_ephemeral = false;
     if (session_file && session_file[0])
     {
-        if (ReplayFile(app, session_file) != 0)
-        {
-            CreateNew(app);
-        }
+        ReplayFile(app, session_file);
         return;
     }
     if (start == PICO_SESSION_RESUME || app->settings.resume_last)
@@ -406,12 +416,11 @@ void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session
         char dir[4096];
         char latest[4096];
         SessionDir(app, dir, sizeof(dir));
-        if (FindLatest(dir, latest, sizeof(latest)) == 0 && ReplayFile(app, latest) == 0)
+        if (FindLatest(dir, latest, sizeof(latest)) == 0)
         {
-            return;
+            ReplayFile(app, latest);
         }
     }
-    CreateNew(app);
 }
 
 void PicoSession_LogUser(PicoApp *app, const char *content)

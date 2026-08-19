@@ -10,7 +10,7 @@ void PicoAgent_Cancel(PicoApp *app);
 void PicoAgent_DismissError(PicoApp *app);
 void PicoAgent_Pump(PicoApp *app);
 bool PicoAgent_BlocksReload(const PicoApp *app);
-void PicoAgent_QueueModelDiscovery(PicoApp *app);
+void PicoAgent_Compact(PicoApp *app);
 
 const char *PicoAgent_CacheKey(const PicoApp *app);
 void PicoAgent_SetCacheKey(PicoApp *app, const char *key);

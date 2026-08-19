@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "session.h"
@@ -218,11 +219,14 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
         }
         if (role && strcmp(role, "user") == 0)
         {
-            PicoApp_AddMessage(app, PICO_ROLE_USER, content ? content : "");
+            char *display = JsonObjStr(doc, obj, "display");
+            PicoApp_AddMessage(app, PICO_ROLE_USER,
+                               display && display[0] ? display : (content ? content : ""));
             if (into_input)
             {
                 PicoAgent_PushHistoryUser(app, content ? content : "");
             }
+            free(display);
         }
         else if (role && strcmp(role, "assistant") == 0)
         {
@@ -280,12 +284,22 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
     else if (strcmp(type, "model_change") == 0)
     {
         char *model = JsonObjStr(doc, obj, "model");
+        char *effort = JsonObjStr(doc, obj, "effort");
         if (model && model[0])
         {
             snprintf(app->settings.model, sizeof(app->settings.model), "%s", model);
-            app->model_name = app->settings.model;
         }
+        if (effort && effort[0])
+        {
+            PicoModel *m = PicoSettings_ActiveModel(app);
+            if (m)
+            {
+                snprintf(m->selected_effort, sizeof(m->selected_effort), "%s", effort);
+            }
+        }
+        PicoSettings_SyncActive(app);
         free(model);
+        free(effort);
     }
     free(type);
 }
@@ -423,7 +437,7 @@ void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session
     }
 }
 
-void PicoSession_LogUser(PicoApp *app, const char *content)
+void PicoSession_LogUser(PicoApp *app, const char *content, const char *display)
 {
     char *pre = EventPrefix("message");
     JsonBuf b;
@@ -431,6 +445,11 @@ void PicoSession_LogUser(PicoApp *app, const char *content)
     JsonBuf_Puts(&b, pre);
     JsonBuf_Puts(&b, ",\"role\":\"user\",\"content\":");
     JsonBuf_String(&b, content ? content : "");
+    if (display && display[0] && (!content || strcmp(display, content) != 0))
+    {
+        JsonBuf_Puts(&b, ",\"display\":");
+        JsonBuf_String(&b, display);
+    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     AppendLine(app, line);
@@ -520,7 +539,7 @@ void PicoSession_LogCompaction(PicoApp *app, const char *summary, int tokens_bef
     free(pre);
 }
 
-void PicoSession_LogModelChange(PicoApp *app, const char *model)
+void PicoSession_LogModelChange(PicoApp *app, const char *model, const char *effort)
 {
     char *pre = EventPrefix("model_change");
     JsonBuf b;
@@ -528,6 +547,11 @@ void PicoSession_LogModelChange(PicoApp *app, const char *model)
     JsonBuf_Puts(&b, pre);
     JsonBuf_Puts(&b, ",\"model\":");
     JsonBuf_String(&b, model ? model : "");
+    if (effort && effort[0])
+    {
+        JsonBuf_Puts(&b, ",\"effort\":");
+        JsonBuf_String(&b, effort);
+    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     AppendLine(app, line);

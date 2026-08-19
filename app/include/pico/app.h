@@ -12,6 +12,11 @@
 #define PICO_MAX_SLOT_VIEWS 8
 #define PICO_MAX_HOOKS 32
 #define PICO_MAX_TOOLS 32
+#define PICO_MAX_COMMANDS 32
+#define PICO_MAX_COMPLETERS 8
+#define PICO_MAX_COMPLETE_ITEMS 24
+#define PICO_MAX_EFFORTS 8
+#define PICO_EFFORT_LEN 16
 
 typedef enum PicoRole {
     PICO_ROLE_USER = 0,
@@ -38,6 +43,7 @@ typedef enum PicoUiSlot {
 typedef enum PicoHook {
     PICO_HOOK_AFTER_LAYOUT = 0,
     PICO_HOOK_AFTER_RENDER,
+    PICO_HOOK_BEFORE_SUBMIT, /* set submit_cancel and/or agent_input */
     PICO_HOOK_ON_SUBMIT,
     PICO_HOOK_ON_MESSAGE,
     PICO_HOOK_ON_COMPACT, /* set app->compact_summary to replace the default briefing */
@@ -55,6 +61,9 @@ typedef struct PicoModel {
     char name[128];
     int context_limit;
     bool vision;
+    char effort[PICO_MAX_EFFORTS][PICO_EFFORT_LEN];
+    int effort_count;
+    char selected_effort[PICO_EFFORT_LEN];
 } PicoModel;
 
 typedef struct PicoTraceLine {
@@ -107,6 +116,16 @@ struct PicoApp;
 typedef void (*PicoViewFn)(struct PicoApp *app);
 typedef void (*PicoHookFn)(struct PicoApp *app);
 typedef void (*PicoToolFn)(struct PicoApp *app, const char *args_json, char **out);
+typedef void (*PicoCmdFn)(struct PicoApp *app, const char *args);
+
+typedef struct PicoCompleteItem {
+    char label[256];
+    char detail[128];
+    char insert[512];
+} PicoCompleteItem;
+
+typedef int (*PicoCompleteQueryFn)(struct PicoApp *app, const char *prefix, PicoCompleteItem *out, int max);
+typedef bool (*PicoCompleteAcceptFn)(struct PicoApp *app, const PicoCompleteItem *item);
 
 typedef struct PicoSlotView {
     PicoViewFn render;
@@ -125,6 +144,19 @@ typedef struct PicoTool {
     PicoToolFn run;
 } PicoTool;
 
+typedef struct PicoCommand {
+    const char *name;
+    const char *help;
+    PicoCmdFn run;
+} PicoCommand;
+
+typedef struct PicoCompleter {
+    char trigger;
+    bool bol_only;
+    PicoCompleteQueryFn query;
+    PicoCompleteAcceptFn accept;
+} PicoCompleter;
+
 typedef struct PicoSettings {
     char api_key[512];
     char base_url[512];
@@ -133,7 +165,6 @@ typedef struct PicoSettings {
     double compact_ratio;
     bool compact_enabled;
     bool context_limit_set;
-    bool reasoning_summary;
     bool resume_last;
 } PicoSettings;
 
@@ -160,6 +191,12 @@ typedef struct PicoApp {
     int hook_count;
     PicoTool tools[PICO_MAX_TOOLS];
     int tool_count;
+    PicoCommand commands[PICO_MAX_COMMANDS];
+    int command_count;
+    PicoCompleter completers[PICO_MAX_COMPLETERS];
+    int completer_count;
+    bool submit_cancel;
+    char *agent_input;
     PicoScrollbar chat_scrollbar;
     PicoScrollbar composer_scrollbar;
     PicoChatSelect chat_sel;
@@ -188,6 +225,9 @@ void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
 void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
                    PicoToolFn run);
+void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run);
+void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,
+                        PicoCompleteAcceptFn accept);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook);
 void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_json);
@@ -227,6 +267,13 @@ void PicoComposer_Render(PicoApp *app);
 void PicoComposer_DrawOverlay(PicoApp *app);
 bool PicoComposer_HasSelection(const PicoApp *app);
 void PicoComposer_Copy(PicoApp *app);
+void PicoComposer_SetText(PicoApp *app, const char *text);
+void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text);
+bool PicoComplete_HandleKeys(PicoApp *app);
+bool PicoComplete_HandlePointer(PicoApp *app);
+void PicoComplete_Refresh(PicoApp *app);
+void PicoComplete_Render(PicoApp *app);
+void PicoComplete_Close(void);
 void PicoFooter_Render(PicoApp *app);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);

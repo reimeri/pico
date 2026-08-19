@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "settings.h"
 
 #include "clay/clay.h"
 
@@ -35,6 +36,8 @@ void PicoFooter_Render(PicoApp *app)
     {
         extra = "  ·  Esc to dismiss";
     }
+    const char *effort = PicoSettings_ActiveEffort(app);
+    bool show_effort = effort && effort[0] && strcmp(effort, "none") != 0 && strcmp(effort, "off") != 0;
     if (app->tokens_used > 0)
     {
         int pct = (int)((long)app->tokens_cached * 100 / app->tokens_used);
@@ -42,9 +45,25 @@ void PicoFooter_Render(PicoApp *app)
         {
             pct = 100;
         }
-        snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens  ·  %d%% cache%s",
-                 AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", app->tokens_used,
-                 app->tokens_limit, pct, extra);
+        if (show_effort)
+        {
+            snprintf(app->footer_text, sizeof(app->footer_text),
+                     "%s  ·  %s  ·  %s  ·  %d / %d tokens  ·  %d%% cache%s",
+                     AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", effort,
+                     app->tokens_used, app->tokens_limit, pct, extra);
+        }
+        else
+        {
+            snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %d / %d tokens  ·  %d%% cache%s",
+                     AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", app->tokens_used,
+                     app->tokens_limit, pct, extra);
+        }
+    }
+    else if (show_effort)
+    {
+        snprintf(app->footer_text, sizeof(app->footer_text), "%s  ·  %s  ·  %s  ·  %d / %d tokens%s",
+                 AgentStateName(app->agent_state), app->model_name ? app->model_name : "?", effort, app->tokens_used,
+                 app->tokens_limit, extra);
     }
     else
     {

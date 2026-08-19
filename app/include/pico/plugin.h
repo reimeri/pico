@@ -19,5 +19,7 @@ PicoExt pico_ext_composer(void);
 PicoExt pico_ext_footer(void);
 PicoExt pico_ext_overlay(void);
 PicoExt pico_ext_shell(void);
+PicoExt pico_ext_commands(void);
+PicoExt pico_ext_files(void);
 
 #endif

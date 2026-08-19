@@ -332,6 +332,24 @@ void JsonFree(JsonDoc *doc)
     memset(doc, 0, sizeof(*doc));
 }
 
+int JsonTokStart(const JsonDoc *doc, int tok)
+{
+    if (!doc || tok < 0 || tok >= doc->ntoks)
+    {
+        return -1;
+    }
+    return Toks(doc)[tok].start;
+}
+
+int JsonTokEnd(const JsonDoc *doc, int tok)
+{
+    if (!doc || tok < 0 || tok >= doc->ntoks)
+    {
+        return -1;
+    }
+    return Toks(doc)[tok].end;
+}
+
 int JsonSkip(const JsonDoc *doc, int tok)
 {
     if (!doc || tok < 0 || tok >= doc->ntoks)

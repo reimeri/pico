@@ -52,6 +52,8 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_footer,
     pico_ext_overlay,
     pico_ext_shell,
+    pico_ext_commands,
+    pico_ext_files,
 };
 
 static void WarnClear(PicoApp *app)

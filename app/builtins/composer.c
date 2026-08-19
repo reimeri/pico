@@ -516,6 +516,9 @@ bool PicoComposer_HasSelection(const PicoApp *app)
     return app->composer.sel_anchor != app->composer.cursor;
 }
 
+static void ComposerDeleteRange(PicoComposer *c, int from, int to);
+static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes);
+
 static void ComposerDeleteRange(PicoComposer *c, int from, int to)
 {
     if (from < 0)
@@ -536,6 +539,35 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     c->sel_anchor = from;
     c->text[c->length] = '\0';
     s_goal_x = -1;
+}
+
+void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text)
+{
+    PicoComposer *c = &app->composer;
+    c->sel_anchor = c->cursor;
+    if (from > to)
+    {
+        int tmp = from;
+        from = to;
+        to = tmp;
+    }
+    ComposerDeleteRange(c, from, to);
+    if (text && text[0])
+    {
+        ComposerInsert(c, text, (int)strlen(text));
+    }
+}
+
+void PicoComposer_SetText(PicoApp *app, const char *text)
+{
+    PicoComposer *c = &app->composer;
+    c->sel_anchor = 0;
+    c->cursor = 0;
+    ComposerDeleteRange(c, 0, c->length);
+    if (text && text[0])
+    {
+        ComposerInsert(c, text, (int)strlen(text));
+    }
 }
 
 static void DeleteSelection(PicoComposer *c)
@@ -669,6 +701,11 @@ void PicoComposer_HandleInput(PicoApp *app)
     bool repeat_right = IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT);
     bool repeat_back = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
     bool repeat_del = IsKeyPressed(KEY_DELETE) || IsKeyPressedRepeat(KEY_DELETE);
+
+    if (PicoComplete_HandleKeys(app))
+    {
+        return;
+    }
 
     if (ctrl && Pico_ShortcutPressed('c'))
     {
@@ -810,6 +847,7 @@ void PicoComposer_HandleInput(PicoApp *app)
             ComposerInsert(c, bytes, n);
         }
     }
+    PicoComplete_Refresh(app);
 }
 
 void PicoComposer_HandlePointer(PicoApp *app)
@@ -960,6 +998,7 @@ void PicoComposer_Render(PicoApp *app)
                 }
             }
         }
+        PicoComplete_Render(app);
     }
 }
 
@@ -1033,7 +1072,10 @@ static void ComposerAfterLayout(PicoApp *app)
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
     app->composer_overflow =
         scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
-    PicoComposer_HandlePointer(app);
+    if (!PicoComplete_HandlePointer(app))
+    {
+        PicoComposer_HandlePointer(app);
+    }
     EnsureCaretVisible(app);
 }
 

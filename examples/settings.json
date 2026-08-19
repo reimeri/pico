@@ -6,12 +6,22 @@
   // API root; /responses is appended if missing. Overridden by PICO_BASE_URL or OPENAI_BASE_URL.
   "base_url": "https://api.openai.com/v1",
 
-  // Model id sent on each request. Overridden by PICO_MODEL or OPENAI_MODEL.
+  // Active catalog id. Overridden by PICO_MODEL or OPENAI_MODEL. /model writes this key.
   "model": "gpt-5.6-sol",
 
-  // Context window used by the footer and compaction. If omitted, Pico may fill
-  // this from GET {base}/models. Overridden by PICO_CONTEXT_LIMIT.
-  "context_limit": 1000000,
+  // Catalog used by /model and /effort. Workspace settings replace this array if present.
+  "models": [
+    {
+      "name": "Sol",
+      "id": "gpt-5.6-sol",
+      "context_limit": 1000000,
+      "effort": ["none", "low", "medium", "high"],
+      "selected_effort": "medium"
+    }
+  ],
+
+  // Optional hard override of the selected model's context window. Overridden by PICO_CONTEXT_LIMIT.
+  // "context_limit": 1000000,
 
   // Fraction of context_limit at which to compact (0.9 = 90%). null disables.
   // Default 0.9 if omitted. Overridden by PICO_COMPACT_AT.
@@ -19,8 +29,5 @@
 
   // Continue the most recent JSONL session for this directory (same as pico --resume).
   // Overridden by PICO_RESUME_LAST.
-  "resume_last": false,
-
-  // Request reasoning.summary=auto. Overridden by PICO_REASONING_SUMMARY.
-  "reasoning_summary": true
+  "resume_last": false
 }

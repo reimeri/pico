@@ -62,6 +62,32 @@ void pico_add_tool(PicoApp *app, const char *name, const char *description, cons
     app->tool_count++;
 }
 
+void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run)
+{
+    if (!name || !run || app->command_count >= PICO_MAX_COMMANDS)
+    {
+        return;
+    }
+    app->commands[app->command_count].name = name;
+    app->commands[app->command_count].help = help;
+    app->commands[app->command_count].run = run;
+    app->command_count++;
+}
+
+void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,
+                        PicoCompleteAcceptFn accept)
+{
+    if (!query || app->completer_count >= PICO_MAX_COMPLETERS)
+    {
+        return;
+    }
+    app->completers[app->completer_count].trigger = trigger;
+    app->completers[app->completer_count].bol_only = bol_only;
+    app->completers[app->completer_count].query = query;
+    app->completers[app->completer_count].accept = accept;
+    app->completer_count++;
+}
+
 void pico_clear_registrations(PicoApp *app)
 {
     memset(app->views, 0, sizeof(app->views));
@@ -70,6 +96,10 @@ void pico_clear_registrations(PicoApp *app)
     app->hook_count = 0;
     memset(app->tools, 0, sizeof(app->tools));
     app->tool_count = 0;
+    memset(app->commands, 0, sizeof(app->commands));
+    app->command_count = 0;
+    memset(app->completers, 0, sizeof(app->completers));
+    app->completer_count = 0;
 }
 
 void pico_run_hooks(PicoApp *app, PicoHook hook)
@@ -261,6 +291,10 @@ void PicoApp_Submit(PicoApp *app)
     }
 
     PicoComposer *c = &app->composer;
+    if (!c->text || c->length <= 0)
+    {
+        return;
+    }
     int start = 0;
     int end = c->length;
     while (start < end && (c->text[start] == ' ' || c->text[start] == '\n' || c->text[start] == '\t'))
@@ -275,14 +309,32 @@ void PicoApp_Submit(PicoApp *app)
     {
         return;
     }
+    if (start > 0)
+    {
+        memmove(c->text, c->text + start, (size_t)(end - start));
+        end -= start;
+    }
+    c->length = end;
+    c->text[c->length] = '\0';
+    c->cursor = c->length;
+    c->sel_anchor = c->length;
 
-    char saved = c->text[end];
-    c->text[end] = '\0';
-    const char *user = c->text + start;
-    PicoApp_AddMessage(app, PICO_ROLE_USER, user);
-    PicoSession_LogUser(app, user);
-    PicoAgent_StartTurn(app, user);
-    c->text[end] = saved;
+    free(app->agent_input);
+    app->agent_input = NULL;
+    app->submit_cancel = false;
+    pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT);
+    if (app->submit_cancel)
+    {
+        free(app->agent_input);
+        app->agent_input = NULL;
+        return;
+    }
+
+    const char *display = c->text;
+    const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : display;
+    PicoApp_AddMessage(app, PICO_ROLE_USER, display);
+    PicoSession_LogUser(app, agent, display);
+    PicoAgent_StartTurn(app, agent);
 
     c->length = 0;
     c->cursor = 0;
@@ -291,6 +343,8 @@ void PicoApp_Submit(PicoApp *app)
     {
         c->text[0] = '\0';
     }
+    free(app->agent_input);
+    app->agent_input = NULL;
     pico_run_hooks(app, PICO_HOOK_ON_SUBMIT);
 }
 
@@ -358,6 +412,7 @@ void PicoApp_Free(PicoApp *app)
     free(app->agent_error);
     free(app->compact_summary);
     free(app->models);
+    free(app->agent_input);
     memset(app, 0, sizeof(*app));
 }
 

@@ -15,7 +15,6 @@
 
 #define PICO_MAX_PENDING_CALLS 16
 
-static const char kReasoningField[] = ",\"reasoning\":{\"summary\":\"auto\"}";
 static const char kBriefPrompt[] =
     "Handoff brief: goals, constraints, progress, decisions, next steps, exact values; omit noise. "
     "Return text, not a tool call.";
@@ -36,7 +35,6 @@ typedef enum PicoAgentEvType {
     PICO_AEV_LLM_CANCEL,
     PICO_AEV_TOOL_DONE,
     PICO_AEV_TOOL_FAIL,
-    PICO_AEV_MODELS_DONE,
 } PicoAgentEvType;
 
 typedef struct PicoAgentEv {
@@ -51,7 +49,6 @@ typedef enum PicoWorkKind {
     PICO_WORK_IDLE = 0,
     PICO_WORK_LLM,
     PICO_WORK_TOOL,
-    PICO_WORK_MODELS,
 } PicoWorkKind;
 
 struct PicoAgentRt {
@@ -92,8 +89,6 @@ struct PicoAgentRt {
     char *instructions;
     bool compacting;
     bool compact_no_tools;
-    PicoModel *disc_models;
-    int disc_count;
 
     PicoPendingCall pending[PICO_MAX_PENDING_CALLS];
     int pending_count;
@@ -214,16 +209,43 @@ static char *BodyWithoutReasoning(const char *body)
     {
         return NULL;
     }
-    const char *found = strstr(body, kReasoningField);
+    const char *found = strstr(body, "\"reasoning\":");
     if (!found)
     {
         return NULL;
     }
-    size_t skip = strlen(kReasoningField);
+    const char *start = found;
+    if (start > body && start[-1] == ',')
+    {
+        start--;
+    }
+    const char *brace = strchr(found, '{');
+    if (!brace)
+    {
+        return NULL;
+    }
+    int depth = 0;
+    const char *end = brace;
+    for (; *end; end++)
+    {
+        if (*end == '{')
+        {
+            depth++;
+        }
+        else if (*end == '}')
+        {
+            depth--;
+            if (depth == 0)
+            {
+                end++;
+                break;
+            }
+        }
+    }
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Append(&b, body, (size_t)(found - body));
-    JsonBuf_Puts(&b, found + skip);
+    JsonBuf_Append(&b, body, (size_t)(start - body));
+    JsonBuf_Puts(&b, end);
     return JsonBuf_Steal(&b);
 }
 
@@ -346,20 +368,6 @@ static void *WorkerMain(void *arg)
                 PostEvent(rt, PICO_AEV_TOOL_DONE, out ? out : Dup(""), call_id, 0, 0);
                 call_id = NULL;
             }
-        }
-        else if (kind == PICO_WORK_MODELS)
-        {
-            PicoModel *list = NULL;
-            int n = 0;
-            char *err = NULL;
-            PicoLlm_ListModels(rt->app->settings.base_url, rt->app->settings.api_key, &list, &n, &err);
-            free(err);
-            pthread_mutex_lock(&rt->mu);
-            free(rt->disc_models);
-            rt->disc_models = list;
-            rt->disc_count = n;
-            pthread_mutex_unlock(&rt->mu);
-            PostEvent(rt, PICO_AEV_MODELS_DONE, NULL, NULL, 0, 0);
         }
 
         free(url);
@@ -492,9 +500,12 @@ static char *BuildRequest(PicoApp *app, bool compact, bool include_tools)
     {
         JsonBuf_Puts(&b, ",\"tool_choice\":\"none\"");
     }
-    if (app->settings.reasoning_summary)
+    const char *effort = PicoSettings_ActiveEffort(app);
+    if (effort && effort[0] && strcmp(effort, "none") != 0 && strcmp(effort, "off") != 0)
     {
-        JsonBuf_Puts(&b, kReasoningField);
+        JsonBuf_Puts(&b, ",\"reasoning\":{\"effort\":");
+        JsonBuf_String(&b, effort);
+        JsonBuf_Puts(&b, ",\"summary\":\"auto\"}");
     }
     JsonBuf_Putc(&b, '}');
     free(loaded);
@@ -1310,6 +1321,15 @@ bool PicoAgent_BlocksReload(const PicoApp *app)
            app->agent_state == PICO_AGENT_COMPACT_WAIT;
 }
 
+void PicoAgent_Compact(PicoApp *app)
+{
+    if (!app || !app->agent || PicoAgent_BlocksReload(app))
+    {
+        return;
+    }
+    StartCompact(app);
+}
+
 void PicoAgent_Init(PicoApp *app)
 {
     PicoAgentRt *rt = (PicoAgentRt *)calloc(1, sizeof(PicoAgentRt));
@@ -1328,7 +1348,6 @@ void PicoAgent_Init(PicoApp *app)
     {
         rt->started = true;
     }
-    PicoAgent_QueueModelDiscovery(app);
 }
 
 void PicoAgent_Shutdown(PicoApp *app)
@@ -1368,7 +1387,6 @@ void PicoAgent_Shutdown(PicoApp *app)
     free(rt->work_tool_args);
     free(rt->work_call_id);
     free(rt->instructions);
-    free(rt->disc_models);
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
     curl_global_cleanup();
@@ -1387,17 +1405,6 @@ void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
         return;
     }
     PicoSettings_Load(app);
-    if (!app->settings.context_limit_set)
-    {
-        for (int i = 0; i < app->model_count; i++)
-        {
-            if (strcmp(app->models[i].id, app->settings.model) == 0 && app->models[i].context_limit > 0)
-            {
-                app->tokens_limit = app->models[i].context_limit;
-                break;
-            }
-        }
-    }
     PicoAgent_DismissError(app);
     free(app->agent->instructions);
     app->agent->instructions = PicoSettings_LoadSystemPrompt(app);
@@ -1522,27 +1529,6 @@ void PicoAgent_Pump(PicoApp *app)
             }
             GoIdle(app);
             break;
-        case PICO_AEV_MODELS_DONE:
-        {
-            free(app->models);
-            app->models = rt->disc_models;
-            app->model_count = rt->disc_count;
-            rt->disc_models = NULL;
-            rt->disc_count = 0;
-            if (!app->settings.context_limit_set)
-            {
-                for (int i = 0; i < app->model_count; i++)
-                {
-                    if (strcmp(app->models[i].id, app->settings.model) == 0 &&
-                        app->models[i].context_limit > 0)
-                    {
-                        app->tokens_limit = app->models[i].context_limit;
-                        break;
-                    }
-                }
-            }
-            break;
-        }
         case PICO_AEV_TOOL_DONE:
             OnToolDone(app, ev, false);
             break;
@@ -1554,29 +1540,6 @@ void PicoAgent_Pump(PicoApp *app)
         free(ev->payload);
     }
     free(events);
-}
-
-void PicoAgent_QueueModelDiscovery(PicoApp *app)
-{
-    PicoAgentRt *rt = app ? app->agent : NULL;
-    if (!rt || !rt->started)
-    {
-        return;
-    }
-    pthread_mutex_lock(&rt->mu);
-    while (rt->busy && !rt->stop)
-    {
-        pthread_cond_wait(&rt->cv, &rt->mu);
-    }
-    if (rt->stop)
-    {
-        pthread_mutex_unlock(&rt->mu);
-        return;
-    }
-    rt->work = PICO_WORK_MODELS;
-    rt->busy = true;
-    pthread_cond_signal(&rt->cv);
-    pthread_mutex_unlock(&rt->mu);
 }
 
 const char *PicoAgent_CacheKey(const PicoApp *app)

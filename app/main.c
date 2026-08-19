@@ -43,7 +43,8 @@ static void PrintUsage(const char *argv0)
             "  PICO_API_KEY / OPENAI_API_KEY     Bearer token\n"
             "  PICO_BASE_URL / OPENAI_BASE_URL   default https://api.openai.com/v1\n"
             "  PICO_MODEL                        default gpt-4o\n"
-            "  ~/.config/pico/settings.json      {api_key, base_url, model, context_limit, compact_at, resume_last, reasoning_summary}\n"
+            "  PICO_EFFORT                       override selected_effort of the active model\n"
+            "  ~/.config/pico/settings.json      {api_key, base_url, model, models, compact_at, resume_last}\n"
             "  ~/.config/pico/SYSTEM.md          optional system prompt\n"
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n",
             argv0);

@@ -48,6 +48,8 @@ int JsonObjInt(const JsonDoc *doc, int obj, const char *key, int fallback);
 bool JsonIsObject(const JsonDoc *doc, int tok);
 bool JsonIsArray(const JsonDoc *doc, int tok);
 
+int JsonTokStart(const JsonDoc *doc, int tok);
+int JsonTokEnd(const JsonDoc *doc, int tok);
 char *JsonDup(const char *s);
 char *Pico_ReadFile(const char *path, size_t *out_len);
 

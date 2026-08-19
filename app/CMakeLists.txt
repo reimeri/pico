@@ -40,7 +40,10 @@ add_executable(pico
     builtins/composer.c
     builtins/footer.c
     builtins/overlay.c
-    builtins/shell.c)
+    builtins/shell.c
+    builtins/complete.c
+    builtins/commands.c
+    builtins/files.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
 

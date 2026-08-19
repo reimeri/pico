@@ -17,6 +17,8 @@ void JsonBuf_Append(JsonBuf *b, const char *s, size_t n);
 void JsonBuf_Puts(JsonBuf *b, const char *s);
 void JsonBuf_Putc(JsonBuf *b, char c);
 void JsonBuf_String(JsonBuf *b, const char *s);
+void JsonBuf_Int(JsonBuf *b, int v);
+void JsonBuf_Bool(JsonBuf *b, bool v);
 char *JsonBuf_Steal(JsonBuf *b);
 
 typedef struct JsonDoc {
@@ -28,6 +30,8 @@ typedef struct JsonDoc {
 
 int JsonParse(JsonDoc *doc, const char *src, size_t len);
 void JsonFree(JsonDoc *doc);
+/* Blank line and block comments to spaces, leaving strings untouched. */
+void JsonStripComments(char *src, size_t len);
 int JsonSkip(const JsonDoc *doc, int tok);
 int JsonObjGet(const JsonDoc *doc, int obj, const char *key);
 int JsonObjLen(const JsonDoc *doc, int obj);

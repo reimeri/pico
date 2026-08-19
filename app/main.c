@@ -15,27 +15,51 @@
 static void PrintUsage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [--safe]\n"
-            "  --safe   load builtin UI only (skip ~/.config/pico/extensions and .pico/extensions)\n"
-            "  -h       this help\n"
+            "usage: %s [--safe] [--resume] [--no-session] [--session FILE]\n"
+            "  --safe        load builtin UI only (skip ~/.config/pico/extensions and .pico/extensions)\n"
+            "  --resume      continue the most recent session for this directory\n"
+            "  --no-session  do not persist a JSONL session file\n"
+            "  --session F   open an existing session file\n"
+            "  -h            this help\n"
             "\n"
             "Auth (Responses API):\n"
             "  PICO_API_KEY / OPENAI_API_KEY     Bearer token\n"
             "  PICO_BASE_URL / OPENAI_BASE_URL   default https://api.openai.com/v1\n"
             "  PICO_MODEL                        default gpt-4o\n"
-            "  ~/.config/pico/settings.json      {api_key, base_url, model, context_limit}\n"
-            "  ~/.config/pico/SYSTEM.md          optional system prompt\n",
+            "  ~/.config/pico/settings.json      {api_key, base_url, model, context_limit, compact_at, resume_last, reasoning_summary}\n"
+            "  ~/.config/pico/SYSTEM.md          optional system prompt\n"
+            "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n",
             argv0);
 }
 
 int main(int argc, char **argv)
 {
     bool safe_mode = false;
+    PicoSessionStart session_start = PICO_SESSION_NEW;
+    const char *session_file = NULL;
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--safe") == 0)
         {
             safe_mode = true;
+        }
+        else if (strcmp(argv[i], "--resume") == 0)
+        {
+            session_start = PICO_SESSION_RESUME;
+        }
+        else if (strcmp(argv[i], "--no-session") == 0)
+        {
+            session_start = PICO_SESSION_NONE;
+        }
+        else if (strcmp(argv[i], "--session") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                PrintUsage(argv[0]);
+                return 1;
+            }
+            session_file = argv[++i];
+            session_start = PICO_SESSION_RESUME;
         }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
         {
@@ -68,7 +92,7 @@ int main(int argc, char **argv)
     RichText_SetMeasureFunction(Pico_MeasureTextUtf8, fonts);
 
     PicoApp app = {0};
-    PicoApp_Init(&app, fonts, workspace, safe_mode);
+    PicoApp_Init(&app, fonts, workspace, safe_mode, session_start, session_file);
     while (!WindowShouldClose())
     {
         if (Pico_NeedsClayReinit())

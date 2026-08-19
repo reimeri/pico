@@ -1,0 +1,26 @@
+// Copy to ~/.config/pico/settings.json or {workspace}/.pico/settings.json
+{
+  // Responses API bearer token. Overridden by PICO_API_KEY or OPENAI_API_KEY.
+  "api_key": "",
+
+  // API root; /responses is appended if missing. Overridden by PICO_BASE_URL or OPENAI_BASE_URL.
+  "base_url": "https://api.openai.com/v1",
+
+  // Model id sent on each request. Overridden by PICO_MODEL or OPENAI_MODEL.
+  "model": "gpt-5.6-sol",
+
+  // Context window used by the footer and compaction. If omitted, Pico may fill
+  // this from GET {base}/models. Overridden by PICO_CONTEXT_LIMIT.
+  "context_limit": 1000000,
+
+  // Fraction of context_limit at which to compact (0.9 = 90%). null disables.
+  // Default 0.9 if omitted. Overridden by PICO_COMPACT_AT.
+  "compact_at": 0.9,
+
+  // Continue the most recent JSONL session for this directory (same as pico --resume).
+  // Overridden by PICO_RESUME_LAST.
+  "resume_last": false,
+
+  // Request reasoning.summary=auto. Overridden by PICO_REASONING_SUMMARY.
+  "reasoning_summary": true
+}

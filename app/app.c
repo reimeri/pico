@@ -1,7 +1,9 @@
 #include "pico/plugin.h"
 #include "pico/md_view.h"
 #include "agent.h"
+#include "session.h"
 #include "settings.h"
+#include "json.h"
 
 #include "clay/clay.h"
 
@@ -176,6 +178,80 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
     pico_run_hooks(app, PICO_HOOK_ON_MESSAGE);
 }
 
+void PicoApp_AppendAssistant(PicoApp *app, const char *text)
+{
+    if (!text)
+    {
+        text = "";
+    }
+    if (app->message_count <= 0 || app->messages[app->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+        return;
+    }
+    if (!text[0])
+    {
+        return;
+    }
+    PicoMessage *m = &app->messages[app->message_count - 1];
+    size_t old = m->source ? strlen(m->source) : 0;
+    size_t n = strlen(text);
+    char *next = (char *)realloc(m->source, old + n + 1);
+    if (!next)
+    {
+        return;
+    }
+    memcpy(next + old, text, n + 1);
+    m->source = next;
+    MdDocument_Free(&m->doc);
+    m->doc = MdDocument_ParseEx(m->source, old + n, MD_PARSE_DEFAULT);
+    app->chat_follow_bottom = true;
+}
+
+void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
+{
+    if (app->message_count <= 0 || app->messages[app->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, "");
+    }
+    PicoMessage *m = &app->messages[app->message_count - 1];
+    PicoTraceLine *next =
+        (PicoTraceLine *)realloc(m->trace, (size_t)(m->trace_count + 1) * sizeof(PicoTraceLine));
+    if (!next)
+    {
+        return;
+    }
+    m->trace = next;
+    PicoTraceLine *line = &m->trace[m->trace_count++];
+    memset(line, 0, sizeof(*line));
+    line->is_tool = true;
+    line->tool_name = JsonDup(name && name[0] ? name : "tool");
+    line->tool_args = JsonDup(args ? args : "");
+}
+
+void PicoApp_SetLastToolOutput(PicoApp *app, const char *output)
+{
+    if (app->message_count <= 0)
+    {
+        return;
+    }
+    PicoMessage *m = &app->messages[app->message_count - 1];
+    for (int t = m->trace_count - 1; t >= 0; t--)
+    {
+        if (m->trace[t].is_tool)
+        {
+            free(m->trace[t].tool_output);
+            m->trace[t].tool_output = JsonDup(output ? output : "");
+            return;
+        }
+    }
+}
+
+void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_json)
+{
+    PicoSession_LogCustom(app, ext, data_json);
+}
+
 void PicoApp_Submit(PicoApp *app)
 {
     if (app->agent_state == PICO_AGENT_LLM_WAIT || app->agent_state == PICO_AGENT_TOOL_WAIT ||
@@ -204,6 +280,7 @@ void PicoApp_Submit(PicoApp *app)
     c->text[end] = '\0';
     const char *user = c->text + start;
     PicoApp_AddMessage(app, PICO_ROLE_USER, user);
+    PicoSession_LogUser(app, user);
     PicoAgent_StartTurn(app, user);
     c->text[end] = saved;
 
@@ -222,7 +299,8 @@ void PicoApp_Cancel(PicoApp *app)
     PicoAgent_Cancel(app);
 }
 
-void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode)
+void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
+                 PicoSessionStart session_start, const char *session_file)
 {
     memset(app, 0, sizeof(*app));
     app->fonts = fonts;
@@ -248,6 +326,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     PicoSettings_Load(app);
     PicoAgent_Init(app);
     PicoPlugins_Load(app);
+    PicoSession_Start(app, session_start, session_file);
 }
 
 void PicoApp_RequestReload(PicoApp *app)
@@ -276,6 +355,8 @@ void PicoApp_Free(PicoApp *app)
     free(app->composer.text);
     free(app->status_warn);
     free(app->agent_error);
+    free(app->compact_summary);
+    free(app->models);
     memset(app, 0, sizeof(*app));
 }
 

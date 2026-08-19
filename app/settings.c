@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "settings.h"
 #include "json.h"
 
@@ -5,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <errno.h>
 
 static const char *HomeDir(void)
@@ -26,7 +29,7 @@ void Pico_ConfigDir(char *out, size_t cap)
     }
 }
 
-static int MkdirP(const char *path)
+void Pico_MkdirP(const char *path)
 {
     char buf[4096];
     snprintf(buf, sizeof(buf), "%s", path);
@@ -41,9 +44,123 @@ static int MkdirP(const char *path)
     }
     if (mkdir(buf, 0755) != 0 && errno != EEXIST)
     {
-        return -1;
+        return;
     }
-    return 0;
+}
+
+void Pico_RandomHex(char *out, size_t cap)
+{
+    if (!out || cap < 2)
+    {
+        return;
+    }
+    size_t n = (cap - 1) / 2;
+    unsigned char raw[32];
+    if (n > sizeof(raw))
+    {
+        n = sizeof(raw);
+    }
+    int got = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f)
+    {
+        got = fread(raw, 1, n, f) == n;
+        fclose(f);
+    }
+    if (!got)
+    {
+        snprintf(out, cap, "%016lx%016lx", (unsigned long)time(NULL), (unsigned long)(size_t)out);
+        out[cap - 1] = '\0';
+        return;
+    }
+    static const char kHex[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++)
+    {
+        out[i * 2] = kHex[raw[i] >> 4];
+        out[i * 2 + 1] = kHex[raw[i] & 0xf];
+    }
+    out[n * 2] = '\0';
+}
+
+void Pico_IsoTime(char *out, size_t cap, bool filename)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+    int ms = (int)(ts.tv_nsec / 1000000);
+    if (filename)
+    {
+        snprintf(out, cap, "%04d-%02d-%02dT%02d-%02d-%02d-%03dZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+    }
+    else
+    {
+        snprintf(out, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+    }
+}
+
+static bool ParseRatio(const char *s, double *out)
+{
+    if (!s || !s[0] || !out)
+    {
+        return false;
+    }
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (end == s)
+    {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t')
+    {
+        end++;
+    }
+    if (*end != '\0' || v < 0.0 || v > 1.0)
+    {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+static bool IsOffWord(const char *s)
+{
+    return s && (strcmp(s, "null") == 0 || strcmp(s, "off") == 0 || strcmp(s, "false") == 0 ||
+                 strcmp(s, "none") == 0);
+}
+
+static void ApplyCompactAt(PicoSettings *s, const JsonDoc *doc, int obj)
+{
+    int tok = JsonObjGet(doc, obj, "compact_at");
+    if (tok < 0)
+    {
+        return;
+    }
+    if (JsonEq(doc, tok, "null"))
+    {
+        s->compact_enabled = false;
+        return;
+    }
+    char *raw = JsonStrDup(doc, tok);
+    if (!raw)
+    {
+        return;
+    }
+    if (IsOffWord(raw))
+    {
+        s->compact_enabled = false;
+        free(raw);
+        return;
+    }
+    double ratio;
+    if (ParseRatio(raw, &ratio))
+    {
+        s->compact_enabled = true;
+        s->compact_ratio = ratio;
+    }
+    free(raw);
 }
 
 static void CopyField(char *dst, size_t cap, const char *src)
@@ -71,6 +188,13 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     if (limit > 0)
     {
         s->context_limit = limit;
+        s->context_limit_set = true;
+    }
+    ApplyCompactAt(s, doc, obj);
+    int resume = JsonObjGet(doc, obj, "resume_last");
+    if (resume >= 0)
+    {
+        s->resume_last = JsonEq(doc, resume, "true") || JsonEq(doc, resume, "1");
     }
     int rs = JsonObjGet(doc, obj, "reasoning_summary");
     if (rs >= 0)
@@ -90,6 +214,7 @@ static void LoadFile(PicoSettings *s, const char *path)
     {
         return;
     }
+    JsonStripComments(src, len);
     JsonDoc doc;
     if (JsonParse(&doc, src, len) == 0)
     {
@@ -122,10 +247,12 @@ void PicoSettings_Load(PicoApp *app)
     snprintf(s->model, sizeof(s->model), "gpt-4o");
     s->context_limit = 128000;
     s->reasoning_summary = true;
+    s->compact_enabled = true;
+    s->compact_ratio = 0.9;
 
     char dir[4096];
     Pico_ConfigDir(dir, sizeof(dir));
-    MkdirP(dir);
+    Pico_MkdirP(dir);
 
     char path[4096];
     snprintf(path, sizeof(path), "%s/settings.json", dir);
@@ -152,6 +279,30 @@ void PicoSettings_Load(PicoApp *app)
         if (n > 0)
         {
             s->context_limit = n;
+            s->context_limit_set = true;
+        }
+    }
+    const char *resume = getenv("PICO_RESUME_LAST");
+    if (resume && resume[0])
+    {
+        s->resume_last = !(resume[0] == '0' || resume[0] == 'f' || resume[0] == 'F' || resume[0] == 'n' ||
+                           resume[0] == 'N');
+    }
+    const char *compact = getenv("PICO_COMPACT_AT");
+    if (compact && compact[0])
+    {
+        if (IsOffWord(compact))
+        {
+            s->compact_enabled = false;
+        }
+        else
+        {
+            double ratio;
+            if (ParseRatio(compact, &ratio))
+            {
+                s->compact_enabled = true;
+                s->compact_ratio = ratio;
+            }
         }
     }
 

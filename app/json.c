@@ -186,6 +186,18 @@ void JsonBuf_String(JsonBuf *b, const char *s)
     JsonBuf_Putc(b, '"');
 }
 
+void JsonBuf_Int(JsonBuf *b, int v)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", v);
+    JsonBuf_Puts(b, buf);
+}
+
+void JsonBuf_Bool(JsonBuf *b, bool v)
+{
+    JsonBuf_Puts(b, v ? "true" : "false");
+}
+
 char *JsonBuf_Steal(JsonBuf *b)
 {
     JsonBuf_Need(b, 0);
@@ -196,6 +208,78 @@ char *JsonBuf_Steal(JsonBuf *b)
     }
     memset(b, 0, sizeof(*b));
     return data;
+}
+
+void JsonStripComments(char *src, size_t len)
+{
+    if (!src || len == 0)
+    {
+        return;
+    }
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = src[i];
+        if (in_string)
+        {
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"')
+        {
+            in_string = true;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && src[i + 1] == '/')
+        {
+            while (i < len && src[i] != '\n' && src[i] != '\r')
+            {
+                src[i] = ' ';
+                i++;
+            }
+            if (i < len)
+            {
+                i--;
+            }
+            continue;
+        }
+        if (c == '/' && i + 1 < len && src[i + 1] == '*')
+        {
+            src[i] = ' ';
+            src[i + 1] = ' ';
+            i += 2;
+            while (i < len)
+            {
+                if (i + 1 < len && src[i] == '*' && src[i + 1] == '/')
+                {
+                    src[i] = ' ';
+                    src[i + 1] = ' ';
+                    i++;
+                    break;
+                }
+                if (src[i] != '\n' && src[i] != '\r')
+                {
+                    src[i] = ' ';
+                }
+                i++;
+            }
+            continue;
+        }
+    }
 }
 
 static jsmntok_t *Toks(const JsonDoc *doc)

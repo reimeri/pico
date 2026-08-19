@@ -34,6 +34,7 @@ add_executable(pico
     settings.c
     llm.c
     agent.c
+    session.c
     chat_sel.c
     builtins/chat.c
     builtins/composer.c

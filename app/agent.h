@@ -10,5 +10,15 @@ void PicoAgent_Cancel(PicoApp *app);
 void PicoAgent_DismissError(PicoApp *app);
 void PicoAgent_Pump(PicoApp *app);
 bool PicoAgent_BlocksReload(const PicoApp *app);
+void PicoAgent_QueueModelDiscovery(PicoApp *app);
+
+const char *PicoAgent_CacheKey(const PicoApp *app);
+void PicoAgent_SetCacheKey(PicoApp *app, const char *key);
+void PicoAgent_RotateCacheKey(PicoApp *app);
+void PicoAgent_ClearInput(PicoApp *app);
+void PicoAgent_PushHistoryUser(PicoApp *app, const char *text);
+void PicoAgent_PushHistoryAssistant(PicoApp *app, const char *text);
+void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const char *name, const char *args);
+void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *output);
 
 #endif

@@ -3,6 +3,7 @@
 #include "agent.h"
 #include "json.h"
 #include "llm.h"
+#include "session.h"
 #include "settings.h"
 
 #include <curl/curl.h>
@@ -15,6 +16,9 @@
 #define PICO_MAX_PENDING_CALLS 16
 
 static const char kReasoningField[] = ",\"reasoning\":{\"summary\":\"auto\"}";
+static const char kBriefPrompt[] =
+    "Handoff brief: goals, constraints, progress, decisions, next steps, exact values; omit noise. "
+    "Return text, not a tool call.";
 
 typedef struct PicoInputItem {
     char *json;
@@ -32,6 +36,7 @@ typedef enum PicoAgentEvType {
     PICO_AEV_LLM_CANCEL,
     PICO_AEV_TOOL_DONE,
     PICO_AEV_TOOL_FAIL,
+    PICO_AEV_MODELS_DONE,
 } PicoAgentEvType;
 
 typedef struct PicoAgentEv {
@@ -46,6 +51,7 @@ typedef enum PicoWorkKind {
     PICO_WORK_IDLE = 0,
     PICO_WORK_LLM,
     PICO_WORK_TOOL,
+    PICO_WORK_MODELS,
 } PicoWorkKind;
 
 struct PicoAgentRt {
@@ -84,6 +90,10 @@ struct PicoAgentRt {
     int input_cap;
     char cache_key[33];
     char *instructions;
+    bool compacting;
+    bool compact_no_tools;
+    PicoModel *disc_models;
+    int disc_count;
 
     PicoPendingCall pending[PICO_MAX_PENDING_CALLS];
     int pending_count;
@@ -96,35 +106,6 @@ struct PicoAgentRt {
 static char *Dup(const char *s)
 {
     return JsonDup(s ? s : "");
-}
-
-static void FillCacheKey(char *out, size_t cap)
-{
-    unsigned char raw[16];
-    int got = 0;
-    FILE *f = fopen("/dev/urandom", "rb");
-    if (f)
-    {
-        got = fread(raw, 1, sizeof(raw), f) == sizeof(raw);
-        fclose(f);
-    }
-    if (!got)
-    {
-        snprintf(out, cap, "%016lx%016lx", (unsigned long)time(NULL), (unsigned long)(size_t)out);
-        return;
-    }
-    static const char kHex[] = "0123456789abcdef";
-    size_t n = (cap - 1) / 2;
-    if (n > sizeof(raw))
-    {
-        n = sizeof(raw);
-    }
-    for (size_t i = 0; i < n; i++)
-    {
-        out[i * 2] = kHex[raw[i] >> 4];
-        out[i * 2 + 1] = kHex[raw[i] & 0xf];
-    }
-    out[n * 2] = '\0';
 }
 
 static void PushInput(PicoAgentRt *rt, char *json)
@@ -366,6 +347,20 @@ static void *WorkerMain(void *arg)
                 call_id = NULL;
             }
         }
+        else if (kind == PICO_WORK_MODELS)
+        {
+            PicoModel *list = NULL;
+            int n = 0;
+            char *err = NULL;
+            PicoLlm_ListModels(rt->app->settings.base_url, rt->app->settings.api_key, &list, &n, &err);
+            free(err);
+            pthread_mutex_lock(&rt->mu);
+            free(rt->disc_models);
+            rt->disc_models = list;
+            rt->disc_count = n;
+            pthread_mutex_unlock(&rt->mu);
+            PostEvent(rt, PICO_AEV_MODELS_DONE, NULL, NULL, 0, 0);
+        }
 
         free(url);
         free(key);
@@ -432,7 +427,9 @@ static PicoToolFn FindTool(PicoApp *app, const char *name)
     return NULL;
 }
 
-static char *BuildRequest(PicoApp *app)
+static char *BuildUserItem(const char *text);
+
+static char *BuildRequest(PicoApp *app, bool compact, bool include_tools)
 {
     PicoAgentRt *rt = app->agent;
     const char *instructions = rt->instructions;
@@ -459,8 +456,18 @@ static char *BuildRequest(PicoApp *app)
         }
         JsonBuf_Puts(&b, rt->input[i].json);
     }
+    if (compact)
+    {
+        if (rt->input_count)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        char *brief = BuildUserItem(kBriefPrompt);
+        JsonBuf_Puts(&b, brief);
+        free(brief);
+    }
     JsonBuf_Puts(&b, "]");
-    if (app->tool_count > 0)
+    if (include_tools && app->tool_count > 0)
     {
         JsonBuf_Puts(&b, ",\"tools\":[");
         for (int i = 0; i < app->tool_count; i++)
@@ -480,6 +487,10 @@ static char *BuildRequest(PicoApp *app)
             JsonBuf_Putc(&b, '}');
         }
         JsonBuf_Putc(&b, ']');
+    }
+    if (compact)
+    {
+        JsonBuf_Puts(&b, ",\"tool_choice\":\"none\"");
     }
     if (app->settings.reasoning_summary)
     {
@@ -919,6 +930,7 @@ static void AbortRemainingCalls(PicoAgentRt *rt)
     for (int i = rt->pending_next; i < rt->pending_count; i++)
     {
         PushFunctionOutput(rt, rt->pending[i].call_id, "(interrupted)");
+        PicoSession_LogToolResult(rt->app, rt->pending[i].call_id, "(interrupted)", true);
     }
     ClearPending(rt);
 }
@@ -929,7 +941,100 @@ static void GoIdle(PicoApp *app)
     app->agent_state = PICO_AGENT_IDLE;
     rt->stream_msg = -1;
     rt->stream_dirty = false;
+    rt->compacting = false;
+    rt->compact_no_tools = false;
     app->agent_activity[0] = '\0';
+}
+
+static int CompactThreshold(const PicoApp *app)
+{
+    if (!app->settings.compact_enabled || app->tokens_limit <= 0)
+    {
+        return 0;
+    }
+    int t = (int)((double)app->tokens_limit * app->settings.compact_ratio);
+    return t > 0 ? t : 0;
+}
+
+static void ApplyCompaction(PicoApp *app, const char *summary)
+{
+    int before = app->tokens_used;
+    PicoAgent_ClearInput(app);
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "Briefing:\n");
+    JsonBuf_Puts(&b, summary ? summary : "");
+    PicoAgent_PushHistoryUser(app, b.data ? b.data : "Briefing:\n");
+    JsonBuf_Free(&b);
+    PicoAgent_RotateCacheKey(app);
+    PicoSession_LogCompaction(app, summary, before);
+    app->tokens_used = 0;
+    app->tokens_cached = 0;
+    free(app->compact_summary);
+    app->compact_summary = NULL;
+}
+
+static bool ItemsHaveFunctionCall(const char *items_json)
+{
+    if (!items_json)
+    {
+        return false;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, items_json, strlen(items_json)) != 0)
+    {
+        return false;
+    }
+    bool found = false;
+    int n = JsonArrayLen(&doc, 0);
+    for (int i = 0; i < n; i++)
+    {
+        if (JsonEq(&doc, JsonObjGet(&doc, JsonArrayAt(&doc, 0, i), "type"), "function_call"))
+        {
+            found = true;
+            break;
+        }
+    }
+    JsonFree(&doc);
+    return found;
+}
+
+static void StartCompact(PicoApp *app)
+{
+    PicoAgentRt *rt = app->agent;
+    rt->stream_msg = -1;
+    rt->stream_dirty = false;
+    app->agent_state = PICO_AGENT_COMPACT_WAIT;
+    SetActivity(app, "Compacting…");
+    free(app->compact_summary);
+    app->compact_summary = NULL;
+    pico_run_hooks(app, PICO_HOOK_ON_COMPACT);
+    if (app->compact_summary && app->compact_summary[0])
+    {
+        ApplyCompaction(app, app->compact_summary);
+        GoIdle(app);
+        return;
+    }
+    rt->compacting = true;
+    rt->compact_no_tools = false;
+    char url[1024];
+    PicoLlm_ResolveUrl(app->settings.base_url, url, sizeof(url));
+    QueueLlm(rt, url, app->settings.api_key, BuildRequest(app, true, true));
+}
+
+static void FinishTurn(PicoApp *app)
+{
+    PicoAgentRt *rt = app->agent;
+    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
+    {
+        PopLastMessage(app);
+    }
+    if (CompactThreshold(app) > 0 && app->tokens_used >= CompactThreshold(app))
+    {
+        StartCompact(app);
+        return;
+    }
+    GoIdle(app);
 }
 
 static void SetErrorState(PicoApp *app, const char *msg)
@@ -945,6 +1050,8 @@ static void SetErrorState(PicoApp *app, const char *msg)
     rt->stream_msg = -1;
     rt->stream_dirty = false;
     ClearPending(rt);
+    rt->compacting = false;
+    rt->compact_no_tools = false;
     app->agent_activity[0] = '\0';
 }
 
@@ -1017,7 +1124,7 @@ static void StartLlm(PicoApp *app)
 
     char url[1024];
     PicoLlm_ResolveUrl(app->settings.base_url, url, sizeof(url));
-    QueueLlm(rt, url, app->settings.api_key, BuildRequest(app));
+    QueueLlm(rt, url, app->settings.api_key, BuildRequest(app, false, true));
 }
 
 static bool ItemIsNonEmptyMessage(const JsonDoc *doc, int item)
@@ -1105,6 +1212,29 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
         app->tokens_used = ev->tokens;
         app->tokens_cached = ev->cached;
     }
+    if (rt->compacting)
+    {
+        if (ItemsHaveFunctionCall(ev->payload) && !rt->compact_no_tools)
+        {
+            rt->compact_no_tools = true;
+            char url[1024];
+            PicoLlm_ResolveUrl(app->settings.base_url, url, sizeof(url));
+            QueueLlm(rt, url, app->settings.api_key, BuildRequest(app, true, false));
+            return;
+        }
+        char *text = MessageTextFromItems(ev->payload);
+        if (text && text[0])
+        {
+            ApplyCompaction(app, text);
+            free(text);
+            GoIdle(app);
+            return;
+        }
+        free(text);
+        rt->compacting = false;
+        SetErrorState(app, "Compaction failed");
+        return;
+    }
     if (rt->stream_msg >= 0 && MessageSourceEmpty(app, rt->stream_msg))
     {
         char *text = MessageTextFromItems(ev->payload);
@@ -1125,17 +1255,21 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
     }
     FinishAssistantHistory(app, ev->payload);
     IngestOutputItems(app, ev->payload);
+    if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+    {
+        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, ev->tokens, ev->cached);
+    }
+    for (int i = 0; i < rt->pending_count; i++)
+    {
+        PicoSession_LogToolCall(app, rt->pending[i].call_id, rt->pending[i].name, rt->pending[i].arguments);
+    }
     if (rt->pending_count > 0)
     {
         rt->pending_next = 0;
         StartNextTool(app);
         return;
     }
-    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
-    {
-        PopLastMessage(app);
-    }
-    GoIdle(app);
+    FinishTurn(app);
 }
 
 static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
@@ -1151,6 +1285,7 @@ static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
     }
     const char *output = ev->text ? ev->text : (failed ? "tool failed" : "");
     PushFunctionOutput(rt, call_id, output);
+    PicoSession_LogToolResult(app, call_id, output, failed);
     if (rt->stream_msg >= 0)
     {
         TraceSetLastToolOutput(app, rt->stream_msg, output);
@@ -1185,7 +1320,7 @@ void PicoAgent_Init(PicoApp *app)
     }
     rt->app = app;
     rt->stream_msg = -1;
-    FillCacheKey(rt->cache_key, sizeof(rt->cache_key));
+    Pico_RandomHex(rt->cache_key, sizeof(rt->cache_key));
     pthread_mutex_init(&rt->mu, NULL);
     pthread_cond_init(&rt->cv, NULL);
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1193,6 +1328,7 @@ void PicoAgent_Init(PicoApp *app)
     {
         rt->started = true;
     }
+    PicoAgent_QueueModelDiscovery(app);
 }
 
 void PicoAgent_Shutdown(PicoApp *app)
@@ -1232,6 +1368,7 @@ void PicoAgent_Shutdown(PicoApp *app)
     free(rt->work_tool_args);
     free(rt->work_call_id);
     free(rt->instructions);
+    free(rt->disc_models);
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
     curl_global_cleanup();
@@ -1250,6 +1387,17 @@ void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
         return;
     }
     PicoSettings_Load(app);
+    if (!app->settings.context_limit_set)
+    {
+        for (int i = 0; i < app->model_count; i++)
+        {
+            if (strcmp(app->models[i].id, app->settings.model) == 0 && app->models[i].context_limit > 0)
+            {
+                app->tokens_limit = app->models[i].context_limit;
+                break;
+            }
+        }
+    }
     PicoAgent_DismissError(app);
     free(app->agent->instructions);
     app->agent->instructions = PicoSettings_LoadSystemPrompt(app);
@@ -1358,13 +1506,43 @@ void PicoAgent_Pump(PicoApp *app)
             SetErrorState(app, ev->text ? ev->text : "LLM request failed");
             break;
         case PICO_AEV_LLM_CANCEL:
+            if (rt->compacting)
+            {
+                GoIdle(app);
+                break;
+            }
             FinishAssistantHistory(app, NULL);
+            if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+            {
+                PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, 0, 0);
+            }
             if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
             {
                 PopLastMessage(app);
             }
             GoIdle(app);
             break;
+        case PICO_AEV_MODELS_DONE:
+        {
+            free(app->models);
+            app->models = rt->disc_models;
+            app->model_count = rt->disc_count;
+            rt->disc_models = NULL;
+            rt->disc_count = 0;
+            if (!app->settings.context_limit_set)
+            {
+                for (int i = 0; i < app->model_count; i++)
+                {
+                    if (strcmp(app->models[i].id, app->settings.model) == 0 &&
+                        app->models[i].context_limit > 0)
+                    {
+                        app->tokens_limit = app->models[i].context_limit;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
         case PICO_AEV_TOOL_DONE:
             OnToolDone(app, ev, false);
             break;
@@ -1376,4 +1554,110 @@ void PicoAgent_Pump(PicoApp *app)
         free(ev->payload);
     }
     free(events);
+}
+
+void PicoAgent_QueueModelDiscovery(PicoApp *app)
+{
+    PicoAgentRt *rt = app ? app->agent : NULL;
+    if (!rt || !rt->started)
+    {
+        return;
+    }
+    pthread_mutex_lock(&rt->mu);
+    while (rt->busy && !rt->stop)
+    {
+        pthread_cond_wait(&rt->cv, &rt->mu);
+    }
+    if (rt->stop)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return;
+    }
+    rt->work = PICO_WORK_MODELS;
+    rt->busy = true;
+    pthread_cond_signal(&rt->cv);
+    pthread_mutex_unlock(&rt->mu);
+}
+
+const char *PicoAgent_CacheKey(const PicoApp *app)
+{
+    return app && app->agent ? app->agent->cache_key : "";
+}
+
+void PicoAgent_SetCacheKey(PicoApp *app, const char *key)
+{
+    if (!app || !app->agent || !key)
+    {
+        return;
+    }
+    snprintf(app->agent->cache_key, sizeof(app->agent->cache_key), "%s", key);
+}
+
+void PicoAgent_RotateCacheKey(PicoApp *app)
+{
+    if (!app || !app->agent)
+    {
+        return;
+    }
+    Pico_RandomHex(app->agent->cache_key, sizeof(app->agent->cache_key));
+}
+
+void PicoAgent_ClearInput(PicoApp *app)
+{
+    PicoAgentRt *rt = app ? app->agent : NULL;
+    if (!rt)
+    {
+        return;
+    }
+    for (int i = 0; i < rt->input_count; i++)
+    {
+        free(rt->input[i].json);
+        rt->input[i].json = NULL;
+    }
+    rt->input_count = 0;
+}
+
+void PicoAgent_PushHistoryUser(PicoApp *app, const char *text)
+{
+    if (!app || !app->agent)
+    {
+        return;
+    }
+    PushInput(app->agent, BuildUserItem(text));
+}
+
+void PicoAgent_PushHistoryAssistant(PicoApp *app, const char *text)
+{
+    if (!app || !app->agent)
+    {
+        return;
+    }
+    PushInput(app->agent, BuildAssistantItem(text));
+}
+
+void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const char *name, const char *args)
+{
+    if (!app || !app->agent)
+    {
+        return;
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"function_call\",\"name\":");
+    JsonBuf_String(&b, name ? name : "");
+    JsonBuf_Puts(&b, ",\"arguments\":");
+    JsonBuf_String(&b, args ? args : "{}");
+    JsonBuf_Puts(&b, ",\"call_id\":");
+    JsonBuf_String(&b, call_id ? call_id : "");
+    JsonBuf_Putc(&b, '}');
+    PushInput(app->agent, JsonBuf_Steal(&b));
+}
+
+void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *output)
+{
+    if (!app || !app->agent)
+    {
+        return;
+    }
+    PushFunctionOutput(app->agent, call_id, output);
 }

@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "pico/app.h"
+
 typedef bool (*PicoLlmCancelFn)(void *user);
 
 typedef enum PicoLlmDeltaKind {
@@ -26,6 +28,7 @@ typedef struct PicoLlmUsage {
 } PicoLlmUsage;
 
 void PicoLlm_ResolveUrl(const char *base, char *out, size_t cap);
+int PicoLlm_ListModels(const char *base, const char *api_key, PicoModel **out, int *out_n, char **out_error);
 int PicoLlm_Stream(const char *url, const char *api_key, const char *body, const char *session_id,
                    PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta, void *user, char **out_items_json,
                    PicoLlmUsage *out_usage, char **out_error);

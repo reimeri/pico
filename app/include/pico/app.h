@@ -40,8 +40,22 @@ typedef enum PicoHook {
     PICO_HOOK_AFTER_RENDER,
     PICO_HOOK_ON_SUBMIT,
     PICO_HOOK_ON_MESSAGE,
+    PICO_HOOK_ON_COMPACT, /* set app->compact_summary to replace the default briefing */
     PICO_HOOK_COUNT,
 } PicoHook;
+
+typedef enum PicoSessionStart {
+    PICO_SESSION_NEW = 0,
+    PICO_SESSION_RESUME,
+    PICO_SESSION_NONE,
+} PicoSessionStart;
+
+typedef struct PicoModel {
+    char id[128];
+    char name[128];
+    int context_limit;
+    bool vision;
+} PicoModel;
 
 typedef struct PicoTraceLine {
     char *text;
@@ -116,7 +130,11 @@ typedef struct PicoSettings {
     char base_url[512];
     char model[128];
     int context_limit;
+    double compact_ratio;
+    bool compact_enabled;
+    bool context_limit_set;
     bool reasoning_summary;
+    bool resume_last;
 } PicoSettings;
 
 struct PicoAgentRt;
@@ -156,8 +174,14 @@ typedef struct PicoApp {
     bool hovered_tool;
     char footer_text[256];
     char workspace[4096];
+    char session_id[40];
+    char session_path[4096];
+    bool session_ephemeral;
     char *status_warn;
     char agent_activity[256];
+    char *compact_summary;
+    PicoModel *models;
+    int model_count;
 } PicoApp;
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
@@ -166,10 +190,15 @@ void pico_add_tool(PicoApp *app, const char *name, const char *description, cons
                    PicoToolFn run);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook);
+void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_json);
 
-void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode);
+void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
+                 PicoSessionStart session_start, const char *session_file);
 void PicoApp_Free(PicoApp *app);
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown);
+void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args);
+void PicoApp_SetLastToolOutput(PicoApp *app, const char *output);
+void PicoApp_AppendAssistant(PicoApp *app, const char *text);
 void PicoApp_Submit(PicoApp *app);
 void PicoApp_Cancel(PicoApp *app);
 void PicoApp_Frame(PicoApp *app);

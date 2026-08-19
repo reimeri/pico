@@ -30,6 +30,180 @@ void PicoLlm_ResolveUrl(const char *base, char *out, size_t cap)
     snprintf(out + n, cap - n, "/responses");
 }
 
+static void ResolveRoot(const char *base, char *out, size_t cap)
+{
+    const char *src = base && base[0] ? base : "https://api.openai.com/v1";
+    snprintf(out, cap, "%s", src);
+    size_t n = strlen(out);
+    while (n > 0 && out[n - 1] == '/')
+    {
+        out[--n] = '\0';
+    }
+    size_t suffix = strlen("/responses");
+    if (n >= suffix && strcmp(out + n - suffix, "/responses") == 0)
+    {
+        out[n - suffix] = '\0';
+    }
+}
+
+static int KnownContextLimit(const char *id)
+{
+    if (!id || !id[0])
+    {
+        return 0;
+    }
+    if (strstr(id, "gpt-4.1"))
+    {
+        return 1047576;
+    }
+    if (strstr(id, "gpt-4o") || strstr(id, "gpt-4-turbo"))
+    {
+        return 128000;
+    }
+    if (strstr(id, "gpt-5"))
+    {
+        return 256000;
+    }
+    if (strstr(id, "o1") || strstr(id, "o3") || strstr(id, "o4"))
+    {
+        return 200000;
+    }
+    return 0;
+}
+
+static bool ModelHasVision(const char *id)
+{
+    return id && (strstr(id, "gpt-4o") || strstr(id, "gpt-4.1") || strstr(id, "vision") || strstr(id, "gpt-5"));
+}
+
+static size_t OnGetWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    JsonBuf *b = (JsonBuf *)userdata;
+    size_t n = size * nmemb;
+    JsonBuf_Append(b, ptr, n);
+    return n;
+}
+
+int PicoLlm_ListModels(const char *base, const char *api_key, PicoModel **out, int *out_n, char **out_error)
+{
+    if (out)
+    {
+        *out = NULL;
+    }
+    if (out_n)
+    {
+        *out_n = 0;
+    }
+    if (out_error)
+    {
+        *out_error = NULL;
+    }
+    char root[1024];
+    char url[1100];
+    ResolveRoot(base, root, sizeof(root));
+    snprintf(url, sizeof(url), "%s/models", root);
+
+    JsonBuf acc;
+    JsonBuf_Init(&acc);
+    CURL *curl = curl_easy_init();
+    if (!curl)
+    {
+        JsonBuf_Free(&acc);
+        if (out_error)
+        {
+            *out_error = JsonDup("curl_easy_init failed");
+        }
+        return PICO_LLM_FAIL;
+    }
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Accept: application/json");
+    char auth[600];
+    if (api_key && api_key[0])
+    {
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
+        headers = curl_slist_append(headers, auth);
+    }
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnGetWrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &acc);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
+    CURLcode rc = curl_easy_perform(curl);
+    long http = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK || http >= 400 || !acc.data)
+    {
+        if (out_error)
+        {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "model list failed (%s HTTP %ld)",
+                     rc != CURLE_OK ? curl_easy_strerror(rc) : "ok", http);
+            *out_error = JsonDup(buf);
+        }
+        JsonBuf_Free(&acc);
+        return PICO_LLM_FAIL;
+    }
+
+    JsonDoc doc;
+    if (JsonParse(&doc, acc.data, acc.len) != 0)
+    {
+        JsonBuf_Free(&acc);
+        if (out_error)
+        {
+            *out_error = JsonDup("model list was not JSON");
+        }
+        return PICO_LLM_FAIL;
+    }
+    int arr = JsonObjGet(&doc, 0, "data");
+    if (!JsonIsArray(&doc, arr))
+    {
+        arr = JsonIsArray(&doc, 0) ? 0 : -1;
+    }
+    int n = JsonIsArray(&doc, arr) ? JsonArrayLen(&doc, arr) : 0;
+    PicoModel *list = NULL;
+    int count = 0;
+    if (n > 0)
+    {
+        list = (PicoModel *)calloc((size_t)n, sizeof(PicoModel));
+    }
+    for (int i = 0; list && i < n; i++)
+    {
+        int item = JsonArrayAt(&doc, arr, i);
+        char *id = JsonObjStr(&doc, item, "id");
+        if (!id || !id[0])
+        {
+            free(id);
+            continue;
+        }
+        snprintf(list[count].id, sizeof(list[count].id), "%s", id);
+        snprintf(list[count].name, sizeof(list[count].name), "%s", id);
+        list[count].context_limit = KnownContextLimit(id);
+        list[count].vision = ModelHasVision(id);
+        count++;
+        free(id);
+    }
+    JsonFree(&doc);
+    JsonBuf_Free(&acc);
+    if (out)
+    {
+        *out = list;
+    }
+    else
+    {
+        free(list);
+    }
+    if (out_n)
+    {
+        *out_n = count;
+    }
+    return PICO_LLM_OK;
+}
+
 typedef struct LlmCtx {
     PicoLlmCancelFn cancel;
     PicoLlmDeltaFn on_delta;

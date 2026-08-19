@@ -9,13 +9,13 @@
 #include "markdown.h"
 #include "pico/theme.h"
 
-#define PICO_MAX_SLOT_VIEWS 8
-#define PICO_MAX_HOOKS 32
-#define PICO_MAX_TOOLS 32
-#define PICO_MAX_COMMANDS 32
-#define PICO_MAX_COMPLETERS 8
+#define PICO_MAX_SLOT_VIEWS 16
+#define PICO_MAX_HOOKS 64
+#define PICO_MAX_TOOLS 64
+#define PICO_MAX_COMMANDS 64
+#define PICO_MAX_COMPLETERS 16
 #define PICO_MAX_COMPLETE_ITEMS 24
-#define PICO_MAX_EFFORTS 8
+#define PICO_MAX_EFFORTS 16
 #define PICO_EFFORT_LEN 16
 
 typedef enum PicoRole {

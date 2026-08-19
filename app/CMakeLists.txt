@@ -49,7 +49,8 @@ find_package(Threads REQUIRED)
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${raylib_SOURCE_DIR}/src/external/glfw/include)
 
 target_compile_definitions(pico PRIVATE
     "PICO_VERSION=\"${PROJECT_VERSION}\""

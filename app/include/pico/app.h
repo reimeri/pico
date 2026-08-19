@@ -181,6 +181,9 @@ void PicoPlugins_OnFrame(PicoApp *app, float dt);
 void PicoPlugins_UnloadUser(PicoApp *app);
 void PicoPlugins_Shutdown(PicoApp *app);
 
+bool Pico_ShortcutPressed(char letter);
+bool Pico_ShortcutRepeat(char letter);
+
 void PicoChat_Render(PicoApp *app);
 void PicoChat_HandlePointer(PicoApp *app);
 void PicoChat_DrawOverlay(PicoApp *app);

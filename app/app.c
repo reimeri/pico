@@ -5,6 +5,9 @@
 
 #include "clay/clay.h"
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +79,62 @@ void pico_run_hooks(PicoApp *app, PicoHook hook)
             app->hooks[i].fn(app);
         }
     }
+}
+
+static char LayoutLetter(int key)
+{
+    const char *name = glfwGetKeyName(key, 0);
+    if (name && name[0] && (unsigned char)name[0] < 128 && name[1] == '\0')
+    {
+        char c = name[0];
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c - 'A' + 'a');
+        }
+        if (c >= 'a' && c <= 'z')
+        {
+            return c;
+        }
+    }
+    if (key >= KEY_A && key <= KEY_Z)
+    {
+        return (char)(key - KEY_A + 'a');
+    }
+    return 0;
+}
+
+static bool LayoutKeyHit(char letter, bool include_repeat)
+{
+    if (letter >= 'A' && letter <= 'Z')
+    {
+        letter = (char)(letter - 'A' + 'a');
+    }
+    if (letter < 'a' || letter > 'z')
+    {
+        return false;
+    }
+    for (int key = KEY_A; key <= KEY_Z; key++)
+    {
+        if (!IsKeyPressed(key) && !(include_repeat && IsKeyPressedRepeat(key)))
+        {
+            continue;
+        }
+        if (LayoutLetter(key) == letter)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Pico_ShortcutPressed(char letter)
+{
+    return LayoutKeyHit(letter, false);
+}
+
+bool Pico_ShortcutRepeat(char letter)
+{
+    return LayoutKeyHit(letter, true);
 }
 
 static void RunSlot(PicoApp *app, PicoUiSlot slot)

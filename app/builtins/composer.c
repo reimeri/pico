@@ -670,7 +670,7 @@ void PicoComposer_HandleInput(PicoApp *app)
     bool repeat_back = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
     bool repeat_del = IsKeyPressed(KEY_DELETE) || IsKeyPressedRepeat(KEY_DELETE);
 
-    if (ctrl && IsKeyPressed(KEY_C))
+    if (ctrl && Pico_ShortcutPressed('c'))
     {
         if (PicoChatSel_HasSelection(app))
         {
@@ -682,14 +682,14 @@ void PicoComposer_HandleInput(PicoApp *app)
         }
         return;
     }
-    if (ctrl && IsKeyPressed(KEY_X))
+    if (ctrl && Pico_ShortcutPressed('x'))
     {
         PicoComposer_Copy(app);
         DeleteSelection(c);
         return;
     }
 
-    if (ctrl && (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_HOME)))
+    if (ctrl && (Pico_ShortcutPressed('a') || IsKeyPressed(KEY_HOME)))
     {
         MoveCursor(c, LineStart(text, c->cursor), shift);
     }
@@ -698,7 +698,7 @@ void PicoComposer_HandleInput(PicoApp *app)
         MoveCursor(c, LineStart(text, c->cursor), shift);
     }
 
-    if (ctrl && (IsKeyPressed(KEY_E) || IsKeyPressed(KEY_END)))
+    if (ctrl && (Pico_ShortcutPressed('e') || IsKeyPressed(KEY_END)))
     {
         MoveCursor(c, LineEnd(text, c->length, c->cursor), shift);
     }
@@ -729,7 +729,7 @@ void PicoComposer_HandleInput(PicoApp *app)
         MoveVertical(app, 1, shift);
     }
 
-    if (ctrl && (IsKeyPressed(KEY_W) || IsKeyPressedRepeat(KEY_W)))
+    if (ctrl && Pico_ShortcutRepeat('w'))
     {
         if (PicoComposer_HasSelection(app))
         {
@@ -752,7 +752,7 @@ void PicoComposer_HandleInput(PicoApp *app)
         }
     }
 
-    if (ctrl && IsKeyPressed(KEY_K))
+    if (ctrl && Pico_ShortcutPressed('k'))
     {
         int to = LineEnd(text, c->length, c->cursor);
         if (to == c->cursor && to < c->length && text[to] == '\n')
@@ -773,7 +773,7 @@ void PicoComposer_HandleInput(PicoApp *app)
         }
     }
 
-    if (ctrl && IsKeyPressed(KEY_V))
+    if (ctrl && Pico_ShortcutPressed('v'))
     {
         PasteClipboard(c);
     }

@@ -53,6 +53,7 @@ int main(int argc, char **argv)
     Clay_Arena clay_memory = Clay_CreateArenaWithCapacityAndMemory(total_memory_size, malloc(total_memory_size));
     Clay_Initialize(clay_memory, (Clay_Dimensions){1100, 800}, (Clay_ErrorHandler){Pico_HandleClayErrors, 0});
     Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    SetExitKey(KEY_NULL);
 
     char workspace[4096];
     if (!getcwd(workspace, sizeof(workspace)))

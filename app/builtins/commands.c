@@ -5,6 +5,7 @@
 #include "agent.h"
 #include "session.h"
 #include "settings.h"
+#include "overlay.h"
 #include "pico/auth.h"
 #include "json.h"
 
@@ -132,7 +133,7 @@ static void CmdModel(PicoApp *app, const char *args)
     {
         char line[256];
         snprintf(line, sizeof(line), "Unknown model `%s`. Try `/model` for the catalog.", args);
-        Note(app, line);
+        PicoOverlay_Notify(app, line);
         ClearComposer(app);
         app->submit_cancel = true;
         return;
@@ -144,7 +145,7 @@ static void CmdModel(PicoApp *app, const char *args)
     char line[256];
     snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
              PicoSettings_ActiveEffort(app));
-    Note(app, line);
+    PicoOverlay_Notify(app, line);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -165,7 +166,7 @@ static void CmdEffort(PicoApp *app, const char *args)
     }
     if (!m)
     {
-        Note(app, "No model in the catalog. Add one in settings.json.");
+        PicoOverlay_Notify(app, "No model in the catalog. Add one in settings.json.");
         ClearComposer(app);
         app->submit_cancel = true;
         return;
@@ -175,7 +176,7 @@ static void CmdEffort(PicoApp *app, const char *args)
     {
         char line[256];
         snprintf(line, sizeof(line), "`%s` is not in this model's effort list.", level);
-        Note(app, line);
+        PicoOverlay_Notify(app, line);
         ClearComposer(app);
         app->submit_cancel = true;
         return;
@@ -185,7 +186,7 @@ static void CmdEffort(PicoApp *app, const char *args)
     LogSelection(app);
     char line[256];
     snprintf(line, sizeof(line), "Effort `%s` for `%s`", m->selected_effort, m->name[0] ? m->name : m->id);
-    Note(app, line);
+    PicoOverlay_Notify(app, line);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -588,7 +589,7 @@ static void CmdCd(PicoApp *app, const char *args)
     }
     if (PicoAgent_IsBusy(app))
     {
-        Note(app, "Wait until the agent is idle before changing directory.");
+        PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
         ClearComposer(app);
         app->submit_cancel = true;
         return;
@@ -609,7 +610,7 @@ static void CmdCd(PicoApp *app, const char *args)
         snprintf(shown, sizeof(shown), "%s", trimmed);
         char line[512];
         snprintf(line, sizeof(line), "Not a directory `%s`.", shown);
-        Note(app, line);
+        PicoOverlay_Notify(app, line);
         ClearComposer(app);
         app->submit_cancel = true;
         return;
@@ -623,7 +624,7 @@ static void CmdCd(PicoApp *app, const char *args)
         FormatHomePath(resolved, pretty, sizeof(pretty));
         char line[512];
         snprintf(line, sizeof(line), "Already in `%s`.", pretty);
-        Note(app, line);
+        PicoOverlay_Notify(app, line);
         ClearComposer(app);
         app->submit_cancel = true;
         return;
@@ -638,7 +639,7 @@ static void CmdCd(PicoApp *app, const char *args)
     FormatHomePath(resolved, pretty, sizeof(pretty));
     char line[512];
     snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
-    Note(app, line);
+    PicoOverlay_Notify(app, line);
     ClearComposer(app);
     app->submit_cancel = true;
 }

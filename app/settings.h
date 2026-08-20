@@ -9,6 +9,7 @@ void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);
 void PicoSettings_Load(PicoApp *app);
 char *PicoSettings_LoadSystemPrompt(const PicoApp *app);
+int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max);
 PicoModel *PicoSettings_ActiveModel(PicoApp *app);
 const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app);
 const char *PicoSettings_ActiveEffort(const PicoApp *app);

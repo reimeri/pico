@@ -1,6 +1,7 @@
 #include "pico/plugin.h"
 #include "pico/md_view.h"
 #include "chat_sel.h"
+#include "settings.h"
 
 #include "clay/clay.h"
 
@@ -128,6 +129,71 @@ static void RenderToolLine(PicoApp *app, PicoTraceLine *line, int message_index,
     PicoChatSel_Break();
 }
 
+static Clay_String EmptyCStr(const char *s)
+{
+    if (!s)
+    {
+        s = "";
+    }
+    return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+}
+
+static void RenderEmptyCard(int id, Clay_String title, const char **items, int n)
+{
+    CLAY(CLAY_IDI("EmptyCard", id),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .padding = {16, 16, 16, 16},
+                     .childGap = 8,
+                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+          .backgroundColor = COLOR_CONTENT_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(8)})
+    {
+        CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 15, .textColor = COLOR_TEXT}));
+        if (n <= 0)
+        {
+            CLAY_TEXT(CLAY_STRING("None"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                             .fontSize = 13,
+                                                             .textColor = COLOR_MUTED,
+                                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
+        else
+        {
+            for (int i = 0; i < n; i++)
+            {
+                CLAY_TEXT(EmptyCStr(items[i]), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                 .fontSize = 13,
+                                                                 .textColor = COLOR_TEXT,
+                                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+            }
+        }
+    }
+}
+
+static void RenderEmptyCards(PicoApp *app)
+{
+    const char *tools[PICO_MAX_TOOLS];
+    int tool_n = 0;
+    for (int i = 0; i < app->tool_count && tool_n < PICO_MAX_TOOLS; i++)
+    {
+        if (app->tools[i].name && app->tools[i].name[0])
+        {
+            tools[tool_n++] = app->tools[i].name;
+        }
+    }
+    const char *ctx[8];
+    int ctx_n = PicoSettings_LoadedContext(app, ctx, 8);
+    bool narrow = GetScreenWidth() < 720;
+    CLAY(CLAY_ID("EmptyCards"),
+         {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
+                     .childGap = 12,
+                     .sizing = {.width = CLAY_SIZING_GROW(0, 900)}}})
+    {
+        RenderEmptyCard(0, CLAY_STRING("Tools"), tools, tool_n);
+        RenderEmptyCard(1, CLAY_STRING("Context"), ctx, ctx_n);
+        RenderEmptyCard(2, CLAY_STRING("Skills"), NULL, 0);
+    }
+}
+
 void PicoChat_Render(PicoApp *app)
 {
     app->hovered_tool = false;
@@ -142,12 +208,25 @@ void PicoChat_Render(PicoApp *app)
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
+            bool empty = app->message_count == 0;
+            Clay_ChildAlignment align = empty ? (Clay_ChildAlignment){.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}
+                                              : (Clay_ChildAlignment){0};
+            Clay_Sizing content_size = {.width = CLAY_SIZING_GROW(0)};
+            if (empty)
+            {
+                content_size.height = CLAY_SIZING_GROW(0);
+            }
             CLAY(CLAY_ID("ChatContent"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .childGap = 16,
                              .padding = {4, 4, 8, 8},
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                             .childAlignment = align,
+                             .sizing = content_size}})
             {
+                if (empty)
+                {
+                    RenderEmptyCards(app);
+                }
                 float available_width = ChatWidth(app);
                 for (int i = 0; i < app->message_count; i++)
                 {

@@ -919,6 +919,45 @@ static void AppendFile(JsonBuf *b, const char *path)
     free(src);
 }
 
+static bool FileHasContent(const char *path)
+{
+    struct stat st;
+    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+static bool PushContext(const char **labels, int max, int *n, const char *path, const char *label)
+{
+    if (*n >= max || !FileHasContent(path))
+    {
+        return false;
+    }
+    labels[*n] = label;
+    (*n)++;
+    return true;
+}
+
+int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max)
+{
+    if (!labels || max <= 0)
+    {
+        return 0;
+    }
+    int n = 0;
+    char path[4096];
+    Pico_ConfigDir(path, sizeof(path));
+    size_t len = strlen(path);
+    snprintf(path + len, sizeof(path) - len, "/SYSTEM.md");
+    PushContext(labels, max, &n, path, "SYSTEM.md");
+    if (app && app->workspace[0])
+    {
+        snprintf(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace);
+        PushContext(labels, max, &n, path, ".pico/SYSTEM.md");
+        snprintf(path, sizeof(path), "%s/AGENTS.md", app->workspace);
+        PushContext(labels, max, &n, path, "AGENTS.md");
+    }
+    return n;
+}
+
 char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
 {
     JsonBuf b;

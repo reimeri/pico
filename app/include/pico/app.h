@@ -358,6 +358,7 @@ bool PicoComplete_HandlePointer(PicoApp *app);
 void PicoComplete_Refresh(PicoApp *app);
 void PicoComplete_Render(PicoApp *app);
 void PicoComplete_Close(void);
+bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoApp *app);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);

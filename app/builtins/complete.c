@@ -8,6 +8,9 @@
 
 typedef struct CompleteState {
     bool open;
+    bool dismissed;
+    int dismissed_start;
+    int dismissed_len;
     int selected;
     int token_start;
     int token_end;
@@ -22,6 +25,19 @@ void PicoComplete_Close(void)
     g_complete.open = false;
     g_complete.count = 0;
     g_complete.selected = 0;
+}
+
+bool PicoComplete_IsOpen(void)
+{
+    return g_complete.open;
+}
+
+static void Dismiss(PicoApp *app)
+{
+    g_complete.dismissed = true;
+    g_complete.dismissed_start = g_complete.token_start;
+    g_complete.dismissed_len = app->composer.length;
+    PicoComplete_Close();
 }
 
 static bool IsSpaceByte(char c)
@@ -172,8 +188,16 @@ void PicoComplete_Refresh(PicoApp *app)
     if (!ScanToken(app, &start, &end, &comp) || !comp || !comp->query)
     {
         PicoComplete_Close();
+        g_complete.dismissed = false;
         return;
     }
+    if (g_complete.dismissed && start == g_complete.dismissed_start &&
+        app->composer.length == g_complete.dismissed_len)
+    {
+        PicoComplete_Close();
+        return;
+    }
+    g_complete.dismissed = false;
     char prefix[512];
     int plen = end - start - 1;
     if (plen < 0)
@@ -246,15 +270,15 @@ static void Accept(PicoApp *app)
 
 bool PicoComplete_HandleKeys(PicoApp *app)
 {
+    if (g_complete.open && IsKeyPressed(KEY_ESCAPE))
+    {
+        Dismiss(app);
+        return true;
+    }
     PicoComplete_Refresh(app);
     if (!g_complete.open)
     {
         return false;
-    }
-    if (IsKeyPressed(KEY_ESCAPE))
-    {
-        PicoComplete_Close();
-        return true;
     }
     if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP))
     {
@@ -342,7 +366,7 @@ bool PicoComplete_HandlePointer(PicoApp *app)
     {
         return true;
     }
-    PicoComplete_Close();
+    Dismiss(app);
     return false;
 }
 

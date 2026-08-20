@@ -600,8 +600,9 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     bool had_warn = app->status_warn != NULL;
+    bool had_complete = PicoComplete_IsOpen();
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && IsKeyPressed(KEY_ESCAPE))
+    if (!had_warn && !had_complete && IsKeyPressed(KEY_ESCAPE))
     {
         if (PicoAgent_IsBusy(app))
         {

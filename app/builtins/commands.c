@@ -225,6 +225,22 @@ static void RelAge(char *out, size_t cap, time_t mtime)
     }
 }
 
+static void CmdNew(PicoApp *app, const char *args)
+{
+    (void)args;
+    if (PicoAgent_IsBusy(app))
+    {
+        PicoOverlay_Notify(app, "Wait until the agent is idle before starting a new session.");
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
+    PicoSession_Reset(app);
+    PicoOverlay_Notify(app, "New session.");
+    ClearComposer(app);
+    app->submit_cancel = true;
+}
+
 static void CmdResume(PicoApp *app, const char *args)
 {
     while (args && *args && isspace((unsigned char)*args))
@@ -1041,6 +1057,7 @@ static void CommandsInit(PicoApp *app)
     pico_add_command(app, "effort", "Set reasoning effort for this model", CmdEffort);
     pico_add_command(app, "login", "Sign in a provider", CmdLogin);
     pico_add_command(app, "logout", "Sign out a provider", CmdLogout);
+    pico_add_command(app, "new", "Start a new session", CmdNew);
     pico_add_command(app, "resume", "Resume a previous session", CmdResume);
     pico_add_command(app, "cd", "Change workspace directory", CmdCd);
     pico_add_command(app, "compact", "Compact the current session", CmdCompact);

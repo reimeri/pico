@@ -49,6 +49,7 @@ static void PrintUsage(const char *argv0)
             "  models[].provider                 LLM extension name (e.g. openai)\n"
             "  models[].base_url                 optional; omit to use the extension default\n"
             "  ~/.config/pico/SYSTEM.md          optional system prompt\n"
+            "  <workspace>/AGENTS.md             optional project instructions\n"
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n",
             argv0);
 }

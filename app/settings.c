@@ -940,6 +940,11 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
                      "working directory. Use the sh tool to run shell commands when that helps. "
                      "Prefer concise answers.");
     }
+    if (app->workspace[0])
+    {
+        snprintf(path, sizeof(path), "%s/AGENTS.md", app->workspace);
+        AppendFile(&b, path);
+    }
 #ifndef PICO_DOCS
 #define PICO_DOCS ""
 #endif

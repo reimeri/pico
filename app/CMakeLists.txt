@@ -32,6 +32,7 @@ add_executable(pico
     richtext.c
     json.c
     settings.c
+    auth.c
     http.c
     agent.c
     session.c

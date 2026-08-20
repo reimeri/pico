@@ -501,7 +501,8 @@ char *JsonStrDup(const JsonDoc *doc, int tok)
     {
         if (t->type == JSMN_PRIMITIVE)
         {
-            return JsonRawDup(doc, tok);
+            /* A JSON null is an absent value, not the four characters "null". */
+            return TokEq(doc, t, "null") ? NULL : JsonRawDup(doc, tok);
         }
         return NULL;
     }

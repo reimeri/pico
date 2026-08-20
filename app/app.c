@@ -3,6 +3,7 @@
 #include "agent.h"
 #include "session.h"
 #include "settings.h"
+#include "auth.h"
 #include "json.h"
 
 #include "clay/clay.h"
@@ -152,6 +153,8 @@ void pico_clear_registrations(PicoApp *app)
     app->completer_count = 0;
     memset(app->providers, 0, sizeof(app->providers));
     app->provider_count = 0;
+    memset(app->auths, 0, sizeof(app->auths));
+    app->auth_count = 0;
 }
 
 void pico_run_hooks(PicoApp *app, PicoHook hook)
@@ -431,6 +434,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
 
     app->session_ephemeral = true;
     PicoSettings_Load(app);
+    PicoAuth_Load(app);
     PicoAgent_Init(app);
     PicoPlugins_Load(app);
     PicoSession_Start(app, session_start, session_file);
@@ -443,8 +447,16 @@ void PicoApp_RequestReload(PicoApp *app)
 
 void PicoApp_Free(PicoApp *app)
 {
-    PicoAgent_Shutdown(app);
+    /* A detached agent worker outlives us and can still reach the auth store to
+     * refresh a token, so leave the store and the struct itself alone in that case;
+     * the process is exiting anyway. Everything freed below is reached only through
+     * the agent runtime, which the detach path already leaks. */
+    bool agent_reaped = PicoAgent_Shutdown(app);
     PicoPlugins_Shutdown(app);
+    if (agent_reaped)
+    {
+        PicoAuth_Free(app);
+    }
     for (int i = 0; i < app->message_count; i++)
     {
         free(app->messages[i].source);
@@ -465,7 +477,10 @@ void PicoApp_Free(PicoApp *app)
     free(app->compact_summary);
     free(app->models);
     free(app->agent_input);
-    memset(app, 0, sizeof(*app));
+    if (agent_reaped)
+    {
+        memset(app, 0, sizeof(*app));
+    }
 }
 
 static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)

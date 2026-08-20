@@ -2,8 +2,10 @@
 #include "agent.h"
 #include "session.h"
 #include "settings.h"
+#include "pico/auth.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -18,6 +20,8 @@ static void ClearComposer(PicoApp *app)
 {
     PicoComposer_SetText(app, "");
 }
+
+static void SplitPrefix(const char *prefix, char *cmd, size_t cmd_cap, const char **rest);
 
 static int Fold(int c)
 {
@@ -205,6 +209,118 @@ static void CmdHelp(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
+static const PicoAuth *OnlyAuth(PicoApp *app)
+{
+    return app->auth_count == 1 ? &app->auths[0] : NULL;
+}
+
+/* snprintf reports the length it wanted to write, so a truncated result must be
+ * clamped before it is reused as an offset. Returns the new write position. */
+static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...)
+{
+    if (cap == 0 || n + 1 >= cap)
+    {
+        return n;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int wrote = vsnprintf(buf + n, cap - n, fmt, ap);
+    va_end(ap);
+    if (wrote < 0)
+    {
+        return n;
+    }
+    n += (size_t)wrote;
+    return n < cap ? n : cap - 1;
+}
+
+static void ListAuthProviders(PicoApp *app, const char *prefix)
+{
+    char buf[1024];
+    size_t n = Append(buf, sizeof(buf), 0, "%s", prefix);
+    if (app->auth_count == 0)
+    {
+        Append(buf, sizeof(buf), n, " No providers registered.");
+        Note(app, buf);
+        return;
+    }
+    for (int i = 0; i < app->auth_count; i++)
+    {
+        n = Append(buf, sizeof(buf), n, "\n- `%s` — %s", app->auths[i].provider,
+                   app->auths[i].help ? app->auths[i].help : "");
+    }
+    Note(app, buf);
+}
+
+static void RunLogin(PicoApp *app, const PicoAuth *a, const char *args)
+{
+    if (!a || !a->login)
+    {
+        Note(app, "That provider has no login.");
+        return;
+    }
+    a->login(app, args ? args : "");
+}
+
+static const char *Trim(const char *s)
+{
+    while (s && *s && isspace((unsigned char)*s))
+    {
+        s++;
+    }
+    return s ? s : "";
+}
+
+/* Sub-verbs like `key` or `cancel` belong to the provider, so an argument that is
+ * not a provider name is forwarded verbatim for the provider to interpret. */
+static void CmdLogin(PicoApp *app, const char *args)
+{
+    const char *all = Trim(args);
+    char first[64];
+    const char *rest = "";
+    SplitPrefix(all, first, sizeof(first), &rest);
+    const PicoAuth *a = first[0] ? pico_find_auth(app, first) : NULL;
+    if (a)
+    {
+        RunLogin(app, a, rest);
+    }
+    else if ((a = OnlyAuth(app)) != NULL)
+    {
+        RunLogin(app, a, all);
+    }
+    else
+    {
+        ListAuthProviders(app, first[0] ? "Unknown provider. Try:" : "Usage: `/login [provider]`.");
+    }
+    ClearComposer(app);
+    app->submit_cancel = true;
+}
+
+static void CmdLogout(PicoApp *app, const char *args)
+{
+    char first[64];
+    const char *rest = "";
+    SplitPrefix(Trim(args), first, sizeof(first), &rest);
+    const PicoAuth *a = first[0] ? pico_find_auth(app, first) : OnlyAuth(app);
+    if (!a)
+    {
+        ListAuthProviders(app, first[0] ? "Unknown provider. Try:" : "Usage: `/logout [provider]`.");
+    }
+    else if (a->logout)
+    {
+        a->logout(app);
+    }
+    else
+    {
+        Note(app, pico_auth_clear_oauth(app, a->provider)
+                      ? "Logged out."
+                      : "Logged out, but `~/.config/pico/auth.json` could not be written, so the "
+                        "stored credentials may still be on disk.");
+    }
+    ClearComposer(app);
+    app->submit_cancel = true;
+}
+
 static void CmdReload(PicoApp *app, const char *args)
 {
     (void)args;
@@ -255,7 +371,98 @@ static void SplitPrefix(const char *prefix, char *cmd, size_t cmd_cap, const cha
 
 static bool NeedsArgs(const char *name)
 {
-    return FoldEq(name, "model") || FoldEq(name, "effort");
+    return FoldEq(name, "model") || FoldEq(name, "effort") || FoldEq(name, "login") ||
+           FoldEq(name, "logout");
+}
+
+static bool HasSpace(const char *s)
+{
+    for (; s && *s; s++)
+    {
+        if (isspace((unsigned char)*s))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Offers the provider's own `verbs` list; `insert_prefix` is the command text the
+ * verb is appended to, e.g. "/login" or "/login openai". */
+static int AuthVerbs(const PicoAuth *a, const char *insert_prefix, const char *partial,
+                     PicoCompleteItem *out, int max, int n)
+{
+    const char *p = a->verbs;
+    while (p && *p && n < max)
+    {
+        while (*p == ' ')
+        {
+            p++;
+        }
+        size_t len = 0;
+        while (p[len] && p[len] != ' ')
+        {
+            len++;
+        }
+        if (len == 0)
+        {
+            break;
+        }
+        char verb[32];
+        if (len < sizeof(verb))
+        {
+            memcpy(verb, p, len);
+            verb[len] = '\0';
+            if (FoldPrefix(verb, partial))
+            {
+                snprintf(out[n].label, sizeof(out[n].label), "%s", verb);
+                snprintf(out[n].detail, sizeof(out[n].detail), "%s", a->provider);
+                snprintf(out[n].insert, sizeof(out[n].insert), "%s %s", insert_prefix, verb);
+                n++;
+            }
+        }
+        p += len;
+    }
+    return n;
+}
+
+static int AuthQuery(PicoApp *app, bool is_login, const char *rest, PicoCompleteItem *out, int max)
+{
+    char first[64];
+    const char *tail = "";
+    SplitPrefix(rest, first, sizeof(first), &tail);
+    const char *verb_cmd = is_login ? "/login" : "/logout";
+    const PicoAuth *typed = first[0] ? pico_find_auth(app, first) : NULL;
+    if (typed && HasSpace(rest))
+    {
+        if (!is_login)
+        {
+            return 0;
+        }
+        char prefix[96];
+        snprintf(prefix, sizeof(prefix), "%s %s", verb_cmd, typed->provider);
+        return AuthVerbs(typed, prefix, tail, out, max, 0);
+    }
+    int n = 0;
+    for (int i = 0; i < app->auth_count && n < max; i++)
+    {
+        const char *name = app->auths[i].provider;
+        if (!name || (!FoldPrefix(name, rest) && !FoldContains(name, rest)))
+        {
+            continue;
+        }
+        snprintf(out[n].label, sizeof(out[n].label), "%s", name);
+        snprintf(out[n].detail, sizeof(out[n].detail), "%s",
+                 app->auths[i].help ? app->auths[i].help : "");
+        snprintf(out[n].insert, sizeof(out[n].insert), "%s %s", verb_cmd, name);
+        n++;
+    }
+    /* With one provider, `/login <verb>` is unambiguous, so offer its verbs bare. */
+    if (is_login && app->auth_count == 1)
+    {
+        n = AuthVerbs(&app->auths[0], verb_cmd, rest, out, max, n);
+    }
+    return n;
 }
 
 static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
@@ -341,6 +548,10 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
         }
         return n;
     }
+    if (FoldEq(cmd, "login") || FoldEq(cmd, "logout"))
+    {
+        return AuthQuery(app, FoldEq(cmd, "login"), rest, out, max);
+    }
     return 0;
 }
 
@@ -370,6 +581,8 @@ static void CommandsInit(PicoApp *app)
 {
     pico_add_command(app, "model", "Switch model", CmdModel);
     pico_add_command(app, "effort", "Set reasoning effort for this model", CmdEffort);
+    pico_add_command(app, "login", "Sign in a provider", CmdLogin);
+    pico_add_command(app, "logout", "Sign out a provider", CmdLogout);
     pico_add_command(app, "compact", "Compact the current session", CmdCompact);
     pico_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_add_command(app, "help", "List commands", CmdHelp);

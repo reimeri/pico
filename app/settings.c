@@ -253,9 +253,7 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     {
         return;
     }
-    char *api_key = JsonObjStr(doc, obj, "api_key");
     char *model = JsonObjStr(doc, obj, "model");
-    CopyField(s->api_key, sizeof(s->api_key), api_key);
     CopyField(s->model, sizeof(s->model), model);
     int limit = JsonObjInt(doc, obj, "context_limit", 0);
     if (limit > 0)
@@ -269,7 +267,6 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     {
         s->resume_last = JsonEq(doc, resume, "true") || JsonEq(doc, resume, "1");
     }
-    free(api_key);
     free(model);
 }
 
@@ -498,7 +495,6 @@ void PicoSettings_Load(PicoApp *app)
         LoadFile(s, &catalog, &catalog_n, path);
     }
 
-    CopyField(s->api_key, sizeof(s->api_key), FirstEnv("PICO_API_KEY", "OPENAI_API_KEY"));
     CopyField(s->model, sizeof(s->model), FirstEnv("PICO_MODEL", "OPENAI_MODEL"));
     const char *limit = getenv("PICO_CONTEXT_LIMIT");
     if (limit && limit[0])

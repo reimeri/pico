@@ -16,6 +16,7 @@
 #define PICO_MAX_COMPLETERS 16
 #define PICO_MAX_COMPLETE_ITEMS 24
 #define PICO_MAX_PROVIDERS 16
+#define PICO_MAX_AUTH 16
 #define PICO_MAX_EFFORTS 16
 #define PICO_EFFORT_LEN 16
 
@@ -179,7 +180,6 @@ enum {
 typedef struct PicoLlmTurn {
     const char *model;
     const char *base_url;
-    const char *api_key;
     const char *instructions;
     const char *cache_key;
     const char *effort;
@@ -217,8 +217,17 @@ typedef struct PicoProvider {
     PicoProviderStreamFn stream;
 } PicoProvider;
 
+typedef struct PicoAuth {
+    const char *provider;
+    const char *help;
+    /* Space-separated sub-verbs `login` accepts, e.g. "key cancel". Offered as
+     * completions and forwarded verbatim; the provider parses them. */
+    const char *verbs;
+    PicoCmdFn login;
+    PicoHookFn logout;
+} PicoAuth;
+
 typedef struct PicoSettings {
-    char api_key[512];
     char model[128];
     int context_limit;
     double compact_ratio;
@@ -256,6 +265,9 @@ typedef struct PicoApp {
     int completer_count;
     PicoProvider providers[PICO_MAX_PROVIDERS];
     int provider_count;
+    PicoAuth auths[PICO_MAX_AUTH];
+    int auth_count;
+    struct PicoAuthStore *auth_store;
     bool submit_cancel;
     char *agent_input;
     PicoScrollbar chat_scrollbar;
@@ -291,6 +303,8 @@ void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQ
                         PicoCompleteAcceptFn accept);
 void pico_add_provider(PicoApp *app, const PicoProvider *p);
 const PicoProvider *pico_find_provider(const PicoApp *app, const char *name);
+void pico_add_auth(PicoApp *app, const PicoAuth *a);
+const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider);
 void pico_llm_result_free(PicoLlmResult *r);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook);

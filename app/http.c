@@ -9,6 +9,7 @@
 
 #include <curl/curl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct HttpCtx {
@@ -265,4 +266,183 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
         return PICO_HTTP_FAIL;
     }
     return PICO_HTTP_OK;
+}
+
+typedef struct BodyCtx {
+    PicoHttpCancelFn cancel;
+    void *user;
+    JsonBuf acc;
+} BodyCtx;
+
+static bool BodyCancelled(BodyCtx *c)
+{
+    return c->cancel && c->cancel(c->user);
+}
+
+static size_t OnBody(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    BodyCtx *c = (BodyCtx *)userdata;
+    size_t n = size * nmemb;
+    if (n == 0 || BodyCancelled(c))
+    {
+        return 0;
+    }
+    JsonBuf_Append(&c->acc, ptr, n);
+    return BodyCancelled(c) ? 0 : n;
+}
+
+static int OnBodyXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                      curl_off_t ulnow)
+{
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    return BodyCancelled((BodyCtx *)clientp) ? 1 : 0;
+}
+
+int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error)
+{
+    if (out_http)
+    {
+        *out_http = 0;
+    }
+    if (out_body)
+    {
+        *out_body = NULL;
+    }
+    if (out_error)
+    {
+        *out_error = NULL;
+    }
+    if (!req || !req->url || !req->url[0])
+    {
+        if (out_error)
+        {
+            *out_error = JsonDup("missing HTTP url");
+        }
+        return PICO_HTTP_FAIL;
+    }
+
+    BodyCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.cancel = req->cancel;
+    ctx.user = req->user;
+    JsonBuf_Init(&ctx.acc);
+
+    CURL *curl = curl_easy_init();
+    if (!curl)
+    {
+        JsonBuf_Free(&ctx.acc);
+        if (out_error)
+        {
+            *out_error = JsonDup("curl_easy_init failed");
+        }
+        return PICO_HTTP_FAIL;
+    }
+
+    struct curl_slist *headers = NULL;
+    for (int i = 0; i < req->header_count && i < PICO_HTTP_MAX_HEADERS; i++)
+    {
+        if (req->headers[i] && req->headers[i][0])
+        {
+            headers = curl_slist_append(headers, req->headers[i]);
+        }
+    }
+
+    const char *body = req->body ? req->body : "";
+    curl_easy_setopt(curl, CURLOPT_URL, req->url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnBody);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnBodyXfer);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (out_http)
+    {
+        *out_http = http;
+    }
+
+    bool cancelled = BodyCancelled(&ctx) || rc == CURLE_ABORTED_BY_CALLBACK;
+    if (cancelled)
+    {
+        JsonBuf_Free(&ctx.acc);
+        return PICO_HTTP_CANCEL;
+    }
+    if (rc != CURLE_OK)
+    {
+        JsonBuf_Free(&ctx.acc);
+        if (out_error)
+        {
+            *out_error = JsonDup(curl_easy_strerror(rc));
+        }
+        return PICO_HTTP_FAIL;
+    }
+    if (out_body)
+    {
+        *out_body = ctx.acc.data ? JsonBuf_Steal(&ctx.acc) : JsonDup("");
+    }
+    else
+    {
+        JsonBuf_Free(&ctx.acc);
+    }
+    return PICO_HTTP_OK;
+}
+
+static void FormPct(JsonBuf *b, const char *s)
+{
+    static const char kHex[] = "0123456789ABCDEF";
+    if (!s)
+    {
+        return;
+    }
+    for (; *s; s++)
+    {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+            c == '_' || c == '.' || c == '~')
+        {
+            JsonBuf_Putc(b, (char)c);
+        }
+        else
+        {
+            JsonBuf_Putc(b, '%');
+            JsonBuf_Putc(b, kHex[c >> 4]);
+            JsonBuf_Putc(b, kHex[c & 15]);
+        }
+    }
+}
+
+char *pico_http_form_encode(const char *const *keys, const char *const *vals, int n)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    for (int i = 0; i < n; i++)
+    {
+        if (!keys || !keys[i])
+        {
+            continue;
+        }
+        if (b.len)
+        {
+            JsonBuf_Putc(&b, '&');
+        }
+        FormPct(&b, keys[i]);
+        JsonBuf_Putc(&b, '=');
+        FormPct(&b, vals ? vals[i] : NULL);
+    }
+    return b.data ? JsonBuf_Steal(&b) : JsonDup("");
 }

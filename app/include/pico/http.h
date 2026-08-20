@@ -27,6 +27,18 @@ typedef struct PicoHttpPost {
     void *user; /* passed to both callbacks */
 } PicoHttpPost;
 
+/* Buffered JSON/form POST. `body` may be empty. `out_body` is malloc'd JSON/text. */
+typedef struct PicoHttpReq {
+    const char *url;
+    const char *body;
+    const char *headers[PICO_HTTP_MAX_HEADERS];
+    int header_count;
+    PicoHttpCancelFn cancel;
+    void *user;
+} PicoHttpReq;
+
 int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error);
+int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error);
+char *pico_http_form_encode(const char *const *keys, const char *const *vals, int n);
 
 #endif

@@ -61,7 +61,6 @@ struct PicoAgentRt {
     PicoProviderStreamFn work_stream;
     char *work_model;
     char *work_base_url;
-    char *work_api_key;
     char *work_effort;
     char *work_instructions;
     char *work_cache_key;
@@ -333,7 +332,6 @@ static void *WorkerMain(void *arg)
         PicoProviderStreamFn stream_fn = rt->work_stream;
         char *model = rt->work_model;
         char *base_url = rt->work_base_url;
-        char *api_key = rt->work_api_key;
         char *effort = rt->work_effort;
         char *instructions = rt->work_instructions;
         char *cache_key = rt->work_cache_key;
@@ -349,7 +347,6 @@ static void *WorkerMain(void *arg)
         rt->work_stream = NULL;
         rt->work_model = NULL;
         rt->work_base_url = NULL;
-        rt->work_api_key = NULL;
         rt->work_effort = NULL;
         rt->work_instructions = NULL;
         rt->work_cache_key = NULL;
@@ -369,7 +366,6 @@ static void *WorkerMain(void *arg)
             memset(&turn, 0, sizeof(turn));
             turn.model = model;
             turn.base_url = base_url;
-            turn.api_key = api_key;
             turn.instructions = instructions;
             turn.cache_key = cache_key;
             turn.effort = effort;
@@ -430,7 +426,6 @@ static void *WorkerMain(void *arg)
 
         free(model);
         free(base_url);
-        free(api_key);
         free(effort);
         free(instructions);
         free(cache_key);
@@ -498,7 +493,6 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
     rt->turn_provider = Dup(p->name);
     rt->work_model = Dup(m->id);
     rt->work_base_url = Dup(m->base_url);
-    rt->work_api_key = Dup(app->settings.api_key);
     rt->work_effort = Dup(PicoSettings_ActiveEffort(app));
     rt->work_instructions = Dup(rt->instructions ? rt->instructions : "");
     rt->work_cache_key = Dup(rt->cache_key);
@@ -1286,12 +1280,12 @@ void PicoAgent_Init(PicoApp *app)
     }
 }
 
-void PicoAgent_Shutdown(PicoApp *app)
+bool PicoAgent_Shutdown(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
     if (!rt)
     {
-        return;
+        return true;
     }
     pthread_mutex_lock(&rt->mu);
     rt->stop = true;
@@ -1309,6 +1303,8 @@ void PicoAgent_Shutdown(PicoApp *app)
     }
     bool done = !rt->busy;
     pthread_mutex_unlock(&rt->mu);
+    /* A worker stuck in a network call outlives us, so everything it can still
+     * reach is deliberately leaked rather than freed underneath it. */
     if (!done)
     {
         if (rt->started)
@@ -1316,7 +1312,7 @@ void PicoAgent_Shutdown(PicoApp *app)
             pthread_detach(rt->thread);
         }
         app->agent = NULL;
-        return;
+        return false;
     }
     if (rt->started)
     {
@@ -1338,7 +1334,6 @@ void PicoAgent_Shutdown(PicoApp *app)
     free(rt->think);
     free(rt->work_model);
     free(rt->work_base_url);
-    free(rt->work_api_key);
     free(rt->work_effort);
     free(rt->work_instructions);
     free(rt->work_cache_key);
@@ -1357,6 +1352,7 @@ void PicoAgent_Shutdown(PicoApp *app)
     curl_global_cleanup();
     free(rt);
     app->agent = NULL;
+    return true;
 }
 
 void PicoAgent_StartTurn(PicoApp *app, const char *user_text)

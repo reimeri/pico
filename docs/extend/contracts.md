@@ -41,6 +41,7 @@ Silent no-op if a `pico_add_*` is full or arguments are NULL.
 - User: `~/.config/pico/extensions/`
 - Workspace: `<workspace>/.pico/extensions/`
 - Only regular `.c` files; hidden names skipped; walk depth 8.
+- `/cd` changes `app->workspace` at runtime: new session, workspace settings, and a plugin reload. Read `app->workspace` when you use it. Assigning the field alone does not reload plugins or start a new session.
 
 ## `PicoApp`
 

@@ -15,6 +15,7 @@ typedef struct PicoSessionInfo {
 void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session_file);
 int PicoSession_List(const PicoApp *app, PicoSessionInfo **out);
 int PicoSession_Open(PicoApp *app, const char *id);
+void PicoSession_Reset(PicoApp *app);
 void PicoSession_LogUser(PicoApp *app, const char *content, const char *display);
 void PicoSession_LogAssistant(PicoApp *app, const char *content, int input_tokens, int cached_tokens);
 void PicoSession_LogToolCall(PicoApp *app, const char *call_id, const char *name, const char *args);

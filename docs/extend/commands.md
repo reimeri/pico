@@ -35,4 +35,4 @@ Full file: `examples/time_cmd.c`. User types `/time`. `/help` lists every regist
 - Max 64 commands (`PICO_MAX_COMMANDS`).
 - Builtin `/` completer (`bol_only`) lists your command automatically.
 
-To offer argument completions (`/docs topic`), add a `pico_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`.
+To offer argument completions (`/docs topic`), add a `pico_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`.

@@ -728,6 +728,17 @@ int PicoSession_Open(PicoApp *app, const char *id)
     snprintf(path, sizeof(path), "%s", found->path);
     free(list);
 
+    PicoSession_Reset(app);
+    app->session_ephemeral = false;
+    return ReplayFile(app, path);
+}
+
+void PicoSession_Reset(PicoApp *app)
+{
+    if (!app)
+    {
+        return;
+    }
     PicoAgent_DismissError(app);
     PicoApp_ClearMessages(app);
     PicoAgent_ClearInput(app);
@@ -739,8 +750,6 @@ int PicoSession_Open(PicoApp *app, const char *id)
     app->compact_summary = NULL;
     app->session_id[0] = '\0';
     app->session_path[0] = '\0';
-    app->session_ephemeral = false;
-    return ReplayFile(app, path);
 }
 
 void PicoSession_LogUser(PicoApp *app, const char *content, const char *display)

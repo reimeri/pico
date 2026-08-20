@@ -1,3 +1,6 @@
+#define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #include "pico/plugin.h"
 #include "agent.h"
 #include "session.h"
@@ -6,11 +9,14 @@
 #include "json.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifndef PICO_DOCS
 #define PICO_DOCS ""
@@ -471,6 +477,268 @@ static void CmdReload(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
+static void StripTrailingSlashes(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 1 && s[n - 1] == '/')
+    {
+        s[--n] = '\0';
+    }
+}
+
+static int ExpandUserPath(const char *workspace, const char *arg, char *out, size_t cap)
+{
+    if (!arg || !arg[0] || !out || cap < 2)
+    {
+        return -1;
+    }
+    if (arg[0] == '~' && (arg[1] == '\0' || arg[1] == '/'))
+    {
+        const char *home = getenv("HOME");
+        if (!home || !home[0])
+        {
+            return -1;
+        }
+        if (arg[1] == '\0')
+        {
+            snprintf(out, cap, "%s", home);
+            return 0;
+        }
+        int n = snprintf(out, cap, "%s%s", home, arg + 1);
+        if (n < 0 || (size_t)n >= cap)
+        {
+            return -1;
+        }
+        return 0;
+    }
+    if (arg[0] == '/')
+    {
+        if (strlen(arg) >= cap)
+        {
+            return -1;
+        }
+        snprintf(out, cap, "%s", arg);
+        return 0;
+    }
+    const char *ws = (workspace && workspace[0]) ? workspace : ".";
+    int n = snprintf(out, cap, "%s/%s", ws, arg);
+    if (n < 0 || (size_t)n >= cap)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap)
+{
+    char expanded[4096];
+    if (ExpandUserPath(workspace, arg, expanded, sizeof(expanded)) != 0)
+    {
+        return -1;
+    }
+    char real[4096];
+    if (!realpath(expanded, real))
+    {
+        return -1;
+    }
+    struct stat st;
+    if (stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
+    {
+        return -1;
+    }
+    if (strlen(real) >= cap)
+    {
+        return -1;
+    }
+    snprintf(out, cap, "%s", real);
+    return 0;
+}
+
+static void FormatHomePath(const char *path, char *out, size_t cap)
+{
+    const char *home = getenv("HOME");
+    if (home && home[0] && path)
+    {
+        size_t n = strlen(home);
+        while (n > 1 && home[n - 1] == '/')
+        {
+            n--;
+        }
+        if (strncmp(path, home, n) == 0 && (path[n] == '\0' || path[n] == '/'))
+        {
+            snprintf(out, cap, "~%s", path + n);
+            return;
+        }
+    }
+    snprintf(out, cap, "%s", path ? path : "");
+}
+
+static void CmdCd(PicoApp *app, const char *args)
+{
+    while (args && *args && isspace((unsigned char)*args))
+    {
+        args++;
+    }
+    if (!args || !args[0])
+    {
+        PicoComposer_SetText(app, "/cd ");
+        app->submit_cancel = true;
+        PicoComplete_Refresh(app);
+        return;
+    }
+    if (PicoAgent_BlocksReload(app))
+    {
+        Note(app, "Wait until the agent is idle before changing directory.");
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
+
+    char trimmed[4096];
+    snprintf(trimmed, sizeof(trimmed), "%s", args);
+    size_t tlen = strlen(trimmed);
+    while (tlen > 0 && isspace((unsigned char)trimmed[tlen - 1]))
+    {
+        trimmed[--tlen] = '\0';
+    }
+
+    char resolved[4096];
+    if (ResolveWorkspaceDir(app->workspace, trimmed, resolved, sizeof(resolved)) != 0)
+    {
+        char shown[400];
+        snprintf(shown, sizeof(shown), "%s", trimmed);
+        char line[512];
+        snprintf(line, sizeof(line), "Not a directory `%s`.", shown);
+        Note(app, line);
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
+
+    char current[4096];
+    const char *ws = app->workspace[0] ? app->workspace : ".";
+    if (realpath(ws, current) && strcmp(current, resolved) == 0)
+    {
+        char pretty[400];
+        FormatHomePath(resolved, pretty, sizeof(pretty));
+        char line[512];
+        snprintf(line, sizeof(line), "Already in `%s`.", pretty);
+        Note(app, line);
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
+
+    snprintf(app->workspace, sizeof(app->workspace), "%s", resolved);
+    PicoSession_Reset(app);
+    PicoSettings_Load(app);
+    PicoApp_RequestReload(app);
+
+    char pretty[400];
+    FormatHomePath(resolved, pretty, sizeof(pretty));
+    char line[512];
+    snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
+    Note(app, line);
+    ClearComposer(app);
+    app->submit_cancel = true;
+}
+
+static int CdQuery(PicoApp *app, const char *rest, PicoCompleteItem *out, int max)
+{
+    if (!rest)
+    {
+        rest = "";
+    }
+    char parent_typed[4096];
+    const char *name_prefix;
+    if (strcmp(rest, "~") == 0)
+    {
+        snprintf(parent_typed, sizeof(parent_typed), "~/");
+        name_prefix = "";
+    }
+    else
+    {
+        const char *slash = strrchr(rest, '/');
+        if (slash)
+        {
+            size_t plen = (size_t)(slash - rest + 1);
+            if (plen >= sizeof(parent_typed))
+            {
+                return 0;
+            }
+            memcpy(parent_typed, rest, plen);
+            parent_typed[plen] = '\0';
+            name_prefix = slash + 1;
+        }
+        else
+        {
+            parent_typed[0] = '\0';
+            name_prefix = rest;
+        }
+    }
+
+    char list_dir[4096];
+    if (!parent_typed[0])
+    {
+        const char *ws = app->workspace[0] ? app->workspace : ".";
+        if (!realpath(ws, list_dir))
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        char parent_arg[4096];
+        snprintf(parent_arg, sizeof(parent_arg), "%s", parent_typed);
+        StripTrailingSlashes(parent_arg);
+        if (ResolveWorkspaceDir(app->workspace, parent_arg, list_dir, sizeof(list_dir)) != 0)
+        {
+            return 0;
+        }
+    }
+
+    DIR *d = opendir(list_dir);
+    if (!d)
+    {
+        return 0;
+    }
+    int n = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL && n < max)
+    {
+        const char *name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        {
+            continue;
+        }
+        if (!FoldPrefix(name, name_prefix) && !FoldContains(name, name_prefix))
+        {
+            continue;
+        }
+        char full[4096];
+        int wn = snprintf(full, sizeof(full), "%s/%s", list_dir, name);
+        if (wn < 0 || (size_t)wn >= sizeof(full))
+        {
+            continue;
+        }
+        struct stat st;
+        if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode))
+        {
+            continue;
+        }
+        snprintf(out[n].label, sizeof(out[n].label), "%s", name);
+        out[n].detail[0] = '\0';
+        int ins = snprintf(out[n].insert, sizeof(out[n].insert), "/cd %s%s", parent_typed, name);
+        if (ins < 0 || (size_t)ins >= sizeof(out[n].insert))
+        {
+            continue;
+        }
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
 static const PicoCommand *FindCommand(PicoApp *app, const char *name)
 {
     for (int i = 0; i < app->command_count; i++)
@@ -513,7 +781,8 @@ static void SplitPrefix(const char *prefix, char *cmd, size_t cmd_cap, const cha
 static bool NeedsArgs(const char *name)
 {
     return FoldEq(name, "model") || FoldEq(name, "effort") || FoldEq(name, "login") ||
-           FoldEq(name, "logout") || FoldEq(name, "docs") || FoldEq(name, "resume");
+           FoldEq(name, "logout") || FoldEq(name, "docs") || FoldEq(name, "resume") ||
+           FoldEq(name, "cd");
 }
 
 static bool HasSpace(const char *s)
@@ -736,6 +1005,10 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
         free(list);
         return n;
     }
+    if (FoldEq(cmd, "cd"))
+    {
+        return CdQuery(app, rest, out, max);
+    }
     return 0;
 }
 
@@ -768,6 +1041,7 @@ static void CommandsInit(PicoApp *app)
     pico_add_command(app, "login", "Sign in a provider", CmdLogin);
     pico_add_command(app, "logout", "Sign out a provider", CmdLogout);
     pico_add_command(app, "resume", "Resume a previous session", CmdResume);
+    pico_add_command(app, "cd", "Change workspace directory", CmdCd);
     pico_add_command(app, "compact", "Compact the current session", CmdCompact);
     pico_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_add_command(app, "help", "List commands", CmdHelp);

@@ -282,7 +282,8 @@ typedef struct PicoApp {
     bool reload_queued;
     const char *hovered_link;
     bool hovered_tool;
-    char footer_text[256];
+    char footer_text[512];
+    char footer_right[128];
     char workspace[4096];
     char session_id[40];
     char session_path[4096];

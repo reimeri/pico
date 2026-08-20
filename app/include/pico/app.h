@@ -283,8 +283,7 @@ typedef struct PicoApp {
     bool reload_queued;
     const char *hovered_link;
     bool hovered_tool;
-    char footer_text[512];
-    char footer_right[128];
+    bool hovered_clickable;
     char workspace[4096];
     char session_id[40];
     char session_path[4096];
@@ -327,6 +326,7 @@ void PicoApp_Submit(PicoApp *app);
 void PicoApp_Cancel(PicoApp *app);
 void PicoApp_Frame(PicoApp *app);
 void PicoApp_RequestReload(PicoApp *app);
+bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path);
 
 typedef struct PicoExtInfo {
     const char *name;        /* NULL if unnamed / failed stub */
@@ -371,6 +371,7 @@ void PicoComplete_Render(PicoApp *app);
 void PicoComplete_Close(void);
 bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoApp *app);
+bool PicoFooter_MenuOpen(void);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);
 void PicoExts_Close(void);

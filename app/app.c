@@ -6,15 +6,18 @@
 #include "auth.h"
 #include "chat_sel.h"
 #include "json.h"
+#include "overlay.h"
 
 #include "clay/clay.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts);
 
@@ -446,6 +449,158 @@ void PicoApp_RequestReload(PicoApp *app)
     PicoPlugins_Reload(app);
 }
 
+static void FormatHomePath(const char *path, char *out, size_t cap)
+{
+    const char *home = getenv("HOME");
+    if (home && home[0] && path)
+    {
+        size_t n = strlen(home);
+        while (n > 1 && home[n - 1] == '/')
+        {
+            n--;
+        }
+        if (strncmp(path, home, n) == 0 && (path[n] == '\0' || path[n] == '/'))
+        {
+            snprintf(out, cap, "~%s", path + n);
+            return;
+        }
+    }
+    snprintf(out, cap, "%s", path ? path : "");
+}
+
+static int ExpandUserPath(const char *workspace, const char *arg, char *out, size_t cap)
+{
+    if (!arg || !arg[0] || !out || cap < 2)
+    {
+        return -1;
+    }
+    if (arg[0] == '~' && (arg[1] == '\0' || arg[1] == '/'))
+    {
+        const char *home = getenv("HOME");
+        if (!home || !home[0])
+        {
+            return -1;
+        }
+        if (arg[1] == '\0')
+        {
+            snprintf(out, cap, "%s", home);
+            return 0;
+        }
+        int n = snprintf(out, cap, "%s%s", home, arg + 1);
+        if (n < 0 || (size_t)n >= cap)
+        {
+            return -1;
+        }
+        return 0;
+    }
+    if (arg[0] == '/')
+    {
+        if (strlen(arg) >= cap)
+        {
+            return -1;
+        }
+        snprintf(out, cap, "%s", arg);
+        return 0;
+    }
+    const char *ws = (workspace && workspace[0]) ? workspace : ".";
+    int n = snprintf(out, cap, "%s/%s", ws, arg);
+    if (n < 0 || (size_t)n >= cap)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap)
+{
+    char expanded[4096];
+    if (ExpandUserPath(workspace, arg, expanded, sizeof(expanded)) != 0)
+    {
+        return -1;
+    }
+    char real[4096];
+    if (!realpath(expanded, real))
+    {
+        return -1;
+    }
+    struct stat st;
+    if (stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
+    {
+        return -1;
+    }
+    if (strlen(real) >= cap)
+    {
+        return -1;
+    }
+    snprintf(out, cap, "%s", real);
+    return 0;
+}
+
+bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
+{
+    if (!app)
+    {
+        return false;
+    }
+    if (PicoAgent_IsBusy(app))
+    {
+        PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
+        return false;
+    }
+
+    while (path && *path && isspace((unsigned char)*path))
+    {
+        path++;
+    }
+    if (!path || !path[0])
+    {
+        return false;
+    }
+
+    char trimmed[4096];
+    snprintf(trimmed, sizeof(trimmed), "%s", path);
+    size_t tlen = strlen(trimmed);
+    while (tlen > 0 && isspace((unsigned char)trimmed[tlen - 1]))
+    {
+        trimmed[--tlen] = '\0';
+    }
+
+    char resolved[4096];
+    if (ResolveWorkspaceDir(app->workspace, trimmed, resolved, sizeof(resolved)) != 0)
+    {
+        char shown[400];
+        snprintf(shown, sizeof(shown), "%s", trimmed);
+        char line[512];
+        snprintf(line, sizeof(line), "Not a directory `%s`.", shown);
+        PicoOverlay_Notify(app, line);
+        return false;
+    }
+
+    char current[4096];
+    const char *ws = app->workspace[0] ? app->workspace : ".";
+    if (realpath(ws, current) && strcmp(current, resolved) == 0)
+    {
+        char pretty[400];
+        FormatHomePath(resolved, pretty, sizeof(pretty));
+        char line[512];
+        snprintf(line, sizeof(line), "Already in `%s`.", pretty);
+        PicoOverlay_Notify(app, line);
+        return false;
+    }
+
+    snprintf(app->workspace, sizeof(app->workspace), "%s", resolved);
+    PicoSession_Reset(app);
+    PicoSettings_Load(app);
+    PicoApp_RequestReload(app);
+
+    char pretty[400];
+    FormatHomePath(resolved, pretty, sizeof(pretty));
+    char line[512];
+    snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
+    PicoOverlay_Notify(app, line);
+    return true;
+}
+
 void PicoApp_ClearMessages(PicoApp *app)
 {
     if (!app)
@@ -602,8 +757,9 @@ void PicoApp_Frame(PicoApp *app)
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
     bool had_exts = PicoExts_IsOpen();
+    bool had_footer = PicoFooter_MenuOpen();
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && !had_complete && !had_exts && IsKeyPressed(KEY_ESCAPE))
+    if (!had_warn && !had_complete && !had_exts && !had_footer && IsKeyPressed(KEY_ESCAPE))
     {
         if (PicoAgent_IsBusy(app))
         {
@@ -647,7 +803,7 @@ void PicoApp_Frame(PicoApp *app)
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT);
 
-    if (app->hovered_link || app->hovered_tool)
+    if (app->hovered_link || app->hovered_tool || app->hovered_clickable)
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }

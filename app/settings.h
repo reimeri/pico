@@ -15,6 +15,8 @@ const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app);
 const char *PicoSettings_ActiveEffort(const PicoApp *app);
 void PicoSettings_SyncActive(PicoApp *app);
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort);
+bool PicoSettings_SetModel(PicoApp *app, const char *id_or_name);
+bool PicoSettings_SetEffort(PicoApp *app, const char *level);
 bool PicoSettings_SaveSelection(PicoApp *app, bool save_model, bool save_effort);
 
 #endif

@@ -46,7 +46,8 @@ add_executable(pico
     builtins/commands.c
     builtins/files.c
     builtins/openai.c
-    builtins/extensions.c)
+    builtins/extensions.c
+    third_party/tinyfiledialogs/tinyfiledialogs.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
 
@@ -59,6 +60,7 @@ target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyfiledialogs
     ${raylib_SOURCE_DIR}/src/external/glfw/include)
 
 target_compile_definitions(pico PRIVATE

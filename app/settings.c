@@ -2,10 +2,13 @@
 
 #include "settings.h"
 #include "json.h"
+#include "overlay.h"
+#include "session.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
@@ -447,6 +450,80 @@ void PicoSettings_SyncActive(PicoApp *app)
     {
         app->tokens_limit = app->settings.context_limit;
     }
+}
+
+static PicoModel *FindCatalog(PicoApp *app, const char *q)
+{
+    if (!app || !q || !q[0])
+    {
+        return NULL;
+    }
+    for (int i = 0; i < app->model_count; i++)
+    {
+        if (strcasecmp(app->models[i].id, q) == 0 || strcasecmp(app->models[i].name, q) == 0)
+        {
+            return &app->models[i];
+        }
+    }
+    return NULL;
+}
+
+bool PicoSettings_SetModel(PicoApp *app, const char *id_or_name)
+{
+    if (!app)
+    {
+        return false;
+    }
+    PicoModel *m = FindCatalog(app, id_or_name);
+    if (!m)
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "Unknown model `%s`. Try `/model` for the catalog.",
+                 id_or_name ? id_or_name : "");
+        PicoOverlay_Notify(app, line);
+        return false;
+    }
+    snprintf(app->settings.model, sizeof(app->settings.model), "%s", m->id);
+    PicoSettings_SyncActive(app);
+    PicoSettings_SaveSelection(app, true, false);
+    PicoSession_LogModelChange(app, app->settings.model, PicoSettings_ActiveEffort(app));
+    char line[256];
+    snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
+             PicoSettings_ActiveEffort(app));
+    PicoOverlay_Notify(app, line);
+    return true;
+}
+
+bool PicoSettings_SetEffort(PicoApp *app, const char *level)
+{
+    if (!app)
+    {
+        return false;
+    }
+    PicoModel *m = PicoSettings_ActiveModel(app);
+    if (!m)
+    {
+        PicoOverlay_Notify(app, "No model in the catalog. Add one in settings.json.");
+        return false;
+    }
+    if (!level || !level[0])
+    {
+        return false;
+    }
+    if (m->effort_count > 0 && !PicoSettings_EffortAllowed(m, level))
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "`%s` is not in this model's effort list.", level);
+        PicoOverlay_Notify(app, line);
+        return false;
+    }
+    snprintf(m->selected_effort, sizeof(m->selected_effort), "%s", level);
+    PicoSettings_SaveSelection(app, false, true);
+    PicoSession_LogModelChange(app, app->settings.model, PicoSettings_ActiveEffort(app));
+    char line[256];
+    snprintf(line, sizeof(line), "Effort `%s` for `%s`", m->selected_effort, m->name[0] ? m->name : m->id);
+    PicoOverlay_Notify(app, line);
+    return true;
 }
 
 static void EnsureDefaultCatalog(PicoApp *app)

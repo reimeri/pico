@@ -94,27 +94,6 @@ static bool FoldContains(const char *s, const char *needle)
     return false;
 }
 
-static PicoModel *FindCatalog(PicoApp *app, const char *q)
-{
-    if (!q || !q[0])
-    {
-        return NULL;
-    }
-    for (int i = 0; i < app->model_count; i++)
-    {
-        if (FoldEq(app->models[i].id, q) || FoldEq(app->models[i].name, q))
-        {
-            return &app->models[i];
-        }
-    }
-    return NULL;
-}
-
-static void LogSelection(PicoApp *app)
-{
-    PicoSession_LogModelChange(app, app->settings.model, PicoSettings_ActiveEffort(app));
-}
-
 static void CmdModel(PicoApp *app, const char *args)
 {
     while (args && *args && isspace((unsigned char)*args))
@@ -128,24 +107,7 @@ static void CmdModel(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    PicoModel *m = FindCatalog(app, args);
-    if (!m)
-    {
-        char line[256];
-        snprintf(line, sizeof(line), "Unknown model `%s`. Try `/model` for the catalog.", args);
-        PicoOverlay_Notify(app, line);
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
-    snprintf(app->settings.model, sizeof(app->settings.model), "%s", m->id);
-    PicoSettings_SyncActive(app);
-    PicoSettings_SaveSelection(app, true, false);
-    LogSelection(app);
-    char line[256];
-    snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
-             PicoSettings_ActiveEffort(app));
-    PicoOverlay_Notify(app, line);
+    PicoSettings_SetModel(app, args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -156,7 +118,6 @@ static void CmdEffort(PicoApp *app, const char *args)
     {
         args++;
     }
-    PicoModel *m = PicoSettings_ActiveModel(app);
     if (!args || !args[0])
     {
         PicoComposer_SetText(app, "/effort ");
@@ -164,29 +125,7 @@ static void CmdEffort(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    if (!m)
-    {
-        PicoOverlay_Notify(app, "No model in the catalog. Add one in settings.json.");
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
-    const char *level = args;
-    if (m->effort_count > 0 && !PicoSettings_EffortAllowed(m, level))
-    {
-        char line[256];
-        snprintf(line, sizeof(line), "`%s` is not in this model's effort list.", level);
-        PicoOverlay_Notify(app, line);
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
-    snprintf(m->selected_effort, sizeof(m->selected_effort), "%s", level);
-    PicoSettings_SaveSelection(app, false, true);
-    LogSelection(app);
-    char line[256];
-    snprintf(line, sizeof(line), "Effort `%s` for `%s`", m->selected_effort, m->name[0] ? m->name : m->id);
-    PicoOverlay_Notify(app, line);
+    PicoSettings_SetEffort(app, args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -571,25 +510,6 @@ static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out
     return 0;
 }
 
-static void FormatHomePath(const char *path, char *out, size_t cap)
-{
-    const char *home = getenv("HOME");
-    if (home && home[0] && path)
-    {
-        size_t n = strlen(home);
-        while (n > 1 && home[n - 1] == '/')
-        {
-            n--;
-        }
-        if (strncmp(path, home, n) == 0 && (path[n] == '\0' || path[n] == '/'))
-        {
-            snprintf(out, cap, "~%s", path + n);
-            return;
-        }
-    }
-    snprintf(out, cap, "%s", path ? path : "");
-}
-
 static void CmdCd(PicoApp *app, const char *args)
 {
     while (args && *args && isspace((unsigned char)*args))
@@ -603,59 +523,8 @@ static void CmdCd(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    if (PicoAgent_IsBusy(app))
-    {
-        PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
 
-    char trimmed[4096];
-    snprintf(trimmed, sizeof(trimmed), "%s", args);
-    size_t tlen = strlen(trimmed);
-    while (tlen > 0 && isspace((unsigned char)trimmed[tlen - 1]))
-    {
-        trimmed[--tlen] = '\0';
-    }
-
-    char resolved[4096];
-    if (ResolveWorkspaceDir(app->workspace, trimmed, resolved, sizeof(resolved)) != 0)
-    {
-        char shown[400];
-        snprintf(shown, sizeof(shown), "%s", trimmed);
-        char line[512];
-        snprintf(line, sizeof(line), "Not a directory `%s`.", shown);
-        PicoOverlay_Notify(app, line);
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
-
-    char current[4096];
-    const char *ws = app->workspace[0] ? app->workspace : ".";
-    if (realpath(ws, current) && strcmp(current, resolved) == 0)
-    {
-        char pretty[400];
-        FormatHomePath(resolved, pretty, sizeof(pretty));
-        char line[512];
-        snprintf(line, sizeof(line), "Already in `%s`.", pretty);
-        PicoOverlay_Notify(app, line);
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
-
-    snprintf(app->workspace, sizeof(app->workspace), "%s", resolved);
-    PicoSession_Reset(app);
-    PicoSettings_Load(app);
-    PicoApp_RequestReload(app);
-
-    char pretty[400];
-    FormatHomePath(resolved, pretty, sizeof(pretty));
-    char line[512];
-    snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
-    PicoOverlay_Notify(app, line);
+    PicoApp_ChangeWorkspace(app, args);
     ClearComposer(app);
     app->submit_cancel = true;
 }

@@ -331,7 +331,7 @@ void PicoChat_Render(PicoApp *app)
 void PicoChat_HandlePointer(PicoApp *app)
 {
     PicoChatSel_Clamp(app);
-    if (app->status_warn || PicoExts_IsOpen())
+    if (app->status_warn || PicoExts_IsOpen() || PicoFooter_MenuOpen())
     {
         return;
     }

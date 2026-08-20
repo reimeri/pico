@@ -4,6 +4,7 @@
 #include "session.h"
 #include "settings.h"
 #include "auth.h"
+#include "chat_sel.h"
 #include "json.h"
 
 #include "clay/clay.h"
@@ -445,17 +446,11 @@ void PicoApp_RequestReload(PicoApp *app)
     PicoPlugins_Reload(app);
 }
 
-void PicoApp_Free(PicoApp *app)
+void PicoApp_ClearMessages(PicoApp *app)
 {
-    /* A detached agent worker outlives us and can still reach the auth store to
-     * refresh a token, so leave the store and the struct itself alone in that case;
-     * the process is exiting anyway. Everything freed below is reached only through
-     * the agent runtime, which the detach path already leaks. */
-    bool agent_reaped = PicoAgent_Shutdown(app);
-    PicoPlugins_Shutdown(app);
-    if (agent_reaped)
+    if (!app)
     {
-        PicoAuth_Free(app);
+        return;
     }
     for (int i = 0; i < app->message_count; i++)
     {
@@ -469,7 +464,25 @@ void PicoApp_Free(PicoApp *app)
         }
         free(app->messages[i].trace);
         MdDocument_Free(&app->messages[i].doc);
+        memset(&app->messages[i], 0, sizeof(app->messages[i]));
     }
+    app->message_count = 0;
+    PicoChatSel_Clear(app);
+}
+
+void PicoApp_Free(PicoApp *app)
+{
+    /* A detached agent worker outlives us and can still reach the auth store to
+     * refresh a token, so leave the store and the struct itself alone in that case;
+     * the process is exiting anyway. Everything freed below is reached only through
+     * the agent runtime, which the detach path already leaks. */
+    bool agent_reaped = PicoAgent_Shutdown(app);
+    PicoPlugins_Shutdown(app);
+    if (agent_reaped)
+    {
+        PicoAuth_Free(app);
+    }
+    PicoApp_ClearMessages(app);
     free(app->messages);
     free(app->composer.text);
     free(app->status_warn);

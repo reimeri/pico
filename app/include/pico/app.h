@@ -313,6 +313,7 @@ void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_jso
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
                  PicoSessionStart session_start, const char *session_file);
 void PicoApp_Free(PicoApp *app);
+void PicoApp_ClearMessages(PicoApp *app);
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown);
 void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args);
 void PicoApp_SetLastToolOutput(PicoApp *app, const char *output);

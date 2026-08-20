@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef PICO_DOCS
 #define PICO_DOCS ""
@@ -187,6 +188,71 @@ static void CmdCompact(PicoApp *app, const char *args)
 {
     (void)args;
     PicoAgent_Compact(app);
+    ClearComposer(app);
+    app->submit_cancel = true;
+}
+
+static void RelAge(char *out, size_t cap, time_t mtime)
+{
+    time_t now = time(NULL);
+    long sec = (long)(now - mtime);
+    if (sec < 0)
+    {
+        sec = 0;
+    }
+    if (sec < 60)
+    {
+        snprintf(out, cap, "<1m");
+    }
+    else if (sec < 3600)
+    {
+        snprintf(out, cap, "%ldm", sec / 60);
+    }
+    else if (sec < 86400)
+    {
+        snprintf(out, cap, "%ldh", sec / 3600);
+    }
+    else
+    {
+        snprintf(out, cap, "%ldd", sec / 86400);
+    }
+}
+
+static void CmdResume(PicoApp *app, const char *args)
+{
+    while (args && *args && isspace((unsigned char)*args))
+    {
+        args++;
+    }
+    if (!args || !args[0])
+    {
+        PicoComposer_SetText(app, "/resume ");
+        app->submit_cancel = true;
+        PicoComplete_Refresh(app);
+        return;
+    }
+    if (PicoAgent_BlocksReload(app))
+    {
+        Note(app, "Wait until the agent is idle before resuming a session.");
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
+    if (FoldEq(app->session_id, args))
+    {
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
+    if (PicoSession_Open(app, args) != 0)
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "Unknown session `%s`. Try `/resume`.", args);
+        Note(app, line);
+        ClearComposer(app);
+        app->submit_cancel = true;
+        return;
+    }
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -447,7 +513,7 @@ static void SplitPrefix(const char *prefix, char *cmd, size_t cmd_cap, const cha
 static bool NeedsArgs(const char *name)
 {
     return FoldEq(name, "model") || FoldEq(name, "effort") || FoldEq(name, "login") ||
-           FoldEq(name, "logout") || FoldEq(name, "docs");
+           FoldEq(name, "logout") || FoldEq(name, "docs") || FoldEq(name, "resume");
 }
 
 static bool HasSpace(const char *s)
@@ -642,6 +708,34 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
         }
         return n;
     }
+    if (FoldEq(cmd, "resume"))
+    {
+        PicoSessionInfo *list = NULL;
+        int nlist = PicoSession_List(app, &list);
+        for (int i = 0; i < nlist && n < max; i++)
+        {
+            const PicoSessionInfo *s = &list[i];
+            if (rest[0] && !FoldContains(s->title, rest) && !FoldContains(s->id, rest))
+            {
+                continue;
+            }
+            snprintf(out[n].label, sizeof(out[n].label), "%s", s->title);
+            char age[32];
+            RelAge(age, sizeof(age), s->mtime);
+            if (s->id[0] && FoldEq(s->id, app->session_id))
+            {
+                snprintf(out[n].detail, sizeof(out[n].detail), "current · %s", age);
+            }
+            else
+            {
+                snprintf(out[n].detail, sizeof(out[n].detail), "%s", age);
+            }
+            snprintf(out[n].insert, sizeof(out[n].insert), "/resume %s", s->id);
+            n++;
+        }
+        free(list);
+        return n;
+    }
     return 0;
 }
 
@@ -673,6 +767,7 @@ static void CommandsInit(PicoApp *app)
     pico_add_command(app, "effort", "Set reasoning effort for this model", CmdEffort);
     pico_add_command(app, "login", "Sign in a provider", CmdLogin);
     pico_add_command(app, "logout", "Sign out a provider", CmdLogout);
+    pico_add_command(app, "resume", "Resume a previous session", CmdResume);
     pico_add_command(app, "compact", "Compact the current session", CmdCompact);
     pico_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_add_command(app, "help", "List commands", CmdHelp);

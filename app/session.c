@@ -6,10 +6,13 @@
 #include "json.h"
 #include "settings.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static int EncodeCwd(const char *cwd, char *out, size_t cap)
@@ -52,6 +55,12 @@ static void SessionDir(const PicoApp *app, char *out, size_t cap)
     snprintf(out, cap, "%s/sessions/%s", cfg, enc);
 }
 
+static bool IsSessionJsonl(const char *name)
+{
+    size_t len = name ? strlen(name) : 0;
+    return len >= 7 && name[0] != '.' && strcmp(name + len - 6, ".jsonl") == 0;
+}
+
 static int FindLatest(const char *dir, char *out, size_t cap)
 {
     DIR *d = opendir(dir);
@@ -61,18 +70,26 @@ static int FindLatest(const char *dir, char *out, size_t cap)
     }
     char best[256];
     best[0] = '\0';
+    time_t best_mtime = 0;
     struct dirent *ent;
     while ((ent = readdir(d)))
     {
         const char *n = ent->d_name;
-        size_t len = strlen(n);
-        if (len < 7 || strcmp(n + len - 6, ".jsonl") != 0)
+        if (!IsSessionJsonl(n))
         {
             continue;
         }
-        if (!best[0] || strcmp(n, best) > 0)
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/%s", dir, n);
+        struct stat st;
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        {
+            continue;
+        }
+        if (!best[0] || st.st_mtime > best_mtime)
         {
             snprintf(best, sizeof(best), "%s", n);
+            best_mtime = st.st_mtime;
         }
     }
     closedir(d);
@@ -82,6 +99,234 @@ static int FindLatest(const char *dir, char *out, size_t cap)
     }
     snprintf(out, cap, "%s/%s", dir, best);
     return 0;
+}
+
+static void IdFromName(const char *name, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (!name || cap < 2)
+    {
+        return;
+    }
+    const char *us = strchr(name, '_');
+    if (!us || !us[1])
+    {
+        return;
+    }
+    us++;
+    size_t len = strlen(us);
+    if (len > 6 && strcmp(us + len - 6, ".jsonl") == 0)
+    {
+        len -= 6;
+    }
+    if (len >= cap)
+    {
+        len = cap - 1;
+    }
+    memcpy(out, us, len);
+    out[len] = '\0';
+}
+
+static void MakeTitle(char *out, size_t cap, const char *src)
+{
+    if (!out || cap == 0)
+    {
+        return;
+    }
+    out[0] = '\0';
+    if (!src)
+    {
+        snprintf(out, cap, "Untitled");
+        return;
+    }
+    while (*src && isspace((unsigned char)*src))
+    {
+        src++;
+    }
+    size_t max_keep = 72;
+    if (max_keep + 1 > cap)
+    {
+        max_keep = cap - 1;
+    }
+    size_t n = 0;
+    bool space = false;
+    for (const char *p = src; *p && n < max_keep; p++)
+    {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ')
+        {
+            if (n == 0)
+            {
+                continue;
+            }
+            space = true;
+            continue;
+        }
+        if (space)
+        {
+            if (n + 1 >= max_keep)
+            {
+                break;
+            }
+            out[n++] = ' ';
+            space = false;
+        }
+        out[n++] = (char)c;
+    }
+    out[n] = '\0';
+    if (n == 0)
+    {
+        snprintf(out, cap, "Untitled");
+    }
+}
+
+static void ScanSessionFile(const char *path, char *id, size_t id_cap, char *title, size_t title_cap)
+{
+    if (title && title_cap)
+    {
+        title[0] = '\0';
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        if (title && title_cap)
+        {
+            snprintf(title, title_cap, "Untitled");
+        }
+        return;
+    }
+    char *buf = NULL;
+    size_t buf_cap = 0;
+    bool got_title = false;
+    while (!got_title && getline(&buf, &buf_cap, f) != -1)
+    {
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+        {
+            buf[--len] = '\0';
+        }
+        if (len == 0)
+        {
+            continue;
+        }
+        JsonDoc doc;
+        if (JsonParse(&doc, buf, len) != 0)
+        {
+            continue;
+        }
+        char *type = JsonObjStr(&doc, 0, "type");
+        if (type && strcmp(type, "session") == 0)
+        {
+            char *sid = JsonObjStr(&doc, 0, "id");
+            if (sid && sid[0] && id && id_cap)
+            {
+                snprintf(id, id_cap, "%s", sid);
+            }
+            free(sid);
+        }
+        else if (type && strcmp(type, "message") == 0)
+        {
+            char *role = JsonObjStr(&doc, 0, "role");
+            if (role && strcmp(role, "user") == 0)
+            {
+                char *display = JsonObjStr(&doc, 0, "display");
+                char *content = JsonObjStr(&doc, 0, "content");
+                const char *src = (display && display[0]) ? display : content;
+                MakeTitle(title, title_cap, src);
+                got_title = true;
+                free(display);
+                free(content);
+            }
+            free(role);
+        }
+        free(type);
+        JsonFree(&doc);
+    }
+    free(buf);
+    fclose(f);
+    if (title && title_cap && !title[0])
+    {
+        snprintf(title, title_cap, "Untitled");
+    }
+}
+
+static int CmpMtimeDesc(const void *a, const void *b)
+{
+    const PicoSessionInfo *x = (const PicoSessionInfo *)a;
+    const PicoSessionInfo *y = (const PicoSessionInfo *)b;
+    if (x->mtime > y->mtime)
+    {
+        return -1;
+    }
+    if (x->mtime < y->mtime)
+    {
+        return 1;
+    }
+    return strcmp(y->path, x->path);
+}
+
+int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
+{
+    if (out)
+    {
+        *out = NULL;
+    }
+    if (!app || !out)
+    {
+        return 0;
+    }
+    char dir[4096];
+    SessionDir(app, dir, sizeof(dir));
+    DIR *d = opendir(dir);
+    if (!d)
+    {
+        return 0;
+    }
+    PicoSessionInfo *list = NULL;
+    int n = 0;
+    int cap = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)))
+    {
+        if (!IsSessionJsonl(ent->d_name))
+        {
+            continue;
+        }
+        if (n >= cap)
+        {
+            int next_cap = cap == 0 ? 8 : cap * 2;
+            PicoSessionInfo *next = (PicoSessionInfo *)realloc(list, (size_t)next_cap * sizeof(*list));
+            if (!next)
+            {
+                break;
+            }
+            list = next;
+            cap = next_cap;
+        }
+        PicoSessionInfo *s = &list[n];
+        memset(s, 0, sizeof(*s));
+        snprintf(s->path, sizeof(s->path), "%s/%s", dir, ent->d_name);
+        struct stat st;
+        if (stat(s->path, &st) != 0 || !S_ISREG(st.st_mode))
+        {
+            continue;
+        }
+        s->mtime = st.st_mtime;
+        IdFromName(ent->d_name, s->id, sizeof(s->id));
+        ScanSessionFile(s->path, s->id, sizeof(s->id), s->title, sizeof(s->title));
+        if (!s->id[0])
+        {
+            continue;
+        }
+        n++;
+    }
+    closedir(d);
+    if (n > 1)
+    {
+        qsort(list, (size_t)n, sizeof(*list), CmpMtimeDesc);
+    }
+    *out = list;
+    return n;
 }
 
 static void WriteLine(PicoApp *app, const char *json)
@@ -435,6 +680,67 @@ void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session
             ReplayFile(app, latest);
         }
     }
+}
+
+int PicoSession_Open(PicoApp *app, const char *id)
+{
+    if (!app || !id || !id[0] || PicoAgent_BlocksReload(app))
+    {
+        return -1;
+    }
+
+    PicoSessionInfo *list = NULL;
+    int n = PicoSession_List(app, &list);
+    const PicoSessionInfo *found = NULL;
+    const PicoSessionInfo *prefix = NULL;
+    int prefix_hits = 0;
+    size_t id_len = strlen(id);
+    for (int i = 0; i < n; i++)
+    {
+        if (strcmp(list[i].id, id) == 0)
+        {
+            found = &list[i];
+            break;
+        }
+        if (strncmp(list[i].id, id, id_len) == 0)
+        {
+            prefix = &list[i];
+            prefix_hits++;
+        }
+    }
+    if (!found && prefix_hits == 1)
+    {
+        found = prefix;
+    }
+    if (!found)
+    {
+        free(list);
+        return -1;
+    }
+
+    if (app->session_path[0] && strcmp(app->session_path, found->path) == 0)
+    {
+        free(list);
+        return 0;
+    }
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s", found->path);
+    free(list);
+
+    PicoAgent_DismissError(app);
+    PicoApp_ClearMessages(app);
+    PicoAgent_ClearInput(app);
+    PicoAgent_RotateCacheKey(app);
+    app->tokens_used = 0;
+    app->tokens_cached = 0;
+    app->agent_activity[0] = '\0';
+    free(app->compact_summary);
+    app->compact_summary = NULL;
+    app->session_id[0] = '\0';
+    app->session_path[0] = '\0';
+    app->session_ephemeral = false;
+    return ReplayFile(app, path);
 }
 
 void PicoSession_LogUser(PicoApp *app, const char *content, const char *display)

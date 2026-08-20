@@ -41,6 +41,7 @@ typedef struct RtWord {
     bool bold;
     bool italic;
     bool code;
+    bool strike;
     char *link_url; // arena owned, stable for the document lifetime
     bool hard_break; // length is 0; forces a line break
     bool space_before; // the source had whitespace before this word
@@ -52,6 +53,7 @@ typedef struct RtRun {
     bool bold;
     bool italic;
     bool code;
+    bool strike;
     char *link_url;
     bool space_before; // emit a space before this run (source had whitespace)
 } RtRun;
@@ -128,16 +130,16 @@ static void PushWord(WordArray *words, RtWord word)
     words->items[words->count++] = word;
 }
 
-static void SplitChunksIntoWords(MdBlock *block, const RichTextStyle *style, WordArray *words)
+static void SplitChunksIntoWords(MdChunk *chunks, int chunk_count, bool force_bold,
+                                 WordArray *words)
 {
-    bool heading = block->type == MDB_HEADING;
     // Tracks whether whitespace preceded the next word; carries across chunk
     // boundaries so a space at the end of one chunk separates the first word
     // of the next.
     bool pending_space = false;
-    for (int c = 0; c < block->chunk_count; c++)
+    for (int c = 0; c < chunk_count; c++)
     {
-        MdChunk *chunk = &block->chunks[c];
+        MdChunk *chunk = &chunks[c];
         const char *start = NULL;
         for (int i = 0; i <= chunk->length; i++)
         {
@@ -149,9 +151,10 @@ static void SplitChunksIntoWords(MdBlock *block, const RichTextStyle *style, Wor
                     RtWord word = {0};
                     word.text = start;
                     word.length = (int)(chunk->text + i - start);
-                    word.bold = chunk->bold || heading;
+                    word.bold = chunk->bold || force_bold;
                     word.italic = chunk->italic;
                     word.code = chunk->code;
+                    word.strike = chunk->strike;
                     word.link_url = chunk->link_url;
                     word.space_before = pending_space;
                     PushWord(words, word);
@@ -176,7 +179,7 @@ static void SplitChunksIntoWords(MdBlock *block, const RichTextStyle *style, Wor
 static bool SameStyle(RtWord a, RtWord b)
 {
     return a.bold == b.bold && a.italic == b.italic && a.code == b.code &&
-           a.link_url == b.link_url;
+           a.strike == b.strike && a.link_url == b.link_url;
 }
 
 static void MeasureWords(WordArray *words, const RichTextStyle *style)
@@ -203,6 +206,7 @@ typedef struct ScratchRun {
     bool bold;
     bool italic;
     bool code;
+    bool strike;
     char *link_url;
     bool space_before;
 } ScratchRun;
@@ -268,7 +272,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
     }
 
     WordArray words = {0};
-    SplitChunksIntoWords(block, style, &words);
+    bool force_bold = style->force_bold || block->type == MDB_HEADING;
+    SplitChunksIntoWords(block->chunks, block->chunk_count, force_bold, &words);
     MeasureWords(&words, style);
 
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
@@ -311,13 +316,15 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.bold = word->bold;
             new_run.italic = word->italic;
             new_run.code = word->code;
+            new_run.strike = word->strike;
             new_run.link_url = word->link_url;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
             line_x = word->width;
         }
         else if (fits && last_run && last_run->bold == word->bold && last_run->italic == word->italic &&
-                 last_run->code == word->code && last_run->link_url == word->link_url)
+                 last_run->code == word->code && last_run->strike == word->strike &&
+                 last_run->link_url == word->link_url)
         {
             // Extend the current run.
             ScratchRunAppendWord(last_run, word, word->space_before);
@@ -336,6 +343,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.bold = word->bold;
             new_run.italic = word->italic;
             new_run.code = word->code;
+            new_run.strike = word->strike;
             new_run.link_url = word->link_url;
             new_run.space_before = word->space_before;
             current_line.runs[current_line.run_count++] = new_run;
@@ -352,6 +360,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.bold = word->bold;
             new_run.italic = word->italic;
             new_run.code = word->code;
+            new_run.strike = word->strike;
             new_run.link_url = word->link_url;
             current_line.runs = (ScratchRun *)malloc(4 * sizeof(ScratchRun));
             current_line.run_capacity = 4;
@@ -383,6 +392,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             dst->bold = src->bold;
             dst->italic = src->italic;
             dst->code = src->code;
+            dst->strike = src->strike;
             dst->link_url = src->link_url;
             dst->space_before = src->space_before;
         }
@@ -396,6 +406,19 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
 // ---------------------------------------------------------------------------
 // Emission
 
+static void EmitStrikeBar(Clay_Color color)
+{
+    CLAY_AUTO_ID({.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                               .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_CENTER,
+                                                .parent = CLAY_ATTACH_POINT_LEFT_CENTER},
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                               .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT},
+                  .layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(1)}},
+                  .backgroundColor = color})
+    {
+    }
+}
+
 static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *emit)
 {
     Clay_TextElementConfig config =
@@ -408,7 +431,18 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
                       .backgroundColor = style->code_bg_color,
                       .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
-            PicoChatSel_Text(text, config);
+            if (run->strike)
+            {
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT(0)}}})
+                {
+                    PicoChatSel_Text(text, config);
+                    EmitStrikeBar(config.textColor);
+                }
+            }
+            else
+            {
+                PicoChatSel_Text(text, config);
+            }
         }
     }
     else if (run->link_url)
@@ -423,6 +457,18 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
         CLAY(id, {})
         {
             PicoChatSel_Text(text, config);
+            if (run->strike)
+            {
+                EmitStrikeBar(config.textColor);
+            }
+        }
+    }
+    else if (run->strike)
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT(0)}}})
+        {
+            PicoChatSel_Text(text, config);
+            EmitStrikeBar(config.textColor);
         }
     }
     else
@@ -444,7 +490,8 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                                 .height = CLAY_SIZING_FIXED((float)row_h)},
-                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}})
+                                     .childAlignment = {.x = style->text_align,
+                                                        .y = CLAY_ALIGN_Y_CENTER}}})
             {
                 if (line->run_count == 0)
                 {
@@ -479,4 +526,52 @@ void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_wi
         block->wrap_cache = cache;
     }
     EmitLines(cache, style, emit);
+}
+
+void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextStyle *style,
+                               float *preferred_width, float *min_width)
+{
+    float preferred = 0;
+    float min = 0;
+    WordArray words = {0};
+    SplitChunksIntoWords(chunks, chunk_count, style->force_bold, &words);
+    MeasureWords(&words, style);
+
+    Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
+    float space_width = Measure(" ", 1, &space_config).width;
+
+    float line_x = 0;
+    for (int i = 0; i < words.count; i++)
+    {
+        RtWord *word = &words.items[i];
+        if (word->hard_break)
+        {
+            if (line_x > preferred)
+            {
+                preferred = line_x;
+            }
+            line_x = 0;
+            continue;
+        }
+        if (word->width > min)
+        {
+            min = word->width;
+        }
+        float gap = (line_x > 0 && word->space_before) ? space_width : 0;
+        line_x += gap + word->width;
+    }
+    if (line_x > preferred)
+    {
+        preferred = line_x;
+    }
+
+    free(words.items);
+    if (preferred_width)
+    {
+        *preferred_width = preferred;
+    }
+    if (min_width)
+    {
+        *min_width = min;
+    }
 }

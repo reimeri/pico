@@ -7,6 +7,7 @@
 #include "raylib.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static uint16_t HeadingSizes[7] = {0, 32, 27, 23, 20, 17, 15};
@@ -100,6 +101,247 @@ void MdView_BeginFrame(void)
 const char *MdView_HoveredLink(void)
 {
     return hovered_link;
+}
+
+#define TABLE_CELL_PAD_X 8
+#define TABLE_CELL_PAD_Y 6
+#define TABLE_BORDER 1
+
+typedef struct {
+    float available_width;
+    uint16_t font_size;
+    int col_count;
+    float *col_widths;
+} MdTableWrapCache;
+
+static Clay_LayoutAlignmentX CellAlignX(MdCellAlign align)
+{
+    switch (align)
+    {
+        case MD_CELL_ALIGN_CENTER:
+            return CLAY_ALIGN_X_CENTER;
+        case MD_CELL_ALIGN_RIGHT:
+            return CLAY_ALIGN_X_RIGHT;
+        default:
+            return CLAY_ALIGN_X_LEFT;
+    }
+}
+
+static float *TableColWidths(MdBlock *block, MdArena *arena, float available_width,
+                             const RichTextStyle *base_style)
+{
+    MdTable *table = &block->table;
+    MdTableWrapCache *cache = (MdTableWrapCache *)block->wrap_cache;
+    if (cache && cache->available_width == available_width && cache->font_size == base_style->font_size &&
+        cache->col_count == table->col_count)
+    {
+        return cache->col_widths;
+    }
+
+    int cols = table->col_count;
+    int rows = table->row_count;
+    if (cols <= 0)
+    {
+        return NULL;
+    }
+
+    float *preferred = (float *)malloc((size_t)cols * sizeof(float));
+    float *minw = (float *)malloc((size_t)cols * sizeof(float));
+    if (!preferred || !minw)
+    {
+        free(preferred);
+        free(minw);
+        return NULL;
+    }
+    for (int c = 0; c < cols; c++)
+    {
+        preferred[c] = 0;
+        minw[c] = 0;
+    }
+
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            MdTableCell *cell = &table->cells[r * cols + c];
+            RichTextStyle style = *base_style;
+            style.force_bold = cell->header || r < table->header_row_count;
+            float pref = 0;
+            float min = 0;
+            RichText_MeasureUnwrapped(cell->chunks, cell->chunk_count, &style, &pref, &min);
+            if (pref > preferred[c])
+            {
+                preferred[c] = pref;
+            }
+            if (min > minw[c])
+            {
+                minw[c] = min;
+            }
+        }
+    }
+
+    float borders = 2.0f * TABLE_BORDER + (float)(cols > 0 ? cols - 1 : 0) * TABLE_BORDER;
+    float padding = (float)cols * (2.0f * TABLE_CELL_PAD_X);
+    float budget = available_width - borders - padding;
+    if (budget < (float)cols)
+    {
+        budget = (float)cols;
+    }
+
+    float sum_pref = 0;
+    float sum_min = 0;
+    for (int c = 0; c < cols; c++)
+    {
+        if (preferred[c] < minw[c])
+        {
+            preferred[c] = minw[c];
+        }
+        sum_pref += preferred[c];
+        sum_min += minw[c];
+    }
+
+    float *widths = (float *)MdArena_Alloc(arena, (size_t)cols * sizeof(float), 8);
+    if (sum_pref <= budget)
+    {
+        float extra = budget - sum_pref;
+        float each = extra / (float)cols;
+        float used = 0;
+        for (int c = 0; c < cols; c++)
+        {
+            widths[c] = preferred[c] + each;
+            used += widths[c];
+        }
+        widths[cols - 1] += budget - used;
+    }
+    else if (sum_min <= 0)
+    {
+        float each = budget / (float)cols;
+        for (int c = 0; c < cols; c++)
+        {
+            widths[c] = each;
+        }
+    }
+    else if (sum_min >= budget)
+    {
+        float scale = budget / sum_min;
+        float used = 0;
+        for (int c = 0; c < cols; c++)
+        {
+            widths[c] = minw[c] * scale;
+            used += widths[c];
+        }
+        widths[cols - 1] += budget - used;
+    }
+    else
+    {
+        float extra_needed = sum_pref - budget;
+        float shrinkable = sum_pref - sum_min;
+        float used = 0;
+        for (int c = 0; c < cols; c++)
+        {
+            float room = preferred[c] - minw[c];
+            widths[c] = preferred[c] - extra_needed * (room / shrinkable);
+            used += widths[c];
+        }
+        widths[cols - 1] += budget - used;
+    }
+
+    free(preferred);
+    free(minw);
+
+    cache = (MdTableWrapCache *)MdArena_Alloc(arena, sizeof(MdTableWrapCache), 8);
+    cache->available_width = available_width;
+    cache->font_size = base_style->font_size;
+    cache->col_count = cols;
+    cache->col_widths = widths;
+    block->wrap_cache = cache;
+    return widths;
+}
+
+static void RenderTable(MdDocument *doc, MdBlock *block, float available_width, RichTextEmitState *emit)
+{
+    MdTable *table = &block->table;
+    if (!table->cells || table->col_count <= 0 || table->row_count <= 0)
+    {
+        return;
+    }
+
+    int indent = block->list_indent;
+    if (indent < 0)
+    {
+        indent = 0;
+    }
+
+    float inner_width = available_width - (float)(indent * 24);
+    if (inner_width < 32.0f)
+    {
+        inner_width = 32.0f;
+    }
+
+    float *col_widths = TableColWidths(block, &doc->arena, inner_width, &BaseStyle);
+    if (!col_widths)
+    {
+        return;
+    }
+
+    int cols = table->col_count;
+    int rows = table->row_count;
+
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .padding = {.left = (uint16_t)(indent * 24)},
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                      .border = {.color = COLOR_TABLE_BORDER,
+                                 .width = {.left = TABLE_BORDER,
+                                           .right = TABLE_BORDER,
+                                           .top = TABLE_BORDER,
+                                           .bottom = TABLE_BORDER,
+                                           .betweenChildren = TABLE_BORDER}}})
+        {
+            for (int r = 0; r < rows; r++)
+            {
+                bool header_row = r < table->header_row_count;
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .backgroundColor = header_row ? COLOR_TABLE_HEADER : (Clay_Color){0, 0, 0, 0},
+                              .border = {.color = COLOR_TABLE_BORDER,
+                                         .width = {.betweenChildren = TABLE_BORDER}}})
+                {
+                    for (int c = 0; c < cols; c++)
+                    {
+                        MdTableCell *cell = &table->cells[r * cols + c];
+                        float cw = col_widths[c];
+                        Clay_LayoutAlignmentX ax = CellAlignX(cell->align);
+                        CLAY_AUTO_ID({.layout = {
+                                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                          .padding = {TABLE_CELL_PAD_X, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y,
+                                                      TABLE_CELL_PAD_Y},
+                                          .sizing = {.width = CLAY_SIZING_FIXED(cw + 2.0f * TABLE_CELL_PAD_X)},
+                                          .childAlignment = {.x = ax}}})
+                        {
+                            MdBlock view = {0};
+                            view.type = MDB_PARAGRAPH;
+                            view.chunks = cell->chunks;
+                            view.chunk_count = cell->chunk_count;
+                            view.wrap_cache = cell->wrap_cache;
+                            RichTextStyle style = BaseStyle;
+                            style.force_bold = cell->header || header_row;
+                            style.text_align = ax;
+                            RichText_RenderParagraph(&view, &doc->arena, cw, &style, emit);
+                            cell->wrap_cache = view.wrap_cache;
+                        }
+                        if (c + 1 < cols)
+                        {
+                            PicoChatSel_Glue("\t");
+                        }
+                    }
+                }
+                PicoChatSel_Break();
+            }
+        }
+    }
 }
 
 static void RenderBlock(MdDocument *doc, int index, float available_width, RichTextEmitState *emit)
@@ -285,6 +527,11 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
                           .backgroundColor = COLOR_HR})
             {
             }
+            break;
+        }
+        case MDB_TABLE:
+        {
+            RenderTable(doc, block, available_width, emit);
             break;
         }
     }

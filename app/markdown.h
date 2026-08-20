@@ -46,6 +46,7 @@ typedef struct MdChunk {
     bool bold;
     bool italic;
     bool code;      // inline code span (`...`)
+    bool strike;    // GFM strikethrough (`~~...~~`)
     char *link_url; // set when the run is inside a link, else NULL
 } MdChunk;
 
@@ -58,7 +59,31 @@ typedef enum MdBlockType {
     MDB_QUOTE,   // paragraph(s) inside a blockquote
     MDB_HR,
     MDB_HTML,    // raw HTML rendered verbatim in a mono box
+    MDB_TABLE,   // GFM table: row-major cells in `table`
 } MdBlockType;
+
+typedef enum MdCellAlign {
+    MD_CELL_ALIGN_DEFAULT = 0,
+    MD_CELL_ALIGN_LEFT,
+    MD_CELL_ALIGN_CENTER,
+    MD_CELL_ALIGN_RIGHT,
+} MdCellAlign;
+
+typedef struct MdTableCell {
+    MdChunk *chunks; // malloc owned (same as MdBlock.chunks)
+    int chunk_count;
+    bool header;
+    MdCellAlign align;
+    // Per-cell wrap cache (arena owned), filled by richtext.c.
+    void *wrap_cache;
+} MdTableCell;
+
+typedef struct MdTable {
+    int col_count;
+    int row_count;          // including header rows
+    int header_row_count;   // usually 1
+    MdTableCell *cells;     // malloc owned, row-major [row * col_count + col]
+} MdTable;
 
 typedef struct MdBlock {
     MdBlockType type;
@@ -72,6 +97,7 @@ typedef struct MdBlock {
     char *raw_text;      // code blocks, html blocks
     char *image_path;    // BLOCK_IMAGE: source path (relative or absolute)
     char *image_alt;     // BLOCK_IMAGE: alt text fallback
+    MdTable table;       // MDB_TABLE only
     // Rich text wrap cache (filled in by richtext.c on first layout at a
     // given container width; invalidated when the width changes). Lives in
     // the document arena, so it is freed automatically on reload.

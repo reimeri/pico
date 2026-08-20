@@ -328,6 +328,7 @@ typedef struct {
 
     int em_depth;
     int strong_depth;
+    int del_depth;
     bool in_code_span;
     bool in_img_span;
     char *link_stack[MAX_LINK_DEPTH]; // arena owned hrefs
@@ -338,6 +339,18 @@ typedef struct {
 
     Buffer raw_buffer; // code / html block contents
     bool preserve_newlines;
+
+    // GFM table currently being assembled (cells malloc'd until TABLE leave).
+    bool in_table;
+    bool table_in_header;
+    int table_col_count;
+    int table_row_count;
+    int table_header_row_count;
+    int table_cell_count;
+    int table_cell_capacity;
+    MdTableCell *table_cells;
+    MdCellAlign table_cell_align;
+    bool table_cell_header;
 } Builder;
 
 static void AddBlock(Builder *b, MdBlock block)
@@ -403,7 +416,8 @@ static void CollectorAppendText(Builder *b, const char *text, size_t length)
     {
         MdChunk *last = &c->chunks[c->count - 1];
         if (last->bold == (b->strong_depth > 0) && last->italic == (b->em_depth > 0) &&
-            last->code == b->in_code_span && last->link_url == link_url)
+            last->code == b->in_code_span && last->strike == (b->del_depth > 0) &&
+            last->link_url == link_url)
         {
             // Grow: old text + new text. Old chunk memory is abandoned
             // inside the arena (the arena only frees as a whole), which is
@@ -443,6 +457,7 @@ static void CollectorAppendText(Builder *b, const char *text, size_t length)
     chunk->bold = b->strong_depth > 0;
     chunk->italic = b->em_depth > 0;
     chunk->code = b->in_code_span;
+    chunk->strike = b->del_depth > 0;
     chunk->link_url = link_url;
 }
 
@@ -574,6 +589,140 @@ static void PopCollector(Builder *b, MdBlockType fallback_type, int heading_leve
     // Note: c->chunks is now owned by the block and freed in MdDocument_Free.
 }
 
+static MdCellAlign CellAlignFromMd4c(MD_ALIGN align)
+{
+    switch (align)
+    {
+        case MD_ALIGN_LEFT:
+            return MD_CELL_ALIGN_LEFT;
+        case MD_ALIGN_CENTER:
+            return MD_CELL_ALIGN_CENTER;
+        case MD_ALIGN_RIGHT:
+            return MD_CELL_ALIGN_RIGHT;
+        default:
+            return MD_CELL_ALIGN_DEFAULT;
+    }
+}
+
+static void FreeBuilderTable(Builder *b)
+{
+    if (!b->table_cells)
+    {
+        b->in_table = false;
+        return;
+    }
+    for (int i = 0; i < b->table_cell_count; i++)
+    {
+        free(b->table_cells[i].chunks);
+    }
+    free(b->table_cells);
+    b->table_cells = NULL;
+    b->table_cell_count = 0;
+    b->table_cell_capacity = 0;
+    b->in_table = false;
+}
+
+static void FreeBlockTable(MdBlock *block)
+{
+    if (block->type != MDB_TABLE || !block->table.cells)
+    {
+        return;
+    }
+    int n = block->table.col_count * block->table.row_count;
+    for (int i = 0; i < n; i++)
+    {
+        free(block->table.cells[i].chunks);
+    }
+    free(block->table.cells);
+    block->table.cells = NULL;
+}
+
+static void BeginTable(Builder *b, MD_BLOCK_TABLE_DETAIL *d)
+{
+    FreeBuilderTable(b);
+    int col_count = d ? (int)d->col_count : 0;
+    int header_rows = d ? (int)d->head_row_count : 0;
+    int body_rows = d ? (int)d->body_row_count : 0;
+    if (col_count < 0)
+    {
+        col_count = 0;
+    }
+    if (header_rows < 0)
+    {
+        header_rows = 0;
+    }
+    if (body_rows < 0)
+    {
+        body_rows = 0;
+    }
+    int row_count = header_rows + body_rows;
+    int n = col_count * row_count;
+    b->in_table = true;
+    b->table_in_header = false;
+    b->table_col_count = col_count;
+    b->table_row_count = row_count;
+    b->table_header_row_count = header_rows;
+    b->table_cell_count = 0;
+    b->table_cell_capacity = n;
+    b->table_cells = n > 0 ? (MdTableCell *)calloc((size_t)n, sizeof(MdTableCell)) : NULL;
+    if (n > 0 && !b->table_cells)
+    {
+        b->table_cell_capacity = 0;
+        b->in_table = false;
+    }
+}
+
+static void FinishTable(Builder *b)
+{
+    if (!b->in_table)
+    {
+        return;
+    }
+    MdBlock block = NewBlock(MDB_TABLE);
+    block.table.col_count = b->table_col_count;
+    block.table.row_count = b->table_row_count;
+    block.table.header_row_count = b->table_header_row_count;
+    block.table.cells = b->table_cells;
+    if (b->quote_depth > 0)
+    {
+        block.list_indent = b->quote_depth;
+    }
+    AddBlock(b, block);
+    b->table_cells = NULL;
+    b->table_cell_count = 0;
+    b->table_cell_capacity = 0;
+    b->in_table = false;
+}
+
+// Pops the innermost collector into the next table cell. Empty cells are kept
+// so the grid stays rectangular. Images stay as inline chunks.
+static void PopCollectorIntoCell(Builder *b)
+{
+    if (b->collector_depth == 0)
+    {
+        return;
+    }
+    Collector *c = &b->collector_stack[--b->collector_depth];
+    if (!b->in_table || !b->table_cells || b->table_cell_count >= b->table_cell_capacity)
+    {
+        free(c->chunks);
+        return;
+    }
+    MdTableCell *cell = &b->table_cells[b->table_cell_count++];
+    cell->header = b->table_cell_header;
+    cell->align = b->table_cell_align;
+    cell->wrap_cache = NULL;
+    if (c->count == 0)
+    {
+        free(c->chunks);
+        cell->chunks = NULL;
+        cell->chunk_count = 0;
+        return;
+    }
+    cell->chunks = c->chunks;
+    cell->chunk_count = c->count;
+}
+
 // ---------------------------------------------------------------------------
 // md4c callbacks
 
@@ -666,6 +815,25 @@ static int OnEnterBlock(MD_BLOCKTYPE type, void *detail, void *userdata)
             PushCollector(b);
             break;
         }
+        case MD_BLOCK_TABLE:
+        {
+            BeginTable(b, (MD_BLOCK_TABLE_DETAIL *)detail);
+            break;
+        }
+        case MD_BLOCK_THEAD:
+        {
+            b->table_in_header = true;
+            break;
+        }
+        case MD_BLOCK_TH:
+        case MD_BLOCK_TD:
+        {
+            MD_BLOCK_TD_DETAIL *d = (MD_BLOCK_TD_DETAIL *)detail;
+            b->table_cell_header = (type == MD_BLOCK_TH) || b->table_in_header;
+            b->table_cell_align = CellAlignFromMd4c(d ? d->align : MD_ALIGN_DEFAULT);
+            PushCollector(b);
+            break;
+        }
         default:
             break;
     }
@@ -749,6 +917,22 @@ static int OnLeaveBlock(MD_BLOCKTYPE type, void *detail, void *userdata)
             AddBlock(b, block);
             break;
         }
+        case MD_BLOCK_THEAD:
+        {
+            b->table_in_header = false;
+            break;
+        }
+        case MD_BLOCK_TH:
+        case MD_BLOCK_TD:
+        {
+            PopCollectorIntoCell(b);
+            break;
+        }
+        case MD_BLOCK_TABLE:
+        {
+            FinishTable(b);
+            break;
+        }
         default:
             break;
     }
@@ -805,8 +989,13 @@ static int OnEnterSpan(MD_SPANTYPE type, void *detail, void *userdata)
             }
             break;
         }
+        case MD_SPAN_DEL:
+        {
+            b->del_depth++;
+            break;
+        }
         default:
-            break; // DEL, U, LATEXMATH, WIKILINK: render as plain text
+            break; // U, LATEXMATH, WIKILINK: render as plain text
     }
     return 0;
 }
@@ -849,6 +1038,14 @@ static int OnLeaveSpan(MD_SPANTYPE type, void *detail, void *userdata)
         case MD_SPAN_IMG:
         {
             b->in_img_span = false;
+            break;
+        }
+        case MD_SPAN_DEL:
+        {
+            if (b->del_depth > 0)
+            {
+                b->del_depth--;
+            }
             break;
         }
         default:
@@ -1032,7 +1229,7 @@ MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
 
     MD_PARSER parser = {0};
     parser.flags = MD_FLAG_PERMISSIVEAUTOLINKS | MD_FLAG_NOHTMLSPANS | MD_FLAG_TASKLISTS |
-                   MD_FLAG_STRIKETHROUGH;
+                   MD_FLAG_STRIKETHROUGH | MD_FLAG_TABLES;
     parser.enter_block = OnEnterBlock;
     parser.leave_block = OnLeaveBlock;
     parser.enter_span = OnEnterSpan;
@@ -1066,11 +1263,15 @@ MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
         for (int i = 0; i < builder.block_count; i++)
         {
             free(builder.blocks[i].chunks);
+            FreeBlockTable(&builder.blocks[i]);
         }
         free(builder.blocks);
+        FreeBuilderTable(&builder);
         doc.load_error = MdArena_DupCstr(&doc.arena, "Markdown parsing failed.");
         return doc;
     }
+
+    FreeBuilderTable(&builder);
 
     doc.blocks = builder.blocks;
     doc.block_count = builder.block_count;
@@ -1124,6 +1325,7 @@ void MdDocument_Free(MdDocument *doc)
     for (int i = 0; i < doc->block_count; i++)
     {
         free(doc->blocks[i].chunks);
+        FreeBlockTable(&doc->blocks[i]);
     }
     free(doc->blocks);
     MdArena_Free(&doc->arena);

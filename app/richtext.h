@@ -29,6 +29,8 @@ typedef struct RichTextStyle {
     Clay_Color code_bg_color;
     Clay_Color link_color;
     Clay_Color link_hover_color;
+    bool force_bold; // table header cells
+    Clay_LayoutAlignmentX text_align;
 } RichTextStyle;
 
 // Mutable state threaded through one layout pass. hovered_link is set while
@@ -55,5 +57,10 @@ void RichText_SetMeasureFunction(RichTextMeasureFunction measure, void *userData
 // Safe to call every frame; results are cached per block + width.
 void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_width,
                               const RichTextStyle *style, RichTextEmitState *emit);
+
+// Unwrapped preferred width (longest line) and min width (longest word) for
+// a chunk list. Used to allocate table column widths.
+void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextStyle *style,
+                               float *preferred_width, float *min_width);
 
 #endif // RICHTEXT_H

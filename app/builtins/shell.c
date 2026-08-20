@@ -74,6 +74,7 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
     }
     if (pid == 0)
     {
+        setpgid(0, 0);
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
@@ -89,6 +90,8 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
         _exit(127);
     }
 
+    setpgid(pid, pid);
+    pico_tool_set_child(app, pid);
     close(pipefd[1]);
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -101,6 +104,7 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
     close(pipefd[0]);
     int status = 0;
     waitpid(pid, &status, 0);
+    pico_tool_set_child(app, 0);
     free(command);
 
     if (b.len > (size_t)(SH_HEAD + SH_TAIL))

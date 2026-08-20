@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/types.h>
 
 #include "raylib.h"
 
@@ -299,6 +300,9 @@ void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
 void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
                    PicoToolFn run);
+/* Bind a child pid to the in-flight tool so force-cancel can kill its process
+ * group. Call from the tool (worker thread) after fork; 0 clears. */
+void pico_tool_set_child(PicoApp *app, pid_t pid);
 void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run);
 void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,
                         PicoCompleteAcceptFn accept);

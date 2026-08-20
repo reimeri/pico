@@ -4,7 +4,9 @@ Read this before writing an extension. Getting these wrong crashes Pico or silen
 
 ## Reload waits until idle
 
-`PicoPlugins_Reload` queues while `agent_state` is `PICO_AGENT_LLM_WAIT`, `PICO_AGENT_TOOL_WAIT`, or `PICO_AGENT_COMPACT_WAIT`. A `.c` file written in this turn does not load until the agent finishes. Tell the user to wait, or use `/reload` after. Polling is ~0.5s; F5 and `/reload` request the same path.
+`PicoPlugins_Reload` queues while the live agent is in `PICO_AGENT_LLM_WAIT`, `PICO_AGENT_TOOL_WAIT`, or `PICO_AGENT_COMPACT_WAIT`, **or** a force-cancelled worker is still inside a tool or provider call. A `.c` file written in this turn does not load until that work finishes. Tell the user to wait, or use `/reload` after. Polling is ~0.5s; F5 and `/reload` request the same path.
+
+A second Esc force-cancels a stuck turn: the UI goes idle and a new worker starts so the user can keep chatting, but reload still waits for the abandoned worker. That worker may outlive the turn; do not touch Clay, Raylib, or chat/composer state from it.
 
 `--safe` skips user extensions. Compile errors set `app->status_warn` (overlay).
 
@@ -16,7 +18,7 @@ Worker thread: `PicoToolFn`, `PicoProviderStreamFn`.
 
 Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a malloc'd string; providers use `on_delta` / `PicoLlmResult`.
 
-Reload is deferred while the worker is busy so tool/provider pointers stay valid for the turn.
+Reload is deferred while the live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns.
 
 ## Ownership
 

@@ -684,7 +684,7 @@ void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session
 
 int PicoSession_Open(PicoApp *app, const char *id)
 {
-    if (!app || !id || !id[0] || PicoAgent_BlocksReload(app))
+    if (!app || !id || !id[0] || PicoAgent_IsBusy(app))
     {
         return -1;
     }

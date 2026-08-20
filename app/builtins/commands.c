@@ -237,7 +237,7 @@ static void CmdResume(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    if (PicoAgent_BlocksReload(app))
+    if (PicoAgent_IsBusy(app))
     {
         Note(app, "Wait until the agent is idle before resuming a session.");
         ClearComposer(app);
@@ -586,7 +586,7 @@ static void CmdCd(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    if (PicoAgent_BlocksReload(app))
+    if (PicoAgent_IsBusy(app))
     {
         Note(app, "Wait until the agent is idle before changing directory.");
         ClearComposer(app);

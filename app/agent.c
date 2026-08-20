@@ -8,10 +8,13 @@
 #include <curl/curl.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
 #define PICO_MAX_PENDING_CALLS 16
 
@@ -56,6 +59,8 @@ struct PicoAgentRt {
     bool started;
     bool busy;
     bool cancel;
+    pid_t tool_child;
+    struct PicoAgentRt *zombie_next;
 
     PicoWorkKind work;
     PicoProviderStreamFn work_stream;
@@ -102,8 +107,12 @@ struct PicoAgentRt {
     bool stream_dirty;
 };
 
+static PicoAgentRt *g_zombies;
+static __thread PicoAgentRt *t_worker_rt;
+
 static void SetErrorState(PicoApp *app, const char *msg);
 static void FinishAssistantHistory(PicoApp *app);
+static void *WorkerMain(void *arg);
 
 static char *Dup(const char *s)
 {
@@ -316,6 +325,7 @@ static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
 static void *WorkerMain(void *arg)
 {
     PicoAgentRt *rt = (PicoAgentRt *)arg;
+    t_worker_rt = rt;
     for (;;)
     {
         pthread_mutex_lock(&rt->mu);
@@ -520,6 +530,7 @@ static bool QueueTool(PicoAgentRt *rt, const char *name, const char *args, const
     rt->work_tool_args = Dup(args ? args : "{}");
     rt->work_call_id = Dup(call_id);
     rt->work_tool_fn = fn;
+    rt->tool_child = 0;
     rt->busy = true;
     pthread_cond_signal(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
@@ -950,7 +961,12 @@ static void ApplyCancel(PicoApp *app)
     {
         PopLastMessage(app);
     }
+    bool open_tool = rt->pending_next < rt->pending_count;
     AbortRemainingCalls(rt);
+    if (open_tool && rt->stream_msg >= 0)
+    {
+        TraceSetLastToolOutput(app, rt->stream_msg, "(interrupted)");
+    }
     GoIdle(app);
 }
 
@@ -1245,78 +1261,66 @@ static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
     StartNextTool(app);
 }
 
-bool PicoAgent_BlocksReload(const PicoApp *app)
+static bool LiveBusyState(PicoAgentState s)
 {
-    return app->agent_state == PICO_AGENT_LLM_WAIT || app->agent_state == PICO_AGENT_TOOL_WAIT ||
-           app->agent_state == PICO_AGENT_COMPACT_WAIT;
+    return s == PICO_AGENT_LLM_WAIT || s == PICO_AGENT_TOOL_WAIT || s == PICO_AGENT_COMPACT_WAIT;
 }
 
-void PicoAgent_Compact(PicoApp *app)
+bool PicoAgent_IsBusy(const PicoApp *app)
 {
-    if (!app || !app->agent || PicoAgent_BlocksReload(app))
-    {
-        return;
-    }
-    StartCompact(app);
+    return app && LiveBusyState(app->agent_state);
 }
 
-void PicoAgent_Init(PicoApp *app)
+bool PicoAgent_CancelRequested(const PicoApp *app)
 {
-    PicoAgentRt *rt = (PicoAgentRt *)calloc(1, sizeof(PicoAgentRt));
-    app->agent = rt;
+    PicoAgentRt *rt = app ? app->agent : NULL;
     if (!rt)
     {
-        return;
-    }
-    rt->app = app;
-    rt->stream_msg = -1;
-    Pico_RandomHex(rt->cache_key, sizeof(rt->cache_key));
-    pthread_mutex_init(&rt->mu, NULL);
-    pthread_cond_init(&rt->cv, NULL);
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-    if (pthread_create(&rt->thread, NULL, WorkerMain, rt) == 0)
-    {
-        rt->started = true;
-    }
-}
-
-bool PicoAgent_Shutdown(PicoApp *app)
-{
-    PicoAgentRt *rt = app->agent;
-    if (!rt)
-    {
-        return true;
-    }
-    pthread_mutex_lock(&rt->mu);
-    rt->stop = true;
-    rt->cancel = true;
-    pthread_cond_signal(&rt->cv);
-    struct timespec until;
-    clock_gettime(CLOCK_REALTIME, &until);
-    until.tv_sec += 1;
-    while (rt->busy)
-    {
-        if (pthread_cond_timedwait(&rt->cv, &rt->mu, &until) == ETIMEDOUT)
-        {
-            break;
-        }
-    }
-    bool done = !rt->busy;
-    pthread_mutex_unlock(&rt->mu);
-    /* A worker stuck in a network call outlives us, so everything it can still
-     * reach is deliberately leaked rather than freed underneath it. */
-    if (!done)
-    {
-        if (rt->started)
-        {
-            pthread_detach(rt->thread);
-        }
-        app->agent = NULL;
         return false;
     }
-    if (rt->started)
+    pthread_mutex_lock(&rt->mu);
+    bool c = rt->cancel;
+    pthread_mutex_unlock(&rt->mu);
+    return c;
+}
+
+static bool ZombiesBusy(void)
+{
+    for (PicoAgentRt *z = g_zombies; z; z = z->zombie_next)
     {
-        pthread_join(rt->thread, NULL);
+        pthread_mutex_lock(&z->mu);
+        bool busy = z->busy;
+        pthread_mutex_unlock(&z->mu);
+        if (busy)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PicoAgent_BlocksReload(const PicoApp *app)
+{
+    return PicoAgent_IsBusy(app) || ZombiesBusy();
+}
+
+static void KillToolChild(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+    if (kill(-pid, SIGKILL) != 0)
+    {
+        kill(pid, SIGKILL);
+    }
+}
+
+static void FreeRt(PicoAgentRt *rt)
+{
+    if (!rt)
+    {
+        return;
     }
     for (int i = 0; i < rt->event_count; i++)
     {
@@ -1349,10 +1353,164 @@ bool PicoAgent_Shutdown(PicoApp *app)
     free(rt->turn_provider);
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
-    curl_global_cleanup();
     free(rt);
+}
+
+static PicoAgentRt *CreateRt(PicoApp *app)
+{
+    PicoAgentRt *rt = (PicoAgentRt *)calloc(1, sizeof(PicoAgentRt));
+    if (!rt)
+    {
+        return NULL;
+    }
+    rt->app = app;
+    rt->stream_msg = -1;
+    pthread_mutex_init(&rt->mu, NULL);
+    pthread_cond_init(&rt->cv, NULL);
+    if (pthread_create(&rt->thread, NULL, WorkerMain, rt) == 0)
+    {
+        rt->started = true;
+    }
+    return rt;
+}
+
+/* True if the thread has exited (or never started) and rt can be freed. */
+static bool StopRt(PicoAgentRt *rt, bool wait_one_sec)
+{
+    pthread_mutex_lock(&rt->mu);
+    rt->stop = true;
+    rt->cancel = true;
+    pid_t child = rt->tool_child;
+    pthread_cond_signal(&rt->cv);
+    if (wait_one_sec && rt->busy)
+    {
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_sec += 1;
+        while (rt->busy)
+        {
+            if (pthread_cond_timedwait(&rt->cv, &rt->mu, &until) == ETIMEDOUT)
+            {
+                break;
+            }
+        }
+    }
+    bool done = !rt->busy;
+    pthread_mutex_unlock(&rt->mu);
+    KillToolChild(child);
+    return done;
+}
+
+static void ReapZombies(void)
+{
+    PicoAgentRt **pp = &g_zombies;
+    while (*pp)
+    {
+        PicoAgentRt *z = *pp;
+        pthread_mutex_lock(&z->mu);
+        bool done = !z->busy;
+        pthread_mutex_unlock(&z->mu);
+        if (!done)
+        {
+            pp = &z->zombie_next;
+            continue;
+        }
+        *pp = z->zombie_next;
+        if (z->started)
+        {
+            pthread_join(z->thread, NULL);
+        }
+        FreeRt(z);
+    }
+}
+
+/* Wait up to 1s for each zombie; detach and leak any that are still in a call. */
+static bool ShutdownZombies(void)
+{
+    bool all_done = true;
+    PicoAgentRt *z = g_zombies;
+    g_zombies = NULL;
+    while (z)
+    {
+        PicoAgentRt *next = z->zombie_next;
+        z->zombie_next = NULL;
+        if (StopRt(z, true))
+        {
+            if (z->started)
+            {
+                pthread_join(z->thread, NULL);
+            }
+            FreeRt(z);
+        }
+        else
+        {
+            if (z->started)
+            {
+                pthread_detach(z->thread);
+            }
+            all_done = false;
+        }
+        z = next;
+    }
+    return all_done;
+}
+
+void PicoAgent_Compact(PicoApp *app)
+{
+    if (!app || !app->agent || PicoAgent_IsBusy(app))
+    {
+        return;
+    }
+    StartCompact(app);
+}
+
+void PicoAgent_Init(PicoApp *app)
+{
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    PicoAgentRt *rt = CreateRt(app);
+    app->agent = rt;
+    if (rt)
+    {
+        Pico_RandomHex(rt->cache_key, sizeof(rt->cache_key));
+    }
+}
+
+bool PicoAgent_Shutdown(PicoApp *app)
+{
+    bool zombies_done = ShutdownZombies();
+    PicoAgentRt *rt = app->agent;
+    if (!rt)
+    {
+        if (zombies_done)
+        {
+            curl_global_cleanup();
+        }
+        return zombies_done;
+    }
+    bool done = StopRt(rt, true);
+    /* A worker stuck in a network call outlives us, so everything it can still
+     * reach is deliberately leaked rather than freed underneath it. */
+    if (!done)
+    {
+        if (rt->started)
+        {
+            pthread_detach(rt->thread);
+        }
+        app->agent = NULL;
+        return false;
+    }
+    if (rt->started)
+    {
+        pthread_join(rt->thread, NULL);
+    }
+    FreeRt(rt);
     app->agent = NULL;
-    return true;
+    if (zombies_done)
+    {
+        curl_global_cleanup();
+        return true;
+    }
+    return false;
 }
 
 void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
@@ -1361,7 +1519,7 @@ void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
     {
         return;
     }
-    if (PicoAgent_BlocksReload(app))
+    if (PicoAgent_IsBusy(app))
     {
         return;
     }
@@ -1376,12 +1534,69 @@ void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
 void PicoAgent_Cancel(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
-    if (!rt || !PicoAgent_BlocksReload(app))
+    if (!rt || !PicoAgent_IsBusy(app))
     {
         return;
     }
     pthread_mutex_lock(&rt->mu);
     rt->cancel = true;
+    pthread_mutex_unlock(&rt->mu);
+}
+
+void PicoAgent_ForceCancel(PicoApp *app)
+{
+    PicoAgentRt *old = app ? app->agent : NULL;
+    if (!old || !PicoAgent_IsBusy(app))
+    {
+        return;
+    }
+
+    PicoAgentRt *rt = CreateRt(app);
+    if (!rt)
+    {
+        PicoAgent_Cancel(app);
+        return;
+    }
+
+    pthread_mutex_lock(&old->mu);
+    old->cancel = true;
+    old->stop = true;
+    pid_t child = old->tool_child;
+    old->tool_child = 0;
+    pthread_cond_signal(&old->cv);
+    pthread_mutex_unlock(&old->mu);
+    KillToolChild(child);
+
+    ApplyCancel(app);
+
+    rt->input = old->input;
+    rt->input_count = old->input_count;
+    rt->input_cap = old->input_cap;
+    old->input = NULL;
+    old->input_count = 0;
+    old->input_cap = 0;
+    memcpy(rt->cache_key, old->cache_key, sizeof(rt->cache_key));
+    rt->instructions = old->instructions;
+    old->instructions = NULL;
+
+    old->zombie_next = g_zombies;
+    g_zombies = old;
+    app->agent = rt;
+}
+
+void pico_tool_set_child(PicoApp *app, pid_t pid)
+{
+    PicoAgentRt *rt = t_worker_rt;
+    if (!rt && app)
+    {
+        rt = app->agent;
+    }
+    if (!rt)
+    {
+        return;
+    }
+    pthread_mutex_lock(&rt->mu);
+    rt->tool_child = pid;
     pthread_mutex_unlock(&rt->mu);
 }
 
@@ -1397,6 +1612,7 @@ void PicoAgent_DismissError(PicoApp *app)
 
 void PicoAgent_Pump(PicoApp *app)
 {
+    ReapZombies();
     PicoAgentRt *rt = app->agent;
     if (!rt)
     {

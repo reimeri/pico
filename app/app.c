@@ -603,9 +603,16 @@ void PicoApp_Frame(PicoApp *app)
     PicoPlugins_OnFrame(app, GetFrameTime());
     if (!had_warn && IsKeyPressed(KEY_ESCAPE))
     {
-        if (PicoAgent_BlocksReload(app))
+        if (PicoAgent_IsBusy(app))
         {
-            PicoApp_Cancel(app);
+            if (PicoAgent_CancelRequested(app))
+            {
+                PicoAgent_ForceCancel(app);
+            }
+            else
+            {
+                PicoApp_Cancel(app);
+            }
         }
         else if (app->agent_state == PICO_AGENT_ERROR)
         {

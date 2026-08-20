@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
+#include "agent.h"
 #include "settings.h"
 
 #include "clay/clay.h"
@@ -58,7 +59,11 @@ static void FormatCwd(const char *workspace, char *out, size_t cap)
 void PicoFooter_Render(PicoApp *app)
 {
     const char *extra = "";
-    if (app->agent_state == PICO_AGENT_LLM_WAIT || app->agent_state == PICO_AGENT_TOOL_WAIT)
+    if (PicoAgent_IsBusy(app) && PicoAgent_CancelRequested(app))
+    {
+        extra = "  ·  Esc again to force";
+    }
+    else if (PicoAgent_IsBusy(app))
     {
         extra = "  ·  Esc to cancel";
     }

@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "agent.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -478,8 +479,7 @@ void PicoPlugins_Load(PicoApp *app)
 
 void PicoPlugins_Reload(PicoApp *app)
 {
-    if (app->agent_state == PICO_AGENT_TOOL_WAIT || app->agent_state == PICO_AGENT_LLM_WAIT ||
-        app->agent_state == PICO_AGENT_COMPACT_WAIT)
+    if (PicoAgent_BlocksReload(app))
     {
         app->reload_queued = true;
         return;

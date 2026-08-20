@@ -9,6 +9,7 @@
 typedef struct PicoExt {
     int abi;
     const char *name;
+    const char *description; /* optional; shown in /extensions */
     void (*init)(PicoApp *app);
     void (*shutdown)(PicoApp *app);
     void (*on_frame)(PicoApp *app, float dt);
@@ -22,5 +23,6 @@ PicoExt pico_ext_shell(void);
 PicoExt pico_ext_commands(void);
 PicoExt pico_ext_files(void);
 PicoExt pico_ext_openai(void);
+PicoExt pico_ext_extensions(void);
 
 #endif

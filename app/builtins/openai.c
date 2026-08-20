@@ -1758,6 +1758,7 @@ PicoExt pico_ext_openai(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "openai",
+        .description = "OpenAI-compatible provider",
         .init = OpenAiInit,
         .shutdown = OpenAiShutdown,
         .on_frame = OpenAiFrame,

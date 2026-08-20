@@ -28,6 +28,7 @@ PicoExt pico_ext(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "time",
+        .description = "Show the local time",
         .init = TimeInit,
     };
 }

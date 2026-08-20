@@ -43,7 +43,7 @@ typedef struct LoadedPlugin {
     bool builtin;
 } LoadedPlugin;
 
-static LoadedPlugin g_plugins[PICO_MAX_USER_PLUGINS + 8];
+static LoadedPlugin g_plugins[PICO_MAX_USER_PLUGINS + 16];
 static int g_plugin_count = 0;
 static double g_last_poll = 0;
 
@@ -56,6 +56,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_commands,
     pico_ext_files,
     pico_ext_openai,
+    pico_ext_extensions,
 };
 
 static void WarnClear(PicoApp *app)
@@ -157,7 +158,8 @@ static void SoPathFor(const char *src, time_t mtime, char *out, size_t cap)
     CacheDir(cache, sizeof(cache));
     const char *base = strrchr(src, '/');
     base = base ? base + 1 : src;
-    snprintf(out, cap, "%s/%08x-%s-%ld-" PICO_VERSION ".so", cache, PathHash(src), base, (long)mtime);
+    snprintf(out, cap, "%s/%08x-%s-%ld-" PICO_VERSION "-%d.so", cache, PathHash(src), base, (long)mtime,
+             PICO_EXT_ABI);
 }
 
 static int CompileExt(const char *src, const char *so, char *err, size_t err_cap)
@@ -600,4 +602,25 @@ void PicoPlugins_OnFrame(PicoApp *app, float dt)
             g_plugins[i].ext.on_frame(app, dt);
         }
     }
+}
+
+int PicoPlugins_Count(void)
+{
+    return g_plugin_count;
+}
+
+bool PicoPlugins_Get(int index, PicoExtInfo *out)
+{
+    if (!out || index < 0 || index >= g_plugin_count)
+    {
+        return false;
+    }
+    LoadedPlugin *p = &g_plugins[index];
+    out->name = p->ext.name;
+    out->description = p->ext.description;
+    out->source = (p->builtin || p->source[0] == '\0') ? NULL : p->source;
+    out->builtin = p->builtin;
+    out->loaded = p->builtin || p->handle != NULL;
+    out->enabled = out->loaded;
+    return true;
 }

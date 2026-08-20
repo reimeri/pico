@@ -53,6 +53,7 @@ PicoExt pico_ext(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "echo",
+        .description = "Echo tool example",
         .init = EchoInit,
     };
 }

@@ -31,7 +31,7 @@ Full file: `examples/hello.c`.
 - `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this).
 - `PICO_SLOT_COMPOSER` — input box.
 - `PICO_SLOT_FOOTER` — status line.
-- `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups).
+- `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions` is an overlay modal.
 
 `z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`).
 

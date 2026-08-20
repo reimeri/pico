@@ -252,7 +252,7 @@ void PicoChat_Render(PicoApp *app)
 void PicoChat_HandlePointer(PicoApp *app)
 {
     PicoChatSel_Clamp(app);
-    if (app->status_warn)
+    if (app->status_warn || PicoExts_IsOpen())
     {
         return;
     }
@@ -428,6 +428,7 @@ PicoExt pico_ext_chat(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "chat",
+        .description = "Chat transcript",
         .init = ChatInit,
     };
 }

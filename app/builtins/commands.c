@@ -1056,6 +1056,7 @@ PicoExt pico_ext_commands(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "commands",
+        .description = "Slash commands",
         .init = CommandsInit,
     };
 }

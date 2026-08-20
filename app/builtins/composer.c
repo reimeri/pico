@@ -693,6 +693,10 @@ static void PasteClipboard(PicoComposer *c)
 
 void PicoComposer_HandleInput(PicoApp *app)
 {
+    if (PicoExts_IsOpen())
+    {
+        return;
+    }
     PicoComposer *c = &app->composer;
     bool ctrl = IsCtrlDown();
     bool shift = IsShiftDown();
@@ -1072,9 +1076,12 @@ static void ComposerAfterLayout(PicoApp *app)
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
     app->composer_overflow =
         scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
-    if (!PicoComplete_HandlePointer(app))
+    if (!PicoExts_IsOpen())
     {
-        PicoComposer_HandlePointer(app);
+        if (!PicoComplete_HandlePointer(app))
+        {
+            PicoComposer_HandlePointer(app);
+        }
     }
     EnsureCaretVisible(app);
 }
@@ -1113,7 +1120,10 @@ static void ComposerFrame(PicoApp *app, float dt)
 {
     (void)dt;
     PicoComposer_HandleInput(app);
-    UpdateComposerScrollbarDrag(app);
+    if (!PicoExts_IsOpen())
+    {
+        UpdateComposerScrollbarDrag(app);
+    }
 }
 
 static void ComposerInit(PicoApp *app)
@@ -1128,6 +1138,7 @@ PicoExt pico_ext_composer(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "composer",
+        .description = "Prompt input",
         .init = ComposerInit,
         .on_frame = ComposerFrame,
     };

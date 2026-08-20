@@ -45,7 +45,8 @@ add_executable(pico
     builtins/complete.c
     builtins/commands.c
     builtins/files.c
-    builtins/openai.c)
+    builtins/openai.c
+    builtins/extensions.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
 

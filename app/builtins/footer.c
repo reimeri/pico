@@ -134,6 +134,7 @@ PicoExt pico_ext_footer(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "footer",
+        .description = "Status bar",
         .init = FooterInit,
     };
 }

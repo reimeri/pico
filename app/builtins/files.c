@@ -352,6 +352,7 @@ PicoExt pico_ext_files(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "files",
+        .description = "Workspace file completion",
         .init = FilesInit,
         .shutdown = FilesShutdown,
     };

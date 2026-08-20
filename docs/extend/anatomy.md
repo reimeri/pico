@@ -16,13 +16,15 @@ PicoExt pico_ext(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "myext",
+        .description = "Short summary shown in /extensions",
         .init = MyInit,
     };
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 1). `name` is for diagnostics. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 1). `name` is for diagnostics and `/extensions`. Optional:
 
+- `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload.
 - `shutdown` — release extension-owned memory/threads before `dlclose`.
 - `on_frame` — main thread, once per frame, `dt` in seconds.
@@ -51,4 +53,4 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** while the agent is in LLM/tool/compact wait. Tell the user to wait until idle, or run `/reload` after.
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `sh`, `commands`, `files`, `openai`.
+Builtins: `chat`, `composer`, `footer`, `overlay`, `sh`, `commands`, `files`, `openai`, `extensions`. `/extensions` lists them.

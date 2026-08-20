@@ -22,11 +22,13 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 
 ## Ownership
 
-- `name`, `description`, `help`, `params_json`, provider/auth string fields: must outlive the extension. Use string literals.
+- `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - Tool `*out`: malloc, Pico frees. Never leave `*out` unset on a path that returns; use `JsonDup("")` or an error string.
 - `app->agent_input` and `app->compact_summary`: malloc if you set them; Pico frees.
 - `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
+
+`PicoPlugins_Count` / `PicoPlugins_Get` return the loaded registry (builtins and user sources, including failed loads). Pointers in `PicoExtInfo` are valid until the next reload. `enabled` is currently true when the extension loaded; failed stubs are false.
 
 ## Limits
 

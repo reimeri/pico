@@ -328,12 +328,23 @@ void PicoApp_Cancel(PicoApp *app);
 void PicoApp_Frame(PicoApp *app);
 void PicoApp_RequestReload(PicoApp *app);
 
+typedef struct PicoExtInfo {
+    const char *name;        /* NULL if unnamed / failed stub */
+    const char *description; /* NULL if omitted */
+    const char *source;      /* user .c path; NULL for builtins */
+    bool builtin;
+    bool loaded;  /* false for compile/dlopen stubs */
+    bool enabled; /* currently same as loaded; later independently togglable */
+} PicoExtInfo;
+
 void PicoPlugins_Load(PicoApp *app);
 void PicoPlugins_Reload(PicoApp *app);
 void PicoPlugins_Poll(PicoApp *app);
 void PicoPlugins_OnFrame(PicoApp *app, float dt);
 void PicoPlugins_UnloadUser(PicoApp *app);
 void PicoPlugins_Shutdown(PicoApp *app);
+int PicoPlugins_Count(void);
+bool PicoPlugins_Get(int index, PicoExtInfo *out);
 
 bool Pico_ShortcutPressed(char letter);
 bool Pico_ShortcutRepeat(char letter);
@@ -362,5 +373,7 @@ bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoApp *app);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);
+void PicoExts_Close(void);
+bool PicoExts_IsOpen(void);
 
 #endif

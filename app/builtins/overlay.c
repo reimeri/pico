@@ -43,7 +43,7 @@ void PicoOverlay_Render(PicoApp *app)
 void PicoOverlay_OnFrame(PicoApp *app, float dt)
 {
     (void)dt;
-    if (!IsKeyPressed(KEY_ESCAPE))
+    if (PicoExts_IsOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }
@@ -57,7 +57,7 @@ void PicoOverlay_OnFrame(PicoApp *app, float dt)
 
 static void OverlayAfterLayout(PicoApp *app)
 {
-    if (!app->status_warn && !app->agent_error)
+    if (PicoExts_IsOpen() || (!app->status_warn && !app->agent_error))
     {
         return;
     }
@@ -89,6 +89,7 @@ PicoExt pico_ext_overlay(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "overlay",
+        .description = "Errors and notifications",
         .init = OverlayInit,
         .on_frame = PicoOverlay_OnFrame,
     };

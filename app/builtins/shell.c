@@ -153,6 +153,7 @@ PicoExt pico_ext_shell(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "sh",
+        .description = "Shell tool",
         .init = ShellInit,
     };
 }

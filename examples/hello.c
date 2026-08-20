@@ -31,6 +31,7 @@ PicoExt pico_ext(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "hello",
+        .description = "Sidebar hello view",
         .init = HelloInit,
     };
 }

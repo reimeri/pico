@@ -23,7 +23,7 @@ static void TimeInit(PicoApp *app)
 }
 ```
 
-Full file: `examples/time_cmd.c`. User types `/time`. `/help` lists every registered command.
+Full file: `examples/time_cmd.c`. User types `/time`. `/help` lists every registered command. Builtin `/extensions` opens a modal listing installed extensions.
 
 ## Contract
 

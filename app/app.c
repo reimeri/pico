@@ -601,8 +601,9 @@ void PicoApp_Frame(PicoApp *app)
 
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
+    bool had_exts = PicoExts_IsOpen();
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && !had_complete && IsKeyPressed(KEY_ESCAPE))
+    if (!had_warn && !had_complete && !had_exts && IsKeyPressed(KEY_ESCAPE))
     {
         if (PicoAgent_IsBusy(app))
         {
@@ -625,13 +626,17 @@ void PicoApp_Frame(PicoApp *app)
     bool composer_bar_drag = app->composer_scrollbar.mouse_down;
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
     bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    bool modal_open = PicoExts_IsOpen();
     Clay_SetPointerState(mouse_position,
                          IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down && !composer_bar_drag);
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
 
-    UpdateChatScrollbarDrag(app, mouse_position);
-    Clay_UpdateScrollContainers(!over_composer && !over_chat && !composer_bar_drag &&
-                                    !app->chat_sel.mouse_selecting,
+    if (!modal_open)
+    {
+        UpdateChatScrollbarDrag(app, mouse_position);
+    }
+    Clay_UpdateScrollContainers(modal_open || (!over_composer && !over_chat && !composer_bar_drag &&
+                                               !app->chat_sel.mouse_selecting),
                                 (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);

@@ -306,6 +306,7 @@ static void RenderMenu(PicoApp *app)
                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 if (detail[0])
                 {
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                     CLAY_TEXT(CStr(detail), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                              .fontSize = 13,
                                                              .textColor = COLOR_MUTED,

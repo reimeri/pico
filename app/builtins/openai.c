@@ -454,8 +454,49 @@ static char *ContentText(const JsonDoc *doc, int content)
     return JsonStrDup(doc, content);
 }
 
+/* Hosted OpenAI encrypts raw CoT, so reasoning_text can be a few control
+ * bytes. Compatible /responses endpoints often send the same field as
+ * readable thinking; keep those, drop the opaque blobs. */
+static bool ThinkUsable(const char *s, size_t n)
+{
+    if (!s || n == 0)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r')
+        {
+            return false;
+        }
+        if (c == 0x7F)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void AppendThink(JsonBuf *think, const char *text)
+{
+    if (!ThinkUsable(text, text ? strlen(text) : 0))
+    {
+        return;
+    }
+    if (think->len)
+    {
+        JsonBuf_Puts(think, "\n\n");
+    }
+    JsonBuf_Puts(think, text);
+}
+
 static void EmitDelta(LlmCtx *c, PicoLlmDeltaKind kind, const char *s, size_t n)
 {
+    if (kind == PICO_LLM_DELTA_THINKING && !ThinkUsable(s, n))
+    {
+        return;
+    }
     if (kind == PICO_LLM_DELTA_TEXT && s && n)
     {
         c->saw_text = true;
@@ -704,21 +745,15 @@ static void FillResult(LlmCtx *c, PicoLlmResult *out)
         AddRaw(out, raw);
         if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
         {
-            char *text = ContentText(&doc, JsonObjGet(&doc, item, "summary"));
-            if (!text || !text[0])
+            char *summary = ContentText(&doc, JsonObjGet(&doc, item, "summary"));
+            char *content = ContentText(&doc, JsonObjGet(&doc, item, "content"));
+            AppendThink(&think, summary);
+            if (content && (!summary || strcmp(content, summary) != 0))
             {
-                free(text);
-                text = ContentText(&doc, JsonObjGet(&doc, item, "content"));
+                AppendThink(&think, content);
             }
-            if (text && text[0])
-            {
-                if (think.len)
-                {
-                    JsonBuf_Puts(&think, "\n\n");
-                }
-                JsonBuf_Puts(&think, text);
-            }
-            free(text);
+            free(summary);
+            free(content);
         }
         free(raw);
     }

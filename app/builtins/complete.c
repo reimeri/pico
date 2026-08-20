@@ -294,24 +294,49 @@ bool PicoComplete_HandleKeys(PicoApp *app)
     return false;
 }
 
+static int HoveredItem(void)
+{
+    for (int i = 0; i < g_complete.count; i++)
+    {
+        if (Clay_PointerOver(CLAY_IDI("CompleteItem", i)))
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void SelectHoveredItem(void)
+{
+    Vector2 delta = GetMouseDelta();
+    if (delta.x == 0.0f && delta.y == 0.0f)
+    {
+        return;
+    }
+    int hovered = HoveredItem();
+    if (hovered >= 0)
+    {
+        g_complete.selected = hovered;
+    }
+}
+
 bool PicoComplete_HandlePointer(PicoApp *app)
 {
     if (!g_complete.open)
     {
         return false;
     }
+    SelectHoveredItem();
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompletePopup")));
     }
-    for (int i = 0; i < g_complete.count; i++)
+    int hovered = HoveredItem();
+    if (hovered >= 0)
     {
-        if (Clay_PointerOver(CLAY_IDI("CompleteItem", i)))
-        {
-            g_complete.selected = i;
-            Accept(app);
-            return true;
-        }
+        g_complete.selected = hovered;
+        Accept(app);
+        return true;
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompletePopup"))))
     {
@@ -328,6 +353,7 @@ void PicoComplete_Render(PicoApp *app)
     {
         return;
     }
+    SelectHoveredItem();
     CLAY(CLAY_ID("CompletePopup"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
                        .zIndex = 25,

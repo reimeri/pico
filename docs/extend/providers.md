@@ -1,0 +1,59 @@
+# Providers
+
+An LLM provider implements one streaming turn. The builtin is `openai` (`app/builtins/openai.c`). Models in `settings.json` name the provider:
+
+```json
+{ "id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "context_limit": 128000 }
+```
+
+`provider` must match `PicoProvider.name`. Optional `base_url` overrides the extension default.
+
+```c
+#include "pico/plugin.h"
+#include "pico/http.h"
+#include "json.h"
+
+static int MyStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                    PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+{
+    (void)app;
+    (void)turn;
+    (void)cancel;
+    if (on_delta)
+    {
+        on_delta(user, PICO_LLM_DELTA_TEXT, "hello", 5);
+    }
+    out->assistant_text = JsonDup("hello");
+    return PICO_LLM_OK;
+}
+
+static void MyInit(PicoApp *app)
+{
+    pico_add_provider(app, &(PicoProvider){.name = "myllm", .stream = MyStream});
+}
+```
+
+Add a catalog entry with `"provider": "myllm"` or the builtin OpenAI path is used instead.
+
+## Turn
+
+`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `effort`, `compact`, `include_tools`, `input_json` / `input_count` (serialized history), `tools` / `tool_count`.
+
+Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
+
+## Result
+
+Fill `PicoLlmResult` with malloc'd strings. Pico calls `pico_llm_result_free`. Return `PICO_LLM_OK`, `PICO_LLM_FAIL` (set `out->error`), or `PICO_LLM_CANCEL`.
+
+- `assistant_text`, `think_text`
+- `calls[]` — `call_id`, `name`, `arguments` (JSON object text)
+- `raw_items[]` — optional provider-native items replayed on the next turn
+- `input_tokens`, `cached_tokens` for the footer / compaction
+
+HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_form_encode` in `pico/http.h`.
+
+## Contract
+
+- Stream runs on the **worker thread**. Do not use Clay or mutate UI. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
+- `name` must outlive the extension. Max 16 providers (`PICO_MAX_PROVIDERS`).
+- Look up credentials with `pico_auth_copy` — see `auth.md`.

@@ -52,6 +52,8 @@ set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
+get_filename_component(PICO_DOCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../docs/extend" ABSOLUTE)
+
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -64,7 +66,8 @@ target_compile_definitions(pico PRIVATE
     "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
     "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
     "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
-    "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
+    "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\""
+    "PICO_DOCS=\"${PICO_DOCS_DIR}\"")
 
 target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
@@ -75,13 +78,15 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)
 
-add_custom_command(
-        TARGET pico POST_BUILD
-        COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include
-            -I${CMAKE_CURRENT_SOURCE_DIR}
-            -I${CMAKE_CURRENT_SOURCE_DIR}/..
-            -I${raylib_SOURCE_DIR}/src
-            -o ${CMAKE_CURRENT_BINARY_DIR}/hello_ext.so
-            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/hello.c
-        COMMENT "Compile examples/hello.c as a plugin smoke test")
+foreach(ext hello echo_tool time_cmd)
+    add_custom_command(
+            TARGET pico POST_BUILD
+            COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99
+                -I${CMAKE_CURRENT_SOURCE_DIR}/include
+                -I${CMAKE_CURRENT_SOURCE_DIR}
+                -I${CMAKE_CURRENT_SOURCE_DIR}/..
+                -I${raylib_SOURCE_DIR}/src
+                -o ${CMAKE_CURRENT_BINARY_DIR}/${ext}_ext.so
+                ${CMAKE_CURRENT_SOURCE_DIR}/../examples/${ext}.c
+            COMMENT "Compile examples/${ext}.c as a plugin smoke test")
+endforeach()

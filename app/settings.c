@@ -940,5 +940,18 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
                      "working directory. Use the sh tool to run shell commands when that helps. "
                      "Prefer concise answers.");
     }
+#ifndef PICO_DOCS
+#define PICO_DOCS ""
+#endif
+    if (PICO_DOCS[0])
+    {
+        if (b.len)
+        {
+            JsonBuf_Puts(&b, "\n\n");
+        }
+        JsonBuf_Puts(&b, "If the user asks about Pico or wants to extend it, read ");
+        JsonBuf_Puts(&b, PICO_DOCS);
+        JsonBuf_Puts(&b, "/README.md.");
+    }
     return JsonBuf_Steal(&b);
 }

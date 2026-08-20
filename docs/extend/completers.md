@@ -1,0 +1,43 @@
+# Completers
+
+Composer completions fire when the cursor is in a triggered token.
+
+```c
+static int HashQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
+{
+    (void)app;
+    (void)prefix;
+    if (max < 1)
+    {
+        return 0;
+    }
+    snprintf(out[0].label, sizeof(out[0].label), "todo");
+    snprintf(out[0].detail, sizeof(out[0].detail), "example");
+    snprintf(out[0].insert, sizeof(out[0].insert), "#todo");
+    return 1;
+}
+
+static void HashInit(PicoApp *app)
+{
+    pico_add_completer(app, '#', false, HashQuery, NULL);
+}
+```
+
+## Fields
+
+- `trigger` — character that starts the token (`/` and `@` are taken by builtins).
+- `bol_only` — if true, only when the trigger is at the start of the composer (commands). If false, the trigger must be at a token start (preceded by start-of-text or whitespace).
+- `query(app, prefix, out, max)` — fill up to `max` items (`PICO_MAX_COMPLETE_ITEMS` is 24). `prefix` is the text after the trigger. Return the count.
+- `accept` — optional. Return true if you handled insertion yourself; otherwise Pico replaces the token with `item->insert` (or `label` if `insert` is empty).
+
+Each item:
+
+- `label` — list row
+- `detail` — muted subtitle
+- `insert` — text that replaces the whole token, **including the trigger** (e.g. `/model gpt-4o`, `@src/foo.c`)
+
+## Contract
+
+- Query/accept run on the **main thread** while typing.
+- Max 16 completers (`PICO_MAX_COMPLETERS`). First match for a trigger wins (`bol_only` preferred when the cursor is at bol).
+- Builtins: `/` commands, `@` workspace files.

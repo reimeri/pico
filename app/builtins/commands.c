@@ -3,11 +3,17 @@
 #include "session.h"
 #include "settings.h"
 #include "pico/auth.h"
+#include "json.h"
 
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#ifndef PICO_DOCS
+#define PICO_DOCS ""
+#endif
 
 #include "raylib.h"
 
@@ -193,6 +199,75 @@ static void CmdQuit(PicoApp *app, const char *args)
     CloseWindow();
 }
 
+static const char *const kDocTopics[] = {
+    "README", "anatomy", "views", "hooks", "tools", "commands", "completers", "providers", "auth", "contracts",
+};
+
+static void DocsTopicName(char *out, size_t cap, const char *args)
+{
+    while (args && *args && isspace((unsigned char)*args))
+    {
+        args++;
+    }
+    if (!args || !args[0] || FoldEq(args, "readme") || FoldEq(args, "index"))
+    {
+        snprintf(out, cap, "README");
+        return;
+    }
+    size_t n = 0;
+    for (; args[n] && n + 1 < cap; n++)
+    {
+        unsigned char c = (unsigned char)args[n];
+        if (!(isalnum(c) || c == '_' || c == '-'))
+        {
+            break;
+        }
+        out[n] = (char)Fold(c);
+    }
+    out[n] = '\0';
+    if (FoldEq(out, "readme") || FoldEq(out, "index"))
+    {
+        snprintf(out, cap, "README");
+    }
+}
+
+static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);
+
+static void CmdDocs(PicoApp *app, const char *args)
+{
+    ClearComposer(app);
+    app->submit_cancel = true;
+    if (!PICO_DOCS[0])
+    {
+        Note(app, "Extension docs path is not configured.");
+        return;
+    }
+    char topic[64];
+    DocsTopicName(topic, sizeof(topic), args);
+    if (!topic[0])
+    {
+        Note(app, "Unknown docs topic. Try `/docs`.");
+        return;
+    }
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/%s.md", PICO_DOCS, topic);
+    size_t len = 0;
+    char *src = Pico_ReadFile(path, &len);
+    if (!src)
+    {
+        char buf[512];
+        size_t n = Append(buf, sizeof(buf), 0, "Unknown topic. Try:");
+        for (size_t i = 0; i < sizeof(kDocTopics) / sizeof(kDocTopics[0]); i++)
+        {
+            n = Append(buf, sizeof(buf), n, i == 0 ? " `%s`" : ", `%s`", kDocTopics[i]);
+        }
+        Note(app, buf);
+        return;
+    }
+    Note(app, src);
+    free(src);
+}
+
 static void CmdHelp(PicoApp *app, const char *args)
 {
     (void)args;
@@ -372,7 +447,7 @@ static void SplitPrefix(const char *prefix, char *cmd, size_t cmd_cap, const cha
 static bool NeedsArgs(const char *name)
 {
     return FoldEq(name, "model") || FoldEq(name, "effort") || FoldEq(name, "login") ||
-           FoldEq(name, "logout");
+           FoldEq(name, "logout") || FoldEq(name, "docs");
 }
 
 static bool HasSpace(const char *s)
@@ -552,6 +627,21 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     {
         return AuthQuery(app, FoldEq(cmd, "login"), rest, out, max);
     }
+    if (FoldEq(cmd, "docs"))
+    {
+        for (size_t i = 0; i < sizeof(kDocTopics) / sizeof(kDocTopics[0]) && n < max; i++)
+        {
+            if (!FoldPrefix(kDocTopics[i], rest) && !FoldContains(kDocTopics[i], rest))
+            {
+                continue;
+            }
+            snprintf(out[n].label, sizeof(out[n].label), "%s", kDocTopics[i]);
+            out[n].detail[0] = '\0';
+            snprintf(out[n].insert, sizeof(out[n].insert), "/docs %s", kDocTopics[i]);
+            n++;
+        }
+        return n;
+    }
     return 0;
 }
 
@@ -586,6 +676,7 @@ static void CommandsInit(PicoApp *app)
     pico_add_command(app, "compact", "Compact the current session", CmdCompact);
     pico_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_add_command(app, "help", "List commands", CmdHelp);
+    pico_add_command(app, "docs", "Show extension docs", CmdDocs);
     pico_add_command(app, "reload", "Reload extensions", CmdReload);
     pico_add_completer(app, '/', true, CommandQuery, NULL);
     pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, CommandsBeforeSubmit);

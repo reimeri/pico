@@ -15,6 +15,7 @@
 #define COMPOSER_MAX_LINES 256
 #define COMPOSER_MIN_HEIGHT 56
 #define COMPOSER_MAX_GROW_LINES 10
+#define CARET_BLINK_HZ 2.0
 
 static Font ComposerFont(void)
 {
@@ -253,8 +254,14 @@ static float s_wrap_width = 0;
 static int s_seen_cursor = -1;
 static int s_seen_length = -1;
 static float s_goal_x = -1;
+static double s_caret_blink_at;
 
 static void MoveCursor(PicoComposer *c, int pos, bool extend);
+
+static void NoteCaretActivity(void)
+{
+    s_caret_blink_at = GetTime();
+}
 
 static ComposerView GetComposerView(PicoApp *app)
 {
@@ -544,6 +551,7 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     c->sel_anchor = from;
     c->text[c->length] = '\0';
     s_goal_x = -1;
+    NoteCaretActivity();
 }
 
 void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text)
@@ -602,6 +610,7 @@ static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
     c->sel_anchor = c->cursor;
     c->text[c->length] = '\0';
     s_goal_x = -1;
+    NoteCaretActivity();
 }
 
 static void MoveCursor(PicoComposer *c, int pos, bool extend)
@@ -620,6 +629,7 @@ static void MoveCursor(PicoComposer *c, int pos, bool extend)
         c->sel_anchor = pos;
     }
     s_goal_x = -1;
+    NoteCaretActivity();
 }
 
 static int Utf8Encode(int cp, char out[4])
@@ -1060,7 +1070,12 @@ void PicoComposer_DrawOverlay(PicoApp *app)
         }
     }
 
-    if (((int)(GetTime() * 2.0) & 1) == 0)
+    double elapsed = GetTime() - s_caret_blink_at;
+    if (elapsed < 0)
+    {
+        elapsed = 0;
+    }
+    if (((int)(elapsed * CARET_BLINK_HZ) & 1) == 0)
     {
         float x, y, h;
         CaretPos(app, &x, &y, &h);

@@ -333,7 +333,7 @@ typedef struct PicoApp {
     PicoScrollbar chat_scrollbar;
     PicoScrollbar composer_scrollbar;
     PicoChatSelect chat_sel;
-    bool chat_follow_bottom;
+    bool chat_follow_bottom; /* sticky: pin to bottom until the user scrolls away */
     bool chat_overflow;
     bool composer_overflow;
     bool reinitialize_clay;

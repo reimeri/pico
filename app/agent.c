@@ -1038,97 +1038,13 @@ static void TraceAppendThink(PicoApp *app, int idx, const char *s, size_t n)
     line->text = next;
 }
 
-static void FlattenPut(JsonBuf *b, const char *s, size_t max)
-{
-    if (!s)
-    {
-        return;
-    }
-    for (; *s && b->len < max; s++)
-    {
-        char c = (*s == '\n' || *s == '\r' || *s == '\t') ? ' ' : *s;
-        JsonBuf_Putc(b, c);
-    }
-}
-
-static char *FormatToolProps(const char *args_json)
-{
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    if (!args_json || !args_json[0])
-    {
-        return JsonBuf_Steal(&b);
-    }
-    JsonDoc doc;
-    if (JsonParse(&doc, args_json, strlen(args_json)) != 0)
-    {
-        FlattenPut(&b, args_json, 240);
-        return JsonBuf_Steal(&b);
-    }
-    if (JsonIsObject(&doc, 0))
-    {
-        int n = JsonObjLen(&doc, 0);
-        for (int i = 0; i < n; i++)
-        {
-            int key_tok = -1;
-            int val_tok = -1;
-            if (!JsonObjPair(&doc, 0, i, &key_tok, &val_tok))
-            {
-                continue;
-            }
-            if (b.len)
-            {
-                JsonBuf_Puts(&b, "  ");
-            }
-            char *key = JsonStrDup(&doc, key_tok);
-            FlattenPut(&b, key, 240);
-            free(key);
-            JsonBuf_Puts(&b, ": ");
-            char *val = NULL;
-            if (JsonIsObject(&doc, val_tok) || JsonIsArray(&doc, val_tok))
-            {
-                val = JsonRawDup(&doc, val_tok);
-            }
-            else
-            {
-                val = JsonStrDup(&doc, val_tok);
-                if (!val)
-                {
-                    val = JsonRawDup(&doc, val_tok);
-                }
-            }
-            FlattenPut(&b, val, 240);
-            free(val);
-            if (b.len > 240)
-            {
-                JsonBuf_Puts(&b, "...");
-                break;
-            }
-        }
-    }
-    else
-    {
-        char *raw = JsonRawDup(&doc, 0);
-        FlattenPut(&b, raw, 240);
-        free(raw);
-    }
-    JsonFree(&doc);
-    return JsonBuf_Steal(&b);
-}
-
 static void TraceAddTool(PicoApp *app, int idx, const char *name, const char *args_json)
 {
     if (idx < 0 || idx >= app->message_count)
     {
         return;
     }
-    PicoTraceLine *line = TracePush(&app->messages[idx], true);
-    if (!line)
-    {
-        return;
-    }
-    line->tool_name = Dup(name && name[0] ? name : "tool");
-    line->tool_args = FormatToolProps(args_json);
+    PicoApp_AddToolCall(app, name, args_json);
 }
 
 static void TraceSetLastToolOutput(PicoApp *app, int idx, const char *output, bool is_error)
@@ -1535,7 +1451,6 @@ static void OnToolStart(PicoApp *app, PicoAgentEv *ev)
     if (rt->stream_msg >= 0)
     {
         TraceAddTool(app, rt->stream_msg, name, args);
-        app->chat_follow_bottom = true;
     }
 }
 
@@ -2219,14 +2134,12 @@ void PicoAgent_Pump(PicoApp *app)
     {
         AppendMessageText(app, rt->stream_msg, stream, stream_len);
         rt->stream_dirty = true;
-        app->chat_follow_bottom = true;
     }
     free(stream);
 
     if (think && think_len && rt->stream_msg >= 0)
     {
         TraceAppendThink(app, rt->stream_msg, think, think_len);
-        app->chat_follow_bottom = true;
     }
     free(think);
 
@@ -2235,7 +2148,6 @@ void PicoAgent_Pump(PicoApp *app)
         char line[192];
         snprintf(line, sizeof(line), "Calling `%s`…", status);
         SetActivity(app, line);
-        app->chat_follow_bottom = true;
     }
 
     if (rt->stream_dirty)

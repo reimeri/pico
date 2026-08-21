@@ -1075,6 +1075,18 @@ static int TestToolTraceError(void)
     return ok ? 0 : Fail(name, "unknown tool was not marked as error");
 }
 
+static int TestResumedToolCallArgs(void)
+{
+    const char *name = "resumed tool args match live format";
+    PicoApp app;
+    InitApp(&app);
+    PicoApp_AddToolCall(&app, "sh", "{\"command\":\"cat examples/extra_instructions.c\"}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    bool ok = line && line->tool_args && strcmp(line->tool_args, "command: cat examples/extra_instructions.c") == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "resumed tool call kept raw JSON arguments");
+}
+
 int main(void)
 {
     int failed = 0;
@@ -1096,5 +1108,6 @@ int main(void)
     failed |= TestErrorNotification();
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();
+    failed |= TestResumedToolCallArgs();
     return failed ? 1 : 0;
 }

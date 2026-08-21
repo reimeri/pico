@@ -292,7 +292,6 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
     }
     msg->doc = MdDocument_ParseEx(markdown ? markdown : "", len,
                                   role == PICO_ROLE_USER ? MD_PARSE_PRESERVE_NEWLINES : MD_PARSE_DEFAULT);
-    app->chat_follow_bottom = true;
     pico_run_hooks(app, PICO_HOOK_ON_MESSAGE);
 }
 
@@ -323,7 +322,84 @@ void PicoApp_AppendAssistant(PicoApp *app, const char *text)
     m->source = next;
     MdDocument_Free(&m->doc);
     m->doc = MdDocument_ParseEx(m->source, old + n, MD_PARSE_DEFAULT);
-    app->chat_follow_bottom = true;
+}
+
+static void FlattenPut(JsonBuf *b, const char *s, size_t max)
+{
+    if (!s)
+    {
+        return;
+    }
+    for (; *s && b->len < max; s++)
+    {
+        char c = (*s == '\n' || *s == '\r' || *s == '\t') ? ' ' : *s;
+        JsonBuf_Putc(b, c);
+    }
+}
+
+static char *FormatToolProps(const char *args_json)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    if (!args_json || !args_json[0])
+    {
+        return JsonBuf_Steal(&b);
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, args_json, strlen(args_json)) != 0)
+    {
+        FlattenPut(&b, args_json, 240);
+        return JsonBuf_Steal(&b);
+    }
+    if (JsonIsObject(&doc, 0))
+    {
+        int n = JsonObjLen(&doc, 0);
+        for (int i = 0; i < n; i++)
+        {
+            int key_tok = -1;
+            int val_tok = -1;
+            if (!JsonObjPair(&doc, 0, i, &key_tok, &val_tok))
+            {
+                continue;
+            }
+            if (b.len)
+            {
+                JsonBuf_Puts(&b, "  ");
+            }
+            char *key = JsonStrDup(&doc, key_tok);
+            FlattenPut(&b, key, 240);
+            free(key);
+            JsonBuf_Puts(&b, ": ");
+            char *val = NULL;
+            if (JsonIsObject(&doc, val_tok) || JsonIsArray(&doc, val_tok))
+            {
+                val = JsonRawDup(&doc, val_tok);
+            }
+            else
+            {
+                val = JsonStrDup(&doc, val_tok);
+                if (!val)
+                {
+                    val = JsonRawDup(&doc, val_tok);
+                }
+            }
+            FlattenPut(&b, val, 240);
+            free(val);
+            if (b.len > 240)
+            {
+                JsonBuf_Puts(&b, "...");
+                break;
+            }
+        }
+    }
+    else
+    {
+        char *raw = JsonRawDup(&doc, 0);
+        FlattenPut(&b, raw, 240);
+        free(raw);
+    }
+    JsonFree(&doc);
+    return JsonBuf_Steal(&b);
 }
 
 void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
@@ -344,7 +420,7 @@ void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
     memset(line, 0, sizeof(*line));
     line->is_tool = true;
     line->tool_name = JsonDup(name && name[0] ? name : "tool");
-    line->tool_args = JsonDup(args ? args : "");
+    line->tool_args = FormatToolProps(args);
 }
 
 void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
@@ -422,6 +498,7 @@ void PicoApp_Submit(PicoApp *app)
     const char *display = c->text;
     const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : display;
     PicoApp_AddMessage(app, PICO_ROLE_USER, display);
+    app->chat_follow_bottom = true;
     PicoSession_LogUser(app, agent, display);
     PicoAgent_StartTurn(app, agent);
 
@@ -454,6 +531,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     app->fonts = fonts;
     app->agent_state = PICO_AGENT_IDLE;
     app->chat_sel.msg = -1;
+    app->chat_follow_bottom = true;
     app->chat_overflow = true;
     app->safe_mode = safe_mode;
     if (workspace && workspace[0])
@@ -757,6 +835,39 @@ static void UpdateChatScrollbarDrag(PicoApp *app, Clay_Vector2 mouse)
     }
 }
 
+#define CHAT_FOLLOW_SLACK 8.0f
+
+static bool ChatScrollAtBottom(Clay_ScrollContainerData data)
+{
+    if (!data.found || !data.scrollPosition)
+    {
+        return true;
+    }
+    float overflow = data.contentDimensions.height - data.scrollContainerDimensions.height;
+    if (overflow <= 0.5f)
+    {
+        return true;
+    }
+    float bottom = data.scrollContainerDimensions.height - data.contentDimensions.height;
+    return data.scrollPosition->y <= bottom + CHAT_FOLLOW_SLACK;
+}
+
+static void UpdateChatFollowFromUserScroll(PicoApp *app, bool over_chat, bool modal_open, float wheel_y)
+{
+    if (modal_open)
+    {
+        return;
+    }
+    bool bar_drag = app->chat_scrollbar.mouse_down;
+    bool wheel = over_chat && wheel_y != 0.0f;
+    if (!bar_drag && !wheel)
+    {
+        return;
+    }
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    app->chat_follow_bottom = ChatScrollAtBottom(data);
+}
+
 void PicoApp_Frame(PicoApp *app)
 {
     Vector2 mouse_delta = GetMouseWheelMoveV();
@@ -824,6 +935,7 @@ void PicoApp_Frame(PicoApp *app)
     Clay_UpdateScrollContainers(modal_open || (!over_composer && !over_chat && !composer_bar_drag &&
                                                !app->chat_sel.mouse_selecting),
                                 (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
+    UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);
 
@@ -861,7 +973,6 @@ void PicoApp_Frame(PicoApp *app)
         {
             data.scrollPosition->y = data.scrollContainerDimensions.height - data.contentDimensions.height;
         }
-        app->chat_follow_bottom = false;
     }
 
     if (app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&

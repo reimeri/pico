@@ -41,3 +41,5 @@ Full file: `examples/hello.c`.
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`).
 - Do not call Clay from a tool or provider callback (worker thread).
+- `PicoUi_ModalOpen` is true while `/extensions` is open, a footer menu is open, or a tool ask is pending. Builtin composer, chat, and footer skip input then. A custom ask overlay still receives pointer hits; it may consume `GetCharPressed()` from `on_frame` after the composer has skipped.
+- Answer a pending ask with `pico_tool_answer(app, ask.id, json)` from the main thread. Bind buttons to the `id` from `pico_tool_pending_ask`. The request string stays valid through Clay render of this frame even if you answer in `AFTER_LAYOUT`.

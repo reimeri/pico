@@ -693,7 +693,7 @@ static void PasteClipboard(PicoComposer *c)
 
 void PicoComposer_HandleInput(PicoApp *app)
 {
-    if (PicoExts_IsOpen() || PicoFooter_MenuOpen())
+    if (PicoUi_ModalOpen(app))
     {
         return;
     }
@@ -1076,7 +1076,7 @@ static void ComposerAfterLayout(PicoApp *app)
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
     app->composer_overflow =
         scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
-    if (!PicoExts_IsOpen() && !PicoFooter_MenuOpen())
+    if (!PicoUi_ModalOpen(app))
     {
         if (!PicoComplete_HandlePointer(app))
         {
@@ -1120,7 +1120,7 @@ static void ComposerFrame(PicoApp *app, float dt)
 {
     (void)dt;
     PicoComposer_HandleInput(app);
-    if (!PicoExts_IsOpen() && !PicoFooter_MenuOpen())
+    if (!PicoUi_ModalOpen(app))
     {
         UpdateComposerScrollbarDrag(app);
     }

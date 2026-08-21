@@ -82,6 +82,21 @@ if(BUILD_TESTING)
         json.c)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
+
+    add_executable(pico_agent_behavior_tests
+        tests/agent_behavior_test.c
+        app.c
+        agent.c
+        json.c)
+    target_include_directories(pico_agent_behavior_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_agent_behavior_tests PRIVATE raylib CURL::libcurl Threads::Threads)
+    add_test(NAME pico_agent_behavior_tests COMMAND pico_agent_behavior_tests)
 endif()
 
 add_custom_command(
@@ -90,7 +105,7 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)
 
-foreach(ext hello echo_tool time_cmd)
+foreach(ext hello echo_tool ask_tool time_cmd)
     add_custom_command(
             TARGET pico POST_BUILD
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99

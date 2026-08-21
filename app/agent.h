@@ -12,6 +12,7 @@ void PicoAgent_Cancel(PicoApp *app);
 void PicoAgent_ForceCancel(PicoApp *app);
 bool PicoAgent_IsBusy(const PicoApp *app);
 bool PicoAgent_CancelRequested(const PicoApp *app);
+bool PicoAgent_AskUiOpen(const PicoApp *app);
 void PicoAgent_DismissError(PicoApp *app);
 void PicoAgent_Pump(PicoApp *app);
 bool PicoAgent_BlocksReload(const PicoApp *app);

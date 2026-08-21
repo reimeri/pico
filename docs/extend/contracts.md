@@ -8,22 +8,26 @@ Read this before writing an extension. Getting these wrong crashes Pico or silen
 
 A second Esc force-cancels a stuck turn: the UI goes idle and a new worker starts so the user can keep chatting, but reload still waits for the abandoned worker. That worker may outlive the turn; do not touch Clay, Raylib, or chat/composer state from it.
 
+On process exit, `PicoAgent_Shutdown` waits about one second. If a worker is still running, Pico leaves the entire `PicoApp`, all registrations, builtin state, and user-extension `.so` handles intact for that worker. No extension `shutdown` callback runs and no handle is closed; process exit reclaims the state.
+
 `--safe` skips user extensions. Compile errors set `app->status_warn` (overlay).
 
 ## Threads
 
 Main thread: `init`, `shutdown`, `on_frame`, view render, hooks, command `run`, completer query/accept, auth login/logout.
 
-Worker thread: `PicoToolFn`, `PicoProviderStreamFn`.
+Worker thread: `PicoToolFn`, `PicoProviderStreamFn`. `pico_tool_ask` is the only supported wait for user input; it may be called only from `PicoToolFn`. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
-Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a malloc'd string; providers use `on_delta` / `PicoLlmResult`.
+Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a malloc'd string; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`.
 
-Reload is deferred while the live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns.
+Reload is deferred while the live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns. That includes a worker blocked in `pico_tool_ask`.
 
 ## Ownership
 
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - Tool `*out`: malloc, Pico frees. Never leave `*out` unset on a path that returns; use `JsonDup("")` or an error string.
+- `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the tool frees it. Always `NULL` on cancel/fail.
+- `pico_tool_pending_ask` `request_json`: valid until the next `PicoAgent_Pump`. Do not retain it across frames.
 - `app->agent_input` and `app->compact_summary`: malloc if you set them; Pico frees.
 - `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
@@ -37,6 +41,7 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 - 64 hooks, tools, commands
 - 16 completers, providers, auth registrations
 - 24 completion items per query
+- `PICO_TOOL_ASK_MAX_REQUEST` / `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)
 
 Silent no-op if a `pico_add_*` is full or arguments are NULL.
 

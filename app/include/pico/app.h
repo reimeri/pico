@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #include "raylib.h"
@@ -13,6 +14,8 @@
 #define PICO_MAX_SLOT_VIEWS 16
 #define PICO_MAX_HOOKS 64
 #define PICO_MAX_TOOLS 64
+#define PICO_TOOL_ASK_MAX_REQUEST (64 * 1024)
+#define PICO_TOOL_ASK_MAX_ANSWER (64 * 1024)
 #define PICO_MAX_COMMANDS 64
 #define PICO_MAX_COMPLETERS 16
 #define PICO_MAX_COMPLETE_ITEMS 24
@@ -178,6 +181,17 @@ enum {
     PICO_LLM_CANCEL = 2,
 };
 
+enum {
+    PICO_ASK_OK = 0,
+    PICO_ASK_CANCEL = 1,
+    PICO_ASK_FAIL = 2,
+};
+
+typedef struct PicoToolAsk {
+    uint64_t id;
+    const char *request_json;
+} PicoToolAsk;
+
 typedef struct PicoLlmTurn {
     const char *model;
     const char *base_url;
@@ -302,6 +316,17 @@ void pico_add_tool(PicoApp *app, const char *name, const char *description, cons
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process
  * group. Call from the tool (worker thread) after fork; 0 clears. */
 void pico_tool_set_child(PicoApp *app, pid_t pid);
+/* Worker thread, inside PicoToolFn only. Validates and copies request_json.
+ * Invalid JSON/confirm schema returns an immediate OK error answer.
+ * On OK, *answer_json is malloc'd and the tool frees it.
+ * On CANCEL/FAIL, *answer_json is always set to NULL. */
+int pico_tool_ask(PicoApp *app, const char *request_json, char **answer_json);
+/* Main thread. False when no live ask exists. request_json is valid until
+ * the next PicoAgent_Pump; do not retain it across frames. */
+bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out);
+/* Main thread. False if id is stale, cancelled, or no longer pending. */
+bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json);
+bool PicoUi_ModalOpen(const PicoApp *app);
 void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run);
 void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,
                         PicoCompleteAcceptFn accept);

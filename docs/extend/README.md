@@ -35,6 +35,7 @@ Copy-templates in the Pico source tree:
 
 - `examples/hello.c` — sidebar view
 - `examples/echo_tool.c` — tool + `json.h`
+- `examples/ask_tool.c` — `pico_tool_ask` + builtin confirm overlay
 - `examples/time_cmd.c` — slash command
 
 Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat `agent.h`, `session.h`, or `settings.h` as API.

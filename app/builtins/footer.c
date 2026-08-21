@@ -36,16 +36,16 @@ bool PicoFooter_MenuOpen(void)
     return g_menu != FOOTER_MENU_NONE || g_esc_block;
 }
 
-static const char *AgentStateName(PicoAgentState state)
+static const char *AgentStateName(const PicoApp *app)
 {
-    switch (state)
+    switch (app->agent_state)
     {
         case PICO_AGENT_IDLE:
             return "idle";
         case PICO_AGENT_LLM_WAIT:
             return "waiting on model";
         case PICO_AGENT_TOOL_WAIT:
-            return "running tool";
+            return PicoAgent_AskUiOpen(app) ? "waiting for you" : "running tool";
         case PICO_AGENT_COMPACT_WAIT:
             return "compacting";
         case PICO_AGENT_ERROR:
@@ -351,7 +351,7 @@ void PicoFooter_Render(PicoApp *app)
     }
 
     FormatCwd(app->workspace, g_cwd, sizeof(g_cwd));
-    snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app->agent_state));
+    snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app));
     snprintf(g_extra, sizeof(g_extra), "%s", extra);
     if (app->tokens_used > 0)
     {
@@ -414,7 +414,7 @@ void PicoFooter_Render(PicoApp *app)
 
 static void FooterAfterLayout(PicoApp *app)
 {
-    if (PicoExts_IsOpen())
+    if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(app))
     {
         app->hovered_clickable = false;
         return;

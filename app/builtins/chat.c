@@ -121,7 +121,8 @@ static void RenderToolLine(PicoApp *app, PicoTraceLine *line, int message_index,
             const char *output = line->tool_output;
             if (!output && app->agent_state == PICO_AGENT_TOOL_WAIT)
             {
-                output = "Running…";
+                PicoToolAsk ask;
+                output = pico_tool_pending_ask(app, &ask) ? "Waiting for you…" : "Running…";
             }
             RenderToolOutput(output);
         }
@@ -331,7 +332,7 @@ void PicoChat_Render(PicoApp *app)
 void PicoChat_HandlePointer(PicoApp *app)
 {
     PicoChatSel_Clamp(app);
-    if (app->status_warn || PicoExts_IsOpen() || PicoFooter_MenuOpen())
+    if (app->status_warn || PicoUi_ModalOpen(app))
     {
         return;
     }

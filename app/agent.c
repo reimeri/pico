@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,10 +106,29 @@ struct PicoAgentRt {
 
     int stream_msg;
     bool stream_dirty;
+
+    uint64_t ask_id;
+    char *ask_request;
+    char *ask_answer;
+    bool ask_waiting;
+    bool ask_done;
+
+    uint64_t snap_id;
+    char *snap_request;
+    bool snap_retired;
 };
 
 static PicoAgentRt *g_zombies;
+static pthread_mutex_t g_ask_id_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_ask_next_id;
 static __thread PicoAgentRt *t_worker_rt;
+
+typedef enum PicoWorkerContext {
+    PICO_WORKER_NONE = 0,
+    PICO_WORKER_PROVIDER,
+    PICO_WORKER_TOOL,
+} PicoWorkerContext;
+static __thread PicoWorkerContext t_worker_context;
 
 static void SetErrorState(PicoApp *app, const char *msg);
 static void FinishAssistantHistory(PicoApp *app);
@@ -166,7 +186,7 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
         if (!next)
         {
             rt->busy = false;
-            pthread_cond_signal(&rt->cv);
+            pthread_cond_broadcast(&rt->cv);
             pthread_mutex_unlock(&rt->mu);
             free(text);
             free(payload);
@@ -182,7 +202,7 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
     ev->tokens = tokens;
     ev->cached = cached;
     rt->busy = false;
-    pthread_cond_signal(&rt->cv);
+    pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
 }
 
@@ -389,7 +409,9 @@ static void *WorkerMain(void *arg)
             turn.tool_count = include_tools ? rt->app->tool_count : 0;
             PicoLlmResult result;
             memset(&result, 0, sizeof(result));
+            t_worker_context = PICO_WORKER_PROVIDER;
             int rc = stream_fn ? stream_fn(rt->app, &turn, CancelCb, DeltaCb, rt, &result) : PICO_LLM_FAIL;
+            t_worker_context = PICO_WORKER_NONE;
             if (rc == PICO_LLM_CANCEL)
             {
                 PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0, 0);
@@ -414,7 +436,9 @@ static void *WorkerMain(void *arg)
             char *out = NULL;
             if (tool_fn)
             {
+                t_worker_context = PICO_WORKER_TOOL;
                 tool_fn(rt->app, tool_args ? tool_args : "{}", &out);
+                t_worker_context = PICO_WORKER_NONE;
             }
             else
             {
@@ -512,7 +536,7 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
     rt->work_input_count = input_count;
     rt->busy = true;
     rt->cancel = false;
-    pthread_cond_signal(&rt->cv);
+    pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
     return true;
 }
@@ -532,7 +556,7 @@ static bool QueueTool(PicoAgentRt *rt, const char *name, const char *args, const
     rt->work_tool_fn = fn;
     rt->tool_child = 0;
     rt->busy = true;
-    pthread_cond_signal(&rt->cv);
+    pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
     return true;
 }
@@ -1284,6 +1308,41 @@ bool PicoAgent_CancelRequested(const PicoApp *app)
     return c;
 }
 
+bool PicoAgent_AskUiOpen(const PicoApp *app)
+{
+    PicoAgentRt *rt = app ? app->agent : NULL;
+    return rt && rt->snap_id != 0;
+}
+
+static void PublishAskSnapshot(PicoAgentRt *rt)
+{
+    pthread_mutex_lock(&rt->mu);
+    bool waiting = rt->ask_waiting && !rt->cancel && !rt->stop;
+    uint64_t live_id = waiting ? rt->ask_id : 0;
+    char *live_copy = NULL;
+    if (waiting && rt->ask_request && (rt->snap_retired || rt->snap_id != live_id))
+    {
+        live_copy = Dup(rt->ask_request);
+    }
+    pthread_mutex_unlock(&rt->mu);
+
+    if (!rt->snap_retired && rt->snap_id == live_id && live_id != 0)
+    {
+        return;
+    }
+    free(rt->snap_request);
+    rt->snap_request = NULL;
+    rt->snap_id = 0;
+    rt->snap_retired = false;
+    if (live_id != 0)
+    {
+        rt->snap_id = live_id;
+        rt->snap_request = live_copy;
+        live_copy = NULL;
+    }
+    free(live_copy);
+}
+
 static bool ZombiesBusy(void)
 {
     for (PicoAgentRt *z = g_zombies; z; z = z->zombie_next)
@@ -1351,6 +1410,9 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt->work_call_id);
     free(rt->instructions);
     free(rt->turn_provider);
+    free(rt->ask_request);
+    free(rt->ask_answer);
+    free(rt->snap_request);
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
     free(rt);
@@ -1381,7 +1443,7 @@ static bool StopRt(PicoAgentRt *rt, bool wait_one_sec)
     rt->stop = true;
     rt->cancel = true;
     pid_t child = rt->tool_child;
-    pthread_cond_signal(&rt->cv);
+    pthread_cond_broadcast(&rt->cv);
     if (wait_one_sec && rt->busy)
     {
         struct timespec until;
@@ -1540,7 +1602,9 @@ void PicoAgent_Cancel(PicoApp *app)
     }
     pthread_mutex_lock(&rt->mu);
     rt->cancel = true;
+    pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    rt->snap_retired = true;
 }
 
 void PicoAgent_ForceCancel(PicoApp *app)
@@ -1563,7 +1627,7 @@ void PicoAgent_ForceCancel(PicoApp *app)
     old->stop = true;
     pid_t child = old->tool_child;
     old->tool_child = 0;
-    pthread_cond_signal(&old->cv);
+    pthread_cond_broadcast(&old->cv);
     pthread_mutex_unlock(&old->mu);
     KillToolChild(child);
 
@@ -1600,6 +1664,207 @@ void pico_tool_set_child(PicoApp *app, pid_t pid)
     pthread_mutex_unlock(&rt->mu);
 }
 
+static uint64_t NextAskId(void)
+{
+    pthread_mutex_lock(&g_ask_id_mu);
+    g_ask_next_id++;
+    if (g_ask_next_id == 0)
+    {
+        g_ask_next_id++;
+    }
+    uint64_t id = g_ask_next_id;
+    pthread_mutex_unlock(&g_ask_id_mu);
+    return id;
+}
+
+static int InvalidAskResult(char **answer_json)
+{
+    char *answer = Dup("{\"error\":\"invalid ask payload; fix it and try again\"}");
+    if (!answer)
+    {
+        return PICO_ASK_FAIL;
+    }
+    if (answer_json)
+    {
+        *answer_json = answer;
+    }
+    else
+    {
+        free(answer);
+    }
+    return PICO_ASK_OK;
+}
+
+static bool AskRequestInvalid(const char *request_json)
+{
+    JsonDoc doc;
+    if (JsonParse(&doc, request_json, strlen(request_json)) != 0)
+    {
+        return true;
+    }
+    bool builtin_confirm = JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "confirm") &&
+                           !JsonEq(&doc, JsonObjGet(&doc, 0, "ui"), "custom");
+    char *message = builtin_confirm ? JsonObjStr(&doc, 0, "message") : NULL;
+    bool invalid = builtin_confirm && (!message || !message[0]);
+    free(message);
+    JsonFree(&doc);
+    return invalid;
+}
+
+static int AskFail(char **answer_json)
+{
+    if (answer_json)
+    {
+        *answer_json = NULL;
+    }
+    return PICO_ASK_FAIL;
+}
+
+static int AskCancel(char **answer_json)
+{
+    if (answer_json)
+    {
+        *answer_json = NULL;
+    }
+    return PICO_ASK_CANCEL;
+}
+
+int pico_tool_ask(PicoApp *app, const char *request_json, char **answer_json)
+{
+    if (answer_json)
+    {
+        *answer_json = NULL;
+    }
+    if (!app || !request_json)
+    {
+        return PICO_ASK_FAIL;
+    }
+    if (strlen(request_json) > PICO_TOOL_ASK_MAX_REQUEST)
+    {
+        return PICO_ASK_FAIL;
+    }
+    if (t_worker_context != PICO_WORKER_TOOL || !t_worker_rt || t_worker_rt->app != app)
+    {
+        return PICO_ASK_FAIL;
+    }
+    bool invalid = AskRequestInvalid(request_json);
+    PicoAgentRt *rt = t_worker_rt;
+    pthread_mutex_lock(&rt->mu);
+    if (rt->ask_waiting)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return AskFail(answer_json);
+    }
+    if (rt->cancel || rt->stop)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return AskCancel(answer_json);
+    }
+    if (invalid)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return InvalidAskResult(answer_json);
+    }
+    char *req = Dup(request_json);
+    if (!req)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return AskFail(answer_json);
+    }
+    rt->ask_id = NextAskId();
+    rt->ask_request = req;
+    free(rt->ask_answer);
+    rt->ask_answer = NULL;
+    rt->ask_waiting = true;
+    rt->ask_done = false;
+    while (!rt->ask_done && !rt->cancel && !rt->stop)
+    {
+        pthread_cond_wait(&rt->cv, &rt->mu);
+    }
+    int rc;
+    if (rt->stop || rt->cancel)
+    {
+        free(rt->ask_answer);
+        rt->ask_answer = NULL;
+        rc = PICO_ASK_CANCEL;
+    }
+    else
+    {
+        if (answer_json)
+        {
+            *answer_json = rt->ask_answer ? rt->ask_answer : Dup("");
+        }
+        else
+        {
+            free(rt->ask_answer);
+        }
+        rt->ask_answer = NULL;
+        rc = PICO_ASK_OK;
+    }
+    free(rt->ask_request);
+    rt->ask_request = NULL;
+    rt->ask_waiting = false;
+    rt->ask_done = false;
+    rt->ask_id = 0;
+    pthread_mutex_unlock(&rt->mu);
+    if (rc == PICO_ASK_CANCEL)
+    {
+        return AskCancel(answer_json);
+    }
+    return rc;
+}
+
+bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
+{
+    PicoAgentRt *rt = app ? app->agent : NULL;
+    if (!rt || !out || rt->snap_id == 0 || !rt->snap_request || rt->snap_retired)
+    {
+        return false;
+    }
+    out->id = rt->snap_id;
+    out->request_json = rt->snap_request;
+    return true;
+}
+
+bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
+{
+    if (!app || id == 0)
+    {
+        return false;
+    }
+    const char *src = answer_json ? answer_json : "";
+    if (strlen(src) > PICO_TOOL_ASK_MAX_ANSWER)
+    {
+        return false;
+    }
+    PicoAgentRt *rt = app->agent;
+    if (!rt)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&rt->mu);
+    if (!rt->ask_waiting || rt->ask_done || rt->ask_id != id || rt->cancel || rt->stop)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return false;
+    }
+    char *ans = Dup(src);
+    if (!ans)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return false;
+    }
+    rt->ask_answer = ans;
+    rt->ask_done = true;
+    pthread_cond_broadcast(&rt->cv);
+    pthread_mutex_unlock(&rt->mu);
+    if (rt->snap_id == id)
+    {
+        rt->snap_retired = true;
+    }
+    return true;
+}
+
 void PicoAgent_DismissError(PicoApp *app)
 {
     if (app->agent_state == PICO_AGENT_ERROR)
@@ -1618,6 +1883,7 @@ void PicoAgent_Pump(PicoApp *app)
     {
         return;
     }
+    PublishAskSnapshot(rt);
 
     pthread_mutex_lock(&rt->mu);
     char *stream = rt->stream;

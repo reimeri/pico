@@ -412,6 +412,11 @@ void PicoApp_Cancel(PicoApp *app)
     PicoAgent_Cancel(app);
 }
 
+bool PicoUi_ModalOpen(const PicoApp *app)
+{
+    return PicoExts_IsOpen() || PicoFooter_MenuOpen() || PicoAgent_AskUiOpen(app);
+}
+
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
                  PicoSessionStart session_start, const char *session_file)
 {
@@ -627,16 +632,14 @@ void PicoApp_ClearMessages(PicoApp *app)
 
 void PicoApp_Free(PicoApp *app)
 {
-    /* A detached agent worker outlives us and can still reach the auth store to
-     * refresh a token, so leave the store and the struct itself alone in that case;
-     * the process is exiting anyway. Everything freed below is reached only through
-     * the agent runtime, which the detach path already leaks. */
-    bool agent_reaped = PicoAgent_Shutdown(app);
-    PicoPlugins_Shutdown(app);
-    if (agent_reaped)
+    /* A detached worker can still reach any public PicoApp field, registered
+     * callback, or builtin state. Process exit will reclaim all of it. */
+    if (!PicoAgent_Shutdown(app))
     {
-        PicoAuth_Free(app);
+        return;
     }
+    PicoPlugins_Shutdown(app);
+    PicoAuth_Free(app);
     PicoApp_ClearMessages(app);
     free(app->messages);
     free(app->composer.text);
@@ -645,10 +648,7 @@ void PicoApp_Free(PicoApp *app)
     free(app->compact_summary);
     free(app->models);
     free(app->agent_input);
-    if (agent_reaped)
-    {
-        memset(app, 0, sizeof(*app));
-    }
+    memset(app, 0, sizeof(*app));
 }
 
 static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
@@ -782,7 +782,7 @@ void PicoApp_Frame(PicoApp *app)
     bool composer_bar_drag = app->composer_scrollbar.mouse_down;
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
     bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    bool modal_open = PicoExts_IsOpen();
+    bool modal_open = PicoUi_ModalOpen(app);
     Clay_SetPointerState(mouse_position,
                          IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down && !composer_bar_drag);
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});

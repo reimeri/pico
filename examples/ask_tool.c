@@ -1,0 +1,88 @@
+// Example Pico tool that asks the user before returning.
+// Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
+//
+//   mkdir -p ~/.config/pico/extensions/ask
+//   cp examples/ask_tool.c ~/.config/pico/extensions/ask/
+
+#include "pico/plugin.h"
+#include "json.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+static const char *kParams =
+    "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":"
+    "\"Confirmation prompt\"}},\"required\":[\"message\"]}";
+
+static void AskRun(PicoApp *app, const char *args_json, char **out)
+{
+    if (out)
+    {
+        *out = NULL;
+    }
+    JsonDoc doc;
+    const char *src = args_json ? args_json : "";
+    if (JsonParse(&doc, src, strlen(src)) != 0)
+    {
+        if (out)
+        {
+            *out = JsonDup("ask: bad json");
+        }
+        return;
+    }
+    char *message = JsonObjStr(&doc, 0, "message");
+    JsonFree(&doc);
+    if (!message || !message[0])
+    {
+        free(message);
+        if (out)
+        {
+            *out = JsonDup("ask: missing message");
+        }
+        return;
+    }
+
+    JsonBuf req;
+    JsonBuf_Init(&req);
+    JsonBuf_Puts(&req, "{\"type\":\"confirm\",\"message\":");
+    JsonBuf_String(&req, message);
+    JsonBuf_Putc(&req, '}');
+    free(message);
+    char *request = JsonBuf_Steal(&req);
+
+    char *answer = NULL;
+    int rc = pico_tool_ask(app, request, &answer);
+    free(request);
+    if (rc != PICO_ASK_OK)
+    {
+        free(answer);
+        if (out)
+        {
+            *out = JsonDup(rc == PICO_ASK_CANCEL ? "ask: cancelled" : "ask: failed");
+        }
+        return;
+    }
+    if (out)
+    {
+        *out = answer ? answer : JsonDup("{}");
+    }
+    else
+    {
+        free(answer);
+    }
+}
+
+static void AskInit(PicoApp *app)
+{
+    pico_add_tool(app, "confirm", "Ask the user to confirm something", kParams, AskRun);
+}
+
+PicoExt pico_ext(void)
+{
+    return (PicoExt){
+        .abi = PICO_EXT_ABI,
+        .name = "confirm",
+        .description = "Builtin confirm overlay via pico_tool_ask",
+        .init = AskInit,
+    };
+}

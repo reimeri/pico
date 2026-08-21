@@ -19,7 +19,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 
 - `anatomy` — entry point, lifecycle, compile
 - `views` — UI in a slot (sidebar, chat, footer, …)
-- `hooks` — submit, layout, compact, messages; tool and LLM interceptors
+- `hooks` — submit, layout, compact, turn end/cancel/error; tool and LLM interceptors
 - `tools` — LLM-callable tools
 - `commands` — slash commands (`/foo`)
 - `completers` — composer `#` / `@` style completion

@@ -23,6 +23,10 @@ All of these run on the main thread.
 - `PICO_HOOK_ON_SUBMIT` — after the user message is logged and the agent turn started.
 - `PICO_HOOK_ON_MESSAGE` — after `PicoApp_AddMessage`.
 - `PICO_HOOK_ON_COMPACT` — compaction starting. Custom briefing.
+- `PICO_HOOK_AFTER_COMPACT` — history was replaced with a briefing. `agent_state` is still `PICO_AGENT_COMPACT_WAIT` until `ON_TURN_END`.
+- `PICO_HOOK_ON_TURN_END` — the agent is idle after a finished turn. Not fired on cancel or error. Compact is not idle; this waits until compaction completes.
+- `PICO_HOOK_ON_CANCEL` — the user cancelled the turn (Esc / force-cancel). State is idle. Distinct from tool-hook deny.
+- `PICO_HOOK_ON_ERROR` — `agent_state` is `PICO_AGENT_ERROR`; `app->agent_error` is set.
 
 ## BEFORE_SUBMIT
 
@@ -38,6 +42,8 @@ The builtin `commands` extension dispatches `/name` here. The builtin `files` ex
 ## ON_COMPACT
 
 Set `app->compact_summary` to a malloc'd briefing to skip the default LLM compact. Pico frees it. Leave it NULL to keep the default.
+
+`PICO_HOOK_AFTER_COMPACT` runs after that briefing is applied (custom or LLM). Then `PICO_HOOK_ON_TURN_END` if the agent goes idle.
 
 ## Tool interceptors
 

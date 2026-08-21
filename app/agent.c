@@ -1209,12 +1209,19 @@ static void GoIdle(PicoApp *app)
     app->agent_activity[0] = '\0';
 }
 
+static void EndTurnIdle(PicoApp *app)
+{
+    GoIdle(app);
+    pico_run_hooks(app, PICO_HOOK_ON_TURN_END);
+}
+
 static void ApplyCancel(PicoApp *app)
 {
     PicoAgentRt *rt = app->agent;
     if (rt->compacting)
     {
         GoIdle(app);
+        pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
         return;
     }
     FinishAssistantHistory(app);
@@ -1233,6 +1240,7 @@ static void ApplyCancel(PicoApp *app)
         TraceSetLastToolOutput(app, rt->stream_msg, "(interrupted)");
     }
     GoIdle(app);
+    pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
 }
 
 static int CompactThreshold(const PicoApp *app)
@@ -1261,6 +1269,7 @@ static void ApplyCompaction(PicoApp *app, const char *summary)
     app->tokens_cached = 0;
     free(app->compact_summary);
     app->compact_summary = NULL;
+    pico_run_hooks(app, PICO_HOOK_AFTER_COMPACT);
 }
 
 static void StartCompact(PicoApp *app)
@@ -1276,7 +1285,7 @@ static void StartCompact(PicoApp *app)
     if (app->compact_summary && app->compact_summary[0])
     {
         ApplyCompaction(app, app->compact_summary);
-        GoIdle(app);
+        EndTurnIdle(app);
         return;
     }
     rt->compacting = true;
@@ -1299,7 +1308,7 @@ static void FinishTurn(PicoApp *app)
         StartCompact(app);
         return;
     }
-    GoIdle(app);
+    EndTurnIdle(app);
 }
 
 static void SetErrorState(PicoApp *app, const char *msg)
@@ -1318,6 +1327,7 @@ static void SetErrorState(PicoApp *app, const char *msg)
     rt->compacting = false;
     rt->compact_no_tools = false;
     app->agent_activity[0] = '\0';
+    pico_run_hooks(app, PICO_HOOK_ON_ERROR);
 }
 
 static void StartLlm(PicoApp *app);
@@ -1461,7 +1471,7 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
         {
             ApplyCompaction(app, text);
             free(text);
-            GoIdle(app);
+            EndTurnIdle(app);
             return;
         }
         free(text);
@@ -1575,6 +1585,7 @@ static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
     {
         AbortRemainingCalls(rt);
         GoIdle(app);
+        pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
         return;
     }
     StartNextTool(app);

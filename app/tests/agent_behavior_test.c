@@ -40,6 +40,12 @@ typedef struct TestState {
     char *after_seen_args;
     char *after_seen_output;
     int followup_hook_calls;
+    bool provider_fail;
+    int provider_tokens;
+    int life_turn_end;
+    int life_cancel;
+    int life_error;
+    int life_after_compact;
 } TestState;
 
 static TestState g_test = {
@@ -83,6 +89,12 @@ static void ResetTest(TestMode mode, int tool_limit)
     free(g_test.after_seen_output);
     g_test.after_seen_output = NULL;
     g_test.followup_hook_calls = 0;
+    g_test.provider_fail = false;
+    g_test.provider_tokens = 0;
+    g_test.life_turn_end = 0;
+    g_test.life_cancel = 0;
+    g_test.life_error = 0;
+    g_test.life_after_compact = 0;
     pthread_mutex_unlock(&g_test.mu);
     g_plugin_shutdowns = 0;
     g_auth_frees = 0;
@@ -144,11 +156,21 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
 
     pthread_mutex_lock(&g_test.mu);
     SnapshotTurn(turn);
-    bool issue_tool = g_test.provider_tools_issued < g_test.provider_tool_limit;
+    bool fail = g_test.provider_fail;
+    int tokens = g_test.provider_tokens;
+    bool issue_tool = !fail && g_test.provider_tools_issued < g_test.provider_tool_limit;
     int call_number = ++g_test.provider_tools_issued;
     char tool_name[64];
     snprintf(tool_name, sizeof(tool_name), "%s", g_test.issue_tool_name);
     pthread_mutex_unlock(&g_test.mu);
+
+    if (fail)
+    {
+        out->error = JsonDup("provider failed");
+        return PICO_LLM_FAIL;
+    }
+
+    out->input_tokens = tokens;
 
     if (!issue_tool)
     {
@@ -325,6 +347,35 @@ static void CaptureAfter(PicoApp *app, PicoToolEvent *ev)
     free(g_test.after_seen_output);
     g_test.after_seen_output = JsonDup(ev->output ? ev->output : "");
     pthread_mutex_unlock(&g_test.mu);
+}
+
+static void LifeTurnEnd(PicoApp *app)
+{
+    (void)app;
+    g_test.life_turn_end++;
+}
+
+static void LifeCancel(PicoApp *app)
+{
+    (void)app;
+    g_test.life_cancel++;
+}
+
+static void LifeError(PicoApp *app)
+{
+    (void)app;
+    g_test.life_error++;
+}
+
+static void LifeAfterCompact(PicoApp *app)
+{
+    (void)app;
+    g_test.life_after_compact++;
+}
+
+static void CompactBrief(PicoApp *app)
+{
+    app->compact_summary = JsonDup("brief");
 }
 
 static void ExtraInstructions(PicoApp *app, PicoLlmEvent *ev)
@@ -881,6 +932,97 @@ static int TestLlmExcludeTool(void)
     return ok ? 0 : Fail(name, "excluded tool was still in the catalog");
 }
 
+static void AddLifeHooks(PicoApp *app)
+{
+    pico_add_hook(app, PICO_HOOK_ON_TURN_END, LifeTurnEnd);
+    pico_add_hook(app, PICO_HOOK_ON_CANCEL, LifeCancel);
+    pico_add_hook(app, PICO_HOOK_ON_ERROR, LifeError);
+    pico_add_hook(app, PICO_HOOK_AFTER_COMPACT, LifeAfterCompact);
+}
+
+static int TestTurnEnd(void)
+{
+    const char *name = "turn end notification";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    AddLifeHooks(&app);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    bool ok = g_test.life_turn_end == 1 && g_test.life_cancel == 0 && g_test.life_error == 0 &&
+              app.agent_state == PICO_AGENT_IDLE;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "ON_TURN_END did not fire once");
+}
+
+static int TestCancelNotification(void)
+{
+    const char *name = "cancel notification";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    AddLifeHooks(&app);
+    PicoAgent_StartTurn(&app, "start");
+    PicoToolAsk ask;
+    if (!WaitForPending(&app, 0, &ask))
+    {
+        return Fail(name, "request was not published");
+    }
+    PicoAgent_Cancel(&app);
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not cancel");
+    }
+    bool ok = g_test.life_cancel == 1 && g_test.life_turn_end == 0 && g_test.life_error == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "ON_CANCEL did not fire (or TURN_END did)");
+}
+
+static int TestErrorNotification(void)
+{
+    const char *name = "error notification";
+    ResetTest(TEST_SINGLE, 0);
+    g_test.provider_fail = true;
+    PicoApp app;
+    InitApp(&app);
+    AddLifeHooks(&app);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not leave the busy state");
+    }
+    bool ok = g_test.life_error == 1 && g_test.life_turn_end == 0 && g_test.life_cancel == 0 &&
+              app.agent_state == PICO_AGENT_ERROR && app.agent_error;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "ON_ERROR did not fire");
+}
+
+static int TestAfterCompact(void)
+{
+    const char *name = "after compact then turn end";
+    ResetTest(TEST_SINGLE, 0);
+    g_test.provider_tokens = 100;
+    PicoApp app;
+    InitApp(&app);
+    app.settings.compact_enabled = true;
+    app.settings.compact_ratio = 0.5;
+    app.tokens_limit = 100;
+    AddLifeHooks(&app);
+    pico_add_hook(&app, PICO_HOOK_ON_COMPACT, CompactBrief);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    bool ok = g_test.life_after_compact == 1 && g_test.life_turn_end == 1 && g_test.life_cancel == 0 &&
+              g_test.life_error == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "AFTER_COMPACT/ON_TURN_END did not fire after briefing");
+}
+
 int main(void)
 {
     int failed = 0;
@@ -897,5 +1039,9 @@ int main(void)
     failed |= TestRewriteThenDenyArgs();
     failed |= TestLlmExtraInstructions();
     failed |= TestLlmExcludeTool();
+    failed |= TestTurnEnd();
+    failed |= TestCancelNotification();
+    failed |= TestErrorNotification();
+    failed |= TestAfterCompact();
     return failed ? 1 : 0;
 }

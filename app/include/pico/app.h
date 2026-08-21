@@ -55,6 +55,10 @@ typedef enum PicoHook {
     PICO_HOOK_ON_SUBMIT,
     PICO_HOOK_ON_MESSAGE,
     PICO_HOOK_ON_COMPACT, /* set app->compact_summary to replace the default briefing */
+    PICO_HOOK_AFTER_COMPACT,
+    PICO_HOOK_ON_TURN_END, /* idle after a finished turn (not cancel/error) */
+    PICO_HOOK_ON_CANCEL,
+    PICO_HOOK_ON_ERROR,
     PICO_HOOK_COUNT,
 } PicoHook;
 

@@ -16,7 +16,9 @@
 #define PICO_MAX_HOOKS 64
 #define PICO_MAX_TOOL_HOOKS 64
 #define PICO_MAX_LLM_HOOKS 64
+#define PICO_MAX_CONTEXT_HOOKS 64
 #define PICO_MAX_TOOLS 64
+#define PICO_TOOL_DETAILS_MAX (64 * 1024)
 #define PICO_TOOL_ASK_MAX_REQUEST (64 * 1024)
 #define PICO_TOOL_ASK_MAX_ANSWER (64 * 1024)
 #define PICO_MAX_COMMANDS 64
@@ -66,6 +68,7 @@ typedef enum PicoHook {
     PICO_HOOK_ON_TURN_END, /* idle after a finished turn (not cancel/error) */
     PICO_HOOK_ON_CANCEL,
     PICO_HOOK_ON_ERROR,
+    PICO_HOOK_ON_SESSION_RESET,
     PICO_HOOK_COUNT,
 } PicoHook;
 
@@ -139,7 +142,15 @@ struct PicoApp;
 
 typedef void (*PicoViewFn)(struct PicoApp *app);
 typedef void (*PicoHookFn)(struct PicoApp *app);
-typedef void (*PicoToolFn)(struct PicoApp *app, const char *args_json, char **out);
+
+typedef struct PicoToolResult {
+    char *output;       /* malloc; Pico frees */
+    char *details_json; /* optional malloc'd JSON object; Pico validates and frees */
+    bool is_error;
+} PicoToolResult;
+
+typedef void (*PicoToolFn)(struct PicoApp *app, const char *args_json, PicoToolResult *out);
+typedef bool (*PicoToolApplyFn)(struct PicoApp *app, const char *details_json, bool replay);
 typedef void (*PicoCmdFn)(struct PicoApp *app, const char *args);
 
 typedef struct PicoCompleteItem {
@@ -172,6 +183,7 @@ typedef struct PicoTool {
     const char *description;
     const char *params_json;
     PicoToolFn run;
+    PicoToolApplyFn apply; /* optional; main thread after success and during replay */
 } PicoTool;
 
 typedef enum PicoToolHook {
@@ -185,8 +197,11 @@ typedef struct PicoToolEvent {
     const char *args_json; /* current args; core-owned */
     char *args_json_out;   /* BEFORE only: malloc rewrite; Pico frees */
     bool deny;             /* BEFORE only */
-    const char *output;    /* AFTER only: current output; core-owned */
-    char *result;          /* BEFORE+deny, or AFTER rewrite; malloc, Pico frees */
+    const char *output;       /* AFTER only: current output; core-owned */
+    const char *details_json; /* AFTER only: validated details object; core-owned */
+    bool executed;            /* AFTER only: false when denied */
+    bool is_error;            /* AFTER only: tool-defined/core failure */
+    char *result;             /* BEFORE+deny, or AFTER rewrite; malloc, Pico frees */
 } PicoToolEvent;
 
 typedef void (*PicoToolHookFn)(struct PicoApp *app, PicoToolEvent *ev);
@@ -207,6 +222,15 @@ typedef struct PicoLlmEvent {
 } PicoLlmEvent;
 
 typedef void (*PicoLlmHookFn)(struct PicoApp *app, PicoLlmEvent *ev);
+
+typedef struct PicoContextEvent {
+    bool compact;
+    const char *const *history_json; /* immutable base history for this request */
+    int history_count;
+    char *extra_context; /* optional malloc'd text; Pico appends request-only user context */
+} PicoContextEvent;
+
+typedef void (*PicoContextHookFn)(struct PicoApp *app, PicoContextEvent *ev);
 
 typedef struct PicoCommand {
     const char *name;
@@ -335,6 +359,8 @@ typedef struct PicoApp {
     int tool_hook_count;
     PicoLlmHookFn llm_hooks[PICO_MAX_LLM_HOOKS];
     int llm_hook_count;
+    PicoContextHookFn context_hooks[PICO_MAX_CONTEXT_HOOKS];
+    int context_hook_count;
     PicoTool tools[PICO_MAX_TOOLS];
     int tool_count;
     PicoCommand commands[PICO_MAX_COMMANDS];
@@ -379,8 +405,9 @@ void pico_add_empty_view(PicoApp *app, PicoEmptyKind kind, int z, PicoViewFn ren
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
 void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn);
 void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);
-void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
-                   PicoToolFn run);
+void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn);
+bool pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
+                   PicoToolFn run, PicoToolApplyFn apply);
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process
  * group. Call from the tool (worker thread) after fork; 0 clears. */
 void pico_tool_set_child(PicoApp *app, pid_t pid);

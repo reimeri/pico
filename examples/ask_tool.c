@@ -14,11 +14,11 @@ static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":"
     "\"Confirmation prompt\"}},\"required\":[\"message\"]}";
 
-static void AskRun(PicoApp *app, const char *args_json, char **out)
+static void AskRun(PicoApp *app, const char *args_json, PicoToolResult *out)
 {
     if (out)
     {
-        *out = NULL;
+        memset(out, 0, sizeof(*out));
     }
     JsonDoc doc;
     const char *src = args_json ? args_json : "";
@@ -26,7 +26,8 @@ static void AskRun(PicoApp *app, const char *args_json, char **out)
     {
         if (out)
         {
-            *out = JsonDup("ask: bad json");
+            out->output = JsonDup("ask: bad json");
+            out->is_error = true;
         }
         return;
     }
@@ -37,7 +38,8 @@ static void AskRun(PicoApp *app, const char *args_json, char **out)
         free(message);
         if (out)
         {
-            *out = JsonDup("ask: missing message");
+            out->output = JsonDup("ask: missing message");
+            out->is_error = true;
         }
         return;
     }
@@ -58,13 +60,14 @@ static void AskRun(PicoApp *app, const char *args_json, char **out)
         free(answer);
         if (out)
         {
-            *out = JsonDup(rc == PICO_ASK_CANCEL ? "ask: cancelled" : "ask: failed");
+            out->output = JsonDup(rc == PICO_ASK_CANCEL ? "ask: cancelled" : "ask: failed");
+            out->is_error = true;
         }
         return;
     }
     if (out)
     {
-        *out = answer ? answer : JsonDup("{}");
+        out->output = answer ? answer : JsonDup("{}");
     }
     else
     {
@@ -74,7 +77,7 @@ static void AskRun(PicoApp *app, const char *args_json, char **out)
 
 static void AskInit(PicoApp *app)
 {
-    pico_add_tool(app, "confirm", "Ask the user to confirm something", kParams, AskRun);
+    pico_add_tool(app, "confirm", "Ask the user to confirm something", kParams, AskRun, NULL);
 }
 
 PicoExt pico_ext(void)

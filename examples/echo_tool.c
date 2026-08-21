@@ -14,12 +14,12 @@ static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to "
     "echo back\"}},\"required\":[\"text\"]}";
 
-static void EchoRun(PicoApp *app, const char *args_json, char **out)
+static void EchoRun(PicoApp *app, const char *args_json, PicoToolResult *out)
 {
     (void)app;
     if (out)
     {
-        *out = NULL;
+        memset(out, 0, sizeof(*out));
     }
     JsonDoc doc;
     const char *src = args_json ? args_json : "";
@@ -27,7 +27,8 @@ static void EchoRun(PicoApp *app, const char *args_json, char **out)
     {
         if (out)
         {
-            *out = JsonDup("echo: bad json");
+            out->output = JsonDup("echo: bad json");
+            out->is_error = true;
         }
         return;
     }
@@ -35,7 +36,8 @@ static void EchoRun(PicoApp *app, const char *args_json, char **out)
     JsonFree(&doc);
     if (out)
     {
-        *out = text ? text : JsonDup("echo: missing text");
+        out->output = text ? text : JsonDup("echo: missing text");
+        out->is_error = text == NULL;
     }
     else
     {
@@ -45,7 +47,7 @@ static void EchoRun(PicoApp *app, const char *args_json, char **out)
 
 static void EchoInit(PicoApp *app)
 {
-    pico_add_tool(app, "echo", "Echo text back", kParams, EchoRun);
+    pico_add_tool(app, "echo", "Echo text back", kParams, EchoRun, NULL);
 }
 
 PicoExt pico_ext(void)

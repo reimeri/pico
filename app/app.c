@@ -7,6 +7,7 @@
 #include "chat_sel.h"
 #include "json.h"
 #include "overlay.h"
+#include "builtins/todo.h"
 
 #include "clay/clay.h"
 
@@ -106,17 +107,36 @@ void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn)
     app->llm_hook_count++;
 }
 
-void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json, PicoToolFn run)
+void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn)
 {
-    if (!name || !run || app->tool_count >= PICO_MAX_TOOLS)
+    if (!app || !fn || app->context_hook_count >= PICO_MAX_CONTEXT_HOOKS)
     {
         return;
+    }
+    app->context_hooks[app->context_hook_count++] = fn;
+}
+
+bool pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
+                   PicoToolFn run, PicoToolApplyFn apply)
+{
+    if (!app || !name || !name[0] || !run || app->tool_count >= PICO_MAX_TOOLS)
+    {
+        return false;
+    }
+    for (int i = 0; i < app->tool_count; i++)
+    {
+        if (app->tools[i].name && strcmp(app->tools[i].name, name) == 0)
+        {
+            return false;
+        }
     }
     app->tools[app->tool_count].name = name;
     app->tools[app->tool_count].description = description;
     app->tools[app->tool_count].params_json = params_json;
     app->tools[app->tool_count].run = run;
+    app->tools[app->tool_count].apply = apply;
     app->tool_count++;
+    return true;
 }
 
 void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run)
@@ -207,6 +227,8 @@ void pico_clear_registrations(PicoApp *app)
     app->tool_hook_count = 0;
     memset(app->llm_hooks, 0, sizeof(app->llm_hooks));
     app->llm_hook_count = 0;
+    memset(app->context_hooks, 0, sizeof(app->context_hooks));
+    app->context_hook_count = 0;
     memset(app->tools, 0, sizeof(app->tools));
     app->tool_count = 0;
     memset(app->commands, 0, sizeof(app->commands));
@@ -583,6 +605,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     PicoAuth_Load(app);
     PicoAgent_Init(app);
     PicoPlugins_Load(app);
+    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET);
     PicoSession_Start(app, session_start, session_file);
 }
 
@@ -930,8 +953,10 @@ void PicoApp_Frame(PicoApp *app)
     bool had_exts = PicoExts_IsOpen();
     bool had_prompt = PicoPrompt_IsOpen();
     bool had_footer = PicoFooter_MenuOpen();
+    bool had_todo = PicoTodo_IsExpanded();
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && IsKeyPressed(KEY_ESCAPE))
+    if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_todo &&
+        IsKeyPressed(KEY_ESCAPE))
     {
         if (PicoAgent_IsBusy(app))
         {

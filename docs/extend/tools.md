@@ -12,38 +12,30 @@ Tools are functions the model can call. Register in `init`:
 static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}";
 
-static void EchoRun(PicoApp *app, const char *args_json, char **out)
+static void EchoRun(PicoApp *app, const char *args_json, PicoToolResult *out)
 {
     (void)app;
-    if (out)
-    {
-        *out = NULL;
-    }
+    memset(out, 0, sizeof(*out));
     JsonDoc doc;
     const char *src = args_json ? args_json : "";
     if (JsonParse(&doc, src, strlen(src)) != 0)
     {
-        if (out)
-        {
-            *out = JsonDup("echo: bad json");
-        }
+        out->output = JsonDup("echo: bad json");
+        out->is_error = true;
         return;
     }
-    char *text = JsonObjStr(&doc, 0, "text");
+    out->output = JsonObjStr(&doc, 0, "text");
     JsonFree(&doc);
-    if (out)
+    if (!out->output)
     {
-        *out = text ? text : JsonDup("echo: missing text");
-    }
-    else
-    {
-        free(text);
+        out->output = JsonDup("echo: missing text");
+        out->is_error = true;
     }
 }
 
 static void EchoInit(PicoApp *app)
 {
-    pico_add_tool(app, "echo", "Echo text back", kParams, EchoRun);
+    pico_add_tool(app, "echo", "Echo text back", kParams, EchoRun, NULL);
 }
 ```
 
@@ -58,14 +50,15 @@ char *answer = NULL;
 int rc = pico_tool_ask(app, "{\"type\":\"confirm\",\"message\":\"Proceed?\"}", &answer);
 if (rc != PICO_ASK_OK)
 {
-    *out = JsonDup("cancelled");
+    out->output = JsonDup("cancelled");
+    out->is_error = true;
     free(answer); /* always NULL on CANCEL/FAIL */
     return;
 }
-*out = answer; /* malloc'd; Pico frees *out */
+out->output = answer; /* malloc'd; Pico frees it */
 ```
 
-- `PICO_ASK_OK` — `*answer_json` is malloc'd; the caller frees it (or a tool hands it to `*out`). This includes the immediate error answer for an invalid payload.
+- `PICO_ASK_OK` — `*answer_json` is malloc'd; the caller frees it (or assigns it to `out->output`). This includes the immediate error answer for an invalid payload.
 - `PICO_ASK_CANCEL` / `PICO_ASK_FAIL` — `*answer_json` is always `NULL`. Return promptly; do not ask again after cancel.
 - Request/answer copies are capped at `PICO_TOOL_ASK_MAX_REQUEST` / `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB). Oversized values fail / are rejected.
 - Nested asks (ask while already waiting) fail. Sequential asks in one tool are allowed; each gets a new `id`.
@@ -122,14 +115,33 @@ pico_add_tool_hook(app, PICO_TOOL_BEFORE, PermitBefore);
 
 Deny skips `run` and sends `result` (or `User denied this tool.`) back to the model; the turn continues. Esc cancels the turn. Full file: `examples/permit_tool.c`.
 
+## Structured details and replay
+
+`PicoToolResult.details_json` optionally carries one JSON object (maximum `PICO_TOOL_DETAILS_MAX`) alongside the visible output. Details are not sent to the model. Pico validates them, stores them in the same session `tool_result` record, and passes them to the tool's optional main-thread apply callback after a successful live call and during session replay:
+
+```c
+static bool ApplyState(PicoApp *app, const char *details_json, bool replay)
+{
+    (void)app;
+    (void)replay;
+    /* Parse into temporary state; swap only after complete validation. */
+    return true;
+}
+
+pico_add_tool(app, "stateful", "Update state", kParams, RunStateful, ApplyState);
+```
+
+The apply callback returns `false` to reject details. A live rejection converts the tool result to an error and omits details from persistence. A replay rejection ignores that snapshot and preserves the latest valid state. Pico replays details chronologically on session resume and after extension reload, so details should be complete snapshots and apply should be idempotent. The callback runs on the main thread and may update extension state, but should not call Clay outside a view callback.
+
 ## Contract
 
 - `name`, `description`, `params_json` must outlive the extension — use string literals.
 - `params_json` is a JSON Schema object (OpenAI function parameters).
-- `*out` must be malloc'd. Pico frees it. Always set a string, even on error (`JsonDup("…")`).
+- Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
+- `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
 - Runs on the **worker thread**. Do not call Clay, add views, or mutate chat UI. Returning output is enough; Pico shows it in the trace.
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - If the tool forks a child, call `pico_tool_set_child(app, pid)` after spawn (and `pico_tool_set_child(app, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.
-- Max 64 tools (`PICO_MAX_TOOLS`). Names should be unique; the provider exposes the catalog after LLM-hook excludes.
+- Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. The provider exposes the catalog after LLM-hook excludes.

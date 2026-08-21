@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 static char g_config_dir[4096];
+static int g_restored_value;
+static int g_reset_hooks;
 
 static int Fail(const char *message)
 {
@@ -85,6 +87,21 @@ void PicoAgent_DismissError(PicoApp *app)
     }
 }
 
+void pico_run_hooks(PicoApp *app, PicoHook hook)
+{
+    if (!app)
+    {
+        return;
+    }
+    for (int i = 0; i < app->hook_count; i++)
+    {
+        if (app->hooks[i].hook == hook && app->hooks[i].fn)
+        {
+            app->hooks[i].fn(app);
+        }
+    }
+}
+
 void PicoAgent_ClearInput(PicoApp *app)
 {
     (void)app;
@@ -110,11 +127,14 @@ void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const 
     (void)args;
 }
 
-void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *output)
+void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *name,
+                                         const char *output, bool is_error)
 {
     (void)app;
     (void)call_id;
+    (void)name;
     (void)output;
+    (void)is_error;
 }
 
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *text)
@@ -160,6 +180,47 @@ void PicoSettings_SyncActive(PicoApp *app)
     (void)app;
 }
 
+static void ResetHook(PicoApp *app)
+{
+    (void)app;
+    g_reset_hooks++;
+}
+
+static void ReplayTool(PicoApp *app, const char *args_json, PicoToolResult *out)
+{
+    (void)app;
+    (void)args_json;
+    (void)out;
+}
+
+static bool ReplayApply(PicoApp *app, const char *details_json, bool replay)
+{
+    (void)app;
+    if (!replay)
+    {
+        return false;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, details_json, strlen(details_json)) != 0)
+    {
+        return false;
+    }
+    int value = JsonObjInt(&doc, 0, "value", -1);
+    JsonFree(&doc);
+    if (value < 0 || value > 10)
+    {
+        return false;
+    }
+    g_restored_value = value;
+    return true;
+}
+
+static void RegisterReplayTool(PicoApp *app)
+{
+    app->tools[0] = (PicoTool){.name = "state_test", .run = ReplayTool, .apply = ReplayApply};
+    app->tool_count = 1;
+}
+
 static bool AppendRaw(const char *path, const char *line)
 {
     FILE *f = fopen(path, "ab");
@@ -189,6 +250,9 @@ int main(void)
     PicoSession_LogUsage(&writer, 200, 150);
     PicoSession_LogAssistant(&writer, "assistant response");
     PicoSession_LogCompaction(&writer, "brief", 200);
+    PicoSession_LogToolResult(&writer, "state-1", "state_test", "saved", false, "{\"value\":7}");
+    PicoSession_LogToolResult(&writer, "state-2", "state_test", "failed", true, "{\"value\":8}");
+    PicoSession_LogToolResult(&writer, "state-3", "state_test", "bad snapshot", false, "{\"value\":99}");
     if (!writer.session_path[0])
     {
         return Fail("usage did not create a session file");
@@ -206,11 +270,19 @@ int main(void)
 
     PicoApp compacted;
     memset(&compacted, 0, sizeof(compacted));
+    RegisterReplayTool(&compacted);
+    g_restored_value = 0;
     PicoSession_Start(&compacted, PICO_SESSION_NEW, writer.session_path);
     if (compacted.session_input_tokens != 300 || compacted.session_cached_tokens != 170 ||
-        compacted.tokens_used != 0 || compacted.tokens_cached != 0)
+        compacted.tokens_used != 0 || compacted.tokens_cached != 0 || g_restored_value != 7)
     {
-        return Fail("replay did not retain totals and clear latest usage at compaction");
+        return Fail("replay did not retain totals, restore the latest valid tool details, or clear compacted usage");
+    }
+    g_restored_value = 0;
+    PicoSession_ReplayToolDetails(&compacted);
+    if (g_restored_value != 7)
+    {
+        return Fail("details-only replay did not restore extension state after reload");
     }
 
     if (!AppendRaw(writer.session_path, "{\"type\":\"usage\",\"input_tokens\":50,\"cached_tokens\":-3}") ||
@@ -240,9 +312,12 @@ int main(void)
         return Fail("session open did not reset and rebuild usage totals");
     }
 
+    replayed.hooks[0] = (PicoHookEntry){.hook = PICO_HOOK_ON_SESSION_RESET, .fn = ResetHook};
+    replayed.hook_count = 1;
+    g_reset_hooks = 0;
     PicoSession_Reset(&replayed);
     if (replayed.session_input_tokens != 0 || replayed.session_cached_tokens != 0 ||
-        replayed.tokens_used != 0 || replayed.tokens_cached != 0)
+        replayed.tokens_used != 0 || replayed.tokens_cached != 0 || g_reset_hooks != 1)
     {
         return Fail("session reset did not clear usage state");
     }

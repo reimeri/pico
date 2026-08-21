@@ -19,8 +19,9 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 
 - `anatomy` — entry point, lifecycle, compile
 - `views` — UI in a slot (sidebar, chat, footer, …) and the chat empty-state
-- `hooks` — submit, layout, compact, turn end/cancel/error; tool and LLM interceptors
-- `tools` — LLM-callable tools
+- `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool and LLM interceptors
+- `context` — request-only, non-persistent agent context
+- `tools` — LLM-callable tools and structured replayable details
 - `commands` — slash commands (`/foo`)
 - `completers` — composer `#` / `@` style completion
 - `providers` — LLM backends
@@ -39,6 +40,7 @@ Copy-templates in the Pico source tree:
 - `examples/ask_tool.c` — `pico_tool_ask` + builtin confirm overlay
 - `examples/permit_tool.c` — `PICO_TOOL_BEFORE` permission prompt
 - `examples/extra_instructions.c` — `pico_add_llm_hook` extra prompt line
+- `examples/ephemeral_context.c` — request-only context
 - `examples/time_cmd.c` — slash command
 
 Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat `agent.h`, `session.h`, or `settings.h` as API.

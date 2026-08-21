@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "agent.h"
+#include "session.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -52,6 +53,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_composer,
     pico_ext_footer,
     pico_ext_overlay,
+    pico_ext_todo,
     pico_ext_shell,
     pico_ext_commands,
     pico_ext_files,
@@ -499,6 +501,7 @@ void PicoPlugins_Reload(PicoApp *app)
         }
     }
     LoadUsers(app);
+    PicoSession_ReplayToolDetails(app);
 }
 
 void PicoPlugins_Shutdown(PicoApp *app)

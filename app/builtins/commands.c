@@ -228,7 +228,7 @@ static void CmdQuit(PicoApp *app, const char *args)
 }
 
 static const char *const kDocTopics[] = {
-    "README", "anatomy", "views", "hooks", "tools", "commands", "completers", "providers", "auth", "contracts",
+    "README", "anatomy", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
 };
 
 static void DocsTopicName(char *out, size_t cap, const char *args)

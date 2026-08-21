@@ -436,6 +436,28 @@ static void ApplyHeader(PicoApp *app, const JsonDoc *doc, int obj)
     free(key);
 }
 
+static void ApplyToolDetails(PicoApp *app, const char *name, const char *details, bool is_error)
+{
+    size_t details_len = details ? strlen(details) : 0;
+    if (!app || is_error || !name || !details || details_len > PICO_TOOL_DETAILS_MAX ||
+        !JsonValidUtf8(details, details_len))
+    {
+        return;
+    }
+    for (int i = 0; i < app->tool_count; i++)
+    {
+        PicoTool *tool = &app->tools[i];
+        if (tool->name && strcmp(tool->name, name) == 0)
+        {
+            if (tool->apply)
+            {
+                (void)tool->apply(app, details, true);
+            }
+            return;
+        }
+    }
+}
+
 static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_input)
 {
     char *type = JsonObjStr(doc, obj, "type");
@@ -496,15 +518,25 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
     else if (strcmp(type, "tool_result") == 0)
     {
         char *call_id = JsonObjStr(doc, obj, "call_id");
+        char *name = JsonObjStr(doc, obj, "name");
         char *output = JsonObjStr(doc, obj, "output");
         bool is_error = JsonEq(doc, JsonObjGet(doc, obj, "is_error"), "true");
+        char *details = NULL;
+        int details_tok = JsonObjGet(doc, obj, "details");
+        if (JsonIsObject(doc, details_tok))
+        {
+            details = JsonRawDup(doc, details_tok);
+        }
+        ApplyToolDetails(app, name, details, is_error);
         PicoApp_SetLastToolOutput(app, output, is_error);
         if (into_input)
         {
-            PicoAgent_PushHistoryFunctionOutput(app, call_id, output);
+            PicoAgent_PushHistoryFunctionOutput(app, call_id, name, output, is_error);
         }
         free(call_id);
+        free(name);
         free(output);
+        free(details);
     }
     else if (strcmp(type, "compaction") == 0)
     {
@@ -632,10 +664,12 @@ static int ReplayFile(PicoApp *app, const char *path)
         if (JsonParse(&doc, lines[last_tool_call], strlen(lines[last_tool_call])) == 0)
         {
             char *call_id = JsonObjStr(&doc, 0, "call_id");
-            PicoSession_LogToolResult(app, call_id, "(interrupted)", true);
+            char *name = JsonObjStr(&doc, 0, "name");
+            PicoSession_LogToolResult(app, call_id, name, "(interrupted)", true, NULL);
             PicoApp_SetLastToolOutput(app, "(interrupted)", true);
-            PicoAgent_PushHistoryFunctionOutput(app, call_id, "(interrupted)");
+            PicoAgent_PushHistoryFunctionOutput(app, call_id, name, "(interrupted)", true);
             free(call_id);
+            free(name);
             JsonFree(&doc);
         }
     }
@@ -647,6 +681,51 @@ static int ReplayFile(PicoApp *app, const char *path)
     free(lines);
     app->chat_follow_bottom = true;
     return 0;
+}
+
+void PicoSession_ReplayToolDetails(PicoApp *app)
+{
+    if (!app || !app->session_path[0])
+    {
+        return;
+    }
+    FILE *f = fopen(app->session_path, "rb");
+    if (!f)
+    {
+        return;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    while (getline(&line, &cap, f) != -1)
+    {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        {
+            line[--len] = '\0';
+        }
+        JsonDoc doc;
+        if (len == 0 || JsonParse(&doc, line, len) != 0)
+        {
+            continue;
+        }
+        if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_result"))
+        {
+            char *name = JsonObjStr(&doc, 0, "name");
+            bool is_error = JsonEq(&doc, JsonObjGet(&doc, 0, "is_error"), "true");
+            char *details = NULL;
+            int details_tok = JsonObjGet(&doc, 0, "details");
+            if (JsonIsObject(&doc, details_tok))
+            {
+                details = JsonRawDup(&doc, details_tok);
+            }
+            ApplyToolDetails(app, name, details, is_error);
+            free(name);
+            free(details);
+        }
+        JsonFree(&doc);
+    }
+    free(line);
+    fclose(f);
 }
 
 void PicoSession_Start(PicoApp *app, PicoSessionStart start, const char *session_file)
@@ -736,6 +815,7 @@ void PicoSession_Reset(PicoApp *app)
     {
         return;
     }
+    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET);
     PicoAgent_DismissError(app);
     PicoApp_ClearMessages(app);
     PicoAgent_ClearInput(app);
@@ -830,7 +910,8 @@ void PicoSession_LogToolCall(PicoApp *app, const char *call_id, const char *name
     free(pre);
 }
 
-void PicoSession_LogToolResult(PicoApp *app, const char *call_id, const char *output, bool is_error)
+void PicoSession_LogToolResult(PicoApp *app, const char *call_id, const char *name, const char *output,
+                               bool is_error, const char *details_json)
 {
     char *pre = EventPrefix("tool_result");
     JsonBuf b;
@@ -838,10 +919,17 @@ void PicoSession_LogToolResult(PicoApp *app, const char *call_id, const char *ou
     JsonBuf_Puts(&b, pre);
     JsonBuf_Puts(&b, ",\"call_id\":");
     JsonBuf_String(&b, call_id ? call_id : "");
+    JsonBuf_Puts(&b, ",\"name\":");
+    JsonBuf_String(&b, name ? name : "");
     JsonBuf_Puts(&b, ",\"output\":");
     JsonBuf_String(&b, output ? output : "");
     JsonBuf_Puts(&b, ",\"is_error\":");
     JsonBuf_Bool(&b, is_error);
+    if (details_json && details_json[0])
+    {
+        JsonBuf_Puts(&b, ",\"details\":");
+        JsonBuf_Puts(&b, details_json);
+    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     AppendLine(app, line);

@@ -32,18 +32,19 @@ static char *ExtractCommand(const char *args_json)
     return cmd;
 }
 
-static void ShRun(PicoApp *app, const char *args_json, char **out)
+static void ShRun(PicoApp *app, const char *args_json, PicoToolResult *out)
 {
     if (out)
     {
-        *out = NULL;
+        memset(out, 0, sizeof(*out));
     }
     char *command = ExtractCommand(args_json);
     if (!command || !command[0])
     {
         if (out)
         {
-            *out = JsonDup("sh: missing command");
+            out->output = JsonDup("sh: missing command");
+            out->is_error = true;
         }
         free(command);
         return;
@@ -54,7 +55,8 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
     {
         if (out)
         {
-            *out = JsonDup("sh: pipe failed");
+            out->output = JsonDup("sh: pipe failed");
+            out->is_error = true;
         }
         free(command);
         return;
@@ -67,7 +69,8 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
         close(pipefd[1]);
         if (out)
         {
-            *out = JsonDup("sh: fork failed");
+            out->output = JsonDup("sh: fork failed");
+            out->is_error = true;
         }
         free(command);
         return;
@@ -117,17 +120,20 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
         JsonBuf_Free(&b);
         b = t;
     }
+    bool failed = false;
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
     {
         char line[64];
         snprintf(line, sizeof(line), "\n(exit %d)", WEXITSTATUS(status));
         JsonBuf_Puts(&b, line);
+        failed = true;
     }
     else if (WIFSIGNALED(status))
     {
         char line[64];
         snprintf(line, sizeof(line), "\n(signal %d)", WTERMSIG(status));
         JsonBuf_Puts(&b, line);
+        failed = true;
     }
     if (!b.len)
     {
@@ -135,7 +141,8 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
     }
     if (out)
     {
-        *out = JsonBuf_Steal(&b);
+        out->output = JsonBuf_Steal(&b);
+        out->is_error = failed;
     }
     else
     {
@@ -145,7 +152,7 @@ static void ShRun(PicoApp *app, const char *args_json, char **out)
 
 static void ShellInit(PicoApp *app)
 {
-    pico_add_tool(app, "sh", "Run a shell command in the workspace", kShParams, ShRun);
+    pico_add_tool(app, "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL);
 }
 
 PicoExt pico_ext_shell(void)

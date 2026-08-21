@@ -28,6 +28,7 @@ void PicoAgent_ClearInput(PicoApp *app);
 void PicoAgent_PushHistoryUser(PicoApp *app, const char *text);
 void PicoAgent_PushHistoryAssistant(PicoApp *app, const char *text);
 void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const char *name, const char *args);
-void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *output);
+void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *name,
+                                         const char *output, bool is_error);
 
 #endif

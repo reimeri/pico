@@ -336,6 +336,65 @@ void JsonFree(JsonDoc *doc)
     memset(doc, 0, sizeof(*doc));
 }
 
+bool JsonValidUtf8(const char *src, size_t len)
+{
+    if (!src && len)
+    {
+        return false;
+    }
+    size_t i = 0;
+    while (i < len)
+    {
+        unsigned char first = (unsigned char)src[i];
+        unsigned cp;
+        int bytes;
+        if (first < 0x80)
+        {
+            i++;
+            continue;
+        }
+        if (first >= 0xC2 && first <= 0xDF)
+        {
+            cp = first & 0x1F;
+            bytes = 2;
+        }
+        else if (first >= 0xE0 && first <= 0xEF)
+        {
+            cp = first & 0x0F;
+            bytes = 3;
+        }
+        else if (first >= 0xF0 && first <= 0xF4)
+        {
+            cp = first & 0x07;
+            bytes = 4;
+        }
+        else
+        {
+            return false;
+        }
+        if (i + (size_t)bytes > len)
+        {
+            return false;
+        }
+        for (int j = 1; j < bytes; j++)
+        {
+            unsigned char next = (unsigned char)src[i + (size_t)j];
+            if ((next & 0xC0) != 0x80)
+            {
+                return false;
+            }
+            cp = (cp << 6) | (next & 0x3F);
+        }
+        if ((bytes == 3 && cp < 0x800) || (bytes == 4 && cp < 0x10000) ||
+            (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+        {
+            return false;
+        }
+        i += (size_t)bytes;
+    }
+    return true;
+}
+
 int JsonTokStart(const JsonDoc *doc, int tok)
 {
     if (!doc || tok < 0 || tok >= doc->ntoks)

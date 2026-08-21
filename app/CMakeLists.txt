@@ -42,6 +42,8 @@ add_executable(pico
     builtins/composer.c
     builtins/footer.c
     builtins/overlay.c
+    builtins/todo.c
+    builtins/todo_model.c
     builtins/shell.c
     builtins/complete.c
     builtins/commands.c
@@ -85,6 +87,13 @@ if(BUILD_TESTING)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
 
+    add_executable(pico_todo_tests
+        tests/todo_test.c
+        builtins/todo_model.c
+        json.c)
+    target_include_directories(pico_todo_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME pico_todo_tests COMMAND pico_todo_tests)
+
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
         app.c
@@ -122,7 +131,7 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)
 
-foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions time_cmd)
+foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd)
     add_custom_command(
             TARGET pico POST_BUILD
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99

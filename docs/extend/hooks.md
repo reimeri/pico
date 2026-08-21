@@ -1,9 +1,10 @@
 # Hooks
 
-Two families:
+Three families:
 
 - **Notifications** — `pico_add_hook`. No payload: `void (*)(PicoApp *)`. Main thread.
 - **Interceptors** — `pico_add_tool_hook` / `pico_add_llm_hook`. Event struct, can veto or rewrite. See below and `tools.md`.
+- **Request context** — `pico_add_context_hook`. Appends non-persistent context; see [context](context.md).
 
 ```c
 pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
@@ -27,6 +28,7 @@ All of these run on the main thread.
 - `PICO_HOOK_ON_TURN_END` — the agent is idle after a finished turn. Not fired on cancel or error. Compact is not idle; this waits until compaction completes.
 - `PICO_HOOK_ON_CANCEL` — the user cancelled the turn (Esc / force-cancel). State is idle. Distinct from tool-hook deny.
 - `PICO_HOOK_ON_ERROR` — `agent_state` is `PICO_AGENT_ERROR`; `app->agent_error` is set.
+- `PICO_HOOK_ON_SESSION_RESET` — a new, resumed, ephemeral, or changed-workspace session is starting. Clear session-scoped extension state. Session replay apply callbacks run afterward.
 
 ## BEFORE_SUBMIT
 
@@ -55,13 +57,15 @@ Set `app->compact_summary` to a malloc'd briefing to skip the default LLM compac
 - `args_json_out` — BEFORE only: malloc'd rewrite; Pico frees. Later BEFORE hooks and the tool see the new args
 - `deny` — BEFORE only: skip remaining BEFORE hooks and do not call `run`
 - `output` — AFTER only: current output, including rewrites from earlier AFTER hooks; core-owned
+- `details_json` — AFTER only: validated structured details from the executed tool; core-owned and read-only
+- `executed` / `is_error` — AFTER only: outcome metadata. Denied calls have `executed = false` and `is_error = true`
 - `result` — malloc'd. BEFORE: used only with `deny` (default `User denied this tool.`). AFTER: replaces the output sent to the model
 
 **BEFORE** runs on the worker, in the tool slot, before `run`. You may call `pico_tool_ask`. First `deny` wins. After the hooks return, core checks cancel: Esc/`PICO_ASK_CANCEL` wins over deny and still does not call `run`. Overlay Deny is not Esc — set `deny` yourself (see `examples/permit_tool.c`).
 
 **AFTER** runs on the main thread when a result is about to go to the model (allow and deny). Skipped on turn cancel. `args_json` is read-only. Non-NULL `result` replaces output; later AFTER hooks see the new text.
 
-Do not use Clay from BEFORE. Permission UI goes through `pico_tool_ask` + overlay, same as a tool.
+Do not use Clay from BEFORE. Permission UI goes through `pico_tool_ask` + overlay, same as a tool. Structured details are applied before AFTER hooks; AFTER hooks can rewrite visible output but cannot rewrite authoritative details.
 
 ## LLM interceptor
 
@@ -77,4 +81,4 @@ Do not use Clay from BEFORE. Permission UI goes through `pico_tool_ask` + overla
 
 The provider receives a filtered copy of the catalog (`turn.tools`), not necessarily `app->tools`. Example: `examples/extra_instructions.c`.
 
-`/show-prompt` runs the same hooks with `compact = false` and `include_tools = true`, so the modal matches the next normal turn.
+`/show-prompt` runs the same hooks with `compact = false` and `include_tools = true`, so the modal matches the next normal turn's system instructions. Request-context hooks are separate and are not shown there.

@@ -41,6 +41,11 @@ typedef struct TestState {
     char *tool_seen_args;
     char *after_seen_args;
     char *after_seen_output;
+    char *after_seen_details;
+    bool after_executed;
+    bool after_is_error;
+    int apply_calls;
+    bool context_saw_base_tail;
     int followup_hook_calls;
     bool provider_fail;
     int provider_tokens;
@@ -93,6 +98,12 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.after_seen_args = NULL;
     free(g_test.after_seen_output);
     g_test.after_seen_output = NULL;
+    free(g_test.after_seen_details);
+    g_test.after_seen_details = NULL;
+    g_test.after_executed = false;
+    g_test.after_is_error = false;
+    g_test.apply_calls = 0;
+    g_test.context_saw_base_tail = false;
     g_test.followup_hook_calls = 0;
     g_test.provider_fail = false;
     g_test.provider_tokens = 0;
@@ -235,12 +246,12 @@ static void StoreAskResult(int invocation, int step, int rc, char *answer)
     pthread_mutex_unlock(&g_test.mu);
 }
 
-static void AskTool(PicoApp *app, const char *args_json, char **out)
+static void AskTool(PicoApp *app, const char *args_json, PicoToolResult *out)
 {
     (void)args_json;
     if (out)
     {
-        *out = NULL;
+        memset(out, 0, sizeof(*out));
     }
 
     pthread_mutex_lock(&g_test.mu);
@@ -262,7 +273,7 @@ static void AskTool(PicoApp *app, const char *args_json, char **out)
         pthread_mutex_unlock(&g_test.mu);
         if (out)
         {
-            *out = JsonDup("unblocked");
+            out->output = JsonDup("unblocked");
         }
         return;
     }
@@ -298,11 +309,11 @@ static void AskTool(PicoApp *app, const char *args_json, char **out)
 
     if (out)
     {
-        *out = JsonDup("tool complete");
+        out->output = JsonDup("tool complete");
     }
 }
 
-static void EchoTool(PicoApp *app, const char *args_json, char **out)
+static void EchoTool(PicoApp *app, const char *args_json, PicoToolResult *out)
 {
     (void)app;
     pthread_mutex_lock(&g_test.mu);
@@ -312,8 +323,46 @@ static void EchoTool(PicoApp *app, const char *args_json, char **out)
     pthread_mutex_unlock(&g_test.mu);
     if (out)
     {
-        *out = JsonDup("echo-out");
+        out->output = JsonDup("echo-out");
     }
+}
+
+static void DetailsTool(PicoApp *app, const char *args_json, PicoToolResult *out)
+{
+    (void)app;
+    (void)args_json;
+    if (!out)
+    {
+        return;
+    }
+    out->output = JsonDup("details-out");
+    out->details_json = JsonDup("{\"value\":7}");
+}
+
+static void InvalidDetailsTool(PicoApp *app, const char *args_json, PicoToolResult *out)
+{
+    (void)app;
+    (void)args_json;
+    if (!out)
+    {
+        return;
+    }
+    out->output = JsonDup("bad-details-out");
+    out->details_json = JsonDup("{\"value\":\"\xC3(\"}");
+}
+
+static bool ApplyDetails(PicoApp *app, const char *details_json, bool replay)
+{
+    (void)app;
+    (void)replay;
+    if (!details_json || !strstr(details_json, "\"value\":7"))
+    {
+        return false;
+    }
+    pthread_mutex_lock(&g_test.mu);
+    g_test.apply_calls++;
+    pthread_mutex_unlock(&g_test.mu);
+    return true;
 }
 
 static void DenyBefore(PicoApp *app, PicoToolEvent *ev)
@@ -379,6 +428,10 @@ static void CaptureAfter(PicoApp *app, PicoToolEvent *ev)
     g_test.after_seen_args = JsonDup(ev->args_json ? ev->args_json : "");
     free(g_test.after_seen_output);
     g_test.after_seen_output = JsonDup(ev->output ? ev->output : "");
+    free(g_test.after_seen_details);
+    g_test.after_seen_details = JsonDup(ev->details_json ? ev->details_json : "");
+    g_test.after_executed = ev->executed;
+    g_test.after_is_error = ev->is_error;
     pthread_mutex_unlock(&g_test.mu);
 }
 
@@ -436,6 +489,27 @@ static void ExcludeAskTest(PicoApp *app, PicoLlmEvent *ev)
             ev->exclude[i] = true;
         }
     }
+}
+
+static void AddEphemeralContext(PicoApp *app, PicoContextEvent *ev)
+{
+    (void)app;
+    ev->extra_context = JsonDup("ephemeral-context");
+}
+
+static void InspectBaseContext(PicoApp *app, PicoContextEvent *ev)
+{
+    (void)app;
+    bool saw_user_tail = false;
+    if (ev->history_count > 0)
+    {
+        const char *last = ev->history_json[ev->history_count - 1];
+        saw_user_tail = last && strstr(last, "\"type\":\"user\"") != NULL &&
+                        strstr(last, "ephemeral-context") == NULL;
+    }
+    pthread_mutex_lock(&g_test.mu);
+    g_test.context_saw_base_tail = saw_user_tail;
+    pthread_mutex_unlock(&g_test.mu);
 }
 
 /* Minimal host implementations used by the real agent worker. */
@@ -507,12 +581,15 @@ void PicoSession_LogToolCall(PicoApp *app, const char *call_id, const char *name
     (void)args;
 }
 
-void PicoSession_LogToolResult(PicoApp *app, const char *call_id, const char *output, bool is_error)
+void PicoSession_LogToolResult(PicoApp *app, const char *call_id, const char *name, const char *output,
+                               bool is_error, const char *details_json)
 {
     (void)app;
     (void)call_id;
+    (void)name;
     (void)output;
     (void)is_error;
+    (void)details_json;
 }
 
 void PicoSession_LogCompaction(PicoApp *app, const char *summary, int tokens_before)
@@ -555,7 +632,7 @@ static void InitApp(PicoApp *app)
         snprintf(app->models[0].provider, sizeof(app->models[0].provider), "test");
     }
     pico_add_provider(app, &(PicoProvider){.name = "test", .stream = FakeProvider});
-    pico_add_tool(app, "ask_test", "test", "{}", AskTool);
+    pico_add_tool(app, "ask_test", "test", "{}", AskTool, NULL);
     PicoAgent_Init(app);
 }
 
@@ -893,7 +970,7 @@ static int TestBeforeRewriteArgs(void)
     ResetTest(TEST_SINGLE, 1);
     PicoApp app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     pico_add_tool_hook(&app, PICO_TOOL_BEFORE, RewriteArgsBefore);
     PicoAgent_StartTurn(&app, "start");
@@ -915,7 +992,7 @@ static int TestAfterRewriteOutput(void)
     ResetTest(TEST_SINGLE, 1);
     PicoApp app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     pico_add_tool_hook(&app, PICO_TOOL_AFTER, RewriteOutAfter);
     pico_add_tool_hook(&app, PICO_TOOL_AFTER, CaptureAfter);
@@ -953,6 +1030,122 @@ static int TestRewriteThenDenyArgs(void)
     pthread_mutex_unlock(&g_test.mu);
     PicoApp_Free(&app);
     return ok ? 0 : Fail(name, "after hook did not receive the denied call's current values");
+}
+
+static int TestStructuredToolDetails(void)
+{
+    const char *name = "structured tool details apply and reach hooks";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    if (!pico_add_tool(&app, "details_test", "details", "{}", DetailsTool, ApplyDetails) ||
+        pico_add_tool(&app, "details_test", "duplicate", "{}", DetailsTool, ApplyDetails))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "tool name uniqueness contract failed");
+    }
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "details_test");
+    pico_add_tool_hook(&app, PICO_TOOL_AFTER, CaptureAfter);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.apply_calls == 1 && g_test.after_executed && !g_test.after_is_error &&
+              g_test.after_seen_details && strcmp(g_test.after_seen_details, "{\"value\":7}") == 0 &&
+              g_test.last_input && strstr(g_test.last_input, "\"name\":\"details_test\"") &&
+              strstr(g_test.last_input, "\"is_error\":false");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "details were not applied or represented in the result input");
+}
+
+static int TestInvalidDetailsFailClosed(void)
+{
+    const char *name = "invalid structured details fail closed";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "invalid_details", "details", "{}", InvalidDetailsTool, ApplyDetails);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "invalid_details");
+    pico_add_tool_hook(&app, PICO_TOOL_AFTER, CaptureAfter);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.apply_calls == 0 && g_test.after_executed && g_test.after_is_error &&
+              g_test.after_seen_details && g_test.after_seen_details[0] == '\0';
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "invalid details were applied or exposed as successful");
+}
+
+static int TestDeniedDetailsDoNotApply(void)
+{
+    const char *name = "denied structured tool does not apply";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "details_test", "details", "{}", DetailsTool, ApplyDetails);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "details_test");
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, DenyBefore);
+    pico_add_tool_hook(&app, PICO_TOOL_AFTER, CaptureAfter);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.apply_calls == 0 && !g_test.after_executed && g_test.after_is_error;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "denied result applied details or looked successful");
+}
+
+static int CountOccurrences(const char *text, const char *needle)
+{
+    int count = 0;
+    size_t n = strlen(needle);
+    for (const char *p = text; p && (p = strstr(p, needle)); p += n)
+    {
+        count++;
+    }
+    return count;
+}
+
+static int TestRequestOnlyContext(void)
+{
+    const char *name = "context hook appends request-only base-isolated context";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_context_hook(&app, AddEphemeralContext);
+    pico_add_context_hook(&app, InspectBaseContext);
+    PicoAgent_StartTurn(&app, "first");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "first turn did not finish");
+    }
+    PicoAgent_StartTurn(&app, "second");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "second turn did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.context_saw_base_tail && g_test.last_input &&
+              CountOccurrences(g_test.last_input, "ephemeral-context") == 1 &&
+              (!g_test.last_instructions || strstr(g_test.last_instructions, "ephemeral-context") == NULL);
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "context persisted, entered instructions, or changed the next hook's base history");
 }
 
 static int TestLlmExtraInstructions(void)
@@ -1117,7 +1310,7 @@ static int TestSessionUsageAccumulation(void)
     g_test.provider_cached_tokens = 25;
     PicoApp app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, "first");
     if (!WaitForIdle(&app))
@@ -1194,7 +1387,7 @@ static int TestToolTraceError(void)
     ResetTest(TEST_SINGLE, 1);
     PicoApp app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, "start");
     if (!WaitForIdle(&app))
@@ -1242,7 +1435,7 @@ static int TestThinkSummaryCoalesce(void)
     g_test.emit_think_summaries = true;
     PicoApp app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, "start");
     if (!WaitForIdle(&app))
@@ -1281,6 +1474,10 @@ int main(void)
     failed |= TestBeforeRewriteArgs();
     failed |= TestAfterRewriteOutput();
     failed |= TestRewriteThenDenyArgs();
+    failed |= TestStructuredToolDetails();
+    failed |= TestInvalidDetailsFailClosed();
+    failed |= TestDeniedDetailsDoNotApply();
+    failed |= TestRequestOnlyContext();
     failed |= TestLlmExtraInstructions();
     failed |= TestBuildInstructionsMatchTurn();
     failed |= TestLlmExcludeTool();

@@ -6,7 +6,7 @@ A small C99 AI agent harness with a native chat UI. The core is a loader, agent 
 
 - Markdown chat UI, composer, and footer
 - OpenAI-compatible models (API key or ChatGPT/`/login`)
-- Workspace tools (`sh`), sessions, compaction
+- Workspace tools (`sh`), built-in agent TODO tracking, sessions, compaction
 - Hot-reloadable C99 extensions (views, tools, commands, providers)
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 

@@ -30,6 +30,7 @@ typedef struct JsonDoc {
 
 int JsonParse(JsonDoc *doc, const char *src, size_t len);
 void JsonFree(JsonDoc *doc);
+bool JsonValidUtf8(const char *src, size_t len);
 /* Blank line and block comments to spaces, leaving strings untouched. */
 void JsonStripComments(char *src, size_t len);
 int JsonSkip(const JsonDoc *doc, int tok);

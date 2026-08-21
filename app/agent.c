@@ -89,6 +89,11 @@ struct PicoAgentRt {
     char *think;
     size_t think_len;
     size_t think_cap;
+    char *summary;
+    size_t summary_len;
+    size_t summary_cap;
+    int summary_steps;
+    bool summary_new_step;
     char status[128];
 
     PicoAgentEv *events;
@@ -259,6 +264,38 @@ static void BufAppend(char **buf, size_t *len, size_t *cap, const char *s, size_
     (*buf)[*len] = '\0';
 }
 
+static void BufSet(char **buf, size_t *len, size_t *cap, const char *s, size_t n)
+{
+    if (!s)
+    {
+        n = 0;
+    }
+    if (n + 1 > *cap)
+    {
+        size_t next_cap = *cap ? *cap : 256;
+        while (next_cap < n + 1)
+        {
+            next_cap *= 2;
+        }
+        char *next = (char *)realloc(*buf, next_cap);
+        if (!next)
+        {
+            return;
+        }
+        *buf = next;
+        *cap = next_cap;
+    }
+    if (*buf)
+    {
+        if (n)
+        {
+            memcpy(*buf, s, n);
+        }
+        (*buf)[n] = '\0';
+        *len = n;
+    }
+}
+
 static void SetActivity(PicoApp *app, const char *msg)
 {
     snprintf(app->agent_activity, sizeof(app->agent_activity), "%s", msg ? msg : "");
@@ -338,11 +375,30 @@ static char *ResultStr(const char *payload, const char *key)
 static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
 {
     PicoAgentRt *rt = (PicoAgentRt *)user;
-    if (!s || n == 0)
+    pthread_mutex_lock(&rt->mu);
+    if (kind == PICO_LLM_DELTA_THINKING_SUMMARY)
     {
+        if (n == 0)
+        {
+            rt->summary_new_step = true;
+        }
+        else if (s)
+        {
+            if (rt->summary_steps < 1 || rt->summary_new_step)
+            {
+                rt->summary_steps++;
+                rt->summary_new_step = false;
+            }
+            BufSet(&rt->summary, &rt->summary_len, &rt->summary_cap, s, n);
+        }
+        pthread_mutex_unlock(&rt->mu);
         return;
     }
-    pthread_mutex_lock(&rt->mu);
+    if (!s || n == 0)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        return;
+    }
     if (kind == PICO_LLM_DELTA_THINKING)
     {
         BufAppend(&rt->think, &rt->think_len, &rt->think_cap, s, n);
@@ -596,6 +652,14 @@ static void *WorkerMain(void *arg)
 
         if (kind == PICO_WORK_LLM)
         {
+            pthread_mutex_lock(&rt->mu);
+            free(rt->summary);
+            rt->summary = NULL;
+            rt->summary_len = 0;
+            rt->summary_cap = 0;
+            rt->summary_steps = 0;
+            rt->summary_new_step = false;
+            pthread_mutex_unlock(&rt->mu);
             PicoLlmTurn turn;
             memset(&turn, 0, sizeof(turn));
             turn.model = model;
@@ -932,6 +996,7 @@ static void PopLastMessage(PicoApp *app)
         free(app->messages[i].trace[t].tool_name);
         free(app->messages[i].trace[t].tool_args);
         free(app->messages[i].trace[t].tool_output);
+        MdDocument_Free(&app->messages[i].trace[t].doc);
     }
     free(app->messages[i].trace);
     MdDocument_Free(&app->messages[i].doc);
@@ -1015,7 +1080,8 @@ static void TraceAppendThink(PicoApp *app, int idx, const char *s, size_t n)
     }
     PicoMessage *m = &app->messages[idx];
     PicoTraceLine *line = NULL;
-    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool)
+    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool &&
+        m->trace[m->trace_count - 1].think_steps == 0)
     {
         line = &m->trace[m->trace_count - 1];
     }
@@ -1036,6 +1102,76 @@ static void TraceAppendThink(PicoApp *app, int idx, const char *s, size_t n)
     memcpy(next + old, s, n);
     next[old + n] = '\0';
     line->text = next;
+}
+
+static void ReparseThinkSummary(PicoTraceLine *line)
+{
+    MdDocument_Free(&line->doc);
+    const char *text = line->text ? line->text : "";
+    size_t tlen = strlen(text);
+    if (line->think_steps > 1)
+    {
+        char prefix[32];
+        int plen = snprintf(prefix, sizeof(prefix), "%dx ", line->think_steps);
+        if (plen < 0)
+        {
+            line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
+            return;
+        }
+        size_t n = (size_t)plen + tlen;
+        char *src = (char *)malloc(n + 1);
+        if (!src)
+        {
+            line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
+            return;
+        }
+        memcpy(src, prefix, (size_t)plen);
+        memcpy(src + plen, text, tlen + 1);
+        line->doc = MdDocument_ParseEx(src, n, MD_PARSE_DEFAULT);
+        free(src);
+        return;
+    }
+    line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
+}
+
+static void TraceSetThinkSummary(PicoApp *app, int idx, const char *s, size_t n, int steps)
+{
+    if (idx < 0 || idx >= app->message_count || !s || n == 0)
+    {
+        return;
+    }
+    PicoMessage *m = &app->messages[idx];
+    PicoTraceLine *line = NULL;
+    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool &&
+        m->trace[m->trace_count - 1].think_steps > 0)
+    {
+        line = &m->trace[m->trace_count - 1];
+    }
+    else
+    {
+        line = TracePush(m, false);
+        if (line)
+        {
+            line->think_steps = 1;
+        }
+    }
+    if (!line)
+    {
+        return;
+    }
+    char *next = (char *)realloc(line->text, n + 1);
+    if (!next)
+    {
+        return;
+    }
+    memcpy(next, s, n);
+    next[n] = '\0';
+    line->text = next;
+    if (steps > 0)
+    {
+        line->think_steps = steps;
+    }
+    ReparseThinkSummary(line);
 }
 
 static void TraceAddTool(PicoApp *app, int idx, const char *name, const char *args_json)
@@ -1618,6 +1754,7 @@ static void FreeRt(PicoAgentRt *rt)
     ClearPending(rt);
     free(rt->stream);
     free(rt->think);
+    free(rt->summary);
     free(rt->work_model);
     free(rt->work_base_url);
     free(rt->work_effort);
@@ -2120,6 +2257,12 @@ void PicoAgent_Pump(PicoApp *app)
     rt->think = NULL;
     rt->think_len = 0;
     rt->think_cap = 0;
+    char *summary = rt->summary;
+    size_t summary_len = rt->summary_len;
+    int summary_steps = rt->summary_steps;
+    rt->summary = NULL;
+    rt->summary_len = 0;
+    rt->summary_cap = 0;
     char status[128];
     memcpy(status, rt->status, sizeof(status));
     rt->status[0] = '\0';
@@ -2142,6 +2285,12 @@ void PicoAgent_Pump(PicoApp *app)
         TraceAppendThink(app, rt->stream_msg, think, think_len);
     }
     free(think);
+
+    if (summary && summary_len && rt->stream_msg >= 0)
+    {
+        TraceSetThinkSummary(app, rt->stream_msg, summary, summary_len, summary_steps);
+    }
+    free(summary);
 
     if (status[0])
     {

@@ -41,7 +41,9 @@ Add a catalog entry with `"provider": "myllm"` or the builtin OpenAI path is use
 
 `tools` is the catalog for this round: a copy of registered tools after `pico_add_llm_hook` excludes. It may be empty or a subset of `app->tools`. Pointers inside each `PicoTool` (name, description, params) stay extension-owned; reload is deferred while the worker is busy.
 
-Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
+Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_THINKING_SUMMARY`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
+
+`PICO_LLM_DELTA_THINKING` appends raw thinking. `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current reasoning-summary snapshot (OpenAI-style short titles). A zero-length `THINKING_SUMMARY` starts a new step in that streak; Pico coalesces consecutive summaries until a tool call and shows an `Nx` counter. After a tool, the next summary starts a new line.
 
 ## Result
 

@@ -1,6 +1,7 @@
 #include "pico/plugin.h"
 #include "pico/md_view.h"
 #include "chat_sel.h"
+#include "richtext.h"
 #include "settings.h"
 
 #include "clay/clay.h"
@@ -64,6 +65,35 @@ static void RenderToolOutput(const char *output)
                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
     }
+}
+
+static void RenderThinkSummary(PicoTraceLine *line, float available_width)
+{
+    RichTextStyle style = {
+        .font_regular = FONT_ITALIC,
+        .font_bold = FONT_BOLD_ITALIC,
+        .font_italic = FONT_ITALIC,
+        .font_bold_italic = FONT_BOLD_ITALIC,
+        .font_mono = FONT_MONO,
+        .font_size = 15,
+        .line_height = 18,
+        .text_color = COLOR_MUTED,
+        .code_text_color = COLOR_MUTED,
+        .code_bg_color = COLOR_CODE_BG,
+        .link_color = COLOR_MUTED,
+        .link_hover_color = COLOR_MUTED,
+    };
+    RichTextEmitState emit = {0};
+    for (int b = 0; b < line->doc.block_count; b++)
+    {
+        MdBlock *block = &line->doc.blocks[b];
+        if (!block->chunks || block->chunk_count <= 0)
+        {
+            continue;
+        }
+        RichText_RenderParagraph(block, &line->doc.arena, available_width, &style, &emit);
+    }
+    PicoChatSel_Break();
 }
 
 static Clay_Color ToolStatusColor(const PicoTraceLine *line)
@@ -320,6 +350,11 @@ void PicoChat_Render(PicoApp *app)
                             const char *text = line->text;
                             if (!text || !text[0])
                             {
+                                continue;
+                            }
+                            if (line->think_steps >= 1 && line->doc.block_count > 0)
+                            {
+                                RenderThinkSummary(line, available_width);
                                 continue;
                             }
                             Clay_String think = {.length = (int32_t)strlen(text), .chars = text};

@@ -18,7 +18,7 @@ Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, `P
 
 Worker thread: `PicoToolFn`, `PICO_TOOL_BEFORE`, `PicoProviderStreamFn`. `pico_tool_ask` is the only supported wait for user input; it may be called only from the worker tool slot (`PicoToolFn` or `PICO_TOOL_BEFORE`). Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
-Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a malloc'd string; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`.
+Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a malloc'd string; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`. `PICO_LLM_DELTA_THINKING` appends; `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current summary (zero-length starts the next step). Pico coalesces consecutive summaries until a tool call.
 
 Reload is deferred while the live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns. That includes a worker blocked in `pico_tool_ask`.
 

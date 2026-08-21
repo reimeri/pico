@@ -42,6 +42,7 @@ typedef struct TestState {
     int followup_hook_calls;
     bool provider_fail;
     int provider_tokens;
+    bool emit_think_summaries;
     int life_turn_end;
     int life_cancel;
     int life_error;
@@ -91,6 +92,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.followup_hook_calls = 0;
     g_test.provider_fail = false;
     g_test.provider_tokens = 0;
+    g_test.emit_think_summaries = false;
     g_test.life_turn_end = 0;
     g_test.life_cancel = 0;
     g_test.life_error = 0;
@@ -151,13 +153,12 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
 {
     (void)app;
     (void)cancel;
-    (void)on_delta;
-    (void)user;
 
     pthread_mutex_lock(&g_test.mu);
     SnapshotTurn(turn);
     bool fail = g_test.provider_fail;
     int tokens = g_test.provider_tokens;
+    bool emit_summaries = g_test.emit_think_summaries;
     bool issue_tool = !fail && g_test.provider_tools_issued < g_test.provider_tool_limit;
     int call_number = ++g_test.provider_tools_issued;
     char tool_name[64];
@@ -171,6 +172,22 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     }
 
     out->input_tokens = tokens;
+
+    if (emit_summaries && on_delta)
+    {
+        if (issue_tool)
+        {
+            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "**first**", 9);
+            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "**second**", 10);
+        }
+        else
+        {
+            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "**third**", 9);
+        }
+    }
 
     if (!issue_tool)
     {
@@ -1087,6 +1104,38 @@ static int TestResumedToolCallArgs(void)
     return ok ? 0 : Fail(name, "resumed tool call kept raw JSON arguments");
 }
 
+static int TestThinkSummaryCoalesce(void)
+{
+    const char *name = "think summaries coalesce until a tool";
+    ResetTest(TEST_SINGLE, 1);
+    g_test.emit_think_summaries = true;
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "turn did not finish");
+    }
+    PicoMessage *msg = NULL;
+    for (int i = app.message_count - 1; i >= 0; i--)
+    {
+        if (app.messages[i].role == PICO_ROLE_ASSISTANT)
+        {
+            msg = &app.messages[i];
+            break;
+        }
+    }
+    bool ok = msg && msg->trace_count == 3 && !msg->trace[0].is_tool && msg->trace[0].think_steps == 2 &&
+              msg->trace[0].text && strcmp(msg->trace[0].text, "**second**") == 0 && msg->trace[1].is_tool &&
+              !msg->trace[2].is_tool && msg->trace[2].think_steps == 1 && msg->trace[2].text &&
+              strcmp(msg->trace[2].text, "**third**") == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "consecutive summaries did not replace with Nx, or tool did not reset");
+}
+
 int main(void)
 {
     int failed = 0;
@@ -1109,5 +1158,6 @@ int main(void)
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();
     failed |= TestResumedToolCallArgs();
+    failed |= TestThinkSummaryCoalesce();
     return failed ? 1 : 0;
 }

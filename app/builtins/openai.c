@@ -341,12 +341,16 @@ typedef struct LlmCtx {
     PicoLlmDeltaFn on_delta;
     void *user;
     JsonBuf items;
+    JsonBuf summary;
+    int summary_output_index;
+    int summary_index;
     int item_count;
     int input_tokens;
     int cached_tokens;
     char *error;
     bool failed;
     bool saw_text;
+    bool saw_summary;
     long http;
 } LlmCtx;
 
@@ -493,7 +497,8 @@ static void AppendThink(JsonBuf *think, const char *text)
 
 static void EmitDelta(LlmCtx *c, PicoLlmDeltaKind kind, const char *s, size_t n)
 {
-    if (kind == PICO_LLM_DELTA_THINKING && !ThinkUsable(s, n))
+    if ((kind == PICO_LLM_DELTA_THINKING || kind == PICO_LLM_DELTA_THINKING_SUMMARY) && n > 0 &&
+        !ThinkUsable(s, n))
     {
         return;
     }
@@ -501,9 +506,106 @@ static void EmitDelta(LlmCtx *c, PicoLlmDeltaKind kind, const char *s, size_t n)
     {
         c->saw_text = true;
     }
-    if (c->on_delta && s && n)
+    if (kind == PICO_LLM_DELTA_THINKING_SUMMARY && n > 0)
+    {
+        c->saw_summary = true;
+    }
+    if (!c->on_delta)
+    {
+        return;
+    }
+    if (n == 0)
+    {
+        if (kind == PICO_LLM_DELTA_THINKING_SUMMARY)
+        {
+            c->on_delta(c->user, kind, "", 0);
+        }
+        return;
+    }
+    if (s)
     {
         c->on_delta(c->user, kind, s, n);
+    }
+}
+
+static void BeginSummaryStep(LlmCtx *c, int output_index, int summary_index)
+{
+    if (c->summary_output_index == output_index && c->summary_index == summary_index)
+    {
+        return;
+    }
+    c->summary_output_index = output_index;
+    c->summary_index = summary_index;
+    JsonBuf_Clear(&c->summary);
+    EmitDelta(c, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+}
+
+static void SetSummarySnapshot(LlmCtx *c, const char *text)
+{
+    if (!ThinkUsable(text, text ? strlen(text) : 0))
+    {
+        return;
+    }
+    JsonBuf_Clear(&c->summary);
+    JsonBuf_Puts(&c->summary, text);
+    EmitDelta(c, PICO_LLM_DELTA_THINKING_SUMMARY, c->summary.data, c->summary.len);
+}
+
+static void HandleSummaryDelta(LlmCtx *c, const JsonDoc *doc, const char *delta)
+{
+    int output_index = JsonObjInt(doc, 0, "output_index", 0);
+    int summary_index = JsonObjInt(doc, 0, "summary_index", 0);
+    BeginSummaryStep(c, output_index, summary_index);
+    if (!delta || !delta[0] || !ThinkUsable(delta, strlen(delta)))
+    {
+        return;
+    }
+    JsonBuf_Puts(&c->summary, delta);
+    EmitDelta(c, PICO_LLM_DELTA_THINKING_SUMMARY, c->summary.data, c->summary.len);
+}
+
+static void HandleSummaryDone(LlmCtx *c, const JsonDoc *doc)
+{
+    int output_index = JsonObjInt(doc, 0, "output_index", 0);
+    int summary_index = JsonObjInt(doc, 0, "summary_index", 0);
+    BeginSummaryStep(c, output_index, summary_index);
+    char *text = JsonObjStr(doc, 0, "text");
+    if (text)
+    {
+        SetSummarySnapshot(c, text);
+        free(text);
+    }
+}
+
+static void EmitSummaryParts(LlmCtx *c, const JsonDoc *doc, int summary, int item_index)
+{
+    if (c->saw_summary)
+    {
+        return;
+    }
+    if (JsonIsArray(doc, summary))
+    {
+        int n = JsonArrayLen(doc, summary);
+        for (int i = 0; i < n; i++)
+        {
+            int part = JsonArrayAt(doc, summary, i);
+            char *text = JsonObjStr(doc, part, "text");
+            if (!text)
+            {
+                continue;
+            }
+            BeginSummaryStep(c, item_index, i);
+            SetSummarySnapshot(c, text);
+            free(text);
+        }
+        return;
+    }
+    char *text = JsonStrDup(doc, summary);
+    if (text)
+    {
+        BeginSummaryStep(c, item_index, 0);
+        SetSummarySnapshot(c, text);
+        free(text);
     }
 }
 
@@ -592,8 +694,7 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             free(delta);
         }
     }
-    else if (type && (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
-                      strcmp(type, "response.reasoning_text.delta") == 0))
+    else if (type && strcmp(type, "response.reasoning_text.delta") == 0)
     {
         char *delta = JsonObjStr(&doc, 0, "delta");
         if (delta)
@@ -601,6 +702,16 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             EmitDelta(c, PICO_LLM_DELTA_THINKING, delta, strlen(delta));
             free(delta);
         }
+    }
+    else if (type && strcmp(type, "response.reasoning_summary_text.delta") == 0)
+    {
+        char *delta = JsonObjStr(&doc, 0, "delta");
+        HandleSummaryDelta(c, &doc, delta);
+        free(delta);
+    }
+    else if (type && strcmp(type, "response.reasoning_summary_text.done") == 0)
+    {
+        HandleSummaryDone(c, &doc);
     }
     else if (type && strcmp(type, "response.output_item.added") == 0)
     {
@@ -745,7 +856,9 @@ static void FillResult(LlmCtx *c, PicoLlmResult *out)
         AddRaw(out, raw);
         if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
         {
-            char *summary = ContentText(&doc, JsonObjGet(&doc, item, "summary"));
+            int summary_tok = JsonObjGet(&doc, item, "summary");
+            EmitSummaryParts(c, &doc, summary_tok, i);
+            char *summary = ContentText(&doc, summary_tok);
             char *content = ContentText(&doc, JsonObjGet(&doc, item, "content"));
             AppendThink(&think, summary);
             if (content && (!summary || strcmp(content, summary) != 0))
@@ -1507,7 +1620,10 @@ static int PostOnce(const char *url, const char *bearer, const char *account_id,
     ctx->cancel = cancel;
     ctx->on_delta = on_delta;
     ctx->user = user;
+    ctx->summary_output_index = -1;
+    ctx->summary_index = -1;
     JsonBuf_Init(&ctx->items);
+    JsonBuf_Init(&ctx->summary);
 
     char *auth = NULL;
     char *acct = NULL;
@@ -1562,6 +1678,7 @@ static int PostOnce(const char *url, const char *bearer, const char *account_id,
     {
         free(err);
         JsonBuf_Free(&ctx->items);
+        JsonBuf_Free(&ctx->summary);
         free(ctx->error);
         memset(ctx, 0, sizeof(*ctx));
         return PICO_LLM_CANCEL;
@@ -1658,6 +1775,7 @@ static int OpenAiStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
         JsonBuf_Free(&ctx.items);
+        JsonBuf_Free(&ctx.summary);
         free(ctx.error);
         ctx.error = NULL;
         if (!RefreshOauth(app, &auth, &tc))
@@ -1681,6 +1799,7 @@ static int OpenAiStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
         if (stripped)
         {
             JsonBuf_Free(&ctx.items);
+            JsonBuf_Free(&ctx.summary);
             free(ctx.error);
             rc = PostOnce(url, BearerOf(&auth, oauth), auth.account_id, oauth, stripped, turn->cache_key,
                           &ctx, cancel, on_delta, user);
@@ -1695,6 +1814,7 @@ static int OpenAiStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     }
     FillResult(&ctx, out);
     JsonBuf_Free(&ctx.items);
+    JsonBuf_Free(&ctx.summary);
     if (rc != PICO_LLM_OK)
     {
         if (!out->error)

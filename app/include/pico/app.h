@@ -95,6 +95,8 @@ typedef struct PicoTraceLine {
     char *tool_output;
     bool tool_error;
     bool expanded;
+    int think_steps;
+    MdDocument doc;
 } PicoTraceLine;
 
 typedef struct PicoMessage {
@@ -224,6 +226,7 @@ typedef bool (*PicoLlmCancelFn)(void *user);
 typedef enum PicoLlmDeltaKind {
     PICO_LLM_DELTA_TEXT = 0,
     PICO_LLM_DELTA_THINKING,
+    PICO_LLM_DELTA_THINKING_SUMMARY,
     PICO_LLM_DELTA_STATUS,
 } PicoLlmDeltaKind;
 

@@ -758,6 +758,7 @@ void PicoApp_ClearMessages(PicoApp *app)
             free(app->messages[i].trace[t].tool_name);
             free(app->messages[i].trace[t].tool_args);
             free(app->messages[i].trace[t].tool_output);
+            MdDocument_Free(&app->messages[i].trace[t].doc);
         }
         free(app->messages[i].trace);
         MdDocument_Free(&app->messages[i].doc);

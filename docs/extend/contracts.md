@@ -40,12 +40,13 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 
 - 32 user `.c` files
 - 16 views per slot
+- 16 empty-state views (`pico_add_empty_view`)
 - 64 hooks, tool hooks, LLM hooks, tools, commands
 - 16 completers, providers, auth registrations
 - 24 completion items per query
 - `PICO_TOOL_ASK_MAX_REQUEST` / `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)
 
-Silent no-op if a `pico_add_*` is full or arguments are NULL.
+Silent no-op if a `pico_add_*` is full, arguments are NULL, or the kind/slot is invalid.
 
 ## Directories
 

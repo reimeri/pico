@@ -43,6 +43,33 @@ void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render)
     app->view_count[slot]++;
 }
 
+void pico_add_empty_view(PicoApp *app, PicoEmptyKind kind, int z, PicoViewFn render)
+{
+    if (!app || !render)
+    {
+        return;
+    }
+    if (kind != PICO_EMPTY_ABOVE && kind != PICO_EMPTY_BELOW && kind != PICO_EMPTY_REPLACE)
+    {
+        return;
+    }
+    int n = app->empty_view_count;
+    if (n >= PICO_MAX_EMPTY_VIEWS)
+    {
+        return;
+    }
+    int i = n;
+    while (i > 0 && app->empty_views[i - 1].z > z)
+    {
+        app->empty_views[i] = app->empty_views[i - 1];
+        i--;
+    }
+    app->empty_views[i].render = render;
+    app->empty_views[i].kind = kind;
+    app->empty_views[i].z = z;
+    app->empty_view_count++;
+}
+
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn)
 {
     if (!fn || app->hook_count >= PICO_MAX_HOOKS)
@@ -172,6 +199,8 @@ void pico_clear_registrations(PicoApp *app)
 {
     memset(app->views, 0, sizeof(app->views));
     memset(app->view_count, 0, sizeof(app->view_count));
+    memset(app->empty_views, 0, sizeof(app->empty_views));
+    app->empty_view_count = 0;
     memset(app->hooks, 0, sizeof(app->hooks));
     app->hook_count = 0;
     memset(app->tool_hooks, 0, sizeof(app->tool_hooks));

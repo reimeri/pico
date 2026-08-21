@@ -18,7 +18,7 @@ Compile errors appear in the overlay. `/docs [topic]` prints these pages into ch
 Read the page that matches the work (`/docs <name>` or the file next to this README):
 
 - `anatomy` — entry point, lifecycle, compile
-- `views` — UI in a slot (sidebar, chat, footer, …)
+- `views` — UI in a slot (sidebar, chat, footer, …) and the chat empty-state
 - `hooks` — submit, layout, compact, turn end/cancel/error; tool and LLM interceptors
 - `tools` — LLM-callable tools
 - `commands` — slash commands (`/foo`)
@@ -34,6 +34,7 @@ Always read `contracts.md` before shipping an extension.
 Copy-templates in the Pico source tree:
 
 - `examples/hello.c` — sidebar view
+- `examples/empty_banner.c` — empty-state banner above the Tools / Context / Skills cards
 - `examples/echo_tool.c` — tool + `json.h`
 - `examples/ask_tool.c` — `pico_tool_ask` + builtin confirm overlay
 - `examples/permit_tool.c` — `PICO_TOOL_BEFORE` permission prompt

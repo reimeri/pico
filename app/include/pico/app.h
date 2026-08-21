@@ -12,6 +12,7 @@
 #include "pico/theme.h"
 
 #define PICO_MAX_SLOT_VIEWS 16
+#define PICO_MAX_EMPTY_VIEWS 16
 #define PICO_MAX_HOOKS 64
 #define PICO_MAX_TOOL_HOOKS 64
 #define PICO_MAX_LLM_HOOKS 64
@@ -47,6 +48,12 @@ typedef enum PicoUiSlot {
     PICO_SLOT_OVERLAY,
     PICO_SLOT_COUNT,
 } PicoUiSlot;
+
+typedef enum PicoEmptyKind {
+    PICO_EMPTY_ABOVE = 0, /* stacked above the three cards */
+    PICO_EMPTY_BELOW,     /* stacked below the three cards */
+    PICO_EMPTY_REPLACE,   /* takes over the empty state */
+} PicoEmptyKind;
 
 typedef enum PicoHook {
     PICO_HOOK_AFTER_LAYOUT = 0,
@@ -146,6 +153,12 @@ typedef struct PicoSlotView {
     PicoViewFn render;
     int z;
 } PicoSlotView;
+
+typedef struct PicoEmptyView {
+    PicoViewFn render;
+    PicoEmptyKind kind;
+    int z;
+} PicoEmptyView;
 
 typedef struct PicoHookEntry {
     PicoHook hook;
@@ -311,6 +324,8 @@ typedef struct PicoApp {
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
+    PicoEmptyView empty_views[PICO_MAX_EMPTY_VIEWS];
+    int empty_view_count;
     PicoHookEntry hooks[PICO_MAX_HOOKS];
     int hook_count;
     PicoToolHookEntry tool_hooks[PICO_MAX_TOOL_HOOKS];
@@ -355,6 +370,7 @@ typedef struct PicoApp {
 } PicoApp;
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
+void pico_add_empty_view(PicoApp *app, PicoEmptyKind kind, int z, PicoViewFn render);
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
 void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn);
 void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);

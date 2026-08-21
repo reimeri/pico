@@ -207,11 +207,52 @@ static void RenderEmptyCards(PicoApp *app)
     CLAY(CLAY_ID("EmptyCards"),
          {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
                      .childGap = 12,
-                     .sizing = {.width = CLAY_SIZING_GROW(0, 900)}}})
+                     .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
         RenderEmptyCard(0, CLAY_STRING("Tools"), tools, tool_n);
         RenderEmptyCard(1, CLAY_STRING("Context"), ctx, ctx_n);
         RenderEmptyCard(2, CLAY_STRING("Skills"), NULL, 0);
+    }
+}
+
+static bool EmptyReplaced(PicoApp *app)
+{
+    for (int i = 0; i < app->empty_view_count; i++)
+    {
+        if (app->empty_views[i].kind == PICO_EMPTY_REPLACE)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void RunEmpty(PicoApp *app, PicoEmptyKind kind)
+{
+    for (int i = 0; i < app->empty_view_count; i++)
+    {
+        if (app->empty_views[i].kind == kind && app->empty_views[i].render)
+        {
+            app->empty_views[i].render(app);
+        }
+    }
+}
+
+static void RenderEmptyState(PicoApp *app)
+{
+    if (EmptyReplaced(app))
+    {
+        RunEmpty(app, PICO_EMPTY_REPLACE);
+        return;
+    }
+    CLAY(CLAY_ID("EmptyStack"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = 12,
+                     .sizing = {.width = CLAY_SIZING_GROW(0, 900)}}})
+    {
+        RunEmpty(app, PICO_EMPTY_ABOVE);
+        RenderEmptyCards(app);
+        RunEmpty(app, PICO_EMPTY_BELOW);
     }
 }
 
@@ -246,7 +287,7 @@ void PicoChat_Render(PicoApp *app)
             {
                 if (empty)
                 {
-                    RenderEmptyCards(app);
+                    RenderEmptyState(app);
                 }
                 float available_width = ChatWidth(app);
                 for (int i = 0; i < app->message_count; i++)

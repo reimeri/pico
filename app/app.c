@@ -550,7 +550,7 @@ void PicoApp_Cancel(PicoApp *app)
 
 bool PicoUi_ModalOpen(const PicoApp *app)
 {
-    return PicoExts_IsOpen() || PicoFooter_MenuOpen() || PicoAgent_AskUiOpen(app);
+    return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() || PicoAgent_AskUiOpen(app);
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
@@ -928,9 +928,10 @@ void PicoApp_Frame(PicoApp *app)
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
     bool had_exts = PicoExts_IsOpen();
+    bool had_prompt = PicoPrompt_IsOpen();
     bool had_footer = PicoFooter_MenuOpen();
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && !had_complete && !had_exts && !had_footer && IsKeyPressed(KEY_ESCAPE))
+    if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && IsKeyPressed(KEY_ESCAPE))
     {
         if (PicoAgent_IsBusy(app))
         {

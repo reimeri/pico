@@ -24,5 +24,6 @@ PicoExt pico_ext_commands(void);
 PicoExt pico_ext_files(void);
 PicoExt pico_ext_openai(void);
 PicoExt pico_ext_extensions(void);
+PicoExt pico_ext_prompt(void);
 
 #endif

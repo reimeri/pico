@@ -401,6 +401,16 @@ static void ExtraInstructions(PicoApp *app, PicoLlmEvent *ev)
     ev->extra_instructions = JsonDup("injected-line");
 }
 
+static void ExtraWhenTools(PicoApp *app, PicoLlmEvent *ev)
+{
+    (void)app;
+    if (!ev->include_tools)
+    {
+        return;
+    }
+    ev->extra_instructions = JsonDup("tool-notes");
+}
+
 static void ExcludeAskTest(PicoApp *app, PicoLlmEvent *ev)
 {
     (void)app;
@@ -947,6 +957,30 @@ static int TestLlmExtraInstructions(void)
     return ok ? 0 : Fail(name, "provider did not receive extra instructions");
 }
 
+static int TestBuildInstructionsMatchTurn(void)
+{
+    const char *name = "previewed instructions match the next turn";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_llm_hook(&app, ExtraWhenTools);
+    char *preview = PicoAgent_BuildInstructions(&app);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        free(preview);
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = preview && strstr(preview, "tool-notes") != NULL && g_test.last_instructions &&
+              strcmp(preview, g_test.last_instructions) == 0;
+    pthread_mutex_unlock(&g_test.mu);
+    free(preview);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "preview did not match the instructions sent to the provider");
+}
+
 static int TestLlmExcludeTool(void)
 {
     const char *name = "llm hook excludes a tool";
@@ -1151,6 +1185,7 @@ int main(void)
     failed |= TestAfterRewriteOutput();
     failed |= TestRewriteThenDenyArgs();
     failed |= TestLlmExtraInstructions();
+    failed |= TestBuildInstructionsMatchTurn();
     failed |= TestLlmExcludeTool();
     failed |= TestTurnEnd();
     failed |= TestCancelNotification();

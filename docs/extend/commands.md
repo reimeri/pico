@@ -23,7 +23,7 @@ static void TimeInit(PicoApp *app)
 }
 ```
 
-Full file: `examples/time_cmd.c`. User types `/time`. `/help` lists every registered command. Builtin `/extensions` opens a modal listing installed extensions.
+Full file: `examples/time_cmd.c`. User types `/time`. `/help` lists every registered command. Builtin `/extensions` opens a modal listing installed extensions. Builtin `/show-prompt` opens a modal with the assembled system prompt for the next turn (`SYSTEM.md`, workspace `AGENTS.md`, the docs hint, and any `pico_add_llm_hook` extras).
 
 ## Contract
 

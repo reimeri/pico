@@ -47,6 +47,7 @@ add_executable(pico
     builtins/files.c
     builtins/openai.c
     builtins/extensions.c
+    builtins/prompt.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)

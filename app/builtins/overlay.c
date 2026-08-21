@@ -264,7 +264,7 @@ void PicoOverlay_OnFrame(PicoApp *app, float dt)
             g_notify_ttl = 0.0f;
         }
     }
-    if (PicoExts_IsOpen() || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }
@@ -304,7 +304,7 @@ static void OverlayAfterLayout(PicoApp *app)
         }
     }
 
-    if (PicoExts_IsOpen() || (!app->status_warn && !app->agent_error))
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !app->agent_error))
     {
         return;
     }

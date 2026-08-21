@@ -67,9 +67,10 @@
 
           shellHook = ''
             echo "Pico development shell"
-            echo "  cmake -S app -B app/build -G Ninja"
-            echo "  cmake --build app/build"
-            echo "  ./app/build/pico"
+            echo "  cmake -S app --preset debug && cmake --build app/build/debug"
+            echo "  ./app/build/debug/pico"
+            echo "  cmake -S app --preset release && cmake --build app/build/release"
+            echo "  ./app/build/release/pico"
           '';
         };
       });

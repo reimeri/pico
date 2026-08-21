@@ -42,6 +42,7 @@ add_executable(pico
     builtins/composer.c
     builtins/footer.c
     builtins/overlay.c
+    builtins/ask_user.c
     builtins/todo.c
     builtins/todo_model.c
     builtins/shell.c
@@ -94,10 +95,25 @@ if(BUILD_TESTING)
     target_include_directories(pico_todo_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME pico_todo_tests COMMAND pico_todo_tests)
 
+    add_executable(pico_ask_user_tests
+        tests/ask_user_test.c
+        builtins/ask_user.c
+        json.c)
+    target_include_directories(pico_ask_user_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_compile_options(pico_ask_user_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_ask_user_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_ask_user_tests COMMAND pico_ask_user_tests)
+
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
+        tests/clay_impl.c
         app.c
         agent.c
+        builtins/ask_user.c
         json.c
         usage.c)
     target_include_directories(pico_agent_behavior_tests PRIVATE

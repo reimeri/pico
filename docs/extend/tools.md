@@ -80,6 +80,44 @@ Builtin overlay handles `{"type":"confirm","message":"…"}` (Approve/Deny → `
 
 Pico does not model questionnaire steps. Preferred: one `pico_tool_ask` with the full schema; the overlay keeps Next/Back and answers once. Sequential `pico_tool_ask` calls work too — drop widgets bound to a previous `id`.
 
+### Builtin `ask_user` questionnaire
+
+The `ask-user` builtin registers the model-facing `ask_user` tool and a custom questionnaire overlay. It accepts all questions in one call:
+
+```json
+{
+  "questions": [
+    {
+      "id": "target",
+      "question": "Which interface should this target?",
+      "kind": "select",
+      "options": ["CLI", "GUI"],
+      "allow_other": true
+    },
+    {
+      "id": "constraints",
+      "question": "Describe any additional constraints.",
+      "kind": "text"
+    }
+  ]
+}
+```
+
+Every question is required. A call contains 1–24 questions with unique, non-empty IDs of at most 128 UTF-8 bytes. `kind` is `select` or `text`. Select questions contain 1–20 non-empty options and may set boolean `allow_other`; choosing **Other…** requires text. Text questions accept up to 16 KiB and ignore `options` and `allow_other`. The complete request and answer remain subject to the 64 KiB ask limits.
+
+The modal preserves answers while moving Next/Back and returns them in question order:
+
+```json
+{
+  "answers": [
+    {"id": "target", "answer": "GUI"},
+    {"id": "constraints", "answer": "Keep startup under one second."}
+  ]
+}
+```
+
+Controls: Up/Down, Space, or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline; Esc cancels the questionnaire and current turn. The builtin also adds a non-compaction system instruction requiring the agent to use `ask_user` before implementing ambiguous work.
+
 ## Wrapping tools
 
 You cannot replace a builtin by registering the same name. Use `pico_add_tool_hook` to intercept every call, including `sh`. See `hooks.md` for the event fields.

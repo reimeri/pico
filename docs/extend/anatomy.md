@@ -53,4 +53,4 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** while the agent is in LLM/tool/compact wait. Tell the user to wait until idle, or run `/reload` after.
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `todos`, `sh`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.
+Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.

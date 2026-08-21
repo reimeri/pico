@@ -2,6 +2,7 @@
 
 #include "agent.h"
 #include "json.h"
+#include "pico/plugin.h"
 #include "settings.h"
 #include "usage.h"
 
@@ -34,6 +35,7 @@ typedef struct TestState {
     bool block_done;
     bool block_saw_live_state;
     char issue_tool_name[64];
+    char issue_tool_args[2048];
     char *last_instructions;
     int last_tool_count;
     char last_tools[512];
@@ -86,6 +88,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.block_done = false;
     g_test.block_saw_live_state = false;
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ask_test");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args), "{}");
     free(g_test.last_instructions);
     g_test.last_instructions = NULL;
     g_test.last_tool_count = 0;
@@ -180,7 +183,9 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     bool issue_tool = !fail && g_test.provider_tools_issued < g_test.provider_tool_limit;
     int call_number = ++g_test.provider_tools_issued;
     char tool_name[64];
+    char tool_args[2048];
     snprintf(tool_name, sizeof(tool_name), "%s", g_test.issue_tool_name);
+    snprintf(tool_args, sizeof(tool_args), "%s", g_test.issue_tool_args);
     pthread_mutex_unlock(&g_test.mu);
 
     if (fail)
@@ -232,7 +237,7 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     snprintf(call_id, sizeof(call_id), "call-%d", call_number);
     out->calls[0].call_id = JsonDup(call_id);
     out->calls[0].name = JsonDup(tool_name);
-    out->calls[0].arguments = JsonDup("{}");
+    out->calls[0].arguments = JsonDup(tool_args);
     out->call_count = 1;
     return PICO_LLM_OK;
 }
@@ -1416,6 +1421,121 @@ static int TestToolTraceError(void)
     return ok ? 0 : Fail(name, "unknown tool was not marked as error");
 }
 
+static bool AskUserRegistered(const PicoApp *app)
+{
+    return app && app->tool_count == 1 && app->tools[0].name &&
+           strcmp(app->tools[0].name, "ask_user") == 0 && app->tools[0].run &&
+           app->llm_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
+           app->hook_count == 1;
+}
+
+static int TestAskUserRegistrationReload(void)
+{
+    const char *name = "ask_user registration reload";
+    PicoApp app;
+    memset(&app, 0, sizeof(app));
+    PicoExt ext = pico_ext_ask_user();
+    ext.init(&app);
+    if (!AskUserRegistered(&app))
+    {
+        ext.shutdown(&app);
+        return Fail(name, "builtin did not register its tool, instruction hook, and overlay");
+    }
+    pico_clear_registrations(&app);
+    ext.init(&app);
+    bool ok = AskUserRegistered(&app);
+    ext.shutdown(&app);
+    pico_clear_registrations(&app);
+    return ok ? 0 : Fail(name, "builtin did not re-register cleanly after registrations were cleared");
+}
+
+static void ConfigureAskUserCall(void)
+{
+    pthread_mutex_lock(&g_test.mu);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ask_user");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
+             "{\"questions\":[{\"id\":\"target\",\"question\":\"Which?\",\"kind\":\"select\","
+             "\"options\":[\"CLI\",\"GUI\"]},{\"id\":\"notes\",\"question\":\"Notes?\","
+             "\"kind\":\"text\"}]}");
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static int TestAskUserToolSuccess(void)
+{
+    const char *name = "ask_user tool success";
+    const char *expected_request =
+        "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":[{\"id\":\"target\","
+        "\"question\":\"Which?\",\"kind\":\"select\",\"options\":[\"CLI\",\"GUI\"]},"
+        "{\"id\":\"notes\",\"question\":\"Notes?\",\"kind\":\"text\"}]}";
+    const char *answer =
+        "{\"answers\":[{\"id\":\"target\",\"answer\":\"GUI\"},{\"id\":\"notes\","
+        "\"answer\":\"Keep it fast.\"}]}";
+
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoExt ext = pico_ext_ask_user();
+    ext.init(&app);
+    ConfigureAskUserCall();
+    PicoAgent_StartTurn(&app, "start");
+
+    PicoToolAsk ask;
+    if (!WaitForPending(&app, 0, &ask) || strcmp(ask.request_json, expected_request) != 0)
+    {
+        PicoAgent_Cancel(&app);
+        WaitForIdle(&app);
+        ext.shutdown(&app);
+        PicoApp_Free(&app);
+        return Fail(name, "questionnaire request was not published unchanged");
+    }
+    if (!pico_tool_answer(&app, ask.id, answer) || !WaitForIdle(&app))
+    {
+        ext.shutdown(&app);
+        PicoApp_Free(&app);
+        return Fail(name, "answer was not delivered to the tool");
+    }
+
+    PicoTraceLine *line = LastToolTrace(&app);
+    bool ok = line && line->tool_output && strcmp(line->tool_output, answer) == 0 && !line->tool_error &&
+              g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user");
+    ext.shutdown(&app);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "tool result or clarification instruction was not preserved");
+}
+
+static int TestAskUserToolCancellation(void)
+{
+    const char *name = "ask_user tool cancellation";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoExt ext = pico_ext_ask_user();
+    ext.init(&app);
+    ConfigureAskUserCall();
+    PicoAgent_StartTurn(&app, "start");
+
+    PicoToolAsk ask;
+    if (!WaitForPending(&app, 0, &ask))
+    {
+        ext.shutdown(&app);
+        PicoApp_Free(&app);
+        return Fail(name, "questionnaire request was not published");
+    }
+    PicoAgent_Cancel(&app);
+    if (!WaitForIdle(&app))
+    {
+        ext.shutdown(&app);
+        PicoApp_Free(&app);
+        return Fail(name, "cancelled questionnaire did not return idle");
+    }
+    PicoTraceLine *line = LastToolTrace(&app);
+    bool ok = line && line->tool_error && line->tool_output &&
+              strcmp(line->tool_output, "{\"error\":\"questionnaire cancelled\"}") == 0;
+    ext.shutdown(&app);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "cancellation did not produce the expected tool error");
+}
+
 static int TestResumedToolCallArgs(void)
 {
     const char *name = "resumed tool args match live format";
@@ -1489,6 +1609,9 @@ int main(void)
     failed |= TestUsageNormalizationAndSaturation();
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();
+    failed |= TestAskUserRegistrationReload();
+    failed |= TestAskUserToolSuccess();
+    failed |= TestAskUserToolCancellation();
     failed |= TestResumedToolCallArgs();
     failed |= TestThinkSummaryCoalesce();
     return failed ? 1 : 0;

@@ -45,6 +45,7 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 - 16 completers, providers, auth registrations
 - 24 completion items per query
 - `PICO_TOOL_DETAILS_MAX`, `PICO_TOOL_ASK_MAX_REQUEST`, and `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)
+- Builtin `ask_user`: 24 questions, 20 options per select question, 16 KiB per free-form answer
 
 Registrations are ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for these cases and for duplicate names.
 

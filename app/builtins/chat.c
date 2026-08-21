@@ -165,7 +165,7 @@ static void RenderEmptyCard(int id, Clay_String title, const char **items, int n
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .padding = {16, 16, 16, 16},
                      .childGap = 8,
-                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {

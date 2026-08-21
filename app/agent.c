@@ -528,10 +528,10 @@ static char *AppendParagraph(char *base, char *extra)
     return out;
 }
 
-static void RunLlmHooks(PicoApp *app, bool compact, bool include_tools, char **instructions, PicoTool **tools,
-                        int *tool_count)
+static void RunLlmHooks(PicoApp *app, bool compact, bool include_tools, const char *base, char **instructions,
+                        PicoTool **tools, int *tool_count)
 {
-    char *instr = Dup(app->agent->instructions ? app->agent->instructions : "");
+    char *instr = Dup(base);
     bool exclude[PICO_MAX_TOOLS];
     memset(exclude, 0, sizeof(exclude));
     int ntools = app->tool_count;
@@ -808,7 +808,7 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
     char *instructions = NULL;
     PicoTool *tools = NULL;
     int tool_count = 0;
-    RunLlmHooks(app, compact, include_tools, &instructions, &tools, &tool_count);
+    RunLlmHooks(app, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
 
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
@@ -2409,4 +2409,20 @@ void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, cons
         return;
     }
     PushFunctionOutput(app->agent, call_id, output);
+}
+
+char *PicoAgent_BuildInstructions(PicoApp *app)
+{
+    if (!app)
+    {
+        return JsonDup("");
+    }
+    char *base = PicoSettings_LoadSystemPrompt(app);
+    char *instr = NULL;
+    PicoTool *tools = NULL;
+    int tool_count = 0;
+    RunLlmHooks(app, false, true, base, &instr, &tools, &tool_count);
+    free(base);
+    free(tools);
+    return instr ? instr : JsonDup("");
 }

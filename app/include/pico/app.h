@@ -469,5 +469,7 @@ void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);
 void PicoExts_Close(void);
 bool PicoExts_IsOpen(void);
+void PicoPrompt_Close(void);
+bool PicoPrompt_IsOpen(void);
 
 #endif

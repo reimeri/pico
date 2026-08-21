@@ -228,6 +228,7 @@ static void ExtsOnFrame(PicoApp *app, float dt)
 static void CmdExtensions(PicoApp *app, const char *args)
 {
     (void)args;
+    PicoPrompt_Close();
     g_open = true;
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;

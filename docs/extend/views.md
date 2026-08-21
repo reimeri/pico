@@ -31,7 +31,7 @@ Full file: `examples/hello.c`.
 - `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this).
 - `PICO_SLOT_COMPOSER` — input box.
 - `PICO_SLOT_FOOTER` — status line. Builtin footer: click cwd for a folder picker, model/effort for dropdowns.
-- `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions` is an overlay modal.
+- `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions` and `/show-prompt` are overlay modals.
 
 `z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`).
 
@@ -83,5 +83,5 @@ static void CustomEmptyInit(PicoApp *app)
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`).
 - Do not call Clay from a tool or provider callback (worker thread).
-- `PicoUi_ModalOpen` is true while `/extensions` is open, a footer menu is open, or a tool ask is pending. Builtin composer, chat, and footer skip input then. A custom ask overlay still receives pointer hits; it may consume `GetCharPressed()` from `on_frame` after the composer has skipped.
+- `PicoUi_ModalOpen` is true while `/extensions` or `/show-prompt` is open, a footer menu is open, or a tool ask is pending. Builtin composer, chat, and footer skip input then. A custom ask overlay still receives pointer hits; it may consume `GetCharPressed()` from `on_frame` after the composer has skipped.
 - Answer a pending ask with `pico_tool_answer(app, ask.id, json)` from the main thread. Bind buttons to the `id` from `pico_tool_pending_ask`. The request string stays valid through Clay render of this frame even if you answer in `AFTER_LAYOUT`.

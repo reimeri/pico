@@ -76,3 +76,5 @@ Do not use Clay from BEFORE. Permission UI goes through `pico_tool_ask` + overla
 - `extra_instructions` — malloc'd; Pico appends it after this hook (`\n\n`) and frees it. Later hooks see the accumulated blob
 
 The provider receives a filtered copy of the catalog (`turn.tools`), not necessarily `app->tools`. Example: `examples/extra_instructions.c`.
+
+`/show-prompt` runs the same hooks with `compact = false` and `include_tools = true`, so the modal matches the next normal turn.

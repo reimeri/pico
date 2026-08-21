@@ -17,6 +17,9 @@ void PicoAgent_DismissError(PicoApp *app);
 void PicoAgent_Pump(PicoApp *app);
 bool PicoAgent_BlocksReload(const PicoApp *app);
 void PicoAgent_Compact(PicoApp *app);
+/* Malloc'd instructions for the next normal turn: SYSTEM.md / AGENTS.md plus
+ * pico_add_llm_hook extras. Caller frees. */
+char *PicoAgent_BuildInstructions(PicoApp *app);
 
 const char *PicoAgent_CacheKey(const PicoApp *app);
 void PicoAgent_SetCacheKey(PicoApp *app, const char *key);

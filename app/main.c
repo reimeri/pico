@@ -123,6 +123,7 @@ int main(int argc, char **argv)
             Clay_Arena memory = Clay_CreateArenaWithCapacityAndMemory(size, malloc(size));
             Clay_Initialize(memory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()},
                             (Clay_ErrorHandler){Pico_HandleClayErrors, 0});
+            Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
             Pico_ClearClayReinit();
         }
         PicoApp_Frame(&app);

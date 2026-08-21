@@ -105,7 +105,7 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)
 
-foreach(ext hello echo_tool ask_tool time_cmd)
+foreach(ext hello echo_tool ask_tool permit_tool extra_instructions time_cmd)
     add_custom_command(
             TARGET pico POST_BUILD
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99

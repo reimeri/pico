@@ -14,9 +14,9 @@ On process exit, `PicoAgent_Shutdown` waits about one second. If a worker is sti
 
 ## Threads
 
-Main thread: `init`, `shutdown`, `on_frame`, view render, hooks, command `run`, completer query/accept, auth login/logout.
+Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, `PICO_TOOL_AFTER`, `pico_add_llm_hook`, command `run`, completer query/accept, auth login/logout.
 
-Worker thread: `PicoToolFn`, `PicoProviderStreamFn`. `pico_tool_ask` is the only supported wait for user input; it may be called only from `PicoToolFn`. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
+Worker thread: `PicoToolFn`, `PICO_TOOL_BEFORE`, `PicoProviderStreamFn`. `pico_tool_ask` is the only supported wait for user input; it may be called only from the worker tool slot (`PicoToolFn` or `PICO_TOOL_BEFORE`). Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
 Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a malloc'd string; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`.
 
@@ -26,8 +26,10 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - Tool `*out`: malloc, Pico frees. Never leave `*out` unset on a path that returns; use `JsonDup("")` or an error string.
-- `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the tool frees it. Always `NULL` on cancel/fail.
+- `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
 - `pico_tool_pending_ask` `request_json`: valid until the next `PicoAgent_Pump`. Do not retain it across frames.
+- `PicoToolEvent.name` / `call_id` / `args_json` / `output` and `PicoLlmEvent.tools` / `instructions`: core-owned and valid only during the callback.
+- `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`: malloc if you set them; Pico frees.
 - `app->agent_input` and `app->compact_summary`: malloc if you set them; Pico frees.
 - `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
@@ -38,7 +40,7 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 
 - 32 user `.c` files
 - 16 views per slot
-- 64 hooks, tools, commands
+- 64 hooks, tool hooks, LLM hooks, tools, commands
 - 16 completers, providers, auth registrations
 - 24 completion items per query
 - `PICO_TOOL_ASK_MAX_REQUEST` / `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)

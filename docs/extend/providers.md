@@ -39,6 +39,8 @@ Add a catalog entry with `"provider": "myllm"` or the builtin OpenAI path is use
 
 `PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `effort`, `compact`, `include_tools`, `input_json` / `input_count` (serialized history), `tools` / `tool_count`.
 
+`tools` is the catalog for this round: a copy of registered tools after `pico_add_llm_hook` excludes. It may be empty or a subset of `app->tools`. Pointers inside each `PicoTool` (name, description, params) stay extension-owned; reload is deferred while the worker is busy.
+
 Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
 
 ## Result

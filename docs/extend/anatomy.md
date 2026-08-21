@@ -7,7 +7,7 @@ Every user extension is one `.c` file that exports `pico_ext`:
 
 static void MyInit(PicoApp *app)
 {
-    /* pico_add_view / pico_add_tool / pico_add_command / … */
+    /* pico_add_view / pico_add_tool / pico_add_tool_hook / pico_add_command / … */
     (void)app;
 }
 
@@ -22,7 +22,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 1). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 2). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload.

@@ -31,6 +31,15 @@ typedef struct TestState {
     bool block_release;
     bool block_done;
     bool block_saw_live_state;
+    char issue_tool_name[64];
+    char *last_instructions;
+    int last_tool_count;
+    char last_tools[512];
+    char *last_input;
+    char *tool_seen_args;
+    char *after_seen_args;
+    char *after_seen_output;
+    int followup_hook_calls;
 } TestState;
 
 static TestState g_test = {
@@ -60,6 +69,20 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.block_release = false;
     g_test.block_done = false;
     g_test.block_saw_live_state = false;
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ask_test");
+    free(g_test.last_instructions);
+    g_test.last_instructions = NULL;
+    g_test.last_tool_count = 0;
+    g_test.last_tools[0] = '\0';
+    free(g_test.last_input);
+    g_test.last_input = NULL;
+    free(g_test.tool_seen_args);
+    g_test.tool_seen_args = NULL;
+    free(g_test.after_seen_args);
+    g_test.after_seen_args = NULL;
+    free(g_test.after_seen_output);
+    g_test.after_seen_output = NULL;
+    g_test.followup_hook_calls = 0;
     pthread_mutex_unlock(&g_test.mu);
     g_plugin_shutdowns = 0;
     g_auth_frees = 0;
@@ -77,18 +100,54 @@ static void SleepOneMs(void)
     nanosleep(&delay, NULL);
 }
 
+static void SnapshotTurn(const PicoLlmTurn *turn)
+{
+    free(g_test.last_instructions);
+    g_test.last_instructions = JsonDup(turn && turn->instructions ? turn->instructions : "");
+    g_test.last_tool_count = turn ? turn->tool_count : 0;
+    g_test.last_tools[0] = '\0';
+    if (turn && turn->tools)
+    {
+        size_t n = 0;
+        for (int i = 0; i < turn->tool_count; i++)
+        {
+            const char *nm = turn->tools[i].name ? turn->tools[i].name : "";
+            int wrote = snprintf(g_test.last_tools + n, sizeof(g_test.last_tools) - n, "%s%s", i ? "," : "", nm);
+            if (wrote < 0 || n + (size_t)wrote + 1 >= sizeof(g_test.last_tools))
+            {
+                break;
+            }
+            n += (size_t)wrote;
+        }
+    }
+    free(g_test.last_input);
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    if (turn && turn->input_json)
+    {
+        for (int i = 0; i < turn->input_count; i++)
+        {
+            JsonBuf_Puts(&b, turn->input_json[i] ? turn->input_json[i] : "");
+            JsonBuf_Puts(&b, "\n");
+        }
+    }
+    g_test.last_input = JsonBuf_Steal(&b);
+}
+
 static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
 {
     (void)app;
-    (void)turn;
     (void)cancel;
     (void)on_delta;
     (void)user;
 
     pthread_mutex_lock(&g_test.mu);
+    SnapshotTurn(turn);
     bool issue_tool = g_test.provider_tools_issued < g_test.provider_tool_limit;
     int call_number = ++g_test.provider_tools_issued;
+    char tool_name[64];
+    snprintf(tool_name, sizeof(tool_name), "%s", g_test.issue_tool_name);
     pthread_mutex_unlock(&g_test.mu);
 
     if (!issue_tool)
@@ -106,7 +165,7 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     char call_id[32];
     snprintf(call_id, sizeof(call_id), "call-%d", call_number);
     out->calls[0].call_id = JsonDup(call_id);
-    out->calls[0].name = JsonDup("ask_test");
+    out->calls[0].name = JsonDup(tool_name);
     out->calls[0].arguments = JsonDup("{}");
     out->call_count = 1;
     return PICO_LLM_OK;
@@ -185,6 +244,108 @@ static void AskTool(PicoApp *app, const char *args_json, char **out)
     if (out)
     {
         *out = JsonDup("tool complete");
+    }
+}
+
+static void EchoTool(PicoApp *app, const char *args_json, char **out)
+{
+    (void)app;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.tool_invocations++;
+    free(g_test.tool_seen_args);
+    g_test.tool_seen_args = JsonDup(args_json ? args_json : "");
+    pthread_mutex_unlock(&g_test.mu);
+    if (out)
+    {
+        *out = JsonDup("echo-out");
+    }
+}
+
+static void DenyBefore(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)app;
+    ev->deny = true;
+}
+
+static void AskBefore(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)ev;
+    char *answer = NULL;
+    int rc = pico_tool_ask(app, "{\"type\":\"confirm\",\"message\":\"gate\"}", &answer);
+    pthread_mutex_lock(&g_test.mu);
+    g_test.ask_rc[0][0] = rc;
+    free(g_test.ask_answer[0][0]);
+    g_test.ask_answer[0][0] = answer;
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static void RewriteArgsBefore(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)app;
+    ev->args_json_out = JsonDup("{\"rewritten\":true}");
+}
+
+static void BlockingBefore(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)app;
+    (void)ev;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_entered = true;
+    pthread_cond_broadcast(&g_test.cv);
+    while (!g_test.block_release)
+    {
+        pthread_cond_wait(&g_test.cv, &g_test.mu);
+    }
+    g_test.block_done = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static void CountBefore(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)app;
+    (void)ev;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.followup_hook_calls++;
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static void RewriteOutAfter(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)app;
+    ev->result = JsonDup("rewritten-output");
+}
+
+static void CaptureAfter(PicoApp *app, PicoToolEvent *ev)
+{
+    (void)app;
+    pthread_mutex_lock(&g_test.mu);
+    free(g_test.after_seen_args);
+    g_test.after_seen_args = JsonDup(ev->args_json ? ev->args_json : "");
+    free(g_test.after_seen_output);
+    g_test.after_seen_output = JsonDup(ev->output ? ev->output : "");
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static void ExtraInstructions(PicoApp *app, PicoLlmEvent *ev)
+{
+    (void)app;
+    ev->extra_instructions = JsonDup("injected-line");
+}
+
+static void ExcludeAskTest(PicoApp *app, PicoLlmEvent *ev)
+{
+    (void)app;
+    if (!ev->exclude)
+    {
+        return;
+    }
+    for (int i = 0; i < ev->tool_count; i++)
+    {
+        if (ev->tools[i].name && strcmp(ev->tools[i].name, "ask_test") == 0)
+        {
+            ev->exclude[i] = true;
+        }
     }
 }
 
@@ -524,6 +685,202 @@ static int TestShutdownTimeout(void)
     return saw_live_state ? 0 : Fail(name, "detached worker observed torn-down state");
 }
 
+static int TestBeforeForceCancel(void)
+{
+    const char *name = "force cancel stops remaining before hooks";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, BlockingBefore);
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, CountBefore);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForBlock(&app))
+    {
+        return Fail(name, "blocking before hook did not start");
+    }
+
+    PicoAgent_ForceCancel(&app);
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    while (!g_test.block_done)
+    {
+        pthread_cond_wait(&g_test.cv, &g_test.mu);
+    }
+    pthread_mutex_unlock(&g_test.mu);
+
+    bool reaped = false;
+    for (int i = 0; i < 3000; i++)
+    {
+        PicoAgent_Pump(&app);
+        if (!PicoAgent_BlocksReload(&app))
+        {
+            reaped = true;
+            break;
+        }
+        SleepOneMs();
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool skipped = g_test.followup_hook_calls == 0;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    if (!reaped)
+    {
+        return Fail(name, "abandoned before hook was not reaped");
+    }
+    return skipped ? 0 : Fail(name, "cancelled runtime executed a later before hook");
+}
+
+static int TestBeforeDeny(void)
+{
+    const char *name = "before hook deny skips tool";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, DenyBefore);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.tool_invocations == 0 && g_test.provider_tools_issued == 2;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "denied tool ran or turn did not continue");
+}
+
+static int TestBeforeAskCancel(void)
+{
+    const char *name = "cancel during before ask skips tool";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, AskBefore);
+    PicoAgent_StartTurn(&app, "start");
+    PicoToolAsk ask;
+    if (!WaitForPending(&app, 0, &ask))
+    {
+        return Fail(name, "before-hook request was not published");
+    }
+    PicoAgent_Cancel(&app);
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not cancel");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.tool_invocations == 0 && g_test.ask_rc[0][0] == PICO_ASK_CANCEL;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "tool ran after cancelled before-ask");
+}
+
+static int TestBeforeRewriteArgs(void)
+{
+    const char *name = "before hook rewrites tool args";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, RewriteArgsBefore);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.tool_invocations == 1 && g_test.tool_seen_args &&
+              strcmp(g_test.tool_seen_args, "{\"rewritten\":true}") == 0;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "tool did not see rewritten args");
+}
+
+static int TestAfterRewriteOutput(void)
+{
+    const char *name = "after hook rewrites tool output";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    pico_add_tool_hook(&app, PICO_TOOL_AFTER, RewriteOutAfter);
+    pico_add_tool_hook(&app, PICO_TOOL_AFTER, CaptureAfter);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.last_input && strstr(g_test.last_input, "rewritten-output") != NULL &&
+              g_test.after_seen_output && strcmp(g_test.after_seen_output, "rewritten-output") == 0;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "rewritten output was not chained to the model and later hooks");
+}
+
+static int TestRewriteThenDenyArgs(void)
+{
+    const char *name = "denied call preserves rewritten args";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, RewriteArgsBefore);
+    pico_add_tool_hook(&app, PICO_TOOL_BEFORE, DenyBefore);
+    pico_add_tool_hook(&app, PICO_TOOL_AFTER, CaptureAfter);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.tool_invocations == 0 && g_test.after_seen_args &&
+              strcmp(g_test.after_seen_args, "{\"rewritten\":true}") == 0 &&
+              g_test.after_seen_output && strcmp(g_test.after_seen_output, "User denied this tool.") == 0;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "after hook did not receive the denied call's current values");
+}
+
+static int TestLlmExtraInstructions(void)
+{
+    const char *name = "llm hook appends instructions";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_llm_hook(&app, ExtraInstructions);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.last_instructions && strstr(g_test.last_instructions, "injected-line") != NULL;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "provider did not receive extra instructions");
+}
+
+static int TestLlmExcludeTool(void)
+{
+    const char *name = "llm hook excludes a tool";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_llm_hook(&app, ExcludeAskTest);
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.last_tool_count == 0 && strstr(g_test.last_tools, "ask_test") == NULL;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "excluded tool was still in the catalog");
+}
+
 int main(void)
 {
     int failed = 0;
@@ -532,5 +889,13 @@ int main(void)
     failed |= TestStaleId();
     failed |= TestInvalidPayload();
     failed |= TestShutdownTimeout();
+    failed |= TestBeforeForceCancel();
+    failed |= TestBeforeDeny();
+    failed |= TestBeforeAskCancel();
+    failed |= TestBeforeRewriteArgs();
+    failed |= TestAfterRewriteOutput();
+    failed |= TestRewriteThenDenyArgs();
+    failed |= TestLlmExtraInstructions();
+    failed |= TestLlmExcludeTool();
     return failed ? 1 : 0;
 }

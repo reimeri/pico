@@ -47,11 +47,11 @@ static void EchoInit(PicoApp *app)
 }
 ```
 
-Full file: `examples/echo_tool.c`. Builtin reference: `app/builtins/shell.c` (`sh`). Asking the user: `examples/ask_tool.c` (`pico_tool_ask` + builtin confirm overlay).
+Full file: `examples/echo_tool.c`. Builtin reference: `app/builtins/shell.c` (`sh`). Asking the user: `examples/ask_tool.c` (`pico_tool_ask` + builtin confirm overlay). Wrapping builtins: `examples/permit_tool.c` (`PICO_TOOL_BEFORE`).
 
 ## Asking the user
 
-Call `pico_tool_ask` from inside `PicoToolFn` only. Pico validates and copies `request_json`, blocks the worker, and shows UI on the main thread. The tool continues after `pico_tool_answer` or Esc. Malformed JSON and builtin confirmations without a non-empty `message` return immediately with `PICO_ASK_OK` and `{"error":"invalid ask payload; fix it and try again"}` so the tool can pass that result back to the agent.
+Call `pico_tool_ask` from the worker tool slot only (`PicoToolFn` or a `PICO_TOOL_BEFORE` hook). Pico validates and copies `request_json`, blocks the worker, and shows UI on the main thread. The caller continues after `pico_tool_answer` or Esc. Malformed JSON and builtin confirmations without a non-empty `message` return immediately with `PICO_ASK_OK` and `{"error":"invalid ask payload; fix it and try again"}` so the tool can pass that result back to the agent.
 
 ```c
 char *answer = NULL;
@@ -65,7 +65,7 @@ if (rc != PICO_ASK_OK)
 *out = answer; /* malloc'd; Pico frees *out */
 ```
 
-- `PICO_ASK_OK` — `*answer_json` is malloc'd; the tool frees it (or hands it to `*out`). This includes the immediate error answer for an invalid payload.
+- `PICO_ASK_OK` — `*answer_json` is malloc'd; the caller frees it (or a tool hands it to `*out`). This includes the immediate error answer for an invalid payload.
 - `PICO_ASK_CANCEL` / `PICO_ASK_FAIL` — `*answer_json` is always `NULL`. Return promptly; do not ask again after cancel.
 - Request/answer copies are capped at `PICO_TOOL_ASK_MAX_REQUEST` / `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB). Oversized values fail / are rejected.
 - Nested asks (ask while already waiting) fail. Sequential asks in one tool are allowed; each gets a new `id`.
@@ -87,6 +87,41 @@ Builtin overlay handles `{"type":"confirm","message":"…"}` (Approve/Deny → `
 
 Pico does not model questionnaire steps. Preferred: one `pico_tool_ask` with the full schema; the overlay keeps Next/Back and answers once. Sequential `pico_tool_ask` calls work too — drop widgets bound to a previous `id`.
 
+## Wrapping tools
+
+You cannot replace a builtin by registering the same name. Use `pico_add_tool_hook` to intercept every call, including `sh`. See `hooks.md` for the event fields.
+
+```c
+static void PermitBefore(PicoApp *app, PicoToolEvent *ev)
+{
+    char *answer = NULL;
+    int rc = pico_tool_ask(app, "{\"type\":\"confirm\",\"message\":\"Allow this tool?\"}", &answer);
+    if (rc != PICO_ASK_OK)
+    {
+        free(answer);
+        return; /* Esc: core skips run */
+    }
+    JsonDoc doc;
+    const char *src = answer ? answer : "";
+    bool allow = false;
+    if (JsonParse(&doc, src, strlen(src)) == 0)
+    {
+        allow = JsonEq(&doc, JsonObjGet(&doc, 0, "ok"), "true");
+        JsonFree(&doc);
+    }
+    free(answer);
+    if (!allow)
+    {
+        ev->deny = true; /* overlay Deny is not Esc */
+        ev->result = JsonDup("User denied this tool.");
+    }
+}
+
+pico_add_tool_hook(app, PICO_TOOL_BEFORE, PermitBefore);
+```
+
+Deny skips `run` and sends `result` (or `User denied this tool.`) back to the model; the turn continues. Esc cancels the turn. Full file: `examples/permit_tool.c`.
+
 ## Contract
 
 - `name`, `description`, `params_json` must outlive the extension — use string literals.
@@ -97,4 +132,4 @@ Pico does not model questionnaire steps. Preferred: one `pico_tool_ask` with the
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - If the tool forks a child, call `pico_tool_set_child(app, pid)` after spawn (and `pico_tool_set_child(app, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.
-- Max 64 tools (`PICO_MAX_TOOLS`). Names should be unique; the provider exposes all registered tools.
+- Max 64 tools (`PICO_MAX_TOOLS`). Names should be unique; the provider exposes the catalog after LLM-hook excludes.

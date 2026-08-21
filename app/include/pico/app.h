@@ -13,6 +13,8 @@
 
 #define PICO_MAX_SLOT_VIEWS 16
 #define PICO_MAX_HOOKS 64
+#define PICO_MAX_TOOL_HOOKS 64
+#define PICO_MAX_LLM_HOOKS 64
 #define PICO_MAX_TOOLS 64
 #define PICO_TOOL_ASK_MAX_REQUEST (64 * 1024)
 #define PICO_TOOL_ASK_MAX_ANSWER (64 * 1024)
@@ -152,6 +154,40 @@ typedef struct PicoTool {
     PicoToolFn run;
 } PicoTool;
 
+typedef enum PicoToolHook {
+    PICO_TOOL_BEFORE = 0,
+    PICO_TOOL_AFTER,
+} PicoToolHook;
+
+typedef struct PicoToolEvent {
+    const char *name;
+    const char *call_id;
+    const char *args_json; /* current args; core-owned */
+    char *args_json_out;   /* BEFORE only: malloc rewrite; Pico frees */
+    bool deny;             /* BEFORE only */
+    const char *output;    /* AFTER only: current output; core-owned */
+    char *result;          /* BEFORE+deny, or AFTER rewrite; malloc, Pico frees */
+} PicoToolEvent;
+
+typedef void (*PicoToolHookFn)(struct PicoApp *app, PicoToolEvent *ev);
+
+typedef struct PicoToolHookEntry {
+    PicoToolHook kind;
+    PicoToolHookFn fn;
+} PicoToolHookEntry;
+
+typedef struct PicoLlmEvent {
+    bool compact;
+    bool include_tools; /* read-only; false => catalog omitted, exclude ignored */
+    const PicoTool *tools;
+    int tool_count;
+    bool *exclude; /* include_tools ? tool_count flags : NULL */
+    const char *instructions;
+    char *extra_instructions; /* malloc; core appends after this hook and frees */
+} PicoLlmEvent;
+
+typedef void (*PicoLlmHookFn)(struct PicoApp *app, PicoLlmEvent *ev);
+
 typedef struct PicoCommand {
     const char *name;
     const char *help;
@@ -272,6 +308,10 @@ typedef struct PicoApp {
     int view_count[PICO_SLOT_COUNT];
     PicoHookEntry hooks[PICO_MAX_HOOKS];
     int hook_count;
+    PicoToolHookEntry tool_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_hook_count;
+    PicoLlmHookFn llm_hooks[PICO_MAX_LLM_HOOKS];
+    int llm_hook_count;
     PicoTool tools[PICO_MAX_TOOLS];
     int tool_count;
     PicoCommand commands[PICO_MAX_COMMANDS];
@@ -311,14 +351,16 @@ typedef struct PicoApp {
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
+void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn);
+void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);
 void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
                    PicoToolFn run);
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process
  * group. Call from the tool (worker thread) after fork; 0 clears. */
 void pico_tool_set_child(PicoApp *app, pid_t pid);
-/* Worker thread, inside PicoToolFn only. Validates and copies request_json.
- * Invalid JSON/confirm schema returns an immediate OK error answer.
- * On OK, *answer_json is malloc'd and the tool frees it.
+/* Worker thread, inside PicoToolFn or a PICO_TOOL_BEFORE hook. Validates and
+ * copies request_json. Invalid JSON/confirm schema returns an immediate OK
+ * error answer. On OK, *answer_json is malloc'd and the caller frees it.
  * On CANCEL/FAIL, *answer_json is always set to NULL. */
 int pico_tool_ask(PicoApp *app, const char *request_json, char **answer_json);
 /* Main thread. False when no live ask exists. request_json is valid until

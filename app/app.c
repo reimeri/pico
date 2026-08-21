@@ -54,6 +54,31 @@ void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn)
     app->hook_count++;
 }
 
+void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn)
+{
+    if (!app || !fn || app->tool_hook_count >= PICO_MAX_TOOL_HOOKS)
+    {
+        return;
+    }
+    if (kind != PICO_TOOL_BEFORE && kind != PICO_TOOL_AFTER)
+    {
+        return;
+    }
+    app->tool_hooks[app->tool_hook_count].kind = kind;
+    app->tool_hooks[app->tool_hook_count].fn = fn;
+    app->tool_hook_count++;
+}
+
+void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn)
+{
+    if (!app || !fn || app->llm_hook_count >= PICO_MAX_LLM_HOOKS)
+    {
+        return;
+    }
+    app->llm_hooks[app->llm_hook_count] = fn;
+    app->llm_hook_count++;
+}
+
 void pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json, PicoToolFn run)
 {
     if (!name || !run || app->tool_count >= PICO_MAX_TOOLS)
@@ -149,6 +174,10 @@ void pico_clear_registrations(PicoApp *app)
     memset(app->view_count, 0, sizeof(app->view_count));
     memset(app->hooks, 0, sizeof(app->hooks));
     app->hook_count = 0;
+    memset(app->tool_hooks, 0, sizeof(app->tool_hooks));
+    app->tool_hook_count = 0;
+    memset(app->llm_hooks, 0, sizeof(app->llm_hooks));
+    app->llm_hook_count = 0;
     memset(app->tools, 0, sizeof(app->tools));
     app->tool_count = 0;
     memset(app->commands, 0, sizeof(app->commands));

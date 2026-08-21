@@ -33,6 +33,7 @@ typedef enum PicoAgentEvType {
     PICO_AEV_LLM_DONE = 0,
     PICO_AEV_LLM_FAIL,
     PICO_AEV_LLM_CANCEL,
+    PICO_AEV_TOOL_START,
     PICO_AEV_TOOL_DONE,
     PICO_AEV_TOOL_FAIL,
 } PicoAgentEvType;
@@ -41,6 +42,7 @@ typedef struct PicoAgentEv {
     PicoAgentEvType type;
     char *text;
     char *payload;
+    char *tool_args;
     int tokens;
     int cached;
 } PicoAgentEv;
@@ -74,6 +76,8 @@ struct PicoAgentRt {
     int work_input_count;
     bool work_compact;
     bool work_include_tools;
+    PicoTool *work_tools;
+    int work_tool_count;
     char *work_tool_name;
     char *work_tool_args;
     char *work_call_id;
@@ -176,7 +180,8 @@ static void ClearPending(PicoAgentRt *rt)
 /* Ends the work item: `busy` has to clear in the same critical section that
  * publishes the event, or the main thread can pump the event and queue the next
  * request while this thread still looks busy. Exactly one call per work item. */
-static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens, int cached)
+static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, char *tool_args,
+                        int tokens, int cached, bool finish)
 {
     pthread_mutex_lock(&rt->mu);
     if (rt->event_count >= rt->event_cap)
@@ -185,11 +190,15 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
         PicoAgentEv *next = (PicoAgentEv *)realloc(rt->events, (size_t)cap * sizeof(PicoAgentEv));
         if (!next)
         {
-            rt->busy = false;
+            if (finish)
+            {
+                rt->busy = false;
+            }
             pthread_cond_broadcast(&rt->cv);
             pthread_mutex_unlock(&rt->mu);
             free(text);
             free(payload);
+            free(tool_args);
             return;
         }
         rt->events = next;
@@ -199,11 +208,20 @@ static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *p
     ev->type = type;
     ev->text = text;
     ev->payload = payload;
+    ev->tool_args = tool_args;
     ev->tokens = tokens;
     ev->cached = cached;
-    rt->busy = false;
+    if (finish)
+    {
+        rt->busy = false;
+    }
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+}
+
+static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens, int cached)
+{
+    PostEventEx(rt, type, text, payload, NULL, tokens, cached, true);
 }
 
 static bool CancelCb(void *user)
@@ -342,6 +360,188 @@ static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
     pthread_mutex_unlock(&rt->mu);
 }
 
+static bool WorkerIsCancelled(PicoAgentRt *rt)
+{
+    pthread_mutex_lock(&rt->mu);
+    bool c = rt->cancel || rt->stop;
+    pthread_mutex_unlock(&rt->mu);
+    return c;
+}
+
+static char *RunToolBeforeHooks(PicoAgentRt *rt, const char *name, const char *call_id, char **args_inout,
+                                bool *denied)
+{
+    PicoApp *app = rt->app;
+    *denied = false;
+    char *args = *args_inout;
+    if (!args)
+    {
+        args = Dup("{}");
+        *args_inout = args;
+    }
+    for (int i = 0; i < app->tool_hook_count; i++)
+    {
+        if (app->tool_hooks[i].kind != PICO_TOOL_BEFORE || !app->tool_hooks[i].fn)
+        {
+            continue;
+        }
+        if (WorkerIsCancelled(rt))
+        {
+            break;
+        }
+        PicoToolEvent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.name = name ? name : "";
+        ev.call_id = call_id ? call_id : "";
+        ev.args_json = args ? args : "{}";
+        app->tool_hooks[i].fn(app, &ev);
+        if (ev.args_json_out)
+        {
+            if (args != ev.args_json_out)
+            {
+                free(args);
+            }
+            args = ev.args_json_out;
+            *args_inout = args;
+        }
+        if (ev.deny)
+        {
+            *denied = true;
+            *args_inout = args;
+            return ev.result ? ev.result : Dup("User denied this tool.");
+        }
+        free(ev.result);
+    }
+    *args_inout = args;
+    return NULL;
+}
+
+static char *RunToolAfterHooks(PicoApp *app, const char *name, const char *call_id, const char *args,
+                              const char *output)
+{
+    char *cur = Dup(output ? output : "");
+    for (int i = 0; i < app->tool_hook_count; i++)
+    {
+        if (app->tool_hooks[i].kind != PICO_TOOL_AFTER || !app->tool_hooks[i].fn)
+        {
+            continue;
+        }
+        PicoToolEvent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.name = name ? name : "";
+        ev.call_id = call_id ? call_id : "";
+        ev.args_json = args ? args : "{}";
+        ev.output = cur ? cur : "";
+        app->tool_hooks[i].fn(app, &ev);
+        free(ev.args_json_out);
+        if (ev.result)
+        {
+            free(cur);
+            cur = ev.result;
+        }
+    }
+    return cur;
+}
+
+static char *AppendParagraph(char *base, char *extra)
+{
+    if (!extra || !extra[0])
+    {
+        free(extra);
+        return base;
+    }
+    if (!base || !base[0])
+    {
+        free(base);
+        return extra;
+    }
+    size_t nb = strlen(base);
+    size_t ne = strlen(extra);
+    char *out = (char *)malloc(nb + 2 + ne + 1);
+    if (!out)
+    {
+        free(extra);
+        return base;
+    }
+    memcpy(out, base, nb);
+    memcpy(out + nb, "\n\n", 2);
+    memcpy(out + nb + 2, extra, ne + 1);
+    free(base);
+    free(extra);
+    return out;
+}
+
+static void RunLlmHooks(PicoApp *app, bool compact, bool include_tools, char **instructions, PicoTool **tools,
+                        int *tool_count)
+{
+    char *instr = Dup(app->agent->instructions ? app->agent->instructions : "");
+    bool exclude[PICO_MAX_TOOLS];
+    memset(exclude, 0, sizeof(exclude));
+    int ntools = app->tool_count;
+    if (ntools > PICO_MAX_TOOLS)
+    {
+        ntools = PICO_MAX_TOOLS;
+    }
+    for (int i = 0; i < app->llm_hook_count; i++)
+    {
+        if (!app->llm_hooks[i])
+        {
+            continue;
+        }
+        PicoLlmEvent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.compact = compact;
+        ev.include_tools = include_tools;
+        ev.tools = app->tools;
+        ev.tool_count = ntools;
+        ev.exclude = include_tools ? exclude : NULL;
+        ev.instructions = instr ? instr : "";
+        ev.extra_instructions = NULL;
+        app->llm_hooks[i](app, &ev);
+        if (ev.extra_instructions)
+        {
+            instr = AppendParagraph(instr, ev.extra_instructions);
+        }
+    }
+    *instructions = instr;
+    if (!include_tools)
+    {
+        *tools = NULL;
+        *tool_count = 0;
+        return;
+    }
+    int kept = 0;
+    for (int i = 0; i < ntools; i++)
+    {
+        if (!exclude[i])
+        {
+            kept++;
+        }
+    }
+    PicoTool *copy = NULL;
+    if (kept > 0)
+    {
+        copy = (PicoTool *)calloc((size_t)kept, sizeof(PicoTool));
+        if (copy)
+        {
+            int j = 0;
+            for (int i = 0; i < ntools; i++)
+            {
+                if (!exclude[i])
+                {
+                    copy[j++] = app->tools[i];
+                }
+            }
+        }
+        else
+        {
+            kept = 0;
+        }
+    }
+    *tools = copy;
+    *tool_count = kept;
+}
+
 static void *WorkerMain(void *arg)
 {
     PicoAgentRt *rt = (PicoAgentRt *)arg;
@@ -369,6 +569,8 @@ static void *WorkerMain(void *arg)
         int input_count = rt->work_input_count;
         bool compact = rt->work_compact;
         bool include_tools = rt->work_include_tools;
+        PicoTool *work_tools = rt->work_tools;
+        int work_tool_count = rt->work_tool_count;
         char *tool_name = rt->work_tool_name;
         char *tool_args = rt->work_tool_args;
         char *call_id = rt->work_call_id;
@@ -384,6 +586,8 @@ static void *WorkerMain(void *arg)
         rt->work_input_count = 0;
         rt->work_compact = false;
         rt->work_include_tools = false;
+        rt->work_tools = NULL;
+        rt->work_tool_count = 0;
         rt->work_tool_name = NULL;
         rt->work_tool_args = NULL;
         rt->work_call_id = NULL;
@@ -403,10 +607,8 @@ static void *WorkerMain(void *arg)
             turn.include_tools = include_tools;
             turn.input_json = (const char *const *)input;
             turn.input_count = input_count;
-            /* Safe to read from this thread only because PicoPlugins_Reload
-             * defers itself while the agent is busy. */
-            turn.tools = rt->app->tools;
-            turn.tool_count = include_tools ? rt->app->tool_count : 0;
+            turn.tools = work_tools;
+            turn.tool_count = include_tools ? work_tool_count : 0;
             PicoLlmResult result;
             memset(&result, 0, sizeof(result));
             t_worker_context = PICO_WORKER_PROVIDER;
@@ -434,28 +636,55 @@ static void *WorkerMain(void *arg)
         else if (kind == PICO_WORK_TOOL)
         {
             char *out = NULL;
-            if (tool_fn)
+            bool skip_run = false;
+            t_worker_context = PICO_WORKER_TOOL;
+            bool denied = false;
+            char *deny_result = RunToolBeforeHooks(rt, tool_name, call_id, &tool_args, &denied);
+            if (WorkerIsCancelled(rt))
             {
-                t_worker_context = PICO_WORKER_TOOL;
-                tool_fn(rt->app, tool_args ? tool_args : "{}", &out);
-                t_worker_context = PICO_WORKER_NONE;
+                free(deny_result);
+                PostEvent(rt, PICO_AEV_TOOL_DONE, Dup("(interrupted)"), call_id, 0, 0);
+                call_id = NULL;
+                skip_run = true;
+            }
+            else if (denied)
+            {
+                PostEventEx(rt, PICO_AEV_TOOL_DONE,
+                            deny_result ? deny_result : Dup("User denied this tool."), call_id,
+                            Dup(tool_args ? tool_args : "{}"), 0, 0, true);
+                call_id = NULL;
+                skip_run = true;
             }
             else
             {
-                JsonBuf b;
-                JsonBuf_Init(&b);
-                JsonBuf_Puts(&b, "unknown tool: ");
-                JsonBuf_Puts(&b, tool_name ? tool_name : "?");
-                out = JsonBuf_Steal(&b);
-                PostEvent(rt, PICO_AEV_TOOL_FAIL, out, call_id, 0, 0);
-                call_id = NULL;
-                out = NULL;
+                free(deny_result);
             }
-            if (out || call_id)
+            if (!skip_run)
             {
-                PostEvent(rt, PICO_AEV_TOOL_DONE, out ? out : Dup(""), call_id, 0, 0);
-                call_id = NULL;
+                PostEventEx(rt, PICO_AEV_TOOL_START, Dup(tool_name ? tool_name : ""),
+                            Dup(tool_args ? tool_args : "{}"), NULL, 0, 0, false);
+                if (tool_fn)
+                {
+                    tool_fn(rt->app, tool_args ? tool_args : "{}", &out);
+                }
+                else
+                {
+                    JsonBuf b;
+                    JsonBuf_Init(&b);
+                    JsonBuf_Puts(&b, "unknown tool: ");
+                    JsonBuf_Puts(&b, tool_name ? tool_name : "?");
+                    out = JsonBuf_Steal(&b);
+                    PostEvent(rt, PICO_AEV_TOOL_FAIL, out, call_id, 0, 0);
+                    call_id = NULL;
+                    out = NULL;
+                }
+                if (out || call_id)
+                {
+                    PostEvent(rt, PICO_AEV_TOOL_DONE, out ? out : Dup(""), call_id, 0, 0);
+                    call_id = NULL;
+                }
             }
+            t_worker_context = PICO_WORKER_NONE;
         }
 
         free(model);
@@ -468,6 +697,7 @@ static void *WorkerMain(void *arg)
             free(input[i]);
         }
         free(input);
+        free(work_tools);
         free(tool_name);
         free(tool_args);
         free(call_id);
@@ -510,6 +740,11 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
         }
     }
 
+    char *instructions = NULL;
+    PicoTool *tools = NULL;
+    int tool_count = 0;
+    RunLlmHooks(app, compact, include_tools, &instructions, &tools, &tool_count);
+
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
     {
@@ -519,6 +754,8 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
             free(input[i]);
         }
         free(input);
+        free(instructions);
+        free(tools);
         return false;
     }
     rt->work = PICO_WORK_LLM;
@@ -528,10 +765,12 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
     rt->work_model = Dup(m->id);
     rt->work_base_url = Dup(m->base_url);
     rt->work_effort = Dup(PicoSettings_ActiveEffort(app));
-    rt->work_instructions = Dup(rt->instructions ? rt->instructions : "");
+    rt->work_instructions = instructions;
     rt->work_cache_key = Dup(rt->cache_key);
     rt->work_compact = compact;
     rt->work_include_tools = include_tools;
+    rt->work_tools = tools;
+    rt->work_tool_count = tool_count;
     rt->work_input = input;
     rt->work_input_count = input_count;
     rt->busy = true;
@@ -554,6 +793,8 @@ static bool QueueTool(PicoAgentRt *rt, const char *name, const char *args, const
     rt->work_tool_args = Dup(args ? args : "{}");
     rt->work_call_id = Dup(call_id);
     rt->work_tool_fn = fn;
+    rt->work_tools = NULL;
+    rt->work_tool_count = 0;
     rt->tool_child = 0;
     rt->busy = true;
     pthread_cond_broadcast(&rt->cv);
@@ -1092,18 +1333,11 @@ static void StartNextTool(PicoApp *app)
     }
     PicoPendingCall *call = &rt->pending[rt->pending_next];
     app->agent_state = PICO_AGENT_TOOL_WAIT;
-    char *line = FormatToolLine(call->name, call->arguments);
-    SetActivity(app, line);
-    if (rt->stream_msg >= 0)
-    {
-        TraceAddTool(app, rt->stream_msg, call->name, call->arguments);
-        app->chat_follow_bottom = true;
-    }
+    SetActivity(app, call->name && call->name[0] ? call->name : "tool");
     if (!QueueTool(rt, call->name, call->arguments, call->call_id, FindTool(app, call->name)))
     {
         SetErrorState(app, "Failed to start tool");
     }
-    free(line);
 }
 
 static void StartLlm(PicoApp *app)
@@ -1253,29 +1487,90 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
     FinishTurn(app);
 }
 
+static int CountToolTrace(const PicoMessage *m)
+{
+    int n = 0;
+    if (!m)
+    {
+        return 0;
+    }
+    for (int t = 0; t < m->trace_count; t++)
+    {
+        if (m->trace[t].is_tool)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void OnToolStart(PicoApp *app, PicoAgentEv *ev)
+{
+    PicoAgentRt *rt = app->agent;
+    const char *name = ev->text ? ev->text : "tool";
+    const char *args = ev->payload ? ev->payload : "{}";
+    if (rt->pending_next < rt->pending_count)
+    {
+        PicoPendingCall *call = &rt->pending[rt->pending_next];
+        if (ev->payload)
+        {
+            free(call->arguments);
+            call->arguments = Dup(ev->payload);
+        }
+    }
+    char *line = FormatToolLine(name, args);
+    SetActivity(app, line);
+    free(line);
+    if (rt->stream_msg >= 0)
+    {
+        TraceAddTool(app, rt->stream_msg, name, args);
+        app->chat_follow_bottom = true;
+    }
+}
+
 static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
 {
     PicoAgentRt *rt = app->agent;
+    PicoPendingCall *call = NULL;
+    if (rt->pending_next < rt->pending_count)
+    {
+        call = &rt->pending[rt->pending_next];
+    }
+    if (call && ev->tool_args)
+    {
+        free(call->arguments);
+        call->arguments = Dup(ev->tool_args);
+    }
     const char *call_id = ev->payload;
-    if (rt->pending_next < rt->pending_count && rt->pending[rt->pending_next].call_id)
+    if (call && call->call_id && !call_id)
     {
-        if (!call_id)
-        {
-            call_id = rt->pending[rt->pending_next].call_id;
-        }
+        call_id = call->call_id;
     }
-    const char *output = ev->text ? ev->text : (failed ? "tool failed" : "");
-    PushFunctionOutput(rt, call_id, output);
-    PicoSession_LogToolResult(app, call_id, output, failed);
-    if (rt->stream_msg >= 0)
-    {
-        TraceSetLastToolOutput(app, rt->stream_msg, output);
-    }
-    rt->pending_next++;
     bool cancel;
     pthread_mutex_lock(&rt->mu);
     cancel = rt->cancel;
     pthread_mutex_unlock(&rt->mu);
+
+    const char *raw = ev->text ? ev->text : (failed ? "tool failed" : "");
+    char *output = NULL;
+    if (!cancel)
+    {
+        output = RunToolAfterHooks(app, call ? call->name : NULL, call_id, call ? call->arguments : NULL, raw);
+    }
+    const char *use = output ? output : raw;
+    PushFunctionOutput(rt, call_id, use);
+    PicoSession_LogToolResult(app, call_id, use, failed);
+    if (rt->stream_msg >= 0)
+    {
+        if (CountToolTrace(&app->messages[rt->stream_msg]) <= rt->pending_next)
+        {
+            TraceAddTool(app, rt->stream_msg, call && call->name ? call->name : "tool",
+                         call && call->arguments ? call->arguments : "{}");
+        }
+        TraceSetLastToolOutput(app, rt->stream_msg, use);
+    }
+    rt->pending_next++;
+    free(output);
     if (cancel)
     {
         AbortRemainingCalls(rt);
@@ -1385,6 +1680,7 @@ static void FreeRt(PicoAgentRt *rt)
     {
         free(rt->events[i].text);
         free(rt->events[i].payload);
+        free(rt->events[i].tool_args);
     }
     free(rt->events);
     for (int i = 0; i < rt->input_count; i++)
@@ -1405,6 +1701,7 @@ static void FreeRt(PicoAgentRt *rt)
         free(rt->work_input[i]);
     }
     free(rt->work_input);
+    free(rt->work_tools);
     free(rt->work_tool_name);
     free(rt->work_tool_args);
     free(rt->work_call_id);
@@ -1949,6 +2246,9 @@ void PicoAgent_Pump(PicoApp *app)
         case PICO_AEV_LLM_CANCEL:
             ApplyCancel(app);
             break;
+        case PICO_AEV_TOOL_START:
+            OnToolStart(app, ev);
+            break;
         case PICO_AEV_TOOL_DONE:
             OnToolDone(app, ev, false);
             break;
@@ -1958,6 +2258,7 @@ void PicoAgent_Pump(PicoApp *app)
         }
         free(ev->text);
         free(ev->payload);
+        free(ev->tool_args);
     }
     free(events);
 }

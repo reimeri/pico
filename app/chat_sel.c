@@ -453,7 +453,7 @@ static int HitOffset(PicoApp *app, const SelHit *hit, Clay_BoundingBox box, floa
     int available = b->len - hit->start;
     int len = hit->length < available ? hit->length : available;
     const char *s = b->text + hit->start;
-    Font font = app->fonts[hit->font_id < FONT_COUNT ? hit->font_id : FONT_REGULAR];
+    Font font = Pico_FontAt(hit->font_id, hit->font_size);
     float size = (float)hit->font_size;
     bool wrap = hit->wrap != CLAY_TEXT_WRAP_NONE;
     WrapLine lines[SEL_MAX_WRAP_LINES];
@@ -594,7 +594,7 @@ void PicoChatSel_DrawOverlay(PicoApp *app)
             continue;
         }
         Clay_BoundingBox box = el.boundingBox;
-        Font font = app->fonts[hit->font_id < FONT_COUNT ? hit->font_id : FONT_REGULAR];
+        Font font = Pico_FontAt(hit->font_id, hit->font_size);
         float size = (float)hit->font_size;
         const char *s = s_msgs[msg].text + hit->start;
         int len = hit->length;

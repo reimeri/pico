@@ -5,6 +5,7 @@
 
 #include "clay/clay.h"
 
+#include <math.h>
 #include <string.h>
 
 #define TOOL_OUTPUT_MAX_LINES 100
@@ -474,7 +475,7 @@ static void PicoChat_DrawChevrons(PicoApp *app)
     Clay_BoundingBox clip = scroll.boundingBox;
     BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
 
-    Font font = app->fonts[FONT_REGULAR];
+    Font font = Pico_FontAt(FONT_REGULAR, 15);
     const char *glyph = "\xE2\x80\xBA";
     Vector2 size = MeasureTextEx(font, glyph, 15.0f, 0.0f);
 
@@ -499,7 +500,7 @@ static void PicoChat_DrawChevrons(PicoApp *app)
                 continue;
             }
             Clay_BoundingBox box = el.boundingBox;
-            Vector2 center = {box.x + box.width * 0.5f, box.y + box.height * 0.5f};
+            Vector2 center = {roundf(box.x + box.width * 0.5f), roundf(box.y + box.height * 0.5f)};
             Color color = ClayToRay(hovered ? COLOR_TOOL_NAME_HOVER : COLOR_TOOL_CHEVRON);
             DrawTextPro(font, glyph, center, (Vector2){size.x * 0.5f, size.y * 0.5f},
                         line->expanded ? 90.0f : 0.0f, 15.0f, 0.0f, color);

@@ -1,16 +1,102 @@
 #include "pico/theme.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define PICO_FONT_SIZE_MIN 8
+#define PICO_FONT_SIZE_MAX 64
+#define PICO_FONT_SIZE_SLOTS (PICO_FONT_SIZE_MAX - PICO_FONT_SIZE_MIN + 1)
+
+static const char *kFontPaths[FONT_COUNT] = {
+    "resources/Roboto-Regular.ttf",
+    "resources/Roboto-Bold.ttf",
+    "resources/Roboto-Italic.ttf",
+    "resources/Roboto-BoldItalic.ttf",
+    "resources/RobotoMono-Medium.ttf",
+};
+
+static int g_codepoints[256];
+static int g_codepoint_count;
+static Font g_fonts[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
+static bool g_font_ready[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
+static bool g_font_owned[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
+
+static void EnsureCodepoints(void)
+{
+    if (g_codepoint_count > 0)
+    {
+        return;
+    }
+    for (int c = 32; c < 127; c++)
+    {
+        g_codepoints[g_codepoint_count++] = c;
+    }
+    for (int c = 160; c < 256; c++)
+    {
+        g_codepoints[g_codepoint_count++] = c;
+    }
+    int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x203A, 0x25BE, 0x2603, 0x2610,
+                   0x2611};
+    for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
+    {
+        g_codepoints[g_codepoint_count++] = extra[i];
+    }
+}
+
+static int SizeIndex(uint16_t fontSize)
+{
+    int size = (int)fontSize;
+    if (size < PICO_FONT_SIZE_MIN)
+    {
+        size = PICO_FONT_SIZE_MIN;
+    }
+    if (size > PICO_FONT_SIZE_MAX)
+    {
+        size = PICO_FONT_SIZE_MAX;
+    }
+    return size - PICO_FONT_SIZE_MIN;
+}
+
+Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
+{
+    if (fontId >= FONT_COUNT)
+    {
+        fontId = FONT_REGULAR;
+    }
+    int idx = SizeIndex(fontSize);
+    if (g_font_ready[fontId][idx])
+    {
+        return g_fonts[fontId][idx];
+    }
+
+    EnsureCodepoints();
+    int pixel_size = idx + PICO_FONT_SIZE_MIN;
+    Font font = LoadFontEx(kFontPaths[fontId], pixel_size, g_codepoints, g_codepoint_count);
+    Font fallback = GetFontDefault();
+    bool owned = font.texture.id != 0 && font.texture.id != fallback.texture.id;
+    if (!owned)
+    {
+        font = fallback;
+    }
+    else
+    {
+        SetTextureFilter(font.texture, TEXTURE_FILTER_POINT);
+    }
+    g_fonts[fontId][idx] = font;
+    g_font_ready[fontId][idx] = true;
+    g_font_owned[fontId][idx] = owned;
+    return font;
+}
 
 Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
 {
     static char *buffer = NULL;
     static size_t buffer_capacity = 0;
+    (void)userData;
 
-    Font *fonts = (Font *)userData;
-    Font font = fonts[config->fontId];
+    Font font = Pico_FontAt(config->fontId, config->fontSize);
     if (!font.glyphs)
     {
         font = GetFontDefault();
@@ -34,45 +120,37 @@ Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConf
     return (Clay_Dimensions){.width = size.x, .height = size.y};
 }
 
-static void LoadFontWithGlyphs(const char *path, Font *out)
-{
-    static int codepoints[256];
-    static int count = 0;
-    if (count == 0)
-    {
-        for (int c = 32; c < 127; c++)
-        {
-            codepoints[count++] = c;
-        }
-        for (int c = 160; c < 256; c++)
-        {
-            codepoints[count++] = c;
-        }
-        int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x203A, 0x25BE, 0x2603,
-                       0x2610, 0x2611};
-        for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
-        {
-            codepoints[count++] = extra[i];
-        }
-    }
-    *out = LoadFontEx(path, 48, codepoints, count);
-    SetTextureFilter(out->texture, TEXTURE_FILTER_BILINEAR);
-}
-
 void Pico_LoadFonts(Font *fonts)
 {
-    LoadFontWithGlyphs("resources/Roboto-Regular.ttf", &fonts[FONT_REGULAR]);
-    LoadFontWithGlyphs("resources/Roboto-Bold.ttf", &fonts[FONT_BOLD]);
-    LoadFontWithGlyphs("resources/Roboto-Italic.ttf", &fonts[FONT_ITALIC]);
-    LoadFontWithGlyphs("resources/Roboto-BoldItalic.ttf", &fonts[FONT_BOLD_ITALIC]);
-    LoadFontWithGlyphs("resources/RobotoMono-Medium.ttf", &fonts[FONT_MONO]);
+    EnsureCodepoints();
+    if (!fonts)
+    {
+        return;
+    }
+    for (int i = 0; i < FONT_COUNT; i++)
+    {
+        fonts[i] = Pico_FontAt((uint16_t)i, 16);
+    }
 }
 
 void Pico_UnloadFonts(Font *fonts)
 {
-    for (int i = 0; i < FONT_COUNT; i++)
+    for (int face = 0; face < FONT_COUNT; face++)
     {
-        UnloadFont(fonts[i]);
+        for (int i = 0; i < PICO_FONT_SIZE_SLOTS; i++)
+        {
+            if (g_font_owned[face][i])
+            {
+                UnloadFont(g_fonts[face][i]);
+            }
+            g_fonts[face][i] = (Font){0};
+            g_font_ready[face][i] = false;
+            g_font_owned[face][i] = false;
+        }
+    }
+    if (fonts)
+    {
+        memset(fonts, 0, sizeof(Font) * FONT_COUNT);
     }
 }
 

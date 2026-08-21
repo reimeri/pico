@@ -51,6 +51,7 @@ enum {
 #define BLOCK_SPACING 14
 
 Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+Font Pico_FontAt(uint16_t fontId, uint16_t fontSize);
 void Pico_LoadFonts(Font *fonts);
 void Pico_UnloadFonts(Font *fonts);
 void Pico_HandleClayErrors(Clay_ErrorData error_data);

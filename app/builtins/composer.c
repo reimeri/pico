@@ -16,6 +16,11 @@
 #define COMPOSER_MIN_HEIGHT 56
 #define COMPOSER_MAX_GROW_LINES 10
 
+static Font ComposerFont(void)
+{
+    return Pico_FontAt(FONT_REGULAR, COMPOSER_FONT_SIZE);
+}
+
 typedef struct CompLine {
     int start;
     int length;
@@ -284,7 +289,7 @@ static ComposerView GetComposerView(PicoApp *app)
     {
         v.scroll_y = scroll.scrollPosition->y;
     }
-    v.line_count = WrapComposer(c, app->fonts[FONT_REGULAR], v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
+    v.line_count = WrapComposer(c, ComposerFont(), v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
     return v;
 }
 
@@ -330,7 +335,7 @@ static void MoveVertical(PicoApp *app, int dir, bool extend)
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = COMPOSER_FONT_SIZE;
     float wrap = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
-    int line_count = WrapComposer(c, app->fonts[FONT_REGULAR], wrap, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_count = WrapComposer(c, ComposerFont(), wrap, lines, COMPOSER_MAX_LINES, &line_height);
     int line_i = 0;
     for (int i = 0; i < line_count; i++)
     {
@@ -349,7 +354,7 @@ static void MoveVertical(PicoApp *app, int dir, bool extend)
     {
         take = 0;
     }
-    float x = MeasureSlice(app->fonts[FONT_REGULAR], c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
+    float x = MeasureSlice(ComposerFont(), c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
     float goal = s_goal_x >= 0 ? s_goal_x : x;
     int next = line_i + dir;
     int pos;
@@ -363,7 +368,7 @@ static void MoveVertical(PicoApp *app, int dir, bool extend)
     }
     else
     {
-        pos = OffsetAtXOnLine(app->fonts[FONT_REGULAR], c, lines[next], goal);
+        pos = OffsetAtXOnLine(ComposerFont(), c, lines[next], goal);
     }
     MoveCursor(c, pos, extend);
     s_goal_x = goal;
@@ -404,7 +409,7 @@ static int OffsetAtPoint(PicoApp *app, float x, float y)
     while (pos < end)
     {
         int next = Utf8Next(c->text, c->length, pos);
-        float ch_w = MeasureSlice(app->fonts[FONT_REGULAR], c->text, pos, next - pos, COMPOSER_FONT_SIZE);
+        float ch_w = MeasureSlice(ComposerFont(), c->text, pos, next - pos, COMPOSER_FONT_SIZE);
         if (width + ch_w * 0.5f >= local_x)
         {
             return pos;
@@ -443,7 +448,7 @@ static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
     }
     *out_y = v.origin_y + (float)line_i * v.line_height + v.scroll_y;
     *out_x = v.origin_x +
-             MeasureSlice(app->fonts[FONT_REGULAR], c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
+             MeasureSlice(ComposerFont(), c->text ? c->text : "", start, take, COMPOSER_FONT_SIZE);
 }
 
 static void EnsureCaretVisible(PicoApp *app)
@@ -896,7 +901,7 @@ void PicoComposer_Render(PicoApp *app)
     float wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = COMPOSER_FONT_SIZE;
-    int line_count = empty ? 1 : WrapComposer(c, app->fonts[FONT_REGULAR], wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_count = empty ? 1 : WrapComposer(c, ComposerFont(), wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
     if (line_height < 1)
     {
         line_height = (float)COMPOSER_FONT_SIZE;
@@ -1049,8 +1054,8 @@ void PicoComposer_DrawOverlay(PicoApp *app)
             {
                 a = b;
             }
-            float x0 = MeasureSlice(app->fonts[FONT_REGULAR], c->text, start, a - start, COMPOSER_FONT_SIZE);
-            float x1 = MeasureSlice(app->fonts[FONT_REGULAR], c->text, start, b - start, COMPOSER_FONT_SIZE);
+            float x0 = MeasureSlice(ComposerFont(), c->text, start, a - start, COMPOSER_FONT_SIZE);
+            float x1 = MeasureSlice(ComposerFont(), c->text, start, b - start, COMPOSER_FONT_SIZE);
             DrawRectangle((int)(v.origin_x + x0), (int)y, (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)v.line_height, fill);
         }
     }

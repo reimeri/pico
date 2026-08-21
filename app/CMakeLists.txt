@@ -36,6 +36,7 @@ add_executable(pico
     http.c
     agent.c
     session.c
+    usage.c
     chat_sel.c
     builtins/chat.c
     builtins/composer.c
@@ -87,7 +88,8 @@ if(BUILD_TESTING)
         tests/agent_behavior_test.c
         app.c
         agent.c
-        json.c)
+        json.c
+        usage.c)
     target_include_directories(pico_agent_behavior_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -97,6 +99,20 @@ if(BUILD_TESTING)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_agent_behavior_tests PRIVATE raylib CURL::libcurl Threads::Threads)
     add_test(NAME pico_agent_behavior_tests COMMAND pico_agent_behavior_tests)
+
+    add_executable(pico_session_usage_tests
+        tests/session_usage_test.c
+        session.c
+        json.c
+        usage.c)
+    target_include_directories(pico_session_usage_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
 endif()
 
 add_custom_command(

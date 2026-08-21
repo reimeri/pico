@@ -4,6 +4,7 @@
 #include "json.h"
 #include "session.h"
 #include "settings.h"
+#include "usage.h"
 
 #include <curl/curl.h>
 #include <errno.h>
@@ -1280,7 +1281,7 @@ static void ApplyCancel(PicoApp *app)
     FinishAssistantHistory(app);
     if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
     {
-        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, 0, 0);
+        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source);
     }
     if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
     {
@@ -1498,10 +1499,10 @@ static void IngestResult(PicoApp *app, const char *payload)
 static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
 {
     PicoAgentRt *rt = app->agent;
-    if (ev->tokens > 0)
+    int normalized_cached = 0;
+    if (PicoUsage_Apply(app, ev->tokens, ev->cached, &normalized_cached))
     {
-        app->tokens_used = ev->tokens;
-        app->tokens_cached = ev->cached;
+        PicoSession_LogUsage(app, ev->tokens, normalized_cached);
     }
     if (rt->compacting)
     {
@@ -1535,7 +1536,7 @@ static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
     IngestResult(app, ev->payload);
     if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
     {
-        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source, ev->tokens, ev->cached);
+        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source);
     }
     for (int i = 0; i < rt->pending_count; i++)
     {

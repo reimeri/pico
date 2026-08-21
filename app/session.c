@@ -5,6 +5,7 @@
 #include "agent.h"
 #include "json.h"
 #include "settings.h"
+#include "usage.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -374,7 +375,7 @@ static int CreateNew(PicoApp *app)
     Pico_IsoTime(ts, sizeof(ts), false);
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":1,\"id\":");
+    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":2,\"id\":");
     JsonBuf_String(&b, app->session_id);
     JsonBuf_Puts(&b, ",\"timestamp\":");
     JsonBuf_String(&b, ts);
@@ -446,22 +447,16 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
     {
         ApplyHeader(app, doc, obj);
     }
+    else if (strcmp(type, "usage") == 0)
+    {
+        int input_tokens = JsonObjInt(doc, obj, "input_tokens", 0);
+        int cached_tokens = JsonObjInt(doc, obj, "cached_tokens", 0);
+        PicoUsage_Apply(app, input_tokens, cached_tokens, NULL);
+    }
     else if (strcmp(type, "message") == 0)
     {
         char *role = JsonObjStr(doc, obj, "role");
         char *content = JsonObjStr(doc, obj, "content");
-        int input_tok = 0;
-        int usage = JsonObjGet(doc, obj, "usage");
-        if (JsonIsObject(doc, usage))
-        {
-            input_tok = JsonObjInt(doc, usage, "input_tokens", 0);
-            int cached = JsonObjInt(doc, usage, "cached_tokens", 0);
-            if (input_tok > 0)
-            {
-                app->tokens_used = input_tok;
-                app->tokens_cached = cached;
-            }
-        }
         if (role && strcmp(role, "user") == 0)
         {
             char *display = JsonObjStr(doc, obj, "display");
@@ -483,7 +478,6 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
         }
         free(role);
         free(content);
-        (void)input_tok;
     }
     else if (strcmp(type, "tool_call") == 0)
     {
@@ -514,6 +508,8 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
     }
     else if (strcmp(type, "compaction") == 0)
     {
+        app->tokens_used = 0;
+        app->tokens_cached = 0;
         char *summary = JsonObjStr(doc, obj, "summary");
         if (into_input)
         {
@@ -746,6 +742,8 @@ void PicoSession_Reset(PicoApp *app)
     PicoAgent_RotateCacheKey(app);
     app->tokens_used = 0;
     app->tokens_cached = 0;
+    app->session_input_tokens = 0;
+    app->session_cached_tokens = 0;
     app->agent_activity[0] = '\0';
     free(app->compact_summary);
     app->compact_summary = NULL;
@@ -773,7 +771,28 @@ void PicoSession_LogUser(PicoApp *app, const char *content, const char *display)
     free(pre);
 }
 
-void PicoSession_LogAssistant(PicoApp *app, const char *content, int input_tokens, int cached_tokens)
+void PicoSession_LogUsage(PicoApp *app, int input_tokens, int cached_tokens)
+{
+    if (input_tokens <= 0)
+    {
+        return;
+    }
+    char *pre = EventPrefix("usage");
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    JsonBuf_Puts(&b, ",\"input_tokens\":");
+    JsonBuf_Int(&b, input_tokens);
+    JsonBuf_Puts(&b, ",\"cached_tokens\":");
+    JsonBuf_Int(&b, cached_tokens);
+    JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    AppendLine(app, line);
+    free(line);
+    free(pre);
+}
+
+void PicoSession_LogAssistant(PicoApp *app, const char *content)
 {
     if (!content || !content[0])
     {
@@ -785,14 +804,6 @@ void PicoSession_LogAssistant(PicoApp *app, const char *content, int input_token
     JsonBuf_Puts(&b, pre);
     JsonBuf_Puts(&b, ",\"role\":\"assistant\",\"content\":");
     JsonBuf_String(&b, content);
-    if (input_tokens > 0)
-    {
-        JsonBuf_Puts(&b, ",\"usage\":{\"input_tokens\":");
-        JsonBuf_Int(&b, input_tokens);
-        JsonBuf_Puts(&b, ",\"cached_tokens\":");
-        JsonBuf_Int(&b, cached_tokens);
-        JsonBuf_Putc(&b, '}');
-    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     AppendLine(app, line);

@@ -3,6 +3,7 @@
 #include "agent.h"
 #include "json.h"
 #include "settings.h"
+#include "usage.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@ typedef enum TestMode {
     TEST_SEQUENTIAL,
     TEST_INVALID,
     TEST_BLOCK,
+    TEST_PROVIDER_BLOCK,
 } TestMode;
 
 typedef struct TestState {
@@ -42,6 +44,8 @@ typedef struct TestState {
     int followup_hook_calls;
     bool provider_fail;
     int provider_tokens;
+    int provider_cached_tokens;
+    int usage_log_count;
     bool emit_think_summaries;
     int life_turn_end;
     int life_cancel;
@@ -92,6 +96,8 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.followup_hook_calls = 0;
     g_test.provider_fail = false;
     g_test.provider_tokens = 0;
+    g_test.provider_cached_tokens = 0;
+    g_test.usage_log_count = 0;
     g_test.emit_think_summaries = false;
     g_test.life_turn_end = 0;
     g_test.life_cancel = 0;
@@ -152,12 +158,13 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
 {
     (void)app;
-    (void)cancel;
 
     pthread_mutex_lock(&g_test.mu);
     SnapshotTurn(turn);
+    TestMode mode = g_test.mode;
     bool fail = g_test.provider_fail;
     int tokens = g_test.provider_tokens;
+    int cached_tokens = g_test.provider_cached_tokens;
     bool emit_summaries = g_test.emit_think_summaries;
     bool issue_tool = !fail && g_test.provider_tools_issued < g_test.provider_tool_limit;
     int call_number = ++g_test.provider_tools_issued;
@@ -172,6 +179,15 @@ static int FakeProvider(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
     }
 
     out->input_tokens = tokens;
+    out->cached_tokens = cached_tokens;
+    if (mode == TEST_PROVIDER_BLOCK)
+    {
+        while (!cancel(user))
+        {
+            SleepOneMs();
+        }
+        return PICO_LLM_CANCEL;
+    }
 
     if (emit_summaries && on_delta)
     {
@@ -390,11 +406,6 @@ static void LifeAfterCompact(PicoApp *app)
     g_test.life_after_compact++;
 }
 
-static void CompactBrief(PicoApp *app)
-{
-    app->compact_summary = JsonDup("brief");
-}
-
 static void ExtraInstructions(PicoApp *app, PicoLlmEvent *ev)
 {
     (void)app;
@@ -464,12 +475,18 @@ void MdDocument_Free(MdDocument *doc)
     }
 }
 
-void PicoSession_LogAssistant(PicoApp *app, const char *content, int input_tokens, int cached_tokens)
+void PicoSession_LogUsage(PicoApp *app, int input_tokens, int cached_tokens)
+{
+    (void)app;
+    (void)input_tokens;
+    (void)cached_tokens;
+    g_test.usage_log_count++;
+}
+
+void PicoSession_LogAssistant(PicoApp *app, const char *content)
 {
     (void)app;
     (void)content;
-    (void)input_tokens;
-    (void)cached_tokens;
 }
 
 void PicoSession_LogToolCall(PicoApp *app, const char *call_id, const char *name, const char *args)
@@ -1020,6 +1037,8 @@ static int TestErrorNotification(void)
     const char *name = "error notification";
     ResetTest(TEST_SINGLE, 0);
     g_test.provider_fail = true;
+    g_test.provider_tokens = 100;
+    g_test.provider_cached_tokens = 80;
     PicoApp app;
     InitApp(&app);
     AddLifeHooks(&app);
@@ -1029,9 +1048,85 @@ static int TestErrorNotification(void)
         return Fail(name, "agent did not leave the busy state");
     }
     bool ok = g_test.life_error == 1 && g_test.life_turn_end == 0 && g_test.life_cancel == 0 &&
-              app.agent_state == PICO_AGENT_ERROR && app.agent_error;
+              app.agent_state == PICO_AGENT_ERROR && app.agent_error && app.session_input_tokens == 0 &&
+              app.session_cached_tokens == 0 && g_test.usage_log_count == 0;
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "ON_ERROR did not fire");
+    return ok ? 0 : Fail(name, "failed request changed usage or did not fire ON_ERROR");
+}
+
+static int TestCancelledProviderUsage(void)
+{
+    const char *name = "cancelled provider usage";
+    ResetTest(TEST_PROVIDER_BLOCK, 0);
+    g_test.provider_tokens = 100;
+    g_test.provider_cached_tokens = 80;
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, "start");
+    PicoAgent_Cancel(&app);
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "cancelled provider did not return idle");
+    }
+    bool ok = app.session_input_tokens == 0 && app.session_cached_tokens == 0 &&
+              g_test.usage_log_count == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "cancelled provider result contributed usage");
+}
+
+static int TestSessionUsageAccumulation(void)
+{
+    const char *name = "session usage accumulates successful requests";
+    ResetTest(TEST_SINGLE, 1);
+    g_test.provider_tokens = 100;
+    g_test.provider_cached_tokens = 25;
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent_StartTurn(&app, "first");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "tool turn did not finish");
+    }
+    g_test.provider_tokens = 200;
+    g_test.provider_cached_tokens = 150;
+    PicoAgent_StartTurn(&app, "second");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "second turn did not finish");
+    }
+    bool ok = app.tokens_used == 200 && app.tokens_cached == 150 && app.session_input_tokens == 400 &&
+              app.session_cached_tokens == 200 && g_test.usage_log_count == 3;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "latest or cumulative usage did not include every successful request");
+}
+
+static int TestUsageNormalizationAndSaturation(void)
+{
+    const char *name = "usage normalization and saturation";
+    PicoApp app;
+    memset(&app, 0, sizeof(app));
+    int cached = -1;
+    int percent = -1;
+    bool ignored = !PicoUsage_Apply(&app, 0, 10, &cached) && app.session_input_tokens == 0 &&
+                   !PicoUsage_SessionPercent(&app, &percent);
+    bool negative = PicoUsage_Apply(&app, 10, -5, &cached) && cached == 0 && app.tokens_cached == 0;
+    app.tokens_used = 0;
+    app.session_input_tokens = 400;
+    app.session_cached_tokens = 200;
+    bool cumulative_rate = PicoUsage_SessionPercent(&app, &percent) && percent == 50 && app.tokens_used == 0;
+    app.session_input_tokens = UINT64_MAX - 5;
+    app.session_cached_tokens = UINT64_MAX - 5;
+    bool saturated = PicoUsage_Apply(&app, 10, 20, &cached) && cached == 10 && app.tokens_cached == 10 &&
+                     app.session_input_tokens == UINT64_MAX && app.session_cached_tokens == UINT64_MAX &&
+                     PicoUsage_SessionPercent(&app, &percent) && percent == 100;
+    return ignored && negative && cumulative_rate && saturated
+               ? 0
+               : Fail(name, "usage or cumulative percentage was not normalized or saturated");
 }
 
 static int TestAfterCompact(void)
@@ -1039,22 +1134,24 @@ static int TestAfterCompact(void)
     const char *name = "after compact then turn end";
     ResetTest(TEST_SINGLE, 0);
     g_test.provider_tokens = 100;
+    g_test.provider_cached_tokens = 40;
     PicoApp app;
     InitApp(&app);
     app.settings.compact_enabled = true;
     app.settings.compact_ratio = 0.5;
     app.tokens_limit = 100;
     AddLifeHooks(&app);
-    pico_add_hook(&app, PICO_HOOK_ON_COMPACT, CompactBrief);
     PicoAgent_StartTurn(&app, "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
     }
     bool ok = g_test.life_after_compact == 1 && g_test.life_turn_end == 1 && g_test.life_cancel == 0 &&
-              g_test.life_error == 0;
+              g_test.life_error == 0 && app.tokens_used == 0 && app.tokens_cached == 0 &&
+              app.session_input_tokens == 200 && app.session_cached_tokens == 80 &&
+              g_test.usage_log_count == 2;
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "AFTER_COMPACT/ON_TURN_END did not fire after briefing");
+    return ok ? 0 : Fail(name, "compaction did not retain cumulative usage or fire lifecycle hooks");
 }
 
 static int TestToolTraceError(void)
@@ -1155,6 +1252,9 @@ int main(void)
     failed |= TestTurnEnd();
     failed |= TestCancelNotification();
     failed |= TestErrorNotification();
+    failed |= TestCancelledProviderUsage();
+    failed |= TestSessionUsageAccumulation();
+    failed |= TestUsageNormalizationAndSaturation();
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();
     failed |= TestResumedToolCallArgs();

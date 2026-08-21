@@ -52,7 +52,9 @@ Fill `PicoLlmResult` with malloc'd strings. Pico calls `pico_llm_result_free`. R
 - `assistant_text`, `think_text`
 - `calls[]` — `call_id`, `name`, `arguments` (JSON object text)
 - `raw_items[]` — optional provider-native items replayed on the next turn
-- `input_tokens`, `cached_tokens` for the footer / compaction
+- `input_tokens`, `cached_tokens` report this completed provider call's input usage. `cached_tokens` is the cached portion of `input_tokens`. Pico ignores usage when `input_tokens <= 0` and clamps cached usage to the input range.
+
+Each successful provider completion with valid usage contributes to the saved session totals, including tool follow-ups and compaction calls. The builtin footer keeps `app->tokens_used / app->tokens_limit` as the latest context-window reading, but calculates its cache percentage from `app->session_cached_tokens / app->session_input_tokens`. Failed and cancelled calls do not contribute.
 
 HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_form_encode` in `pico/http.h`.
 

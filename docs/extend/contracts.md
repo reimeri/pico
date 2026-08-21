@@ -59,4 +59,6 @@ Silent no-op if a `pico_add_*` is full, arguments are NULL, or the kind/slot is 
 
 The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `compact_summary`, `workspace`). `agent.h` / `session.h` / `settings.h` are not extension API even though they compile.
 
+Token usage fields are core-owned and read-only to extensions. `tokens_used` / `tokens_cached` describe the current context's latest successful provider call (and reset after compaction); `tokens_limit` is the active context limit. `session_input_tokens` / `session_cached_tokens` are saturating totals of valid usage from successful provider calls in the saved session. Session totals survive compaction and model, provider, effort, or cache-key changes; session reset clears them and session replay restores them from usage events.
+
 `pico_session_log_custom(app, "myext", "{…json…}")` appends a JSONL record. Session replay does not dispatch it back to extensions.

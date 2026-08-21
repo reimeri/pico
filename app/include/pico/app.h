@@ -370,6 +370,8 @@ typedef struct PicoApp {
     char *compact_summary;
     PicoModel *models;
     int model_count;
+    uint64_t session_input_tokens;
+    uint64_t session_cached_tokens;
 } PicoApp;
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);

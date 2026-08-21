@@ -6,6 +6,7 @@
 #include "overlay.h"
 #include "settings.h"
 #include "tinyfiledialogs.h"
+#include "usage.h"
 
 #include "clay/clay.h"
 
@@ -353,14 +354,11 @@ void PicoFooter_Render(PicoApp *app)
     FormatCwd(app->workspace, g_cwd, sizeof(g_cwd));
     snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app));
     snprintf(g_extra, sizeof(g_extra), "%s", extra);
-    if (app->tokens_used > 0)
+    int cache_percent = 0;
+    if (PicoUsage_SessionPercent(app, &cache_percent))
     {
-        int pct = (int)((long)app->tokens_cached * 100 / app->tokens_used);
-        if (pct > 100)
-        {
-            pct = 100;
-        }
-        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens  ·  %d%% cache", app->tokens_used, app->tokens_limit, pct);
+        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens  ·  %d%% cache", app->tokens_used,
+                 app->tokens_limit, cache_percent);
     }
     else
     {

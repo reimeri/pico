@@ -347,7 +347,7 @@ void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
     line->tool_args = JsonDup(args ? args : "");
 }
 
-void PicoApp_SetLastToolOutput(PicoApp *app, const char *output)
+void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
 {
     if (app->message_count <= 0)
     {
@@ -360,6 +360,7 @@ void PicoApp_SetLastToolOutput(PicoApp *app, const char *output)
         {
             free(m->trace[t].tool_output);
             m->trace[t].tool_output = JsonDup(output ? output : "");
+            m->trace[t].tool_error = is_error;
             return;
         }
     }

@@ -86,6 +86,7 @@ typedef struct PicoTraceLine {
     char *tool_name;
     char *tool_args;
     char *tool_output;
+    bool tool_error;
     bool expanded;
 } PicoTraceLine;
 
@@ -391,7 +392,7 @@ void PicoApp_Free(PicoApp *app);
 void PicoApp_ClearMessages(PicoApp *app);
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown);
 void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args);
-void PicoApp_SetLastToolOutput(PicoApp *app, const char *output);
+void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error);
 void PicoApp_AppendAssistant(PicoApp *app, const char *text);
 void PicoApp_Submit(PicoApp *app);
 void PicoApp_Cancel(PicoApp *app);

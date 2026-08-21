@@ -40,6 +40,8 @@ enum {
 #define COLOR_ERROR_BG (Clay_Color){70, 40, 40, 255}
 #define COLOR_STATUS_ON (Clay_Color){90, 180, 120, 255}
 #define COLOR_STATUS_OFF (Clay_Color){90, 90, 100, 255}
+#define COLOR_STATUS_RUN (Clay_Color){220, 180, 70, 255}
+#define COLOR_STATUS_ERR (Clay_Color){200, 80, 80, 255}
 #define COLOR_CURSOR (Clay_Color){200, 210, 255, 255}
 #define COLOR_SELECTION (Clay_Color){90, 130, 210, 110}
 

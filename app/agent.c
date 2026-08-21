@@ -1131,7 +1131,7 @@ static void TraceAddTool(PicoApp *app, int idx, const char *name, const char *ar
     line->tool_args = FormatToolProps(args_json);
 }
 
-static void TraceSetLastToolOutput(PicoApp *app, int idx, const char *output)
+static void TraceSetLastToolOutput(PicoApp *app, int idx, const char *output, bool is_error)
 {
     if (idx < 0 || idx >= app->message_count)
     {
@@ -1144,6 +1144,7 @@ static void TraceSetLastToolOutput(PicoApp *app, int idx, const char *output)
         {
             free(m->trace[t].tool_output);
             m->trace[t].tool_output = Dup(output ? output : "");
+            m->trace[t].tool_error = is_error;
             return;
         }
     }
@@ -1237,7 +1238,7 @@ static void ApplyCancel(PicoApp *app)
     AbortRemainingCalls(rt);
     if (open_tool && rt->stream_msg >= 0)
     {
-        TraceSetLastToolOutput(app, rt->stream_msg, "(interrupted)");
+        TraceSetLastToolOutput(app, rt->stream_msg, "(interrupted)", true);
     }
     GoIdle(app);
     pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
@@ -1577,7 +1578,7 @@ static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
             TraceAddTool(app, rt->stream_msg, call && call->name ? call->name : "tool",
                          call && call->arguments ? call->arguments : "{}");
         }
-        TraceSetLastToolOutput(app, rt->stream_msg, use);
+        TraceSetLastToolOutput(app, rt->stream_msg, use, failed || cancel);
     }
     rt->pending_next++;
     free(output);

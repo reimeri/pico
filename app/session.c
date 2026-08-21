@@ -503,7 +503,8 @@ static void ReplayLine(PicoApp *app, const JsonDoc *doc, int obj, bool into_inpu
     {
         char *call_id = JsonObjStr(doc, obj, "call_id");
         char *output = JsonObjStr(doc, obj, "output");
-        PicoApp_SetLastToolOutput(app, output);
+        bool is_error = JsonEq(doc, JsonObjGet(doc, obj, "is_error"), "true");
+        PicoApp_SetLastToolOutput(app, output, is_error);
         if (into_input)
         {
             PicoAgent_PushHistoryFunctionOutput(app, call_id, output);
@@ -636,7 +637,7 @@ static int ReplayFile(PicoApp *app, const char *path)
         {
             char *call_id = JsonObjStr(&doc, 0, "call_id");
             PicoSession_LogToolResult(app, call_id, "(interrupted)", true);
-            PicoApp_SetLastToolOutput(app, "(interrupted)");
+            PicoApp_SetLastToolOutput(app, "(interrupted)", true);
             PicoAgent_PushHistoryFunctionOutput(app, call_id, "(interrupted)");
             free(call_id);
             JsonFree(&doc);

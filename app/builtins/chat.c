@@ -65,6 +65,19 @@ static void RenderToolOutput(const char *output)
     }
 }
 
+static Clay_Color ToolStatusColor(const PicoTraceLine *line)
+{
+    if (!line->tool_output)
+    {
+        return COLOR_STATUS_RUN;
+    }
+    if (line->tool_error)
+    {
+        return COLOR_STATUS_ERR;
+    }
+    return COLOR_STATUS_ON;
+}
+
 static void RenderToolLine(PicoApp *app, PicoTraceLine *line, int message_index, int trace_index)
 {
     if (!line->tool_name || !line->tool_name[0])
@@ -92,6 +105,12 @@ static void RenderToolLine(PicoApp *app, PicoTraceLine *line, int message_index,
                                  .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
+            CLAY(CLAY_IDI("ToolStatus", message_index * 256 + trace_index),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
+                  .backgroundColor = ToolStatusColor(line),
+                  .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+            }
             PicoChatSel_Text(name, (Clay_TextElementConfig){.fontId = FONT_REGULAR,
                                                             .fontSize = 15,
                                                             .textColor = name_color,

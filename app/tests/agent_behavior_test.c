@@ -545,6 +545,23 @@ static bool WaitForIdle(PicoApp *app)
     return false;
 }
 
+static PicoTraceLine *LastToolTrace(PicoApp *app)
+{
+    if (!app || app->message_count <= 0)
+    {
+        return NULL;
+    }
+    PicoMessage *m = &app->messages[app->message_count - 1];
+    for (int t = m->trace_count - 1; t >= 0; t--)
+    {
+        if (m->trace[t].is_tool)
+        {
+            return &m->trace[t];
+        }
+    }
+    return NULL;
+}
+
 static bool WaitForBlock(PicoApp *app)
 {
     for (int i = 0; i < 3000; i++)
@@ -1023,6 +1040,41 @@ static int TestAfterCompact(void)
     return ok ? 0 : Fail(name, "AFTER_COMPACT/ON_TURN_END did not fire after briefing");
 }
 
+static int TestToolTraceError(void)
+{
+    const char *name = "tool trace error flag";
+    ResetTest(TEST_SINGLE, 1);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "successful tool did not finish");
+    }
+    PicoTraceLine *ok_line = LastToolTrace(&app);
+    bool ok = ok_line && ok_line->tool_output && !ok_line->tool_error;
+    PicoApp_Free(&app);
+    if (!ok)
+    {
+        return Fail(name, "successful tool was marked as error");
+    }
+
+    ResetTest(TEST_SINGLE, 1);
+    InitApp(&app);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
+    PicoAgent_StartTurn(&app, "start");
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "unknown tool did not finish");
+    }
+    PicoTraceLine *err_line = LastToolTrace(&app);
+    ok = err_line && err_line->tool_output && err_line->tool_error;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "unknown tool was not marked as error");
+}
+
 int main(void)
 {
     int failed = 0;
@@ -1043,5 +1095,6 @@ int main(void)
     failed |= TestCancelNotification();
     failed |= TestErrorNotification();
     failed |= TestAfterCompact();
+    failed |= TestToolTraceError();
     return failed ? 1 : 0;
 }

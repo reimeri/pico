@@ -202,7 +202,11 @@ char *JsonBuf_Steal(JsonBuf *b)
 {
     JsonBuf_Need(b, 0);
     char *data = b->data;
-    if (!data)
+    if (data)
+    {
+        data[b->len] = '\0';
+    }
+    else
     {
         data = JsonDup("");
     }

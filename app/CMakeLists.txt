@@ -75,6 +75,15 @@ target_compile_definitions(pico PRIVATE
 target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
 
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(pico_json_tests
+        tests/json_test.c
+        json.c)
+    target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME pico_json_tests COMMAND pico_json_tests)
+endif()
+
 add_custom_command(
         TARGET pico POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory

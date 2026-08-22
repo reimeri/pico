@@ -18,6 +18,7 @@ Compile errors appear in the overlay. `/docs [topic]` prints these pages into ch
 Read the page that matches the work (`/docs <name>` or the file next to this README):
 
 - `anatomy` — entry point, lifecycle, compile
+- `agents` — opaque agent identity, copied snapshots, ownership, worker host
 - `views` — UI in a slot (sidebar, chat, footer, …) and the chat empty-state
 - `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool and LLM interceptors
 - `context` — request-only, non-persistent agent context
@@ -43,4 +44,4 @@ Copy-templates in the Pico source tree:
 - `examples/ephemeral_context.c` — request-only context
 - `examples/time_cmd.c` — slash command
 
-Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat `agent.h`, `session.h`, or `settings.h` as API.
+Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/agent.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat the private app-level `agent.h`, `agent_internal.h`, `session.h`, or `settings.h` as API.

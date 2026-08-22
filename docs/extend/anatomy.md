@@ -22,7 +22,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 4). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 5). ABI 5 extracts conversation/runtime state into opaque `PicoAgent`. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload.

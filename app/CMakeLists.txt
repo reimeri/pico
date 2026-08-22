@@ -114,6 +114,8 @@ if(BUILD_TESTING)
         app.c
         agent.c
         builtins/ask_user.c
+        builtins/todo.c
+        builtins/todo_model.c
         json.c
         usage.c)
     target_include_directories(pico_agent_behavior_tests PRIVATE
@@ -139,6 +141,19 @@ if(BUILD_TESTING)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
+
+    add_executable(pico_settings_agent_tests
+        tests/settings_agent_test.c
+        settings.c
+        json.c)
+    target_include_directories(pico_settings_agent_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_compile_options(pico_settings_agent_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_settings_agent_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_settings_agent_tests COMMAND pico_settings_agent_tests)
 endif()
 
 add_custom_command(

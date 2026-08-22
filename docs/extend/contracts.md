@@ -8,7 +8,7 @@ Read this before writing an extension. Getting these wrong crashes Pico or silen
 
 A second Esc force-cancels a stuck turn: the UI goes idle and a new worker starts so the user can keep chatting, but reload still waits for the abandoned worker. That worker may outlive the turn; do not touch Clay, Raylib, or chat/composer state from it.
 
-On process exit, `PicoAgent_Shutdown` waits about one second. If a worker is still running, Pico leaves the entire `PicoApp`, all registrations, builtin state, and user-extension `.so` handles intact for that worker. No extension `shutdown` callback runs and no handle is closed; process exit reclaims the state.
+On process exit, agent shutdown waits about one second. If a worker is still running, Pico retains its heap execution host plus every registration, auth store, builtin state, and user-extension `.so` handle that worker can reach. No extension `shutdown` callback runs and no handle is closed; process exit reclaims the retained state. The stack/UI `PicoApp` is never worker-owned.
 
 `--safe` skips user extensions. Compile errors set `app->status_warn` (overlay).
 
@@ -16,7 +16,7 @@ On process exit, `PicoAgent_Shutdown` waits about one second. If a worker is sti
 
 Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, `PICO_TOOL_AFTER`, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout.
 
-Worker thread: `PicoToolFn`, `PICO_TOOL_BEFORE`, `PicoProviderStreamFn`. `pico_tool_ask` is the only supported wait for user input; it may be called only from the worker tool slot (`PicoToolFn` or `PICO_TOOL_BEFORE`). Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
+Worker thread: `PicoToolFn`, `PICO_TOOL_BEFORE`, `PicoProviderStreamFn`. Their `PicoApp *` is a heap execution-host view with copied worker-facing registrations/workspace and retained auth—not the stack/UI app. It has no active agent. Do not retain it after the callback or use it for UI, transcript, session, settings, or model-catalog state. `pico_tool_ask` is the only supported wait for user input; it may be called only from the worker tool slot (`PicoToolFn` or `PICO_TOOL_BEFORE`). Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
 Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a `PicoToolResult` with malloc'd fields; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`. `PICO_LLM_DELTA_THINKING` appends; `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current summary (zero-length starts the next step). Pico coalesces consecutive summaries until a tool call.
 
@@ -30,7 +30,8 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 - `pico_tool_pending_ask` `request_json`: valid until the next `PicoAgent_Pump`. Do not retain it across frames.
 - `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
-- `app->agent_input` and `app->compact_summary`: malloc if you set them; Pico frees.
+- `app->agent_input`: malloc if you set it; Pico frees.
+- `pico_agent_set_compact_summary(app, summary)`: `summary` is malloc'd and ownership transfers to Pico.
 - `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
 
@@ -47,7 +48,7 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 - `PICO_TOOL_DETAILS_MAX`, `PICO_TOOL_ASK_MAX_REQUEST`, and `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)
 - Builtin `ask_user`: 24 questions, 20 options per select question, 16 KiB per free-form answer
 
-Registrations are ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for these cases and for duplicate names.
+Registrations are ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for these cases, duplicate names, and malformed/non-object `params_json` schemas.
 
 ## Directories
 
@@ -58,8 +59,8 @@ Registrations are ignored when a limit is full, arguments are NULL, or the kind/
 
 ## `PicoApp`
 
-The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `compact_summary`, `workspace`). `agent.h` / `session.h` / `settings.h` are not extension API even though they compile.
+The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `workspace`). Conversation/runtime/session/model/usage fields live in opaque `PicoAgent`, not `PicoApp`. Use `pico_agent_id` and `pico_agent_info_snapshot`; see [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `session.h`, and `settings.h` are not extension API.
 
-Token usage fields are core-owned and read-only to extensions. `tokens_used` / `tokens_cached` describe the current context's latest successful provider call (and reset after compaction); `tokens_limit` is the active context limit. `session_input_tokens` / `session_cached_tokens` are saturating totals of valid usage from successful provider calls in the saved session. Session totals survive compaction and model, provider, effort, or cache-key changes; session reset clears them and session replay restores them from usage events.
+The model catalog in `PicoApp` is immutable while agents run. Each agent owns copied model/effort/context/compaction selection, so changing defaults or replaying a session does not mutate another live agent.
 
-`pico_session_log_custom(app, "myext", "{…json…}")` appends a JSONL record. Session replay does not dispatch it back to extensions. For replayable tool-owned state, return validated structured `details_json` and register a tool apply callback instead. Details are replayed chronologically on resume and extension reload; use complete snapshots and make replay application idempotent.
+`pico_session_log_custom(app, app->agent, "myext", "{…json…}")` appends a JSONL record to the explicit active agent on the main thread. Worker-host and stale/mismatched targets are rejected. Session replay does not dispatch it back to extensions. For replayable tool-owned state, return validated structured `details_json` and register a tool apply callback instead. Details are replayed chronologically on resume and extension reload; use complete snapshots and make replay application idempotent.

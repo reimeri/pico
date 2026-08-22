@@ -485,7 +485,7 @@ void PicoPlugins_Load(PicoApp *app)
 
 void PicoPlugins_Reload(PicoApp *app)
 {
-    if (PicoAgent_BlocksReload(app))
+    if (PicoAgent_BlocksReload(app->agent))
     {
         app->reload_queued = true;
         return;
@@ -502,7 +502,7 @@ void PicoPlugins_Reload(PicoApp *app)
         }
     }
     LoadUsers(app);
-    PicoSession_ReplayToolDetails(app);
+    PicoSession_ReplayToolDetails(app, app->agent);
 }
 
 void PicoPlugins_Shutdown(PicoApp *app)

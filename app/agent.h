@@ -1,34 +1,40 @@
 #ifndef PICO_AGENT_H
 #define PICO_AGENT_H
 
-#include "pico/app.h"
+#include "agent_internal.h"
 
-void PicoAgent_Init(PicoApp *app);
-/* False when a worker was still running and had to be detached, meaning anything
- * it can still reach must not be freed. */
-bool PicoAgent_Shutdown(PicoApp *app);
-void PicoAgent_StartTurn(PicoApp *app, const char *user_text);
-void PicoAgent_Cancel(PicoApp *app);
-void PicoAgent_ForceCancel(PicoApp *app);
-bool PicoAgent_IsBusy(const PicoApp *app);
-bool PicoAgent_CancelRequested(const PicoApp *app);
-bool PicoAgent_AskUiOpen(const PicoApp *app);
-void PicoAgent_DismissError(PicoApp *app);
-void PicoAgent_Pump(PicoApp *app);
-bool PicoAgent_BlocksReload(const PicoApp *app);
-void PicoAgent_Compact(PicoApp *app);
-/* Malloc'd instructions for the next normal turn: SYSTEM.md / AGENTS.md plus
- * pico_add_llm_hook extras. Caller frees. */
-char *PicoAgent_BuildInstructions(PicoApp *app);
+PicoAgent *PicoAgent_Create(PicoApp *app);
+/* False when a worker was still running and had to be detached. */
+bool PicoAgent_Destroy(PicoAgent *agent);
+void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text);
+void PicoAgent_Cancel(PicoAgent *agent);
+void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent);
+bool PicoAgent_IsBusy(const PicoAgent *agent);
+bool PicoAgent_CancelRequested(const PicoAgent *agent);
+bool PicoAgent_AskUiOpen(const PicoAgent *agent);
+void PicoAgent_DismissError(PicoAgent *agent);
+void PicoAgent_Pump(PicoApp *app, PicoAgent *agent);
+bool PicoAgent_BlocksReload(const PicoAgent *agent);
+void PicoAgent_Compact(PicoApp *app, PicoAgent *agent);
+/* Malloc'd instructions for the next normal turn. Caller frees. */
+char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent);
 
-const char *PicoAgent_CacheKey(const PicoApp *app);
-void PicoAgent_SetCacheKey(PicoApp *app, const char *key);
-void PicoAgent_RotateCacheKey(PicoApp *app);
-void PicoAgent_ClearInput(PicoApp *app);
-void PicoAgent_PushHistoryUser(PicoApp *app, const char *text);
-void PicoAgent_PushHistoryAssistant(PicoApp *app, const char *text);
-void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const char *name, const char *args);
-void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *name,
+const char *PicoAgent_CacheKey(const PicoAgent *agent);
+void PicoAgent_SetCacheKey(PicoAgent *agent, const char *key);
+void PicoAgent_RotateCacheKey(PicoAgent *agent);
+void PicoAgent_ClearInput(PicoAgent *agent);
+void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text);
+void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text);
+void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name,
+                                       const char *args);
+void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
                                          const char *output, bool is_error);
+
+void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *markdown);
+void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text);
+void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args);
+void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error);
+void PicoAgent_ClearMessages(PicoAgent *agent);
+void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out);
 
 #endif

@@ -142,7 +142,7 @@ static void CmdShowPrompt(PicoApp *app, const char *args)
     (void)args;
     PicoExts_Close();
     free(g_text);
-    g_text = PicoAgent_BuildInstructions(app);
+    g_text = PicoAgent_BuildInstructions(app, app->agent);
     g_open = true;
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;

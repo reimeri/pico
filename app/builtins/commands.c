@@ -1,4 +1,6 @@
 #define _DEFAULT_SOURCE
+
+#include "../agent_internal.h"
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
@@ -107,7 +109,7 @@ static void CmdModel(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    PicoSettings_SetModel(app, args);
+    PicoSettings_SetModel(app, app->agent, args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -125,7 +127,7 @@ static void CmdEffort(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    PicoSettings_SetEffort(app, args);
+    PicoSettings_SetEffort(app, app->agent, args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -133,7 +135,7 @@ static void CmdEffort(PicoApp *app, const char *args)
 static void CmdCompact(PicoApp *app, const char *args)
 {
     (void)args;
-    PicoAgent_Compact(app);
+    PicoAgent_Compact(app, app->agent);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -167,14 +169,14 @@ static void RelAge(char *out, size_t cap, time_t mtime)
 static void CmdNew(PicoApp *app, const char *args)
 {
     (void)args;
-    if (PicoAgent_IsBusy(app))
+    if (PicoAgent_IsBusy(app->agent))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before starting a new session.");
         ClearComposer(app);
         app->submit_cancel = true;
         return;
     }
-    PicoSession_Reset(app);
+    PicoSession_Reset(app, app->agent);
     PicoOverlay_Notify(app, "New session.");
     ClearComposer(app);
     app->submit_cancel = true;
@@ -193,20 +195,20 @@ static void CmdResume(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    if (PicoAgent_IsBusy(app))
+    if (PicoAgent_IsBusy(app->agent))
     {
         Note(app, "Wait until the agent is idle before resuming a session.");
         ClearComposer(app);
         app->submit_cancel = true;
         return;
     }
-    if (FoldEq(app->session_id, args))
+    if (FoldEq(app->agent->session_id, args))
     {
         ClearComposer(app);
         app->submit_cancel = true;
         return;
     }
-    if (PicoSession_Open(app, args) != 0)
+    if (PicoSession_Open(app, app->agent, args) != 0)
     {
         char line[256];
         snprintf(line, sizeof(line), "Unknown session `%s`. Try `/resume`.", args);
@@ -228,7 +230,7 @@ static void CmdQuit(PicoApp *app, const char *args)
 }
 
 static const char *const kDocTopics[] = {
-    "README", "anatomy", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
+    "README", "anatomy", "agents", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
 };
 
 static void DocsTopicName(char *out, size_t cap, const char *args)
@@ -820,7 +822,7 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     }
     if (FoldEq(cmd, "effort"))
     {
-        PicoModel *m = PicoSettings_ActiveModel(app);
+        PicoModel *m = PicoSettings_ActiveModel(app, app->agent);
         if (!m)
         {
             return 0;
@@ -877,7 +879,7 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
             snprintf(out[n].label, sizeof(out[n].label), "%s", s->title);
             char age[32];
             RelAge(age, sizeof(age), s->mtime);
-            if (s->id[0] && FoldEq(s->id, app->session_id))
+            if (s->id[0] && FoldEq(s->id, app->agent->session_id))
             {
                 snprintf(out[n].detail, sizeof(out[n].detail), "current · %s", age);
             }

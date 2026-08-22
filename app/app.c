@@ -116,10 +116,32 @@ void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn)
     app->context_hooks[app->context_hook_count++] = fn;
 }
 
+static bool ToolParamsValid(const char *params_json)
+{
+    if (!params_json || !params_json[0])
+    {
+        return true;
+    }
+    size_t len = strlen(params_json);
+    if (!JsonValidSyntax(params_json, len))
+    {
+        return false;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, params_json, len) != 0)
+    {
+        return false;
+    }
+    bool valid = JsonIsObject(&doc, 0) && JsonSkip(&doc, 0) == doc.ntoks;
+    JsonFree(&doc);
+    return valid;
+}
+
 bool pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
                    PicoToolFn run, PicoToolApplyFn apply)
 {
-    if (!app || !name || !name[0] || !run || app->tool_count >= PICO_MAX_TOOLS)
+    if (!app || !name || !name[0] || !run || !ToolParamsValid(params_json) ||
+        app->tool_count >= PICO_MAX_TOOLS)
     {
         return false;
     }
@@ -319,20 +341,24 @@ static void RunSlot(PicoApp *app, PicoUiSlot slot)
     }
 }
 
-void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
+void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *markdown)
 {
-    if (app->message_count >= app->message_capacity)
+    if (!app || !agent)
     {
-        int capacity = app->message_capacity == 0 ? 8 : app->message_capacity * 2;
-        PicoMessage *next = (PicoMessage *)realloc(app->messages, (size_t)capacity * sizeof(PicoMessage));
+        return;
+    }
+    if (agent->message_count >= agent->message_capacity)
+    {
+        int capacity = agent->message_capacity == 0 ? 8 : agent->message_capacity * 2;
+        PicoMessage *next = (PicoMessage *)realloc(agent->messages, (size_t)capacity * sizeof(PicoMessage));
         if (!next)
         {
             return;
         }
-        app->messages = next;
-        app->message_capacity = capacity;
+        agent->messages = next;
+        agent->message_capacity = capacity;
     }
-    PicoMessage *msg = &app->messages[app->message_count++];
+    PicoMessage *msg = &agent->messages[agent->message_count++];
     memset(msg, 0, sizeof(*msg));
     msg->role = role;
     size_t len = markdown ? strlen(markdown) : 0;
@@ -346,22 +372,26 @@ void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
     pico_run_hooks(app, PICO_HOOK_ON_MESSAGE);
 }
 
-void PicoApp_AppendAssistant(PicoApp *app, const char *text)
+void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text)
 {
+    if (!agent)
+    {
+        return;
+    }
     if (!text)
     {
         text = "";
     }
-    if (app->message_count <= 0 || app->messages[app->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    if (agent->message_count <= 0 || agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
     {
-        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+        PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
         return;
     }
     if (!text[0])
     {
         return;
     }
-    PicoMessage *m = &app->messages[app->message_count - 1];
+    PicoMessage *m = &agent->messages[agent->message_count - 1];
     size_t old = m->source ? strlen(m->source) : 0;
     size_t n = strlen(text);
     char *next = (char *)realloc(m->source, old + n + 1);
@@ -453,13 +483,17 @@ static char *FormatToolProps(const char *args_json)
     return JsonBuf_Steal(&b);
 }
 
-void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
+void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args)
 {
-    if (app->message_count <= 0 || app->messages[app->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    if (!agent)
     {
-        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, "");
+        return;
     }
-    PicoMessage *m = &app->messages[app->message_count - 1];
+    if (agent->message_count <= 0 || agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
+    }
+    PicoMessage *m = &agent->messages[agent->message_count - 1];
     PicoTraceLine *next =
         (PicoTraceLine *)realloc(m->trace, (size_t)(m->trace_count + 1) * sizeof(PicoTraceLine));
     if (!next)
@@ -474,13 +508,13 @@ void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
     line->tool_args = FormatToolProps(args);
 }
 
-void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
+void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error)
 {
-    if (app->message_count <= 0)
+    if (!agent || agent->message_count <= 0)
     {
         return;
     }
-    PicoMessage *m = &app->messages[app->message_count - 1];
+    PicoMessage *m = &agent->messages[agent->message_count - 1];
     for (int t = m->trace_count - 1; t >= 0; t--)
     {
         if (m->trace[t].is_tool)
@@ -493,15 +527,51 @@ void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
     }
 }
 
-void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_json)
+void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown)
 {
-    PicoSession_LogCustom(app, ext, data_json);
+    PicoAgent_AddMessage(app, PicoApp_ActiveAgent(app), role, markdown);
+}
+
+void PicoApp_AppendAssistant(PicoApp *app, const char *text)
+{
+    PicoAgent_AppendAssistant(app, PicoApp_ActiveAgent(app), text);
+}
+
+void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args)
+{
+    PicoAgent_AddToolCall(app, PicoApp_ActiveAgent(app), name, args);
+}
+
+void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
+{
+    PicoAgent_SetLastToolOutput(PicoApp_ActiveAgent(app), output, is_error);
+}
+
+void pico_session_log_custom(PicoApp *app, PicoAgent *agent, const char *ext, const char *data_json)
+{
+    if (!app || !agent || agent != PicoApp_ActiveAgent(app))
+    {
+        return;
+    }
+    PicoSession_LogCustom(app, agent, ext, data_json);
+}
+
+void pico_agent_set_compact_summary(PicoApp *app, char *summary)
+{
+    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    if (!agent)
+    {
+        free(summary);
+        return;
+    }
+    free(agent->compact_summary);
+    agent->compact_summary = summary;
 }
 
 void PicoApp_Submit(PicoApp *app)
 {
-    if (app->agent_state == PICO_AGENT_LLM_WAIT || app->agent_state == PICO_AGENT_TOOL_WAIT ||
-        app->agent_state == PICO_AGENT_COMPACT_WAIT)
+    if (app->agent->state == PICO_AGENT_LLM_WAIT || app->agent->state == PICO_AGENT_TOOL_WAIT ||
+        app->agent->state == PICO_AGENT_COMPACT_WAIT)
     {
         return;
     }
@@ -550,8 +620,8 @@ void PicoApp_Submit(PicoApp *app)
     const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : display;
     PicoApp_AddMessage(app, PICO_ROLE_USER, display);
     app->chat_follow_bottom = true;
-    PicoSession_LogUser(app, agent, display);
-    PicoAgent_StartTurn(app, agent);
+    PicoSession_LogUser(app, app->agent, agent, display);
+    PicoAgent_StartTurn(app, app->agent, agent);
 
     c->length = 0;
     c->cursor = 0;
@@ -567,12 +637,12 @@ void PicoApp_Submit(PicoApp *app)
 
 void PicoApp_Cancel(PicoApp *app)
 {
-    PicoAgent_Cancel(app);
+    PicoAgent_Cancel(app->agent);
 }
 
 bool PicoUi_ModalOpen(const PicoApp *app)
 {
-    return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() || PicoAgent_AskUiOpen(app);
+    return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() || PicoAgent_AskUiOpen(app->agent);
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
@@ -580,7 +650,6 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
 {
     memset(app, 0, sizeof(*app));
     app->fonts = fonts;
-    app->agent_state = PICO_AGENT_IDLE;
     app->chat_sel.msg = -1;
     app->chat_follow_bottom = true;
     app->chat_overflow = true;
@@ -600,13 +669,17 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
         app->composer.text[0] = '\0';
     }
 
-    app->session_ephemeral = true;
     PicoSettings_Load(app);
     PicoAuth_Load(app);
-    PicoAgent_Init(app);
+    app->agent = PicoAgent_Create(app);
+    if (!app->agent)
+    {
+        app->status_warn = JsonDup("Could not create the agent runtime.");
+        return;
+    }
     PicoPlugins_Load(app);
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET);
-    PicoSession_Start(app, session_start, session_file);
+    PicoSession_Start(app, app->agent, session_start, session_file);
 }
 
 void PicoApp_RequestReload(PicoApp *app)
@@ -707,7 +780,7 @@ bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
     {
         return false;
     }
-    if (PicoAgent_IsBusy(app))
+    if (PicoAgent_IsBusy(app->agent))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
         return false;
@@ -754,8 +827,9 @@ bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
     }
 
     snprintf(app->workspace, sizeof(app->workspace), "%s", resolved);
-    PicoSession_Reset(app);
+    PicoSession_Reset(app, app->agent);
     PicoSettings_Load(app);
+    PicoSettings_InitAgent(app, app->agent);
     PicoApp_RequestReload(app);
 
     char pretty[400];
@@ -766,47 +840,53 @@ bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
     return true;
 }
 
-void PicoApp_ClearMessages(PicoApp *app)
+void PicoAgent_ClearMessages(PicoAgent *agent)
 {
-    if (!app)
+    if (!agent)
     {
         return;
     }
-    for (int i = 0; i < app->message_count; i++)
+    for (int i = 0; i < agent->message_count; i++)
     {
-        free(app->messages[i].source);
-        for (int t = 0; t < app->messages[i].trace_count; t++)
+        free(agent->messages[i].source);
+        for (int t = 0; t < agent->messages[i].trace_count; t++)
         {
-            free(app->messages[i].trace[t].text);
-            free(app->messages[i].trace[t].tool_name);
-            free(app->messages[i].trace[t].tool_args);
-            free(app->messages[i].trace[t].tool_output);
-            MdDocument_Free(&app->messages[i].trace[t].doc);
+            free(agent->messages[i].trace[t].text);
+            free(agent->messages[i].trace[t].tool_name);
+            free(agent->messages[i].trace[t].tool_args);
+            free(agent->messages[i].trace[t].tool_output);
+            MdDocument_Free(&agent->messages[i].trace[t].doc);
         }
-        free(app->messages[i].trace);
-        MdDocument_Free(&app->messages[i].doc);
-        memset(&app->messages[i], 0, sizeof(app->messages[i]));
+        free(agent->messages[i].trace);
+        MdDocument_Free(&agent->messages[i].doc);
+        memset(&agent->messages[i], 0, sizeof(agent->messages[i]));
     }
-    app->message_count = 0;
-    PicoChatSel_Clear(app);
+    agent->message_count = 0;
+}
+
+void PicoApp_ClearMessages(PicoApp *app)
+{
+    PicoAgent_ClearMessages(PicoApp_ActiveAgent(app));
+    if (app)
+    {
+        PicoChatSel_Clear(app);
+    }
 }
 
 void PicoApp_Free(PicoApp *app)
 {
     /* A detached worker can still reach any public PicoApp field, registered
      * callback, or builtin state. Process exit will reclaim all of it. */
-    if (!PicoAgent_Shutdown(app))
+    if (!PicoAgent_Destroy(app->agent))
     {
         return;
     }
+    app->agent = NULL;
     PicoPlugins_Shutdown(app);
     PicoAuth_Free(app);
     PicoApp_ClearMessages(app);
-    free(app->messages);
     free(app->composer.text);
     free(app->status_warn);
-    free(app->agent_error);
-    free(app->compact_summary);
     free(app->models);
     free(app->agent_input);
     memset(app, 0, sizeof(*app));
@@ -923,6 +1003,10 @@ static void UpdateChatFollowFromUserScroll(PicoApp *app, bool over_chat, bool mo
 
 void PicoApp_Frame(PicoApp *app)
 {
+    if (!app || !app->agent)
+    {
+        return;
+    }
     Vector2 mouse_delta = GetMouseWheelMoveV();
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
@@ -942,8 +1026,8 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     PicoPlugins_Poll(app);
-    PicoAgent_Pump(app);
-    if (app->reload_queued && !PicoAgent_BlocksReload(app))
+    PicoAgent_Pump(app, app->agent);
+    if (app->reload_queued && !PicoAgent_BlocksReload(app->agent))
     {
         PicoPlugins_Reload(app);
     }
@@ -958,20 +1042,20 @@ void PicoApp_Frame(PicoApp *app)
     if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_todo &&
         IsKeyPressed(KEY_ESCAPE))
     {
-        if (PicoAgent_IsBusy(app))
+        if (PicoAgent_IsBusy(app->agent))
         {
-            if (PicoAgent_CancelRequested(app))
+            if (PicoAgent_CancelRequested(app->agent))
             {
-                PicoAgent_ForceCancel(app);
+                PicoAgent_ForceCancel(app, app->agent);
             }
             else
             {
                 PicoApp_Cancel(app);
             }
         }
-        else if (app->agent_state == PICO_AGENT_ERROR)
+        else if (app->agent->state == PICO_AGENT_ERROR)
         {
-            PicoAgent_DismissError(app);
+            PicoAgent_DismissError(app->agent);
         }
     }
 

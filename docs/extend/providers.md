@@ -54,12 +54,12 @@ Fill `PicoLlmResult` with malloc'd strings. Pico calls `pico_llm_result_free`. R
 - `raw_items[]` — optional provider-native items replayed on the next turn
 - `input_tokens`, `cached_tokens` report this completed provider call's input usage. `cached_tokens` is the cached portion of `input_tokens`. Pico ignores usage when `input_tokens <= 0` and clamps cached usage to the input range.
 
-Each successful provider completion with valid usage contributes to the saved session totals, including tool follow-ups and compaction calls. The builtin footer keeps `app->tokens_used / app->tokens_limit` as the latest context-window reading, but calculates its cache percentage from `app->session_cached_tokens / app->session_input_tokens`. Failed and cancelled calls do not contribute.
+Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.
 
 HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_form_encode` in `pico/http.h`.
 
 ## Contract
 
-- Stream runs on the **worker thread**. Do not use Clay or mutate UI. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
+- Stream runs on the **worker thread**. Its `PicoApp *` is the heap execution-host view described in [agents](agents.md), not the UI app. Do not retain it, use Clay, mutate UI, or inspect active-agent state. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
 - `name` must outlive the extension. Max 16 providers (`PICO_MAX_PROVIDERS`).
 - Look up credentials with `pico_auth_copy` — see `auth.md`.

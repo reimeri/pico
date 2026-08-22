@@ -174,11 +174,11 @@ The apply callback returns `false` to reject details. A live rejection converts 
 ## Contract
 
 - `name`, `description`, `params_json` must outlive the extension — use string literals.
-- `params_json` is a JSON Schema object (OpenAI function parameters).
+- `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema.
 - Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
-- Runs on the **worker thread**. Do not call Clay, add views, or mutate chat UI. Returning output is enough; Pico shows it in the trace.
+- Runs on the **worker thread**. Its `PicoApp *` is a heap execution-host view with copied workspace/registrations and retained auth, not the UI app; it has no active agent and must not be retained. Do not inspect transcript/session/settings/model state, call Clay, add views, or mutate chat UI. Returning output is enough; Pico shows it in the trace. See [agents](agents.md).
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - If the tool forks a child, call `pico_tool_set_child(app, pid)` after spawn (and `pico_tool_set_child(app, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.

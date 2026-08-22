@@ -395,6 +395,122 @@ bool JsonValidUtf8(const char *src, size_t len)
     return true;
 }
 
+static void StrictSkipWs(const char *src, size_t len, size_t *at)
+{
+    while (*at < len && (src[*at] == ' ' || src[*at] == '\t' || src[*at] == '\r' || src[*at] == '\n'))
+    {
+        (*at)++;
+    }
+}
+
+static bool StrictString(const char *src, size_t len, size_t *at)
+{
+    if (*at >= len || src[(*at)++] != '"') return false;
+    while (*at < len)
+    {
+        unsigned char c = (unsigned char)src[(*at)++];
+        if (c == '"') return true;
+        if (c < 0x20) return false;
+        if (c != '\\') continue;
+        if (*at >= len) return false;
+        char esc = src[(*at)++];
+        if (esc == '"' || esc == '\\' || esc == '/' || esc == 'b' || esc == 'f' ||
+            esc == 'n' || esc == 'r' || esc == 't') continue;
+        if (esc != 'u' || *at + 4 > len) return false;
+        for (int i = 0; i < 4; i++)
+        {
+            char h = src[(*at)++];
+            if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F')))
+                return false;
+        }
+    }
+    return false;
+}
+
+static bool StrictNumber(const char *src, size_t len, size_t *at)
+{
+    size_t i = *at;
+    if (i < len && src[i] == '-') i++;
+    if (i >= len) return false;
+    if (src[i] == '0') i++;
+    else
+    {
+        if (src[i] < '1' || src[i] > '9') return false;
+        while (i < len && src[i] >= '0' && src[i] <= '9') i++;
+    }
+    if (i < len && src[i] == '.')
+    {
+        i++;
+        if (i >= len || src[i] < '0' || src[i] > '9') return false;
+        while (i < len && src[i] >= '0' && src[i] <= '9') i++;
+    }
+    if (i < len && (src[i] == 'e' || src[i] == 'E'))
+    {
+        i++;
+        if (i < len && (src[i] == '+' || src[i] == '-')) i++;
+        if (i >= len || src[i] < '0' || src[i] > '9') return false;
+        while (i < len && src[i] >= '0' && src[i] <= '9') i++;
+    }
+    *at = i;
+    return true;
+}
+
+static bool StrictValue(const char *src, size_t len, size_t *at, int depth)
+{
+    if (depth > 256) return false;
+    StrictSkipWs(src, len, at);
+    if (*at >= len) return false;
+    if (src[*at] == '"') return StrictString(src, len, at);
+    if (src[*at] == '{')
+    {
+        (*at)++; StrictSkipWs(src, len, at);
+        if (*at < len && src[*at] == '}') { (*at)++; return true; }
+        for (;;)
+        {
+            if (!StrictString(src, len, at)) return false;
+            StrictSkipWs(src, len, at);
+            if (*at >= len || src[(*at)++] != ':') return false;
+            if (!StrictValue(src, len, at, depth + 1)) return false;
+            StrictSkipWs(src, len, at);
+            if (*at < len && src[*at] == '}') { (*at)++; return true; }
+            if (*at >= len || src[(*at)++] != ',') return false;
+            StrictSkipWs(src, len, at);
+        }
+    }
+    if (src[*at] == '[')
+    {
+        (*at)++; StrictSkipWs(src, len, at);
+        if (*at < len && src[*at] == ']') { (*at)++; return true; }
+        for (;;)
+        {
+            if (!StrictValue(src, len, at, depth + 1)) return false;
+            StrictSkipWs(src, len, at);
+            if (*at < len && src[*at] == ']') { (*at)++; return true; }
+            if (*at >= len || src[(*at)++] != ',') return false;
+        }
+    }
+    static const char *literals[] = {"true", "false", "null"};
+    for (int i = 0; i < 3; i++)
+    {
+        size_t n = strlen(literals[i]);
+        if (*at + n <= len && memcmp(src + *at, literals[i], n) == 0)
+        {
+            *at += n;
+            return true;
+        }
+    }
+    return StrictNumber(src, len, at);
+}
+
+bool JsonValidSyntax(const char *src, size_t len)
+{
+    if (!src || !JsonValidUtf8(src, len)) return false;
+    size_t at = 0;
+    if (!StrictValue(src, len, &at, 0)) return false;
+    StrictSkipWs(src, len, &at);
+    return at == len;
+}
+
 int JsonTokStart(const JsonDoc *doc, int tok)
 {
     if (!doc || tok < 0 || tok >= doc->ntoks)

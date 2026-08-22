@@ -9,6 +9,7 @@
 #include "raylib.h"
 
 #include "markdown.h"
+#include "pico/agent.h"
 #include "pico/theme.h"
 
 #define PICO_MAX_SLOT_VIEWS 16
@@ -27,20 +28,11 @@
 #define PICO_MAX_PROVIDERS 16
 #define PICO_MAX_AUTH 16
 #define PICO_MAX_EFFORTS 16
-#define PICO_EFFORT_LEN 16
 
 typedef enum PicoRole {
     PICO_ROLE_USER = 0,
     PICO_ROLE_ASSISTANT,
 } PicoRole;
-
-typedef enum PicoAgentState {
-    PICO_AGENT_IDLE = 0,
-    PICO_AGENT_LLM_WAIT,
-    PICO_AGENT_TOOL_WAIT,
-    PICO_AGENT_COMPACT_WAIT,
-    PICO_AGENT_ERROR,
-} PicoAgentState;
 
 typedef enum PicoUiSlot {
     PICO_SLOT_SIDEBAR = 0,
@@ -63,7 +55,7 @@ typedef enum PicoHook {
     PICO_HOOK_BEFORE_SUBMIT, /* set submit_cancel and/or agent_input */
     PICO_HOOK_ON_SUBMIT,
     PICO_HOOK_ON_MESSAGE,
-    PICO_HOOK_ON_COMPACT, /* set app->compact_summary to replace the default briefing */
+    PICO_HOOK_ON_COMPACT, /* pico_agent_set_compact_summary can replace the default briefing */
     PICO_HOOK_AFTER_COMPACT,
     PICO_HOOK_ON_TURN_END, /* idle after a finished turn (not cancel/error) */
     PICO_HOOK_ON_CANCEL,
@@ -87,7 +79,7 @@ typedef struct PicoModel {
     bool vision;
     char effort[PICO_MAX_EFFORTS][PICO_EFFORT_LEN];
     int effort_count;
-    char selected_effort[PICO_EFFORT_LEN];
+    char default_effort[PICO_EFFORT_LEN];
 } PicoModel;
 
 typedef struct PicoTraceLine {
@@ -332,22 +324,10 @@ typedef struct PicoSettings {
     bool resume_last;
 } PicoSettings;
 
-struct PicoAgentRt;
-typedef struct PicoAgentRt PicoAgentRt;
-
 typedef struct PicoApp {
-    PicoMessage *messages;
-    int message_count;
-    int message_capacity;
+    PicoAgent *agent; /* single active agent until PicoAgentManager is introduced */
     PicoComposer composer;
-    PicoAgentState agent_state;
-    PicoAgentRt *agent;
-    PicoSettings settings;
-    const char *model_name;
-    int tokens_used;
-    int tokens_cached;
-    int tokens_limit;
-    char *agent_error;
+    PicoSettings settings; /* defaults for newly created agents */
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
@@ -388,16 +368,9 @@ typedef struct PicoApp {
     bool hovered_tool;
     bool hovered_clickable;
     char workspace[4096];
-    char session_id[40];
-    char session_path[4096];
-    bool session_ephemeral;
     char *status_warn;
-    char agent_activity[256];
-    char *compact_summary;
-    PicoModel *models;
+    PicoModel *models; /* immutable capabilities and configured defaults */
     int model_count;
-    uint64_t session_input_tokens;
-    uint64_t session_cached_tokens;
 } PicoApp;
 
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
@@ -432,7 +405,10 @@ const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider);
 void pico_llm_result_free(PicoLlmResult *r);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook);
-void pico_session_log_custom(PicoApp *app, const char *ext, const char *data_json);
+/* Main thread. Logs to the explicit agent's session. */
+void pico_session_log_custom(PicoApp *app, PicoAgent *agent, const char *ext, const char *data_json);
+/* ON_COMPACT only. Takes ownership of malloc'd summary; NULL keeps default compaction. */
+void pico_agent_set_compact_summary(PicoApp *app, char *summary);
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
                  PicoSessionStart session_start, const char *session_file);

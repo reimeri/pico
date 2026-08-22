@@ -205,7 +205,7 @@ static void ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     m->context_limit = JsonObjInt(doc, obj, "context_limit", 0);
     int vis = JsonObjGet(doc, obj, "vision");
     m->vision = vis >= 0 && (JsonEq(doc, vis, "true") || JsonEq(doc, vis, "1"));
-    CopyField(m->selected_effort, sizeof(m->selected_effort), selected);
+    CopyField(m->default_effort, sizeof(m->default_effort), selected);
     int arr = JsonObjGet(doc, obj, "effort");
     int n = JsonIsArray(doc, arr) ? JsonArrayLen(doc, arr) : 0;
     for (int i = 0; i < n && m->effort_count < PICO_MAX_EFFORTS; i++)
@@ -352,7 +352,7 @@ static bool FileHasModels(const char *path)
     return has;
 }
 
-static PicoModel *FindModel(PicoApp *app, const char *id)
+PicoModel *PicoSettings_FindModel(PicoApp *app, const char *id)
 {
     if (!app || !id || !id[0])
     {
@@ -384,20 +384,15 @@ bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
     return false;
 }
 
-PicoModel *PicoSettings_ActiveModel(PicoApp *app)
+const PicoModel *PicoSettings_FindModelConst(const PicoApp *app, const char *id)
 {
-    return app ? FindModel(app, app->settings.model) : NULL;
-}
-
-const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app)
-{
-    if (!app || !app->settings.model[0])
+    if (!app || !id || !id[0])
     {
         return NULL;
     }
     for (int i = 0; i < app->model_count; i++)
     {
-        if (strcmp(app->models[i].id, app->settings.model) == 0)
+        if (strcmp(app->models[i].id, id) == 0)
         {
             return &app->models[i];
         }
@@ -405,51 +400,62 @@ const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app)
     return NULL;
 }
 
-const char *PicoSettings_ActiveEffort(const PicoApp *app)
+PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent)
 {
-    const PicoModel *m = PicoSettings_ActiveModelConst(app);
-    if (!m)
-    {
-        return "none";
-    }
-    if (PicoSettings_EffortAllowed(m, m->selected_effort))
-    {
-        return m->selected_effort;
-    }
-    if (m->effort_count > 0)
-    {
-        return m->effort[0];
-    }
-    return "none";
+    return agent ? PicoSettings_FindModel(app, agent->model) : NULL;
 }
 
-void PicoSettings_SyncActive(PicoApp *app)
+const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app, const PicoAgent *agent)
 {
-    if (!app)
+    return agent ? PicoSettings_FindModelConst(app, agent->model) : NULL;
+}
+
+const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
+{
+    return agent && agent->effort[0] ? agent->effort : "none";
+}
+
+void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent)
+{
+    if (!app || !agent)
     {
         return;
     }
-    PicoModel *m = PicoSettings_ActiveModel(app);
-    if (m && m->name[0])
-    {
-        app->model_name = m->name;
-    }
-    else
-    {
-        app->model_name = app->settings.model;
-    }
+    const PicoModel *m = PicoSettings_ActiveModelConst(app, agent);
+    snprintf(agent->model_name, sizeof(agent->model_name), "%s",
+             m && m->name[0] ? m->name : agent->model);
     if (app->settings.context_limit_set)
     {
-        app->tokens_limit = app->settings.context_limit;
+        agent->context_limit = app->settings.context_limit;
     }
     else if (m && m->context_limit > 0)
     {
-        app->tokens_limit = m->context_limit;
+        agent->context_limit = m->context_limit;
     }
     else
     {
-        app->tokens_limit = app->settings.context_limit;
+        agent->context_limit = app->settings.context_limit;
     }
+    if (!m || !PicoSettings_EffortAllowed(m, agent->effort))
+    {
+        const char *effort = m && PicoSettings_EffortAllowed(m, m->default_effort)
+                                 ? m->default_effort
+                                 : (m && m->effort_count > 0 ? m->effort[0] : "none");
+        snprintf(agent->effort, sizeof(agent->effort), "%s", effort);
+    }
+}
+
+void PicoSettings_InitAgent(const PicoApp *app, PicoAgent *agent)
+{
+    if (!app || !agent)
+    {
+        return;
+    }
+    snprintf(agent->model, sizeof(agent->model), "%s", app->settings.model);
+    agent->compact_enabled = app->settings.compact_enabled;
+    agent->compact_ratio = app->settings.compact_ratio;
+    agent->effort[0] = '\0';
+    PicoSettings_SyncAgent(app, agent);
 }
 
 static PicoModel *FindCatalog(PicoApp *app, const char *q)
@@ -468,9 +474,9 @@ static PicoModel *FindCatalog(PicoApp *app, const char *q)
     return NULL;
 }
 
-bool PicoSettings_SetModel(PicoApp *app, const char *id_or_name)
+bool PicoSettings_SetModel(PicoApp *app, PicoAgent *agent, const char *id_or_name)
 {
-    if (!app)
+    if (!app || !agent)
     {
         return false;
     }
@@ -483,24 +489,26 @@ bool PicoSettings_SetModel(PicoApp *app, const char *id_or_name)
         PicoOverlay_Notify(app, line);
         return false;
     }
+    snprintf(agent->model, sizeof(agent->model), "%s", m->id);
     snprintf(app->settings.model, sizeof(app->settings.model), "%s", m->id);
-    PicoSettings_SyncActive(app);
-    PicoSettings_SaveSelection(app, true, false);
-    PicoSession_LogModelChange(app, app->settings.model, PicoSettings_ActiveEffort(app));
+    agent->effort[0] = '\0';
+    PicoSettings_SyncAgent(app, agent);
+    PicoSettings_SaveSelection(app, agent, true, false);
+    PicoSession_LogModelChange(app, agent, agent->model, PicoSettings_ActiveEffort(agent));
     char line[256];
     snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
-             PicoSettings_ActiveEffort(app));
+             PicoSettings_ActiveEffort(agent));
     PicoOverlay_Notify(app, line);
     return true;
 }
 
-bool PicoSettings_SetEffort(PicoApp *app, const char *level)
+bool PicoSettings_SetEffort(PicoApp *app, PicoAgent *agent, const char *level)
 {
-    if (!app)
+    if (!app || !agent)
     {
         return false;
     }
-    PicoModel *m = PicoSettings_ActiveModel(app);
+    PicoModel *m = PicoSettings_ActiveModel(app, agent);
     if (!m)
     {
         PicoOverlay_Notify(app, "No model in the catalog. Add one in settings.json.");
@@ -517,11 +525,11 @@ bool PicoSettings_SetEffort(PicoApp *app, const char *level)
         PicoOverlay_Notify(app, line);
         return false;
     }
-    snprintf(m->selected_effort, sizeof(m->selected_effort), "%s", level);
-    PicoSettings_SaveSelection(app, false, true);
-    PicoSession_LogModelChange(app, app->settings.model, PicoSettings_ActiveEffort(app));
+    snprintf(agent->effort, sizeof(agent->effort), "%s", level);
+    PicoSettings_SaveSelection(app, agent, false, true);
+    PicoSession_LogModelChange(app, agent, agent->model, PicoSettings_ActiveEffort(agent));
     char line[256];
-    snprintf(line, sizeof(line), "Effort `%s` for `%s`", m->selected_effort, m->name[0] ? m->name : m->id);
+    snprintf(line, sizeof(line), "Effort `%s` for `%s`", agent->effort, m->name[0] ? m->name : m->id);
     PicoOverlay_Notify(app, line);
     return true;
 }
@@ -541,7 +549,7 @@ static void EnsureDefaultCatalog(PicoApp *app)
     snprintf(list[0].name, sizeof(list[0].name), "%s", app->settings.model);
     snprintf(list[0].provider, sizeof(list[0].provider), "%s", "openai");
     list[0].context_limit = app->settings.context_limit;
-    snprintf(list[0].selected_effort, sizeof(list[0].selected_effort), "%s", "none");
+    snprintf(list[0].default_effort, sizeof(list[0].default_effort), "%s", "none");
     app->models = list;
     app->model_count = 1;
 }
@@ -615,14 +623,12 @@ void PicoSettings_Load(PicoApp *app)
     const char *effort = getenv("PICO_EFFORT");
     if (effort && effort[0])
     {
-        PicoModel *m = PicoSettings_ActiveModel(app);
+        PicoModel *m = PicoSettings_FindModel(app, app->settings.model);
         if (m)
         {
-            snprintf(m->selected_effort, sizeof(m->selected_effort), "%s", effort);
+            snprintf(m->default_effort, sizeof(m->default_effort), "%s", effort);
         }
     }
-
-    PicoSettings_SyncActive(app);
 }
 
 static bool WriteFile(const char *path, const char *data, size_t len)
@@ -820,7 +826,7 @@ static bool PatchRootString(const char *path, const char *key, const char *value
     return ok;
 }
 
-static void WriteModelValue(JsonBuf *b, const PicoModel *m)
+static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected_effort)
 {
     JsonBuf_Puts(b, "{\"name\":");
     JsonBuf_String(b, m->name);
@@ -848,13 +854,14 @@ static void WriteModelValue(JsonBuf *b, const PicoModel *m)
         JsonBuf_String(b, m->effort[i]);
     }
     JsonBuf_Puts(b, "],\"selected_effort\":");
-    JsonBuf_String(b, m->selected_effort[0] ? m->selected_effort : "none");
+    JsonBuf_String(b, selected_effort && selected_effort[0] ? selected_effort :
+                      (m->default_effort[0] ? m->default_effort : "none"));
     JsonBuf_Putc(b, '}');
 }
 
-static bool PatchSelectedEffort(const char *path, PicoApp *app)
+static bool PatchSelectedEffort(const char *path, PicoApp *app, const PicoAgent *agent)
 {
-    PicoModel *active = PicoSettings_ActiveModel(app);
+    PicoModel *active = PicoSettings_ActiveModel(app, agent);
     if (!active)
     {
         return false;
@@ -866,9 +873,9 @@ static bool PatchSelectedEffort(const char *path, PicoApp *app)
         JsonBuf b;
         JsonBuf_Init(&b);
         JsonBuf_Puts(&b, "{\n  \"model\":");
-        JsonBuf_String(&b, app->settings.model);
+        JsonBuf_String(&b, agent->model);
         JsonBuf_Puts(&b, ",\n  \"models\":[");
-        WriteModelValue(&b, active);
+        WriteModelValue(&b, active, agent->effort);
         JsonBuf_Puts(&b, "]\n}\n");
         char *out = JsonBuf_Steal(&b);
         bool ok = WriteFile(path, out, out ? strlen(out) : 0);
@@ -903,7 +910,8 @@ static bool PatchSelectedEffort(const char *path, PicoApp *app)
             {
                 JsonBuf_Putc(&b, ',');
             }
-            WriteModelValue(&b, &app->models[i]);
+            WriteModelValue(&b, &app->models[i],
+                            strcmp(app->models[i].id, agent->model) == 0 ? agent->effort : NULL);
         }
         JsonBuf_Putc(&b, ']');
         char *val = JsonBuf_Steal(&b);
@@ -931,11 +939,11 @@ static bool PatchSelectedEffort(const char *path, PicoApp *app)
             int tok = JsonObjGet(&doc, found, "selected_effort");
             if (tok >= 0)
             {
-                ok = PatchStringTok(&src, &len, &doc, tok, active->selected_effort);
+                ok = PatchStringTok(&src, &len, &doc, tok, agent->effort);
             }
             else
             {
-                char *quoted = JsonQuoted(active->selected_effort);
+                char *quoted = JsonQuoted(agent->effort);
                 ok = InsertObjectKey(&src, &len, &doc, found, "selected_effort", quoted);
                 free(quoted);
             }
@@ -951,9 +959,9 @@ static bool PatchSelectedEffort(const char *path, PicoApp *app)
     return ok;
 }
 
-bool PicoSettings_SaveSelection(PicoApp *app, bool save_model, bool save_effort)
+bool PicoSettings_SaveSelection(PicoApp *app, const PicoAgent *agent, bool save_model, bool save_effort)
 {
-    if (!app)
+    if (!app || !agent)
     {
         return false;
     }
@@ -965,7 +973,7 @@ bool PicoSettings_SaveSelection(PicoApp *app, bool save_model, bool save_effort)
     if (save_model)
     {
         const char *path = SettingsFileExists(workspace) ? workspace : user;
-        ok = PatchRootString(path, "model", app->settings.model) && ok;
+        ok = PatchRootString(path, "model", agent->model) && ok;
     }
     if (save_effort)
     {
@@ -974,7 +982,7 @@ bool PicoSettings_SaveSelection(PicoApp *app, bool save_model, bool save_effort)
         {
             path = SettingsFileExists(workspace) ? workspace : user;
         }
-        ok = PatchSelectedEffort(path, app) && ok;
+        ok = PatchSelectedEffort(path, app, agent) && ok;
     }
     return ok;
 }

@@ -1,4 +1,6 @@
 #define _DEFAULT_SOURCE
+
+#include "../agent_internal.h"
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
@@ -39,14 +41,14 @@ bool PicoFooter_MenuOpen(void)
 
 static const char *AgentStateName(const PicoApp *app)
 {
-    switch (app->agent_state)
+    switch (app->agent->state)
     {
         case PICO_AGENT_IDLE:
             return "idle";
         case PICO_AGENT_LLM_WAIT:
             return "waiting on model";
         case PICO_AGENT_TOOL_WAIT:
-            return PicoAgent_AskUiOpen(app) ? "waiting for you" : "running tool";
+            return PicoAgent_AskUiOpen(app->agent) ? "waiting for you" : "running tool";
         case PICO_AGENT_COMPACT_WAIT:
             return "compacting";
         case PICO_AGENT_ERROR:
@@ -117,7 +119,7 @@ static int MenuCount(const PicoApp *app)
     }
     if (g_menu == FOOTER_MENU_EFFORT)
     {
-        const PicoModel *m = PicoSettings_ActiveModelConst(app);
+        const PicoModel *m = PicoSettings_ActiveModelConst(app, app->agent);
         return m ? m->effort_count : 0;
     }
     return 0;
@@ -169,7 +171,7 @@ static void OpenMenu(PicoApp *app, FooterMenu which)
     }
     if (which == FOOTER_MENU_EFFORT)
     {
-        PicoModel *m = PicoSettings_ActiveModel(app);
+        PicoModel *m = PicoSettings_ActiveModel(app, app->agent);
         if (!m || m->effort_count <= 0)
         {
             return;
@@ -191,8 +193,8 @@ static void OpenMenu(PicoApp *app, FooterMenu which)
     }
     else
     {
-        PicoModel *m = PicoSettings_ActiveModel(app);
-        const char *cur = PicoSettings_ActiveEffort(app);
+        PicoModel *m = PicoSettings_ActiveModel(app, app->agent);
+        const char *cur = PicoSettings_ActiveEffort(app->agent);
         if (m && cur)
         {
             for (int i = 0; i < m->effort_count; i++)
@@ -211,14 +213,14 @@ static void Accept(PicoApp *app)
 {
     if (g_menu == FOOTER_MENU_MODEL && g_selected >= 0 && g_selected < app->model_count)
     {
-        PicoSettings_SetModel(app, app->models[g_selected].id);
+        PicoSettings_SetModel(app, app->agent, app->models[g_selected].id);
     }
     else if (g_menu == FOOTER_MENU_EFFORT)
     {
-        PicoModel *m = PicoSettings_ActiveModel(app);
+        PicoModel *m = PicoSettings_ActiveModel(app, app->agent);
         if (m && g_selected >= 0 && g_selected < m->effort_count)
         {
-            PicoSettings_SetEffort(app, m->effort[g_selected]);
+            PicoSettings_SetEffort(app, app->agent, m->effort[g_selected]);
         }
     }
     CloseMenu();
@@ -239,7 +241,7 @@ static bool FolderDialogGraphic(void)
 static void RequestFolder(PicoApp *app)
 {
     CloseMenu();
-    if (PicoAgent_IsBusy(app))
+    if (PicoAgent_IsBusy(app->agent))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
         return;
@@ -289,7 +291,7 @@ static void RenderMenu(PicoApp *app)
             }
             else
             {
-                PicoModel *m = PicoSettings_ActiveModel(app);
+                PicoModel *m = PicoSettings_ActiveModel(app, app->agent);
                 label = m ? m->effort[i] : "";
             }
             Clay_Color bg = i == g_selected ? COLOR_CODE_BG : COLOR_CONTENT_BG;
@@ -338,15 +340,15 @@ static void Chip(Clay_ElementId id, const char *text, bool open, bool with_menu,
 void PicoFooter_Render(PicoApp *app)
 {
     const char *extra = "";
-    if (PicoAgent_IsBusy(app) && PicoAgent_CancelRequested(app))
+    if (PicoAgent_IsBusy(app->agent) && PicoAgent_CancelRequested(app->agent))
     {
         extra = "Esc again to force";
     }
-    else if (PicoAgent_IsBusy(app))
+    else if (PicoAgent_IsBusy(app->agent))
     {
         extra = "Esc to cancel";
     }
-    else if (app->agent_state == PICO_AGENT_ERROR)
+    else if (app->agent->state == PICO_AGENT_ERROR)
     {
         extra = "Esc to dismiss";
     }
@@ -355,23 +357,23 @@ void PicoFooter_Render(PicoApp *app)
     snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app));
     snprintf(g_extra, sizeof(g_extra), "%s", extra);
     int cache_percent = 0;
-    if (PicoUsage_SessionPercent(app, &cache_percent))
+    if (PicoUsage_SessionPercent(app->agent, &cache_percent))
     {
-        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens  ·  %d%% cache", app->tokens_used,
-                 app->tokens_limit, cache_percent);
+        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens  ·  %d%% cache", app->agent->tokens_used,
+                 app->agent->context_limit, cache_percent);
     }
     else
     {
-        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens", app->tokens_used, app->tokens_limit);
+        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens", app->agent->tokens_used, app->agent->context_limit);
     }
 
-    PicoModel *active = PicoSettings_ActiveModel(app);
+    PicoModel *active = PicoSettings_ActiveModel(app, app->agent);
     bool show_effort = active && active->effort_count > 0;
-    const char *model = app->model_name ? app->model_name : "?";
+    const char *model = app->agent->model_name ? app->agent->model_name : "?";
     snprintf(g_model, sizeof(g_model), "%s", model);
     if (show_effort)
     {
-        const char *effort = PicoSettings_ActiveEffort(app);
+        const char *effort = PicoSettings_ActiveEffort(app->agent);
         snprintf(g_effort, sizeof(g_effort), "%s", effort ? effort : "none");
     }
     else
@@ -412,7 +414,7 @@ void PicoFooter_Render(PicoApp *app)
 
 static void FooterAfterLayout(PicoApp *app)
 {
-    if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(app))
+    if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(app->agent))
     {
         app->hovered_clickable = false;
         return;
@@ -510,7 +512,7 @@ static void FooterOnFrame(PicoApp *app, float dt)
         return;
     }
     g_want_folder = false;
-    if (PicoAgent_IsBusy(app))
+    if (PicoAgent_IsBusy(app->agent))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
         return;

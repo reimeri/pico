@@ -30,7 +30,7 @@ static const char *kTodoParams =
     "\"pattern\":\"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$\"},"
     "\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300},"
     "\"status\":{\"type\":\"string\",\"enum\":[\"pending\",\"in_progress\",\"completed\"]}},"
-    "\"required\":[\"id\",\"text\",\"status\"]}}},"
+    "\"required\":[\"id\",\"text\",\"status\"]}},"
     "\"explanation\":{\"type\":\"string\",\"maxLength\":300}},\"required\":[\"todos\"]}";
 
 static Clay_String CStr(const char *s)

@@ -24,10 +24,10 @@ All of these run on the main thread.
 - `PICO_HOOK_ON_SUBMIT` — after the user message is logged and the agent turn started.
 - `PICO_HOOK_ON_MESSAGE` — after `PicoApp_AddMessage`.
 - `PICO_HOOK_ON_COMPACT` — compaction starting. Custom briefing.
-- `PICO_HOOK_AFTER_COMPACT` — history was replaced with a briefing. `agent_state` is still `PICO_AGENT_COMPACT_WAIT` until `ON_TURN_END`.
+- `PICO_HOOK_AFTER_COMPACT` — history was replaced with a briefing. The active agent snapshot remains `PICO_AGENT_COMPACT_WAIT` until `ON_TURN_END`.
 - `PICO_HOOK_ON_TURN_END` — the agent is idle after a finished turn. Not fired on cancel or error. Compact is not idle; this waits until compaction completes.
 - `PICO_HOOK_ON_CANCEL` — the user cancelled the turn (Esc / force-cancel). State is idle. Distinct from tool-hook deny.
-- `PICO_HOOK_ON_ERROR` — `agent_state` is `PICO_AGENT_ERROR`; `app->agent_error` is set.
+- `PICO_HOOK_ON_ERROR` — the active `PicoAgentInfo.state` is `PICO_AGENT_ERROR`.
 - `PICO_HOOK_ON_SESSION_RESET` — a new, resumed, ephemeral, or changed-workspace session is starting. Clear session-scoped extension state. Session replay apply callbacks run afterward.
 
 ## BEFORE_SUBMIT
@@ -43,7 +43,7 @@ The builtin `commands` extension dispatches `/name` here. The builtin `files` ex
 
 ## ON_COMPACT
 
-Set `app->compact_summary` to a malloc'd briefing to skip the default LLM compact. Pico frees it. Leave it NULL to keep the default.
+Call `pico_agent_set_compact_summary(app, briefing)` with a malloc'd briefing to skip the default LLM compact. Pico takes ownership. Do not call it outside `PICO_HOOK_ON_COMPACT`; leave it uncalled (or pass NULL) to keep the default.
 
 `PICO_HOOK_AFTER_COMPACT` runs after that briefing is applied (custom or LLM). Then `PICO_HOOK_ON_TURN_END` if the agent goes idle.
 
@@ -61,7 +61,7 @@ Set `app->compact_summary` to a malloc'd briefing to skip the default LLM compac
 - `executed` / `is_error` — AFTER only: outcome metadata. Denied calls have `executed = false` and `is_error = true`
 - `result` — malloc'd. BEFORE: used only with `deny` (default `User denied this tool.`). AFTER: replaces the output sent to the model
 
-**BEFORE** runs on the worker, in the tool slot, before `run`. You may call `pico_tool_ask`. First `deny` wins. After the hooks return, core checks cancel: Esc/`PICO_ASK_CANCEL` wins over deny and still does not call `run`. Overlay Deny is not Esc — set `deny` yourself (see `examples/permit_tool.c`).
+**BEFORE** runs on the worker, in the tool slot, before `run`. Its `PicoApp *` is the restricted heap execution-host view described in [agents](agents.md), has no active agent/UI/session state, and must not be retained. You may call `pico_tool_ask`. First `deny` wins. After the hooks return, core checks cancel: Esc/`PICO_ASK_CANCEL` wins over deny and still does not call `run`. Overlay Deny is not Esc — set `deny` yourself (see `examples/permit_tool.c`).
 
 **AFTER** runs on the main thread when a result is about to go to the model (allow and deny). Skipped on turn cancel. `args_json` is read-only. Non-NULL `result` replaces output; later AFTER hooks see the new text.
 

@@ -58,7 +58,9 @@ typedef enum PicoWorkKind {
 } PicoWorkKind;
 
 struct PicoAgentRt {
-    PicoApp *app;
+    /* Heap-owned callback host. It contains only copied worker-facing services,
+     * never the stack/UI PicoApp or an active-agent pointer. */
+    PicoApp worker_host;
     pthread_t thread;
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -143,8 +145,9 @@ typedef enum PicoWorkerContext {
 } PicoWorkerContext;
 static __thread PicoWorkerContext t_worker_context;
 
-static void SetErrorState(PicoApp *app, const char *msg);
-static void FinishAssistantHistory(PicoApp *app);
+static void SetErrorState(PicoApp *app, PicoAgent *agent, const char *msg);
+static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent);
+static void RefreshWorkerHost(PicoAgentRt *rt, const PicoApp *app);
 static char *BuildUserItem(const char *text);
 static void *WorkerMain(void *arg);
 
@@ -305,9 +308,9 @@ static void BufSet(char **buf, size_t *len, size_t *cap, const char *s, size_t n
     }
 }
 
-static void SetActivity(PicoApp *app, const char *msg)
+static void SetActivity(PicoApp *app, PicoAgent *agent, const char *msg)
 {
-    snprintf(app->agent_activity, sizeof(app->agent_activity), "%s", msg ? msg : "");
+    snprintf(agent->activity, sizeof(agent->activity), "%s", msg ? msg : "");
 }
 
 static char *EncodeResult(const PicoLlmResult *r)
@@ -436,7 +439,7 @@ static bool WorkerIsCancelled(PicoAgentRt *rt)
 static char *RunToolBeforeHooks(PicoAgentRt *rt, const char *name, const char *call_id, char **args_inout,
                                 bool *denied)
 {
-    PicoApp *app = rt->app;
+    PicoApp *app = &rt->worker_host;
     *denied = false;
     char *args = *args_inout;
     if (!args)
@@ -735,7 +738,8 @@ static void *WorkerMain(void *arg)
             PicoLlmResult result;
             memset(&result, 0, sizeof(result));
             t_worker_context = PICO_WORKER_PROVIDER;
-            int rc = stream_fn ? stream_fn(rt->app, &turn, CancelCb, DeltaCb, rt, &result) : PICO_LLM_FAIL;
+            int rc = stream_fn ? stream_fn(&rt->worker_host, &turn, CancelCb, DeltaCb, rt, &result)
+                               : PICO_LLM_FAIL;
             t_worker_context = PICO_WORKER_NONE;
             if (rc == PICO_LLM_CANCEL)
             {
@@ -790,7 +794,7 @@ static void *WorkerMain(void *arg)
                 memset(&result, 0, sizeof(result));
                 if (tool_fn)
                 {
-                    tool_fn(rt->app, tool_args ? tool_args : "{}", &result);
+                    tool_fn(&rt->worker_host, tool_args ? tool_args : "{}", &result);
                     bool details_valid = false;
                     result.details_json = ValidateToolDetails(result.details_json, &details_valid);
                     if (!details_valid)
@@ -887,13 +891,14 @@ static void RunContextHooks(PicoApp *app, bool compact, char ***input_inout, int
     *count_inout = base_count + extra_count;
 }
 
-static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
+static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_tools)
 {
-    PicoAgentRt *rt = app->agent;
-    PicoModel *m = PicoSettings_ActiveModel(app);
+    PicoAgentRt *rt = agent->runtime;
+    RefreshWorkerHost(rt, app);
+    PicoModel *m = PicoSettings_ActiveModel(app, agent);
     if (!m || !m->provider[0])
     {
-        SetErrorState(app, "Active model has no provider. Set `provider` on the model in settings.json.");
+        SetErrorState(app, agent, "Active model has no provider. Set `provider` on the model in settings.json.");
         return false;
     }
     const PicoProvider *p = pico_find_provider(app, m->provider);
@@ -902,7 +907,7 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
         char buf[256];
         snprintf(buf, sizeof(buf), "No provider `%s` for model `%s`.", m->provider,
                  m->id[0] ? m->id : "?");
-        SetErrorState(app, buf);
+        SetErrorState(app, agent, buf);
         return false;
     }
 
@@ -913,7 +918,7 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
         input = (char **)calloc((size_t)input_count, sizeof(char *));
         if (!input)
         {
-            SetErrorState(app, "out of memory");
+            SetErrorState(app, agent, "out of memory");
             return false;
         }
         for (int i = 0; i < input_count; i++)
@@ -948,7 +953,7 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
     rt->turn_provider = Dup(p->name);
     rt->work_model = Dup(m->id);
     rt->work_base_url = Dup(m->base_url);
-    rt->work_effort = Dup(PicoSettings_ActiveEffort(app));
+    rt->work_effort = Dup(PicoSettings_ActiveEffort(agent));
     rt->work_instructions = instructions;
     rt->work_cache_key = Dup(rt->cache_key);
     rt->work_compact = compact;
@@ -964,8 +969,10 @@ static bool QueueLlm(PicoApp *app, bool compact, bool include_tools)
     return true;
 }
 
-static bool QueueTool(PicoAgentRt *rt, const char *name, const char *args, const char *call_id, PicoToolFn fn)
+static bool QueueTool(PicoApp *app, PicoAgentRt *rt, const char *name, const char *args,
+                      const char *call_id, PicoToolFn fn)
 {
+    RefreshWorkerHost(rt, app);
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
     {
@@ -1064,13 +1071,13 @@ static char *BuildRawItem(const char *provider, const char *json)
     return JsonBuf_Steal(&b);
 }
 
-static void AppendMessageText(PicoApp *app, int idx, const char *s, size_t n)
+static void AppendMessageText(PicoApp *app, PicoAgent *agent, int idx, const char *s, size_t n)
 {
-    if (idx < 0 || idx >= app->message_count || !s || n == 0)
+    if (idx < 0 || idx >= agent->message_count || !s || n == 0)
     {
         return;
     }
-    PicoMessage *m = &app->messages[idx];
+    PicoMessage *m = &agent->messages[idx];
     size_t old = m->source ? strlen(m->source) : 0;
     char *next = (char *)realloc(m->source, old + n + 1);
     if (!next)
@@ -1082,49 +1089,49 @@ static void AppendMessageText(PicoApp *app, int idx, const char *s, size_t n)
     m->source = next;
 }
 
-static void ReparseMessage(PicoApp *app, int idx)
+static void ReparseMessage(PicoApp *app, PicoAgent *agent, int idx)
 {
-    if (idx < 0 || idx >= app->message_count)
+    if (idx < 0 || idx >= agent->message_count)
     {
         return;
     }
-    PicoMessage *m = &app->messages[idx];
+    PicoMessage *m = &agent->messages[idx];
     MdDocument_Free(&m->doc);
     size_t len = m->source ? strlen(m->source) : 0;
     m->doc = MdDocument_ParseEx(m->source ? m->source : "", len, MD_PARSE_DEFAULT);
 }
 
-static void SetMessageText(PicoApp *app, int idx, const char *text)
+static void SetMessageText(PicoApp *app, PicoAgent *agent, int idx, const char *text)
 {
-    if (idx < 0 || idx >= app->message_count)
+    if (idx < 0 || idx >= agent->message_count)
     {
         return;
     }
-    PicoMessage *m = &app->messages[idx];
+    PicoMessage *m = &agent->messages[idx];
     free(m->source);
     m->source = Dup(text ? text : "");
-    ReparseMessage(app, idx);
+    ReparseMessage(app, agent, idx);
 }
 
-static void PopLastMessage(PicoApp *app)
+static void PopLastMessage(PicoApp *app, PicoAgent *agent)
 {
-    if (app->message_count <= 0)
+    if (agent->message_count <= 0)
     {
         return;
     }
-    int i = --app->message_count;
-    free(app->messages[i].source);
-    for (int t = 0; t < app->messages[i].trace_count; t++)
+    int i = --agent->message_count;
+    free(agent->messages[i].source);
+    for (int t = 0; t < agent->messages[i].trace_count; t++)
     {
-        free(app->messages[i].trace[t].text);
-        free(app->messages[i].trace[t].tool_name);
-        free(app->messages[i].trace[t].tool_args);
-        free(app->messages[i].trace[t].tool_output);
-        MdDocument_Free(&app->messages[i].trace[t].doc);
+        free(agent->messages[i].trace[t].text);
+        free(agent->messages[i].trace[t].tool_name);
+        free(agent->messages[i].trace[t].tool_args);
+        free(agent->messages[i].trace[t].tool_output);
+        MdDocument_Free(&agent->messages[i].trace[t].doc);
     }
-    free(app->messages[i].trace);
-    MdDocument_Free(&app->messages[i].doc);
-    memset(&app->messages[i], 0, sizeof(app->messages[i]));
+    free(agent->messages[i].trace);
+    MdDocument_Free(&agent->messages[i].doc);
+    memset(&agent->messages[i], 0, sizeof(agent->messages[i]));
 }
 
 static bool Blank(const char *s)
@@ -1140,28 +1147,28 @@ static bool Blank(const char *s)
     return *s == '\0';
 }
 
-static bool MessageSourceEmpty(const PicoApp *app, int idx)
+static bool MessageSourceEmpty(const PicoAgent *agent, int idx)
 {
-    if (idx < 0 || idx >= app->message_count)
+    if (idx < 0 || idx >= agent->message_count)
     {
         return true;
     }
-    return Blank(app->messages[idx].source);
+    return Blank(agent->messages[idx].source);
 }
 
-static bool MessageEmpty(const PicoApp *app, int idx)
+static bool MessageEmpty(const PicoAgent *agent, int idx)
 {
-    if (idx < 0 || idx >= app->message_count)
+    if (idx < 0 || idx >= agent->message_count)
     {
         return true;
     }
-    if (!Blank(app->messages[idx].source))
+    if (!Blank(agent->messages[idx].source))
     {
         return false;
     }
-    for (int t = 0; t < app->messages[idx].trace_count; t++)
+    for (int t = 0; t < agent->messages[idx].trace_count; t++)
     {
-        if (!Blank(app->messages[idx].trace[t].text) || !Blank(app->messages[idx].trace[t].tool_name))
+        if (!Blank(agent->messages[idx].trace[t].text) || !Blank(agent->messages[idx].trace[t].tool_name))
         {
             return false;
         }
@@ -1196,13 +1203,13 @@ static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
     return line;
 }
 
-static void TraceAppendThink(PicoApp *app, int idx, const char *s, size_t n)
+static void TraceAppendThink(PicoApp *app, PicoAgent *agent, int idx, const char *s, size_t n)
 {
-    if (idx < 0 || idx >= app->message_count || !s || n == 0)
+    if (idx < 0 || idx >= agent->message_count || !s || n == 0)
     {
         return;
     }
-    PicoMessage *m = &app->messages[idx];
+    PicoMessage *m = &agent->messages[idx];
     PicoTraceLine *line = NULL;
     if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool &&
         m->trace[m->trace_count - 1].think_steps == 0)
@@ -1258,13 +1265,13 @@ static void ReparseThinkSummary(PicoTraceLine *line)
     line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
 }
 
-static void TraceSetThinkSummary(PicoApp *app, int idx, const char *s, size_t n, int steps)
+static void TraceSetThinkSummary(PicoApp *app, PicoAgent *agent, int idx, const char *s, size_t n, int steps)
 {
-    if (idx < 0 || idx >= app->message_count || !s || n == 0)
+    if (idx < 0 || idx >= agent->message_count || !s || n == 0)
     {
         return;
     }
-    PicoMessage *m = &app->messages[idx];
+    PicoMessage *m = &agent->messages[idx];
     PicoTraceLine *line = NULL;
     if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool &&
         m->trace[m->trace_count - 1].think_steps > 0)
@@ -1298,22 +1305,22 @@ static void TraceSetThinkSummary(PicoApp *app, int idx, const char *s, size_t n,
     ReparseThinkSummary(line);
 }
 
-static void TraceAddTool(PicoApp *app, int idx, const char *name, const char *args_json)
+static void TraceAddTool(PicoApp *app, PicoAgent *agent, int idx, const char *name, const char *args_json)
 {
-    if (idx < 0 || idx >= app->message_count)
+    if (idx < 0 || idx >= agent->message_count)
     {
         return;
     }
-    PicoApp_AddToolCall(app, name, args_json);
+    PicoAgent_AddToolCall(app, agent, name, args_json);
 }
 
-static void TraceSetLastToolOutput(PicoApp *app, int idx, const char *output, bool is_error)
+static void TraceSetLastToolOutput(PicoApp *app, PicoAgent *agent, int idx, const char *output, bool is_error)
 {
-    if (idx < 0 || idx >= app->message_count)
+    if (idx < 0 || idx >= agent->message_count)
     {
         return;
     }
-    PicoMessage *m = &app->messages[idx];
+    PicoMessage *m = &agent->messages[idx];
     for (int t = m->trace_count - 1; t >= 0; t--)
     {
         if (m->trace[t].is_tool)
@@ -1366,228 +1373,228 @@ static void PushFunctionOutput(PicoAgentRt *rt, const char *call_id, const char 
     PushInput(rt, BuildToolResult(call_id, name, output, is_error));
 }
 
-static void AbortRemainingCalls(PicoAgentRt *rt)
+static void AbortRemainingCalls(PicoApp *app, PicoAgent *agent, PicoAgentRt *rt)
 {
     for (int i = rt->pending_next; i < rt->pending_count; i++)
     {
         PushFunctionOutput(rt, rt->pending[i].call_id, rt->pending[i].name, "(interrupted)", true);
-        PicoSession_LogToolResult(rt->app, rt->pending[i].call_id, rt->pending[i].name,
+        PicoSession_LogToolResult(app, agent, rt->pending[i].call_id, rt->pending[i].name,
                                   "(interrupted)", true, NULL);
     }
     ClearPending(rt);
 }
 
-static void GoIdle(PicoApp *app)
+static void GoIdle(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
-    app->agent_state = PICO_AGENT_IDLE;
+    PicoAgentRt *rt = agent->runtime;
+    agent->state = PICO_AGENT_IDLE;
     rt->stream_msg = -1;
     rt->stream_dirty = false;
     rt->compacting = false;
     rt->compact_no_tools = false;
-    app->agent_activity[0] = '\0';
+    agent->activity[0] = '\0';
 }
 
-static void EndTurnIdle(PicoApp *app)
+static void EndTurnIdle(PicoApp *app, PicoAgent *agent)
 {
-    GoIdle(app);
+    GoIdle(app, agent);
     pico_run_hooks(app, PICO_HOOK_ON_TURN_END);
 }
 
-static void ApplyCancel(PicoApp *app)
+static void ApplyCancel(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     if (rt->compacting)
     {
-        GoIdle(app);
+        GoIdle(app, agent);
         pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
         return;
     }
-    FinishAssistantHistory(app);
-    if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+    FinishAssistantHistory(app, agent);
+    if (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
     {
-        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source);
+        PicoSession_LogAssistant(app, agent, agent->messages[rt->stream_msg].source);
     }
-    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
+    if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
-        PopLastMessage(app);
+        PopLastMessage(app, agent);
     }
     bool open_tool = rt->pending_next < rt->pending_count;
-    AbortRemainingCalls(rt);
+    AbortRemainingCalls(app, agent, rt);
     if (open_tool && rt->stream_msg >= 0)
     {
-        TraceSetLastToolOutput(app, rt->stream_msg, "(interrupted)", true);
+        TraceSetLastToolOutput(app, agent, rt->stream_msg, "(interrupted)", true);
     }
-    GoIdle(app);
+    GoIdle(app, agent);
     pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
 }
 
-static int CompactThreshold(const PicoApp *app)
+static int CompactThreshold(const PicoAgent *agent)
 {
-    if (!app->settings.compact_enabled || app->tokens_limit <= 0)
+    if (!agent->compact_enabled || agent->context_limit <= 0)
     {
         return 0;
     }
-    int t = (int)((double)app->tokens_limit * app->settings.compact_ratio);
+    int t = (int)((double)agent->context_limit * agent->compact_ratio);
     return t > 0 ? t : 0;
 }
 
-static void ApplyCompaction(PicoApp *app, const char *summary)
+static void ApplyCompaction(PicoApp *app, PicoAgent *agent, const char *summary)
 {
-    int before = app->tokens_used;
-    PicoAgent_ClearInput(app);
+    int before = agent->tokens_used;
+    PicoAgent_ClearInput(agent);
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "Briefing:\n");
     JsonBuf_Puts(&b, summary ? summary : "");
-    PicoAgent_PushHistoryUser(app, b.data ? b.data : "Briefing:\n");
+    PicoAgent_PushHistoryUser(agent, b.data ? b.data : "Briefing:\n");
     JsonBuf_Free(&b);
-    PicoAgent_RotateCacheKey(app);
-    PicoSession_LogCompaction(app, summary, before);
-    app->tokens_used = 0;
-    app->tokens_cached = 0;
-    free(app->compact_summary);
-    app->compact_summary = NULL;
+    PicoAgent_RotateCacheKey(agent);
+    PicoSession_LogCompaction(app, agent, summary, before);
+    agent->tokens_used = 0;
+    agent->tokens_cached = 0;
+    free(agent->compact_summary);
+    agent->compact_summary = NULL;
     pico_run_hooks(app, PICO_HOOK_AFTER_COMPACT);
 }
 
-static void StartCompact(PicoApp *app)
+static void StartCompact(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     rt->stream_msg = -1;
     rt->stream_dirty = false;
-    app->agent_state = PICO_AGENT_COMPACT_WAIT;
-    SetActivity(app, "Compacting…");
-    free(app->compact_summary);
-    app->compact_summary = NULL;
+    agent->state = PICO_AGENT_COMPACT_WAIT;
+    SetActivity(app, agent, "Compacting…");
+    free(agent->compact_summary);
+    agent->compact_summary = NULL;
     pico_run_hooks(app, PICO_HOOK_ON_COMPACT);
-    if (app->compact_summary && app->compact_summary[0])
+    if (agent->compact_summary && agent->compact_summary[0])
     {
-        ApplyCompaction(app, app->compact_summary);
-        EndTurnIdle(app);
+        ApplyCompaction(app, agent, agent->compact_summary);
+        EndTurnIdle(app, agent);
         return;
     }
     rt->compacting = true;
     rt->compact_no_tools = false;
-    if (!QueueLlm(app, true, true))
+    if (!QueueLlm(app, agent, true, true))
     {
-        SetErrorState(app, "Failed to start compaction");
+        SetErrorState(app, agent, "Failed to start compaction");
     }
 }
 
-static void FinishTurn(PicoApp *app)
+static void FinishTurn(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
-    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
+    PicoAgentRt *rt = agent->runtime;
+    if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
-        PopLastMessage(app);
+        PopLastMessage(app, agent);
     }
-    if (CompactThreshold(app) > 0 && app->tokens_used >= CompactThreshold(app))
+    if (CompactThreshold(agent) > 0 && agent->tokens_used >= CompactThreshold(agent))
     {
-        StartCompact(app);
+        StartCompact(app, agent);
         return;
     }
-    EndTurnIdle(app);
+    EndTurnIdle(app, agent);
 }
 
-static void SetErrorState(PicoApp *app, const char *msg)
+static void SetErrorState(PicoApp *app, PicoAgent *agent, const char *msg)
 {
-    PicoAgentRt *rt = app->agent;
-    free(app->agent_error);
-    app->agent_error = Dup(msg ? msg : "agent error");
-    app->agent_state = PICO_AGENT_ERROR;
-    if (rt->stream_msg >= 0 && MessageEmpty(app, rt->stream_msg))
+    PicoAgentRt *rt = agent->runtime;
+    free(agent->error);
+    agent->error = Dup(msg ? msg : "agent error");
+    agent->state = PICO_AGENT_ERROR;
+    if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
-        SetMessageText(app, rt->stream_msg, app->agent_error);
+        SetMessageText(app, agent, rt->stream_msg, agent->error);
     }
     rt->stream_msg = -1;
     rt->stream_dirty = false;
     ClearPending(rt);
     rt->compacting = false;
     rt->compact_no_tools = false;
-    app->agent_activity[0] = '\0';
+    agent->activity[0] = '\0';
     pico_run_hooks(app, PICO_HOOK_ON_ERROR);
 }
 
-static void StartLlm(PicoApp *app);
+static void StartLlm(PicoApp *app, PicoAgent *agent);
 
-static void StartNextTool(PicoApp *app)
+static void StartNextTool(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     if (rt->pending_next >= rt->pending_count)
     {
         ClearPending(rt);
-        StartLlm(app);
+        StartLlm(app, agent);
         return;
     }
     PicoPendingCall *call = &rt->pending[rt->pending_next];
-    app->agent_state = PICO_AGENT_TOOL_WAIT;
-    SetActivity(app, call->name && call->name[0] ? call->name : "tool");
+    agent->state = PICO_AGENT_TOOL_WAIT;
+    SetActivity(app, agent, call->name && call->name[0] ? call->name : "tool");
     PicoTool *tool = FindTool(app, call->name);
-    if (!QueueTool(rt, call->name, call->arguments, call->call_id, tool ? tool->run : NULL))
+    if (!QueueTool(app, rt, call->name, call->arguments, call->call_id, tool ? tool->run : NULL))
     {
-        SetErrorState(app, "Failed to start tool");
+        SetErrorState(app, agent, "Failed to start tool");
     }
 }
 
-static void StartLlm(PicoApp *app)
+static void StartLlm(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
-    int last = app->message_count - 1;
-    if (last >= 0 && app->messages[last].role == PICO_ROLE_ASSISTANT && MessageSourceEmpty(app, last))
+    PicoAgentRt *rt = agent->runtime;
+    int last = agent->message_count - 1;
+    if (last >= 0 && agent->messages[last].role == PICO_ROLE_ASSISTANT && MessageSourceEmpty(agent, last))
     {
         rt->stream_msg = last;
     }
     else
     {
-        PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, "");
-        rt->stream_msg = app->message_count - 1;
+        PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
+        rt->stream_msg = agent->message_count - 1;
     }
     rt->stream_dirty = false;
-    app->agent_state = PICO_AGENT_LLM_WAIT;
-    SetActivity(app, "Thinking…");
-    free(app->agent_error);
-    app->agent_error = NULL;
-    if (!QueueLlm(app, false, true))
+    agent->state = PICO_AGENT_LLM_WAIT;
+    SetActivity(app, agent, "Thinking…");
+    free(agent->error);
+    agent->error = NULL;
+    if (!QueueLlm(app, agent, false, true))
     {
-        SetErrorState(app, "Failed to start model request");
+        SetErrorState(app, agent, "Failed to start model request");
     }
 }
 
-static void FinishAssistantHistory(PicoApp *app)
+static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
-    if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+    PicoAgentRt *rt = agent->runtime;
+    if (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
     {
-        PushInput(rt, BuildAssistantItem(app->messages[rt->stream_msg].source));
+        PushInput(rt, BuildAssistantItem(agent->messages[rt->stream_msg].source));
     }
 }
 
-static void IngestResult(PicoApp *app, const char *payload)
+static void IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     if (!payload)
     {
-        FinishAssistantHistory(app);
+        FinishAssistantHistory(app, agent);
         return;
     }
     JsonDoc doc;
     if (JsonParse(&doc, payload, strlen(payload)) != 0)
     {
-        FinishAssistantHistory(app);
+        FinishAssistantHistory(app, agent);
         return;
     }
 
     char *assistant = JsonObjStr(&doc, 0, "assistant_text");
-    if (rt->stream_msg >= 0 && MessageSourceEmpty(app, rt->stream_msg) && assistant && assistant[0])
+    if (rt->stream_msg >= 0 && MessageSourceEmpty(agent, rt->stream_msg) && assistant && assistant[0])
     {
-        SetMessageText(app, rt->stream_msg, assistant);
+        SetMessageText(app, agent, rt->stream_msg, assistant);
     }
 
     char *think = JsonObjStr(&doc, 0, "think_text");
-    if (think && think[0] && rt->stream_msg >= 0 && !HasThinkTrace(&app->messages[rt->stream_msg]))
+    if (think && think[0] && rt->stream_msg >= 0 && !HasThinkTrace(&agent->messages[rt->stream_msg]))
     {
-        TraceAppendThink(app, rt->stream_msg, think, strlen(think));
+        TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
     }
 
     const char *prov = rt->turn_provider ? rt->turn_provider : "";
@@ -1603,7 +1610,7 @@ static void IngestResult(PicoApp *app, const char *payload)
         }
     }
 
-    FinishAssistantHistory(app);
+    FinishAssistantHistory(app, agent);
 
     int calls = JsonObjGet(&doc, 0, "calls");
     int n = JsonIsArray(&doc, calls) ? JsonArrayLen(&doc, calls) : 0;
@@ -1622,59 +1629,59 @@ static void IngestResult(PicoApp *app, const char *payload)
     JsonFree(&doc);
 }
 
-static void OnLlmDone(PicoApp *app, PicoAgentEv *ev)
+static void OnLlmDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     int normalized_cached = 0;
-    if (PicoUsage_Apply(app, ev->tokens, ev->cached, &normalized_cached))
+    if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
     {
-        PicoSession_LogUsage(app, ev->tokens, normalized_cached);
+        PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached);
     }
     if (rt->compacting)
     {
         if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
             rt->compact_no_tools = true;
-            if (!QueueLlm(app, true, false))
+            if (!QueueLlm(app, agent, true, false))
             {
-                SetErrorState(app, "Failed to start compaction");
+                SetErrorState(app, agent, "Failed to start compaction");
             }
             return;
         }
         char *text = ResultStr(ev->payload, "assistant_text");
-        if ((!text || !text[0]) && rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+        if ((!text || !text[0]) && rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
         {
             free(text);
-            text = Dup(app->messages[rt->stream_msg].source);
+            text = Dup(agent->messages[rt->stream_msg].source);
         }
         if (text && text[0])
         {
-            ApplyCompaction(app, text);
+            ApplyCompaction(app, agent, text);
             free(text);
-            EndTurnIdle(app);
+            EndTurnIdle(app, agent);
             return;
         }
         free(text);
         rt->compacting = false;
-        SetErrorState(app, "Compaction failed");
+        SetErrorState(app, agent, "Compaction failed");
         return;
     }
-    IngestResult(app, ev->payload);
-    if (rt->stream_msg >= 0 && !MessageSourceEmpty(app, rt->stream_msg))
+    IngestResult(app, agent, ev->payload);
+    if (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
     {
-        PicoSession_LogAssistant(app, app->messages[rt->stream_msg].source);
+        PicoSession_LogAssistant(app, agent, agent->messages[rt->stream_msg].source);
     }
     for (int i = 0; i < rt->pending_count; i++)
     {
-        PicoSession_LogToolCall(app, rt->pending[i].call_id, rt->pending[i].name, rt->pending[i].arguments);
+        PicoSession_LogToolCall(app, agent, rt->pending[i].call_id, rt->pending[i].name, rt->pending[i].arguments);
     }
     if (rt->pending_count > 0)
     {
         rt->pending_next = 0;
-        StartNextTool(app);
+        StartNextTool(app, agent);
         return;
     }
-    FinishTurn(app);
+    FinishTurn(app, agent);
 }
 
 static int CountToolTrace(const PicoMessage *m)
@@ -1694,9 +1701,9 @@ static int CountToolTrace(const PicoMessage *m)
     return n;
 }
 
-static void OnToolStart(PicoApp *app, PicoAgentEv *ev)
+static void OnToolStart(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     const char *name = ev->text ? ev->text : "tool";
     const char *args = ev->payload ? ev->payload : "{}";
     if (rt->pending_next < rt->pending_count)
@@ -1709,17 +1716,17 @@ static void OnToolStart(PicoApp *app, PicoAgentEv *ev)
         }
     }
     char *line = FormatToolLine(name, args);
-    SetActivity(app, line);
+    SetActivity(app, agent, line);
     free(line);
     if (rt->stream_msg >= 0)
     {
-        TraceAddTool(app, rt->stream_msg, name, args);
+        TraceAddTool(app, agent, rt->stream_msg, name, args);
     }
 }
 
-static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
+static void OnToolDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev, bool failed)
 {
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent->runtime;
     PicoPendingCall *call = NULL;
     if (rt->pending_next < rt->pending_count)
     {
@@ -1761,27 +1768,27 @@ static void OnToolDone(PicoApp *app, PicoAgentEv *ev, bool failed)
     }
     const char *use = output ? output : raw;
     PushFunctionOutput(rt, call_id, name, use, is_error);
-    PicoSession_LogToolResult(app, call_id, name, use, is_error, details);
+    PicoSession_LogToolResult(app, agent, call_id, name, use, is_error, details);
     if (rt->stream_msg >= 0)
     {
-        if (CountToolTrace(&app->messages[rt->stream_msg]) <= rt->pending_next)
+        if (CountToolTrace(&agent->messages[rt->stream_msg]) <= rt->pending_next)
         {
-            TraceAddTool(app, rt->stream_msg, name[0] ? name : "tool",
+            TraceAddTool(app, agent, rt->stream_msg, name[0] ? name : "tool",
                          call && call->arguments ? call->arguments : "{}");
         }
-        TraceSetLastToolOutput(app, rt->stream_msg, use, is_error);
+        TraceSetLastToolOutput(app, agent, rt->stream_msg, use, is_error);
     }
     rt->pending_next++;
     free(output);
     free(apply_error);
     if (cancel)
     {
-        AbortRemainingCalls(rt);
-        GoIdle(app);
+        AbortRemainingCalls(app, agent, rt);
+        GoIdle(app, agent);
         pico_run_hooks(app, PICO_HOOK_ON_CANCEL);
         return;
     }
-    StartNextTool(app);
+    StartNextTool(app, agent);
 }
 
 static bool LiveBusyState(PicoAgentState s)
@@ -1789,14 +1796,14 @@ static bool LiveBusyState(PicoAgentState s)
     return s == PICO_AGENT_LLM_WAIT || s == PICO_AGENT_TOOL_WAIT || s == PICO_AGENT_COMPACT_WAIT;
 }
 
-bool PicoAgent_IsBusy(const PicoApp *app)
+bool PicoAgent_IsBusy(const PicoAgent *agent)
 {
-    return app && LiveBusyState(app->agent_state);
+    return agent && LiveBusyState(agent->state);
 }
 
-bool PicoAgent_CancelRequested(const PicoApp *app)
+bool PicoAgent_CancelRequested(const PicoAgent *agent)
 {
-    PicoAgentRt *rt = app ? app->agent : NULL;
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt)
     {
         return false;
@@ -1807,9 +1814,9 @@ bool PicoAgent_CancelRequested(const PicoApp *app)
     return c;
 }
 
-bool PicoAgent_AskUiOpen(const PicoApp *app)
+bool PicoAgent_AskUiOpen(const PicoAgent *agent)
 {
-    PicoAgentRt *rt = app ? app->agent : NULL;
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
     return rt && rt->snap_id != 0;
 }
 
@@ -1842,6 +1849,16 @@ static void PublishAskSnapshot(PicoAgentRt *rt)
     free(live_copy);
 }
 
+static int ZombieCount(void)
+{
+    int count = 0;
+    for (PicoAgentRt *z = g_zombies; z; z = z->zombie_next)
+    {
+        count++;
+    }
+    return count;
+}
+
 static bool ZombiesBusy(void)
 {
     for (PicoAgentRt *z = g_zombies; z; z = z->zombie_next)
@@ -1857,9 +1874,9 @@ static bool ZombiesBusy(void)
     return false;
 }
 
-bool PicoAgent_BlocksReload(const PicoApp *app)
+bool PicoAgent_BlocksReload(const PicoAgent *agent)
 {
-    return PicoAgent_IsBusy(app) || ZombiesBusy();
+    return PicoAgent_IsBusy(agent) || ZombiesBusy();
 }
 
 static void KillToolChild(pid_t pid)
@@ -1921,6 +1938,27 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt);
 }
 
+static void RefreshWorkerHost(PicoAgentRt *rt, const PicoApp *app)
+{
+    PicoApp *host = &rt->worker_host;
+    memset(host, 0, sizeof(*host));
+    if (!app)
+    {
+        return;
+    }
+    snprintf(host->workspace, sizeof(host->workspace), "%s", app->workspace);
+    host->safe_mode = app->safe_mode;
+    host->auth_store = app->auth_store;
+    memcpy(host->tools, app->tools, sizeof(host->tools));
+    host->tool_count = app->tool_count;
+    memcpy(host->tool_hooks, app->tool_hooks, sizeof(host->tool_hooks));
+    host->tool_hook_count = app->tool_hook_count;
+    memcpy(host->providers, app->providers, sizeof(host->providers));
+    host->provider_count = app->provider_count;
+    memcpy(host->auths, app->auths, sizeof(host->auths));
+    host->auth_count = app->auth_count;
+}
+
 static PicoAgentRt *CreateRt(PicoApp *app)
 {
     PicoAgentRt *rt = (PicoAgentRt *)calloc(1, sizeof(PicoAgentRt));
@@ -1928,7 +1966,7 @@ static PicoAgentRt *CreateRt(PicoApp *app)
     {
         return NULL;
     }
-    rt->app = app;
+    RefreshWorkerHost(rt, app);
     rt->stream_msg = -1;
     pthread_mutex_init(&rt->mu, NULL);
     pthread_cond_init(&rt->cv, NULL);
@@ -1940,21 +1978,18 @@ static PicoAgentRt *CreateRt(PicoApp *app)
 }
 
 /* True if the thread has exited (or never started) and rt can be freed. */
-static bool StopRt(PicoAgentRt *rt, bool wait_one_sec)
+static bool StopRt(PicoAgentRt *rt, const struct timespec *deadline)
 {
     pthread_mutex_lock(&rt->mu);
     rt->stop = true;
     rt->cancel = true;
     pid_t child = rt->tool_child;
     pthread_cond_broadcast(&rt->cv);
-    if (wait_one_sec && rt->busy)
+    if (deadline && rt->busy)
     {
-        struct timespec until;
-        clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_sec += 1;
         while (rt->busy)
         {
-            if (pthread_cond_timedwait(&rt->cv, &rt->mu, &until) == ETIMEDOUT)
+            if (pthread_cond_timedwait(&rt->cv, &rt->mu, deadline) == ETIMEDOUT)
             {
                 break;
             }
@@ -1989,8 +2024,8 @@ static void ReapZombies(void)
     }
 }
 
-/* Wait up to 1s for each zombie; detach and leak any that are still in a call. */
-static bool ShutdownZombies(void)
+/* Share one shutdown deadline across every retired runtime. */
+static bool ShutdownZombies(const struct timespec *deadline)
 {
     bool all_done = true;
     PicoAgentRt *z = g_zombies;
@@ -1999,7 +2034,7 @@ static bool ShutdownZombies(void)
     {
         PicoAgentRt *next = z->zombie_next;
         z->zombie_next = NULL;
-        if (StopRt(z, true))
+        if (StopRt(z, deadline))
         {
             if (z->started)
             {
@@ -2020,30 +2055,50 @@ static bool ShutdownZombies(void)
     return all_done;
 }
 
-void PicoAgent_Compact(PicoApp *app)
+void PicoAgent_Compact(PicoApp *app, PicoAgent *agent)
 {
-    if (!app || !app->agent || PicoAgent_IsBusy(app))
+    if (!app || !agent || !agent->runtime || PicoAgent_IsBusy(agent))
     {
         return;
     }
-    StartCompact(app);
+    StartCompact(app, agent);
 }
 
-void PicoAgent_Init(PicoApp *app)
+PicoAgent *PicoAgent_Create(PicoApp *app)
 {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-    PicoAgentRt *rt = CreateRt(app);
-    app->agent = rt;
-    if (rt)
+    static PicoAgentId next_id;
+    PicoAgent *agent = (PicoAgent *)calloc(1, sizeof(PicoAgent));
+    if (!agent)
     {
-        Pico_RandomHex(rt->cache_key, sizeof(rt->cache_key));
+        return NULL;
     }
+    agent->id = ++next_id;
+    agent->kind = PICO_AGENT_NORMAL;
+    agent->state = PICO_AGENT_IDLE;
+    agent->persistence = PICO_SESSION_EPHEMERAL;
+    PicoSettings_InitAgent(app, agent);
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    agent->runtime = CreateRt(app);
+    if (!agent->runtime)
+    {
+        free(agent);
+        return NULL;
+    }
+    Pico_RandomHex(agent->runtime->cache_key, sizeof(agent->runtime->cache_key));
+    return agent;
 }
 
-bool PicoAgent_Shutdown(PicoApp *app)
+bool PicoAgent_Destroy(PicoAgent *agent)
 {
-    bool zombies_done = ShutdownZombies();
-    PicoAgentRt *rt = app->agent;
+    if (!agent)
+    {
+        return true;
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    bool zombies_done = ShutdownZombies(&deadline);
+    PicoAgentRt *rt = agent->runtime;
     if (!rt)
     {
         if (zombies_done)
@@ -2052,7 +2107,7 @@ bool PicoAgent_Shutdown(PicoApp *app)
         }
         return zombies_done;
     }
-    bool done = StopRt(rt, true);
+    bool done = StopRt(rt, &deadline);
     /* A worker stuck in a network call outlives us, so everything it can still
      * reach is deliberately leaked rather than freed underneath it. */
     if (!done)
@@ -2061,7 +2116,7 @@ bool PicoAgent_Shutdown(PicoApp *app)
         {
             pthread_detach(rt->thread);
         }
-        app->agent = NULL;
+        agent->runtime = NULL;
         return false;
     }
     if (rt->started)
@@ -2069,37 +2124,46 @@ bool PicoAgent_Shutdown(PicoApp *app)
         pthread_join(rt->thread, NULL);
     }
     FreeRt(rt);
-    app->agent = NULL;
-    if (zombies_done)
+    agent->runtime = NULL;
+    if (!zombies_done)
     {
-        curl_global_cleanup();
-        return true;
+        return false;
     }
-    return false;
+    PicoAgent_ClearMessages(agent);
+    free(agent->messages);
+    free(agent->error);
+    free(agent->compact_summary);
+    for (int i = 0; i < agent->allowed_tool_count; i++)
+    {
+        free(agent->allowed_tools[i]);
+    }
+    free(agent->allowed_tools);
+    free(agent);
+    curl_global_cleanup();
+    return true;
 }
 
-void PicoAgent_StartTurn(PicoApp *app, const char *user_text)
+void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
 {
-    if (!app->agent || !user_text || !user_text[0])
+    if (!app || !agent || !agent->runtime || !user_text || !user_text[0])
     {
         return;
     }
-    if (PicoAgent_IsBusy(app))
+    if (PicoAgent_IsBusy(agent))
     {
         return;
     }
-    PicoSettings_Load(app);
-    PicoAgent_DismissError(app);
-    free(app->agent->instructions);
-    app->agent->instructions = PicoSettings_LoadSystemPrompt(app);
-    PushInput(app->agent, BuildUserItem(user_text));
-    StartLlm(app);
+    PicoAgent_DismissError(agent);
+    free(agent->runtime->instructions);
+    agent->runtime->instructions = PicoSettings_LoadSystemPrompt(app);
+    PushInput(agent->runtime, BuildUserItem(user_text));
+    StartLlm(app, agent);
 }
 
-void PicoAgent_Cancel(PicoApp *app)
+void PicoAgent_Cancel(PicoAgent *agent)
 {
-    PicoAgentRt *rt = app->agent;
-    if (!rt || !PicoAgent_IsBusy(app))
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!rt || !PicoAgent_IsBusy(agent))
     {
         return;
     }
@@ -2110,18 +2174,25 @@ void PicoAgent_Cancel(PicoApp *app)
     rt->snap_retired = true;
 }
 
-void PicoAgent_ForceCancel(PicoApp *app)
+void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
 {
-    PicoAgentRt *old = app ? app->agent : NULL;
-    if (!old || !PicoAgent_IsBusy(app))
+    PicoAgentRt *old = agent ? agent->runtime : NULL;
+    if (!old || !PicoAgent_IsBusy(agent))
     {
+        return;
+    }
+
+    ReapZombies();
+    if (ZombieCount() >= PICO_MAX_RETIRED_RUNTIMES)
+    {
+        PicoAgent_Cancel(agent);
         return;
     }
 
     PicoAgentRt *rt = CreateRt(app);
     if (!rt)
     {
-        PicoAgent_Cancel(app);
+        PicoAgent_Cancel(agent);
         return;
     }
 
@@ -2134,7 +2205,7 @@ void PicoAgent_ForceCancel(PicoApp *app)
     pthread_mutex_unlock(&old->mu);
     KillToolChild(child);
 
-    ApplyCancel(app);
+    ApplyCancel(app, agent);
 
     rt->input = old->input;
     rt->input_count = old->input_count;
@@ -2148,16 +2219,13 @@ void PicoAgent_ForceCancel(PicoApp *app)
 
     old->zombie_next = g_zombies;
     g_zombies = old;
-    app->agent = rt;
+    agent->runtime = rt;
 }
 
 void pico_tool_set_child(PicoApp *app, pid_t pid)
 {
+    (void)app;
     PicoAgentRt *rt = t_worker_rt;
-    if (!rt && app)
-    {
-        rt = app->agent;
-    }
     if (!rt)
     {
         return;
@@ -2246,7 +2314,7 @@ int pico_tool_ask(PicoApp *app, const char *request_json, char **answer_json)
     {
         return PICO_ASK_FAIL;
     }
-    if (t_worker_context != PICO_WORKER_TOOL || !t_worker_rt || t_worker_rt->app != app)
+    if (t_worker_context != PICO_WORKER_TOOL || !t_worker_rt || &t_worker_rt->worker_host != app)
     {
         return PICO_ASK_FAIL;
     }
@@ -2319,7 +2387,8 @@ int pico_tool_ask(PicoApp *app, const char *request_json, char **answer_json)
 
 bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
 {
-    PicoAgentRt *rt = app ? app->agent : NULL;
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt || !out || rt->snap_id == 0 || !rt->snap_request || rt->snap_retired)
     {
         return false;
@@ -2340,7 +2409,8 @@ bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
     {
         return false;
     }
-    PicoAgentRt *rt = app->agent;
+    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt)
     {
         return false;
@@ -2368,20 +2438,24 @@ bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
     return true;
 }
 
-void PicoAgent_DismissError(PicoApp *app)
+void PicoAgent_DismissError(PicoAgent *agent)
 {
-    if (app->agent_state == PICO_AGENT_ERROR)
+    if (!agent)
     {
-        app->agent_state = PICO_AGENT_IDLE;
+        return;
     }
-    free(app->agent_error);
-    app->agent_error = NULL;
+    if (agent->state == PICO_AGENT_ERROR)
+    {
+        agent->state = PICO_AGENT_IDLE;
+    }
+    free(agent->error);
+    agent->error = NULL;
 }
 
-void PicoAgent_Pump(PicoApp *app)
+void PicoAgent_Pump(PicoApp *app, PicoAgent *agent)
 {
     ReapZombies();
-    PicoAgentRt *rt = app->agent;
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt)
     {
         return;
@@ -2417,20 +2491,20 @@ void PicoAgent_Pump(PicoApp *app)
 
     if (stream && stream_len && rt->stream_msg >= 0)
     {
-        AppendMessageText(app, rt->stream_msg, stream, stream_len);
+        AppendMessageText(app, agent, rt->stream_msg, stream, stream_len);
         rt->stream_dirty = true;
     }
     free(stream);
 
     if (think && think_len && rt->stream_msg >= 0)
     {
-        TraceAppendThink(app, rt->stream_msg, think, think_len);
+        TraceAppendThink(app, agent, rt->stream_msg, think, think_len);
     }
     free(think);
 
     if (summary && summary_len && rt->stream_msg >= 0)
     {
-        TraceSetThinkSummary(app, rt->stream_msg, summary, summary_len, summary_steps);
+        TraceSetThinkSummary(app, agent, rt->stream_msg, summary, summary_len, summary_steps);
     }
     free(summary);
 
@@ -2438,12 +2512,12 @@ void PicoAgent_Pump(PicoApp *app)
     {
         char line[192];
         snprintf(line, sizeof(line), "Calling `%s`…", status);
-        SetActivity(app, line);
+        SetActivity(app, agent, line);
     }
 
     if (rt->stream_dirty)
     {
-        ReparseMessage(app, rt->stream_msg);
+        ReparseMessage(app, agent, rt->stream_msg);
         rt->stream_dirty = false;
     }
 
@@ -2453,22 +2527,22 @@ void PicoAgent_Pump(PicoApp *app)
         switch (ev->type)
         {
         case PICO_AEV_LLM_DONE:
-            OnLlmDone(app, ev);
+            OnLlmDone(app, agent, ev);
             break;
         case PICO_AEV_LLM_FAIL:
-            SetErrorState(app, ev->text ? ev->text : "LLM request failed");
+            SetErrorState(app, agent, ev->text ? ev->text : "LLM request failed");
             break;
         case PICO_AEV_LLM_CANCEL:
-            ApplyCancel(app);
+            ApplyCancel(app, agent);
             break;
         case PICO_AEV_TOOL_START:
-            OnToolStart(app, ev);
+            OnToolStart(app, agent, ev);
             break;
         case PICO_AEV_TOOL_DONE:
-            OnToolDone(app, ev, false);
+            OnToolDone(app, agent, ev, false);
             break;
         case PICO_AEV_TOOL_FAIL:
-            OnToolDone(app, ev, true);
+            OnToolDone(app, agent, ev, true);
             break;
         }
         free(ev->text);
@@ -2479,36 +2553,31 @@ void PicoAgent_Pump(PicoApp *app)
     free(events);
 }
 
-const char *PicoAgent_CacheKey(const PicoApp *app)
+const char *PicoAgent_CacheKey(const PicoAgent *agent)
 {
-    return app && app->agent ? app->agent->cache_key : "";
+    return agent && agent->runtime ? agent->runtime->cache_key : "";
 }
 
-void PicoAgent_SetCacheKey(PicoApp *app, const char *key)
+void PicoAgent_SetCacheKey(PicoAgent *agent, const char *key)
 {
-    if (!app || !app->agent || !key)
+    if (agent && agent->runtime && key)
     {
-        return;
+        snprintf(agent->runtime->cache_key, sizeof(agent->runtime->cache_key), "%s", key);
     }
-    snprintf(app->agent->cache_key, sizeof(app->agent->cache_key), "%s", key);
 }
 
-void PicoAgent_RotateCacheKey(PicoApp *app)
+void PicoAgent_RotateCacheKey(PicoAgent *agent)
 {
-    if (!app || !app->agent)
+    if (agent && agent->runtime)
     {
-        return;
+        Pico_RandomHex(agent->runtime->cache_key, sizeof(agent->runtime->cache_key));
     }
-    Pico_RandomHex(app->agent->cache_key, sizeof(app->agent->cache_key));
 }
 
-void PicoAgent_ClearInput(PicoApp *app)
+void PicoAgent_ClearInput(PicoAgent *agent)
 {
-    PicoAgentRt *rt = app ? app->agent : NULL;
-    if (!rt)
-    {
-        return;
-    }
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!rt) return;
     for (int i = 0; i < rt->input_count; i++)
     {
         free(rt->input[i].json);
@@ -2517,49 +2586,31 @@ void PicoAgent_ClearInput(PicoApp *app)
     rt->input_count = 0;
 }
 
-void PicoAgent_PushHistoryUser(PicoApp *app, const char *text)
+void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
 {
-    if (!app || !app->agent)
-    {
-        return;
-    }
-    PushInput(app->agent, BuildUserItem(text));
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildUserItem(text));
 }
 
-void PicoAgent_PushHistoryAssistant(PicoApp *app, const char *text)
+void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text)
 {
-    if (!app || !app->agent)
-    {
-        return;
-    }
-    PushInput(app->agent, BuildAssistantItem(text));
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildAssistantItem(text));
 }
 
-void PicoAgent_PushHistoryFunctionCall(PicoApp *app, const char *call_id, const char *name, const char *args)
+void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args)
 {
-    if (!app || !app->agent)
-    {
-        return;
-    }
-    PushInput(app->agent, BuildToolCall(call_id, name, args));
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildToolCall(call_id, name, args));
 }
 
-void PicoAgent_PushHistoryFunctionOutput(PicoApp *app, const char *call_id, const char *name,
+void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
                                          const char *output, bool is_error)
 {
-    if (!app || !app->agent)
-    {
-        return;
-    }
-    PushFunctionOutput(app->agent, call_id, name, output, is_error);
+    if (agent && agent->runtime) PushFunctionOutput(agent->runtime, call_id, name, output, is_error);
 }
 
-char *PicoAgent_BuildInstructions(PicoApp *app)
+char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent)
 {
-    if (!app)
-    {
-        return JsonDup("");
-    }
+    (void)agent;
+    if (!app) return JsonDup("");
     char *base = PicoSettings_LoadSystemPrompt(app);
     char *instr = NULL;
     PicoTool *tools = NULL;
@@ -2568,4 +2619,37 @@ char *PicoAgent_BuildInstructions(PicoApp *app)
     free(base);
     free(tools);
     return instr ? instr : JsonDup("");
+}
+
+PicoAgentId pico_agent_id(const PicoAgent *agent)
+{
+    return agent ? agent->id : 0;
+}
+
+bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out)
+{
+    if (!agent || !out)
+    {
+        return false;
+    }
+    PicoAgent_CopyInfo(agent, out);
+    return true;
+}
+
+void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!agent) return;
+    out->id = agent->id; out->parent_id = agent->parent_id; out->kind = agent->kind;
+    out->state = agent->state; out->depth = agent->depth;
+    snprintf(out->session_id, sizeof(out->session_id), "%s", agent->session_id);
+    snprintf(out->profile, sizeof(out->profile), "%s", agent->profile);
+    snprintf(out->purpose, sizeof(out->purpose), "%s", agent->purpose);
+    snprintf(out->model, sizeof(out->model), "%s", agent->model);
+    snprintf(out->effort, sizeof(out->effort), "%s", agent->effort);
+    snprintf(out->activity, sizeof(out->activity), "%s", agent->activity);
+    out->busy = PicoAgent_IsBusy(agent);
+    out->cancelling = PicoAgent_CancelRequested(agent);
+    out->resumable = agent->persistence == PICO_SESSION_DURABLE && agent->session_id[0];
 }

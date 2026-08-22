@@ -644,7 +644,7 @@ Add `app/tests/agent_manager_test.c` using condition-variable barriers, not timi
 
 ---
 
-# 6. Step 5 — Add named subagent delegation
+# 6. Step 4 — Add named subagent delegation
 
 ## Goal
 
@@ -884,7 +884,7 @@ The parent session needs no separate delegation event: normal persisted tool arg
 
 ---
 
-# 7. Step 6 — Harden lifecycle and contracts
+# 7. Step 5 — Harden lifecycle and contracts
 
 ## Reload
 

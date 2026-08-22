@@ -623,7 +623,8 @@ static void RunLlmHooks(PicoApp *app, PicoAgent *agent, bool compact, bool inclu
         app->llm_hooks[i](app, agent ? agent->id : 0, &ev);
         free(ev.extra_instructions);
     }
-    /* Instructions pass: extra_instructions is appended for later hooks. */
+    /* Instructions pass: extras go under one heading; later hooks see the section. */
+    bool extras = false;
     for (int i = 0; i < app->llm_hook_count; i++)
     {
         if (!app->llm_hooks[i])
@@ -641,6 +642,11 @@ static void RunLlmHooks(PicoApp *app, PicoAgent *agent, bool compact, bool inclu
         app->llm_hooks[i](app, agent ? agent->id : 0, &ev);
         if (ev.extra_instructions)
         {
+            if (ev.extra_instructions[0] && !extras)
+            {
+                extras = true;
+                instr = AppendParagraph(instr, Dup("## Additional instructions"));
+            }
             instr = AppendParagraph(instr, ev.extra_instructions);
         }
     }

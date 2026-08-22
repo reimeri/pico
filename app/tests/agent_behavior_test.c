@@ -1879,11 +1879,15 @@ static int TestLlmExtraInstructions(void)
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
-    bool ok = g_test.llm_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) &&
-              g_test.last_instructions && strstr(g_test.last_instructions, "injected-line") != NULL;
+    const char *header = g_test.last_instructions
+                             ? strstr(g_test.last_instructions, "## Additional instructions")
+                             : NULL;
+    const char *extra = g_test.last_instructions ? strstr(g_test.last_instructions, "injected-line") : NULL;
+    bool ok = g_test.llm_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) && header && extra &&
+              extra > header;
     pthread_mutex_unlock(&g_test.mu);
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "provider did not receive extra instructions");
+    return ok ? 0 : Fail(name, "provider did not receive extra instructions under the section header");
 }
 
 static int TestBuildInstructionsMatchTurn(void)
@@ -1927,7 +1931,8 @@ static int TestAgentPolicyPrecedesLlmHooks(void)
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.last_tool_count == 0 && g_test.last_instructions &&
-              strstr(g_test.last_instructions, "tool-notes") == NULL;
+              strstr(g_test.last_instructions, "tool-notes") == NULL &&
+              strstr(g_test.last_instructions, "## Additional instructions") == NULL;
     pthread_mutex_unlock(&g_test.mu);
     PicoApp_Free(&app);
     return ok ? 0 : Fail(name, "LLM hook or provider saw a policy-hidden tool");

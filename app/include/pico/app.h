@@ -208,7 +208,7 @@ typedef struct PicoLlmEvent {
     int tool_count;
     bool *exclude; /* include_tools ? tool_count flags : NULL */
     const char *instructions;
-    char *extra_instructions; /* malloc; core appends after this hook and frees */
+    char *extra_instructions; /* malloc; core appends under "## Additional instructions" after this hook and frees */
 } PicoLlmEvent;
 
 typedef void (*PicoLlmHookFn)(struct PicoApp *app, PicoAgentId agent_id,

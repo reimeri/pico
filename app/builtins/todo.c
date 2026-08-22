@@ -313,7 +313,6 @@ static void TodoRender(PicoApp *app)
                      .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(height)}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = state->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
-          .border = {.color = COLOR_HR, .width = {1, 1, 1, 1}},
           .transition = {.handler = Clay_EaseOut,
                          .duration = 0.18f,
                          .properties = CLAY_TRANSITION_PROPERTY_DIMENSIONS |

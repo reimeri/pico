@@ -1,0 +1,7 @@
+{
+  "description": "Fast repository exploration",
+  "purpose": "Explore the repository for the delegated question. Return concise findings with exact paths and symbols. Do not modify files.",
+  "model": "gpt-5.6-sol",
+  "effort": "low",
+  "tools": ["sh"]
+}

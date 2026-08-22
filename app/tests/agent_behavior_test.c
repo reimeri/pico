@@ -4,7 +4,9 @@
 #include "agent_manager.h"
 #include "json.h"
 #include "pico/plugin.h"
+#include "session.h"
 #include "settings.h"
+#include "subagent_config.h"
 #include "usage.h"
 
 #include <pthread.h>
@@ -26,6 +28,10 @@ typedef enum TestMode {
     TEST_EMPTY_CALL_ID,
     TEST_TOO_MANY_CALLS,
     TEST_CONCURRENT_REVERSE,
+    TEST_DELEGATION,
+    TEST_DELEGATION_CHILD_BLOCK,
+    TEST_DELEGATION_CHILD_ASK,
+    TEST_DELEGATION_CHILD_EMPTY,
 } TestMode;
 
 typedef struct TestState {
@@ -50,6 +56,11 @@ typedef struct TestState {
     int last_tool_count;
     char last_tools[512];
     char *last_input;
+    char *child_instructions;
+    char *child_input;
+    char child_tools[512];
+    char child_model[128];
+    char child_effort[PICO_EFFORT_LEN];
     char *tool_seen_args;
     char *after_seen_args;
     char *after_seen_output;
@@ -80,8 +91,25 @@ static TestState g_test = {
     .mu = PTHREAD_MUTEX_INITIALIZER,
     .cv = PTHREAD_COND_INITIALIZER,
 };
+typedef struct FakeSessionState {
+    bool enabled;
+    bool resolve_ok;
+    char id[40];
+    char path[4096];
+    char profile[65];
+    char purpose[1025];
+    char header_model[128];
+    char replayed_model[128];
+    char cache_key[65];
+    int replay_count;
+    int log_user_count;
+    int append_interrupted_count;
+} FakeSessionState;
+
 static int g_plugin_shutdowns;
 static int g_auth_frees;
+static int g_random_hex_calls;
+static FakeSessionState g_fake_session;
 static char g_config_dir[4096] = "/tmp/pico-agent-behavior";
 
 static void ResetTest(TestMode mode, int tool_limit)
@@ -115,6 +143,13 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.last_tools[0] = '\0';
     free(g_test.last_input);
     g_test.last_input = NULL;
+    free(g_test.child_instructions);
+    g_test.child_instructions = NULL;
+    free(g_test.child_input);
+    g_test.child_input = NULL;
+    g_test.child_tools[0] = '\0';
+    g_test.child_model[0] = '\0';
+    g_test.child_effort[0] = '\0';
     free(g_test.tool_seen_args);
     g_test.tool_seen_args = NULL;
     free(g_test.after_seen_args);
@@ -146,6 +181,8 @@ static void ResetTest(TestMode mode, int tool_limit)
     pthread_mutex_unlock(&g_test.mu);
     g_plugin_shutdowns = 0;
     g_auth_frees = 0;
+    g_random_hex_calls = 0;
+    memset(&g_fake_session, 0, sizeof(g_fake_session));
 }
 
 static int Fail(const char *test, const char *message)
@@ -197,10 +234,19 @@ static void SnapshotTurn(const PicoLlmTurn *turn)
 static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
 {
-    (void)ctx;
-
     pthread_mutex_lock(&g_test.mu);
     SnapshotTurn(turn);
+    bool child_turn = pico_agent_context_profile(ctx)[0] != '\0';
+    if (child_turn)
+    {
+        free(g_test.child_instructions);
+        g_test.child_instructions = JsonDup(g_test.last_instructions ? g_test.last_instructions : "");
+        free(g_test.child_input);
+        g_test.child_input = JsonDup(g_test.last_input ? g_test.last_input : "");
+        snprintf(g_test.child_tools, sizeof(g_test.child_tools), "%s", g_test.last_tools);
+        snprintf(g_test.child_model, sizeof(g_test.child_model), "%s", turn->model ? turn->model : "");
+        snprintf(g_test.child_effort, sizeof(g_test.child_effort), "%s", turn->effort ? turn->effort : "");
+    }
     TestMode mode = g_test.mode;
     bool fail = g_test.provider_fail;
     int tokens = g_test.provider_tokens;
@@ -214,6 +260,19 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     snprintf(tool_args, sizeof(tool_args), "%s", g_test.issue_tool_args);
     pthread_mutex_unlock(&g_test.mu);
 
+    if (mode == TEST_DELEGATION_CHILD_BLOCK && child_turn)
+    {
+        while (!cancel(user))
+        {
+            SleepOneMs();
+        }
+        return PICO_LLM_CANCEL;
+    }
+    if (mode == TEST_DELEGATION_CHILD_ASK && child_turn)
+    {
+        snprintf(tool_name, sizeof(tool_name), "ask_test");
+        snprintf(tool_args, sizeof(tool_args), "{}");
+    }
     if (fail)
     {
         out->error = JsonDup("provider failed");
@@ -275,6 +334,11 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         }
     }
 
+    if (!issue_tool && mode == TEST_DELEGATION_CHILD_EMPTY && child_turn)
+    {
+        out->assistant_text = JsonDup("");
+        return PICO_LLM_OK;
+    }
     if (!issue_tool)
     {
         out->assistant_text = JsonDup("done");
@@ -397,6 +461,36 @@ static void EchoTool(PicoAgentContext *ctx, const char *args_json, PicoToolResul
     if (out)
     {
         out->output = JsonDup("echo-out");
+    }
+}
+
+static void LateDelegateTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+{
+    (void)args_json;
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_entered = true;
+    pthread_cond_broadcast(&g_test.cv);
+    while (!g_test.block_release)
+    {
+        pthread_cond_wait(&g_test.cv, &g_test.mu);
+    }
+    pthread_mutex_unlock(&g_test.mu);
+
+    bool is_error = false;
+    char *result = PicoAgentManager_Delegate(ctx, "exploration", "late task", NULL,
+                                             &is_error);
+    if (out)
+    {
+        out->output = result;
+        out->is_error = is_error;
+    }
+    else
+    {
+        free(result);
     }
 }
 
@@ -704,6 +798,7 @@ void Pico_MkdirP(const char *path)
 
 void Pico_RandomHex(char *out, size_t cap)
 {
+    g_random_hex_calls++;
     if (cap > 0)
     {
         snprintf(out, cap, "0123456789abcdef");
@@ -740,6 +835,18 @@ void PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *conten
     (void)app;
     (void)agent;
     (void)content;
+}
+
+void PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content, const char *display)
+{
+    (void)app;
+    (void)agent;
+    (void)content;
+    (void)display;
+    if (g_fake_session.enabled)
+    {
+        g_fake_session.log_user_count++;
+    }
 }
 
 void PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *args)
@@ -795,14 +902,56 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
 int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
                         char *path, size_t path_cap)
 {
-    (void)app; (void)id; (void)allow_prefix; (void)path; (void)path_cap;
-    return -1;
+    (void)app;
+    (void)allow_prefix;
+    if (!g_fake_session.enabled || !g_fake_session.resolve_ok || !id ||
+        strcmp(id, g_fake_session.id) != 0)
+    {
+        return -1;
+    }
+    snprintf(path, path_cap, "%s", g_fake_session.path);
+    return 0;
 }
 
 int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path, bool append_interrupted)
 {
-    (void)app; (void)agent; (void)path; (void)append_interrupted;
-    return -1;
+    (void)append_interrupted;
+    if (!g_fake_session.enabled || !g_fake_session.resolve_ok || !agent || !path ||
+        strcmp(path, g_fake_session.path) != 0)
+    {
+        return -1;
+    }
+    agent->persistence = PICO_SESSION_DURABLE;
+    snprintf(agent->session_id, sizeof(agent->session_id), "%s", g_fake_session.id);
+    snprintf(agent->session_path, sizeof(agent->session_path), "%s", g_fake_session.path);
+    agent->kind = PICO_AGENT_SUBAGENT;
+    snprintf(agent->profile, sizeof(agent->profile), "%s", g_fake_session.profile);
+    snprintf(agent->purpose, sizeof(agent->purpose), "%s", g_fake_session.purpose);
+    snprintf(agent->model, sizeof(agent->model), "%s", g_fake_session.replayed_model);
+    PicoAgent_AddMessage(app, agent, PICO_ROLE_USER, "previous delegated context");
+    PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "previous answer");
+    PicoAgent_PushHistoryUser(agent, "previous delegated context");
+    PicoAgent_PushHistoryAssistant(agent, "previous answer");
+    PicoAgent_SetCacheKey(agent, g_fake_session.cache_key);
+    g_fake_session.replay_count++;
+    return 0;
+}
+
+int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
+{
+    if (!g_fake_session.enabled || !g_fake_session.resolve_ok || !path || !out ||
+        strcmp(path, g_fake_session.path) != 0)
+    {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    out->version = 3;
+    out->kind = PICO_AGENT_SUBAGENT;
+    snprintf(out->id, sizeof(out->id), "%s", g_fake_session.id);
+    snprintf(out->profile, sizeof(out->profile), "%s", g_fake_session.profile);
+    snprintf(out->initial_purpose, sizeof(out->initial_purpose), "%s", g_fake_session.purpose);
+    snprintf(out->model, sizeof(out->model), "%s", g_fake_session.header_model);
+    return 0;
 }
 
 void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
@@ -812,7 +961,12 @@ void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
 
 void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent)
 {
-    (void)app; (void)agent;
+    (void)app;
+    (void)agent;
+    if (g_fake_session.enabled)
+    {
+        g_fake_session.append_interrupted_count++;
+    }
 }
 
 void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
@@ -2120,6 +2274,8 @@ static int TestResumedToolCallArgs(void)
 }
 
 #include "agent_manager_test.c"
+#include "subagent_config_test.c"
+#include "subagent_test.c"
 
 static int TestThinkSummaryCoalesce(void)
 {
@@ -2198,6 +2354,17 @@ int main(void)
     failed |= TestResumedToolCallArgs();
     failed |= TestManagerProfileRegistry();
     failed |= TestManagerConcurrencyAndIsolation();
+    failed |= TestSubagentProfileResolution();
+    failed |= TestSubagentProfileDiscovery();
+    failed |= TestNamedSubagentDelegation();
+    failed |= TestSubagentParentCancellation();
+    failed |= TestSubagentCancellationBeforeEnqueue();
+    failed |= TestSubagentDirectChildCancellation();
+    failed |= TestSubagentSessionContinuation();
+    failed |= TestSubagentContinuationEmptyAnswer();
+    failed |= TestSubagentResumeFailures();
+    failed |= TestSubagentChildAsk();
+    failed |= TestSubagentDelegationCaps();
     failed |= TestThinkSummaryCoalesce();
     return failed ? 1 : 0;
 }

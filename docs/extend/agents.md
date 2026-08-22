@@ -23,11 +23,43 @@ pico_agent_select(app, active);
 
 `pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. The message pointer is invalidated by pumping, transcript mutation, close, or workspace replacement.
 
-## Profiles and asks
+## Named subagent profiles
 
-`pico_subagent_profile_count` and `pico_subagent_profile_info` return copied snapshots of valid profiles discovered directly under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`). Invalid files are isolated and reported in the warning overlay. Loaded snapshots are replaced on reload.
+`pico_subagent_profile_count` and `pico_subagent_profile_info` return copied snapshots of valid profiles discovered directly under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`). Pico creates the directory, but does not install profiles. Only direct, regular, non-hidden `*.json` files are read. They use JSONC comment rules, and the filename stem is the profile name.
 
-`pico_tool_pending_ask` returns the oldest live ask across all agents, including hidden agents; its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID. The borrowed request remains valid only until the next manager pump.
+A profile has this shape:
+
+```jsonc
+{
+  "description": "Fast repository exploration", // optional, at most 256 bytes
+  "purpose": "Inspect the delegated question.", // required, at most 1024 bytes
+  "model": "model-catalog-id",                  // optional
+  "effort": "low",                             // optional
+  "tools": ["sh"]                              // optional exact-name allowlist
+}
+```
+
+Omitting `tools` allows all registered tools; an empty array allows none. Unknown keys warn but still load. A bad type, invalid filename, duplicate or unknown tool, unknown model, unsupported model/effort pair, or oversized value invalidates only that file. Profiles load after tools at startup and are replaced as one completed snapshot on F5 or `/reload`. Running invocations keep their copied values.
+
+For a fresh child, an omitted model inherits the parent model. An omitted effort inherits the parent effort when the model matches; after a model override it uses that model's configured default, first supported effort, or `none`. Explicit effort must be supported. Resolution never changes the parent or workspace defaults.
+
+## Synchronous delegation
+
+The builtin `subagent` tool accepts only a named profile, a delegated `task`, and an optional exact `session_id`:
+
+```json
+{"profile":"exploration","task":"Find the replay boundary.","session_id":"optional-child-id"}
+```
+
+A fresh child gets current workspace/system instructions, a clearly delimited profile purpose, only the delegated user task, and the profile's copied tool policy. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or cache key. It shares process registrations, providers, authentication, and workspace services.
+
+Supplying `session_id` reserves and replays exactly that prior subagent session. The stored profile must match. Transcript/provider history, usage, compaction state, and prompt cache are restored, then model, effort, purpose, and tools are refreshed from the current profile and parent. A model change rotates the cache key. The delegated task is appended to the same JSONL session.
+
+The parent remains in tool wait while the hidden child runs. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. Parent cancellation wakes the parent generation and cascades to the child. Late child completion cannot publish into a replacement generation.
+
+## Asks
+
+`pico_tool_pending_ask` returns the oldest live ask across all agents, including hidden delegated children; its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, so a child ask remains answerable while its parent waits. The borrowed request remains valid only until the next manager pump.
 
 ## Main-thread targets
 

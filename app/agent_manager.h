@@ -3,7 +3,10 @@
 
 #include "agent_internal.h"
 
+#include <pthread.h>
+
 struct PicoAgentRt;
+struct PicoDelegationJob;
 
 typedef struct PicoSessionReservation {
     PicoAgentId owner;
@@ -24,6 +27,8 @@ struct PicoAgentManager {
 
     PicoSubagentProfileInfo profiles[PICO_MAX_SUBAGENT_PROFILES];
     int profile_count;
+    pthread_mutex_t delegation_mu;
+    struct PicoDelegationJob *delegations;
     bool curl_initialized;
     bool retained_shutdown;
 };
@@ -47,5 +52,12 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
 void PicoAgentManager_LoadProfiles(PicoAgentManager *manager);
 void PicoAgentManager_ReplayToolDetails(PicoAgentManager *manager);
 PicoAgentResult PicoAgentManager_ResumeActive(PicoApp *app, const char *id, bool allow_prefix);
+char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
+                                const char *task, const char *session_id,
+                                bool *is_error);
+void PicoAgentManager_CancelDelegations(PicoAgentManager *manager, PicoAgentId parent_id,
+                                        uint64_t runtime_generation);
+void PicoAgentManager_CancelChildDelegation(PicoAgentManager *manager, PicoAgentId child_id);
+bool PicoAgentManager_JobReferences(const PicoAgentManager *manager, PicoAgentId id);
 
 #endif

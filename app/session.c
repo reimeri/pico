@@ -331,18 +331,32 @@ int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
     return n;
 }
 
-static void WriteLine(PicoAgent *agent, const char *json)
+static bool WriteLine(PicoAgent *agent, const char *json)
 {
     FILE *f = fopen(agent->session_path, "ab");
     if (!f)
     {
-        return;
+        return false;
     }
-    fwrite(json, 1, strlen(json), f);
-    fputc('\n', f);
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    size_t len = strlen(json);
+    bool ok = fwrite(json, 1, len, f) == len && fputc('\n', f) != EOF &&
+              fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0)
+    {
+        ok = false;
+    }
+    return ok;
+}
+
+static void PersistenceFailed(PicoApp *app, PicoAgent *agent)
+{
+    agent->persistence = PICO_SESSION_FAILED;
+    if (app && app->agents)
+    {
+        PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+    }
+    agent->session_id[0] = '\0';
+    agent->session_path[0] = '\0';
 }
 
 static char *EventPrefix(const char *type)
@@ -388,7 +402,7 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     Pico_IsoTime(ts, sizeof(ts), false);
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":2,\"id\":");
+    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":3,\"id\":");
     JsonBuf_String(&b, agent->session_id);
     JsonBuf_Puts(&b, ",\"timestamp\":");
     JsonBuf_String(&b, ts);
@@ -396,6 +410,20 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     JsonBuf_String(&b, app->workspace);
     JsonBuf_Puts(&b, ",\"model\":");
     JsonBuf_String(&b, agent->model);
+    JsonBuf_Puts(&b, ",\"kind\":");
+    JsonBuf_String(&b, agent->kind == PICO_AGENT_SUBAGENT ? "subagent" : "normal");
+    if (agent->kind == PICO_AGENT_SUBAGENT)
+    {
+        JsonBuf_Puts(&b, ",\"profile\":");
+        JsonBuf_String(&b, agent->profile);
+        JsonBuf_Puts(&b, ",\"initial_purpose\":");
+        JsonBuf_String(&b, agent->purpose);
+        if (agent->parent_session_id[0])
+        {
+            JsonBuf_Puts(&b, ",\"parent_session_id\":");
+            JsonBuf_String(&b, agent->parent_session_id);
+        }
+    }
     const char *cache_key = PicoAgent_CacheKey(agent);
     if (cache_key && cache_key[0])
     {
@@ -404,14 +432,20 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    WriteLine(agent, line);
+    bool wrote = WriteLine(agent, line);
     free(line);
+    if (!wrote)
+    {
+        PersistenceFailed(app, agent);
+        return -1;
+    }
     return 0;
 }
 
 static void AppendLine(PicoApp *app, PicoAgent *agent, const char *json)
 {
-    if (!app || !agent || agent->persistence == PICO_SESSION_EPHEMERAL || !json || !json[0])
+    if (!app || !agent || agent->persistence == PICO_SESSION_EPHEMERAL ||
+        agent->persistence == PICO_SESSION_FAILED || !json || !json[0])
     {
         return;
     }
@@ -423,11 +457,35 @@ static void AppendLine(PicoApp *app, PicoAgent *agent, const char *json)
     {
         return;
     }
-    WriteLine(agent, json);
+    if (!WriteLine(agent, json))
+    {
+        PersistenceFailed(app, agent);
+    }
 }
 
 static void ApplyHeader(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int obj)
 {
+    char *kind = JsonObjStr(doc, obj, "kind");
+    agent->kind = kind && strcmp(kind, "subagent") == 0 ? PICO_AGENT_SUBAGENT : PICO_AGENT_NORMAL;
+    free(kind);
+    char *profile = JsonObjStr(doc, obj, "profile");
+    if (profile)
+    {
+        snprintf(agent->profile, sizeof(agent->profile), "%s", profile);
+    }
+    free(profile);
+    char *purpose = JsonObjStr(doc, obj, "initial_purpose");
+    if (purpose)
+    {
+        snprintf(agent->purpose, sizeof(agent->purpose), "%s", purpose);
+    }
+    free(purpose);
+    char *parent_session = JsonObjStr(doc, obj, "parent_session_id");
+    if (parent_session)
+    {
+        snprintf(agent->parent_session_id, sizeof(agent->parent_session_id), "%s", parent_session);
+    }
+    free(parent_session);
     char *id = JsonObjStr(doc, obj, "id");
     if (id && id[0])
     {
@@ -666,9 +724,20 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
         if (i == 0)
         {
             char *header_id = JsonObjStr(&doc, 0, "id");
+            char *kind = JsonObjStr(&doc, 0, "kind");
+            char *profile = JsonObjStr(&doc, 0, "profile");
+            char *purpose = JsonObjStr(&doc, 0, "initial_purpose");
             int version = JsonObjInt(&doc, 0, "version", 0);
-            valid_header = type && strcmp(type, "session") == 0 && header_id && header_id[0] && version == 2;
+            bool normal = kind && strcmp(kind, "normal") == 0;
+            bool subagent = kind && strcmp(kind, "subagent") == 0 &&
+                            profile && profile[0] && purpose && purpose[0];
+            valid_header = type && strcmp(type, "session") == 0 &&
+                           header_id && header_id[0] && version == 3 &&
+                           (normal || subagent);
             free(header_id);
+            free(kind);
+            free(profile);
+            free(purpose);
             if (!valid_header)
             {
                 free(type);
@@ -871,6 +940,66 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
             }
         }
     }
+}
+
+int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
+{
+    if (!path || !out)
+    {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return -1;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t got = getline(&line, &cap, f);
+    fclose(f);
+    if (got <= 0)
+    {
+        free(line);
+        return -1;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, line, (size_t)got) != 0)
+    {
+        free(line);
+        return -1;
+    }
+    if (!JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "session"))
+    {
+        JsonFree(&doc);
+        free(line);
+        return -1;
+    }
+    out->version = JsonObjInt(&doc, 0, "version", 0);
+    char *id = JsonObjStr(&doc, 0, "id");
+    char *kind = JsonObjStr(&doc, 0, "kind");
+    char *profile = JsonObjStr(&doc, 0, "profile");
+    char *purpose = JsonObjStr(&doc, 0, "initial_purpose");
+    char *parent = JsonObjStr(&doc, 0, "parent_session_id");
+    char *model = JsonObjStr(&doc, 0, "model");
+    if (id) snprintf(out->id, sizeof(out->id), "%s", id);
+    bool kind_valid = kind && (strcmp(kind, "normal") == 0 || strcmp(kind, "subagent") == 0);
+    out->kind = kind && strcmp(kind, "subagent") == 0 ? PICO_AGENT_SUBAGENT : PICO_AGENT_NORMAL;
+    if (profile) snprintf(out->profile, sizeof(out->profile), "%s", profile);
+    if (purpose) snprintf(out->initial_purpose, sizeof(out->initial_purpose), "%s", purpose);
+    if (parent) snprintf(out->parent_session_id, sizeof(out->parent_session_id), "%s", parent);
+    if (model) snprintf(out->model, sizeof(out->model), "%s", model);
+    bool valid = out->version == 3 && out->id[0] && kind_valid &&
+                 (out->kind == PICO_AGENT_NORMAL || (out->profile[0] && out->initial_purpose[0]));
+    free(id);
+    free(kind);
+    free(profile);
+    free(purpose);
+    free(parent);
+    free(model);
+    JsonFree(&doc);
+    free(line);
+    return valid ? 0 : -1;
 }
 
 int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,

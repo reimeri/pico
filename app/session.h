@@ -12,12 +12,23 @@ typedef struct PicoSessionInfo {
     time_t mtime;
 } PicoSessionInfo;
 
+typedef struct PicoSessionHeader {
+    int version;
+    PicoAgentKind kind;
+    char id[40];
+    char profile[65];
+    char initial_purpose[1025];
+    char parent_session_id[40];
+    char model[128];
+} PicoSessionHeader;
+
 void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, const char *session_file);
 int PicoSession_List(const PicoApp *app, PicoSessionInfo **out);
 int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id);
 /* Resolve a durable session to a canonical path. Manager callers use exact IDs. */
 int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
                         char *path, size_t path_cap);
+int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
                        bool append_interrupted);

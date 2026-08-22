@@ -24,6 +24,7 @@ struct PicoAgent {
     int depth;
     char profile[65];
     char purpose[1025];
+    char parent_session_id[40];
 
     PicoMessage *messages;
     int message_count;

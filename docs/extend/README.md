@@ -43,5 +43,9 @@ Copy-templates in the Pico source tree:
 - `examples/extra_instructions.c` — `pico_add_llm_hook` extra prompt line
 - `examples/ephemeral_context.c` — request-only context
 - `examples/time_cmd.c` — slash command
+- `examples/subagents/exploration.json` — read-only exploration profile
+- `examples/subagents/review.json` — read-only review profile
+
+The JSON profiles are examples only. Copy or adapt them under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`); Pico does not install them automatically. Their `sh` allowlist limits the exposed tool catalog, not the shell commands that tool may execute.
 
 Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/agent.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat the private app-level `agent.h`, `agent_internal.h`, `session.h`, or `settings.h` as API.

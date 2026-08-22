@@ -47,5 +47,6 @@ void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, con
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error);
 void PicoAgent_ClearMessages(PicoAgent *agent);
 void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out);
+PicoAgentManager *PicoAgentContext_Manager(const PicoAgentContext *ctx);
 
 #endif

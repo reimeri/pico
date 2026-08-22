@@ -36,6 +36,7 @@ add_executable(pico
     http.c
     agent.c
     agent_manager.c
+    subagent_config.c
     session.c
     usage.c
     chat_sel.c
@@ -47,6 +48,7 @@ add_executable(pico
     builtins/todo.c
     builtins/todo_model.c
     builtins/shell.c
+    builtins/subagent.c
     builtins/complete.c
     builtins/commands.c
     builtins/files.c
@@ -110,14 +112,20 @@ if(BUILD_TESTING)
     add_test(NAME pico_ask_user_tests COMMAND pico_ask_user_tests)
 
     set_source_files_properties(tests/agent_manager_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(tests/subagent_config_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(tests/subagent_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
         tests/agent_manager_test.c
+        tests/subagent_config_test.c
+        tests/subagent_test.c
         tests/clay_impl.c
         app.c
         agent.c
         agent_manager.c
+        subagent_config.c
         builtins/ask_user.c
+        builtins/subagent.c
         builtins/todo.c
         builtins/todo_model.c
         json.c
@@ -127,6 +135,8 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    target_compile_definitions(pico_agent_behavior_tests PRIVATE
+        "PICO_SOURCE_ROOT=\"${CMAKE_CURRENT_SOURCE_DIR}/..\"")
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_agent_behavior_tests PRIVATE raylib CURL::libcurl Threads::Threads)

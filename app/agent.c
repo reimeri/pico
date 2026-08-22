@@ -60,6 +60,7 @@ typedef enum PicoWorkKind {
 
 struct PicoAgentContext {
     PicoAgentRt *runtime;
+    PicoAgentManager *manager;
     PicoAgentId agent_id;
     uint64_t runtime_generation;
     char workspace[4096];
@@ -2079,6 +2080,7 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoApp *app, const Pico
     }
     PicoAgentContext *ctx = &rt->context;
     ctx->runtime = rt;
+    ctx->manager = app->agents;
     ctx->agent_id = agent->id;
     ctx->runtime_generation = agent->runtime_generation;
     snprintf(ctx->workspace, sizeof(ctx->workspace), "%s", app->workspace);
@@ -2303,6 +2305,19 @@ void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
     PicoAgent_DismissError(agent);
     free(agent->runtime->instructions);
     agent->runtime->instructions = PicoSettings_LoadSystemPrompt(app);
+    if (agent->kind == PICO_AGENT_SUBAGENT)
+    {
+        JsonBuf instructions;
+        JsonBuf_Init(&instructions);
+        JsonBuf_Puts(&instructions, agent->runtime->instructions ? agent->runtime->instructions : "");
+        JsonBuf_Puts(&instructions, "\n\n---\nSubagent profile: ");
+        JsonBuf_Puts(&instructions, agent->profile);
+        JsonBuf_Puts(&instructions, "\nPurpose:\n");
+        JsonBuf_Puts(&instructions, agent->purpose);
+        JsonBuf_Puts(&instructions, "\n---");
+        free(agent->runtime->instructions);
+        agent->runtime->instructions = JsonBuf_Steal(&instructions);
+    }
     PushInput(agent->runtime, BuildUserItem(user_text));
     StartLlm(app, agent);
 }
@@ -2314,10 +2329,13 @@ void PicoAgent_Cancel(PicoAgent *agent)
     {
         return;
     }
+    PicoAgentManager_CancelChildDelegation(agent->manager, agent->id);
     pthread_mutex_lock(&rt->mu);
     rt->cancel = true;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    PicoAgentManager_CancelDelegations(agent->manager, agent->id,
+                                       agent->runtime_generation);
     rt->snap_retired = true;
 }
 
@@ -2337,6 +2355,7 @@ void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
         return;
     }
 
+    PicoAgentManager_CancelChildDelegation(manager, agent->id);
     uint64_t next_generation = agent->runtime_generation + 1;
     PicoAgentRt *rt = CreateRt(app, agent);
     if (!rt)
@@ -2346,6 +2365,8 @@ void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
     }
     agent->runtime_generation = next_generation;
     rt->context.runtime_generation = next_generation;
+    PicoAgentManager_CancelDelegations(manager, agent->id,
+                                       old->context.runtime_generation);
 
     pthread_mutex_lock(&old->mu);
     old->cancel = true;
@@ -2830,6 +2851,11 @@ bool pico_agent_context_cancelled(const PicoAgentContext *ctx)
         return true;
     }
     return WorkerIsCancelled(ctx->runtime);
+}
+
+PicoAgentManager *PicoAgentContext_Manager(const PicoAgentContext *ctx)
+{
+    return AgentContextActive(ctx) ? ctx->manager : NULL;
 }
 
 struct PicoAuthStore *PicoAgentContext_AuthStore(const PicoAgentContext *ctx)

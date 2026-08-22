@@ -22,6 +22,7 @@ PicoExt pico_ext_overlay(void);
 PicoExt pico_ext_ask_user(void);
 PicoExt pico_ext_todo(void);
 PicoExt pico_ext_shell(void);
+PicoExt pico_ext_subagent(void);
 PicoExt pico_ext_commands(void);
 PicoExt pico_ext_files(void);
 PicoExt pico_ext_openai(void);

@@ -324,13 +324,32 @@ int main(void)
 
     size_t file_len = 0;
     char *file = Pico_ReadFile(writer_agent.session_path, &file_len);
-    if (!file || !strstr(file, "\"version\":2") || !strstr(file, "\"type\":\"usage\"") ||
-        strstr(file, "\"usage\":{"))
+    if (!file || !strstr(file, "\"version\":3") || !strstr(file, "\"kind\":\"normal\"") ||
+        !strstr(file, "\"type\":\"usage\"") || strstr(file, "\"usage\":{"))
     {
         free(file);
-        return Fail("session schema did not use dedicated version 2 usage events");
+        return Fail("session schema did not use version 3 headers and dedicated usage events");
     }
     free(file);
+
+    PicoAgent child_agent;
+    memset(&child_agent, 0, sizeof(child_agent));
+    child_agent.persistence = PICO_SESSION_DURABLE;
+    child_agent.kind = PICO_AGENT_SUBAGENT;
+    snprintf(child_agent.model, sizeof(child_agent.model), "saved-model");
+    snprintf(child_agent.profile, sizeof(child_agent.profile), "review");
+    snprintf(child_agent.purpose, sizeof(child_agent.purpose), "Review carefully");
+    snprintf(child_agent.parent_session_id, sizeof(child_agent.parent_session_id), "parent-session");
+    PicoSession_LogUser(&writer, &child_agent, "delegated task", "delegated task");
+    PicoSessionHeader child_header;
+    if (!child_agent.session_path[0] || PicoSession_ReadHeader(child_agent.session_path, &child_header) != 0 ||
+        child_header.version != 3 || child_header.kind != PICO_AGENT_SUBAGENT ||
+        strcmp(child_header.profile, "review") != 0 ||
+        strcmp(child_header.initial_purpose, "Review carefully") != 0 ||
+        strcmp(child_header.parent_session_id, "parent-session") != 0)
+    {
+        return Fail("subagent session header did not preserve durable profile metadata");
+    }
 
     PicoApp compacted;
     PicoAgent compacted_agent;
@@ -412,6 +431,46 @@ int main(void)
         return Fail("session reset did not clear usage state");
     }
 
+    PicoAgent failed_persistence;
+    memset(&failed_persistence, 0, sizeof(failed_persistence));
+    failed_persistence.persistence = PICO_SESSION_DURABLE;
+    snprintf(failed_persistence.session_id, sizeof(failed_persistence.session_id), "not-resumable");
+    snprintf(failed_persistence.session_path, sizeof(failed_persistence.session_path), "/dev/full");
+    PicoSession_LogUser(&opened, &failed_persistence, "cannot persist", "cannot persist");
+    if (failed_persistence.persistence != PICO_SESSION_FAILED ||
+        failed_persistence.session_id[0] || failed_persistence.session_path[0])
+    {
+        return Fail("persistence failure still advertised a resumable session");
+    }
+
+    char bad_kind_path[4096];
+    snprintf(bad_kind_path, sizeof(bad_kind_path), "%s/bad-kind.jsonl", temp);
+    if (!AppendRaw(bad_kind_path,
+                   "{\"type\":\"session\",\"version\":3,\"id\":\"bad\","
+                   "\"kind\":\"unknown\",\"model\":\"saved-model\"}"))
+    {
+        return Fail("could not create invalid version 3 header");
+    }
+    PicoSessionHeader invalid_header;
+    PicoAgent bad_kind_agent;
+    memset(&bad_kind_agent, 0, sizeof(bad_kind_agent));
+    if (PicoSession_ReadHeader(bad_kind_path, &invalid_header) == 0 ||
+        PicoSession_Replay(&opened, &bad_kind_agent, bad_kind_path, false) == 0)
+    {
+        return Fail("version 3 session accepted an unknown agent kind");
+    }
+
+    char incomplete_child_path[4096];
+    snprintf(incomplete_child_path, sizeof(incomplete_child_path), "%s/incomplete-child.jsonl", temp);
+    if (!AppendRaw(incomplete_child_path,
+                   "{\"type\":\"session\",\"version\":3,\"id\":\"bad-child\","
+                   "\"kind\":\"subagent\",\"profile\":\"review\","
+                   "\"model\":\"saved-model\"}") ||
+        PicoSession_ReadHeader(incomplete_child_path, &invalid_header) == 0)
+    {
+        return Fail("subagent header without durable purpose metadata was accepted");
+    }
+
     char empty_path[4096];
     snprintf(empty_path, sizeof(empty_path), "%s/empty.jsonl", temp);
     FILE *empty = fopen(empty_path, "wb");
@@ -427,6 +486,9 @@ int main(void)
     }
 
     unlink(empty_path);
+    unlink(bad_kind_path);
+    unlink(incomplete_child_path);
+    unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
     return 0;
 }

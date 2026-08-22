@@ -5,15 +5,46 @@
 #include "json.h"
 #include "session.h"
 #include "settings.h"
+#include "subagent_config.h"
 
 #include <curl/curl.h>
-#include <ctype.h>
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
+
+typedef enum PicoDelegationState {
+    PICO_DELEGATION_REQUESTED = 0,
+    PICO_DELEGATION_STARTING,
+    PICO_DELEGATION_RUNNING,
+    PICO_DELEGATION_DONE,
+    PICO_DELEGATION_ERROR,
+    PICO_DELEGATION_CANCELLED,
+    PICO_DELEGATION_ABANDONED,
+} PicoDelegationState;
+
+typedef struct PicoDelegationJob {
+    struct PicoDelegationJob *next;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int refs;
+    PicoDelegationState state;
+    PicoAgentId parent_id;
+    uint64_t parent_generation;
+    PicoAgentId child_id;
+    int child_message_start;
+    char profile[65];
+    char *task;
+    char session_id[40];
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
+    char *result;
+    bool result_is_error;
+} PicoDelegationJob;
+
+static void ProcessDelegationRequests(PicoAgentManager *manager);
+static void ProcessDelegationTerminals(PicoAgentManager *manager);
+static void DropDelegations(PicoAgentManager *manager);
 
 static int FindIndex(const PicoAgentManager *manager, PicoAgentId id)
 {
@@ -61,8 +92,10 @@ PicoAgentManager *PicoAgentManager_Create(PicoApp *app)
         return NULL;
     }
     manager->app = app;
+    pthread_mutex_init(&manager->delegation_mu, NULL);
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
     {
+        pthread_mutex_destroy(&manager->delegation_mu);
         free(manager);
         return NULL;
     }
@@ -178,7 +211,8 @@ static PicoAgentResult ConfigureAgent(PicoApp *app, PicoAgent *agent,
     if (options->effort && options->effort[0])
     {
         const PicoModel *model = PicoSettings_ActiveModelConst(app, agent);
-        if (!PicoSettings_EffortAllowed(model, options->effort))
+        if (!PicoSettings_EffortAllowed(model, options->effort) &&
+            !(model && model->effort_count == 0 && strcmp(options->effort, "none") == 0))
         {
             return PICO_AGENT_RESULT_INVALID;
         }
@@ -337,7 +371,8 @@ PicoAgentResult pico_agent_close(PicoApp *app, PicoAgentId id)
         return PICO_AGENT_RESULT_NOT_FOUND;
     }
     PicoAgent *agent = manager->agents[index];
-    if (manager->count == 1 || PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(manager, id))
+    if (manager->count == 1 || PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(manager, id) ||
+        PicoAgentManager_JobReferences(manager, id))
     {
         return PICO_AGENT_RESULT_BUSY;
     }
@@ -390,10 +425,12 @@ void PicoAgentManager_Pump(PicoAgentManager *manager)
         return;
     }
     PicoAgent_ReapRetired(manager);
+    ProcessDelegationRequests(manager);
     for (int i = 0; i < manager->count; i++)
     {
         PicoAgent_Pump(manager->app, manager->agents[i]);
     }
+    ProcessDelegationTerminals(manager);
 }
 
 bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager)
@@ -403,6 +440,13 @@ bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager)
         return false;
     }
     if (manager->retired_count > 0)
+    {
+        return true;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&manager->delegation_mu);
+    bool delegating = manager->delegations != NULL;
+    pthread_mutex_unlock((pthread_mutex_t *)&manager->delegation_mu);
+    if (delegating)
     {
         return true;
     }
@@ -429,6 +473,7 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 1;
+    PicoAgentManager_CancelDelegations(manager, 0, 0);
     for (int i = 0; i < manager->count; i++)
     {
         PicoAgent_Cancel(manager->agents[i]);
@@ -453,10 +498,12 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
         manager->retained_shutdown = true;
         return false;
     }
+    DropDelegations(manager);
     if (manager->curl_initialized)
     {
         curl_global_cleanup();
     }
+    pthread_mutex_destroy(&manager->delegation_mu);
     free(manager);
     return true;
 }
@@ -574,249 +621,9 @@ void PicoAgentManager_ReplayToolDetails(PicoAgentManager *manager)
     }
 }
 
-static bool ValidProfileName(const char *name)
-{
-    if (!name || !isalnum((unsigned char)name[0]))
-    {
-        return false;
-    }
-    for (const char *p = name + 1; *p; p++)
-    {
-        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '_' && *p != '-')
-        {
-            return false;
-        }
-    }
-    return strlen(name) <= 64;
-}
-
-static bool ToolRegistered(const PicoApp *app, const char *name)
-{
-    for (int i = 0; app && i < app->tool_count; i++)
-    {
-        if (app->tools[i].name && strcmp(app->tools[i].name, name) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void ProfileWarning(PicoApp *app, const char *path, const char *reason)
-{
-    char line[4608];
-    snprintf(line, sizeof(line), "%s: %s", path, reason);
-    pico_status_warn(app, line);
-}
-
-static bool ParseProfile(PicoApp *app, const char *path, const char *name,
-                         PicoSubagentProfileInfo *out)
-{
-    size_t len = 0;
-    char *source = Pico_ReadFile(path, &len);
-    if (!source)
-    {
-        ProfileWarning(app, path, "could not read profile");
-        return false;
-    }
-    if (!JsonValidUtf8(source, len))
-    {
-        ProfileWarning(app, path, "profile is not valid UTF-8");
-        free(source);
-        return false;
-    }
-    JsonStripComments(source, len);
-    JsonDoc doc;
-    if (JsonParse(&doc, source, len) != 0 || !JsonIsObject(&doc, 0))
-    {
-        ProfileWarning(app, path, "profile must be a JSON object");
-        free(source);
-        return false;
-    }
-    memset(out, 0, sizeof(*out));
-    snprintf(out->name, sizeof(out->name), "%s", name);
-    char *purpose = JsonObjStr(&doc, 0, "purpose");
-    char *description = JsonObjStr(&doc, 0, "description");
-    char *model = JsonObjStr(&doc, 0, "model");
-    char *effort = JsonObjStr(&doc, 0, "effort");
-    const char *error = NULL;
-    if (!purpose || !purpose[0] || strlen(purpose) > 1024)
-    {
-        error = "purpose must be a non-empty string of at most 1024 bytes";
-    }
-    else if (JsonObjGet(&doc, 0, "description") >= 0 && !description)
-    {
-        error = "description must be a string";
-    }
-    else if (description && strlen(description) > 256)
-    {
-        error = "description exceeds 256 bytes";
-    }
-    else if (JsonObjGet(&doc, 0, "model") >= 0 && !model)
-    {
-        error = "model must be a string";
-    }
-    else if (model && (!model[0] || !PicoSettings_FindModelConst(app, model)))
-    {
-        error = "model is not in the model catalog";
-    }
-    else if (JsonObjGet(&doc, 0, "effort") >= 0 && !effort)
-    {
-        error = "effort must be a string";
-    }
-    else if (effort)
-    {
-        const PicoModel *resolved = model ? PicoSettings_FindModelConst(app, model) : NULL;
-        if (resolved && !PicoSettings_EffortAllowed(resolved, effort))
-        {
-            error = "effort is not supported by the configured model";
-        }
-    }
-
-    int tools_tok = JsonObjGet(&doc, 0, "tools");
-    if (!error && tools_tok >= 0)
-    {
-        if (!JsonIsArray(&doc, tools_tok) || JsonArrayLen(&doc, tools_tok) > PICO_MAX_TOOLS)
-        {
-            error = "tools must be an array within the tool limit";
-        }
-        else
-        {
-            out->restricted_tools = true;
-            int count = JsonArrayLen(&doc, tools_tok);
-            for (int i = 0; i < count && !error; i++)
-            {
-                char *tool = JsonStrDup(&doc, JsonArrayAt(&doc, tools_tok, i));
-                if (!tool || !tool[0] || strlen(tool) >= sizeof(out->tools[0]))
-                {
-                    error = "tool names must be non-empty strings shorter than 128 bytes";
-                }
-                else if (!ToolRegistered(app, tool))
-                {
-                    error = "tools contains an unknown tool name";
-                }
-                for (int j = 0; tool && !error && j < i; j++)
-                {
-                    if (strcmp(out->tools[j], tool) == 0)
-                    {
-                        error = "tools contains a duplicate name";
-                    }
-                }
-                if (!error)
-                {
-                    snprintf(out->tools[out->tool_count++], sizeof(out->tools[0]), "%s", tool);
-                }
-                free(tool);
-            }
-        }
-    }
-
-    for (int i = 0; i < JsonObjLen(&doc, 0); i++)
-    {
-        int key_tok = -1;
-        int value_tok = -1;
-        if (!JsonObjPair(&doc, 0, i, &key_tok, &value_tok))
-        {
-            continue;
-        }
-        char *key = JsonStrDup(&doc, key_tok);
-        if (key && strcmp(key, "purpose") != 0 && strcmp(key, "description") != 0 &&
-            strcmp(key, "model") != 0 && strcmp(key, "effort") != 0 && strcmp(key, "tools") != 0)
-        {
-            char reason[256];
-            snprintf(reason, sizeof(reason), "unknown profile key `%s`", key);
-            ProfileWarning(app, path, reason);
-        }
-        free(key);
-        (void)value_tok;
-    }
-
-    if (!error)
-    {
-        snprintf(out->purpose, sizeof(out->purpose), "%s", purpose);
-        snprintf(out->description, sizeof(out->description), "%s", description ? description : "");
-        if (model)
-        {
-            out->has_model = true;
-            snprintf(out->model, sizeof(out->model), "%s", model);
-        }
-        if (effort)
-        {
-            out->has_effort = true;
-            snprintf(out->effort, sizeof(out->effort), "%s", effort);
-        }
-    }
-    else
-    {
-        ProfileWarning(app, path, error);
-    }
-    free(purpose);
-    free(description);
-    free(model);
-    free(effort);
-    JsonFree(&doc);
-    free(source);
-    return error == NULL;
-}
-
 void PicoAgentManager_LoadProfiles(PicoAgentManager *manager)
 {
-    if (!manager || !manager->app)
-    {
-        return;
-    }
-    char config[4096];
-    char dir[4096];
-    Pico_ConfigDir(config, sizeof(config));
-    snprintf(dir, sizeof(dir), "%s/subagents", config);
-    Pico_MkdirP(dir);
-
-    PicoSubagentProfileInfo loaded[PICO_MAX_SUBAGENT_PROFILES];
-    int count = 0;
-    DIR *directory = opendir(dir);
-    if (directory)
-    {
-        struct dirent *entry;
-        while ((entry = readdir(directory)) && count < PICO_MAX_SUBAGENT_PROFILES)
-        {
-            size_t name_len = strlen(entry->d_name);
-            if (entry->d_name[0] == '.' || name_len <= 5 ||
-                strcmp(entry->d_name + name_len - 5, ".json") != 0)
-            {
-                continue;
-            }
-            char profile_name[65];
-            size_t stem_len = name_len - 5;
-            if (stem_len >= sizeof(profile_name))
-            {
-                continue;
-            }
-            memcpy(profile_name, entry->d_name, stem_len);
-            profile_name[stem_len] = '\0';
-            char path[4096];
-            if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >= sizeof(path))
-            {
-                continue;
-            }
-            struct stat st;
-            if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
-            {
-                continue;
-            }
-            if (!ValidProfileName(profile_name))
-            {
-                ProfileWarning(manager->app, path, "invalid profile filename");
-                continue;
-            }
-            if (ParseProfile(manager->app, path, profile_name, &loaded[count]))
-            {
-                count++;
-            }
-        }
-        closedir(directory);
-    }
-    memcpy(manager->profiles, loaded, (size_t)count * sizeof(loaded[0]));
-    manager->profile_count = count;
+    PicoSubagentConfig_Load(manager);
 }
 
 int pico_subagent_profile_count(const PicoApp *app)
@@ -889,4 +696,545 @@ PicoAgentResult PicoAgentManager_ResumeActive(PicoApp *app, const char *id, bool
     PicoChatSel_Clear(app);
     app->chat_follow_bottom = true;
     return PICO_AGENT_RESULT_OK;
+}
+
+static bool DelegationTerminal(PicoDelegationState state)
+{
+    return state == PICO_DELEGATION_DONE || state == PICO_DELEGATION_ERROR ||
+           state == PICO_DELEGATION_CANCELLED || state == PICO_DELEGATION_ABANDONED;
+}
+
+static void DelegationRetain(PicoDelegationJob *job)
+{
+    pthread_mutex_lock(&job->mu);
+    job->refs++;
+    pthread_mutex_unlock(&job->mu);
+}
+
+static void DelegationRelease(PicoDelegationJob *job)
+{
+    if (!job)
+    {
+        return;
+    }
+    pthread_mutex_lock(&job->mu);
+    bool free_job = --job->refs == 0;
+    pthread_mutex_unlock(&job->mu);
+    if (!free_job)
+    {
+        return;
+    }
+    pthread_mutex_destroy(&job->mu);
+    pthread_cond_destroy(&job->cv);
+    free(job->task);
+    free(job->result);
+    free(job);
+}
+
+static char *DelegationResultJson(const PicoDelegationJob *job, const char *status,
+                                  const PicoAgent *child, const char *answer)
+{
+    bool resumable = child && child->persistence == PICO_SESSION_DURABLE &&
+                     child->session_id[0] && child->session_path[0];
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"status\":");
+    JsonBuf_String(&b, status);
+    JsonBuf_Puts(&b, ",\"profile\":");
+    JsonBuf_String(&b, job->profile);
+    JsonBuf_Puts(&b, ",\"model\":");
+    JsonBuf_String(&b, child ? child->model : job->model);
+    JsonBuf_Puts(&b, ",\"effort\":");
+    JsonBuf_String(&b, child ? child->effort : job->effort);
+    if (resumable)
+    {
+        JsonBuf_Puts(&b, ",\"session_id\":");
+        JsonBuf_String(&b, child->session_id);
+    }
+    JsonBuf_Puts(&b, ",\"resumable\":");
+    JsonBuf_Bool(&b, resumable);
+    JsonBuf_Puts(&b, ",\"final_answer\":");
+    JsonBuf_String(&b, answer ? answer : "");
+    JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
+}
+
+static bool PublishDelegation(PicoDelegationJob *job, PicoDelegationState state,
+                              const char *status, const PicoAgent *child,
+                              const char *answer, bool is_error)
+{
+    pthread_mutex_lock(&job->mu);
+    if (DelegationTerminal(job->state))
+    {
+        pthread_mutex_unlock(&job->mu);
+        return false;
+    }
+    char *result = DelegationResultJson(job, status, child, answer);
+    if (!result)
+    {
+        result = JsonDup("{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"out of memory\"}");
+        state = PICO_DELEGATION_ERROR;
+        is_error = true;
+    }
+    free(job->result);
+    job->result = result;
+    job->result_is_error = is_error;
+    job->state = state;
+    pthread_cond_broadcast(&job->cv);
+    pthread_mutex_unlock(&job->mu);
+    return true;
+}
+
+static void RemoveDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
+{
+    bool removed = false;
+    pthread_mutex_lock(&manager->delegation_mu);
+    PicoDelegationJob **link = &manager->delegations;
+    while (*link)
+    {
+        if (*link == job)
+        {
+            *link = job->next;
+            job->next = NULL;
+            removed = true;
+            break;
+        }
+        link = &(*link)->next;
+    }
+    pthread_mutex_unlock(&manager->delegation_mu);
+    if (removed)
+    {
+        DelegationRelease(job);
+    }
+}
+
+static const char *AgentResultText(PicoAgentResult result)
+{
+    switch (result)
+    {
+    case PICO_AGENT_RESULT_LIMIT: return "agent or delegation depth limit reached";
+    case PICO_AGENT_RESULT_SESSION_IN_USE: return "session is already open";
+    case PICO_AGENT_RESULT_SESSION_INVALID: return "session is invalid";
+    case PICO_AGENT_RESULT_NO_MEMORY: return "out of memory";
+    case PICO_AGENT_RESULT_NOT_FOUND: return "parent agent no longer exists";
+    default: return "could not create subagent";
+    }
+}
+
+static const char *LastAssistantSince(const PicoAgent *agent, int message_start)
+{
+    for (int i = agent ? agent->message_count - 1 : -1; i >= message_start; i--)
+    {
+        if (agent->messages[i].role == PICO_ROLE_ASSISTANT &&
+            agent->messages[i].source && agent->messages[i].source[0])
+        {
+            return agent->messages[i].source;
+        }
+    }
+    return "";
+}
+
+static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
+{
+    PicoApp *app = manager->app;
+    PicoAgent *parent = PicoAgentManager_Find(manager, job->parent_id);
+    if (!parent || parent->runtime_generation != job->parent_generation)
+    {
+        PublishDelegation(job, PICO_DELEGATION_ABANDONED, "cancelled", NULL,
+                          "parent runtime is no longer live", true);
+        return false;
+    }
+    const PicoSubagentProfileInfo *profile = PicoSubagentConfig_Find(manager, job->profile);
+    if (!profile)
+    {
+        PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                          "unknown subagent profile", true);
+        return false;
+    }
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
+    if (!PicoSubagentConfig_Resolve(app, parent, profile, model, sizeof(model),
+                                    effort, sizeof(effort)))
+    {
+        PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                          "profile model and effort could not be resolved", true);
+        return false;
+    }
+    pthread_mutex_lock(&job->mu);
+    snprintf(job->model, sizeof(job->model), "%s", model);
+    snprintf(job->effort, sizeof(job->effort), "%s", effort);
+    pthread_mutex_unlock(&job->mu);
+
+    PicoSessionHeader header;
+    memset(&header, 0, sizeof(header));
+    if (job->session_id[0])
+    {
+        char path[4096];
+        if (PicoSession_Resolve(app, job->session_id, false, path, sizeof(path)) != 0 ||
+            PicoSession_ReadHeader(path, &header) != 0)
+        {
+            PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                              "subagent session was not found or is invalid", true);
+            return false;
+        }
+        if (header.kind != PICO_AGENT_SUBAGENT || strcmp(header.profile, profile->name) != 0)
+        {
+            PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                              "subagent session profile does not match", true);
+            return false;
+        }
+    }
+
+    const char *tools[PICO_MAX_TOOLS];
+    for (int i = 0; i < profile->tool_count; i++)
+    {
+        tools[i] = profile->tools[i];
+    }
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_SUBAGENT,
+        .parent_id = parent->id,
+        .profile = profile->name,
+        .purpose = profile->purpose,
+        .model = model,
+        .effort = effort,
+        .tools = profile->restricted_tools ? tools : NULL,
+        .tool_count = profile->restricted_tools ? profile->tool_count : 0,
+        .session_start = job->session_id[0] ? PICO_SESSION_RESUME :
+                         (parent->persistence == PICO_SESSION_DURABLE ? PICO_SESSION_NEW : PICO_SESSION_NONE),
+        .session_id = job->session_id[0] ? job->session_id : NULL,
+        .select = false,
+    };
+    PicoAgentId child_id = 0;
+    PicoAgentResult created = pico_agent_create(app, &options, &child_id);
+    if (created != PICO_AGENT_RESULT_OK)
+    {
+        PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                          AgentResultText(created), true);
+        return false;
+    }
+    PicoAgent *child = PicoAgentManager_Find(manager, child_id);
+    if (!child)
+    {
+        PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                          "created subagent was not published", true);
+        return false;
+    }
+
+    char replayed_model[128];
+    snprintf(replayed_model, sizeof(replayed_model), "%s", child->model);
+
+    child->kind = PICO_AGENT_SUBAGENT;
+    child->parent_id = parent->id;
+    snprintf(child->profile, sizeof(child->profile), "%s", profile->name);
+    snprintf(child->purpose, sizeof(child->purpose), "%s", profile->purpose);
+    snprintf(child->model, sizeof(child->model), "%s", model);
+    snprintf(child->effort, sizeof(child->effort), "%s", effort);
+    if (!job->session_id[0])
+    {
+        snprintf(child->parent_session_id, sizeof(child->parent_session_id), "%s",
+                 parent->persistence == PICO_SESSION_DURABLE ? parent->session_id : "");
+    }
+    PicoSettings_SyncAgent(app, child);
+    if (job->session_id[0] && replayed_model[0] && strcmp(replayed_model, model) != 0)
+    {
+        PicoAgent_RotateCacheKey(child);
+    }
+
+    pthread_mutex_lock(&job->mu);
+    job->child_id = child_id;
+    job->child_message_start = child->message_count;
+    job->state = PICO_DELEGATION_RUNNING;
+    pthread_mutex_unlock(&job->mu);
+    PicoAgent_AddMessage(app, child, PICO_ROLE_USER, job->task);
+    PicoSession_LogUser(app, child, job->task, job->task);
+    PicoAgent_StartTurn(app, child, job->task);
+    return true;
+}
+
+static void ProcessDelegationRequests(PicoAgentManager *manager)
+{
+    for (;;)
+    {
+        PicoDelegationJob *job = NULL;
+        pthread_mutex_lock(&manager->delegation_mu);
+        for (PicoDelegationJob *it = manager->delegations; it; it = it->next)
+        {
+            pthread_mutex_lock(&it->mu);
+            if (it->state == PICO_DELEGATION_REQUESTED)
+            {
+                it->state = PICO_DELEGATION_STARTING;
+                job = it;
+                pthread_mutex_unlock(&it->mu);
+                break;
+            }
+            pthread_mutex_unlock(&it->mu);
+        }
+        pthread_mutex_unlock(&manager->delegation_mu);
+        if (!job)
+        {
+            break;
+        }
+        if (!StartDelegation(manager, job))
+        {
+            RemoveDelegation(manager, job);
+        }
+    }
+}
+
+static void CloseDelegationChild(PicoAgentManager *manager, PicoDelegationJob *job,
+                                 PicoAgentId child_id)
+{
+    pthread_mutex_lock(&job->mu);
+    job->child_id = 0;
+    pthread_mutex_unlock(&job->mu);
+    PicoAgentResult closed = pico_agent_close(manager->app, child_id);
+    if (closed == PICO_AGENT_RESULT_OK || closed == PICO_AGENT_RESULT_NOT_FOUND)
+    {
+        RemoveDelegation(manager, job);
+        return;
+    }
+    pthread_mutex_lock(&job->mu);
+    job->child_id = child_id;
+    pthread_mutex_unlock(&job->mu);
+}
+
+static void ProcessDelegationTerminals(PicoAgentManager *manager)
+{
+    PicoDelegationJob *jobs[PICO_MAX_AGENTS * 2];
+    int count = 0;
+    pthread_mutex_lock(&manager->delegation_mu);
+    for (PicoDelegationJob *it = manager->delegations;
+         it && count < (int)(sizeof(jobs) / sizeof(jobs[0])); it = it->next)
+    {
+        DelegationRetain(it);
+        jobs[count++] = it;
+    }
+    pthread_mutex_unlock(&manager->delegation_mu);
+
+    for (int i = 0; i < count; i++)
+    {
+        PicoDelegationJob *job = jobs[i];
+        pthread_mutex_lock(&job->mu);
+        PicoDelegationState state = job->state;
+        PicoAgentId child_id = job->child_id;
+        int child_message_start = job->child_message_start;
+        pthread_mutex_unlock(&job->mu);
+        PicoAgent *child = child_id ? PicoAgentManager_Find(manager, child_id) : NULL;
+
+        if ((state == PICO_DELEGATION_CANCELLED || state == PICO_DELEGATION_ABANDONED) && child)
+        {
+            if (PicoAgent_IsBusy(child))
+            {
+                PicoAgent_Cancel(child);
+            }
+            else
+            {
+                CloseDelegationChild(manager, job, child_id);
+            }
+        }
+        else if (state == PICO_DELEGATION_RUNNING)
+        {
+            if (!child)
+            {
+                PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                                  "subagent disappeared before completion", true);
+                RemoveDelegation(manager, job);
+            }
+            else if (child->state == PICO_AGENT_ERROR)
+            {
+                PublishDelegation(job, PICO_DELEGATION_ERROR, "error", child,
+                                  child->error ? child->error : "subagent failed", true);
+                CloseDelegationChild(manager, job, child_id);
+            }
+            else if (!PicoAgent_IsBusy(child) && child->state == PICO_AGENT_IDLE)
+            {
+                PublishDelegation(job, PICO_DELEGATION_DONE, "completed", child,
+                                  LastAssistantSince(child, child_message_start), false);
+                CloseDelegationChild(manager, job, child_id);
+            }
+        }
+        else if (DelegationTerminal(state))
+        {
+            if (child)
+            {
+                if (!PicoAgent_IsBusy(child))
+                {
+                    CloseDelegationChild(manager, job, child_id);
+                }
+            }
+            else
+            {
+                RemoveDelegation(manager, job);
+            }
+        }
+        DelegationRelease(job);
+    }
+}
+
+char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
+                                const char *task, const char *session_id,
+                                bool *is_error)
+{
+    if (is_error)
+    {
+        *is_error = true;
+    }
+    PicoAgentManager *manager = PicoAgentContext_Manager(ctx);
+    if (!manager || !profile || !profile[0] || strlen(profile) > 64 ||
+        !task || !task[0] || strlen(task) > 64 * 1024 ||
+        (session_id && strlen(session_id) >= 40))
+    {
+        return JsonDup("{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"invalid subagent request\"}");
+    }
+    PicoDelegationJob *job = (PicoDelegationJob *)calloc(1, sizeof(*job));
+    if (!job)
+    {
+        return JsonDup("{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"out of memory\"}");
+    }
+    pthread_mutex_init(&job->mu, NULL);
+    pthread_cond_init(&job->cv, NULL);
+    job->refs = 2;
+    job->state = PICO_DELEGATION_REQUESTED;
+    job->parent_id = pico_agent_context_id(ctx);
+    job->parent_generation = pico_agent_context_generation(ctx);
+    snprintf(job->profile, sizeof(job->profile), "%s", profile);
+    snprintf(job->session_id, sizeof(job->session_id), "%s", session_id ? session_id : "");
+    job->task = JsonDup(task);
+    if (!job->task)
+    {
+        job->refs = 1;
+        DelegationRelease(job);
+        return JsonDup("{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"out of memory\"}");
+    }
+
+    if (!PicoAgentContext_LockIfLive(ctx))
+    {
+        char *result = DelegationResultJson(job, "cancelled", NULL,
+                                            "parent cancelled delegation");
+        job->refs = 1;
+        DelegationRelease(job);
+        return result ? result : JsonDup("{\"status\":\"cancelled\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"parent cancelled delegation\"}");
+    }
+    pthread_mutex_lock(&manager->delegation_mu);
+    PicoDelegationJob **tail = &manager->delegations;
+    while (*tail) tail = &(*tail)->next;
+    *tail = job;
+    pthread_mutex_unlock(&manager->delegation_mu);
+    PicoAgentContext_UnlockLive(ctx);
+
+    pthread_mutex_lock(&job->mu);
+    while (!DelegationTerminal(job->state))
+    {
+        pthread_cond_wait(&job->cv, &job->mu);
+    }
+    char *result = JsonDup(job->result ? job->result :
+                           "{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"delegation ended without a result\"}");
+    bool failed = job->result_is_error;
+    pthread_mutex_unlock(&job->mu);
+    if (is_error)
+    {
+        *is_error = failed;
+    }
+    DelegationRelease(job);
+    return result;
+}
+
+void PicoAgentManager_CancelChildDelegation(PicoAgentManager *manager, PicoAgentId child_id)
+{
+    if (!manager || !child_id)
+    {
+        return;
+    }
+    PicoAgent *child = PicoAgentManager_Find(manager, child_id);
+    pthread_mutex_lock(&manager->delegation_mu);
+    for (PicoDelegationJob *job = manager->delegations; job; job = job->next)
+    {
+        pthread_mutex_lock(&job->mu);
+        if (job->child_id == child_id && !DelegationTerminal(job->state))
+        {
+            free(job->result);
+            job->result = DelegationResultJson(job, "cancelled", child,
+                                               child ? LastAssistantSince(child,
+                                                                         job->child_message_start) : "");
+            job->result_is_error = true;
+            job->state = PICO_DELEGATION_CANCELLED;
+            pthread_cond_broadcast(&job->cv);
+        }
+        pthread_mutex_unlock(&job->mu);
+    }
+    pthread_mutex_unlock(&manager->delegation_mu);
+}
+
+void PicoAgentManager_CancelDelegations(PicoAgentManager *manager, PicoAgentId parent_id,
+                                        uint64_t runtime_generation)
+{
+    if (!manager)
+    {
+        return;
+    }
+    PicoAgentId children[PICO_MAX_AGENTS];
+    int child_count = 0;
+    pthread_mutex_lock(&manager->delegation_mu);
+    for (PicoDelegationJob *job = manager->delegations; job; job = job->next)
+    {
+        pthread_mutex_lock(&job->mu);
+        bool match = parent_id == 0 ||
+                     (job->parent_id == parent_id && job->parent_generation == runtime_generation);
+        if (match && !DelegationTerminal(job->state))
+        {
+            free(job->result);
+            job->result = DelegationResultJson(job, "cancelled", NULL,
+                                               "parent cancelled delegation");
+            job->result_is_error = true;
+            job->state = PICO_DELEGATION_CANCELLED;
+            if (job->child_id && child_count < PICO_MAX_AGENTS)
+            {
+                children[child_count++] = job->child_id;
+            }
+            pthread_cond_broadcast(&job->cv);
+        }
+        pthread_mutex_unlock(&job->mu);
+    }
+    pthread_mutex_unlock(&manager->delegation_mu);
+    for (int i = 0; i < child_count; i++)
+    {
+        PicoAgent *child = PicoAgentManager_Find(manager, children[i]);
+        if (child)
+        {
+            PicoAgent_Cancel(child);
+        }
+    }
+}
+
+bool PicoAgentManager_JobReferences(const PicoAgentManager *manager, PicoAgentId id)
+{
+    if (!manager || !id)
+    {
+        return false;
+    }
+    bool found = false;
+    pthread_mutex_lock((pthread_mutex_t *)&manager->delegation_mu);
+    for (PicoDelegationJob *job = manager->delegations; job && !found; job = job->next)
+    {
+        pthread_mutex_lock(&job->mu);
+        found = job->parent_id == id || job->child_id == id;
+        pthread_mutex_unlock(&job->mu);
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&manager->delegation_mu);
+    return found;
+}
+
+static void DropDelegations(PicoAgentManager *manager)
+{
+    pthread_mutex_lock(&manager->delegation_mu);
+    PicoDelegationJob *job = manager->delegations;
+    manager->delegations = NULL;
+    pthread_mutex_unlock(&manager->delegation_mu);
+    while (job)
+    {
+        PicoDelegationJob *next = job->next;
+        job->next = NULL;
+        DelegationRelease(job);
+        job = next;
+    }
 }

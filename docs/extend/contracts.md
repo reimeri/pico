@@ -4,7 +4,7 @@ Read this before writing an extension. Getting these wrong crashes Pico or silen
 
 ## Reload waits until idle
 
-`PicoPlugins_Reload` queues while the live agent is in `PICO_AGENT_LLM_WAIT`, `PICO_AGENT_TOOL_WAIT`, or `PICO_AGENT_COMPACT_WAIT`, **or** a force-cancelled worker is still inside a tool or provider call. A `.c` file written in this turn does not load until that work finishes. Tell the user to wait, or use `/reload` after. Polling is ~0.5s; F5 and `/reload` request the same path.
+`PicoPlugins_Reload` queues while any live agent is in `PICO_AGENT_LLM_WAIT`, `PICO_AGENT_TOOL_WAIT`, or `PICO_AGENT_COMPACT_WAIT`, **or** a force-cancelled worker is still inside a tool or provider call. A `.c` file written in this turn does not load until that work finishes. Tell the user to wait, or use `/reload` after. Polling is ~0.5s; F5 and `/reload` request the same path.
 
 A second Esc force-cancels a stuck turn: the UI goes idle and a new worker starts so the user can keep chatting, but reload still waits for the abandoned worker. That worker may outlive the turn; do not touch Clay, Raylib, or chat/composer state from it.
 
@@ -20,14 +20,14 @@ Worker thread: `PicoToolFn`, `PicoToolBeforeFn`, `PicoProviderStreamFn`. They re
 
 Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a `PicoToolResult` with malloc'd fields; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`. `PICO_LLM_DELTA_THINKING` appends; `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current summary (zero-length starts the next step). Pico coalesces consecutive summaries until a tool call.
 
-Reload is deferred while the live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns. That includes a worker blocked in `pico_tool_ask`.
+Reload is deferred while any live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns. That includes a worker blocked in `pico_tool_ask`.
 
 ## Ownership
 
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - `PicoToolResult.output` / `details_json`: malloc if set; Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
-- `pico_tool_pending_ask` `request_json`: valid until the next `PicoAgent_Pump`. Do not retain it across frames.
+- `pico_tool_pending_ask` `request_json`: the oldest live ask across all agents; valid until the next manager pump. Do not retain it across frames.
 - `PicoAgentContext *` and all strings returned by its accessors: callback-scoped; never retain them.
 - `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
@@ -60,7 +60,7 @@ Registrations are ignored when a limit is full, arguments are NULL, or the kind/
 
 ## `PicoApp`
 
-The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `workspace`). Conversation/runtime/session/model/usage fields live in opaque `PicoAgent`, not `PicoApp`. Use `pico_agent_id` and `pico_agent_info_snapshot`; see [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `session.h`, and `settings.h` are not extension API.
+The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `workspace`). Conversation/runtime/session/model/usage fields live in opaque manager-owned `PicoAgent` instances, not `PicoApp`. Use the copied `pico_agent_*` manager snapshots; `app->agents` is an opaque owner, not a dereferenceable active-agent handle. See [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `agent_manager.h`, `session.h`, and `settings.h` are not extension API.
 
 The model catalog in `PicoApp` is immutable while agents run. Each agent owns copied model/effort/context/compaction selection, so changing defaults or replaying a session does not mutate another live agent.
 

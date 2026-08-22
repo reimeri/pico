@@ -171,7 +171,7 @@ static void RenderToolLine(PicoApp *app, PicoTraceLine *line, int message_index,
         if (line->expanded)
         {
             const char *output = line->tool_output;
-            if (!output && app->agent->state == PICO_AGENT_TOOL_WAIT)
+            if (!output && PicoApp_ActiveAgent(app)->state == PICO_AGENT_TOOL_WAIT)
             {
                 PicoToolAsk ask;
                 output = pico_tool_pending_ask(app, &ask) ? "Waiting for you…" : "Running…";
@@ -291,7 +291,7 @@ static void RenderEmptyState(PicoApp *app)
 void PicoChat_Render(PicoApp *app)
 {
     app->hovered_tool = false;
-    PicoChatSel_BeginFrame(app->agent->message_count);
+    PicoChatSel_BeginFrame(PicoApp_ActiveAgent(app)->message_count);
     CLAY(CLAY_ID("ChatRow"),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                      .childGap = SCROLLBAR_GAP,
@@ -302,7 +302,7 @@ void PicoChat_Render(PicoApp *app)
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
-            bool empty = app->agent->message_count == 0;
+            bool empty = PicoApp_ActiveAgent(app)->message_count == 0;
             Clay_ChildAlignment align = empty ? (Clay_ChildAlignment){.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}
                                               : (Clay_ChildAlignment){0};
             Clay_Sizing content_size = {.width = CLAY_SIZING_GROW(0)};
@@ -322,9 +322,9 @@ void PicoChat_Render(PicoApp *app)
                     RenderEmptyState(app);
                 }
                 float available_width = ChatWidth(app);
-                for (int i = 0; i < app->agent->message_count; i++)
+                for (int i = 0; i < PicoApp_ActiveAgent(app)->message_count; i++)
                 {
-                    PicoMessage *msg = &app->agent->messages[i];
+                    PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[i];
                     bool user = msg->role == PICO_ROLE_USER;
                     Clay_Color bg = user ? COLOR_USER_BG : COLOR_ASSISTANT_BG;
                     CLAY(CLAY_IDI("Msg", i),
@@ -338,9 +338,9 @@ void PicoChat_Render(PicoApp *app)
                         PicoChatSel_SetMessage(i);
                         bool has_trace = msg->trace_count > 0;
                         bool has_source = msg->source && msg->source[0];
-                        bool live = !user && i == app->agent->message_count - 1 &&
-                                    (app->agent->state == PICO_AGENT_LLM_WAIT ||
-                                     app->agent->state == PICO_AGENT_TOOL_WAIT);
+                        bool live = !user && i == PicoApp_ActiveAgent(app)->message_count - 1 &&
+                                    (PicoApp_ActiveAgent(app)->state == PICO_AGENT_LLM_WAIT ||
+                                     PicoApp_ActiveAgent(app)->state == PICO_AGENT_TOOL_WAIT);
                         for (int t = 0; t < msg->trace_count; t++)
                         {
                             PicoTraceLine *line = &msg->trace[t];
@@ -369,7 +369,7 @@ void PicoChat_Render(PicoApp *app)
                         if (!has_trace && live && !has_source)
                         {
                             const char *label =
-                                app->agent->activity[0] ? app->agent->activity : "Thinking…";
+                                PicoApp_ActiveAgent(app)->activity[0] ? PicoApp_ActiveAgent(app)->activity : "Thinking…";
                             Clay_String think = {.length = (int32_t)strlen(label), .chars = label};
                             PicoChatSel_Text(think, (Clay_TextElementConfig){.fontId = FONT_ITALIC,
                                                                              .fontSize = 15,
@@ -461,9 +461,9 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
     {
         int tool_msg = -1;
         int tool_idx = -1;
-        for (int i = 0; i < app->agent->message_count; i++)
+        for (int i = 0; i < PicoApp_ActiveAgent(app)->message_count; i++)
         {
-            PicoMessage *msg = &app->agent->messages[i];
+            PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[i];
             for (int t = 0; t < msg->trace_count; t++)
             {
                 if (msg->trace[t].is_tool && Clay_PointerOver(ToolRowId(i, t)))
@@ -497,9 +497,9 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
         if (app->chat_sel.mouse_selecting && !app->chat_sel.dragging && app->chat_sel.pressed_tool &&
-            app->chat_sel.tool_msg >= 0 && app->chat_sel.tool_msg < app->agent->message_count)
+            app->chat_sel.tool_msg >= 0 && app->chat_sel.tool_msg < PicoApp_ActiveAgent(app)->message_count)
         {
-            PicoMessage *msg = &app->agent->messages[app->chat_sel.tool_msg];
+            PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
             int t = app->chat_sel.tool_idx;
             if (t >= 0 && t < msg->trace_count && msg->trace[t].is_tool &&
                 Clay_PointerOver(ToolRowId(app->chat_sel.tool_msg, t)))
@@ -558,9 +558,9 @@ static void PicoChat_DrawChevrons(PicoApp *app)
     const char *glyph = "\xE2\x80\xBA";
     Vector2 size = MeasureTextEx(font, glyph, 15.0f, 0.0f);
 
-    for (int i = 0; i < app->agent->message_count; i++)
+    for (int i = 0; i < PicoApp_ActiveAgent(app)->message_count; i++)
     {
-        PicoMessage *msg = &app->agent->messages[i];
+        PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[i];
         for (int t = 0; t < msg->trace_count; t++)
         {
             PicoTraceLine *line = &msg->trace[t];

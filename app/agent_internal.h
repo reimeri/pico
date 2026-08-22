@@ -6,6 +6,9 @@
 struct PicoAgentRt;
 typedef struct PicoAgentRt PicoAgentRt;
 
+PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
+const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
+
 typedef enum PicoSessionPersistence {
     PICO_SESSION_EPHEMERAL = 0,
     PICO_SESSION_DURABLE,
@@ -13,6 +16,7 @@ typedef enum PicoSessionPersistence {
 } PicoSessionPersistence;
 
 struct PicoAgent {
+    PicoAgentManager *manager;
     PicoAgentId id;
     PicoAgentId parent_id;
     uint64_t runtime_generation;
@@ -53,12 +57,12 @@ struct PicoAgent {
 
 static inline PicoAgent *PicoApp_ActiveAgent(PicoApp *app)
 {
-    return app ? app->agent : NULL;
+    return app ? PicoAgentManager_Active(app->agents) : NULL;
 }
 
 static inline const PicoAgent *PicoApp_ActiveAgentConst(const PicoApp *app)
 {
-    return app ? app->agent : NULL;
+    return app ? PicoAgentManager_ActiveConst(app->agents) : NULL;
 }
 
 #endif

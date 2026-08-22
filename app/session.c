@@ -3,6 +3,7 @@
 
 #include "session.h"
 #include "agent.h"
+#include "agent_manager.h"
 #include "json.h"
 #include "settings.h"
 #include "usage.h"
@@ -369,7 +370,19 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     Pico_RandomHex(agent->session_id, sizeof(agent->session_id));
     char stamp[40];
     Pico_IsoTime(stamp, sizeof(stamp), true);
-    snprintf(agent->session_path, sizeof(agent->session_path), "%s/%s_%s.jsonl", dir, stamp, agent->session_id);
+    char canonical_dir[4096];
+    if (!realpath(dir, canonical_dir))
+    {
+        return -1;
+    }
+    snprintf(agent->session_path, sizeof(agent->session_path), "%s/%s_%s.jsonl",
+             canonical_dir, stamp, agent->session_id);
+    if (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, agent->session_path))
+    {
+        agent->session_id[0] = '\0';
+        agent->session_path[0] = '\0';
+        return -1;
+    }
 
     char ts[40];
     Pico_IsoTime(ts, sizeof(ts), false);
@@ -576,7 +589,8 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
     free(type);
 }
 
-static int ReplayFile(PicoApp *app, PicoAgent *agent, const char *path)
+int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
+                       bool append_interrupted)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -590,6 +604,7 @@ static int ReplayFile(PicoApp *app, PicoAgent *agent, const char *path)
     int cap = 0;
     char *buf = NULL;
     size_t buf_cap = 0;
+    bool read_failed = false;
     while (getline(&buf, &buf_cap, f) != -1)
     {
         size_t len = strlen(buf);
@@ -607,26 +622,60 @@ static int ReplayFile(PicoApp *app, PicoAgent *agent, const char *path)
             char **next = (char **)realloc(lines, (size_t)cap * sizeof(char *));
             if (!next)
             {
+                read_failed = true;
                 break;
             }
             lines = next;
         }
-        lines[n++] = JsonDup(buf);
+        char *copy = JsonDup(buf);
+        if (!copy)
+        {
+            read_failed = true;
+            break;
+        }
+        lines[n++] = copy;
+    }
+    if (ferror(f))
+    {
+        read_failed = true;
     }
     free(buf);
     fclose(f);
+    if (read_failed || n == 0)
+    {
+        goto invalid;
+    }
 
     int last_compact = -1;
     int last_tool_call = -1;
     int last_tool_result = -1;
+    bool valid_header = false;
     for (int i = 0; i < n; i++)
     {
         JsonDoc doc;
-        if (JsonParse(&doc, lines[i], strlen(lines[i])) != 0)
+        memset(&doc, 0, sizeof(doc));
+        if (JsonParse(&doc, lines[i], strlen(lines[i])) != 0 || !JsonIsObject(&doc, 0))
         {
-            continue;
+            if (doc.toks)
+            {
+                JsonFree(&doc);
+            }
+            goto invalid;
         }
         char *type = JsonObjStr(&doc, 0, "type");
+        if (i == 0)
+        {
+            char *header_id = JsonObjStr(&doc, 0, "id");
+            int version = JsonObjInt(&doc, 0, "version", 0);
+            valid_header = type && strcmp(type, "session") == 0 && header_id && header_id[0] && version == 2;
+            free(header_id);
+            if (!valid_header)
+            {
+                free(type);
+                JsonFree(&doc);
+                goto invalid;
+            }
+        }
         if (type && strcmp(type, "compaction") == 0)
         {
             last_compact = i;
@@ -642,6 +691,10 @@ static int ReplayFile(PicoApp *app, PicoAgent *agent, const char *path)
         free(type);
         JsonFree(&doc);
     }
+    if (!valid_header)
+    {
+        goto invalid;
+    }
 
     PicoAgent_ClearInput(agent);
     for (int i = 0; i < n; i++)
@@ -656,10 +709,69 @@ static int ReplayFile(PicoApp *app, PicoAgent *agent, const char *path)
         JsonFree(&doc);
     }
 
-    if (last_tool_call > last_tool_result)
+    for (int i = 0; i < n; i++)
+    {
+        free(lines[i]);
+    }
+    free(lines);
+    app->chat_follow_bottom = true;
+    if (append_interrupted && last_tool_call > last_tool_result)
+    {
+        PicoSession_AppendInterrupted(app, agent);
+    }
+    return 0;
+
+invalid:
+    for (int i = 0; i < n; i++)
+    {
+        free(lines[i]);
+    }
+    free(lines);
+    agent->session_path[0] = '\0';
+    return -1;
+}
+
+void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent)
+{
+    if (!app || !agent || !agent->session_path[0])
+    {
+        return;
+    }
+    FILE *f = fopen(agent->session_path, "rb");
+    if (!f)
+    {
+        return;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    char *last_call = NULL;
+    int calls = 0;
+    int results = 0;
+    while (getline(&line, &cap, f) != -1)
     {
         JsonDoc doc;
-        if (JsonParse(&doc, lines[last_tool_call], strlen(lines[last_tool_call])) == 0)
+        if (JsonParse(&doc, line, strlen(line)) != 0)
+        {
+            continue;
+        }
+        if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_call"))
+        {
+            calls++;
+            free(last_call);
+            last_call = JsonDup(line);
+        }
+        else if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_result"))
+        {
+            results++;
+        }
+        JsonFree(&doc);
+    }
+    free(line);
+    fclose(f);
+    if (calls > results && last_call)
+    {
+        JsonDoc doc;
+        if (JsonParse(&doc, last_call, strlen(last_call)) == 0)
         {
             char *call_id = JsonObjStr(&doc, 0, "call_id");
             char *name = JsonObjStr(&doc, 0, "name");
@@ -671,14 +783,7 @@ static int ReplayFile(PicoApp *app, PicoAgent *agent, const char *path)
             JsonFree(&doc);
         }
     }
-
-    for (int i = 0; i < n; i++)
-    {
-        free(lines[i]);
-    }
-    free(lines);
-    app->chat_follow_bottom = true;
-    return 0;
+    free(last_call);
 }
 
 void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
@@ -741,7 +846,14 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
     agent->persistence = PICO_SESSION_DURABLE;
     if (session_file && session_file[0])
     {
-        ReplayFile(app, agent, session_file);
+        char canonical[4096];
+        if (!realpath(session_file, canonical) ||
+            (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, canonical)) ||
+            PicoSession_Replay(app, agent, canonical, true) != 0)
+        {
+            agent->persistence = PICO_SESSION_FAILED;
+            pico_status_warn(app, "Could not open the requested session file.");
+        }
         return;
     }
     if (start == PICO_SESSION_RESUME || app->settings.resume_last)
@@ -751,18 +863,23 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
         SessionDir(app, dir, sizeof(dir));
         if (FindLatest(dir, latest, sizeof(latest)) == 0)
         {
-            ReplayFile(app, agent, latest);
+            char canonical[4096];
+            if (realpath(latest, canonical) &&
+                (!app->agents || PicoAgentManager_ReserveSession(app->agents, agent->id, canonical)))
+            {
+                (void)PicoSession_Replay(app, agent, canonical, true);
+            }
         }
     }
 }
 
-int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id)
+int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
+                        char *path, size_t path_cap)
 {
-    if (!app || !id || !id[0] || PicoAgent_IsBusy(agent))
+    if (!app || !id || !id[0] || !path || path_cap == 0)
     {
         return -1;
     }
-
     PicoSessionInfo *list = NULL;
     int n = PicoSession_List(app, &list);
     const PicoSessionInfo *found = NULL;
@@ -776,35 +893,54 @@ int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id)
             found = &list[i];
             break;
         }
-        if (strncmp(list[i].id, id, id_len) == 0)
+        if (allow_prefix && strncmp(list[i].id, id, id_len) == 0)
         {
             prefix = &list[i];
             prefix_hits++;
         }
     }
-    if (!found && prefix_hits == 1)
+    if (!found && allow_prefix && prefix_hits == 1)
     {
         found = prefix;
     }
-    if (!found)
+    char canonical[4096];
+    bool ok = found && realpath(found->path, canonical) && strlen(canonical) < path_cap;
+    if (ok)
     {
-        free(list);
+        snprintf(path, path_cap, "%s", canonical);
+    }
+    free(list);
+    return ok ? 0 : -1;
+}
+
+int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id)
+{
+    if (!app || !id || !id[0] || PicoAgent_IsBusy(agent))
+    {
         return -1;
     }
 
-    if (agent->session_path[0] && strcmp(agent->session_path, found->path) == 0)
+    char path[4096];
+    if (PicoSession_Resolve(app, id, true, path, sizeof(path)) != 0)
     {
-        free(list);
+        return -1;
+    }
+    if (agent->session_path[0] && strcmp(agent->session_path, path) == 0)
+    {
         return 0;
     }
-
-    char path[4096];
-    snprintf(path, sizeof(path), "%s", found->path);
-    free(list);
+    if (app->agents && PicoAgentManager_SessionReserved(app->agents, path, agent->id))
+    {
+        return -1;
+    }
 
     PicoSession_Reset(app, agent);
+    if (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, path))
+    {
+        return -1;
+    }
     agent->persistence = PICO_SESSION_DURABLE;
-    return ReplayFile(app, agent, path);
+    return PicoSession_Replay(app, agent, path, true);
 }
 
 void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
@@ -812,6 +948,10 @@ void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
     if (!app || !agent)
     {
         return;
+    }
+    if (app->agents)
+    {
+        PicoAgentManager_ReleaseSessions(app->agents, agent->id);
     }
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, agent->id);
     PicoAgent_DismissError(agent);

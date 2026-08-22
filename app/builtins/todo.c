@@ -75,7 +75,7 @@ static TodoAgentState *FindState(PicoAgentId agent_id, bool create)
 
 static TodoAgentState *ActiveState(const PicoApp *app)
 {
-    return FindState(app && app->agent ? pico_agent_id(app->agent) : 0, false);
+    return FindState(pico_agent_active(app), false);
 }
 
 bool PicoTodo_IsExpanded(const PicoApp *app)

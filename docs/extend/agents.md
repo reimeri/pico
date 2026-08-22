@@ -1,6 +1,6 @@
 # Agents
 
-Pico currently owns one extracted `PicoAgent`; the callback ABI is already agent-aware so concurrent agents can be added without another extension ABI transition. `PicoAgent` and `PicoAgentContext` are opaque.
+Pico owns a heap `PicoAgentManager` that can run up to `PICO_MAX_AGENTS` independent agents concurrently. `PicoAgent`, `PicoAgentManager`, and `PicoAgentContext` are opaque.
 
 Include `pico/agent.h` directly, or include `pico/plugin.h`.
 
@@ -8,19 +8,26 @@ Include `pico/agent.h` directly, or include `pico/plugin.h`.
 
 `PicoAgentId` identifies one in-memory agent for the lifetime of the process. It is distinct from the durable JSONL `session_id`. Runtime generation identifies one worker generation inside that agent; force cancellation replaces the generation without changing the agent ID.
 
-The current single-agent app exposes a borrowed `app->agent`. Read copied state instead of private fields:
+Use the main-thread manager API; `PicoApp` exposes only the opaque `app->agents` owner:
 
 ```c
-PicoAgentInfo info;
-if (pico_agent_info_snapshot(app->agent, &info))
-{
-    /* info.id, state, model, effort, activity, session_id, ... */
+for (int i = 0; i < pico_agent_count(app); i++) {
+    PicoAgentInfo info;
+    if (pico_agent_info(app, i, &info)) { /* copied snapshot */ }
 }
+PicoAgentId active = pico_agent_active(app);
+pico_agent_select(app, active);
 ```
 
-`pico_agent_id(NULL)` returns zero. Snapshot strings are copied, require no freeing, and do not update after the call.
+`pico_agent_find` returns a copied snapshot by ID. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
 
-Creation, selection, enumeration, and close APIs arrive with `PicoAgentManager`; extensions must not allocate `PicoAgent` themselves.
+`pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. The message pointer is invalidated by pumping, transcript mutation, close, or workspace replacement.
+
+## Profiles and asks
+
+`pico_subagent_profile_count` and `pico_subagent_profile_info` return copied snapshots of valid profiles discovered directly under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`). Invalid files are isolated and reported in the warning overlay. Loaded snapshots are replaced on reload.
+
+`pico_tool_pending_ask` returns the oldest live ask across all agents, including hidden agents; its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID. The borrowed request remains valid only until the next manager pump.
 
 ## Main-thread targets
 

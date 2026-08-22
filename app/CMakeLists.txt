@@ -35,6 +35,7 @@ add_executable(pico
     auth.c
     http.c
     agent.c
+    agent_manager.c
     session.c
     usage.c
     chat_sel.c
@@ -108,11 +109,14 @@ if(BUILD_TESTING)
     target_link_options(pico_ask_user_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_ask_user_tests COMMAND pico_ask_user_tests)
 
+    set_source_files_properties(tests/agent_manager_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
+        tests/agent_manager_test.c
         tests/clay_impl.c
         app.c
         agent.c
+        agent_manager.c
         builtins/ask_user.c
         builtins/todo.c
         builtins/todo_model.c

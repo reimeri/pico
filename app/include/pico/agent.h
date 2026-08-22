@@ -10,13 +10,18 @@
 
 #define PICO_MAX_AGENTS 16
 #define PICO_MAX_SUBAGENT_PROFILES 32
+#ifndef PICO_MAX_TOOLS
+#define PICO_MAX_TOOLS 64
+#endif
 #define PICO_MAX_DELEGATION_DEPTH 4
 #define PICO_MAX_RETIRED_RUNTIMES 16
 
 typedef uint64_t PicoAgentId;
 
+struct PicoApp;
 typedef struct PicoAgent PicoAgent;
 typedef struct PicoAgentContext PicoAgentContext;
+typedef struct PicoAgentManager PicoAgentManager;
 
 typedef enum PicoAgentKind {
     PICO_AGENT_NORMAL = 0,
@@ -30,6 +35,50 @@ typedef enum PicoAgentState {
     PICO_AGENT_COMPACT_WAIT,
     PICO_AGENT_ERROR,
 } PicoAgentState;
+
+typedef enum PicoSessionStart {
+    PICO_SESSION_NEW = 0,
+    PICO_SESSION_RESUME,
+    PICO_SESSION_NONE,
+} PicoSessionStart;
+
+typedef enum PicoAgentResult {
+    PICO_AGENT_RESULT_OK = 0,
+    PICO_AGENT_RESULT_INVALID,
+    PICO_AGENT_RESULT_NOT_FOUND,
+    PICO_AGENT_RESULT_BUSY,
+    PICO_AGENT_RESULT_LIMIT,
+    PICO_AGENT_RESULT_SESSION_IN_USE,
+    PICO_AGENT_RESULT_SESSION_INVALID,
+    PICO_AGENT_RESULT_NO_MEMORY,
+} PicoAgentResult;
+
+typedef struct PicoAgentCreateOptions {
+    PicoAgentKind kind;
+    PicoAgentId parent_id;
+    const char *profile;
+    const char *purpose;
+    const char *model;
+    const char *effort;
+    const char *const *tools; /* NULL allows all registered tools; non-NULL is an exact-name allowlist. */
+    int tool_count;
+    PicoSessionStart session_start;
+    const char *session_id; /* exact durable ID; used when session_start is PICO_SESSION_RESUME */
+    bool select;
+} PicoAgentCreateOptions;
+
+typedef struct PicoSubagentProfileInfo {
+    char name[65];
+    char description[257];
+    char purpose[1025];
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
+    bool has_model;
+    bool has_effort;
+    bool restricted_tools;
+    int tool_count;
+    char tools[PICO_MAX_TOOLS][128];
+} PicoSubagentProfileInfo;
 
 typedef struct PicoAgentInfo {
     PicoAgentId id;
@@ -52,6 +101,21 @@ typedef struct PicoAgentInfo {
 
 PicoAgentId pico_agent_id(const PicoAgent *agent);
 bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out);
+
+/* Main-thread-only manager API. All returned information is copied. */
+int pico_agent_count(const struct PicoApp *app);
+bool pico_agent_info(const struct PicoApp *app, int index, PicoAgentInfo *out);
+bool pico_agent_find(const struct PicoApp *app, PicoAgentId id, PicoAgentInfo *out);
+PicoAgentId pico_agent_active(const struct PicoApp *app);
+bool pico_agent_select(struct PicoApp *app, PicoAgentId id);
+PicoAgentResult pico_agent_create(struct PicoApp *app, const PicoAgentCreateOptions *options,
+                                  PicoAgentId *out);
+PicoAgentResult pico_agent_close(struct PicoApp *app, PicoAgentId id);
+PicoAgentResult pico_agent_cancel(struct PicoApp *app, PicoAgentId id);
+PicoAgentResult pico_agent_force_cancel(struct PicoApp *app, PicoAgentId id);
+int pico_subagent_profile_count(const struct PicoApp *app);
+bool pico_subagent_profile_info(const struct PicoApp *app, int index,
+                                PicoSubagentProfileInfo *out);
 
 /* Worker callback context. All returned strings are read-only and valid only
  * for the duration of the callback that received ctx. */

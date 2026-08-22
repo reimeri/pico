@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agent.h"
+#include "agent_manager.h"
 #include "json.h"
 #include "session.h"
 #include "settings.h"
@@ -149,7 +150,6 @@ struct PicoAgentRt {
     bool snap_retired;
 };
 
-static PicoAgentRt *g_zombies;
 static pthread_mutex_t g_ask_id_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_ask_next_id;
 static __thread PicoAgentRt *t_worker_rt;
@@ -1989,34 +1989,9 @@ static void PublishAskSnapshot(PicoAgentRt *rt)
     free(live_copy);
 }
 
-static int ZombieCount(void)
-{
-    int count = 0;
-    for (PicoAgentRt *z = g_zombies; z; z = z->zombie_next)
-    {
-        count++;
-    }
-    return count;
-}
-
-static bool ZombiesBusy(void)
-{
-    for (PicoAgentRt *z = g_zombies; z; z = z->zombie_next)
-    {
-        pthread_mutex_lock(&z->mu);
-        bool busy = z->busy;
-        pthread_mutex_unlock(&z->mu);
-        if (busy)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool PicoAgent_BlocksReload(const PicoAgent *agent)
 {
-    return PicoAgent_IsBusy(agent) || ZombiesBusy();
+    return PicoAgent_IsBusy(agent);
 }
 
 static void KillToolChild(pid_t pid)
@@ -2140,9 +2115,13 @@ static bool StopRt(PicoAgentRt *rt, const struct timespec *deadline)
     return done;
 }
 
-static void ReapZombies(void)
+void PicoAgent_ReapRetired(PicoAgentManager *manager)
 {
-    PicoAgentRt **pp = &g_zombies;
+    if (!manager)
+    {
+        return;
+    }
+    PicoAgentRt **pp = &manager->retired_runtimes;
     while (*pp)
     {
         PicoAgentRt *z = *pp;
@@ -2155,6 +2134,7 @@ static void ReapZombies(void)
             continue;
         }
         *pp = z->zombie_next;
+        manager->retired_count--;
         if (z->started)
         {
             pthread_join(z->thread, NULL);
@@ -2163,12 +2143,28 @@ static void ReapZombies(void)
     }
 }
 
+bool PicoAgent_RetiredReferences(const PicoAgentManager *manager, PicoAgentId id)
+{
+    for (const PicoAgentRt *z = manager ? manager->retired_runtimes : NULL; z; z = z->zombie_next)
+    {
+        if (z->context.agent_id == id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Share one shutdown deadline across every retired runtime. */
-static bool ShutdownZombies(const struct timespec *deadline)
+bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec *deadline)
 {
     bool all_done = true;
-    PicoAgentRt *z = g_zombies;
-    g_zombies = NULL;
+    PicoAgentRt *z = manager ? manager->retired_runtimes : NULL;
+    if (manager)
+    {
+        manager->retired_runtimes = NULL;
+        manager->retired_count = 0;
+    }
     while (z)
     {
         PicoAgentRt *next = z->zombie_next;
@@ -2211,13 +2207,13 @@ PicoAgent *PicoAgent_Create(PicoApp *app)
     {
         return NULL;
     }
+    agent->manager = app ? app->agents : NULL;
     agent->id = ++next_id;
     agent->runtime_generation = 1;
     agent->kind = PICO_AGENT_NORMAL;
     agent->state = PICO_AGENT_IDLE;
     agent->persistence = PICO_SESSION_EPHEMERAL;
     PicoSettings_InitAgent(app, agent);
-    curl_global_init(CURL_GLOBAL_DEFAULT);
     agent->runtime = CreateRt(app, agent);
     if (!agent->runtime)
     {
@@ -2228,46 +2224,32 @@ PicoAgent *PicoAgent_Create(PicoApp *app)
     return agent;
 }
 
-bool PicoAgent_Destroy(PicoAgent *agent)
+bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
 {
     if (!agent)
     {
         return true;
     }
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 1;
-    bool zombies_done = ShutdownZombies(&deadline);
     PicoAgentRt *rt = agent->runtime;
-    if (!rt)
+    if (rt)
     {
-        if (zombies_done)
+        bool done = StopRt(rt, deadline);
+        /* A worker stuck in a callback keeps the execution host alive. */
+        if (!done)
         {
-            curl_global_cleanup();
+            if (rt->started)
+            {
+                pthread_detach(rt->thread);
+            }
+            agent->runtime = NULL;
+            return false;
         }
-        return zombies_done;
-    }
-    bool done = StopRt(rt, &deadline);
-    /* A worker stuck in a network call outlives us, so everything it can still
-     * reach is deliberately leaked rather than freed underneath it. */
-    if (!done)
-    {
         if (rt->started)
         {
-            pthread_detach(rt->thread);
+            pthread_join(rt->thread, NULL);
         }
+        FreeRt(rt);
         agent->runtime = NULL;
-        return false;
-    }
-    if (rt->started)
-    {
-        pthread_join(rt->thread, NULL);
-    }
-    FreeRt(rt);
-    agent->runtime = NULL;
-    if (!zombies_done)
-    {
-        return false;
     }
     PicoAgent_ClearMessages(agent);
     free(agent->messages);
@@ -2279,8 +2261,15 @@ bool PicoAgent_Destroy(PicoAgent *agent)
     }
     free(agent->allowed_tools);
     free(agent);
-    curl_global_cleanup();
     return true;
+}
+
+bool PicoAgent_Destroy(PicoAgent *agent)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    return PicoAgent_DestroyBefore(agent, &deadline);
 }
 
 void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
@@ -2322,8 +2311,9 @@ void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
         return;
     }
 
-    ReapZombies();
-    if (ZombieCount() >= PICO_MAX_RETIRED_RUNTIMES)
+    PicoAgentManager *manager = agent->manager;
+    PicoAgent_ReapRetired(manager);
+    if (!manager || manager->retired_count >= PICO_MAX_RETIRED_RUNTIMES)
     {
         PicoAgent_Cancel(agent);
         return;
@@ -2361,8 +2351,9 @@ void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
     rt->instructions = old->instructions;
     old->instructions = NULL;
 
-    old->zombie_next = g_zombies;
-    g_zombies = old;
+    old->zombie_next = manager->retired_runtimes;
+    manager->retired_runtimes = old;
+    manager->retired_count++;
     agent->runtime = rt;
 }
 
@@ -2531,9 +2522,8 @@ int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer
     return rc;
 }
 
-bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
+bool PicoAgent_PendingAsk(const PicoAgent *agent, PicoToolAsk *out)
 {
-    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt || !out || rt->snap_id == 0 || !rt->snap_request || rt->snap_retired)
     {
@@ -2547,9 +2537,9 @@ bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
     return true;
 }
 
-bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
+bool PicoAgent_AnswerAsk(PicoAgent *agent, uint64_t id, const char *answer_json)
 {
-    if (!app || id == 0)
+    if (!agent || id == 0)
     {
         return false;
     }
@@ -2558,8 +2548,7 @@ bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
     {
         return false;
     }
-    PicoAgent *agent = PicoApp_ActiveAgent(app);
-    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    PicoAgentRt *rt = agent->runtime;
     if (!rt)
     {
         return false;
@@ -2603,7 +2592,6 @@ void PicoAgent_DismissError(PicoAgent *agent)
 
 void PicoAgent_Pump(PicoApp *app, PicoAgent *agent)
 {
-    ReapZombies();
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt)
     {

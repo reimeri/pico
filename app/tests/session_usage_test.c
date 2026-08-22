@@ -28,6 +28,29 @@ void Pico_ConfigDir(char *out, size_t cap)
     snprintf(out, cap, "%s", g_config_dir);
 }
 
+bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner, const char *path)
+{
+    (void)manager; (void)owner; (void)path;
+    return true;
+}
+
+void PicoAgentManager_ReleaseSessions(PicoAgentManager *manager, PicoAgentId owner)
+{
+    (void)manager; (void)owner;
+}
+
+bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const char *path,
+                                      PicoAgentId except_owner)
+{
+    (void)manager; (void)path; (void)except_owner;
+    return false;
+}
+
+void pico_status_warn(PicoApp *app, const char *msg)
+{
+    (void)app; (void)msg;
+}
+
 void Pico_MkdirP(const char *path)
 {
     char buf[4096];
@@ -283,25 +306,24 @@ int main(void)
     PicoAgent writer_agent;
     memset(&writer, 0, sizeof(writer));
     memset(&writer_agent, 0, sizeof(writer_agent));
-    writer.agent = &writer_agent;
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
     snprintf(writer.workspace, sizeof(writer.workspace), "/workspace");
     snprintf(writer.settings.model, sizeof(writer.settings.model), "default-model");
-    PicoSession_LogUsage(&writer, writer.agent, 100, 20);
-    PicoSession_LogUsage(&writer, writer.agent, 200, 150);
-    PicoSession_LogAssistant(&writer, writer.agent, "assistant response");
-    PicoSession_LogCompaction(&writer, writer.agent, "brief", 200);
-    PicoSession_LogToolResult(&writer, writer.agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
-    PicoSession_LogToolResult(&writer, writer.agent, "state-2", "state_test", "failed", true, "{\"value\":8}");
-    PicoSession_LogToolResult(&writer, writer.agent, "state-3", "state_test", "bad snapshot", false, "{\"value\":99}");
-    if (!writer.agent->session_path[0])
+    PicoSession_LogUsage(&writer, &writer_agent, 100, 20);
+    PicoSession_LogUsage(&writer, &writer_agent, 200, 150);
+    PicoSession_LogAssistant(&writer, &writer_agent, "assistant response");
+    PicoSession_LogCompaction(&writer, &writer_agent, "brief", 200);
+    PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
+    PicoSession_LogToolResult(&writer, &writer_agent, "state-2", "state_test", "failed", true, "{\"value\":8}");
+    PicoSession_LogToolResult(&writer, &writer_agent, "state-3", "state_test", "bad snapshot", false, "{\"value\":99}");
+    if (!writer_agent.session_path[0])
     {
         return Fail("usage did not create a session file");
     }
 
     size_t file_len = 0;
-    char *file = Pico_ReadFile(writer.agent->session_path, &file_len);
+    char *file = Pico_ReadFile(writer_agent.session_path, &file_len);
     if (!file || !strstr(file, "\"version\":2") || !strstr(file, "\"type\":\"usage\"") ||
         strstr(file, "\"usage\":{"))
     {
@@ -314,7 +336,6 @@ int main(void)
     PicoAgent compacted_agent;
     memset(&compacted, 0, sizeof(compacted));
     memset(&compacted_agent, 0, sizeof(compacted_agent));
-    compacted.agent = &compacted_agent;
     PicoModel replay_models[2];
     memset(replay_models, 0, sizeof(replay_models));
     snprintf(replay_models[0].id, sizeof(replay_models[0].id), "default-model");
@@ -332,9 +353,9 @@ int main(void)
     compacted_agent.context_limit = 111;
     RegisterReplayTool(&compacted);
     g_restored_value = 0;
-    PicoSession_Start(&compacted, compacted.agent, PICO_SESSION_NEW, writer.agent->session_path);
-    if (compacted.agent->session_input_tokens != 300 || compacted.agent->session_cached_tokens != 170 ||
-        compacted.agent->tokens_used != 0 || compacted.agent->tokens_cached != 0 || g_restored_value != 7)
+    PicoSession_Start(&compacted, &compacted_agent, PICO_SESSION_NEW, writer_agent.session_path);
+    if (compacted_agent.session_input_tokens != 300 || compacted_agent.session_cached_tokens != 170 ||
+        compacted_agent.tokens_used != 0 || compacted_agent.tokens_cached != 0 || g_restored_value != 7)
     {
         return Fail("replay did not retain totals, restore the latest valid tool details, or clear compacted usage");
     }
@@ -344,15 +365,15 @@ int main(void)
         return Fail("session header did not synchronize model-specific effort and context on the replay target");
     }
     g_restored_value = 0;
-    PicoSession_ReplayToolDetails(&compacted, compacted.agent);
+    PicoSession_ReplayToolDetails(&compacted, &compacted_agent);
     if (g_restored_value != 7)
     {
         return Fail("details-only replay did not restore extension state after reload");
     }
 
-    if (!AppendRaw(writer.agent->session_path, "{\"type\":\"usage\",\"input_tokens\":50,\"cached_tokens\":-3}") ||
-        !AppendRaw(writer.agent->session_path, "{\"type\":\"usage\",\"input_tokens\":-4,\"cached_tokens\":2}") ||
-        !AppendRaw(writer.agent->session_path, "{\"type\":\"usage\",\"input_tokens\":10,\"cached_tokens\":20}"))
+    if (!AppendRaw(writer_agent.session_path, "{\"type\":\"usage\",\"input_tokens\":50,\"cached_tokens\":-3}") ||
+        !AppendRaw(writer_agent.session_path, "{\"type\":\"usage\",\"input_tokens\":-4,\"cached_tokens\":2}") ||
+        !AppendRaw(writer_agent.session_path, "{\"type\":\"usage\",\"input_tokens\":10,\"cached_tokens\":20}"))
     {
         return Fail("could not append replay boundary cases");
     }
@@ -361,10 +382,9 @@ int main(void)
     PicoAgent replayed_agent;
     memset(&replayed, 0, sizeof(replayed));
     memset(&replayed_agent, 0, sizeof(replayed_agent));
-    replayed.agent = &replayed_agent;
-    PicoSession_Start(&replayed, replayed.agent, PICO_SESSION_NEW, writer.agent->session_path);
-    if (replayed.agent->session_input_tokens != 360 || replayed.agent->session_cached_tokens != 180 ||
-        replayed.agent->tokens_used != 10 || replayed.agent->tokens_cached != 10)
+    PicoSession_Start(&replayed, &replayed_agent, PICO_SESSION_NEW, writer_agent.session_path);
+    if (replayed_agent.session_input_tokens != 360 || replayed_agent.session_cached_tokens != 180 ||
+        replayed_agent.tokens_used != 10 || replayed_agent.tokens_cached != 10)
     {
         return Fail("replay did not normalize and aggregate usage events");
     }
@@ -373,12 +393,11 @@ int main(void)
     PicoAgent opened_agent;
     memset(&opened, 0, sizeof(opened));
     memset(&opened_agent, 0, sizeof(opened_agent));
-    opened.agent = &opened_agent;
     snprintf(opened.workspace, sizeof(opened.workspace), "/workspace");
-    opened.agent->session_input_tokens = 999;
-    opened.agent->session_cached_tokens = 999;
-    if (PicoSession_Open(&opened, opened.agent, writer.agent->session_id) != 0 || opened.agent->session_input_tokens != 360 ||
-        opened.agent->session_cached_tokens != 180 || opened.agent->tokens_used != 10 || opened.agent->tokens_cached != 10)
+    opened_agent.session_input_tokens = 999;
+    opened_agent.session_cached_tokens = 999;
+    if (PicoSession_Open(&opened, &opened_agent, writer_agent.session_id) != 0 || opened_agent.session_input_tokens != 360 ||
+        opened_agent.session_cached_tokens != 180 || opened_agent.tokens_used != 10 || opened_agent.tokens_cached != 10)
     {
         return Fail("session open did not reset and rebuild usage totals");
     }
@@ -386,13 +405,28 @@ int main(void)
     replayed.hooks[0] = (PicoHookEntry){.hook = PICO_HOOK_ON_SESSION_RESET, .fn = ResetHook};
     replayed.hook_count = 1;
     g_reset_hooks = 0;
-    PicoSession_Reset(&replayed, replayed.agent);
-    if (replayed.agent->session_input_tokens != 0 || replayed.agent->session_cached_tokens != 0 ||
-        replayed.agent->tokens_used != 0 || replayed.agent->tokens_cached != 0 || g_reset_hooks != 1)
+    PicoSession_Reset(&replayed, &replayed_agent);
+    if (replayed_agent.session_input_tokens != 0 || replayed_agent.session_cached_tokens != 0 ||
+        replayed_agent.tokens_used != 0 || replayed_agent.tokens_cached != 0 || g_reset_hooks != 1)
     {
         return Fail("session reset did not clear usage state");
     }
 
-    unlink(writer.agent->session_path);
+    char empty_path[4096];
+    snprintf(empty_path, sizeof(empty_path), "%s/empty.jsonl", temp);
+    FILE *empty = fopen(empty_path, "wb");
+    if (empty)
+    {
+        fclose(empty);
+    }
+    PicoAgent invalid_agent;
+    memset(&invalid_agent, 0, sizeof(invalid_agent));
+    if (PicoSession_Replay(&opened, &invalid_agent, empty_path, false) == 0)
+    {
+        return Fail("empty session replay was accepted");
+    }
+
+    unlink(empty_path);
+    unlink(writer_agent.session_path);
     return 0;
 }

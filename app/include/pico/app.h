@@ -18,7 +18,6 @@
 #define PICO_MAX_TOOL_HOOKS 64
 #define PICO_MAX_LLM_HOOKS 64
 #define PICO_MAX_CONTEXT_HOOKS 64
-#define PICO_MAX_TOOLS 64
 #define PICO_TOOL_DETAILS_MAX (64 * 1024)
 #define PICO_TOOL_ASK_MAX_REQUEST (64 * 1024)
 #define PICO_TOOL_ASK_MAX_ANSWER (64 * 1024)
@@ -64,12 +63,6 @@ typedef enum PicoHook {
     PICO_HOOK_ON_AGENT_DESTROY,
     PICO_HOOK_COUNT,
 } PicoHook;
-
-typedef enum PicoSessionStart {
-    PICO_SESSION_NEW = 0,
-    PICO_SESSION_RESUME,
-    PICO_SESSION_NONE,
-} PicoSessionStart;
 
 typedef struct PicoModel {
     char id[128];
@@ -335,7 +328,7 @@ typedef struct PicoSettings {
 } PicoSettings;
 
 typedef struct PicoApp {
-    PicoAgent *agent; /* single active agent until PicoAgentManager is introduced */
+    PicoAgentManager *agents;
     PicoComposer composer;
     PicoSettings settings; /* defaults for newly created agents */
     Font *fonts;
@@ -410,6 +403,10 @@ int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer
 bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out);
 /* Main thread. False if id is stale, cancelled, or no longer pending. */
 bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json);
+/* Main-thread-only borrowed transcript access. The pointer is invalidated by
+ * the next manager pump, transcript mutation, close, or workspace change. */
+int pico_agent_message_count(const PicoApp *app, PicoAgentId id);
+const PicoMessage *pico_agent_message(const PicoApp *app, PicoAgentId id, int index);
 bool PicoUi_ModalOpen(const PicoApp *app);
 void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run);
 void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,

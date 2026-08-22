@@ -132,10 +132,11 @@ int main(int argc, char **argv)
 
     char session_path[4096];
     session_path[0] = '\0';
-    if (app.agent && app.agent->persistence != PICO_SESSION_EPHEMERAL && app.agent->session_path[0] &&
-        access(app.agent->session_path, F_OK) == 0)
+    const PicoAgent *active = PicoApp_ActiveAgentConst(&app);
+    if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0] &&
+        access(active->session_path, F_OK) == 0)
     {
-        snprintf(session_path, sizeof(session_path), "%s", app.agent->session_path);
+        snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
     PicoApp_Free(&app);
 

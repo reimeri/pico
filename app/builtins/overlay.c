@@ -39,7 +39,7 @@ void PicoOverlay_Notify(PicoApp *app, const char *text)
 
 static bool HasError(const PicoApp *app)
 {
-    return (app->status_warn && app->status_warn[0]) || (app->agent->error && app->agent->error[0]);
+    return (app->status_warn && app->status_warn[0]) || (PicoApp_ActiveAgent(app)->error && PicoApp_ActiveAgent(app)->error[0]);
 }
 
 static Clay_String CStr(const char *s)
@@ -188,7 +188,7 @@ static void RenderAsk(PicoApp *app)
 static void RenderError(PicoApp *app)
 {
     const char *warn = app->status_warn;
-    const char *agent = (!warn || !warn[0]) ? app->agent->error : NULL;
+    const char *agent = (!warn || !warn[0]) ? PicoApp_ActiveAgent(app)->error : NULL;
     if ((!warn || !warn[0]) && (!agent || !agent[0]))
     {
         return;
@@ -307,7 +307,7 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
         }
     }
 
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !app->agent->error))
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !PicoApp_ActiveAgent(app)->error))
     {
         return;
     }
@@ -319,11 +319,11 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
             free(app->status_warn);
             app->status_warn = NULL;
         }
-        else if (app->agent->error && app->agent->state == PICO_AGENT_ERROR)
+        else if (PicoApp_ActiveAgent(app)->error && PicoApp_ActiveAgent(app)->state == PICO_AGENT_ERROR)
         {
-            free(app->agent->error);
-            app->agent->error = NULL;
-            app->agent->state = PICO_AGENT_IDLE;
+            free(PicoApp_ActiveAgent(app)->error);
+            PicoApp_ActiveAgent(app)->error = NULL;
+            PicoApp_ActiveAgent(app)->state = PICO_AGENT_IDLE;
         }
     }
 }

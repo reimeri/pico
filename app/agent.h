@@ -3,9 +3,15 @@
 
 #include "agent_internal.h"
 
+#include <time.h>
+
 PicoAgent *PicoAgent_Create(PicoApp *app);
 /* False when a worker was still running and had to be detached. */
 bool PicoAgent_Destroy(PicoAgent *agent);
+bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline);
+void PicoAgent_ReapRetired(PicoAgentManager *manager);
+bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec *deadline);
+bool PicoAgent_RetiredReferences(const PicoAgentManager *manager, PicoAgentId id);
 void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text);
 void PicoAgent_Cancel(PicoAgent *agent);
 void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent);
@@ -14,6 +20,8 @@ bool PicoAgent_CancelRequested(const PicoAgent *agent);
 bool PicoAgent_AskUiOpen(const PicoAgent *agent);
 void PicoAgent_DismissError(PicoAgent *agent);
 void PicoAgent_Pump(PicoApp *app, PicoAgent *agent);
+bool PicoAgent_PendingAsk(const PicoAgent *agent, PicoToolAsk *out);
+bool PicoAgent_AnswerAsk(PicoAgent *agent, uint64_t id, const char *answer_json);
 bool PicoAgent_BlocksReload(const PicoAgent *agent);
 void PicoAgent_Compact(PicoApp *app, PicoAgent *agent);
 /* Malloc'd instructions for the next normal turn. Caller frees. */

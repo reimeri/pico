@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "agent.h"
+#include "agent_manager.h"
 #include "session.h"
 
 #include <dirent.h>
@@ -467,7 +468,7 @@ void PicoPlugins_Load(PicoApp *app)
 
 void PicoPlugins_Reload(PicoApp *app)
 {
-    if (PicoAgent_BlocksReload(app->agent))
+    if (PicoAgentManager_BlocksReload(app->agents))
     {
         app->reload_queued = true;
         return;
@@ -484,7 +485,8 @@ void PicoPlugins_Reload(PicoApp *app)
         }
     }
     LoadUsers(app);
-    PicoSession_ReplayToolDetails(app, app->agent);
+    PicoAgentManager_LoadProfiles(app->agents);
+    PicoAgentManager_ReplayToolDetails(app->agents);
 }
 
 void PicoPlugins_Shutdown(PicoApp *app)

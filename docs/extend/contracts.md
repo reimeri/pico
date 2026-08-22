@@ -10,7 +10,7 @@ A second Esc force-cancels a stuck turn: the UI goes idle and a new worker start
 
 On process exit, agent shutdown waits about one second. If a worker is still running, Pico retains its heap execution host plus every registration, auth store, builtin state, and user-extension `.so` handle that worker can reach. No extension `shutdown` callback runs and no handle is closed; process exit reclaims the retained state. The stack/UI `PicoApp` is never worker-owned.
 
-`--safe` skips user extensions. Compile errors set `app->status_warn` (overlay).
+`--safe` skips user extensions. Compile errors and failed `pico_add_tool` registrations set `app->status_warn` (overlay). `pico_status_warn` appends a line to that overlay.
 
 ## Threads
 
@@ -48,7 +48,7 @@ Reload is deferred while the live worker is busy, and while any force-cancelled 
 - `PICO_TOOL_DETAILS_MAX`, `PICO_TOOL_ASK_MAX_REQUEST`, and `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)
 - Builtin `ask_user`: 24 questions, 20 options per select question, 16 KiB per free-form answer
 
-Registrations are ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for these cases, duplicate names, and malformed/non-object `params_json` schemas.
+Registrations are ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for these cases, duplicate names, and malformed/non-object `params_json` schemas, and appends a `status_warn` line naming the tool and the reason.
 
 ## Directories
 

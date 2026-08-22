@@ -885,9 +885,70 @@ static int TestToolSchemaValidation(void)
     todo.init(&todo_app);
     bool todo_registered = todo_app.tool_count == 1 && todo_app.tools[0].params_json;
     if (todo.shutdown) todo.shutdown(&todo_app);
-    return null_schema && empty_schema && valid && rejected && app.tool_count == 3 && todo_registered
-               ? 0
-               : Fail(name, "invalid JSON Schema was accepted or builtin todo_update was unavailable");
+    bool ok = null_schema && empty_schema && valid && rejected && app.tool_count == 3 && todo_registered;
+    free(app.status_warn);
+    free(todo_app.status_warn);
+    return ok ? 0 : Fail(name, "invalid JSON Schema was accepted or builtin todo_update was unavailable");
+}
+
+static bool WarnMentions(const PicoApp *app, const char *tool, const char *reason)
+{
+    return app->status_warn && strstr(app->status_warn, tool) && strstr(app->status_warn, reason);
+}
+
+static int TestToolRegistrationFailureWarns(void)
+{
+    const char *name = "tool registration failure warns";
+    PicoApp app;
+    memset(&app, 0, sizeof(app));
+    if (!pico_add_tool(&app, "ok", "ok", "{}", EchoTool, NULL) || app.status_warn)
+    {
+        free(app.status_warn);
+        return Fail(name, "successful registration warned or failed");
+    }
+    if (pico_add_tool(&app, "ok", "dup", "{}", EchoTool, NULL) ||
+        !WarnMentions(&app, "\"ok\"", "already registered"))
+    {
+        free(app.status_warn);
+        return Fail(name, "duplicate name did not name the tool and reason");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+    if (pico_add_tool(&app, "bad_schema", "invalid", "[]", EchoTool, NULL) ||
+        !WarnMentions(&app, "\"bad_schema\"", "JSON object"))
+    {
+        free(app.status_warn);
+        return Fail(name, "invalid schema did not name the tool and reason");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+    if (pico_add_tool(&app, "no_run", "missing", "{}", NULL, NULL) ||
+        !WarnMentions(&app, "\"no_run\"", "missing run function"))
+    {
+        free(app.status_warn);
+        return Fail(name, "missing run did not name the tool and reason");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+    char extra[PICO_MAX_TOOLS][8];
+    while (app.tool_count < PICO_MAX_TOOLS)
+    {
+        int i = app.tool_count;
+        snprintf(extra[i], sizeof(extra[i]), "x%d", i);
+        if (!pico_add_tool(&app, extra[i], "pad", "{}", EchoTool, NULL))
+        {
+            free(app.status_warn);
+            return Fail(name, "padding tools to the limit failed");
+        }
+    }
+    if (pico_add_tool(&app, "overflow", "full", "{}", EchoTool, NULL) ||
+        !WarnMentions(&app, "\"overflow\"", "tool limit reached"))
+    {
+        free(app.status_warn);
+        return Fail(name, "tool limit did not name the tool and reason");
+    }
+    free(app.status_warn);
+    return 0;
 }
 
 static int TestProductionInit(void)
@@ -1722,6 +1783,7 @@ int main(void)
     failed |= TestCancellation();
     failed |= TestStaleId();
     failed |= TestToolSchemaValidation();
+    failed |= TestToolRegistrationFailureWarns();
     failed |= TestProductionInit();
     failed |= TestInvalidPayload();
     failed |= TestShutdownTimeout();

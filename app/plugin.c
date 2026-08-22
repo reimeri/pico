@@ -69,24 +69,6 @@ static void WarnClear(PicoApp *app)
     app->status_warn = NULL;
 }
 
-static void WarnAppend(PicoApp *app, const char *msg)
-{
-    if (!msg || !msg[0])
-    {
-        return;
-    }
-    size_t extra = strlen(msg) + 2;
-    size_t old = app->status_warn ? strlen(app->status_warn) : 0;
-    char *next = (char *)realloc(app->status_warn, old + extra);
-    if (!next)
-    {
-        return;
-    }
-    app->status_warn = next;
-    memcpy(app->status_warn + old, msg, extra - 1);
-    app->status_warn[old + extra - 2] = '\n';
-    app->status_warn[old + extra - 1] = '\0';
-}
 
 static int MkdirP(const char *path)
 {
@@ -283,7 +265,7 @@ static int LoadSo(PicoApp *app, const char *src, const char *so, time_t mtime)
     {
         char line[2048];
         snprintf(line, sizeof(line), "%s: dlopen: %s", src, dlerror());
-        WarnAppend(app, line);
+        pico_status_warn(app, line);
         RecordStub(src, mtime);
         return -1;
     }
@@ -292,7 +274,7 @@ static int LoadSo(PicoApp *app, const char *src, const char *so, time_t mtime)
     {
         char line[2048];
         snprintf(line, sizeof(line), "%s: missing pico_ext() (%s)", src, dlerror());
-        WarnAppend(app, line);
+        pico_status_warn(app, line);
         dlclose(handle);
         RecordStub(src, mtime);
         return -1;
@@ -302,14 +284,14 @@ static int LoadSo(PicoApp *app, const char *src, const char *so, time_t mtime)
     {
         char line[2048];
         snprintf(line, sizeof(line), "%s: abi %d != %d", src, ext.abi, PICO_EXT_ABI);
-        WarnAppend(app, line);
+        pico_status_warn(app, line);
         dlclose(handle);
         RecordStub(src, mtime);
         return -1;
     }
     if (g_plugin_count >= (int)(sizeof(g_plugins) / sizeof(g_plugins[0])))
     {
-        WarnAppend(app, "too many extensions");
+        pico_status_warn(app, "too many extensions");
         dlclose(handle);
         return -1;
     }
@@ -344,7 +326,7 @@ static void LoadUserFile(PicoApp *app, const char *src)
         {
             char line[8700];
             snprintf(line, sizeof(line), "compile %s:\n%s", src, err);
-            WarnAppend(app, line);
+            pico_status_warn(app, line);
             RecordStub(src, st.st_mtime);
             return;
         }

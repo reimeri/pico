@@ -47,7 +47,7 @@ Pico runs the configured C compiler (`gcc` unless CMake set `PICO_CC`) as:
 cc -shared -fPIC -std=c99 -I<pico headers> -I<app> -I<clay> -I<raylib> -I<source dir> -o <cache>.so <file.c>
 ```
 
-The source directory is on the include path, so local headers next to the `.c` file work. Failures show in the overlay; the previous working `.so` is not reused when mtime changes.
+The source directory is on the include path, so local headers next to the `.c` file work. Compile failures and failed `pico_add_tool` registrations show in the overlay; the previous working `.so` is not reused when mtime changes.
 
 ## Reload
 

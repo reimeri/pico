@@ -11,7 +11,7 @@ Subfolders are fine. Only `.c` files are loaded (depth 8). Skip with `pico --saf
 
 After writing a file, reload happens automatically once the agent is **idle**. F5 or `/reload` also work. A file written during this turn will not load until the turn finishes.
 
-Compile errors appear in the overlay. `/docs [topic]` prints these pages into chat.
+Compile errors and failed tool registrations appear in the overlay. `/docs [topic]` prints these pages into chat.
 
 ## Topics
 

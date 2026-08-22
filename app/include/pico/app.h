@@ -368,7 +368,7 @@ typedef struct PicoApp {
     bool hovered_tool;
     bool hovered_clickable;
     char workspace[4096];
-    char *status_warn;
+    char *status_warn; /* overlay; compile/load and failed pico_add_tool */
     PicoModel *models; /* immutable capabilities and configured defaults */
     int model_count;
 } PicoApp;
@@ -379,6 +379,9 @@ void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
 void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn);
 void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);
 void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn);
+/* Append a line to status_warn (extension-error overlay). */
+void pico_status_warn(PicoApp *app, const char *msg);
+/* False and a status_warn line on invalid args/schema, duplicate name, or limit. */
 bool pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
                    PicoToolFn run, PicoToolApplyFn apply);
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process

@@ -116,39 +116,95 @@ void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn)
     app->context_hooks[app->context_hook_count++] = fn;
 }
 
-static bool ToolParamsValid(const char *params_json)
+void pico_status_warn(PicoApp *app, const char *msg)
+{
+    if (!app || !msg || !msg[0])
+    {
+        return;
+    }
+    size_t extra = strlen(msg) + 2;
+    size_t old = app->status_warn ? strlen(app->status_warn) : 0;
+    char *next = (char *)realloc(app->status_warn, old + extra);
+    if (!next)
+    {
+        return;
+    }
+    app->status_warn = next;
+    memcpy(app->status_warn + old, msg, extra - 1);
+    app->status_warn[old + extra - 2] = '\n';
+    app->status_warn[old + extra - 1] = '\0';
+}
+
+static const char *ToolParamsError(const char *params_json)
 {
     if (!params_json || !params_json[0])
     {
-        return true;
+        return NULL;
     }
     size_t len = strlen(params_json);
     if (!JsonValidSyntax(params_json, len))
     {
-        return false;
+        return "params_json is not valid JSON";
     }
     JsonDoc doc;
     if (JsonParse(&doc, params_json, len) != 0)
     {
-        return false;
+        return "params_json is not valid JSON";
     }
     bool valid = JsonIsObject(&doc, 0) && JsonSkip(&doc, 0) == doc.ntoks;
     JsonFree(&doc);
-    return valid;
+    return valid ? NULL : "params_json must be a JSON object";
+}
+
+static void ToolAddFail(PicoApp *app, const char *name, const char *reason)
+{
+    char line[1024];
+    if (name && name[0])
+    {
+        snprintf(line, sizeof(line), "tool \"%s\": %s", name, reason);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "tool: %s", reason);
+    }
+    pico_status_warn(app, line);
 }
 
 bool pico_add_tool(PicoApp *app, const char *name, const char *description, const char *params_json,
                    PicoToolFn run, PicoToolApplyFn apply)
 {
-    if (!app || !name || !name[0] || !run || !ToolParamsValid(params_json) ||
-        app->tool_count >= PICO_MAX_TOOLS)
+    if (!app)
     {
+        return false;
+    }
+    if (!name || !name[0])
+    {
+        ToolAddFail(app, name, "missing name");
+        return false;
+    }
+    if (!run)
+    {
+        ToolAddFail(app, name, "missing run function");
+        return false;
+    }
+    const char *params_err = ToolParamsError(params_json);
+    if (params_err)
+    {
+        ToolAddFail(app, name, params_err);
+        return false;
+    }
+    if (app->tool_count >= PICO_MAX_TOOLS)
+    {
+        char reason[64];
+        snprintf(reason, sizeof(reason), "tool limit reached (%d)", PICO_MAX_TOOLS);
+        ToolAddFail(app, name, reason);
         return false;
     }
     for (int i = 0; i < app->tool_count; i++)
     {
         if (app->tools[i].name && strcmp(app->tools[i].name, name) == 0)
         {
+            ToolAddFail(app, name, "already registered");
             return false;
         }
     }
@@ -674,7 +730,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     app->agent = PicoAgent_Create(app);
     if (!app->agent)
     {
-        app->status_warn = JsonDup("Could not create the agent runtime.");
+        pico_status_warn(app, "Could not create the agent runtime.");
         return;
     }
     PicoPlugins_Load(app);

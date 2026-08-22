@@ -1073,7 +1073,7 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
     if (!b.len)
     {
         JsonBuf_Puts(&b,
-                     "You are Pico, a small coding assistant. The user's workspace is the current "
+                     "You are coding assistant, working inside Pico agent harness. The user's workspace is the current "
                      "working directory. Use the sh tool to run shell commands when that helps. "
                      "Prefer concise answers.");
     }

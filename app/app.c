@@ -525,21 +525,31 @@ static char *FormatToolProps(const char *args_json)
             FlattenPut(&b, key, 240);
             free(key);
             JsonBuf_Puts(&b, ": ");
-            char *val = NULL;
-            if (JsonIsObject(&doc, val_tok) || JsonIsArray(&doc, val_tok))
+            if (JsonIsArray(&doc, val_tok))
             {
-                val = JsonRawDup(&doc, val_tok);
+                int count = JsonArrayLen(&doc, val_tok);
+                JsonBuf_Puts(&b, "[");
+                JsonBuf_Int(&b, count);
+                JsonBuf_Puts(&b, count == 1 ? " item]" : " items]");
             }
             else
             {
-                val = JsonStrDup(&doc, val_tok);
-                if (!val)
+                char *val = NULL;
+                if (JsonIsObject(&doc, val_tok))
                 {
                     val = JsonRawDup(&doc, val_tok);
                 }
+                else
+                {
+                    val = JsonStrDup(&doc, val_tok);
+                    if (!val)
+                    {
+                        val = JsonRawDup(&doc, val_tok);
+                    }
+                }
+                FlattenPut(&b, val, 240);
+                free(val);
             }
-            FlattenPut(&b, val, 240);
-            free(val);
             if (b.len > 240)
             {
                 JsonBuf_Puts(&b, "...");

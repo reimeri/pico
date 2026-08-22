@@ -2456,6 +2456,22 @@ static int TestResumedToolCallArgs(void)
     return ok ? 0 : Fail(name, "resumed tool call kept raw JSON arguments");
 }
 
+static int TestToolCallListArgs(void)
+{
+    const char *name = "tool call lists show item counts";
+    PicoApp app;
+    InitApp(&app);
+    PicoApp_AddToolCall(&app, "todo_update",
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"a\",\"status\":\"pending\"},"
+                        "{\"id\":\"2\",\"content\":\"b\",\"status\":\"pending\"},"
+                        "{\"id\":\"3\",\"content\":\"c\",\"status\":\"pending\"},"
+                        "{\"id\":\"4\",\"content\":\"d\",\"status\":\"pending\"}]}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    bool ok = line && line->tool_args && strcmp(line->tool_args, "todos: [4 items]") == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "list args were not summarized as an item count");
+}
+
 #include "agent_manager_test.c"
 #include "subagent_config_test.c"
 #include "subagent_test.c"
@@ -2537,6 +2553,7 @@ int main(void)
     failed |= TestAskUserToolSuccess();
     failed |= TestAskUserToolCancellation();
     failed |= TestResumedToolCallArgs();
+    failed |= TestToolCallListArgs();
     failed |= TestManagerProfileRegistry();
     failed |= TestManagerConcurrencyAndIsolation();
     failed |= TestSubagentProfileResolution();

@@ -1971,7 +1971,7 @@ static bool AskUserRegistered(const PicoApp *app)
 {
     return app && app->tool_count == 1 && app->tools[0].name &&
            strcmp(app->tools[0].name, "ask_user") == 0 && app->tools[0].run &&
-           app->context_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
+           app->llm_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
            app->hook_count == 1;
 }
 
@@ -1992,7 +1992,8 @@ static int TestAskUserHiddenOmitsGuidance(void)
         return Fail(name, "agent did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
-    bool ok = g_test.last_input && strstr(g_test.last_input, "always use ask_user") == NULL;
+    bool ok = g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user") == NULL &&
+              (!g_test.last_input || strstr(g_test.last_input, "always use ask_user") == NULL);
     pthread_mutex_unlock(&g_test.mu);
     ext.shutdown(&app);
     PicoApp_Free(&app);
@@ -2067,10 +2068,10 @@ static int TestAskUserToolSuccess(void)
 
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_output && strcmp(line->tool_output, answer) == 0 && !line->tool_error &&
-              g_test.last_input && strstr(g_test.last_input, "always use ask_user");
+              g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user");
     ext.shutdown(&app);
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "tool result or clarification instruction was not preserved");
+    return ok ? 0 : Fail(name, "tool result or clarification guidance was not preserved");
 }
 
 static int TestAskUserToolCancellation(void)

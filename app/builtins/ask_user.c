@@ -1263,14 +1263,15 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void AskUserContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
+static void AskUserLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
 {
     (void)app;
     (void)agent_id;
     bool offered = false;
     for (int i = 0; ev && i < ev->tool_count; i++)
     {
-        if (ev->tools[i].name && strcmp(ev->tools[i].name, "ask_user") == 0)
+        if (ev->tools[i].name && strcmp(ev->tools[i].name, "ask_user") == 0 &&
+            (!ev->exclude || !ev->exclude[i]))
         {
             offered = true;
             break;
@@ -1278,7 +1279,7 @@ static void AskUserContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent 
     }
     if (ev && !ev->compact && offered)
     {
-        ev->extra_context = JsonDup(
+        ev->extra_instructions = JsonDup(
             "If implementation details are ambiguous, always use ask_user to resolve every open question, and do "
             "not begin implementation until all questions have been answered.");
     }
@@ -1292,7 +1293,7 @@ static void AskUserInit(PicoApp *app)
                   "allow_other=true for a required free-form Other choice; use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL);
-    pico_add_context_hook(app, AskUserContext);
+    pico_add_llm_hook(app, AskUserLlm);
     pico_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
 }

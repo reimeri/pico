@@ -604,6 +604,7 @@ static void RunLlmHooks(PicoApp *app, PicoAgent *agent, bool compact, bool inclu
     }
     bool exclude[PICO_MAX_TOOLS];
     memset(exclude, 0, sizeof(exclude));
+    /* Filtering pass: collect exclusions so every hook sees the final catalog. */
     for (int i = 0; i < app->llm_hook_count; i++)
     {
         if (!app->llm_hooks[i])
@@ -618,7 +619,24 @@ static void RunLlmHooks(PicoApp *app, PicoAgent *agent, bool compact, bool inclu
         ev.tool_count = ntools;
         ev.exclude = include_tools ? exclude : NULL;
         ev.instructions = instr ? instr : "";
-        ev.extra_instructions = NULL;
+        app->llm_hooks[i](app, agent ? agent->id : 0, &ev);
+        free(ev.extra_instructions);
+    }
+    /* Instructions pass: extra_instructions is appended for later hooks. */
+    for (int i = 0; i < app->llm_hook_count; i++)
+    {
+        if (!app->llm_hooks[i])
+        {
+            continue;
+        }
+        PicoLlmEvent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.compact = compact;
+        ev.include_tools = include_tools;
+        ev.tools = eligible;
+        ev.tool_count = ntools;
+        ev.exclude = include_tools ? exclude : NULL;
+        ev.instructions = instr ? instr : "";
         app->llm_hooks[i](app, agent ? agent->id : 0, &ev);
         if (ev.extra_instructions)
         {

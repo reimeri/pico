@@ -4,6 +4,7 @@
 
 #include "pico/plugin.h"
 #include "pico/theme.h"
+#include "agent_manager.h"
 #include "builtins/ask_user.h"
 #include "json.h"
 
@@ -70,6 +71,17 @@ typedef struct AskUiState {
 
 static AskUiState g_ui;
 
+typedef struct AskUiDraft {
+    uint64_t id;
+    AskQuestion *questions;
+    int question_count;
+    int current;
+    char validation[160];
+} AskUiDraft;
+
+static AskUiDraft g_drafts[PICO_MAX_AGENTS];
+static int g_draft_count;
+
 static Clay_String CStr(const char *s)
 {
     if (!s)
@@ -128,6 +140,120 @@ static void ClearQuestions(void)
     g_ui.validation[0] = '\0';
     free(g_ui.caret_text);
     g_ui.caret_text = NULL;
+}
+
+static int FindDraft(uint64_t id)
+{
+    for (int i = 0; i < g_draft_count; i++)
+    {
+        if (g_drafts[i].id == id)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void FreeDraftAt(int index)
+{
+    if (index < 0 || index >= g_draft_count)
+    {
+        return;
+    }
+    AskUiDraft *draft = &g_drafts[index];
+    for (int i = 0; i < draft->question_count; i++)
+    {
+        FreeQuestion(&draft->questions[i]);
+    }
+    free(draft->questions);
+    g_drafts[index] = g_drafts[g_draft_count - 1];
+    memset(&g_drafts[g_draft_count - 1], 0, sizeof(g_drafts[0]));
+    g_draft_count--;
+}
+
+static void DropDraft(uint64_t id)
+{
+    FreeDraftAt(FindDraft(id));
+}
+
+static void ClearDrafts(void)
+{
+    while (g_draft_count > 0)
+    {
+        FreeDraftAt(0);
+    }
+}
+
+static void StashCurrent(void)
+{
+    if (!g_ui.show || g_ui.id == 0 || !g_ui.questions)
+    {
+        ClearQuestions();
+        return;
+    }
+    int index = FindDraft(g_ui.id);
+    if (index < 0)
+    {
+        if (g_draft_count >= PICO_MAX_AGENTS)
+        {
+            FreeDraftAt(0);
+        }
+        index = g_draft_count++;
+        memset(&g_drafts[index], 0, sizeof(g_drafts[index]));
+        g_drafts[index].id = g_ui.id;
+    }
+    else
+    {
+        for (int i = 0; i < g_drafts[index].question_count; i++)
+        {
+            FreeQuestion(&g_drafts[index].questions[i]);
+        }
+        free(g_drafts[index].questions);
+    }
+    g_drafts[index].questions = g_ui.questions;
+    g_drafts[index].question_count = g_ui.question_count;
+    g_drafts[index].current = g_ui.current;
+    snprintf(g_drafts[index].validation, sizeof(g_drafts[index].validation), "%s", g_ui.validation);
+    g_ui.questions = NULL;
+    g_ui.question_count = 0;
+    ClearQuestions();
+}
+
+static bool RestoreDraft(uint64_t id)
+{
+    int index = FindDraft(id);
+    if (index < 0)
+    {
+        return false;
+    }
+    AskUiDraft draft = g_drafts[index];
+    g_drafts[index] = g_drafts[g_draft_count - 1];
+    memset(&g_drafts[g_draft_count - 1], 0, sizeof(g_drafts[0]));
+    g_draft_count--;
+    ClearQuestions();
+    g_ui.id = draft.id;
+    g_ui.questions = draft.questions;
+    g_ui.question_count = draft.question_count;
+    g_ui.current = draft.current;
+    snprintf(g_ui.validation, sizeof(g_ui.validation), "%s", draft.validation);
+    g_ui.show = true;
+    return true;
+}
+
+static void PruneDrafts(PicoApp *app)
+{
+    int i = 0;
+    while (i < g_draft_count)
+    {
+        if (!PicoAskStore_Get(app, g_drafts[i].id, NULL, NULL, NULL))
+        {
+            FreeDraftAt(i);
+        }
+        else
+        {
+            i++;
+        }
+    }
 }
 
 static void SetToolError(PicoToolResult *out, const char *message)
@@ -551,6 +677,7 @@ static void AnswerUiError(PicoApp *app, uint64_t id, const char *message)
     }
     if (answer && pico_tool_answer(app, id, answer))
     {
+        DropDraft(id);
         g_ui.answered_id = id;
     }
     free(answer);
@@ -558,10 +685,11 @@ static void AnswerUiError(PicoApp *app, uint64_t id, const char *message)
 
 static void SyncPendingAsk(PicoApp *app)
 {
+    PruneDrafts(app);
     PicoToolAsk ask;
     if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
     {
-        ClearQuestions();
+        StashCurrent();
         g_ui.answered_id = 0;
         return;
     }
@@ -570,7 +698,11 @@ static void SyncPendingAsk(PicoApp *app)
         return;
     }
 
-    ClearQuestions();
+    StashCurrent();
+    if (RestoreDraft(ask.id))
+    {
+        return;
+    }
     char error[192] = "invalid questionnaire payload";
     int rc = LoadUiRequest(ask.request_json, error, sizeof(error));
     if (rc > 0)
@@ -768,6 +900,7 @@ static void SubmitAnswers(PicoApp *app)
     if (pico_tool_answer(app, id, answer))
     {
         free(answer);
+        DropDraft(id);
         ClearQuestions();
         g_ui.answered_id = id;
         return;
@@ -1302,6 +1435,7 @@ static void AskUserShutdown(PicoApp *app)
 {
     (void)app;
     ClearQuestions();
+    ClearDrafts();
     g_ui.answered_id = 0;
 }
 

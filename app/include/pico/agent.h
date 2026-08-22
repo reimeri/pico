@@ -36,6 +36,14 @@ typedef enum PicoAgentState {
     PICO_AGENT_ERROR,
 } PicoAgentState;
 
+typedef enum PicoAgentPresentationStatus {
+    PICO_AGENT_PRESENT_IDLE = 0,
+    PICO_AGENT_PRESENT_RUNNING,
+    PICO_AGENT_PRESENT_WAITING_USER,
+    PICO_AGENT_PRESENT_ERROR,
+    PICO_AGENT_PRESENT_COMPLETED,
+} PicoAgentPresentationStatus;
+
 typedef enum PicoSessionStart {
     PICO_SESSION_NEW = 0,
     PICO_SESSION_RESUME,
@@ -72,6 +80,9 @@ typedef struct PicoAgentCreateOptions {
     const char *purpose;
     const char *model;
     const char *effort;
+    /* Normal agents: NULL uses the active normal agent's workspace. Subagents
+     * inherit their parent and reject any override. */
+    const char *workspace_key;
     const char *const *tools; /* NULL allows all registered tools; non-NULL is an exact-name allowlist. */
     int tool_count;
     PicoSessionStart session_start;
@@ -105,11 +116,16 @@ typedef struct PicoAgentInfo {
     char model[128];
     char effort[PICO_EFFORT_LEN];
     char activity[256];
+    char workspace_key[4096];
+    char workspace_path[4096];
 
     PicoSessionPersistence persistence;
+    PicoAgentPresentationStatus presentation;
+    uint64_t last_selected_seq;
     bool busy;
     bool cancelling;
     bool resumable;
+    bool unread_completion;
 } PicoAgentInfo;
 
 PicoAgentId pico_agent_id(const PicoAgent *agent);

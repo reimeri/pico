@@ -312,45 +312,6 @@ static bool UserSettingsPath(char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/settings.json", dir);
 }
 
-static bool WorkspaceSettingsPath(const PicoApp *app, char *out, size_t cap)
-{
-    if (app && app->workspace[0])
-    {
-        return PicoPath_Format(out, cap, "%s/.pico/settings.json", app->workspace);
-    }
-    if (out && cap > 0)
-    {
-        out[0] = '\0';
-    }
-    return true;
-}
-
-static bool SettingsFileExists(const char *path)
-{
-    struct stat st;
-    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
-}
-
-static bool FileHasModels(const char *path)
-{
-    size_t len = 0;
-    char *src = Pico_ReadFile(path, &len);
-    if (!src)
-    {
-        return false;
-    }
-    JsonStripComments(src, len);
-    JsonDoc doc;
-    bool has = false;
-    if (JsonParse(&doc, src, len) == 0)
-    {
-        has = JsonIsArray(&doc, JsonObjGet(&doc, 0, "models"));
-        JsonFree(&doc);
-    }
-    free(src);
-    return has;
-}
-
 PicoModel *PicoSettings_FindModel(PicoApp *app, const char *id)
 {
     if (!app || !id || !id[0])
@@ -573,11 +534,6 @@ void PicoSettings_Load(PicoApp *app)
 
     char path[4096];
     if (UserSettingsPath(path, sizeof(path)))
-    {
-        LoadFile(s, &catalog, &catalog_n, path);
-    }
-
-    if (WorkspaceSettingsPath(app, path, sizeof(path)) && path[0])
     {
         LoadFile(s, &catalog, &catalog_n, path);
     }
@@ -968,26 +924,18 @@ bool PicoSettings_SaveSelection(PicoApp *app, const PicoAgent *agent, bool save_
         return false;
     }
     char user[4096];
-    char workspace[4096];
-    if (!UserSettingsPath(user, sizeof(user)) ||
-        !WorkspaceSettingsPath(app, workspace, sizeof(workspace)))
+    if (!UserSettingsPath(user, sizeof(user)))
     {
         return false;
     }
     bool ok = true;
     if (save_model)
     {
-        const char *path = SettingsFileExists(workspace) ? workspace : user;
-        ok = PatchRootString(path, "model", agent->model) && ok;
+        ok = PatchRootString(user, "model", agent->model) && ok;
     }
     if (save_effort)
     {
-        const char *path = FileHasModels(workspace) ? workspace : (FileHasModels(user) ? user : NULL);
-        if (!path)
-        {
-            path = SettingsFileExists(workspace) ? workspace : user;
-        }
-        ok = PatchSelectedEffort(path, app, agent) && ok;
+        ok = PatchSelectedEffort(user, app, agent) && ok;
     }
     return ok;
 }
@@ -1026,7 +974,8 @@ static bool PushContext(const char **labels, int max, int *n, const char *path, 
     return true;
 }
 
-int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max)
+int PicoSettings_LoadedContext(const PicoApp *app, const PicoAgent *agent,
+                               const char **labels, int max)
 {
     if (!labels || max <= 0)
     {
@@ -1040,13 +989,13 @@ int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max)
     {
         PushContext(labels, max, &n, path, "SYSTEM.md");
     }
-    if (app && app->workspace[0])
+    if (agent && agent->workspace_path[0])
     {
-        if (PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace))
+        if (PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", agent->workspace_path))
         {
             PushContext(labels, max, &n, path, ".pico/SYSTEM.md");
         }
-        if (PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", app->workspace))
+        if (PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", agent->workspace_path))
         {
             PushContext(labels, max, &n, path, "AGENTS.md");
         }
@@ -1054,7 +1003,7 @@ int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max)
     return n;
 }
 
-char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
+char *PicoSettings_LoadSystemPrompt(const PicoApp *app, const PicoAgent *agent)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -1065,8 +1014,8 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
     {
         AppendFile(&b, path);
     }
-    if (app->workspace[0] &&
-        PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace))
+    if (agent && agent->workspace_path[0] &&
+        PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", agent->workspace_path))
     {
         AppendFile(&b, path);
     }
@@ -1077,7 +1026,8 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
                      "working directory. Use the sh tool to run shell commands when that helps. "
                      "Prefer concise answers.");
     }
-    if (app->workspace[0] && PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", app->workspace))
+    if (agent && agent->workspace_path[0] &&
+        PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", agent->workspace_path))
     {
         AppendFile(&b, path);
     }

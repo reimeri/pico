@@ -9,6 +9,19 @@ typedef struct PicoAgentRt PicoAgentRt;
 PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
 const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
 
+typedef struct PicoAgentUiState {
+    PicoComposer composer;
+    PicoChatSelect chat_sel;
+    PicoScrollbar chat_scrollbar;
+    PicoScrollbar composer_scrollbar;
+    Clay_Vector2 chat_scroll;
+    Clay_Vector2 composer_scroll;
+    bool chat_follow_bottom;
+    bool chat_overflow;
+    bool composer_overflow;
+    bool restore_scroll;
+} PicoAgentUiState;
+
 struct PicoAgent {
     PicoAgentManager *manager;
     PicoAgentId id;
@@ -19,6 +32,11 @@ struct PicoAgent {
     char profile[65];
     char purpose[1025];
     char parent_session_id[40];
+    char workspace_key[4096];
+    char workspace_path[4096];
+    uint64_t last_selected_seq;
+    bool unread_completion;
+    PicoAgentUiState ui;
 
     PicoMessage *messages;
     int message_count;
@@ -32,6 +50,7 @@ struct PicoAgent {
 
     char session_id[40];
     char session_path[4096];
+    int session_lock_fd;
     PicoSessionPersistence persistence;
     uint64_t session_input_tokens;
     uint64_t session_cached_tokens;
@@ -59,6 +78,18 @@ static inline PicoAgent *PicoApp_ActiveAgent(PicoApp *app)
 static inline const PicoAgent *PicoApp_ActiveAgentConst(const PicoApp *app)
 {
     return app ? PicoAgentManager_ActiveConst(app->agents) : NULL;
+}
+
+static inline PicoAgentUiState *PicoApp_ActiveUi(PicoApp *app)
+{
+    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    return agent ? &agent->ui : NULL;
+}
+
+static inline const PicoAgentUiState *PicoApp_ActiveUiConst(const PicoApp *app)
+{
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    return agent ? &agent->ui : NULL;
 }
 
 #endif

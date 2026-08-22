@@ -1538,6 +1538,11 @@ static void GoIdle(PicoApp *app, PicoAgent *agent)
 static void EndTurnIdle(PicoApp *app, PicoAgent *agent)
 {
     GoIdle(app, agent);
+    if (agent->kind == PICO_AGENT_NORMAL && app && app->agents &&
+        app->agents->active_id != agent->id)
+    {
+        agent->unread_completion = true;
+    }
     pico_run_hooks(app, PICO_HOOK_ON_TURN_END, agent->id);
 }
 
@@ -2142,7 +2147,7 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoApp *app, const Pico
     ctx->manager = app->agents;
     ctx->agent_id = agent->id;
     ctx->runtime_generation = agent->runtime_generation;
-    snprintf(ctx->workspace, sizeof(ctx->workspace), "%s", app->workspace);
+    snprintf(ctx->workspace, sizeof(ctx->workspace), "%s", agent->workspace_path);
     snprintf(ctx->session_id, sizeof(ctx->session_id), "%s", agent->session_id);
     snprintf(ctx->profile, sizeof(ctx->profile), "%s", agent->profile);
     snprintf(ctx->purpose, sizeof(ctx->purpose), "%s", agent->purpose);
@@ -2279,14 +2284,33 @@ void PicoAgent_Compact(PicoApp *app, PicoAgent *agent)
     StartCompact(app, agent);
 }
 
-void PicoAgent_RebindHost(PicoApp *app, PicoAgent *agent, PicoAgentManager *manager)
+void PicoAgent_InitUi(PicoAgent *agent)
 {
-    if (!app || !agent || !agent->runtime || PicoAgent_BlocksReload(agent))
+    if (!agent)
     {
         return;
     }
-    agent->manager = manager;
-    RefreshWorkerContext(agent->runtime, app, agent);
+    PicoAgent_FreeUi(agent);
+    agent->ui.chat_sel.msg = -1;
+    agent->ui.chat_follow_bottom = true;
+    agent->ui.chat_overflow = true;
+    agent->ui.composer.capacity = 256;
+    agent->ui.composer.text = (char *)malloc((size_t)agent->ui.composer.capacity);
+    if (agent->ui.composer.text)
+    {
+        agent->ui.composer.text[0] = '\0';
+    }
+}
+
+void PicoAgent_FreeUi(PicoAgent *agent)
+{
+    if (!agent)
+    {
+        return;
+    }
+    free(agent->ui.composer.text);
+    memset(&agent->ui, 0, sizeof(agent->ui));
+    agent->ui.chat_sel.msg = -1;
 }
 
 PicoAgent *PicoAgent_Create(PicoApp *app)
@@ -2303,11 +2327,14 @@ PicoAgent *PicoAgent_Create(PicoApp *app)
     agent->kind = PICO_AGENT_NORMAL;
     agent->state = PICO_AGENT_IDLE;
     agent->persistence = PICO_SESSION_EPHEMERAL;
+    agent->session_lock_fd = -1;
     agent->tool_policy_valid = true;
     PicoSettings_InitAgent(app, agent);
+    PicoAgent_InitUi(agent);
     agent->runtime = CreateRt(app, agent);
     if (!agent->runtime)
     {
+        PicoAgent_FreeUi(agent);
         free(agent);
         return NULL;
     }
@@ -2342,7 +2369,13 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
         FreeRt(rt);
         agent->runtime = NULL;
     }
+    if (agent->session_lock_fd >= 0)
+    {
+        close(agent->session_lock_fd);
+        agent->session_lock_fd = -1;
+    }
     PicoAgent_ClearMessages(agent);
+    PicoAgent_FreeUi(agent);
     free(agent->messages);
     free(agent->error);
     free(agent->compact_summary);
@@ -2380,7 +2413,7 @@ void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
     }
     PicoAgent_DismissError(agent);
     free(agent->runtime->instructions);
-    agent->runtime->instructions = PicoSettings_LoadSystemPrompt(app);
+    agent->runtime->instructions = PicoSettings_LoadSystemPrompt(app, agent);
     if (agent->kind == PICO_AGENT_SUBAGENT)
     {
         JsonBuf instructions;
@@ -2441,6 +2474,7 @@ void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
     }
     agent->runtime_generation = next_generation;
     rt->context.runtime_generation = next_generation;
+    PicoAskStore_RemoveGeneration(app, agent->id, old->context.runtime_generation);
     PicoAgentManager_CancelDelegations(manager, agent->id,
                                        old->context.runtime_generation);
 
@@ -2863,7 +2897,7 @@ char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent)
 {
     (void)agent;
     if (!app) return JsonDup("");
-    char *base = PicoSettings_LoadSystemPrompt(app);
+    char *base = PicoSettings_LoadSystemPrompt(app, agent);
     char *instr = NULL;
     PicoTool *tools = NULL;
     int tool_count = 0;
@@ -2981,6 +3015,76 @@ bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out)
     return true;
 }
 
+static PicoAgentPresentationStatus StatusSelf(const PicoAgent *agent)
+{
+    if (!agent)
+    {
+        return PICO_AGENT_PRESENT_IDLE;
+    }
+    if (agent->error || agent->state == PICO_AGENT_ERROR)
+    {
+        return PICO_AGENT_PRESENT_ERROR;
+    }
+    if (PicoAgent_AskUiOpen(agent))
+    {
+        return PICO_AGENT_PRESENT_WAITING_USER;
+    }
+    if (PicoAgent_IsBusy(agent))
+    {
+        return PICO_AGENT_PRESENT_RUNNING;
+    }
+    if (agent->unread_completion)
+    {
+        return PICO_AGENT_PRESENT_COMPLETED;
+    }
+    return PICO_AGENT_PRESENT_IDLE;
+}
+
+static int StatusRank(PicoAgentPresentationStatus status)
+{
+    switch (status)
+    {
+        case PICO_AGENT_PRESENT_ERROR:
+            return 4;
+        case PICO_AGENT_PRESENT_WAITING_USER:
+            return 3;
+        case PICO_AGENT_PRESENT_RUNNING:
+            return 2;
+        case PICO_AGENT_PRESENT_COMPLETED:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static PicoAgentPresentationStatus AggregatePresentation(const PicoAgent *agent)
+{
+    PicoAgentPresentationStatus best = StatusSelf(agent);
+    if (!agent || agent->kind != PICO_AGENT_NORMAL || !agent->manager)
+    {
+        return best;
+    }
+    PicoAgentManager *manager = agent->manager;
+    for (int i = 0; i < manager->count; i++)
+    {
+        PicoAgent *child = manager->agents[i];
+        if (!child || child->id == agent->id || !PicoAgent_InTree(manager, agent->id, child->id))
+        {
+            continue;
+        }
+        PicoAgentPresentationStatus status = StatusSelf(child);
+        if (status == PICO_AGENT_PRESENT_COMPLETED)
+        {
+            continue;
+        }
+        if (StatusRank(status) > StatusRank(best))
+        {
+            best = status;
+        }
+    }
+    return best;
+}
+
 void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
 {
     if (!out) return;
@@ -2994,8 +3098,13 @@ void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
     snprintf(out->model, sizeof(out->model), "%s", agent->model);
     snprintf(out->effort, sizeof(out->effort), "%s", agent->effort);
     snprintf(out->activity, sizeof(out->activity), "%s", agent->activity);
+    snprintf(out->workspace_key, sizeof(out->workspace_key), "%s", agent->workspace_key);
+    snprintf(out->workspace_path, sizeof(out->workspace_path), "%s", agent->workspace_path);
     out->persistence = agent->persistence;
+    out->last_selected_seq = agent->last_selected_seq;
+    out->unread_completion = agent->unread_completion;
     out->busy = PicoAgent_IsBusy(agent);
     out->cancelling = PicoAgent_CancelRequested(agent);
     out->resumable = agent->persistence == PICO_SESSION_DURABLE && agent->session_id[0];
+    out->presentation = AggregatePresentation(agent);
 }

@@ -1,4 +1,4 @@
-// Copy to ~/.config/pico/settings.json or {workspace}/.pico/settings.json
+// Copy to ~/.config/pico/settings.json
 // Credentials live in ~/.config/pico/auth.json, env (PICO_API_KEY / OPENAI_API_KEY), or /login.
 {
   // Active catalog id. Overridden by PICO_MODEL or OPENAI_MODEL. /model writes this key.

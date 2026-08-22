@@ -1,5 +1,5 @@
 // Append extra system instructions on every LLM round.
-// Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
+// Copy to ~/.config/pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/extra
 //   cp examples/extra_instructions.c ~/.config/pico/extensions/extra/

@@ -1,5 +1,6 @@
 #include "chat_sel.h"
 
+#include "agent_internal.h"
 #include "pico/app.h"
 
 #include "raylib.h"
@@ -38,6 +39,18 @@ static int s_cur_msg = -1;
 static SelHit *s_hits;
 static int s_hit_count;
 static int s_hit_cap;
+
+static PicoChatSelect *ChatSel(PicoApp *app)
+{
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    return ui ? &ui->chat_sel : NULL;
+}
+
+static const PicoChatSelect *ChatSelConst(const PicoApp *app)
+{
+    const PicoAgentUiState *ui = PicoApp_ActiveUiConst(app);
+    return ui ? &ui->chat_sel : NULL;
+}
 
 static int Utf8Next(const char *s, int length, int pos)
 {
@@ -359,21 +372,23 @@ void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config)
 
 bool PicoChatSel_HasSelection(const PicoApp *app)
 {
-    return app && app->chat_sel.msg >= 0 && app->chat_sel.anchor != app->chat_sel.cursor;
+    const PicoChatSelect *sel = ChatSelConst(app);
+    return sel && sel->msg >= 0 && sel->anchor != sel->cursor;
 }
 
 void PicoChatSel_Clear(PicoApp *app)
 {
-    if (!app)
+    PicoChatSelect *sel = ChatSel(app);
+    if (!sel)
     {
         return;
     }
-    app->chat_sel.msg = -1;
-    app->chat_sel.anchor = 0;
-    app->chat_sel.cursor = 0;
-    app->chat_sel.mouse_selecting = false;
-    app->chat_sel.dragging = false;
-    app->chat_sel.pressed_tool = false;
+    sel->msg = -1;
+    sel->anchor = 0;
+    sel->cursor = 0;
+    sel->mouse_selecting = false;
+    sel->dragging = false;
+    sel->pressed_tool = false;
 }
 
 void PicoChatSel_Copy(PicoApp *app)
@@ -382,13 +397,14 @@ void PicoChatSel_Copy(PicoApp *app)
     {
         return;
     }
-    int msg = app->chat_sel.msg;
+    PicoChatSelect *sel = ChatSel(app);
+    int msg = sel->msg;
     if (msg < 0 || msg >= s_msg_n || !s_msgs[msg].text)
     {
         return;
     }
-    int from = app->chat_sel.anchor < app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
-    int to = app->chat_sel.anchor > app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
+    int from = sel->anchor < sel->cursor ? sel->anchor : sel->cursor;
+    int to = sel->anchor > sel->cursor ? sel->anchor : sel->cursor;
     if (from < 0)
     {
         from = 0;
@@ -415,31 +431,32 @@ void PicoChatSel_Copy(PicoApp *app)
 
 void PicoChatSel_Clamp(PicoApp *app)
 {
-    if (!app || app->chat_sel.msg < 0)
+    PicoChatSelect *sel = ChatSel(app);
+    if (!sel || sel->msg < 0)
     {
         return;
     }
-    if (app->chat_sel.msg >= s_msg_n)
+    if (sel->msg >= s_msg_n)
     {
         PicoChatSel_Clear(app);
         return;
     }
-    int len = s_msgs[app->chat_sel.msg].len;
-    if (app->chat_sel.anchor > len)
+    int len = s_msgs[sel->msg].len;
+    if (sel->anchor > len)
     {
-        app->chat_sel.anchor = len;
+        sel->anchor = len;
     }
-    if (app->chat_sel.cursor > len)
+    if (sel->cursor > len)
     {
-        app->chat_sel.cursor = len;
+        sel->cursor = len;
     }
-    if (app->chat_sel.anchor < 0)
+    if (sel->anchor < 0)
     {
-        app->chat_sel.anchor = 0;
+        sel->anchor = 0;
     }
-    if (app->chat_sel.cursor < 0)
+    if (sel->cursor < 0)
     {
-        app->chat_sel.cursor = 0;
+        sel->cursor = 0;
     }
 }
 
@@ -560,14 +577,15 @@ void PicoChatSel_DrawOverlay(PicoApp *app)
     {
         return;
     }
-    int msg = app->chat_sel.msg;
+    PicoChatSelect *sel = ChatSel(app);
+    int msg = sel ? sel->msg : -1;
     if (msg < 0 || msg >= s_msg_n || !s_msgs[msg].text)
     {
         return;
     }
-    int from = app->chat_sel.anchor < app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
-    int to = app->chat_sel.anchor > app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
-    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    int from = sel->anchor < sel->cursor ? sel->anchor : sel->cursor;
+    int to = sel->anchor > sel->cursor ? sel->anchor : sel->cursor;
+    Clay_ElementData scroll = Clay_GetElementData(pico_ui_chat_scroll_id(app));
     if (scroll.found)
     {
         Clay_BoundingBox clip = scroll.boundingBox;

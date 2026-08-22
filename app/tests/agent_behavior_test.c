@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "subagent_config.h"
 #include "usage.h"
+#include "workspace.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -88,6 +89,9 @@ typedef struct TestState {
     PicoAgentId hook_agent_id;
     bool context_manager_matches;
     char context_workspace[4096];
+    PicoAgentId context_ids[4];
+    char context_workspaces[4][4096];
+    int context_seen_count;
 } TestState;
 
 static TestState g_test = {
@@ -185,6 +189,9 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.hook_agent_id = 0;
     g_test.context_manager_matches = false;
     g_test.context_workspace[0] = '\0';
+    memset(g_test.context_ids, 0, sizeof(g_test.context_ids));
+    memset(g_test.context_workspaces, 0, sizeof(g_test.context_workspaces));
+    g_test.context_seen_count = 0;
     g_expected_context_manager = NULL;
     pthread_mutex_unlock(&g_test.mu);
     g_plugin_shutdowns = 0;
@@ -246,6 +253,23 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     SnapshotTurn(turn);
     snprintf(g_test.context_workspace, sizeof(g_test.context_workspace), "%s",
              pico_agent_context_workspace(ctx));
+    PicoAgentId context_id = pico_agent_context_id(ctx);
+    int context_slot = -1;
+    for (int i = 0; i < g_test.context_seen_count; i++)
+    {
+        if (g_test.context_ids[i] == context_id) context_slot = i;
+    }
+    if (context_slot < 0 && g_test.context_seen_count < 4)
+    {
+        context_slot = g_test.context_seen_count++;
+        g_test.context_ids[context_slot] = context_id;
+    }
+    if (context_slot >= 0)
+    {
+        snprintf(g_test.context_workspaces[context_slot],
+                 sizeof(g_test.context_workspaces[context_slot]), "%s",
+                 pico_agent_context_workspace(ctx));
+    }
     g_test.context_manager_matches = !g_expected_context_manager ||
                                      PicoAgentContext_Manager(ctx) == g_expected_context_manager;
     bool child_turn = pico_agent_context_profile(ctx)[0] != '\0';
@@ -726,9 +750,10 @@ void PicoSettings_Load(PicoApp *app)
     (void)app;
 }
 
-char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
+char *PicoSettings_LoadSystemPrompt(const PicoApp *app, const PicoAgent *agent)
 {
     (void)app;
+    (void)agent;
     return JsonDup("");
 }
 
@@ -934,10 +959,11 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
     (void)app; (void)agent; (void)start; (void)session_file;
 }
 
-int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
-                        char *path, size_t path_cap)
+int PicoSession_Resolve(const PicoApp *app, const PicoAgent *agent,
+                        const char *id, bool allow_prefix, char *path, size_t path_cap)
 {
     (void)app;
+    (void)agent;
     (void)allow_prefix;
     if (!g_fake_session.enabled || !g_fake_session.resolve_ok || !id ||
         strcmp(id, g_fake_session.id) != 0)
@@ -989,6 +1015,14 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     return 0;
 }
 
+int PicoSession_Preflight(const char *workspace, const char *session_file, PicoSessionHeader *out)
+{
+    (void)workspace;
+    (void)session_file;
+    (void)out;
+    return -1;
+}
+
 void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
 {
     (void)app; (void)agent;
@@ -1017,10 +1051,24 @@ void PicoAuth_Free(PicoApp *app)
 
 void PicoChatSel_Clear(PicoApp *app)
 {
-    if (app)
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (ui)
     {
-        app->chat_sel.msg = -1;
+        ui->chat_sel.msg = -1;
     }
+}
+
+void PicoComplete_Close(void)
+{
+}
+
+void PicoFooter_Close(void)
+{
+}
+
+bool PicoSidebar_ModalOpen(void)
+{
+    return false;
 }
 
 static void InitApp(PicoApp *app)
@@ -1328,11 +1376,20 @@ static int TestProductionInit(void)
 {
     const char *name = "production app initialization";
     ResetTest(TEST_SINGLE, 0);
+    char workspace[] = "/tmp/pico-production-init-XXXXXX";
+    if (!mkdtemp(workspace))
+    {
+        return Fail(name, "could not create startup workspace");
+    }
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", workspace);
     PicoApp app;
-    PicoApp_Init(&app, NULL, "/workspace", false, PICO_SESSION_NONE, NULL);
-    bool ok = PicoApp_ActiveAgent(&app) && PicoApp_ActiveAgent(&app)->state == PICO_AGENT_IDLE && app.composer.text;
+    PicoApp_Init(&app, NULL, workspace, false, PICO_SESSION_NONE, NULL);
+    PicoComposer *composer = pico_app_composer(&app);
+    bool ok = PicoApp_ActiveAgent(&app) && PicoApp_ActiveAgent(&app)->state == PICO_AGENT_IDLE &&
+              composer && composer->text && strcmp(app.workspace, workspace) == 0;
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "PicoApp_Init did not create a usable agent before session/plugin startup");
+    rmdir(workspace);
+    return ok ? 0 : Fail(name, "PicoApp_Init did not create a usable registered agent before session/plugin startup");
 }
 
 static int TestReloadQuiescence(void)
@@ -1377,61 +1434,84 @@ static int TestReloadQuiescence(void)
 
 static int TestDeferredWorkspaceChange(void)
 {
-    const char *name = "deferred workspace change";
+    const char *name = "concurrent workspace change";
+    char config_template[] = "/tmp/pico-workspace-config-XXXXXX";
     char old_template[] = "/tmp/pico-workspace-old-XXXXXX";
     char new_template[] = "/tmp/pico-workspace-new-XXXXXX";
+    char *config_dir = mkdtemp(config_template);
     char *old_dir = mkdtemp(old_template);
     char *new_dir = mkdtemp(new_template);
-    if (!old_dir || !new_dir)
+    if (!config_dir || !old_dir || !new_dir)
     {
         return Fail(name, "could not create workspaces");
     }
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config_dir);
 
     ResetTest(TEST_BLOCK, 1);
     g_plugin_reloads = 0;
     PicoApp app;
     InitApp(&app);
-    snprintf(app.workspace, sizeof(app.workspace), "%s", old_dir);
-    PicoAgentId old_id = pico_agent_active(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    app.workspaces = calloc(1, sizeof(*app.workspaces));
+    if (!app.workspaces || PicoWorkspaceRegistry_Init(app.workspaces) != PICO_WORKSPACE_OK)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "could not initialize workspace registry");
+    }
+    char old_key[4096];
+    if (PicoWorkspaceRegistry_Register(app.workspaces, old_dir, NULL, old_key, sizeof(old_key)) !=
+        PICO_WORKSPACE_OK)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "could not register the original workspace");
+    }
+    const PicoWorkspace *registered = PicoWorkspaceRegistry_FindKey(app.workspaces, old_key);
+    PicoAgent *old_agent = PicoApp_ActiveAgent(&app);
+    if (!registered || !old_agent)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "original workspace agent was missing");
+    }
+    snprintf(old_agent->workspace_key, sizeof(old_agent->workspace_key), "%s", registered->key);
+    snprintf(old_agent->workspace_path, sizeof(old_agent->workspace_path), "%s", registered->path);
+    snprintf(app.workspace, sizeof(app.workspace), "%s", registered->path);
+    PicoAgentId old_id = old_agent->id;
+    PicoAgent_StartTurn(&app, old_agent, "start");
     if (!WaitForBlock(&app) || !PicoApp_ChangeWorkspace(&app, new_dir))
     {
+        PicoApp_Free(&app);
         return Fail(name, "workspace request was not accepted while busy");
     }
-    if (!app.workspace_change_queued || strcmp(app.workspace, old_dir) != 0 ||
-        PicoAgentManager_AcceptsNewWork(app.agents))
+    PicoAgent *still_old = PicoAgentManager_Find(app.agents, old_id);
+    if (!still_old || !PicoAgent_IsBusy(still_old) || pico_agent_count(&app) < 2 ||
+        pico_agent_active(&app) == old_id || strcmp(app.workspace, still_old->workspace_path) == 0)
     {
-        return Fail(name, "workspace mutated before the quiescence barrier");
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_release = true;
+        pthread_cond_broadcast(&g_test.cv);
+        pthread_mutex_unlock(&g_test.mu);
+        PicoApp_Free(&app);
+        return Fail(name, "busy agent was replaced instead of continuing in the background");
     }
 
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    if (!WaitForIdle(&app))
+    PicoAgent *fresh = PicoApp_ActiveAgent(&app);
+    for (int i = 0; i < 3000 && (PicoAgent_IsBusy(still_old) || PicoAgent_IsBusy(fresh)); i++)
     {
-        return Fail(name, "old workspace did not drain");
+        PicoAgentManager_Pump(app.agents);
+        SleepOneMs();
     }
-    PicoApp_PumpLifecycle(&app);
-    g_expected_context_manager = app.agents;
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "verify rebound workspace");
-    if (!WaitForIdle(&app))
-    {
-        return Fail(name, "replacement agent did not run");
-    }
-    pthread_mutex_lock(&g_test.mu);
-    bool rebound = g_test.context_manager_matches && strcmp(g_test.context_workspace, new_dir) == 0;
-    pthread_mutex_unlock(&g_test.mu);
-    g_expected_context_manager = NULL;
-    PicoAgentInfo ignored;
-    bool ok = !app.workspace_change_queued && strcmp(app.workspace, new_dir) == 0 &&
-              pico_agent_count(&app) == 1 && pico_agent_active(&app) != old_id &&
-              !pico_agent_find(&app, old_id, &ignored) && rebound &&
-              PicoAgentManager_AcceptsNewWork(app.agents) && g_plugin_reloads == 1;
+    char new_real[4096];
+    PicoAgentInfo still_info;
+    bool ok = !PicoAgent_IsBusy(still_old) && pico_agent_find(&app, old_id, &still_info) &&
+              pico_agent_count(&app) >= 2 && realpath(new_dir, new_real) &&
+              strcmp(app.workspace, new_real) == 0 && PicoAgentManager_AcceptsNewWork(app.agents);
     PicoApp_Free(&app);
     rmdir(old_dir);
     rmdir(new_dir);
-    return ok ? 0 : Fail(name, "workspace transition was partial or did not create a fresh agent");
+    return ok ? 0 : Fail(name, "workspace change stopped the original agent or failed to select the new one");
 }
 
 static int TestInvalidRestrictedPolicyPreservesSubmit(void)
@@ -1455,18 +1535,25 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
         return Fail(name, "could not create restricted agent");
     }
     app.tool_count = 0; /* simulate the allowed tool disappearing on reload */
-    app.composer.text = JsonDup("keep this draft");
-    app.composer.length = (int)strlen(app.composer.text);
-    app.composer.capacity = app.composer.length + 1;
-    app.composer.cursor = app.composer.length;
-    app.composer.sel_anchor = app.composer.length;
+    PicoComposer *composer = pico_app_composer(&app);
+    if (!composer)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "active composer was missing");
+    }
+    free(composer->text);
+    composer->text = JsonDup("keep this draft");
+    composer->length = (int)strlen(composer->text);
+    composer->capacity = composer->length + 1;
+    composer->cursor = composer->length;
+    composer->sel_anchor = composer->length;
 
     PicoApp_Submit(&app);
     bool ok = pico_agent_active(&app) == restricted &&
               pico_agent_message_count(&app, restricted) == 0 &&
               !PicoAgent_IsBusy(PicoApp_ActiveAgent(&app)) &&
-              app.composer.length == (int)strlen("keep this draft") &&
-              strcmp(app.composer.text, "keep this draft") == 0 &&
+              composer->length == (int)strlen("keep this draft") &&
+              composer->text && strcmp(composer->text, "keep this draft") == 0 &&
               app.status_warn && strstr(app.status_warn, "restricted tool policy");
     PicoApp_Free(&app);
     return ok ? 0 : Fail(name, "invalid policy persisted a stranded turn or cleared the draft");
@@ -2555,7 +2642,9 @@ int main(void)
     failed |= TestResumedToolCallArgs();
     failed |= TestToolCallListArgs();
     failed |= TestManagerProfileRegistry();
+    failed |= TestCrossWorkspaceTargeting();
     failed |= TestManagerConcurrencyAndIsolation();
+    failed |= TestAgentUiAndPresentation();
     failed |= TestSubagentProfileResolution();
     failed |= TestSubagentProfileDiscovery();
     failed |= TestNamedSubagentDelegation();

@@ -1,5 +1,5 @@
 // Example Pico tool that asks the user before returning.
-// Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
+// Copy to ~/.config/pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/ask
 //   cp examples/ask_tool.c ~/.config/pico/extensions/ask/

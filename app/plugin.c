@@ -52,6 +52,7 @@ static double g_last_poll = 0;
 
 static PicoExt (*kBuiltins[])(void) = {
     pico_ext_chat,
+    pico_ext_sidebar,
     pico_ext_composer,
     pico_ext_footer,
     pico_ext_overlay,
@@ -120,11 +121,6 @@ static bool CacheDir(char *out, size_t cap)
         return PicoPath_Format(out, cap, "%s/pico/ext", xdg);
     }
     return PicoPath_Format(out, cap, "%s/.cache/pico/ext", HomeDir());
-}
-
-static bool WorkspaceExtDir(const PicoApp *app, char *out, size_t cap)
-{
-    return PicoPath_Format(out, cap, "%s/.pico/extensions", app->workspace[0] ? app->workspace : ".");
 }
 
 static unsigned PathHash(const char *s)
@@ -469,10 +465,6 @@ static void LoadUsers(PicoApp *app)
         MkdirP(dir);
         WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
     }
-    if (WorkspaceExtDir(app, dir, sizeof(dir)))
-    {
-        WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
-    }
 }
 
 void PicoPlugins_Load(PicoApp *app)
@@ -522,10 +514,7 @@ void PicoPlugins_Reload(PicoApp *app)
     PicoAgentManager_NotifySessions(app->agents);
     PicoAgentManager_ReplayToolDetails(app->agents);
     app->reload_queued = false;
-    if (!app->workspace_change_queued)
-    {
-        PicoAgentManager_SetAcceptingWork(app->agents, true);
-    }
+    PicoAgentManager_SetAcceptingWork(app->agents, true);
 }
 
 void PicoPlugins_Shutdown(PicoApp *app)
@@ -553,28 +542,20 @@ static void CollectWalk(void *ctx, const char *path, time_t mtime)
     c->mtimes[c->n] = mtime;
 }
 
-static int CollectSources(const PicoApp *app, char paths[][4096], time_t *mtimes, int cap)
+static int CollectSources(char paths[][4096], time_t *mtimes, int cap)
 {
     CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .n = 0, .cap = cap};
-    char dirs[2][4096];
-    bool valid[2] = {
-        ConfigExtDir(dirs[0], sizeof(dirs[0])),
-        WorkspaceExtDir(app, dirs[1], sizeof(dirs[1])),
-    };
-    for (int d = 0; d < 2; d++)
+    char directory[4096];
+    if (ConfigExtDir(directory, sizeof(directory)))
     {
-        if (valid[d])
-        {
-            WalkExtTree(dirs[d], 0, &ctx.n, cap, CollectWalk, &ctx);
-        }
+        WalkExtTree(directory, 0, &ctx.n, cap, CollectWalk, &ctx);
     }
     return ctx.n;
 }
 
 void PicoPlugins_Poll(PicoApp *app)
 {
-    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired() || app->reload_queued ||
-        app->workspace_change_queued)
+    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired() || app->reload_queued)
     {
         return;
     }
@@ -591,7 +572,7 @@ void PicoPlugins_Poll(PicoApp *app)
 
     char paths[PICO_MAX_USER_PLUGINS][4096];
     time_t mtimes[PICO_MAX_USER_PLUGINS];
-    int n = CollectSources(app, paths, mtimes, PICO_MAX_USER_PLUGINS);
+    int n = CollectSources(paths, mtimes, PICO_MAX_USER_PLUGINS);
 
     int user_count = 0;
     for (int i = 0; i < g_plugin_count; i++)

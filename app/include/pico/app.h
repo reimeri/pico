@@ -130,12 +130,16 @@ typedef struct PicoScrollbar {
 } PicoScrollbar;
 
 struct PicoApp;
+struct PicoWorkspaceRegistry;
 
 typedef void (*PicoViewFn)(struct PicoApp *app);
 
 typedef struct PicoHookEvent {
     PicoHook hook;
     PicoAgentId agent_id; /* zero only for app-global hooks without an agent target */
+    /* Copied target snapshot; safe during destroy hooks and independent of the active agent. */
+    char workspace_key[4096];
+    char workspace_path[4096];
 } PicoHookEvent;
 
 typedef void (*PicoHookFn)(struct PicoApp *app, const PicoHookEvent *event);
@@ -334,8 +338,9 @@ typedef struct PicoSettings {
 
 typedef struct PicoApp {
     PicoAgentManager *agents;
-    PicoComposer composer;
+    struct PicoWorkspaceRegistry *workspaces;
     PicoSettings settings; /* defaults for newly created agents */
+    uint64_t selection_epoch; /* changes on session switch so Clay recreates scroll containers */
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
@@ -364,23 +369,15 @@ typedef struct PicoApp {
     struct PicoAuthStore *auth_store;
     bool submit_cancel;
     char *agent_input;
-    PicoScrollbar chat_scrollbar;
-    PicoScrollbar composer_scrollbar;
-    PicoChatSelect chat_sel;
-    bool chat_follow_bottom; /* sticky: pin to bottom until the user scrolls away */
-    bool chat_overflow;
-    bool composer_overflow;
     bool reinitialize_clay;
     bool debug_enabled;
     bool safe_mode;
     bool reload_queued;
-    bool workspace_change_queued;
     bool terminal_shutdown;
     const char *hovered_link;
     bool hovered_tool;
     bool hovered_clickable;
     char workspace[4096];
-    char pending_workspace[4096];
     char *status_warn; /* overlay; compile/load and failed pico_add_tool */
     PicoModel *models; /* immutable capabilities and configured defaults */
     int model_count;
@@ -452,6 +449,16 @@ void PicoApp_Frame(PicoApp *app);
 void PicoApp_RequestReload(PicoApp *app);
 bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path);
 
+/* Active-agent composer. NULL if there is no active normal agent. */
+PicoComposer *pico_app_composer(PicoApp *app);
+const PicoComposer *pico_app_composer_const(const PicoApp *app);
+/* Explicit-agent composer. NULL for missing or hidden subagents. */
+PicoComposer *pico_agent_composer(PicoApp *app, PicoAgentId id);
+void PicoComposer_SetAgentText(PicoApp *app, PicoAgentId id, const char *text);
+
+Clay_ElementId pico_ui_chat_scroll_id(const PicoApp *app);
+Clay_ElementId pico_ui_composer_scroll_id(const PicoApp *app);
+
 typedef struct PicoExtInfo {
     const char *name;        /* NULL if unnamed / failed stub */
     const char *description; /* NULL if omitted */
@@ -496,11 +503,13 @@ void PicoComplete_Close(void);
 bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoApp *app);
 bool PicoFooter_MenuOpen(void);
+void PicoFooter_Close(void);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);
 void PicoExts_Close(void);
 bool PicoExts_IsOpen(void);
 void PicoPrompt_Close(void);
 bool PicoPrompt_IsOpen(void);
+bool PicoSidebar_ModalOpen(void);
 
 #endif

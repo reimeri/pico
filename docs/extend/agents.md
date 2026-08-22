@@ -19,9 +19,11 @@ PicoAgentId active = pico_agent_active(app);
 pico_agent_select(app, active);
 ```
 
-`pico_agent_find` returns a copied snapshot by ID. `PicoAgentInfo.persistence` is `PICO_SESSION_EPHEMERAL`, `PICO_SESSION_DURABLE`, or `PICO_SESSION_FAILED`; `resumable` is true only for a durable identity. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
+`pico_agent_find` returns a copied snapshot by ID. `PicoAgentInfo.workspace_key` and `workspace_path` are immutable copied workspace identity; `last_selected_seq` records normal-session recency. `PicoAgentInfo.persistence` is `PICO_SESSION_EPHEMERAL`, `PICO_SESSION_DURABLE`, or `PICO_SESSION_FAILED`; `resumable` is true only for a durable identity. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Normal creation may provide `workspace_key`; `NULL` uses the active normal agent workspace. Subagents always inherit their parent workspace and reject overrides. Close rejects busy agents, retained-runtime references, and the final normal agent. `pico_agent_select` rejects hidden subagents. Selecting a normal agent updates the active-only `app->workspace` alias, restores that agent's composer/viewport, and clears its unread completion.
 
-`pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. The message pointer is invalidated by pumping, transcript mutation, close, or workspace replacement.
+Each normal agent owns composer text, chat selection, scroll offsets, and follow-bottom state. Use `pico_app_composer` / `pico_app_composer_const` for the active agent, or `pico_agent_composer` / `PicoComposer_SetAgentText` when a command must mutate the invoking session after selection changes.
+
+`pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. The message pointer is invalidated by pumping, transcript mutation, or close.
 
 ## Named subagent profiles
 
@@ -51,7 +53,7 @@ The builtin `subagent` tool accepts only a named profile, a delegated `task`, an
 {"profile":"exploration","task":"Find the replay boundary.","session_id":"optional-child-id"}
 ```
 
-A fresh child gets current workspace/system instructions, a clearly delimited profile purpose, only the delegated user task, and the profile's copied tool policy. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or cache key. It shares process registrations, providers, authentication, and workspace services.
+A fresh child inherits its parent's immutable workspace and gets that workspace's system instructions, a clearly delimited profile purpose, only the delegated user task, and the profile's copied tool policy. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or cache key. It shares process registrations, providers, authentication, and workspace services.
 
 Supplying `session_id` reserves and replays exactly that prior subagent session. The stored profile must match. Transcript/provider history, usage, compaction state, and prompt cache are restored, then model, effort, purpose, and tools are refreshed from the current profile and parent. A model change rotates the cache key. The delegated task is appended to the same JSONL session.
 
@@ -59,7 +61,9 @@ The parent remains in tool wait while the hidden child runs. The result is JSON 
 
 ## Asks
 
-`pico_tool_pending_ask` returns the oldest live ask across all agents, including hidden delegated children; its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, so a child ask remains answerable while its parent waits. The borrowed request remains valid only until the next manager pump.
+`pico_tool_pending_ask` returns the oldest live ask in the active normal agent's tree, including hidden delegated children; its `agent_id`, `profile`, and `purpose` identify the owner. Asks on other sessions stay pending and show as a waiting status on that sidebar row without blocking the active composer. `pico_tool_answer` routes by globally unique ask ID. Builtin `ask_user` drafts are preserved by ask ID across session switches. The borrowed request remains valid only until the next manager pump.
+
+`PicoAgentInfo.presentation` is the sidebar-facing status: error, waiting for user, running, unread background completion, or idle. Aggregation over live descendants is `error > waiting > running > completed > idle`. Child completion never marks the parent unread; a child error bubbles only while that child remains live.
 
 ## Main-thread targets
 
@@ -102,6 +106,6 @@ Agent/session changes produced by worker code must travel through callback resul
 
 ## Reload, workspace, and shutdown
 
-Reload and workspace replacement stop accepting external turns/delegations, keep pumping current work and asks, and commit only after a full manager quiescence check. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn.
+Reload stops accepting external turns/delegations, keeps pumping current work and asks, and commits only after a full manager quiescence check. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn. `/cd` does not wait on that barrier.
 
 `PicoApp_Free` returns `PICO_APP_SHUTDOWN_CLEAN` or `PICO_APP_SHUTDOWN_RETAINED`. Retained means one shared shutdown deadline expired and a callback was detached. Pico keeps every service and `.so` that callback can reach, permanently retires Pico in the process, and rejects later app/plugin initialization. The caller must proceed to process exit.

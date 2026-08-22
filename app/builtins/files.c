@@ -21,6 +21,7 @@
 static char **g_files;
 static int g_file_count;
 static bool g_scanned;
+static char g_workspace[4096];
 
 static bool SkipDirName(const char *name)
 {
@@ -42,6 +43,7 @@ static void FilesClear(void)
     g_files = NULL;
     g_file_count = 0;
     g_scanned = false;
+    g_workspace[0] = '\0';
 }
 
 static void FilesAdd(const char *rel)
@@ -70,13 +72,10 @@ static void Walk(const char *root, const char *rel, int depth)
         return;
     }
     char dir[4096];
-    if (rel[0])
+    if ((rel[0] && !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, rel)) ||
+        (!rel[0] && !PicoPath_Format(dir, sizeof(dir), "%s", root)))
     {
-        snprintf(dir, sizeof(dir), "%s/%s", root, rel);
-    }
-    else
-    {
-        snprintf(dir, sizeof(dir), "%s", root);
+        return;
     }
     DIR *d = opendir(dir);
     if (!d)
@@ -100,7 +99,10 @@ static void Walk(const char *root, const char *rel, int depth)
             snprintf(child, sizeof(child), "%s", ent->d_name);
         }
         char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", root, child);
+        if (!PicoPath_Format(full, sizeof(full), "%s/%s", root, child))
+        {
+            continue;
+        }
         struct stat st;
         if (stat(full, &st) != 0)
         {
@@ -121,9 +123,11 @@ static void Walk(const char *root, const char *rel, int depth)
 static void FilesRebuild(PicoApp *app)
 {
     FilesClear();
-    if (app && app->workspace[0])
+    PicoAgentInfo active;
+    if (app && pico_agent_find(app, pico_agent_active(app), &active) && active.workspace_path[0])
     {
-        Walk(app->workspace, "", 0);
+        snprintf(g_workspace, sizeof(g_workspace), "%s", active.workspace_path);
+        Walk(g_workspace, "", 0);
     }
     g_scanned = true;
 }
@@ -164,7 +168,10 @@ static const char *BaseName(const char *path)
 
 static int FileQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
 {
-    if (!g_scanned)
+    PicoAgentInfo active;
+    const char *workspace = pico_agent_find(app, pico_agent_active(app), &active)
+                                ? active.workspace_path : "";
+    if (!g_scanned || strcmp(g_workspace, workspace) != 0)
     {
         FilesRebuild(app);
     }
@@ -250,12 +257,12 @@ static void AppendFileBlock(JsonBuf *b, const char *abs, const char *body)
 
 static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
 {
-    (void)event;
-    if (app->submit_cancel || !app->composer.text)
+    const PicoComposer *c = pico_app_composer_const(app);
+    if (app->submit_cancel || !c || !c->text || !event || !event->workspace_path[0])
     {
         return;
     }
-    const char *text = app->composer.text;
+    const char *text = c->text;
     char *paths[32];
     int path_n = 0;
     for (int i = 0; text[i] && path_n < 32; i++)
@@ -286,7 +293,7 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
         {
             snprintf(joined, sizeof(joined), "%s", rel);
         }
-        else if (!PicoPath_Format(joined, sizeof(joined), "%s/%s", app->workspace, rel))
+        else if (!PicoPath_Format(joined, sizeof(joined), "%s/%s", event->workspace_path, rel))
         {
             continue;
         }

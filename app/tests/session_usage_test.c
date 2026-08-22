@@ -1,23 +1,27 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agent.h"
+#include "agent_manager.h"
 #include "json.h"
 #include "path.h"
 #include "session.h"
 #include "settings.h"
 #include "usage.h"
+#include "workspace.h"
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char g_config_dir[4096];
 static int g_restored_value;
 static int g_reset_hooks;
 static char g_status_warning[512];
+static PicoWorkspaceRegistry *g_workspace_registry;
 
 static int Fail(const char *message)
 {
@@ -28,6 +32,25 @@ static int Fail(const char *message)
 bool Pico_ConfigDir(char *out, size_t cap)
 {
     return PicoPath_Format(out, cap, "%s", g_config_dir);
+}
+
+PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager)
+{
+    (void)manager;
+    return NULL;
+}
+
+PicoAgentResult PicoAgentManager_ResumeActive(PicoApp *app, const char *id, bool allow_prefix)
+{
+    (void)app; (void)id; (void)allow_prefix;
+    return PICO_AGENT_RESULT_INVALID;
+}
+
+PicoAgentResult PicoAgentManager_OpenSession(PicoApp *app, PicoAgent *workspace_agent,
+                                             const char *id, bool allow_prefix, bool select)
+{
+    (void)app; (void)workspace_agent; (void)id; (void)allow_prefix; (void)select;
+    return PICO_AGENT_RESULT_INVALID;
 }
 
 bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner, const char *path)
@@ -284,6 +307,25 @@ static void RegisterReplayTool(PicoApp *app)
     app->tool_count = 1;
 }
 
+static void InitTestApp(PicoApp *app)
+{
+    memset(app, 0, sizeof(*app));
+    app->workspaces = g_workspace_registry;
+}
+
+static void InitTestAgent(PicoAgent *agent)
+{
+    memset(agent, 0, sizeof(*agent));
+    agent->session_lock_fd = -1;
+    const PicoWorkspace *workspace =
+        g_workspace_registry ? PicoWorkspaceRegistry_Get(g_workspace_registry, 0) : NULL;
+    if (workspace)
+    {
+        snprintf(agent->workspace_key, sizeof(agent->workspace_key), "%s", workspace->key);
+        snprintf(agent->workspace_path, sizeof(agent->workspace_path), "%s", workspace->path);
+    }
+}
+
 static bool AppendRaw(const char *path, const char *line)
 {
     FILE *f = fopen(path, "ab");
@@ -304,11 +346,25 @@ int main(void)
         return Fail("could not create temporary directory");
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    char workspace_path[4096];
+    if (!PicoPath_Format(workspace_path, sizeof(workspace_path), "%s/workspace", temp) ||
+        mkdir(workspace_path, 0700) != 0)
+    {
+        return Fail("could not create registered workspace");
+    }
+    PicoWorkspaceRegistry registry;
+    g_workspace_registry = &registry;
+    if (PicoWorkspaceRegistry_Init(&registry) != PICO_WORKSPACE_OK ||
+        PicoWorkspaceRegistry_Register(&registry, workspace_path, "Workspace", NULL, 0) !=
+            PICO_WORKSPACE_OK)
+    {
+        return Fail("could not initialize workspace registry");
+    }
 
     PicoApp writer;
     PicoAgent writer_agent;
-    memset(&writer, 0, sizeof(writer));
-    memset(&writer_agent, 0, sizeof(writer_agent));
+    InitTestApp(&writer);
+    InitTestAgent(&writer_agent);
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
     snprintf(writer.workspace, sizeof(writer.workspace), "/workspace");
@@ -336,7 +392,7 @@ int main(void)
     free(file);
 
     PicoAgent child_agent;
-    memset(&child_agent, 0, sizeof(child_agent));
+    InitTestAgent(&child_agent);
     child_agent.persistence = PICO_SESSION_DURABLE;
     child_agent.kind = PICO_AGENT_SUBAGENT;
     snprintf(child_agent.model, sizeof(child_agent.model), "saved-model");
@@ -355,23 +411,27 @@ int main(void)
     }
 
     PicoSessionInfo *listed = NULL;
-    int listed_n = PicoSession_List(&writer, &listed, true);
+    int listed_n = PicoSession_List(&writer, &writer_agent, &listed, true);
     bool parent_offered = listed_n == 1 && listed &&
                           strcmp(listed[0].id, writer_agent.session_id) == 0 &&
                           listed[0].kind == PICO_AGENT_NORMAL;
     char child_resolved[4096];
-    bool child_by_id = PicoSession_Resolve(&writer, child_agent.session_id, false,
+    bool child_by_id = PicoSession_Resolve(&writer, &writer_agent, child_agent.session_id, false,
                                            child_resolved, sizeof(child_resolved)) == 0;
     free(listed);
     if (!parent_offered || !child_by_id)
     {
         return Fail("/resume listing included a subagent session, or exact child ids stopped resolving");
     }
+    close(writer_agent.session_lock_fd);
+    writer_agent.session_lock_fd = -1;
+    close(child_agent.session_lock_fd);
+    child_agent.session_lock_fd = -1;
 
     PicoApp compacted;
     PicoAgent compacted_agent;
-    memset(&compacted, 0, sizeof(compacted));
-    memset(&compacted_agent, 0, sizeof(compacted_agent));
+    InitTestApp(&compacted);
+    InitTestAgent(&compacted_agent);
     PicoModel replay_models[2];
     memset(replay_models, 0, sizeof(replay_models));
     snprintf(replay_models[0].id, sizeof(replay_models[0].id), "default-model");
@@ -406,6 +466,14 @@ int main(void)
     {
         return Fail("details-only replay did not restore extension state after reload");
     }
+    PicoAgent contended_agent;
+    InitTestAgent(&contended_agent);
+    if (PicoSession_Replay(&compacted, &contended_agent, writer_agent.session_path, false) == 0)
+    {
+        return Fail("a second live writer acquired the durable session lock");
+    }
+    close(compacted_agent.session_lock_fd);
+    compacted_agent.session_lock_fd = -1;
 
     if (!AppendRaw(writer_agent.session_path, "{\"type\":\"usage\",\"input_tokens\":50,\"cached_tokens\":-3}") ||
         !AppendRaw(writer_agent.session_path, "{\"type\":\"usage\",\"input_tokens\":-4,\"cached_tokens\":2}") ||
@@ -416,19 +484,21 @@ int main(void)
 
     PicoApp replayed;
     PicoAgent replayed_agent;
-    memset(&replayed, 0, sizeof(replayed));
-    memset(&replayed_agent, 0, sizeof(replayed_agent));
+    InitTestApp(&replayed);
+    InitTestAgent(&replayed_agent);
     PicoSession_Start(&replayed, &replayed_agent, PICO_SESSION_NEW, writer_agent.session_path);
     if (replayed_agent.session_input_tokens != 360 || replayed_agent.session_cached_tokens != 180 ||
         replayed_agent.tokens_used != 10 || replayed_agent.tokens_cached != 10)
     {
         return Fail("replay did not normalize and aggregate usage events");
     }
+    close(replayed_agent.session_lock_fd);
+    replayed_agent.session_lock_fd = -1;
 
     PicoApp opened;
     PicoAgent opened_agent;
-    memset(&opened, 0, sizeof(opened));
-    memset(&opened_agent, 0, sizeof(opened_agent));
+    InitTestApp(&opened);
+    InitTestAgent(&opened_agent);
     snprintf(opened.workspace, sizeof(opened.workspace), "/workspace");
     opened_agent.session_input_tokens = 999;
     opened_agent.session_cached_tokens = 999;
@@ -449,7 +519,7 @@ int main(void)
     }
 
     PicoAgent failed_persistence;
-    memset(&failed_persistence, 0, sizeof(failed_persistence));
+    InitTestAgent(&failed_persistence);
     failed_persistence.persistence = PICO_SESSION_DURABLE;
     snprintf(failed_persistence.session_id, sizeof(failed_persistence.session_id), "not-resumable");
     snprintf(failed_persistence.session_path, sizeof(failed_persistence.session_path), "/dev/full");
@@ -477,8 +547,9 @@ int main(void)
     g_status_warning[0] = '\0';
     PicoApp long_path_app;
     PicoAgent long_path_agent;
-    memset(&long_path_app, 0, sizeof(long_path_app));
-    memset(&long_path_agent, 0, sizeof(long_path_agent));
+    InitTestApp(&long_path_app);
+    long_path_app.workspaces = NULL;
+    InitTestAgent(&long_path_agent);
     snprintf(long_path_app.workspace, sizeof(long_path_app.workspace), "/workspace");
     long_path_agent.persistence = PICO_SESSION_DURABLE;
     PicoSessionWriteResult long_path_result =
@@ -493,12 +564,126 @@ int main(void)
     }
 
     PicoAgent ephemeral;
-    memset(&ephemeral, 0, sizeof(ephemeral));
+    InitTestAgent(&ephemeral);
     ephemeral.persistence = PICO_SESSION_EPHEMERAL;
     if (PicoSession_LogUser(&opened, &ephemeral, "not persisted", "not persisted") !=
         PICO_SESSION_WRITE_SKIPPED)
     {
         return Fail("ephemeral session did not report a skipped write");
+    }
+
+    PicoAgent lock_check;
+    InitTestAgent(&lock_check);
+    lock_check.persistence = PICO_SESSION_DURABLE;
+    if (PicoSession_Replay(&opened, &lock_check, writer_agent.session_path, false) == 0)
+    {
+        return Fail("live session lock allowed another writer");
+    }
+    pid_t lock_child = fork();
+    if (lock_child == 0)
+    {
+        close(opened_agent.session_lock_fd);
+        PicoAgent child_lock_check;
+        InitTestAgent(&child_lock_check);
+        _exit(PicoSession_Replay(&opened, &child_lock_check,
+                                 writer_agent.session_path, false) == 0 ? 1 : 0);
+    }
+    int lock_status = 0;
+    waitpid(lock_child, &lock_status, 0);
+    if (!WIFEXITED(lock_status) || WEXITSTATUS(lock_status) != 0)
+    {
+        return Fail("another process acquired the live session lock");
+    }
+    PicoSession_Reset(&opened, &opened_agent);
+    lock_child = fork();
+    if (lock_child == 0)
+    {
+        PicoAgent child_lock_check;
+        InitTestAgent(&child_lock_check);
+        int result = PicoSession_Replay(&opened, &child_lock_check,
+                                        writer_agent.session_path, false);
+        if (child_lock_check.session_lock_fd >= 0) close(child_lock_check.session_lock_fd);
+        _exit(result == 0 ? 0 : 1);
+    }
+    waitpid(lock_child, &lock_status, 0);
+    if (!WIFEXITED(lock_status) || WEXITSTATUS(lock_status) != 0 ||
+        PicoSession_Replay(&opened, &lock_check, writer_agent.session_path, false) != 0)
+    {
+        return Fail("session lock was not released by reset");
+    }
+    close(lock_check.session_lock_fd);
+    lock_check.session_lock_fd = -1;
+
+    char session_dir[4096];
+    snprintf(session_dir, sizeof(session_dir), "%s", writer_agent.session_path);
+    char *session_slash = strrchr(session_dir, '/');
+    if (!session_slash)
+    {
+        return Fail("created session had no parent directory");
+    }
+    *session_slash = '\0';
+    char mismatch_path[4096];
+    char wrong_cwd_path[4096];
+    char duplicate_one[4096];
+    char duplicate_two[4096];
+    char symlink_path[4096];
+    char non_jsonl_path[4096];
+    if (!PicoPath_Format(mismatch_path, sizeof(mismatch_path), "%s/one_mismatch.jsonl", session_dir) ||
+        !PicoPath_Format(wrong_cwd_path, sizeof(wrong_cwd_path), "%s/one_wrongcwd.jsonl", session_dir) ||
+        !PicoPath_Format(duplicate_one, sizeof(duplicate_one), "%s/a_dup.jsonl", session_dir) ||
+        !PicoPath_Format(duplicate_two, sizeof(duplicate_two), "%s/b_dup.jsonl", session_dir) ||
+        !PicoPath_Format(symlink_path, sizeof(symlink_path), "%s/one_link.jsonl", session_dir) ||
+        !PicoPath_Format(non_jsonl_path, sizeof(non_jsonl_path), "%s/one_plain.txt", session_dir))
+    {
+        return Fail("strict session test paths were too long");
+    }
+    const char *mismatch_header =
+        "{\"type\":\"session\",\"version\":3,\"id\":\"different\","
+        "\"cwd\":\"/workspace\",\"kind\":\"normal\",\"model\":\"saved-model\"}";
+    const char *wrong_cwd_header =
+        "{\"type\":\"session\",\"version\":3,\"id\":\"wrongcwd\","
+        "\"cwd\":\"/other\",\"kind\":\"normal\",\"model\":\"saved-model\"}";
+    char duplicate_header[8192];
+    char valid_non_jsonl_header[8192];
+    snprintf(duplicate_header, sizeof(duplicate_header),
+             "{\"type\":\"session\",\"version\":3,\"id\":\"dup\","
+             "\"cwd\":\"%s\",\"kind\":\"normal\",\"model\":\"saved-model\"}",
+             opened_agent.workspace_path);
+    snprintf(valid_non_jsonl_header, sizeof(valid_non_jsonl_header),
+             "{\"type\":\"session\",\"version\":3,\"id\":\"plain\","
+             "\"cwd\":\"%s\",\"kind\":\"normal\",\"model\":\"saved-model\"}",
+             opened_agent.workspace_path);
+    if (!AppendRaw(mismatch_path, mismatch_header) || !AppendRaw(wrong_cwd_path, wrong_cwd_header) ||
+        !AppendRaw(duplicate_one, duplicate_header) || !AppendRaw(duplicate_two, duplicate_header) ||
+        !AppendRaw(non_jsonl_path, valid_non_jsonl_header) ||
+        symlink(writer_agent.session_path, symlink_path) != 0)
+    {
+        return Fail("could not create strict session validation fixtures");
+    }
+    char rejected_path[4096];
+    PicoSessionInfo *strict_list = NULL;
+    int strict_count = PicoSession_List(&opened, &opened_agent, &strict_list, false);
+    PicoAgent mismatched_workspace = opened_agent;
+    mismatched_workspace.session_lock_fd = -1;
+    snprintf(mismatched_workspace.workspace_key, sizeof(mismatched_workspace.workspace_key),
+             "../unsafe");
+    PicoSessionInfo *mismatch_list = NULL;
+    bool fixtures_rejected = strict_count == 2 &&
+                             PicoSession_Replay(&opened, &opened_agent, non_jsonl_path, false) != 0 &&
+                             PicoSession_List(&opened, &mismatched_workspace, &mismatch_list, false) == 0 &&
+                             PicoSession_Replay(&opened, &mismatched_workspace,
+                                                writer_agent.session_path, false) != 0 &&
+                             PicoSession_Resolve(&opened, &opened_agent, "mismatch", false,
+                                                 rejected_path, sizeof(rejected_path)) != 0 &&
+                             PicoSession_Resolve(&opened, &opened_agent, "wrongcwd", false,
+                                                 rejected_path, sizeof(rejected_path)) != 0 &&
+                             PicoSession_Resolve(&opened, &opened_agent, "dup", false,
+                                                 rejected_path, sizeof(rejected_path)) != 0;
+    free(strict_list);
+    free(mismatch_list);
+    if (!fixtures_rejected)
+    {
+        return Fail("symlink, filename/cwd mismatch, or duplicate session ID was accepted");
     }
 
     char bad_kind_path[4096];
@@ -511,7 +696,7 @@ int main(void)
     }
     PicoSessionHeader invalid_header;
     PicoAgent bad_kind_agent;
-    memset(&bad_kind_agent, 0, sizeof(bad_kind_agent));
+    InitTestAgent(&bad_kind_agent);
     if (PicoSession_ReadHeader(bad_kind_path, &invalid_header) == 0 ||
         PicoSession_Replay(&opened, &bad_kind_agent, bad_kind_path, false) == 0)
     {
@@ -537,7 +722,7 @@ int main(void)
         fclose(empty);
     }
     PicoAgent invalid_agent;
-    memset(&invalid_agent, 0, sizeof(invalid_agent));
+    InitTestAgent(&invalid_agent);
     if (PicoSession_Replay(&opened, &invalid_agent, empty_path, false) == 0)
     {
         return Fail("empty session replay was accepted");
@@ -546,6 +731,12 @@ int main(void)
     unlink(empty_path);
     unlink(bad_kind_path);
     unlink(incomplete_child_path);
+    unlink(mismatch_path);
+    unlink(wrong_cwd_path);
+    unlink(duplicate_one);
+    unlink(duplicate_two);
+    unlink(symlink_path);
+    unlink(non_jsonl_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
     return 0;

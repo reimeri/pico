@@ -41,7 +41,10 @@ enum {
 #define COLOR_STATUS_ON (Clay_Color){90, 180, 120, 255}
 #define COLOR_STATUS_OFF (Clay_Color){90, 90, 100, 255}
 #define COLOR_STATUS_RUN (Clay_Color){220, 180, 70, 255}
+#define COLOR_STATUS_WAIT (Clay_Color){220, 180, 70, 255}
 #define COLOR_STATUS_ERR (Clay_Color){200, 80, 80, 255}
+#define COLOR_STATUS_DONE (Clay_Color){80, 150, 230, 255}
+#define COLOR_SIDEBAR_ACTIVE (Clay_Color){42, 44, 56, 255}
 #define COLOR_CURSOR (Clay_Color){200, 210, 255, 255}
 #define COLOR_SELECTION (Clay_Color){90, 130, 210, 110}
 

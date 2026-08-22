@@ -24,11 +24,11 @@ static void MyHook(PicoApp *app, const PicoHookEvent *event)
 }
 ```
 
-All notifications run on the main thread. Agent-scoped notifications carry the affected ID; layout/render and submit hooks carry the active ID.
+All notifications run on the main thread. Agent-scoped notifications carry the affected ID plus copied `workspace_key` and `workspace_path` snapshots; these remain valid during destroy hooks after the ID becomes stale. Layout/render and submit hooks carry the active normal agent identity. Background hooks must use the event snapshot or `pico_agent_find`, never the active-only `app->workspace` alias.
 
 - `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. App-global UI work; target is active agent.
 - `PICO_HOOK_AFTER_RENDER` — after `Clay_Raylib_Render`. App-global UI work; target is active agent.
-- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the global composer submit for the active agent.
+- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the active agent's composer submit.
 - `PICO_HOOK_ON_SUBMIT` — the target user message was logged and its turn started.
 - `PICO_HOOK_ON_MESSAGE` — a message was added to the target transcript.
 - `PICO_HOOK_ON_COMPACT` — target compaction is starting.
@@ -37,11 +37,11 @@ All notifications run on the main thread. Agent-scoped notifications carry the a
 - `PICO_HOOK_ON_CANCEL` — target turn was cancelled.
 - `PICO_HOOK_ON_ERROR` — target entered `PICO_AGENT_ERROR`.
 - `PICO_HOOK_ON_SESSION_RESET` — target starts a new/resumed/ephemeral session, or a reload re-announces a live session; clear only that ID's session state. After reload, structured tool details are replayed to rebuild it.
-- `PICO_HOOK_ON_AGENT_DESTROY` — target is about to become invalid; remove its ID-keyed extension state.
+- `PICO_HOOK_ON_AGENT_DESTROY` — remove the target's ID-keyed extension state. Depending on the lifecycle path the ID may already be stale; use the copied workspace snapshot rather than looking up the agent.
 
 ## BEFORE_SUBMIT
 
-`PicoApp_Submit` clears `submit_cancel` and `agent_input`, then runs the hook. Set `app->submit_cancel = true` to swallow the send. Set `app->agent_input` to a malloc'd replacement sent to the model; the composer text remains the display text and Pico frees the replacement.
+`PicoApp_Submit` clears `submit_cancel` and `agent_input`, then runs the hook. Set `app->submit_cancel = true` to swallow the send. Set `app->agent_input` to a malloc'd replacement sent to the model; the active composer's text remains the display text and Pico frees the replacement. Commands that change the selected session must capture the invoking agent ID and clear that agent's composer with `PicoComposer_SetAgentText` before selecting another session.
 
 ## ON_COMPACT
 

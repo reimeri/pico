@@ -4,7 +4,6 @@ Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext(
 
 ## Where to put files
 
-- This workspace only: `<workspace>/.pico/extensions/`
 - Every workspace: `~/.config/pico/extensions/` (or `$XDG_CONFIG_HOME/pico/extensions/`)
 
 Subfolders are fine. Only `.c` files are loaded (depth 8). Skip with `pico --safe`.

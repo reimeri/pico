@@ -4,7 +4,7 @@ A small C99 AI agent harness with a native chat UI. The core is a loader, agent 
 
 ## Features
 
-- Markdown chat UI, composer, and footer
+- Markdown chat UI, workspace sidebar, composer, and footer
 - OpenAI-compatible models (API key or ChatGPT/`/login`)
 - Workspace tools (`sh`), structured `ask_user` questionnaires, built-in agent TODO tracking, sessions, compaction
 - Concurrent full agents and synchronous named-profile subagent delegation with exact session continuation
@@ -52,4 +52,4 @@ The cwd is the workspace. `pico -h` lists flags. Sign in with `/login` or `PICO_
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 
-F5 and `/reload` reload extensions and profiles after all agent work is quiescent. Workspace changes use the same deferred barrier. Extension API: [`docs/extend/`](docs/extend/README.md).
+F5 and `/reload` reload user-global extensions and profiles after all agent work is quiescent. `/cd` and the sidebar open another workspace immediately while existing agents keep running. Extension API: [`docs/extend/`](docs/extend/README.md).

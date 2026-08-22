@@ -68,6 +68,7 @@ add_executable(pico
     agent_manager.c
     subagent_config.c
     session.c
+    workspace.c
     usage.c
     chat_sel.c
     builtins/chat.c
@@ -85,6 +86,7 @@ add_executable(pico
     builtins/openai.c
     builtins/extensions.c
     builtins/prompt.c
+    builtins/sidebar.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
@@ -133,6 +135,34 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_todo_tests)
     add_test(NAME pico_todo_tests COMMAND pico_todo_tests)
 
+    add_executable(pico_workspace_tests
+        tests/workspace_test.c
+        workspace.c
+        json.c)
+    target_include_directories(pico_workspace_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_workspace_tests)
+    add_test(NAME pico_workspace_tests COMMAND pico_workspace_tests)
+
+    add_executable(pico_plugin_discovery_tests
+        tests/plugin_discovery_test.c
+        plugin.c)
+    target_include_directories(pico_plugin_discovery_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_compile_definitions(pico_plugin_discovery_tests PRIVATE
+        "PICO_CC=\"${CMAKE_C_COMPILER}\""
+        "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
+        "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
+        "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
+        "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
+    target_compile_options(pico_plugin_discovery_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_plugin_discovery_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_plugin_discovery_tests PRIVATE ${CMAKE_DL_LIBS})
+    pico_warnings_are_errors(pico_plugin_discovery_tests)
+    add_test(NAME pico_plugin_discovery_tests COMMAND pico_plugin_discovery_tests)
+
     add_executable(pico_ask_user_tests
         tests/ask_user_test.c
         builtins/ask_user.c
@@ -160,6 +190,7 @@ if(BUILD_TESTING)
         agent.c
         agent_manager.c
         subagent_config.c
+        workspace.c
         builtins/ask_user.c
         builtins/subagent.c
         builtins/todo.c
@@ -182,6 +213,7 @@ if(BUILD_TESTING)
     add_executable(pico_session_usage_tests
         tests/session_usage_test.c
         session.c
+        workspace.c
         json.c
         usage.c)
     target_include_directories(pico_session_usage_tests PRIVATE

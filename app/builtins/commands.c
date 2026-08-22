@@ -36,6 +36,12 @@ static void Note(PicoApp *app, const char *text)
     PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
 }
 
+static void ConsumeInvokingDraft(PicoApp *app, PicoAgentId id)
+{
+    PicoComposer_SetAgentText(app, id, "");
+    app->submit_cancel = true;
+}
+
 static void ClearComposer(PicoApp *app)
 {
     PicoComposer_SetText(app, "");
@@ -173,17 +179,23 @@ static void RelAge(char *out, size_t cap, time_t mtime)
 static void CmdNew(PicoApp *app, const char *args)
 {
     (void)args;
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
+    PicoAgentId invoker = pico_agent_active(app);
+    ConsumeInvokingDraft(app, invoker);
+    PicoAgent *agent = PicoAgentManager_Find(app->agents, invoker);
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_NORMAL,
+        .workspace_key = agent && agent->workspace_key[0] ? agent->workspace_key : NULL,
+        .session_start = PICO_SESSION_NEW,
+        .select = true,
+    };
+    PicoAgentResult result = pico_agent_create(app, &options, NULL);
+    if (result != PICO_AGENT_RESULT_OK)
     {
-        PicoOverlay_Notify(app, "Wait until the agent is idle before starting a new session.");
-        ClearComposer(app);
-        app->submit_cancel = true;
+        PicoOverlay_Notify(app, result == PICO_AGENT_RESULT_LIMIT ? "Agent limit reached."
+                                                                 : "Could not start a new session.");
         return;
     }
-    PicoSession_Reset(app, PicoApp_ActiveAgent(app));
     PicoOverlay_Notify(app, "New session.");
-    ClearComposer(app);
-    app->submit_cancel = true;
 }
 
 static void CmdResume(PicoApp *app, const char *args)
@@ -192,35 +204,27 @@ static void CmdResume(PicoApp *app, const char *args)
     {
         args++;
     }
+    PicoAgentId invoker = pico_agent_active(app);
     if (!args || !args[0])
     {
-        PicoComposer_SetText(app, "/resume ");
+        PicoComposer_SetAgentText(app, invoker, "/resume ");
         app->submit_cancel = true;
         PicoComplete_Refresh(app);
         return;
     }
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
-    {
-        Note(app, "Wait until the agent is idle before resuming a session.");
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
-    }
-    PicoAgentResult result = PicoAgentManager_ResumeActive(app, args, true);
+    ConsumeInvokingDraft(app, invoker);
+    PicoAgent *agent = PicoAgentManager_Find(app->agents, invoker);
+    PicoAgentResult result = PicoAgentManager_OpenSession(app, agent, args, true, true);
     if (result != PICO_AGENT_RESULT_OK)
     {
         char line[256];
         snprintf(line, sizeof(line),
                  result == PICO_AGENT_RESULT_SESSION_IN_USE
                      ? "Session `%s` is already open by another agent."
-                     : "Unknown session `%s`. Try `/resume`.", args);
+                     : "Unknown session `%s`. Try `/resume`.",
+                 args);
         Note(app, line);
-        ClearComposer(app);
-        app->submit_cancel = true;
-        return;
     }
-    ClearComposer(app);
-    app->submit_cancel = true;
 }
 
 static void CmdQuit(PicoApp *app, const char *args)
@@ -527,17 +531,17 @@ static void CmdCd(PicoApp *app, const char *args)
     {
         args++;
     }
+    PicoAgentId invoker = pico_agent_active(app);
     if (!args || !args[0])
     {
-        PicoComposer_SetText(app, "/cd ");
+        PicoComposer_SetAgentText(app, invoker, "/cd ");
         app->submit_cancel = true;
         PicoComplete_Refresh(app);
         return;
     }
 
+    ConsumeInvokingDraft(app, invoker);
     PicoApp_ChangeWorkspace(app, args);
-    ClearComposer(app);
-    app->submit_cancel = true;
 }
 
 static int CdQuery(PicoApp *app, const char *rest, PicoCompleteItem *out, int max)
@@ -877,7 +881,7 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     if (FoldEq(cmd, "resume"))
     {
         PicoSessionInfo *list = NULL;
-        int nlist = PicoSession_List(app, &list, true);
+        int nlist = PicoSession_List(app, PicoApp_ActiveAgentConst(app), &list, true);
         for (int i = 0; i < nlist && n < max; i++)
         {
             const PicoSessionInfo *s = &list[i];
@@ -912,11 +916,12 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
 static void CommandsBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    if (app->submit_cancel || !app->composer.text)
+    const PicoComposer *c = pico_app_composer_const(app);
+    if (app->submit_cancel || !c || !c->text)
     {
         return;
     }
-    const char *s = app->composer.text;
+    const char *s = c->text;
     if (s[0] != '/')
     {
         return;

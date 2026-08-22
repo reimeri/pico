@@ -21,15 +21,21 @@ typedef struct PicoSessionHeader {
     char initial_purpose[1025];
     char parent_session_id[40];
     char model[128];
+    char cwd[4096];
 } PicoSessionHeader;
 
 void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, const char *session_file);
 /* `/resume` passes parents_only to hide subagents; resolve still lists all. */
-int PicoSession_List(const PicoApp *app, PicoSessionInfo **out, bool parents_only);
+int PicoSession_List(const PicoApp *app, const PicoAgent *agent,
+                     PicoSessionInfo **out, bool parents_only);
+int PicoSession_ListWorkspace(const PicoApp *app, const char *workspace_key,
+                              PicoSessionInfo **out, bool parents_only);
+int PicoSession_Preflight(const char *workspace, const char *session_file,
+                          PicoSessionHeader *out);
 int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id);
 /* Resolve a durable session to a canonical path. Manager callers use exact IDs. */
-int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
-                        char *path, size_t path_cap);
+int PicoSession_Resolve(const PicoApp *app, const PicoAgent *agent,
+                        const char *id, bool allow_prefix, char *path, size_t path_cap);
 int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,

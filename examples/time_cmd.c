@@ -1,5 +1,5 @@
-// Example Pico command extension. Copy to ~/.config/pico/extensions/ or
-// <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
+// Example Pico command extension. Copy to ~/.config/pico/extensions/
+// (a subfolder is fine) then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/time
 //   cp examples/time_cmd.c ~/.config/pico/extensions/time/

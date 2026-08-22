@@ -1,5 +1,5 @@
 // Permission prompt in front of every tool, including builtin sh.
-// Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
+// Copy to ~/.config/pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/permit
 //   cp examples/permit_tool.c ~/.config/pico/extensions/permit/

@@ -34,7 +34,7 @@ static void PrintUsage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [--safe] [--resume] [--no-session] [--session FILE]\n"
-            "  --safe        load builtin UI only (skip ~/.config/pico/extensions and .pico/extensions)\n"
+            "  --safe        load builtin UI only (skip ~/.config/pico/extensions)\n"
             "  --resume      continue the most recent session for this directory\n"
             "  --no-session  do not persist a JSONL session file\n"
             "  --session F   open an existing session file\n"

@@ -159,6 +159,11 @@ static void CloseMenu(void)
     g_selected = 0;
 }
 
+void PicoFooter_Close(void)
+{
+    CloseMenu();
+}
+
 static void OpenMenu(PicoApp *app, FooterMenu which)
 {
     if (g_menu == which)
@@ -241,12 +246,8 @@ static bool FolderDialogGraphic(void)
 
 static void RequestFolder(PicoApp *app)
 {
+    (void)app;
     CloseMenu();
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
-    {
-        PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
-        return;
-    }
     g_want_folder = true;
 }
 
@@ -515,11 +516,6 @@ static void FooterOnFrame(PicoApp *app, float dt)
         return;
     }
     g_want_folder = false;
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
-    {
-        PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
-        return;
-    }
     if (!FolderDialogGraphic())
     {
         PicoOverlay_Notify(app, "Folder dialog unavailable. Install zenity or kdialog.");

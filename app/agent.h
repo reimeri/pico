@@ -6,8 +6,8 @@
 #include <time.h>
 
 PicoAgent *PicoAgent_Create(PicoApp *app);
-/* Rebind an unpublished idle agent after a staged workspace replacement. */
-void PicoAgent_RebindHost(PicoApp *app, PicoAgent *agent, PicoAgentManager *manager);
+void PicoAgent_InitUi(PicoAgent *agent);
+void PicoAgent_FreeUi(PicoAgent *agent);
 /* False when a worker was still running and had to be detached. */
 bool PicoAgent_Destroy(PicoAgent *agent);
 bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline);
@@ -28,6 +28,7 @@ bool PicoAgent_BlocksReload(const PicoAgent *agent);
 void PicoAgent_PrepareReload(PicoAgent *agent);
 bool PicoAgent_RevalidateToolPolicy(const PicoApp *app, PicoAgent *agent);
 void PicoAgent_Compact(PicoApp *app, PicoAgent *agent);
+void PicoApp_PrepareSelection(PicoApp *app);
 /* Malloc'd instructions for the next normal turn. Caller frees. */
 char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent);
 struct PicoAuthStore *PicoAgentContext_AuthStore(const PicoAgentContext *ctx);

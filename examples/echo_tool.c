@@ -1,5 +1,5 @@
-// Example Pico tool extension. Copy to ~/.config/pico/extensions/ or
-// <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
+// Example Pico tool extension. Copy to ~/.config/pico/extensions/
+// (a subfolder is fine) then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/echo
 //   cp examples/echo_tool.c ~/.config/pico/extensions/echo/

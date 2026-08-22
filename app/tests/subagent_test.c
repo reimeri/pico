@@ -1,5 +1,20 @@
 /* Included by agent_behavior_test.c to reuse its deterministic provider and worker barriers. */
 
+static PicoTraceLine *AgentLastToolTrace(PicoAgent *agent)
+{
+    for (int m = agent ? agent->message_count - 1 : -1; m >= 0; m--)
+    {
+        for (int t = agent->messages[m].trace_count - 1; t >= 0; t--)
+        {
+            if (agent->messages[m].trace[t].is_tool)
+            {
+                return &agent->messages[m].trace[t];
+            }
+        }
+    }
+    return NULL;
+}
+
 static bool WriteSubagentProfile(const char *root, const char *json,
                                  char *dir, size_t dir_cap, char *path, size_t path_cap)
 {
@@ -519,15 +534,15 @@ static int TestSubagentDelegationCaps(void)
         }
         parent_id = deepest_id;
     }
-    pico_agent_select(&depth_app, deepest_id);
+    bool hidden_selection_rejected = !pico_agent_select(&depth_app, deepest_id);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"too deep\"}");
     PicoAgent_StartTurn(&depth_app, PicoAgentManager_Find(depth_app.agents, deepest_id), "depth");
     bool depth_done = WaitForAgentIdle(&depth_app, deepest_id,
                                        PICO_MAX_DELEGATION_DEPTH + 1);
-    PicoTraceLine *trace = LastToolTrace(&depth_app);
-    bool depth_limited = trace && trace->tool_error && trace->tool_output &&
+    PicoTraceLine *trace = AgentLastToolTrace(PicoAgentManager_Find(depth_app.agents, deepest_id));
+    bool depth_limited = hidden_selection_rejected && trace && trace->tool_error && trace->tool_output &&
                          strstr(trace->tool_output, "depth limit");
     PicoApp_Free(&depth_app);
 

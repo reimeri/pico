@@ -8,6 +8,7 @@
 #include "path.h"
 #include "settings.h"
 #include "usage.h"
+#include "workspace.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -16,96 +17,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-static int EncodeCwd(const char *cwd, char *out, size_t cap)
+static bool SessionDirForKey(const PicoApp *app, const char *key, const char *path,
+                             char *out, size_t cap)
 {
-    char real[4096];
-    const char *src = cwd && cwd[0] ? cwd : ".";
-    if (!realpath(src, real) && !PicoPath_Format(real, sizeof(real), "%s", src))
+    if (!app || !app->workspaces || !key || !key[0] || !path || !path[0])
     {
-        return -1;
+        return false;
     }
-    const char *p = real;
-    if (*p == '/')
-    {
-        p++;
-    }
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "--");
-    for (; *p; p++)
-    {
-        JsonBuf_Putc(&b, *p == '/' ? '-' : *p);
-    }
-    JsonBuf_Puts(&b, "--");
-    if (b.len + 1 > cap)
-    {
-        JsonBuf_Free(&b);
-        return -1;
-    }
-    snprintf(out, cap, "%s", b.data ? b.data : "--.--");
-    JsonBuf_Free(&b);
-    return 0;
+    const PicoWorkspace *workspace = PicoWorkspaceRegistry_FindKey(app->workspaces, key);
+    return workspace && workspace->available && strcmp(workspace->path, path) == 0 &&
+           PicoWorkspace_SessionDir(app->workspaces, workspace->key, out, cap);
 }
 
-static bool SessionDir(const PicoApp *app, char *out, size_t cap)
+static bool SessionDir(const PicoApp *app, const PicoAgent *agent, char *out, size_t cap)
 {
-    char cfg[4096];
-    char enc[4096];
-    return Pico_ConfigDir(cfg, sizeof(cfg)) &&
-           EncodeCwd(app->workspace, enc, sizeof(enc)) == 0 &&
-           PicoPath_Format(out, cap, "%s/sessions/%s", cfg, enc);
+    return agent && SessionDirForKey(app, agent->workspace_key, agent->workspace_path, out, cap);
 }
+
+static int ReadSessionHeaderFd(int fd, PicoSessionHeader *out);
 
 static bool IsSessionJsonl(const char *name)
 {
     size_t len = name ? strlen(name) : 0;
     return len >= 7 && name[0] != '.' && strcmp(name + len - 6, ".jsonl") == 0;
-}
-
-static int FindLatest(const char *dir, char *out, size_t cap)
-{
-    DIR *d = opendir(dir);
-    if (!d)
-    {
-        return -1;
-    }
-    char best[256];
-    best[0] = '\0';
-    time_t best_mtime = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)))
-    {
-        const char *n = ent->d_name;
-        if (!IsSessionJsonl(n))
-        {
-            continue;
-        }
-        char path[4096];
-        if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, n))
-        {
-            continue;
-        }
-        struct stat st;
-        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-        {
-            continue;
-        }
-        if (!best[0] || st.st_mtime > best_mtime)
-        {
-            snprintf(best, sizeof(best), "%s", n);
-            best_mtime = st.st_mtime;
-        }
-    }
-    closedir(d);
-    if (!best[0])
-    {
-        return -1;
-    }
-    return PicoPath_Format(out, cap, "%s/%s", dir, best) ? 0 : -1;
 }
 
 static void IdFromName(const char *name, char *out, size_t cap)
@@ -115,7 +54,7 @@ static void IdFromName(const char *name, char *out, size_t cap)
     {
         return;
     }
-    const char *us = strchr(name, '_');
+    const char *us = strrchr(name, '_');
     if (!us || !us[1])
     {
         return;
@@ -277,18 +216,24 @@ static int CmpMtimeDesc(const void *a, const void *b)
     return strcmp(y->path, x->path);
 }
 
-int PicoSession_List(const PicoApp *app, PicoSessionInfo **out, bool parents_only)
+int PicoSession_ListWorkspace(const PicoApp *app, const char *workspace_key,
+                              PicoSessionInfo **out, bool parents_only)
 {
     if (out)
     {
         *out = NULL;
     }
-    if (!app || !out)
+    if (!app || !app->workspaces || !workspace_key || !workspace_key[0] || !out)
+    {
+        return 0;
+    }
+    const PicoWorkspace *workspace = PicoWorkspaceRegistry_FindKey(app->workspaces, workspace_key);
+    if (!workspace)
     {
         return 0;
     }
     char dir[4096];
-    if (!SessionDir(app, dir, sizeof(dir)))
+    if (!SessionDirForKey(app, workspace->key, workspace->path, dir, sizeof(dir)))
     {
         return 0;
     }
@@ -325,26 +270,66 @@ int PicoSession_List(const PicoApp *app, PicoSessionInfo **out, bool parents_onl
             continue;
         }
         struct stat st;
-        if (stat(s->path, &st) != 0 || !S_ISREG(st.st_mode))
+        if (lstat(s->path, &st) != 0 || !S_ISREG(st.st_mode))
+        {
+            continue;
+        }
+        char filename_id[40];
+        IdFromName(ent->d_name, filename_id, sizeof(filename_id));
+        PicoSessionHeader header;
+        if (!filename_id[0] || PicoSession_ReadHeader(s->path, &header) != 0 ||
+            strcmp(filename_id, header.id) != 0 ||
+            strcmp(header.cwd, workspace->path) != 0)
         {
             continue;
         }
         s->mtime = st.st_mtime;
-        IdFromName(ent->d_name, s->id, sizeof(s->id));
         ScanSessionFile(s->path, s);
-        if (!s->id[0] || (parents_only && s->kind == PICO_AGENT_SUBAGENT))
-        {
-            continue;
-        }
+        snprintf(s->id, sizeof(s->id), "%s", header.id);
+        s->kind = header.kind;
         n++;
     }
     closedir(d);
+    for (int i = 0; i < n; i++)
+    {
+        for (int j = i + 1; j < n; j++)
+        {
+            if (list[i].id[0] && strcmp(list[i].id, list[j].id) == 0)
+            {
+                list[i].id[0] = '\0';
+                list[j].id[0] = '\0';
+            }
+        }
+    }
+    int valid = 0;
+    for (int i = 0; i < n; i++)
+    {
+        if (list[i].id[0] && (!parents_only || list[i].kind == PICO_AGENT_NORMAL))
+        {
+            list[valid++] = list[i];
+        }
+    }
+    n = valid;
     if (n > 1)
     {
         qsort(list, (size_t)n, sizeof(*list), CmpMtimeDesc);
     }
     *out = list;
     return n;
+}
+
+int PicoSession_List(const PicoApp *app, const PicoAgent *agent,
+                     PicoSessionInfo **out, bool parents_only)
+{
+    if (!agent)
+    {
+        if (out)
+        {
+            *out = NULL;
+        }
+        return 0;
+    }
+    return PicoSession_ListWorkspace(app, agent->workspace_key, out, parents_only);
 }
 
 static bool WriteAll(int fd, const char *data, size_t len)
@@ -367,20 +352,54 @@ static bool WriteAll(int fd, const char *data, size_t len)
     return true;
 }
 
+static void CloseSessionLock(PicoAgent *agent)
+{
+    if (agent && agent->session_lock_fd >= 0)
+    {
+        close(agent->session_lock_fd);
+        agent->session_lock_fd = -1;
+    }
+}
+
+static bool AcquireSessionLock(PicoAgent *agent, const char *path, bool create)
+{
+    int flags = O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW;
+    if (create)
+    {
+        flags |= O_CREAT | O_EXCL;
+    }
+    int fd = open(path, flags, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0)
+    {
+        if (fd >= 0)
+        {
+            close(fd);
+        }
+        return false;
+    }
+    CloseSessionLock(agent);
+    agent->session_lock_fd = fd;
+    return true;
+}
+
 static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t error_cap)
 {
     int failure = 0;
-    int fd = open(agent->session_path, O_WRONLY | O_APPEND | O_CREAT, 0600);
-    off_t original_size = -1;
-    if (fd < 0)
+    int fd = agent ? agent->session_lock_fd : -1;
+    struct stat path_stat;
+    struct stat fd_stat;
+    if (fd < 0 || lstat(agent->session_path, &path_stat) != 0 ||
+        !S_ISREG(path_stat.st_mode) || fstat(fd, &fd_stat) != 0 ||
+        path_stat.st_dev != fd_stat.st_dev || path_stat.st_ino != fd_stat.st_ino)
     {
         failure = errno ? errno : EIO;
     }
     else
     {
-        original_size = lseek(fd, 0, SEEK_END);
+        off_t original_size = lseek(fd, 0, SEEK_END);
         size_t len = strlen(json);
-        if (!WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) || fsync(fd) != 0)
+        if (original_size < 0 || !WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) ||
+            fsync(fd) != 0)
         {
             failure = errno ? errno : EIO;
             if (original_size >= 0)
@@ -388,10 +407,6 @@ static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t er
                 int rollback_result = ftruncate(fd, original_size);
                 (void)rollback_result;
             }
-        }
-        if (close(fd) != 0 && failure == 0)
-        {
-            failure = errno ? errno : EIO;
         }
     }
     if (failure != 0 && error && error_cap > 0)
@@ -408,6 +423,7 @@ static void PersistenceFailed(PicoApp *app, PicoAgent *agent, const char *reason
         return;
     }
     agent->persistence = PICO_SESSION_FAILED;
+    CloseSessionLock(agent);
     if (app)
     {
         char line[4608];
@@ -437,9 +453,9 @@ static char *EventPrefix(const char *type)
 static int CreateNew(PicoApp *app, PicoAgent *agent)
 {
     char dir[4096];
-    if (!SessionDir(app, dir, sizeof(dir)))
+    if (!SessionDir(app, agent, dir, sizeof(dir)))
     {
-        PersistenceFailed(app, agent, "session directory path is too long");
+        PersistenceFailed(app, agent, "workspace is not registered or session directory path is too long");
         return -1;
     }
     Pico_MkdirP(dir);
@@ -463,6 +479,15 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
         PersistenceFailed(app, agent, "session path is already reserved");
         return -1;
     }
+    if (!AcquireSessionLock(agent, agent->session_path, true))
+    {
+        if (app->agents)
+        {
+            PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+        }
+        PersistenceFailed(app, agent, "session is locked by another Pico process");
+        return -1;
+    }
 
     char ts[40];
     Pico_IsoTime(ts, sizeof(ts), false);
@@ -473,7 +498,7 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     JsonBuf_Puts(&b, ",\"timestamp\":");
     JsonBuf_String(&b, ts);
     JsonBuf_Puts(&b, ",\"cwd\":");
-    JsonBuf_String(&b, app->workspace);
+    JsonBuf_String(&b, agent->workspace_path);
     JsonBuf_Puts(&b, ",\"model\":");
     JsonBuf_String(&b, agent->model);
     JsonBuf_Puts(&b, ",\"kind\":");
@@ -730,15 +755,94 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
     free(type);
 }
 
+static bool LockedPathMatches(const PicoAgent *agent)
+{
+    struct stat path_stat;
+    struct stat fd_stat;
+    return agent && agent->session_lock_fd >= 0 &&
+           lstat(agent->session_path, &path_stat) == 0 && S_ISREG(path_stat.st_mode) &&
+           fstat(agent->session_lock_fd, &fd_stat) == 0 &&
+           path_stat.st_dev == fd_stat.st_dev && path_stat.st_ino == fd_stat.st_ino;
+}
+
+static bool ValidateSessionLocation(const PicoApp *app, const PicoAgent *agent,
+                                    const char *path, char *canonical, size_t canonical_cap)
+{
+    if (!app || !agent || !path || !canonical || !realpath(path, canonical) ||
+        strlen(canonical) >= canonical_cap)
+    {
+        return false;
+    }
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        return false;
+    }
+    char directory[4096];
+    char canonical_directory[4096];
+    char parent[4096];
+    if (!SessionDir(app, agent, directory, sizeof(directory)) ||
+        !realpath(directory, canonical_directory) ||
+        !PicoPath_Format(parent, sizeof(parent), "%s", canonical))
+    {
+        return false;
+    }
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent || !IsSessionJsonl(slash + 1))
+    {
+        return false;
+    }
+    *slash = '\0';
+    return strcmp(parent, canonical_directory) == 0;
+}
+
 int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
                        bool append_interrupted)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    PicoSessionHeader header;
+    char canonical[4096];
+    if (!ValidateSessionLocation(app, agent, path, canonical, sizeof(canonical)) ||
+        !AcquireSessionLock(agent, canonical, false))
     {
         return -1;
     }
-    snprintf(agent->session_path, sizeof(agent->session_path), "%s", path);
+    snprintf(agent->session_path, sizeof(agent->session_path), "%s", canonical);
+    struct stat locked_stat;
+    if (!LockedPathMatches(agent) || fstat(agent->session_lock_fd, &locked_stat) != 0 ||
+        !S_ISREG(locked_stat.st_mode) || ReadSessionHeaderFd(agent->session_lock_fd, &header) != 0 ||
+        header.kind != agent->kind || strcmp(header.cwd, agent->workspace_path) != 0)
+    {
+        CloseSessionLock(agent);
+        agent->session_path[0] = '\0';
+        return -1;
+    }
+    const char *filename = strrchr(canonical, '/');
+    char filename_id[40];
+    IdFromName(filename ? filename + 1 : canonical, filename_id, sizeof(filename_id));
+    if (!filename_id[0] || strcmp(filename_id, header.id) != 0)
+    {
+        CloseSessionLock(agent);
+        agent->session_path[0] = '\0';
+        return -1;
+    }
+    int read_fd = dup(agent->session_lock_fd);
+    FILE *f = read_fd >= 0 ? fdopen(read_fd, "rb") : NULL;
+    if (!f)
+    {
+        if (read_fd >= 0)
+        {
+            close(read_fd);
+        }
+        CloseSessionLock(agent);
+        return -1;
+    }
+    if (lseek(read_fd, 0, SEEK_SET) < 0)
+    {
+        fclose(f);
+        CloseSessionLock(agent);
+        agent->session_path[0] = '\0';
+        return -1;
+    }
 
     char **lines = NULL;
     int n = 0;
@@ -866,7 +970,7 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
         free(lines[i]);
     }
     free(lines);
-    app->chat_follow_bottom = true;
+    agent->ui.chat_follow_bottom = true;
     if (append_interrupted && last_tool_call > last_tool_result)
     {
         PicoSession_AppendInterrupted(app, agent);
@@ -879,8 +983,30 @@ invalid:
         free(lines[i]);
     }
     free(lines);
+    CloseSessionLock(agent);
     agent->session_path[0] = '\0';
+    agent->session_id[0] = '\0';
     return -1;
+}
+
+static FILE *OpenLockedSessionRead(PicoAgent *agent)
+{
+    if (!LockedPathMatches(agent))
+    {
+        return NULL;
+    }
+    int fd = dup(agent->session_lock_fd);
+    if (fd < 0 || lseek(fd, 0, SEEK_SET) < 0)
+    {
+        if (fd >= 0) close(fd);
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file)
+    {
+        close(fd);
+    }
+    return file;
 }
 
 void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent)
@@ -889,7 +1015,7 @@ void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent)
     {
         return;
     }
-    FILE *f = fopen(agent->session_path, "rb");
+    FILE *f = OpenLockedSessionRead(agent);
     if (!f)
     {
         return;
@@ -944,7 +1070,7 @@ void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
     {
         return;
     }
-    FILE *f = fopen(agent->session_path, "rb");
+    FILE *f = OpenLockedSessionRead(agent);
     if (!f)
     {
         return;
@@ -991,6 +1117,7 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
     }
     if (start == PICO_SESSION_NONE)
     {
+        CloseSessionLock(agent);
         agent->persistence = PICO_SESSION_EPHEMERAL;
         agent->session_path[0] = '\0';
         return;
@@ -999,10 +1126,19 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
     if (session_file && session_file[0])
     {
         char canonical[4096];
-        if (!realpath(session_file, canonical) ||
-            (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, canonical)) ||
-            PicoSession_Replay(app, agent, canonical, true) != 0)
+        bool reserved = ValidateSessionLocation(app, agent, session_file,
+                                                canonical, sizeof(canonical)) &&
+                        (!app->agents || PicoAgentManager_ReserveSession(
+                                             app->agents, agent->id, canonical));
+        if (!reserved || PicoSession_Replay(app, agent, canonical, true) != 0)
         {
+            if (app->agents)
+            {
+                PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+            }
+            CloseSessionLock(agent);
+            agent->session_path[0] = '\0';
+            agent->session_id[0] = '\0';
             agent->persistence = PICO_SESSION_FAILED;
             pico_status_warn(app, "Could not open the requested session file.");
         }
@@ -1010,52 +1146,38 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
     }
     if (start == PICO_SESSION_RESUME || app->settings.resume_last)
     {
-        char dir[4096];
-        char latest[4096];
-        if (SessionDir(app, dir, sizeof(dir)) &&
-            FindLatest(dir, latest, sizeof(latest)) == 0)
+        PicoSessionInfo *sessions = NULL;
+        int count = PicoSession_List(app, agent, &sessions, agent->kind == PICO_AGENT_NORMAL);
+        if (count > 0)
         {
-            char canonical[4096];
-            if (realpath(latest, canonical) &&
-                (!app->agents || PicoAgentManager_ReserveSession(app->agents, agent->id, canonical)))
+            bool reserved = !app->agents || PicoAgentManager_ReserveSession(
+                                                app->agents, agent->id, sessions[0].path);
+            if (!reserved || PicoSession_Replay(app, agent, sessions[0].path, true) != 0)
             {
-                (void)PicoSession_Replay(app, agent, canonical, true);
+                if (app->agents)
+                {
+                    PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+                }
+                CloseSessionLock(agent);
+                agent->session_path[0] = '\0';
+                agent->session_id[0] = '\0';
             }
         }
+        free(sessions);
     }
 }
 
-int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
+static int ParseSessionHeaderLine(const char *line, size_t length, PicoSessionHeader *out)
 {
-    if (!path || !out)
-    {
-        return -1;
-    }
     memset(out, 0, sizeof(*out));
-    FILE *f = fopen(path, "rb");
-    if (!f)
-    {
-        return -1;
-    }
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t got = getline(&line, &cap, f);
-    fclose(f);
-    if (got <= 0)
-    {
-        free(line);
-        return -1;
-    }
     JsonDoc doc;
-    if (JsonParse(&doc, line, (size_t)got) != 0)
+    if (!line || JsonParse(&doc, line, length) != 0 ||
+        !JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "session"))
     {
-        free(line);
-        return -1;
-    }
-    if (!JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "session"))
-    {
-        JsonFree(&doc);
-        free(line);
+        if (line && doc.toks)
+        {
+            JsonFree(&doc);
+        }
         return -1;
     }
     out->version = JsonObjInt(&doc, 0, "version", 0);
@@ -1065,6 +1187,7 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     char *purpose = JsonObjStr(&doc, 0, "initial_purpose");
     char *parent = JsonObjStr(&doc, 0, "parent_session_id");
     char *model = JsonObjStr(&doc, 0, "model");
+    char *cwd = JsonObjStr(&doc, 0, "cwd");
     if (id) snprintf(out->id, sizeof(out->id), "%s", id);
     bool kind_valid = kind && (strcmp(kind, "normal") == 0 || strcmp(kind, "subagent") == 0);
     out->kind = kind && strcmp(kind, "subagent") == 0 ? PICO_AGENT_SUBAGENT : PICO_AGENT_NORMAL;
@@ -1072,28 +1195,63 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     if (purpose) snprintf(out->initial_purpose, sizeof(out->initial_purpose), "%s", purpose);
     if (parent) snprintf(out->parent_session_id, sizeof(out->parent_session_id), "%s", parent);
     if (model) snprintf(out->model, sizeof(out->model), "%s", model);
-    bool valid = out->version == 3 && out->id[0] && kind_valid &&
+    if (cwd) snprintf(out->cwd, sizeof(out->cwd), "%s", cwd);
+    bool valid = out->version == 3 && out->id[0] && out->cwd[0] == '/' && kind_valid &&
                  (out->kind == PICO_AGENT_NORMAL || (out->profile[0] && out->initial_purpose[0]));
-    free(id);
-    free(kind);
-    free(profile);
-    free(purpose);
-    free(parent);
-    free(model);
+    free(id); free(kind); free(profile); free(purpose); free(parent); free(model); free(cwd);
     JsonFree(&doc);
-    free(line);
     return valid ? 0 : -1;
 }
 
-int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
-                        char *path, size_t path_cap)
+static int ReadSessionHeaderFd(int fd, PicoSessionHeader *out)
 {
-    if (!app || !id || !id[0] || !path || path_cap == 0)
+    int copy = dup(fd);
+    if (copy < 0 || lseek(copy, 0, SEEK_SET) < 0)
+    {
+        if (copy >= 0) close(copy);
+        return -1;
+    }
+    FILE *file = fdopen(copy, "rb");
+    if (!file)
+    {
+        close(copy);
+        return -1;
+    }
+    char *line = NULL;
+    size_t capacity = 0;
+    ssize_t got = getline(&line, &capacity, file);
+    int result = got > 0 ? ParseSessionHeaderLine(line, (size_t)got, out) : -1;
+    free(line);
+    fclose(file);
+    return result;
+}
+
+int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
+{
+    struct stat st;
+    if (!path || !out || lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        return -1;
+    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    int result = ReadSessionHeaderFd(fd, out);
+    close(fd);
+    return result;
+}
+
+int PicoSession_Resolve(const PicoApp *app, const PicoAgent *agent,
+                        const char *id, bool allow_prefix, char *path, size_t path_cap)
+{
+    if (!app || !agent || !id || !id[0] || !path || path_cap == 0)
     {
         return -1;
     }
     PicoSessionInfo *list = NULL;
-    int n = PicoSession_List(app, &list, false);
+    int n = PicoSession_List(app, agent, &list, false);
     const PicoSessionInfo *found = NULL;
     const PicoSessionInfo *prefix = NULL;
     int prefix_hits = 0;
@@ -1125,15 +1283,69 @@ int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
     return ok ? 0 : -1;
 }
 
-int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id)
+int PicoSession_Preflight(const char *workspace, const char *session_file,
+                          PicoSessionHeader *out)
 {
-    if (!app || !id || !id[0] || PicoAgent_IsBusy(agent))
+    if (!workspace || !workspace[0] || !session_file || !session_file[0] || !out)
     {
         return -1;
     }
+    char canonical_workspace[4096];
+    char canonical_file[4096];
+    if (!realpath(workspace, canonical_workspace) || !realpath(session_file, canonical_file))
+    {
+        return -1;
+    }
+    struct stat st;
+    if (lstat(session_file, &st) != 0 || !S_ISREG(st.st_mode) ||
+        PicoSession_ReadHeader(canonical_file, out) != 0 ||
+        out->kind != PICO_AGENT_NORMAL || strcmp(out->cwd, canonical_workspace) != 0)
+    {
+        return -1;
+    }
+    char key[4096];
+    char config[4096];
+    char directory[4096];
+    char canonical_directory[4096];
+    char parent[4096];
+    if (!PicoWorkspace_EncodePath(canonical_workspace, key, sizeof(key)) ||
+        !Pico_ConfigDir(config, sizeof(config)) ||
+        !PicoPath_Format(directory, sizeof(directory), "%s/sessions/%s", config, key) ||
+        !realpath(directory, canonical_directory) ||
+        !PicoPath_Format(parent, sizeof(parent), "%s", canonical_file))
+    {
+        return -1;
+    }
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent || !IsSessionJsonl(slash + 1))
+    {
+        return -1;
+    }
+    *slash = '\0';
+    const char *filename = strrchr(canonical_file, '/');
+    char filename_id[40];
+    IdFromName(filename ? filename + 1 : canonical_file, filename_id, sizeof(filename_id));
+    return strcmp(parent, canonical_directory) == 0 && filename_id[0] &&
+                   strcmp(filename_id, out->id) == 0
+               ? 0
+               : -1;
+}
+
+int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id)
+{
+    if (!app || !agent || !id || !id[0])
+    {
+        return -1;
+    }
+    if (app->agents)
+    {
+        return PicoAgentManager_OpenSession(app, agent, id, true, true) == PICO_AGENT_RESULT_OK
+                   ? 0
+                   : -1;
+    }
 
     char path[4096];
-    if (PicoSession_Resolve(app, id, true, path, sizeof(path)) != 0)
+    if (PicoSession_Resolve(app, agent, id, true, path, sizeof(path)) != 0)
     {
         return -1;
     }
@@ -1152,7 +1364,18 @@ int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id)
         return -1;
     }
     agent->persistence = PICO_SESSION_DURABLE;
-    return PicoSession_Replay(app, agent, path, true);
+    if (PicoSession_Replay(app, agent, path, true) != 0)
+    {
+        if (app->agents)
+        {
+            PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+        }
+        CloseSessionLock(agent);
+        agent->session_path[0] = '\0';
+        agent->session_id[0] = '\0';
+        return -1;
+    }
+    return 0;
 }
 
 void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
@@ -1165,6 +1388,7 @@ void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
     {
         PicoAgentManager_ReleaseSessions(app->agents, agent->id);
     }
+    CloseSessionLock(agent);
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, agent->id);
     PicoAgent_DismissError(agent);
     PicoAgent_ClearMessages(agent);

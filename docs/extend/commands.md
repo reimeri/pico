@@ -30,7 +30,7 @@ Full file: `examples/time_cmd.c`. User types `/time`. `/help` lists every regist
 - `name` has no leading slash. Completer inserts `/name`.
 - `name` and `help` must outlive the extension — string literals.
 - `run` receives the rest of the line after `/name` (may be empty).
-- **Always set `app->submit_cancel = true`**, or the slash line is also sent to the agent. Clear the composer with `PicoComposer_SetText(app, "")`.
+- **Always set `app->submit_cancel = true`**, or the slash line is also sent to the agent. Clear the invoking agent's composer with `PicoComposer_SetText(app, "")` or `PicoComposer_SetAgentText` when selection may change.
 - Runs on the **main thread** from `PICO_HOOK_BEFORE_SUBMIT` (builtin `commands` extension). Safe to call `PicoApp_AddMessage`.
 - Max 64 commands (`PICO_MAX_COMMANDS`).
 - Builtin `/` completer (`bol_only`) lists your command automatically.

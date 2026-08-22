@@ -8,6 +8,7 @@
 #include "chat_sel.h"
 #include "json.h"
 #include "overlay.h"
+#include "workspace.h"
 #include "builtins/todo.h"
 
 #include "clay/clay.h"
@@ -332,13 +333,18 @@ void pico_clear_registrations(PicoApp *app)
     app->auth_count = 0;
 }
 
-void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
+void PicoApp_RunHookSnapshot(PicoApp *app, PicoHook hook, PicoAgentId agent_id,
+                             const char *workspace_key, const char *workspace_path)
 {
     if (!app)
     {
         return;
     }
     PicoHookEvent event = {.hook = hook, .agent_id = agent_id};
+    snprintf(event.workspace_key, sizeof(event.workspace_key), "%s",
+             workspace_key ? workspace_key : "");
+    snprintf(event.workspace_path, sizeof(event.workspace_path), "%s",
+             workspace_path ? workspace_path : "");
     for (int i = 0; i < app->hook_count; i++)
     {
         if (app->hooks[i].hook == hook && app->hooks[i].fn)
@@ -346,6 +352,15 @@ void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
             app->hooks[i].fn(app, &event);
         }
     }
+}
+
+void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
+{
+    const PicoAgent *target = app && app->agents
+                                  ? PicoAgentManager_FindConst(app->agents, agent_id)
+                                  : NULL;
+    PicoApp_RunHookSnapshot(app, hook, agent_id, target ? target->workspace_key : NULL,
+                            target ? target->workspace_path : NULL);
 }
 
 static char LayoutLetter(int key)
@@ -669,8 +684,8 @@ void PicoApp_Submit(PicoApp *app)
         return;
     }
 
-    PicoComposer *c = &app->composer;
-    if (!c->text || c->length <= 0)
+    PicoComposer *c = pico_app_composer(app);
+    if (!c || !c->text || c->length <= 0)
     {
         return;
     }
@@ -712,7 +727,11 @@ void PicoApp_Submit(PicoApp *app)
     const char *display = c->text;
     const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : display;
     PicoApp_AddMessage(app, PICO_ROLE_USER, display);
-    app->chat_follow_bottom = true;
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (ui)
+    {
+        ui->chat_follow_bottom = true;
+    }
     PicoSession_LogUser(app, active, agent, display);
     PicoAgent_StartTurn(app, active, agent);
 
@@ -736,7 +755,50 @@ void PicoApp_Cancel(PicoApp *app)
 bool PicoUi_ModalOpen(const PicoApp *app)
 {
     return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-           PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
+           PicoSidebar_ModalOpen() ||
+           PicoAgentManager_TreeHasAsk(app ? app->agents : NULL, pico_agent_active(app));
+}
+
+PicoComposer *pico_app_composer(PicoApp *app)
+{
+    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    return agent && agent->kind == PICO_AGENT_NORMAL ? &agent->ui.composer : NULL;
+}
+
+const PicoComposer *pico_app_composer_const(const PicoApp *app)
+{
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    return agent && agent->kind == PICO_AGENT_NORMAL ? &agent->ui.composer : NULL;
+}
+
+PicoComposer *pico_agent_composer(PicoApp *app, PicoAgentId id)
+{
+    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
+    return agent && agent->kind == PICO_AGENT_NORMAL ? &agent->ui.composer : NULL;
+}
+
+Clay_ElementId pico_ui_chat_scroll_id(const PicoApp *app)
+{
+    return CLAY_IDI("ChatScroll", app ? (int32_t)app->selection_epoch : 0);
+}
+
+Clay_ElementId pico_ui_composer_scroll_id(const PicoApp *app)
+{
+    return CLAY_IDI("ComposerScroll", app ? (int32_t)app->selection_epoch : 0);
+}
+
+void PicoApp_PrepareSelection(PicoApp *app)
+{
+    if (!app)
+    {
+        return;
+    }
+    app->selection_epoch++;
+    PicoComplete_Close();
+    PicoFooter_Close();
+    app->hovered_link = NULL;
+    app->hovered_tool = false;
+    app->hovered_clickable = false;
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
@@ -754,9 +816,6 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
         return;
     }
     app->fonts = fonts;
-    app->chat_sel.msg = -1;
-    app->chat_follow_bottom = true;
-    app->chat_overflow = true;
     app->safe_mode = safe_mode;
     if (workspace && workspace[0])
     {
@@ -766,11 +825,28 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     {
         snprintf(app->workspace, sizeof(app->workspace), ".");
     }
-    app->composer.capacity = 256;
-    app->composer.text = (char *)malloc((size_t)app->composer.capacity);
-    if (app->composer.text)
+    app->workspaces = calloc(1, sizeof(*app->workspaces));
+    bool workspace_ready = false;
+    char workspace_key[4096];
+    workspace_key[0] = '\0';
+    if (app->workspaces && PicoWorkspaceRegistry_Init(app->workspaces) == PICO_WORKSPACE_OK)
     {
-        app->composer.text[0] = '\0';
+        if (PicoWorkspaceRegistry_Register(app->workspaces, app->workspace, NULL,
+                                           workspace_key, sizeof(workspace_key)) == PICO_WORKSPACE_OK)
+        {
+            const PicoWorkspace *registered =
+                PicoWorkspaceRegistry_FindKey(app->workspaces, workspace_key);
+            if (registered)
+            {
+                snprintf(app->workspace, sizeof(app->workspace), "%s", registered->path);
+                workspace_ready = true;
+            }
+        }
+    }
+    if (!workspace_ready)
+    {
+        pico_status_warn(app, "Could not initialize the active workspace registry entry.");
+        return;
     }
 
     PicoSettings_Load(app);
@@ -781,9 +857,27 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
         pico_status_warn(app, "Could not create the agent manager.");
         return;
     }
+    PicoSessionHeader session_header;
+    memset(&session_header, 0, sizeof(session_header));
+    bool resume_file = false;
+    if (session_file && session_file[0])
+    {
+        if (PicoSession_Preflight(app->workspace, session_file, &session_header) == 0)
+        {
+            resume_file = true;
+        }
+        else
+        {
+            pico_status_warn(app, "Could not open the requested session file.");
+        }
+    }
     PicoAgentCreateOptions options = {
         .kind = PICO_AGENT_NORMAL,
-        .session_start = session_start == PICO_SESSION_NONE ? PICO_SESSION_NONE : PICO_SESSION_NEW,
+        .workspace_key = workspace_key,
+        .session_start = resume_file
+                             ? PICO_SESSION_RESUME
+                             : (session_start == PICO_SESSION_NONE ? PICO_SESSION_NONE : PICO_SESSION_NEW),
+        .session_id = resume_file ? session_header.id : NULL,
         .select = true,
     };
     PicoAgentId initial_id = 0;
@@ -795,13 +889,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     PicoPlugins_Load(app);
     PicoAgentManager_LoadProfiles(app->agents);
     PicoAgent *initial = PicoApp_ActiveAgent(app);
-    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, initial_id);
-    if (session_file && session_file[0])
-    {
-        PicoSession_Reset(app, initial);
-        PicoSession_Start(app, initial, session_start, session_file);
-    }
-    else if (session_start == PICO_SESSION_RESUME || app->settings.resume_last)
+    if (!resume_file && (session_start == PICO_SESSION_RESUME || app->settings.resume_last))
     {
         PicoSession_Start(app, initial, session_start, NULL);
     }
@@ -815,7 +903,7 @@ void PicoApp_RequestReload(PicoApp *app)
     }
     app->reload_queued = true;
     PicoAgentManager_SetAcceptingWork(app->agents, false);
-    if (!app->workspace_change_queued && !PicoAgentManager_BlocksReload(app->agents))
+    if (!PicoAgentManager_BlocksReload(app->agents))
     {
         PicoPlugins_Reload(app);
     }
@@ -943,110 +1031,68 @@ bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
         return false;
     }
 
-    char current[4096];
-    const char *ws = app->workspace[0] ? app->workspace : ".";
-    if (realpath(ws, current) && strcmp(current, resolved) == 0)
+    if (!app->workspaces)
+    {
+        PicoOverlay_Notify(app, "Workspace registry is unavailable.");
+        return false;
+    }
+    char target_key[4096];
+    if (PicoWorkspaceRegistry_Register(app->workspaces, resolved, NULL,
+                                       target_key, sizeof(target_key)) != PICO_WORKSPACE_OK)
+    {
+        PicoOverlay_Notify(app, "Could not register the workspace.");
+        return false;
+    }
+    const PicoWorkspace *registered = PicoWorkspaceRegistry_FindKey(app->workspaces, target_key);
+    if (!registered || !registered->available)
+    {
+        PicoOverlay_Notify(app, "That workspace is unavailable until its directory is restored.");
+        return false;
+    }
+
+    PicoAgent *live = PicoAgentManager_MostRecentInWorkspace(app->agents, registered->key);
+    if (live && live->id == pico_agent_active(app))
     {
         char pretty[400];
-        FormatHomePath(resolved, pretty, sizeof(pretty));
+        FormatHomePath(registered->path, pretty, sizeof(pretty));
         char line[512];
         snprintf(line, sizeof(line), "Already in `%s`.", pretty);
         PicoOverlay_Notify(app, line);
         return false;
     }
-
-    snprintf(app->pending_workspace, sizeof(app->pending_workspace), "%s", resolved);
-    app->workspace_change_queued = true;
-    PicoAgentManager_SetAcceptingWork(app->agents, false);
-
-    char pretty[400];
-    FormatHomePath(resolved, pretty, sizeof(pretty));
-    char line[512];
-    if (PicoAgentManager_BlocksReload(app->agents))
+    if (live)
     {
-        snprintf(line, sizeof(line), "Workspace change to `%s` queued until all agents are quiescent.", pretty);
+        if (!pico_agent_select(app, live->id))
+        {
+            PicoOverlay_Notify(app, "Could not switch to that workspace.");
+            return false;
+        }
     }
     else
     {
-        snprintf(line, sizeof(line), "Changing workspace to `%s`…", pretty);
+        PicoAgentCreateOptions options = {
+            .kind = PICO_AGENT_NORMAL,
+            .workspace_key = registered->key,
+            .session_start = PICO_SESSION_NEW,
+            .select = true,
+        };
+        PicoAgentResult created = pico_agent_create(app, &options, NULL);
+        if (created != PICO_AGENT_RESULT_OK)
+        {
+            const char *msg = created == PICO_AGENT_RESULT_LIMIT
+                                  ? "Agent limit reached."
+                                  : "Could not create a session in that workspace.";
+            PicoOverlay_Notify(app, msg);
+            return false;
+        }
     }
-    PicoOverlay_Notify(app, line);
-    return true;
-}
-
-static void WorkspacePreflightFailed(PicoApp *app, const char *message)
-{
-    app->pending_workspace[0] = '\0';
-    app->workspace_change_queued = false;
-    PicoAgentManager_SetAcceptingWork(app->agents, !app->reload_queued);
-    pico_status_warn(app, message);
-}
-
-static void ApplyWorkspaceChange(PicoApp *app)
-{
-    char target[4096];
-    snprintf(target, sizeof(target), "%s", app->pending_workspace);
-    if (!target[0])
-    {
-        app->workspace_change_queued = false;
-        PicoAgentManager_SetAcceptingWork(app->agents, !app->reload_queued);
-        return;
-    }
-
-    /* Stage every allocation needed for a usable replacement before the old
-     * manager or workspace is changed. The staged worker is idle and has no
-     * session or extension-owned state. */
-    PicoAgentManager *replacement = PicoAgentManager_Create(app);
-    if (!replacement)
-    {
-        WorkspacePreflightFailed(app, "Could not prepare an agent manager for the new workspace.");
-        return;
-    }
-    PicoAgent *initial = PicoAgent_Create(app);
-    if (!initial)
-    {
-        (void)PicoAgentManager_Destroy(replacement);
-        WorkspacePreflightFailed(app, "Could not prepare an agent for the new workspace.");
-        return;
-    }
-    PicoAgent_PrepareReload(initial);
-
-    PicoAgentManager *old = app->agents;
-    if (!PicoAgentManager_Destroy(old))
-    {
-        (void)PicoAgent_Destroy(initial);
-        (void)PicoAgentManager_Destroy(replacement);
-        app->terminal_shutdown = true;
-        g_pico_process_retired = true;
-        PicoOverlay_Notify(app, "A worker detached during workspace transition; Pico must now exit.");
-        return;
-    }
-
-    app->agents = replacement;
-    snprintf(app->workspace, sizeof(app->workspace), "%s", target);
-    app->pending_workspace[0] = '\0';
-    app->workspace_change_queued = false;
-    app->reload_queued = true;
-    PicoSettings_Load(app);
-    PicoSettings_InitAgent(app, initial);
-    if (!PicoAgentManager_AdoptInitial(replacement, initial))
-    {
-        (void)PicoAgent_Destroy(initial);
-        app->terminal_shutdown = true;
-        pico_status_warn(app, "Workspace replacement could not publish its prepared agent; Pico must exit.");
-        return;
-    }
-    PicoPlugins_Reload(app);
-    PicoChatSel_Clear(app);
-    memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
-    app->chat_follow_bottom = true;
-    app->chat_overflow = true;
 
     char pretty[400];
-    FormatHomePath(target, pretty, sizeof(pretty));
+    FormatHomePath(registered->path, pretty, sizeof(pretty));
     char line[512];
     snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
     PicoOverlay_Notify(app, line);
+    return true;
 }
 
 void PicoApp_PumpLifecycle(PicoApp *app)
@@ -1056,14 +1102,6 @@ void PicoApp_PumpLifecycle(PicoApp *app)
         return;
     }
     PicoAgentManager_Pump(app->agents);
-    if (app->workspace_change_queued)
-    {
-        if (!PicoAgentManager_BlocksReload(app->agents))
-        {
-            ApplyWorkspaceChange(app);
-        }
-        return;
-    }
     if (app->reload_queued && !PicoAgentManager_BlocksReload(app->agents))
     {
         PicoPlugins_Reload(app);
@@ -1123,8 +1161,8 @@ PicoAppShutdownResult PicoApp_Free(PicoApp *app)
     app->agents = NULL;
     PicoPlugins_Shutdown(app);
     PicoAuth_Free(app);
-    PicoApp_ClearMessages(app);
-    free(app->composer.text);
+    PicoWorkspaceRegistry_Free(app->workspaces);
+    free(app->workspaces);
     free(app->status_warn);
     free(app->models);
     free(app->agent_input);
@@ -1155,7 +1193,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
                                  .padding = {8, 8, 8, 8},
-                                 .sizing = {.width = CLAY_SIZING_FIT(120, 280), .height = CLAY_SIZING_GROW(0)}},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(240), .height = CLAY_SIZING_GROW(0)}},
                       .backgroundColor = COLOR_CONTENT_BG,
                       .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {
@@ -1181,7 +1219,12 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
 
 static void UpdateChatScrollbarDrag(PicoApp *app, Clay_Vector2 mouse)
 {
-    PicoScrollbar *drag = &app->chat_scrollbar;
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (!ui)
+    {
+        return;
+    }
+    PicoScrollbar *drag = &ui->chat_scrollbar;
     if (!IsMouseButtonDown(0))
     {
         drag->mouse_down = false;
@@ -1189,7 +1232,7 @@ static void UpdateChatScrollbarDrag(PicoApp *app, Clay_Vector2 mouse)
     if (IsMouseButtonDown(0) && !drag->mouse_down &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
     {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(pico_ui_chat_scroll_id(app));
         if (data.found)
         {
             drag->click_origin = mouse;
@@ -1199,7 +1242,7 @@ static void UpdateChatScrollbarDrag(PicoApp *app, Clay_Vector2 mouse)
     }
     else if (drag->mouse_down)
     {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(pico_ui_chat_scroll_id(app));
         if (data.found && data.contentDimensions.height > 0)
         {
             float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;
@@ -1231,14 +1274,18 @@ static void UpdateChatFollowFromUserScroll(PicoApp *app, bool over_chat, bool mo
     {
         return;
     }
-    bool bar_drag = app->chat_scrollbar.mouse_down;
+    bool bar_drag = PicoApp_ActiveUi(app) && PicoApp_ActiveUi(app)->chat_scrollbar.mouse_down;
     bool wheel = over_chat && wheel_y != 0.0f;
     if (!bar_drag && !wheel)
     {
         return;
     }
-    Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    app->chat_follow_bottom = ChatScrollAtBottom(data);
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(pico_ui_chat_scroll_id(app));
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (ui)
+    {
+        ui->chat_follow_bottom = ChatScrollAtBottom(data);
+    }
 }
 
 void PicoApp_Frame(PicoApp *app)
@@ -1306,12 +1353,13 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
-    bool composer_bar_drag = app->composer_scrollbar.mouse_down;
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    bool composer_bar_drag = ui && ui->composer_scrollbar.mouse_down;
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
-    bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    bool over_chat = Clay_PointerOver(pico_ui_chat_scroll_id(app));
     bool modal_open = PicoUi_ModalOpen(app);
     Clay_SetPointerState(mouse_position,
-                         IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down && !composer_bar_drag);
+                         IsMouseButtonDown(0) && !(ui && ui->chat_scrollbar.mouse_down) && !composer_bar_drag);
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
 
     if (!modal_open)
@@ -1319,15 +1367,47 @@ void PicoApp_Frame(PicoApp *app)
         UpdateChatScrollbarDrag(app, mouse_position);
     }
     Clay_UpdateScrollContainers(modal_open || (!over_composer && !over_chat && !composer_bar_drag &&
-                                               !app->chat_sel.mouse_selecting),
+                                               !(ui && ui->chat_sel.mouse_selecting)),
                                 (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);
 
-    Clay_ScrollContainerData scroll_data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    app->chat_overflow =
-        scroll_data.found && scroll_data.contentDimensions.height > scroll_data.scrollContainerDimensions.height + 0.5f;
+    Clay_ScrollContainerData chat_scroll = Clay_GetScrollContainerData(pico_ui_chat_scroll_id(app));
+    Clay_ScrollContainerData composer_scroll = Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
+    ui = PicoApp_ActiveUi(app);
+    if (ui)
+    {
+        if (ui->restore_scroll)
+        {
+            if (chat_scroll.found && chat_scroll.scrollPosition)
+            {
+                *chat_scroll.scrollPosition = ui->chat_scroll;
+            }
+            if (composer_scroll.found && composer_scroll.scrollPosition)
+            {
+                *composer_scroll.scrollPosition = ui->composer_scroll;
+            }
+            ui->restore_scroll = false;
+        }
+        else
+        {
+            if (chat_scroll.found && chat_scroll.scrollPosition)
+            {
+                ui->chat_scroll = *chat_scroll.scrollPosition;
+            }
+            if (composer_scroll.found && composer_scroll.scrollPosition)
+            {
+                ui->composer_scroll = *composer_scroll.scrollPosition;
+            }
+        }
+        ui->chat_overflow = chat_scroll.found &&
+                            chat_scroll.contentDimensions.height >
+                                chat_scroll.scrollContainerDimensions.height + 0.5f;
+        ui->composer_overflow = composer_scroll.found &&
+                                composer_scroll.contentDimensions.height >
+                                    composer_scroll.scrollContainerDimensions.height + 0.5f;
+    }
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
 
@@ -1342,7 +1422,7 @@ void PicoApp_Frame(PicoApp *app)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
     else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))) || PicoChatSel_PointerOverText() ||
-             app->chat_sel.mouse_selecting)
+             (ui && ui->chat_sel.mouse_selecting))
     {
         SetMouseCursor(MOUSE_CURSOR_IBEAM);
     }
@@ -1351,9 +1431,9 @@ void PicoApp_Frame(PicoApp *app)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
 
-    if (app->chat_follow_bottom)
+    if (ui && ui->chat_follow_bottom)
     {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(pico_ui_chat_scroll_id(app));
         if (data.found && data.scrollPosition &&
             data.contentDimensions.height > data.scrollContainerDimensions.height)
         {
@@ -1361,7 +1441,7 @@ void PicoApp_Frame(PicoApp *app)
         }
     }
 
-    if (app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
+    if (app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !(ui && ui->chat_sel.dragging) &&
         !PicoChatSel_HasSelection(app))
     {
         OpenURL(app->hovered_link);

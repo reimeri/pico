@@ -34,9 +34,10 @@ bool PicoComplete_IsOpen(void)
 
 static void Dismiss(PicoApp *app)
 {
+    const PicoComposer *c = pico_app_composer_const(app);
     g_complete.dismissed = true;
     g_complete.dismissed_start = g_complete.token_start;
-    g_complete.dismissed_len = app->composer.length;
+    g_complete.dismissed_len = c ? c->length : 0;
     PicoComplete_Close();
 }
 
@@ -71,8 +72,8 @@ static const PicoCompleter *FindCompleter(const PicoApp *app, char trigger, bool
 
 static bool ScanToken(const PicoApp *app, int *start, int *end, const PicoCompleter **out)
 {
-    const PicoComposer *c = &app->composer;
-    if (!c->text || c->length <= 0 || c->cursor <= 0)
+    const PicoComposer *c = pico_app_composer_const(app);
+    if (!c || !c->text || c->length <= 0 || c->cursor <= 0)
     {
         return false;
     }
@@ -191,8 +192,14 @@ void PicoComplete_Refresh(PicoApp *app)
         g_complete.dismissed = false;
         return;
     }
+    const PicoComposer *c = pico_app_composer_const(app);
     if (g_complete.dismissed && start == g_complete.dismissed_start &&
-        app->composer.length == g_complete.dismissed_len)
+        c && c->length == g_complete.dismissed_len)
+    {
+        PicoComplete_Close();
+        return;
+    }
+    if (!c || !c->text)
     {
         PicoComplete_Close();
         return;
@@ -208,7 +215,7 @@ void PicoComplete_Refresh(PicoApp *app)
     {
         plen = (int)sizeof(prefix) - 1;
     }
-    memcpy(prefix, app->composer.text + start + 1, (size_t)plen);
+    memcpy(prefix, c->text + start + 1, (size_t)plen);
     prefix[plen] = '\0';
 
     PicoCompleteItem raw[PICO_MAX_COMPLETE_ITEMS];
@@ -305,9 +312,11 @@ bool PicoComplete_HandleKeys(PicoApp *app)
         !(IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)))
     {
         char before[4096];
-        snprintf(before, sizeof(before), "%s", app->composer.text ? app->composer.text : "");
+        const PicoComposer *c = pico_app_composer_const(app);
+        snprintf(before, sizeof(before), "%s", c && c->text ? c->text : "");
         Accept(app);
-        const char *after = app->composer.text ? app->composer.text : "";
+        c = pico_app_composer_const(app);
+        const char *after = c && c->text ? c->text : "";
         if (strcmp(before, after) == 0)
         {
             PicoComplete_Close();

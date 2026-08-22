@@ -1,5 +1,5 @@
-// Example Pico request-context extension. Copy to ~/.config/pico/extensions/ or
-// <workspace>/.pico/extensions/ then press F5.
+// Example Pico request-context extension. Copy to ~/.config/pico/extensions/
+// then press F5.
 
 #include "pico/plugin.h"
 #include "json.h"

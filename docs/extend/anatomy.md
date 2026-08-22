@@ -22,7 +22,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 7). ABI 7 includes context-based concurrent worker callbacks, agent-targeted main-thread callbacks, copied persistence state/write results, and reported terminal shutdown; there is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 9). ABI 9 adds the builtin workspace sidebar, per-agent composer/viewport state, and composer accessors; there is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload.
@@ -34,7 +34,6 @@ There is no unregister. Reload clears all registrations and calls `init` again (
 ## Directories
 
 - User: `~/.config/pico/extensions/` or `$XDG_CONFIG_HOME/pico/extensions/`
-- Workspace: `<workspace>/.pico/extensions/`
 - Compiled objects: `~/.cache/pico/ext/` (or `$XDG_CACHE_HOME/pico/ext/`)
 
 `pico --safe` loads builtins only.
@@ -53,6 +52,6 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** until every live/retired runtime, pending ask, offered catalog, event, and delegation job is quiescent. A queued reload prevents new turns and delegations. Do not cache registration pointers beyond their documented callback lifetime.
 
-`/cd` queues a workspace transition behind the same barrier; `app->workspace` changes only when the old agent set can be replaced as one main-thread transition.
+`/cd` and the sidebar register or focus a workspace immediately. Other agents keep running; `app->workspace` is only an alias for the newly selected normal agent.
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.
+Builtins: `chat`, `sidebar`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.

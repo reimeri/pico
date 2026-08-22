@@ -1,5 +1,5 @@
-// Example Pico extension. Copy to ~/.config/pico/extensions/ or
-// <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
+// Example Pico extension. Copy to ~/.config/pico/extensions/
+// (a subfolder is fine) then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/empty_banner
 //   cp examples/empty_banner.c ~/.config/pico/extensions/empty_banner/

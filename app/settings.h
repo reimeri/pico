@@ -8,8 +8,9 @@ void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);
 void PicoSettings_Load(PicoApp *app);
-char *PicoSettings_LoadSystemPrompt(const PicoApp *app);
-int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max);
+char *PicoSettings_LoadSystemPrompt(const PicoApp *app, const PicoAgent *agent);
+int PicoSettings_LoadedContext(const PicoApp *app, const PicoAgent *agent,
+                               const char **labels, int max);
 PicoModel *PicoSettings_FindModel(PicoApp *app, const char *id);
 const PicoModel *PicoSettings_FindModelConst(const PicoApp *app, const char *id);
 PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent);

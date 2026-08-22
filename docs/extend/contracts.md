@@ -6,7 +6,7 @@ Read this before writing an extension. Getting these wrong crashes Pico or silen
 
 `PicoPlugins_Reload` queues while any live or retired runtime has provider/tool work, pending calls, an offered-tool snapshot, a pending ask, undrained events, retained extension callbacks, or a delegation wait/job. A `.c` or subagent-profile file written in this turn does not load until that work finishes. Polling is ~0.5s; F5 and `/reload` request the same path. As soon as reload is queued, Pico refuses new external turns and delegations while continuing to pump existing follow-ups, cancellation, and asks. Once quiescent, idle runtimes release copied extension pointers, registrations are rebuilt, and the completely parsed profile snapshot replaces the old registry. Restricted live agents are revalidated, each live session is announced, and structured tool details are replayed.
 
-`/cd` is also queued, never synchronously waits, and uses the same barrier. `app->workspace` remains unchanged while old agents drain. Pico then destroys the old agent set, switches workspace/settings/registrations, revalidates user-global profiles, and publishes one fresh normal agent as one main-thread transition.
+`/cd path` registers that directory, then selects its most recently selected live session or creates a new one. Other agents keep running. Reload still waits for every runtime that retains extension pointers.
 
 A second Esc force-cancels a stuck turn: the UI goes idle and a new worker starts so the user can keep chatting, but reload still waits for the abandoned worker. That worker may outlive the turn; do not touch Clay, Raylib, or chat/composer state from it.
 
@@ -16,7 +16,7 @@ On process exit, every agent, delegation job, and retired runtime shares one abs
 
 ## Threads
 
-Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout. Agent-scoped callbacks receive a `PicoAgentId`; keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized.
+Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout. Agent-scoped callbacks receive a `PicoAgentId`; notification events also copy the target workspace key/path so destroy and background hooks do not depend on active state. Keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized.
 
 Worker thread: `PicoToolFn`, `PicoToolBeforeFn`, `PicoProviderStreamFn`. They receive a callback-scoped opaque `PicoAgentContext *`, never the UI `PicoApp *`. Do not retain it. Worker callbacks from different agents may overlap and must be reentrant. Use context accessors, `pico_tool_ask`, `pico_tool_set_child`, and `pico_auth_copy_ctx`; do not touch UI, transcript, session, settings, model catalog, or unsynchronized agent-scoped extension state. `pico_tool_ask` may be called only from a tool or before-tool callback. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
@@ -31,8 +31,9 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - `PicoToolResult.output` / `details_json`: malloc if set; Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
-- `pico_tool_pending_ask` `request_json`: the oldest live ask across all agents; valid until the next manager pump. Do not retain it across frames.
+- `pico_tool_pending_ask` `request_json`: the oldest live ask in the active normal agent's tree; valid until the next manager pump. Do not retain it across frames.
 - `pico_subagent_profile_info`: copies the complete profile snapshot into caller storage. Profile strings and tool names in that copy are caller-owned values, not registry pointers.
+- `PicoAgentInfo.workspace_key` / `workspace_path` and `PicoHookEvent.workspace_key` / `workspace_path`: copied values. Agent workspace identity is immutable; hook copies remain usable during destroy notification.
 - `PicoAgentContext *` and all strings returned by its accessors: callback-scoped; never retain them.
 - `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
@@ -59,15 +60,15 @@ Registrations are ignored when a limit is full, arguments are NULL, or the kind/
 ## Directories
 
 - User extensions: `~/.config/pico/extensions/`
-- Workspace extensions: `<workspace>/.pico/extensions/`
+- User settings: `~/.config/pico/settings.json` (defaults for new agents; not loaded from `<workspace>/.pico/settings.json`)
 - User subagent profiles: `~/.config/pico/subagents/` (or the matching `$XDG_CONFIG_HOME` path)
 - Extension discovery uses regular `.c` files, skips hidden names, and walks to depth 8.
 - Profile discovery uses only direct, regular, non-hidden `*.json` files and parses them as JSONC.
-- `/cd` queues a deferred workspace replacement: current work drains, then Pico creates a new session, loads workspace settings/plugins, and updates `app->workspace`. Read the field when you use it. Assigning it directly does not perform a transition.
+- `/cd` registers or focuses a workspace immediately and updates the active-only `app->workspace` alias. Assigning that field directly does not perform a transition.
 
 ## `PicoApp`
 
-The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `workspace`). Conversation/runtime/session/model/usage fields live in opaque manager-owned `PicoAgent` instances, not `PicoApp`. Use the copied `pico_agent_*` manager snapshots; `app->agents` is an opaque owner, not a dereferenceable active-agent handle. See [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `agent_manager.h`, `session.h`, and `settings.h` are not extension API.
+The struct is public. Prefer `pico_add_*` and the fields listed in the topic pages (`submit_cancel`, `agent_input`, `workspace`). `app->workspace` is only an alias for the selected normal agent's immutable workspace; background callbacks must use their explicit target snapshot. Conversation/runtime/session/model/usage fields live in opaque manager-owned `PicoAgent` instances, not `PicoApp`. Use the copied `pico_agent_*` manager snapshots; `app->agents` is an opaque owner, not a dereferenceable active-agent handle. See [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `agent_manager.h`, `session.h`, and `settings.h` are not extension API.
 
 The model catalog in `PicoApp` is immutable while agents run. Each agent owns copied model/effort/context/compaction selection, so changing defaults or replaying a session does not mutate another live agent.
 

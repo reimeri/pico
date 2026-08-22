@@ -16,7 +16,8 @@
 static float ChatWidth(PicoApp *app)
 {
     float width = (float)GetScreenWidth() - CONTENT_PADDING - 12;
-    if (app->chat_overflow)
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (ui && ui->chat_overflow)
     {
         width -= (float)(SCROLLBAR_WIDTH + SCROLLBAR_GAP);
     }
@@ -234,7 +235,7 @@ static void RenderEmptyCards(PicoApp *app)
         }
     }
     const char *ctx[8];
-    int ctx_n = PicoSettings_LoadedContext(app, ctx, 8);
+    int ctx_n = PicoSettings_LoadedContext(app, PicoApp_ActiveAgentConst(app), ctx, 8);
     bool narrow = GetScreenWidth() < 720;
     CLAY(CLAY_ID("EmptyCards"),
          {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
@@ -297,7 +298,7 @@ void PicoChat_Render(PicoApp *app)
                      .childGap = SCROLLBAR_GAP,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
     {
-        CLAY(CLAY_ID("ChatScroll"),
+        CLAY(pico_ui_chat_scroll_id(app),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
@@ -387,10 +388,11 @@ void PicoChat_Render(PicoApp *app)
             }
         }
 
-        if (app->chat_overflow)
+        PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+        if (ui && ui->chat_overflow)
         {
             Clay_ScrollContainerData scroll_data =
-                Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+                Clay_GetScrollContainerData(pico_ui_chat_scroll_id(app));
             float track_h = scroll_data.found ? scroll_data.scrollContainerDimensions.height : 0;
             float content_h = scroll_data.found ? scroll_data.contentDimensions.height : 1;
             float thumb_h = content_h > 0 ? (track_h / content_h) * track_h : track_h;
@@ -436,11 +438,18 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
         return;
     }
 
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    PicoChatSelect *sel = ui ? &ui->chat_sel : NULL;
+    if (!sel)
+    {
+        return;
+    }
+
     Vector2 mouse = GetMousePosition();
     bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))) ||
                     Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollTrack")));
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
-    bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    bool over_chat = Clay_PointerOver(pico_ui_chat_scroll_id(app));
 
     if (over_bar || over_composer)
     {
@@ -450,9 +459,9 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
             {
                 PicoChatSel_Clear(app);
             }
-            app->chat_sel.mouse_selecting = false;
-            app->chat_sel.dragging = false;
-            app->chat_sel.pressed_tool = false;
+            sel->mouse_selecting = false;
+            sel->dragging = false;
+            sel->pressed_tool = false;
         }
         return;
     }
@@ -481,60 +490,64 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
 
         int msg = -1;
         int pos = PicoChatSel_OffsetAtPoint(app, mouse.x, mouse.y, -1, &msg);
-        app->chat_sel.mouse_selecting = true;
-        app->chat_sel.dragging = false;
-        app->chat_sel.press_x = mouse.x;
-        app->chat_sel.press_y = mouse.y;
-        app->chat_sel.pressed_tool = tool_idx >= 0;
-        app->chat_sel.tool_msg = tool_msg;
-        app->chat_sel.tool_idx = tool_idx;
-        app->chat_sel.msg = msg;
-        app->chat_sel.anchor = pos;
-        app->chat_sel.cursor = pos;
-        app->composer.sel_anchor = app->composer.cursor;
+        sel->mouse_selecting = true;
+        sel->dragging = false;
+        sel->press_x = mouse.x;
+        sel->press_y = mouse.y;
+        sel->pressed_tool = tool_idx >= 0;
+        sel->tool_msg = tool_msg;
+        sel->tool_idx = tool_idx;
+        sel->msg = msg;
+        sel->anchor = pos;
+        sel->cursor = pos;
+        PicoComposer *composer = pico_app_composer(app);
+        if (composer)
+        {
+            composer->sel_anchor = composer->cursor;
+        }
     }
 
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
-        if (app->chat_sel.mouse_selecting && !app->chat_sel.dragging && app->chat_sel.pressed_tool &&
-            app->chat_sel.tool_msg >= 0 && app->chat_sel.tool_msg < PicoApp_ActiveAgent(app)->message_count)
+        if (sel->mouse_selecting && !sel->dragging && sel->pressed_tool &&
+            sel->tool_msg >= 0 && sel->tool_msg < PicoApp_ActiveAgent(app)->message_count)
         {
-            PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
-            int t = app->chat_sel.tool_idx;
+            PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[sel->tool_msg];
+            int t = sel->tool_idx;
             if (t >= 0 && t < msg->trace_count && msg->trace[t].is_tool &&
-                Clay_PointerOver(ToolRowId(app->chat_sel.tool_msg, t)))
+                Clay_PointerOver(ToolRowId(sel->tool_msg, t)))
             {
                 msg->trace[t].expanded = !msg->trace[t].expanded;
             }
-            app->chat_sel.anchor = app->chat_sel.cursor;
+            sel->anchor = sel->cursor;
         }
-        app->chat_sel.mouse_selecting = false;
-        app->chat_sel.pressed_tool = false;
-        if (!app->chat_sel.dragging && app->chat_sel.anchor == app->chat_sel.cursor)
+        sel->mouse_selecting = false;
+        sel->pressed_tool = false;
+        if (!sel->dragging && sel->anchor == sel->cursor)
         {
-            app->chat_sel.dragging = false;
+            sel->dragging = false;
         }
         return;
     }
 
-    if (app->chat_sel.mouse_selecting)
+    if (sel->mouse_selecting)
     {
-        float dx = mouse.x - app->chat_sel.press_x;
-        float dy = mouse.y - app->chat_sel.press_y;
+        float dx = mouse.x - sel->press_x;
+        float dy = mouse.y - sel->press_y;
         if (dx * dx + dy * dy > 16.0f)
         {
-            app->chat_sel.dragging = true;
+            sel->dragging = true;
         }
-        if (app->chat_sel.dragging)
+        if (sel->dragging)
         {
-            int msg = app->chat_sel.msg;
+            int msg = sel->msg;
             int pos = PicoChatSel_OffsetAtPoint(app, mouse.x, mouse.y, msg, &msg);
-            if (app->chat_sel.msg < 0)
+            if (sel->msg < 0)
             {
-                app->chat_sel.msg = msg;
-                app->chat_sel.anchor = pos;
+                sel->msg = msg;
+                sel->anchor = pos;
             }
-            app->chat_sel.cursor = pos;
+            sel->cursor = pos;
         }
     }
 }
@@ -546,7 +559,7 @@ static Color ClayToRay(Clay_Color c)
 
 static void PicoChat_DrawChevrons(PicoApp *app)
 {
-    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    Clay_ElementData scroll = Clay_GetElementData(pico_ui_chat_scroll_id(app));
     if (!scroll.found || !app->fonts)
     {
         return;

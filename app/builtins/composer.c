@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "agent_internal.h"
 
 #include "clay/clay.h"
 
@@ -16,6 +17,12 @@
 #define COMPOSER_MIN_HEIGHT 56
 #define COMPOSER_MAX_GROW_LINES 10
 #define CARET_BLINK_HZ 2.0
+
+static PicoComposer *ActiveComposer(PicoApp *app)
+{
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    return ui ? &ui->composer : NULL;
+}
 
 static Font ComposerFont(void)
 {
@@ -266,8 +273,12 @@ static void NoteCaretActivity(void)
 static ComposerView GetComposerView(PicoApp *app)
 {
     ComposerView v = {0};
-    PicoComposer *c = &app->composer;
-    Clay_ElementData scroll_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return v;
+    }
+    Clay_ElementData scroll_box = Clay_GetElementData(pico_ui_composer_scroll_id(app));
     Clay_ElementData composer_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("Composer")));
     v.found = scroll_box.found || composer_box.found;
     v.clip = scroll_box.found ? scroll_box.boundingBox : composer_box.boundingBox;
@@ -291,7 +302,7 @@ static ComposerView GetComposerView(PicoApp *app)
     {
         v.wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
     }
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
     if (scroll.found && scroll.scrollPosition)
     {
         v.scroll_y = scroll.scrollPosition->y;
@@ -338,7 +349,11 @@ static int OffsetAtXOnLine(Font font, const PicoComposer *c, CompLine line, floa
 
 static void MoveVertical(PicoApp *app, int dir, bool extend)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = COMPOSER_FONT_SIZE;
     float wrap = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
@@ -383,7 +398,11 @@ static void MoveVertical(PicoApp *app, int dir, bool extend)
 
 static int OffsetAtPoint(PicoApp *app, float x, float y)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return 0;
+    }
     ComposerView v = GetComposerView(app);
     if (!v.found)
     {
@@ -433,7 +452,11 @@ static int OffsetAtPoint(PicoApp *app, float x, float y)
 
 static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     ComposerView v = GetComposerView(app);
     *out_x = v.origin_x;
     *out_y = v.origin_y;
@@ -460,7 +483,11 @@ static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
 
 static void EnsureCaretVisible(PicoApp *app)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     if (c->cursor == s_seen_cursor && c->length == s_seen_length)
     {
         return;
@@ -469,7 +496,7 @@ static void EnsureCaretVisible(PicoApp *app)
     s_seen_length = c->length;
 
     ComposerView v = GetComposerView(app);
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
     if (!scroll.found || !scroll.scrollPosition || v.line_height < 1)
     {
         return;
@@ -525,7 +552,8 @@ static int SelTo(const PicoComposer *c)
 
 bool PicoComposer_HasSelection(const PicoApp *app)
 {
-    return app->composer.sel_anchor != app->composer.cursor;
+    const PicoComposer *c = pico_app_composer_const(app);
+    return c && c->sel_anchor != c->cursor;
 }
 
 static void ComposerDeleteRange(PicoComposer *c, int from, int to);
@@ -556,7 +584,11 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
 
 void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     c->sel_anchor = c->cursor;
     if (from > to)
     {
@@ -573,7 +605,16 @@ void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text)
 
 void PicoComposer_SetText(PicoApp *app, const char *text)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer_SetAgentText(app, pico_agent_active(app), text);
+}
+
+void PicoComposer_SetAgentText(PicoApp *app, PicoAgentId id, const char *text)
+{
+    PicoComposer *c = pico_agent_composer(app, id);
+    if (!c)
+    {
+        return;
+    }
     c->sel_anchor = 0;
     c->cursor = 0;
     ComposerDeleteRange(c, 0, c->length);
@@ -661,7 +702,11 @@ static int Utf8Encode(int cp, char out[4])
 
 void PicoComposer_Copy(PicoApp *app)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     if (c->sel_anchor == c->cursor || !c->text)
     {
         return;
@@ -712,7 +757,11 @@ void PicoComposer_HandleInput(PicoApp *app)
     {
         return;
     }
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     bool ctrl = IsCtrlDown();
     bool shift = IsShiftDown();
     const char *text = c->text ? c->text : "";
@@ -871,11 +920,15 @@ void PicoComposer_HandleInput(PicoApp *app)
 
 void PicoComposer_HandlePointer(PicoApp *app)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     Vector2 mouse = GetMousePosition();
     bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
                     Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack")));
-    bool over = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+    bool over = Clay_PointerOver(pico_ui_composer_scroll_id(app));
 
     if (over_bar)
     {
@@ -905,7 +958,11 @@ void PicoComposer_HandlePointer(PicoApp *app)
 
 void PicoComposer_Render(PicoApp *app)
 {
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     const char *placeholder = "Message Pico…  (Enter to send, Shift+Enter for newline)";
     bool empty = c->length == 0;
     float wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
@@ -941,7 +998,7 @@ void PicoComposer_Render(PicoApp *app)
                          .childGap = SCROLLBAR_GAP,
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY(CLAY_ID("ComposerScroll"),
+            CLAY(pico_ui_composer_scroll_id(app),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
                   .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
@@ -980,10 +1037,11 @@ void PicoComposer_Render(PicoApp *app)
                     }
                 }
             }
-            if (app->composer_overflow)
+            PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+            if (ui && ui->composer_overflow)
             {
                 Clay_ScrollContainerData scroll_data =
-                    Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+                    Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
                 float track_h = scroll_data.found ? scroll_data.scrollContainerDimensions.height : 0;
                 float content_h_scroll = scroll_data.found ? scroll_data.contentDimensions.height : 1;
                 float thumb_h = content_h_scroll > 0 ? (track_h / content_h_scroll) * track_h : track_h;
@@ -1024,7 +1082,11 @@ void PicoComposer_Render(PicoApp *app)
 void PicoComposer_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    PicoComposer *c = &app->composer;
+    PicoComposer *c = ActiveComposer(app);
+    if (!c)
+    {
+        return;
+    }
     ComposerView v = GetComposerView(app);
     if (!v.found)
     {
@@ -1095,9 +1157,13 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
     {
         s_wrap_width = v.wrap_width;
     }
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
-    app->composer_overflow =
-        scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (ui)
+    {
+        ui->composer_overflow =
+            scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
+    }
     if (!PicoUi_ModalOpen(app))
     {
         if (!PicoComplete_HandlePointer(app))
@@ -1110,7 +1176,12 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
 
 static void UpdateComposerScrollbarDrag(PicoApp *app)
 {
-    PicoScrollbar *drag = &app->composer_scrollbar;
+    PicoAgentUiState *ui = PicoApp_ActiveUi(app);
+    if (!ui)
+    {
+        return;
+    }
+    PicoScrollbar *drag = &ui->composer_scrollbar;
     Clay_Vector2 mouse = {.x = GetMousePosition().x, .y = GetMousePosition().y};
     if (!IsMouseButtonDown(0))
     {
@@ -1119,7 +1190,7 @@ static void UpdateComposerScrollbarDrag(PicoApp *app)
     if (IsMouseButtonDown(0) && !drag->mouse_down &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))))
     {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
         if (data.found && data.scrollPosition)
         {
             drag->click_origin = mouse;
@@ -1129,7 +1200,7 @@ static void UpdateComposerScrollbarDrag(PicoApp *app)
     }
     else if (drag->mouse_down)
     {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(pico_ui_composer_scroll_id(app));
         if (data.found && data.scrollPosition && data.contentDimensions.height > 0)
         {
             float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;

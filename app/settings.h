@@ -3,7 +3,7 @@
 
 #include "agent_internal.h"
 
-void Pico_ConfigDir(char *out, size_t cap);
+bool Pico_ConfigDir(char *out, size_t cap);
 void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);

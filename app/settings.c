@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "json.h"
 #include "overlay.h"
+#include "path.h"
 #include "session.h"
 
 #include <stdio.h>
@@ -19,17 +20,14 @@ static const char *HomeDir(void)
     return home && home[0] ? home : ".";
 }
 
-void Pico_ConfigDir(char *out, size_t cap)
+bool Pico_ConfigDir(char *out, size_t cap)
 {
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (xdg && xdg[0])
     {
-        snprintf(out, cap, "%s/pico", xdg);
+        return PicoPath_Format(out, cap, "%s/pico", xdg);
     }
-    else
-    {
-        snprintf(out, cap, "%s/.config/pico", HomeDir());
-    }
+    return PicoPath_Format(out, cap, "%s/.config/pico", HomeDir());
 }
 
 void Pico_MkdirP(const char *path)
@@ -307,23 +305,24 @@ static const char *FirstEnv(const char *a, const char *b)
     return NULL;
 }
 
-static void UserSettingsPath(char *out, size_t cap)
+static bool UserSettingsPath(char *out, size_t cap)
 {
     char dir[4096];
-    Pico_ConfigDir(dir, sizeof(dir));
-    snprintf(out, cap, "%s/settings.json", dir);
+    return Pico_ConfigDir(dir, sizeof(dir)) &&
+           PicoPath_Format(out, cap, "%s/settings.json", dir);
 }
 
-static void WorkspaceSettingsPath(const PicoApp *app, char *out, size_t cap)
+static bool WorkspaceSettingsPath(const PicoApp *app, char *out, size_t cap)
 {
     if (app && app->workspace[0])
     {
-        snprintf(out, cap, "%s/.pico/settings.json", app->workspace);
+        return PicoPath_Format(out, cap, "%s/.pico/settings.json", app->workspace);
     }
-    else
+    if (out && cap > 0)
     {
         out[0] = '\0';
     }
+    return true;
 }
 
 static bool SettingsFileExists(const char *path)
@@ -564,18 +563,21 @@ void PicoSettings_Load(PicoApp *app)
     s->compact_ratio = 0.9;
 
     char dir[4096];
-    Pico_ConfigDir(dir, sizeof(dir));
-    Pico_MkdirP(dir);
+    if (Pico_ConfigDir(dir, sizeof(dir)))
+    {
+        Pico_MkdirP(dir);
+    }
 
     PicoModel *catalog = NULL;
     int catalog_n = 0;
 
     char path[4096];
-    UserSettingsPath(path, sizeof(path));
-    LoadFile(s, &catalog, &catalog_n, path);
+    if (UserSettingsPath(path, sizeof(path)))
+    {
+        LoadFile(s, &catalog, &catalog_n, path);
+    }
 
-    WorkspaceSettingsPath(app, path, sizeof(path));
-    if (path[0])
+    if (WorkspaceSettingsPath(app, path, sizeof(path)) && path[0])
     {
         LoadFile(s, &catalog, &catalog_n, path);
     }
@@ -967,8 +969,11 @@ bool PicoSettings_SaveSelection(PicoApp *app, const PicoAgent *agent, bool save_
     }
     char user[4096];
     char workspace[4096];
-    UserSettingsPath(user, sizeof(user));
-    WorkspaceSettingsPath(app, workspace, sizeof(workspace));
+    if (!UserSettingsPath(user, sizeof(user)) ||
+        !WorkspaceSettingsPath(app, workspace, sizeof(workspace)))
+    {
+        return false;
+    }
     bool ok = true;
     if (save_model)
     {
@@ -1029,16 +1034,22 @@ int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max)
     }
     int n = 0;
     char path[4096];
-    Pico_ConfigDir(path, sizeof(path));
-    size_t len = strlen(path);
-    snprintf(path + len, sizeof(path) - len, "/SYSTEM.md");
-    PushContext(labels, max, &n, path, "SYSTEM.md");
+    char config[4096];
+    if (Pico_ConfigDir(config, sizeof(config)) &&
+        PicoPath_Format(path, sizeof(path), "%s/SYSTEM.md", config))
+    {
+        PushContext(labels, max, &n, path, "SYSTEM.md");
+    }
     if (app && app->workspace[0])
     {
-        snprintf(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace);
-        PushContext(labels, max, &n, path, ".pico/SYSTEM.md");
-        snprintf(path, sizeof(path), "%s/AGENTS.md", app->workspace);
-        PushContext(labels, max, &n, path, "AGENTS.md");
+        if (PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace))
+        {
+            PushContext(labels, max, &n, path, ".pico/SYSTEM.md");
+        }
+        if (PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", app->workspace))
+        {
+            PushContext(labels, max, &n, path, "AGENTS.md");
+        }
     }
     return n;
 }
@@ -1048,13 +1059,15 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
     JsonBuf b;
     JsonBuf_Init(&b);
     char path[4096];
-    Pico_ConfigDir(path, sizeof(path));
-    size_t n = strlen(path);
-    snprintf(path + n, sizeof(path) - n, "/SYSTEM.md");
-    AppendFile(&b, path);
-    if (app->workspace[0])
+    char config[4096];
+    if (Pico_ConfigDir(config, sizeof(config)) &&
+        PicoPath_Format(path, sizeof(path), "%s/SYSTEM.md", config))
     {
-        snprintf(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace);
+        AppendFile(&b, path);
+    }
+    if (app->workspace[0] &&
+        PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace))
+    {
         AppendFile(&b, path);
     }
     if (!b.len)
@@ -1064,9 +1077,8 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
                      "working directory. Use the sh tool to run shell commands when that helps. "
                      "Prefer concise answers.");
     }
-    if (app->workspace[0])
+    if (app->workspace[0] && PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", app->workspace))
     {
-        snprintf(path, sizeof(path), "%s/AGENTS.md", app->workspace);
         AppendFile(&b, path);
     }
 #ifndef PICO_DOCS

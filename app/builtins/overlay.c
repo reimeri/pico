@@ -39,7 +39,8 @@ void PicoOverlay_Notify(PicoApp *app, const char *text)
 
 static bool HasError(const PicoApp *app)
 {
-    return (app->status_warn && app->status_warn[0]) || (PicoApp_ActiveAgent(app)->error && PicoApp_ActiveAgent(app)->error[0]);
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    return (app->status_warn && app->status_warn[0]) || (agent->error && agent->error[0]);
 }
 
 static Clay_String CStr(const char *s)

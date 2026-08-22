@@ -2,6 +2,7 @@
 
 #include "agent.h"
 #include "json.h"
+#include "path.h"
 #include "session.h"
 #include "settings.h"
 #include "usage.h"
@@ -24,9 +25,9 @@ static int Fail(const char *message)
     return 1;
 }
 
-void Pico_ConfigDir(char *out, size_t cap)
+bool Pico_ConfigDir(char *out, size_t cap)
 {
-    snprintf(out, cap, "%s", g_config_dir);
+    return PicoPath_Format(out, cap, "%s", g_config_dir);
 }
 
 bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner, const char *path)
@@ -453,6 +454,28 @@ int main(void)
         failed_persistence.session_id[0] || failed_persistence.session_path[0])
     {
         return Fail("new session did not recover from the prior persistence failure");
+    }
+
+    char saved_config_dir[sizeof(g_config_dir)];
+    memcpy(saved_config_dir, g_config_dir, sizeof(saved_config_dir));
+    memset(g_config_dir, 'x', sizeof(g_config_dir) - 1);
+    g_config_dir[sizeof(g_config_dir) - 1] = '\0';
+    g_status_warning[0] = '\0';
+    PicoApp long_path_app;
+    PicoAgent long_path_agent;
+    memset(&long_path_app, 0, sizeof(long_path_app));
+    memset(&long_path_agent, 0, sizeof(long_path_agent));
+    snprintf(long_path_app.workspace, sizeof(long_path_app.workspace), "/workspace");
+    long_path_agent.persistence = PICO_SESSION_DURABLE;
+    PicoSessionWriteResult long_path_result =
+        PicoSession_LogUser(&long_path_app, &long_path_agent, "cannot persist", "cannot persist");
+    memcpy(g_config_dir, saved_config_dir, sizeof(g_config_dir));
+    if (long_path_result != PICO_SESSION_WRITE_FAILED ||
+        long_path_agent.persistence != PICO_SESSION_FAILED ||
+        long_path_agent.session_path[0] ||
+        !strstr(g_status_warning, "session directory path is too long"))
+    {
+        return Fail("overlong session directory did not fail without using a truncated path");
     }
 
     PicoAgent ephemeral;

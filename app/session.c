@@ -5,6 +5,7 @@
 #include "agent.h"
 #include "agent_manager.h"
 #include "json.h"
+#include "path.h"
 #include "settings.h"
 #include "usage.h"
 
@@ -23,9 +24,9 @@ static int EncodeCwd(const char *cwd, char *out, size_t cap)
 {
     char real[4096];
     const char *src = cwd && cwd[0] ? cwd : ".";
-    if (!realpath(src, real))
+    if (!realpath(src, real) && !PicoPath_Format(real, sizeof(real), "%s", src))
     {
-        snprintf(real, sizeof(real), "%s", src);
+        return -1;
     }
     const char *p = real;
     if (*p == '/')
@@ -50,13 +51,13 @@ static int EncodeCwd(const char *cwd, char *out, size_t cap)
     return 0;
 }
 
-static void SessionDir(const PicoApp *app, char *out, size_t cap)
+static bool SessionDir(const PicoApp *app, char *out, size_t cap)
 {
     char cfg[4096];
     char enc[4096];
-    Pico_ConfigDir(cfg, sizeof(cfg));
-    EncodeCwd(app->workspace, enc, sizeof(enc));
-    snprintf(out, cap, "%s/sessions/%s", cfg, enc);
+    return Pico_ConfigDir(cfg, sizeof(cfg)) &&
+           EncodeCwd(app->workspace, enc, sizeof(enc)) == 0 &&
+           PicoPath_Format(out, cap, "%s/sessions/%s", cfg, enc);
 }
 
 static bool IsSessionJsonl(const char *name)
@@ -84,7 +85,10 @@ static int FindLatest(const char *dir, char *out, size_t cap)
             continue;
         }
         char path[4096];
-        snprintf(path, sizeof(path), "%s/%s", dir, n);
+        if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, n))
+        {
+            continue;
+        }
         struct stat st;
         if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
         {
@@ -101,8 +105,7 @@ static int FindLatest(const char *dir, char *out, size_t cap)
     {
         return -1;
     }
-    snprintf(out, cap, "%s/%s", dir, best);
-    return 0;
+    return PicoPath_Format(out, cap, "%s/%s", dir, best) ? 0 : -1;
 }
 
 static void IdFromName(const char *name, char *out, size_t cap)
@@ -280,7 +283,10 @@ int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
         return 0;
     }
     char dir[4096];
-    SessionDir(app, dir, sizeof(dir));
+    if (!SessionDir(app, dir, sizeof(dir)))
+    {
+        return 0;
+    }
     DIR *d = opendir(dir);
     if (!d)
     {
@@ -309,7 +315,10 @@ int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
         }
         PicoSessionInfo *s = &list[n];
         memset(s, 0, sizeof(*s));
-        snprintf(s->path, sizeof(s->path), "%s/%s", dir, ent->d_name);
+        if (!PicoPath_Format(s->path, sizeof(s->path), "%s/%s", dir, ent->d_name))
+        {
+            continue;
+        }
         struct stat st;
         if (stat(s->path, &st) != 0 || !S_ISREG(st.st_mode))
         {
@@ -423,7 +432,11 @@ static char *EventPrefix(const char *type)
 static int CreateNew(PicoApp *app, PicoAgent *agent)
 {
     char dir[4096];
-    SessionDir(app, dir, sizeof(dir));
+    if (!SessionDir(app, dir, sizeof(dir)))
+    {
+        PersistenceFailed(app, agent, "session directory path is too long");
+        return -1;
+    }
     Pico_MkdirP(dir);
     Pico_RandomHex(agent->session_id, sizeof(agent->session_id));
     char stamp[40];
@@ -994,8 +1007,8 @@ void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, c
     {
         char dir[4096];
         char latest[4096];
-        SessionDir(app, dir, sizeof(dir));
-        if (FindLatest(dir, latest, sizeof(latest)) == 0)
+        if (SessionDir(app, dir, sizeof(dir)) &&
+            FindLatest(dir, latest, sizeof(latest)) == 0)
         {
             char canonical[4096];
             if (realpath(latest, canonical) &&

@@ -3,6 +3,7 @@
 #include "agent.h"
 #include "agent_manager.h"
 #include "json.h"
+#include "path.h"
 #include "pico/plugin.h"
 #include "session.h"
 #include "settings.h"
@@ -786,9 +787,9 @@ void PicoSettings_InitAgent(const PicoApp *app, PicoAgent *agent)
     agent->compact_enabled = app ? app->settings.compact_enabled : false;
     agent->compact_ratio = app ? app->settings.compact_ratio : 0.9;
 }
-void Pico_ConfigDir(char *out, size_t cap)
+bool Pico_ConfigDir(char *out, size_t cap)
 {
-    snprintf(out, cap, "%s", g_config_dir);
+    return PicoPath_Format(out, cap, "%s", g_config_dir);
 }
 
 void Pico_MkdirP(const char *path)
@@ -1302,7 +1303,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    char extra[PICO_MAX_TOOLS][8];
+    char extra[PICO_MAX_TOOLS][16];
     while (app.tool_count < PICO_MAX_TOOLS)
     {
         int i = app.tool_count;

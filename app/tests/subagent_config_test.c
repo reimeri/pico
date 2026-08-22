@@ -54,7 +54,10 @@ static int TestSubagentProfileResolution(void)
 static bool WriteConfigProfile(const char *dir, const char *filename, const char *source)
 {
     char path[4096];
-    snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, filename))
+    {
+        return false;
+    }
     FILE *file = fopen(path, "wb");
     if (!file)
     {
@@ -98,9 +101,9 @@ static int TestSubagentProfileDiscovery(void)
     PicoAgentManager_LoadProfiles(app.agents);
 
     char dir[4096];
-    snprintf(dir, sizeof(dir), "%s/subagents", temp);
+    bool directory_path_ok = PicoPath_Format(dir, sizeof(dir), "%s/subagents", temp);
     struct stat st;
-    bool created_empty = stat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
+    bool created_empty = directory_path_ok && stat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
                          pico_subagent_profile_count(&app) == 0;
 
     PicoModel *models = (PicoModel *)realloc(app.models, 2 * sizeof(PicoModel));
@@ -148,9 +151,13 @@ static int TestSubagentProfileDiscovery(void)
     free(review);
 
     char nested[4096];
-    snprintf(nested, sizeof(nested), "%s/nested", dir);
-    Pico_MkdirP(nested);
-    wrote = wrote && WriteConfigProfile(nested, "ignored.json", "{\"purpose\":\"nested\"}");
+    bool nested_path_ok = PicoPath_Format(nested, sizeof(nested), "%s/nested", dir);
+    if (nested_path_ok)
+    {
+        Pico_MkdirP(nested);
+    }
+    wrote = wrote && nested_path_ok &&
+            WriteConfigProfile(nested, "ignored.json", "{\"purpose\":\"nested\"}");
     PicoAgentManager_LoadProfiles(app.agents);
     PicoSubagentProfileInfo exploration_info;
     PicoSubagentProfileInfo review_info;
@@ -164,10 +171,14 @@ static int TestSubagentProfileDiscovery(void)
 
     char exploration_path[4096];
     char review_path[4096];
-    snprintf(exploration_path, sizeof(exploration_path), "%s/exploration.json", dir);
-    snprintf(review_path, sizeof(review_path), "%s/review.json", dir);
-    unlink(exploration_path);
-    unlink(review_path);
+    if (PicoPath_Format(exploration_path, sizeof(exploration_path), "%s/exploration.json", dir))
+    {
+        unlink(exploration_path);
+    }
+    if (PicoPath_Format(review_path, sizeof(review_path), "%s/review.json", dir))
+    {
+        unlink(review_path);
+    }
     bool replacement_written = WriteConfigProfile(
         dir, "replacement.json",
         "{/* jsonc */\"description\":\"Replacement\",\"purpose\":\"New snapshot\","
@@ -188,12 +199,16 @@ static int TestSubagentProfileDiscovery(void)
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
     {
         char cleanup[4096];
-        snprintf(cleanup, sizeof(cleanup), "%s/%s", dir, files[i]);
-        unlink(cleanup);
+        if (PicoPath_Format(cleanup, sizeof(cleanup), "%s/%s", dir, files[i]))
+        {
+            unlink(cleanup);
+        }
     }
     char nested_file[4096];
-    snprintf(nested_file, sizeof(nested_file), "%s/ignored.json", nested);
-    unlink(nested_file);
+    if (PicoPath_Format(nested_file, sizeof(nested_file), "%s/ignored.json", nested))
+    {
+        unlink(nested_file);
+    }
     rmdir(nested);
     PicoApp_Free(&app);
     rmdir(dir);

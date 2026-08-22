@@ -21,12 +21,16 @@ static int TestManagerProfileRegistry(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     char dir[4096];
-    snprintf(dir, sizeof(dir), "%s/subagents", temp);
-    Pico_MkdirP(dir);
     char valid_path[4096];
     char invalid_path[4096];
-    snprintf(valid_path, sizeof(valid_path), "%s/exploration.json", dir);
-    snprintf(invalid_path, sizeof(invalid_path), "%s/broken.json", dir);
+    if (!PicoPath_Format(dir, sizeof(dir), "%s/subagents", temp) ||
+        !PicoPath_Format(valid_path, sizeof(valid_path), "%s/exploration.json", dir) ||
+        !PicoPath_Format(invalid_path, sizeof(invalid_path), "%s/broken.json", dir))
+    {
+        rmdir(temp);
+        return Fail(name, "temporary profile path was too long");
+    }
+    Pico_MkdirP(dir);
     FILE *file = fopen(valid_path, "wb");
     if (file)
     {

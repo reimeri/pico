@@ -4,6 +4,7 @@
 
 #include "agent_manager.h"
 #include "json.h"
+#include "path.h"
 #include "settings.h"
 
 #include <ctype.h>
@@ -211,13 +212,16 @@ void PicoSubagentConfig_Load(PicoAgentManager *manager)
     }
     char config[4096];
     char dir[4096];
-    Pico_ConfigDir(config, sizeof(config));
-    snprintf(dir, sizeof(dir), "%s/subagents", config);
-    Pico_MkdirP(dir);
+    bool directory_path_ok = Pico_ConfigDir(config, sizeof(config)) &&
+                             PicoPath_Format(dir, sizeof(dir), "%s/subagents", config);
+    if (directory_path_ok)
+    {
+        Pico_MkdirP(dir);
+    }
 
     PicoSubagentProfileInfo loaded[PICO_MAX_SUBAGENT_PROFILES];
     int count = 0;
-    DIR *directory = opendir(dir);
+    DIR *directory = directory_path_ok ? opendir(dir) : NULL;
     if (directory)
     {
         struct dirent *entry;

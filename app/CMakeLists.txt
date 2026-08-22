@@ -15,7 +15,37 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 
+set(_pico_policy_version_minimum_defined FALSE)
+if(DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(_pico_policy_version_minimum_defined TRUE)
+    set(_pico_policy_version_minimum "${CMAKE_POLICY_VERSION_MINIMUM}")
+endif()
+set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 FetchContent_MakeAvailable(raylib)
+if(_pico_policy_version_minimum_defined)
+    set(CMAKE_POLICY_VERSION_MINIMUM "${_pico_policy_version_minimum}")
+else()
+    unset(CMAKE_POLICY_VERSION_MINIMUM)
+endif()
+unset(_pico_policy_version_minimum)
+unset(_pico_policy_version_minimum_defined)
+
+target_compile_options(raylib PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wno-unused-result>)
+
+if(MSVC)
+    set(PICO_WARNINGS_AS_ERRORS_OPTION /WX)
+elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    set(PICO_WARNINGS_AS_ERRORS_OPTION -Werror)
+else()
+    set(PICO_WARNINGS_AS_ERRORS_OPTION)
+endif()
+
+function(pico_warnings_are_errors target)
+    if(PICO_WARNINGS_AS_ERRORS_OPTION)
+        target_compile_options(${target} PRIVATE ${PICO_WARNINGS_AS_ERRORS_OPTION})
+    endif()
+endfunction()
 
 add_library(md4c STATIC
     md4c/md4c.c
@@ -58,6 +88,7 @@ add_executable(pico
     third_party/tinyfiledialogs/tinyfiledialogs.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
+pico_warnings_are_errors(pico)
 
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
@@ -91,6 +122,7 @@ if(BUILD_TESTING)
         tests/json_test.c
         json.c)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_json_tests)
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
 
     add_executable(pico_todo_tests
@@ -98,6 +130,7 @@ if(BUILD_TESTING)
         builtins/todo_model.c
         json.c)
     target_include_directories(pico_todo_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_todo_tests)
     add_test(NAME pico_todo_tests COMMAND pico_todo_tests)
 
     add_executable(pico_ask_user_tests
@@ -109,6 +142,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_ask_user_tests)
     target_compile_options(pico_ask_user_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_ask_user_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_ask_user_tests COMMAND pico_ask_user_tests)
@@ -139,6 +173,7 @@ if(BUILD_TESTING)
         ${raylib_SOURCE_DIR}/src/external/glfw/include)
     target_compile_definitions(pico_agent_behavior_tests PRIVATE
         "PICO_SOURCE_ROOT=\"${CMAKE_CURRENT_SOURCE_DIR}/..\"")
+    pico_warnings_are_errors(pico_agent_behavior_tests)
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_agent_behavior_tests PRIVATE raylib CURL::libcurl Threads::Threads)
@@ -154,6 +189,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_session_usage_tests)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
@@ -167,6 +203,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_settings_agent_tests)
     target_compile_options(pico_settings_agent_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_settings_agent_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_settings_agent_tests COMMAND pico_settings_agent_tests)
@@ -181,7 +218,7 @@ add_custom_command(
 foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd)
     add_custom_command(
             TARGET pico POST_BUILD
-            COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99
+            COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99 ${PICO_WARNINGS_AS_ERRORS_OPTION}
                 -I${CMAKE_CURRENT_SOURCE_DIR}/include
                 -I${CMAKE_CURRENT_SOURCE_DIR}
                 -I${CMAKE_CURRENT_SOURCE_DIR}/..

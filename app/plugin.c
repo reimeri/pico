@@ -1,6 +1,7 @@
 #include "pico/plugin.h"
 #include "agent.h"
 #include "agent_manager.h"
+#include "path.h"
 #include "session.h"
 
 #include <dirent.h>
@@ -75,7 +76,10 @@ static void WarnClear(PicoApp *app)
 static int MkdirP(const char *path)
 {
     char buf[4096];
-    snprintf(buf, sizeof(buf), "%s", path);
+    if (!PicoPath_Format(buf, sizeof(buf), "%s", path))
+    {
+        return -1;
+    }
     for (char *p = buf + 1; *p; p++)
     {
         if (*p == '/')
@@ -98,35 +102,29 @@ static const char *HomeDir(void)
     return home && home[0] ? home : ".";
 }
 
-static void ConfigExtDir(char *out, size_t cap)
+static bool ConfigExtDir(char *out, size_t cap)
 {
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (xdg && xdg[0])
     {
-        snprintf(out, cap, "%s/pico/extensions", xdg);
+        return PicoPath_Format(out, cap, "%s/pico/extensions", xdg);
     }
-    else
-    {
-        snprintf(out, cap, "%s/.config/pico/extensions", HomeDir());
-    }
+    return PicoPath_Format(out, cap, "%s/.config/pico/extensions", HomeDir());
 }
 
-static void CacheDir(char *out, size_t cap)
+static bool CacheDir(char *out, size_t cap)
 {
     const char *xdg = getenv("XDG_CACHE_HOME");
     if (xdg && xdg[0])
     {
-        snprintf(out, cap, "%s/pico/ext", xdg);
+        return PicoPath_Format(out, cap, "%s/pico/ext", xdg);
     }
-    else
-    {
-        snprintf(out, cap, "%s/.cache/pico/ext", HomeDir());
-    }
+    return PicoPath_Format(out, cap, "%s/.cache/pico/ext", HomeDir());
 }
 
-static void WorkspaceExtDir(const PicoApp *app, char *out, size_t cap)
+static bool WorkspaceExtDir(const PicoApp *app, char *out, size_t cap)
 {
-    snprintf(out, cap, "%s/.pico/extensions", app->workspace[0] ? app->workspace : ".");
+    return PicoPath_Format(out, cap, "%s/.pico/extensions", app->workspace[0] ? app->workspace : ".");
 }
 
 static unsigned PathHash(const char *s)
@@ -140,21 +138,27 @@ static unsigned PathHash(const char *s)
     return h;
 }
 
-static void SoPathFor(const char *src, time_t mtime, char *out, size_t cap)
+static bool SoPathFor(const char *src, time_t mtime, char *out, size_t cap)
 {
     char cache[4096];
-    CacheDir(cache, sizeof(cache));
+    if (!CacheDir(cache, sizeof(cache)))
+    {
+        return false;
+    }
     const char *base = strrchr(src, '/');
     base = base ? base + 1 : src;
-    snprintf(out, cap, "%s/%08x-%s-%ld-" PICO_VERSION "-%d.so", cache, PathHash(src), base, (long)mtime,
-             PICO_EXT_ABI);
+    return PicoPath_Format(out, cap, "%s/%08x-%s-%ld-" PICO_VERSION "-%d.so", cache, PathHash(src), base,
+                           (long)mtime, PICO_EXT_ABI);
 }
 
 static int CompileExt(const char *src, const char *so, char *err, size_t err_cap)
 {
     char cache[4096];
-    CacheDir(cache, sizeof(cache));
-    MkdirP(cache);
+    if (!CacheDir(cache, sizeof(cache)) || MkdirP(cache) != 0)
+    {
+        snprintf(err, err_cap, "%s: extension cache path is unavailable", src);
+        return -1;
+    }
 
     int fds[2];
     if (pipe(fds) != 0)
@@ -320,7 +324,12 @@ static void LoadUserFile(PicoApp *app, const char *src)
         return;
     }
     char so[4096];
-    SoPathFor(src, st.st_mtime, so, sizeof(so));
+    if (!SoPathFor(src, st.st_mtime, so, sizeof(so)))
+    {
+        pico_status_warn(app, "Extension cache path is too long.");
+        RecordStub(src, st.st_mtime);
+        return;
+    }
     if (access(so, R_OK) != 0)
     {
         char err[8192];
@@ -455,11 +464,15 @@ static void LoadUsers(PicoApp *app)
     }
     char dir[4096];
     int seen = 0;
-    ConfigExtDir(dir, sizeof(dir));
-    MkdirP(dir);
-    WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
-    WorkspaceExtDir(app, dir, sizeof(dir));
-    WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
+    if (ConfigExtDir(dir, sizeof(dir)))
+    {
+        MkdirP(dir);
+        WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
+    }
+    if (WorkspaceExtDir(app, dir, sizeof(dir)))
+    {
+        WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
+    }
 }
 
 void PicoPlugins_Load(PicoApp *app)
@@ -544,11 +557,16 @@ static int CollectSources(const PicoApp *app, char paths[][4096], time_t *mtimes
 {
     CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .n = 0, .cap = cap};
     char dirs[2][4096];
-    ConfigExtDir(dirs[0], sizeof(dirs[0]));
-    WorkspaceExtDir(app, dirs[1], sizeof(dirs[1]));
+    bool valid[2] = {
+        ConfigExtDir(dirs[0], sizeof(dirs[0])),
+        WorkspaceExtDir(app, dirs[1], sizeof(dirs[1])),
+    };
     for (int d = 0; d < 2; d++)
     {
-        WalkExtTree(dirs[d], 0, &ctx.n, cap, CollectWalk, &ctx);
+        if (valid[d])
+        {
+            WalkExtTree(dirs[d], 0, &ctx.n, cap, CollectWalk, &ctx);
+        }
     }
     return ctx.n;
 }

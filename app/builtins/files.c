@@ -3,6 +3,7 @@
 
 #include "pico/plugin.h"
 #include "json.h"
+#include "path.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -285,9 +286,9 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
         {
             snprintf(joined, sizeof(joined), "%s", rel);
         }
-        else
+        else if (!PicoPath_Format(joined, sizeof(joined), "%s/%s", app->workspace, rel))
         {
-            snprintf(joined, sizeof(joined), "%s/%s", app->workspace, rel);
+            continue;
         }
         char resolved[4096];
         if (!realpath(joined, resolved))

@@ -41,14 +41,15 @@ bool PicoFooter_MenuOpen(void)
 
 static const char *AgentStateName(const PicoApp *app)
 {
-    switch (PicoApp_ActiveAgent(app)->state)
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    switch (agent->state)
     {
         case PICO_AGENT_IDLE:
             return "idle";
         case PICO_AGENT_LLM_WAIT:
             return "waiting on model";
         case PICO_AGENT_TOOL_WAIT:
-            return PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)) ? "waiting for you" : "running tool";
+            return PicoAgent_AskUiOpen(agent) ? "waiting for you" : "running tool";
         case PICO_AGENT_COMPACT_WAIT:
             return "compacting";
         case PICO_AGENT_ERROR:
@@ -119,7 +120,7 @@ static int MenuCount(const PicoApp *app)
     }
     if (g_menu == FOOTER_MENU_EFFORT)
     {
-        const PicoModel *m = PicoSettings_ActiveModelConst(app, PicoApp_ActiveAgent(app));
+        const PicoModel *m = PicoSettings_ActiveModelConst(app, PicoApp_ActiveAgentConst(app));
         return m ? m->effort_count : 0;
     }
     return 0;

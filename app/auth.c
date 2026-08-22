@@ -3,6 +3,7 @@
 #include "auth.h"
 #include "agent.h"
 #include "json.h"
+#include "path.h"
 #include "settings.h"
 
 #include <fcntl.h>
@@ -70,11 +71,11 @@ static const char *EffectiveKey(const StoredAuth *e)
     return NULL;
 }
 
-static void AuthPath(char *out, size_t cap)
+static bool AuthPath(char *out, size_t cap)
 {
     char dir[4096];
-    Pico_ConfigDir(dir, sizeof(dir));
-    snprintf(out, cap, "%s/auth.json", dir);
+    return Pico_ConfigDir(dir, sizeof(dir)) &&
+           PicoPath_Format(out, cap, "%s/auth.json", dir);
 }
 
 static StoredAuth *Find(PicoAuthStore *s, const char *provider)
@@ -187,9 +188,11 @@ static bool SaveLocked(PicoAuthStore *s)
 {
     char dir[4096];
     char path[4096];
-    Pico_ConfigDir(dir, sizeof(dir));
+    if (!Pico_ConfigDir(dir, sizeof(dir)) || !AuthPath(path, sizeof(path)))
+    {
+        return false;
+    }
     Pico_MkdirP(dir);
-    AuthPath(path, sizeof(path));
 
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -579,8 +582,10 @@ void PicoAuth_Load(PicoApp *app)
     pthread_mutex_init(&s->mu, NULL);
     app->auth_store = s;
     char path[4096];
-    AuthPath(path, sizeof(path));
-    LoadFile(s, path);
+    if (AuthPath(path, sizeof(path)))
+    {
+        LoadFile(s, path);
+    }
     for (int i = 0; i < s->count; i++)
     {
         FillActive(s->entries[i]);

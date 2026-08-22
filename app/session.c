@@ -187,19 +187,18 @@ static void MakeTitle(char *out, size_t cap, const char *src)
     }
 }
 
-static void ScanSessionFile(const char *path, char *id, size_t id_cap, char *title, size_t title_cap)
+static void ScanSessionFile(const char *path, PicoSessionInfo *info)
 {
-    if (title && title_cap)
+    if (!info)
     {
-        title[0] = '\0';
+        return;
     }
+    info->title[0] = '\0';
+    info->kind = PICO_AGENT_NORMAL;
     FILE *f = fopen(path, "rb");
     if (!f)
     {
-        if (title && title_cap)
-        {
-            snprintf(title, title_cap, "Untitled");
-        }
+        snprintf(info->title, sizeof(info->title), "Untitled");
         return;
     }
     char *buf = NULL;
@@ -225,11 +224,17 @@ static void ScanSessionFile(const char *path, char *id, size_t id_cap, char *tit
         if (type && strcmp(type, "session") == 0)
         {
             char *sid = JsonObjStr(&doc, 0, "id");
-            if (sid && sid[0] && id && id_cap)
+            if (sid && sid[0])
             {
-                snprintf(id, id_cap, "%s", sid);
+                snprintf(info->id, sizeof(info->id), "%s", sid);
             }
             free(sid);
+            char *kind = JsonObjStr(&doc, 0, "kind");
+            if (kind && strcmp(kind, "subagent") == 0)
+            {
+                info->kind = PICO_AGENT_SUBAGENT;
+            }
+            free(kind);
         }
         else if (type && strcmp(type, "message") == 0)
         {
@@ -239,7 +244,7 @@ static void ScanSessionFile(const char *path, char *id, size_t id_cap, char *tit
                 char *display = JsonObjStr(&doc, 0, "display");
                 char *content = JsonObjStr(&doc, 0, "content");
                 const char *src = (display && display[0]) ? display : content;
-                MakeTitle(title, title_cap, src);
+                MakeTitle(info->title, sizeof(info->title), src);
                 got_title = true;
                 free(display);
                 free(content);
@@ -251,9 +256,9 @@ static void ScanSessionFile(const char *path, char *id, size_t id_cap, char *tit
     }
     free(buf);
     fclose(f);
-    if (title && title_cap && !title[0])
+    if (!info->title[0])
     {
-        snprintf(title, title_cap, "Untitled");
+        snprintf(info->title, sizeof(info->title), "Untitled");
     }
 }
 
@@ -272,7 +277,7 @@ static int CmpMtimeDesc(const void *a, const void *b)
     return strcmp(y->path, x->path);
 }
 
-int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
+int PicoSession_List(const PicoApp *app, PicoSessionInfo **out, bool parents_only)
 {
     if (out)
     {
@@ -326,8 +331,8 @@ int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
         }
         s->mtime = st.st_mtime;
         IdFromName(ent->d_name, s->id, sizeof(s->id));
-        ScanSessionFile(s->path, s->id, sizeof(s->id), s->title, sizeof(s->title));
-        if (!s->id[0])
+        ScanSessionFile(s->path, s);
+        if (!s->id[0] || (parents_only && s->kind == PICO_AGENT_SUBAGENT))
         {
             continue;
         }
@@ -1088,7 +1093,7 @@ int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
         return -1;
     }
     PicoSessionInfo *list = NULL;
-    int n = PicoSession_List(app, &list);
+    int n = PicoSession_List(app, &list, false);
     const PicoSessionInfo *found = NULL;
     const PicoSessionInfo *prefix = NULL;
     int prefix_hits = 0;

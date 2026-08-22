@@ -354,6 +354,20 @@ int main(void)
         return Fail("subagent session header did not preserve durable profile metadata");
     }
 
+    PicoSessionInfo *listed = NULL;
+    int listed_n = PicoSession_List(&writer, &listed, true);
+    bool parent_offered = listed_n == 1 && listed &&
+                          strcmp(listed[0].id, writer_agent.session_id) == 0 &&
+                          listed[0].kind == PICO_AGENT_NORMAL;
+    char child_resolved[4096];
+    bool child_by_id = PicoSession_Resolve(&writer, child_agent.session_id, false,
+                                           child_resolved, sizeof(child_resolved)) == 0;
+    free(listed);
+    if (!parent_offered || !child_by_id)
+    {
+        return Fail("/resume listing included a subagent session, or exact child ids stopped resolving");
+    }
+
     PicoApp compacted;
     PicoAgent compacted_agent;
     memset(&compacted, 0, sizeof(compacted));

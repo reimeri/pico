@@ -877,7 +877,7 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     if (FoldEq(cmd, "resume"))
     {
         PicoSessionInfo *list = NULL;
-        int nlist = PicoSession_List(app, &list);
+        int nlist = PicoSession_List(app, &list, true);
         for (int i = 0; i < nlist && n < max; i++)
         {
             const PicoSessionInfo *s = &list[i];

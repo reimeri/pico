@@ -75,6 +75,8 @@ The result identifies the profile, resolved model and effort, status, final answ
 
 Pass the exact previous child `session_id` with the same profile name. Pico reserves and replays that JSONL session, then refreshes purpose, model, effort, and tools from the current profile. This preserves the child's conversation while applying updated policy. A session cannot be open twice or continued under a different profile.
 
+`/resume` autocomplete lists parent sessions only. A child remains openable by typing its session ID.
+
 A child is advertised as resumable only after its session header and delegated task are durably written. `--no-session`, an ephemeral parent, or a persistence failure produces `"resumable": false` and no reusable ID.
 
 ## Reload and errors

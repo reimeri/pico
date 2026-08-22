@@ -9,6 +9,7 @@ typedef struct PicoSessionInfo {
     char path[4096];
     char id[40];
     char title[256];
+    PicoAgentKind kind;
     time_t mtime;
 } PicoSessionInfo;
 
@@ -23,7 +24,8 @@ typedef struct PicoSessionHeader {
 } PicoSessionHeader;
 
 void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, const char *session_file);
-int PicoSession_List(const PicoApp *app, PicoSessionInfo **out);
+/* `/resume` passes parents_only to hide subagents; resolve still lists all. */
+int PicoSession_List(const PicoApp *app, PicoSessionInfo **out, bool parents_only);
 int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id);
 /* Resolve a durable session to a canonical path. Manager callers use exact IDs. */
 int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,

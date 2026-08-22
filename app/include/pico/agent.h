@@ -42,6 +42,18 @@ typedef enum PicoSessionStart {
     PICO_SESSION_NONE,
 } PicoSessionStart;
 
+typedef enum PicoSessionPersistence {
+    PICO_SESSION_EPHEMERAL = 0,
+    PICO_SESSION_DURABLE,
+    PICO_SESSION_FAILED,
+} PicoSessionPersistence;
+
+typedef enum PicoSessionWriteResult {
+    PICO_SESSION_WRITE_SKIPPED = 0,
+    PICO_SESSION_WRITE_OK,
+    PICO_SESSION_WRITE_FAILED,
+} PicoSessionWriteResult;
+
 typedef enum PicoAgentResult {
     PICO_AGENT_RESULT_OK = 0,
     PICO_AGENT_RESULT_INVALID,
@@ -94,6 +106,7 @@ typedef struct PicoAgentInfo {
     char effort[PICO_EFFORT_LEN];
     char activity[256];
 
+    PicoSessionPersistence persistence;
     bool busy;
     bool cancelling;
     bool resumable;

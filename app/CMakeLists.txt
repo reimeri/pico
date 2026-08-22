@@ -63,6 +63,7 @@ find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
 get_filename_component(PICO_DOCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../docs/extend" ABSOLUTE)
+get_filename_component(PICO_USER_DOCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../docs" ABSOLUTE)
 
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -78,7 +79,8 @@ target_compile_definitions(pico PRIVATE
     "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
     "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
     "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\""
-    "PICO_DOCS=\"${PICO_DOCS_DIR}\"")
+    "PICO_DOCS=\"${PICO_DOCS_DIR}\""
+    "PICO_USER_DOCS=\"${PICO_USER_DOCS_DIR}\"")
 
 target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")

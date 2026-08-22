@@ -9,12 +9,6 @@ typedef struct PicoAgentRt PicoAgentRt;
 PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
 const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
 
-typedef enum PicoSessionPersistence {
-    PICO_SESSION_EPHEMERAL = 0,
-    PICO_SESSION_DURABLE,
-    PICO_SESSION_FAILED,
-} PicoSessionPersistence;
-
 struct PicoAgent {
     PicoAgentManager *manager;
     PicoAgentId id;
@@ -54,6 +48,7 @@ struct PicoAgent {
     /* NULL means all registered tools. A non-NULL snapshot is agent-owned. */
     char **allowed_tools;
     int allowed_tool_count;
+    bool tool_policy_valid;
 };
 
 static inline PicoAgent *PicoApp_ActiveAgent(PicoApp *app)

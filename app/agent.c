@@ -2010,7 +2010,60 @@ static void PublishAskSnapshot(PicoAgentRt *rt)
 
 bool PicoAgent_BlocksReload(const PicoAgent *agent)
 {
-    return PicoAgent_IsBusy(agent);
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!rt)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&rt->mu);
+    bool blocked = PicoAgent_IsBusy(agent) || rt->busy || rt->work != PICO_WORK_IDLE ||
+                   rt->event_count > 0 || rt->ask_waiting || rt->pending_count > 0 ||
+                   rt->offered_tool_count > 0 || rt->stream != NULL || rt->think != NULL ||
+                   rt->summary != NULL;
+    pthread_mutex_unlock(&rt->mu);
+    return blocked;
+}
+
+void PicoAgent_PrepareReload(PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!rt || PicoAgent_BlocksReload(agent))
+    {
+        return;
+    }
+    pthread_mutex_lock(&rt->mu);
+    memset(rt->tool_before_hooks, 0, sizeof(rt->tool_before_hooks));
+    rt->tool_before_hook_count = 0;
+    pthread_mutex_unlock(&rt->mu);
+}
+
+bool PicoAgent_RevalidateToolPolicy(const PicoApp *app, PicoAgent *agent)
+{
+    if (!agent)
+    {
+        return false;
+    }
+    bool valid = true;
+    for (int i = 0; app && agent->allowed_tools && i < agent->allowed_tool_count; i++)
+    {
+        bool found = false;
+        for (int t = 0; t < app->tool_count; t++)
+        {
+            if (app->tools[t].name && agent->allowed_tools[i] &&
+                strcmp(app->tools[t].name, agent->allowed_tools[i]) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            valid = false;
+            break;
+        }
+    }
+    agent->tool_policy_valid = valid;
+    return valid;
 }
 
 static void KillToolChild(pid_t pid)
@@ -2212,11 +2265,22 @@ bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec 
 
 void PicoAgent_Compact(PicoApp *app, PicoAgent *agent)
 {
-    if (!app || !agent || !agent->runtime || PicoAgent_IsBusy(agent))
+    if (!app || !agent || !agent->runtime || PicoAgent_IsBusy(agent) ||
+        !PicoAgentManager_AcceptsNewWork(app->agents) || !agent->tool_policy_valid)
     {
         return;
     }
     StartCompact(app, agent);
+}
+
+void PicoAgent_RebindHost(PicoApp *app, PicoAgent *agent, PicoAgentManager *manager)
+{
+    if (!app || !agent || !agent->runtime || PicoAgent_BlocksReload(agent))
+    {
+        return;
+    }
+    agent->manager = manager;
+    RefreshWorkerContext(agent->runtime, app, agent);
 }
 
 PicoAgent *PicoAgent_Create(PicoApp *app)
@@ -2233,6 +2297,7 @@ PicoAgent *PicoAgent_Create(PicoApp *app)
     agent->kind = PICO_AGENT_NORMAL;
     agent->state = PICO_AGENT_IDLE;
     agent->persistence = PICO_SESSION_EPHEMERAL;
+    agent->tool_policy_valid = true;
     PicoSettings_InitAgent(app, agent);
     agent->runtime = CreateRt(app, agent);
     if (!agent->runtime)
@@ -2298,8 +2363,13 @@ void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
     {
         return;
     }
-    if (PicoAgent_IsBusy(agent))
+    if (PicoAgent_IsBusy(agent) || !PicoAgentManager_AcceptsNewWork(app->agents))
     {
+        return;
+    }
+    if (!PicoAgent_RevalidateToolPolicy(app, agent))
+    {
+        pico_status_warn(app, "This agent's restricted tool policy references a tool that is not currently registered.");
         return;
     }
     PicoAgent_DismissError(agent);
@@ -2918,6 +2988,7 @@ void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
     snprintf(out->model, sizeof(out->model), "%s", agent->model);
     snprintf(out->effort, sizeof(out->effort), "%s", agent->effort);
     snprintf(out->activity, sizeof(out->activity), "%s", agent->activity);
+    out->persistence = agent->persistence;
     out->busy = PicoAgent_IsBusy(agent);
     out->cancelling = PicoAgent_CancelRequested(agent);
     out->resumable = agent->persistence == PICO_SESSION_DURABLE && agent->session_id[0];

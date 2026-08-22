@@ -39,7 +39,7 @@ Add a catalog entry with `"provider": "myllm"` or the builtin OpenAI path is use
 
 `PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `effort`, `compact`, `include_tools`, `input_json` / `input_count` (serialized history), `tools` / `tool_count`.
 
-`tools` is the retained effective catalog for this round after agent policy and `pico_add_llm_hook` exclusions. It may be empty or a subset of registered tools. Calls are authorized and resolved against this exact snapshot. Pointers inside each `PicoTool` stay extension-owned; reload is deferred while a runtime retains them.
+`tools` is the retained effective catalog for this round after agent policy and `pico_add_llm_hook` exclusions. It may be empty or a subset of registered tools. Calls are authorized and resolved against this exact snapshot. Pointers inside each `PicoTool` stay extension-owned; reload and workspace replacement are deferred while a live/retired runtime retains them or has undrained events that can start follow-up work.
 
 Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_THINKING_SUMMARY`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
 
@@ -64,3 +64,4 @@ HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_form_encode` in
 - `name` must outlive the extension. Max 16 providers (`PICO_MAX_PROVIDERS`).
 - Look up credentials with `pico_auth_copy_ctx(ctx, ...)` — see `auth.md`.
 - Empty/duplicate call IDs, malformed call arrays, and more than 16 pending calls fail the provider round explicitly.
+- Shutdown gives all provider/tool callbacks one shared deadline. A provider still blocked at expiry is detached; its extension/auth/curl services stay loaded and Pico becomes permanently unusable until process exit.

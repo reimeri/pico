@@ -25,6 +25,9 @@
 #ifndef PICO_DOCS
 #define PICO_DOCS ""
 #endif
+#ifndef PICO_USER_DOCS
+#define PICO_USER_DOCS ""
+#endif
 
 #include "raylib.h"
 
@@ -229,7 +232,7 @@ static void CmdQuit(PicoApp *app, const char *args)
 }
 
 static const char *const kDocTopics[] = {
-    "README", "anatomy", "agents", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
+    "README", "subagents", "anatomy", "agents", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
 };
 
 static void DocsTopicName(char *out, size_t cap, const char *args)
@@ -279,7 +282,14 @@ static void CmdDocs(PicoApp *app, const char *args)
         return;
     }
     char path[4096];
-    snprintf(path, sizeof(path), "%s/%s.md", PICO_DOCS, topic);
+    if (FoldEq(topic, "subagents") && PICO_USER_DOCS[0])
+    {
+        snprintf(path, sizeof(path), "%s/subagents.md", PICO_USER_DOCS);
+    }
+    else
+    {
+        snprintf(path, sizeof(path), "%s/%s.md", PICO_DOCS, topic);
+    }
     size_t len = 0;
     char *src = Pico_ReadFile(path, &len);
     if (!src)

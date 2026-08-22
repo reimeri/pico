@@ -7,6 +7,7 @@ A small C99 AI agent harness with a native chat UI. The core is a loader, agent 
 - Markdown chat UI, composer, and footer
 - OpenAI-compatible models (API key or ChatGPT/`/login`)
 - Workspace tools (`sh`), structured `ask_user` questionnaires, built-in agent TODO tracking, sessions, compaction
+- Concurrent full agents and synchronous named-profile subagent delegation with exact session continuation
 - Hot-reloadable C99 extensions (views, tools, commands, providers)
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 
@@ -47,4 +48,8 @@ cmake -S app --preset release && cmake --build app/build/release
 
 Tests: `ctest --test-dir app/build/debug --output-on-failure`
 
-The cwd is the workspace. `pico -h` lists flags. Sign in with `/login` or `PICO_API_KEY` / `OPENAI_API_KEY`. Extension API: [`docs/extend/`](docs/extend/README.md).
+The cwd is the workspace. `pico -h` lists flags. Sign in with `/login` or `PICO_API_KEY` / `OPENAI_API_KEY`.
+
+Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
+
+F5 and `/reload` reload extensions and profiles after all agent work is quiescent. Workspace changes use the same deferred barrier. Extension API: [`docs/extend/`](docs/extend/README.md).

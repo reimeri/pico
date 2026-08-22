@@ -16,6 +16,7 @@
 static char g_config_dir[4096];
 static int g_restored_value;
 static int g_reset_hooks;
+static char g_status_warning[512];
 
 static int Fail(const char *message)
 {
@@ -48,7 +49,8 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
 
 void pico_status_warn(PicoApp *app, const char *msg)
 {
-    (void)app; (void)msg;
+    (void)app;
+    snprintf(g_status_warning, sizeof(g_status_warning), "%s", msg ? msg : "");
 }
 
 void Pico_MkdirP(const char *path)
@@ -436,11 +438,30 @@ int main(void)
     failed_persistence.persistence = PICO_SESSION_DURABLE;
     snprintf(failed_persistence.session_id, sizeof(failed_persistence.session_id), "not-resumable");
     snprintf(failed_persistence.session_path, sizeof(failed_persistence.session_path), "/dev/full");
-    PicoSession_LogUser(&opened, &failed_persistence, "cannot persist", "cannot persist");
-    if (failed_persistence.persistence != PICO_SESSION_FAILED ||
+    PicoSessionWriteResult failed_write =
+        PicoSession_LogUser(&opened, &failed_persistence, "cannot persist", "cannot persist");
+    if (failed_write != PICO_SESSION_WRITE_FAILED ||
+        failed_persistence.persistence != PICO_SESSION_FAILED ||
+        strcmp(failed_persistence.session_id, "not-resumable") != 0 ||
+        strcmp(failed_persistence.session_path, "/dev/full") != 0 ||
+        !strstr(g_status_warning, "no longer resumable"))
+    {
+        return Fail("persistence failure was not returned and surfaced as non-resumable");
+    }
+    PicoSession_Reset(&opened, &failed_persistence);
+    if (failed_persistence.persistence != PICO_SESSION_DURABLE ||
         failed_persistence.session_id[0] || failed_persistence.session_path[0])
     {
-        return Fail("persistence failure still advertised a resumable session");
+        return Fail("new session did not recover from the prior persistence failure");
+    }
+
+    PicoAgent ephemeral;
+    memset(&ephemeral, 0, sizeof(ephemeral));
+    ephemeral.persistence = PICO_SESSION_EPHEMERAL;
+    if (PicoSession_LogUser(&opened, &ephemeral, "not persisted", "not persisted") !=
+        PICO_SESSION_WRITE_SKIPPED)
+    {
+        return Fail("ephemeral session did not report a skipped write");
     }
 
     char bad_kind_path[4096];

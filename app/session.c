@@ -10,6 +10,8 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -331,32 +333,74 @@ int PicoSession_List(const PicoApp *app, PicoSessionInfo **out)
     return n;
 }
 
-static bool WriteLine(PicoAgent *agent, const char *json)
+static bool WriteAll(int fd, const char *data, size_t len)
 {
-    FILE *f = fopen(agent->session_path, "ab");
-    if (!f)
+    size_t offset = 0;
+    while (offset < len)
     {
+        ssize_t wrote = write(fd, data + offset, len - offset);
+        if (wrote > 0)
+        {
+            offset += (size_t)wrote;
+            continue;
+        }
+        if (wrote < 0 && errno == EINTR)
+        {
+            continue;
+        }
         return false;
     }
-    size_t len = strlen(json);
-    bool ok = fwrite(json, 1, len, f) == len && fputc('\n', f) != EOF &&
-              fflush(f) == 0 && fsync(fileno(f)) == 0;
-    if (fclose(f) != 0)
-    {
-        ok = false;
-    }
-    return ok;
+    return true;
 }
 
-static void PersistenceFailed(PicoApp *app, PicoAgent *agent)
+static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t error_cap)
 {
-    agent->persistence = PICO_SESSION_FAILED;
-    if (app && app->agents)
+    int failure = 0;
+    int fd = open(agent->session_path, O_WRONLY | O_APPEND | O_CREAT, 0600);
+    off_t original_size = -1;
+    if (fd < 0)
     {
-        PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+        failure = errno ? errno : EIO;
     }
-    agent->session_id[0] = '\0';
-    agent->session_path[0] = '\0';
+    else
+    {
+        original_size = lseek(fd, 0, SEEK_END);
+        size_t len = strlen(json);
+        if (!WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) || fsync(fd) != 0)
+        {
+            failure = errno ? errno : EIO;
+            if (original_size >= 0)
+            {
+                int rollback_result = ftruncate(fd, original_size);
+                (void)rollback_result;
+            }
+        }
+        if (close(fd) != 0 && failure == 0)
+        {
+            failure = errno ? errno : EIO;
+        }
+    }
+    if (failure != 0 && error && error_cap > 0)
+    {
+        snprintf(error, error_cap, "%s", strerror(failure));
+    }
+    return failure == 0;
+}
+
+static void PersistenceFailed(PicoApp *app, PicoAgent *agent, const char *reason)
+{
+    if (!agent || agent->persistence == PICO_SESSION_FAILED)
+    {
+        return;
+    }
+    agent->persistence = PICO_SESSION_FAILED;
+    if (app)
+    {
+        char line[4608];
+        snprintf(line, sizeof(line), "Session persistence failed%s%s. This conversation is no longer resumable.",
+                 reason && reason[0] ? ": " : "", reason && reason[0] ? reason : "");
+        pico_status_warn(app, line);
+    }
 }
 
 static char *EventPrefix(const char *type)
@@ -387,14 +431,18 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     char canonical_dir[4096];
     if (!realpath(dir, canonical_dir))
     {
+        PersistenceFailed(app, agent, strerror(errno ? errno : EIO));
         return -1;
     }
-    snprintf(agent->session_path, sizeof(agent->session_path), "%s/%s_%s.jsonl",
-             canonical_dir, stamp, agent->session_id);
+    if ((size_t)snprintf(agent->session_path, sizeof(agent->session_path), "%s/%s_%s.jsonl",
+                         canonical_dir, stamp, agent->session_id) >= sizeof(agent->session_path))
+    {
+        PersistenceFailed(app, agent, "session path is too long");
+        return -1;
+    }
     if (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, agent->session_path))
     {
-        agent->session_id[0] = '\0';
-        agent->session_path[0] = '\0';
+        PersistenceFailed(app, agent, "session path is already reserved");
         return -1;
     }
 
@@ -432,35 +480,52 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    bool wrote = WriteLine(agent, line);
+    if (!line)
+    {
+        PersistenceFailed(app, agent, "out of memory while creating the session header");
+        return -1;
+    }
+    char error[256] = {0};
+    bool wrote = WriteLine(agent, line, error, sizeof(error));
     free(line);
     if (!wrote)
     {
-        PersistenceFailed(app, agent);
+        PersistenceFailed(app, agent, error);
         return -1;
     }
     return 0;
 }
 
-static void AppendLine(PicoApp *app, PicoAgent *agent, const char *json)
+static PicoSessionWriteResult AppendLine(PicoApp *app, PicoAgent *agent, const char *json)
 {
-    if (!app || !agent || agent->persistence == PICO_SESSION_EPHEMERAL ||
-        agent->persistence == PICO_SESSION_FAILED || !json || !json[0])
+    if (!app || !agent || !json || !json[0])
     {
-        return;
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (agent->persistence == PICO_SESSION_EPHEMERAL)
+    {
+        return PICO_SESSION_WRITE_SKIPPED;
+    }
+    if (agent->persistence == PICO_SESSION_FAILED)
+    {
+        return PICO_SESSION_WRITE_FAILED;
     }
     if (!agent->session_path[0] && CreateNew(app, agent) != 0)
     {
-        return;
+        return PICO_SESSION_WRITE_FAILED;
     }
     if (!agent->session_path[0])
     {
-        return;
+        PersistenceFailed(app, agent, "session path was not created");
+        return PICO_SESSION_WRITE_FAILED;
     }
-    if (!WriteLine(agent, json))
+    char error[256] = {0};
+    if (!WriteLine(agent, json, error, sizeof(error)))
     {
-        PersistenceFailed(app, agent);
+        PersistenceFailed(app, agent, error);
+        return PICO_SESSION_WRITE_FAILED;
     }
+    return PICO_SESSION_WRITE_OK;
 }
 
 static void ApplyHeader(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int obj)
@@ -1094,11 +1159,16 @@ void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
     agent->activity[0] = '\0';
     free(agent->compact_summary);
     agent->compact_summary = NULL;
+    if (agent->persistence != PICO_SESSION_EPHEMERAL)
+    {
+        agent->persistence = PICO_SESSION_DURABLE;
+    }
     agent->session_id[0] = '\0';
     agent->session_path[0] = '\0';
 }
 
-void PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content, const char *display)
+PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
+                                             const char *content, const char *display)
 {
     char *pre = EventPrefix("message");
     JsonBuf b;
@@ -1113,16 +1183,18 @@ void PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content, co
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogUsage(PicoApp *app, PicoAgent *agent, int input_tokens, int cached_tokens)
+PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
+                                            int input_tokens, int cached_tokens)
 {
     if (input_tokens <= 0)
     {
-        return;
+        return PICO_SESSION_WRITE_SKIPPED;
     }
     char *pre = EventPrefix("usage");
     JsonBuf b;
@@ -1134,16 +1206,18 @@ void PicoSession_LogUsage(PicoApp *app, PicoAgent *agent, int input_tokens, int 
     JsonBuf_Int(&b, cached_tokens);
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *content)
+PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
+                                                const char *content)
 {
     if (!content || !content[0])
     {
-        return;
+        return PICO_SESSION_WRITE_SKIPPED;
     }
     char *pre = EventPrefix("message");
     JsonBuf b;
@@ -1153,12 +1227,15 @@ void PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *conten
     JsonBuf_String(&b, content);
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *args)
+PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
+                                               const char *call_id, const char *name,
+                                               const char *args)
 {
     char *pre = EventPrefix("tool_call");
     JsonBuf b;
@@ -1172,13 +1249,16 @@ void PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id
     JsonBuf_String(&b, args ? args : "{}");
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *output,
-                               bool is_error, const char *details_json)
+PicoSessionWriteResult PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent,
+                                                 const char *call_id, const char *name,
+                                                 const char *output, bool is_error,
+                                                 const char *details_json)
 {
     char *pre = EventPrefix("tool_result");
     JsonBuf b;
@@ -1199,12 +1279,14 @@ void PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent, const char *call_
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent, const char *summary, int tokens_before)
+PicoSessionWriteResult PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent,
+                                                 const char *summary, int tokens_before)
 {
     char *pre = EventPrefix("compaction");
     JsonBuf b;
@@ -1216,12 +1298,14 @@ void PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent, const char *summa
     JsonBuf_Int(&b, tokens_before);
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogModelChange(PicoApp *app, PicoAgent *agent, const char *model, const char *effort)
+PicoSessionWriteResult PicoSession_LogModelChange(PicoApp *app, PicoAgent *agent,
+                                                  const char *model, const char *effort)
 {
     char *pre = EventPrefix("model_change");
     JsonBuf b;
@@ -1236,12 +1320,14 @@ void PicoSession_LogModelChange(PicoApp *app, PicoAgent *agent, const char *mode
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }
 
-void PicoSession_LogCustom(PicoApp *app, PicoAgent *agent, const char *ext, const char *data_json)
+PicoSessionWriteResult PicoSession_LogCustom(PicoApp *app, PicoAgent *agent,
+                                             const char *ext, const char *data_json)
 {
     char *pre = EventPrefix("custom");
     JsonBuf b;
@@ -1253,7 +1339,8 @@ void PicoSession_LogCustom(PicoApp *app, PicoAgent *agent, const char *ext, cons
     JsonBuf_Puts(&b, data_json && data_json[0] ? data_json : "{}");
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
-    AppendLine(app, agent, line);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     free(pre);
+    return result;
 }

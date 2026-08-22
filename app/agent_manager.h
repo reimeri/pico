@@ -29,6 +29,8 @@ struct PicoAgentManager {
     int profile_count;
     pthread_mutex_t delegation_mu;
     struct PicoDelegationJob *delegations;
+    pthread_mutex_t lifecycle_mu;
+    bool accepting_work;
     bool curl_initialized;
     bool retained_shutdown;
 };
@@ -38,10 +40,19 @@ PicoAgentManager *PicoAgentManager_Create(PicoApp *app);
 bool PicoAgentManager_Destroy(PicoAgentManager *manager);
 void PicoAgentManager_Pump(PicoAgentManager *manager);
 bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager);
+bool PicoAgentManager_AcceptsNewWork(const PicoAgentManager *manager);
+void PicoAgentManager_SetAcceptingWork(PicoAgentManager *manager, bool accepting);
+/* Drop idle runtime snapshots that may contain extension function pointers. */
+void PicoAgentManager_PrepareReload(PicoAgentManager *manager);
+/* Recheck copied restricted policies after the registration set changes. */
+void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager);
+void PicoAgentManager_NotifySessions(PicoAgentManager *manager);
 PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
 const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
 PicoAgent *PicoAgentManager_Find(PicoAgentManager *manager, PicoAgentId id);
 const PicoAgent *PicoAgentManager_FindConst(const PicoAgentManager *manager, PicoAgentId id);
+/* Adopt one unpublished, idle agent during an atomic workspace replacement. */
+bool PicoAgentManager_AdoptInitial(PicoAgentManager *manager, PicoAgent *agent);
 
 bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner,
                                      const char *path);

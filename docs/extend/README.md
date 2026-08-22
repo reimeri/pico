@@ -9,7 +9,7 @@ Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext(
 
 Subfolders are fine. Only `.c` files are loaded (depth 8). Skip with `pico --safe`.
 
-After writing a file, reload happens automatically once the agent is **idle**. F5 or `/reload` also work. A file written during this turn will not load until the turn finishes.
+After writing a file, reload happens automatically once every live and retired runtime is quiescent. F5 or `/reload` use the same barrier. While reload is queued, new turns and delegations are refused, but current work, cancellation, and ask UI keep pumping.
 
 Compile errors and failed tool registrations appear in the overlay. `/docs [topic]` prints these pages into chat.
 
@@ -18,7 +18,7 @@ Compile errors and failed tool registrations appear in the overlay. `/docs [topi
 Read the page that matches the work (`/docs <name>` or the file next to this README):
 
 - `anatomy` — entry point, lifecycle, compile
-- `agents` — agent/session identity, copied snapshots, callback context, concurrency
+- `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
 - `views` — UI in a slot (sidebar, chat, footer, …) and the chat empty-state
 - `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool and LLM interceptors
 - `context` — request-only, non-persistent agent context
@@ -29,7 +29,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `auth` — `/login` `/logout` and credentials
 - `contracts` — threads, ownership, limits, reload
 
-Always read `contracts.md` before shipping an extension.
+Always read `contracts.md` before shipping an extension. For user-facing profile setup and continuation, see [`../subagents.md`](../subagents.md) or `/docs subagents`.
 
 ## Examples
 

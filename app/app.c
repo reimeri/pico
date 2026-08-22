@@ -23,6 +23,13 @@
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts);
 
+static bool g_pico_process_retired;
+
+bool PicoApp_ProcessRetired(void)
+{
+    return g_pico_process_retired;
+}
+
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render)
 {
     if (slot < 0 || slot >= PICO_SLOT_COUNT || !render)
@@ -614,15 +621,15 @@ void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
     PicoAgent_SetLastToolOutput(PicoApp_ActiveAgent(app), output, is_error);
 }
 
-void pico_session_log_custom(PicoApp *app, PicoAgentId agent_id,
-                             const char *ext, const char *data_json)
+PicoSessionWriteResult pico_session_log_custom(PicoApp *app, PicoAgentId agent_id,
+                                                const char *ext, const char *data_json)
 {
     PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, agent_id) : NULL;
     if (!agent)
     {
-        return;
+        return PICO_SESSION_WRITE_FAILED;
     }
-    PicoSession_LogCustom(app, agent, ext, data_json);
+    return PicoSession_LogCustom(app, agent, ext, data_json);
 }
 
 void pico_agent_set_compact_summary(PicoApp *app, PicoAgentId agent_id, char *summary)
@@ -640,9 +647,15 @@ void pico_agent_set_compact_summary(PicoApp *app, PicoAgentId agent_id, char *su
 void PicoApp_Submit(PicoApp *app)
 {
     PicoAgent *active = PicoApp_ActiveAgent(app);
-    if (!active || active->state == PICO_AGENT_LLM_WAIT || active->state == PICO_AGENT_TOOL_WAIT ||
+    if (!app || !PicoAgentManager_AcceptsNewWork(app->agents) ||
+        !active || active->state == PICO_AGENT_LLM_WAIT || active->state == PICO_AGENT_TOOL_WAIT ||
         active->state == PICO_AGENT_COMPACT_WAIT)
     {
+        return;
+    }
+    if (!PicoAgent_RevalidateToolPolicy(app, active))
+    {
+        pico_status_warn(app, "This agent's restricted tool policy references a tool that is not currently registered.");
         return;
     }
 
@@ -719,7 +732,17 @@ bool PicoUi_ModalOpen(const PicoApp *app)
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
                  PicoSessionStart session_start, const char *session_file)
 {
+    if (!app)
+    {
+        return;
+    }
     memset(app, 0, sizeof(*app));
+    if (g_pico_process_retired)
+    {
+        app->terminal_shutdown = true;
+        pico_status_warn(app, "Pico cannot be initialized again after a retained shutdown; exit the process.");
+        return;
+    }
     app->fonts = fonts;
     app->chat_sel.msg = -1;
     app->chat_follow_bottom = true;
@@ -776,7 +799,16 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
 
 void PicoApp_RequestReload(PicoApp *app)
 {
-    PicoPlugins_Reload(app);
+    if (!app || app->terminal_shutdown || g_pico_process_retired)
+    {
+        return;
+    }
+    app->reload_queued = true;
+    PicoAgentManager_SetAcceptingWork(app->agents, false);
+    if (!app->workspace_change_queued && !PicoAgentManager_BlocksReload(app->agents))
+    {
+        PicoPlugins_Reload(app);
+    }
 }
 
 static void FormatHomePath(const char *path, char *out, size_t cap)
@@ -868,13 +900,8 @@ static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out
 
 bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
 {
-    if (!app)
+    if (!app || app->terminal_shutdown || g_pico_process_retired)
     {
-        return false;
-    }
-    if (PicoAgentManager_BlocksReload(app->agents))
-    {
-        PicoOverlay_Notify(app, "Wait until every agent is idle before changing directory.");
         return false;
     }
 
@@ -918,34 +945,119 @@ bool PicoApp_ChangeWorkspace(PicoApp *app, const char *path)
         return false;
     }
 
-    if (!PicoAgentManager_Destroy(app->agents))
-    {
-        PicoOverlay_Notify(app, "A worker is still stopping; workspace change was cancelled.");
-        return false;
-    }
-    app->agents = NULL;
-    snprintf(app->workspace, sizeof(app->workspace), "%s", resolved);
-    PicoSettings_Load(app);
-    app->agents = PicoAgentManager_Create(app);
-    PicoAgentCreateOptions options = {
-        .kind = PICO_AGENT_NORMAL,
-        .session_start = PICO_SESSION_NEW,
-        .select = true,
-    };
-    PicoAgentId new_id = 0;
-    if (!app->agents || pico_agent_create(app, &options, &new_id) != PICO_AGENT_RESULT_OK)
-    {
-        PicoOverlay_Notify(app, "Could not create an agent for the workspace.");
-        return false;
-    }
-    PicoApp_RequestReload(app);
+    snprintf(app->pending_workspace, sizeof(app->pending_workspace), "%s", resolved);
+    app->workspace_change_queued = true;
+    PicoAgentManager_SetAcceptingWork(app->agents, false);
 
     char pretty[400];
     FormatHomePath(resolved, pretty, sizeof(pretty));
     char line[512];
-    snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
+    if (PicoAgentManager_BlocksReload(app->agents))
+    {
+        snprintf(line, sizeof(line), "Workspace change to `%s` queued until all agents are quiescent.", pretty);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "Changing workspace to `%s`…", pretty);
+    }
     PicoOverlay_Notify(app, line);
     return true;
+}
+
+static void WorkspacePreflightFailed(PicoApp *app, const char *message)
+{
+    app->pending_workspace[0] = '\0';
+    app->workspace_change_queued = false;
+    PicoAgentManager_SetAcceptingWork(app->agents, !app->reload_queued);
+    pico_status_warn(app, message);
+}
+
+static void ApplyWorkspaceChange(PicoApp *app)
+{
+    char target[4096];
+    snprintf(target, sizeof(target), "%s", app->pending_workspace);
+    if (!target[0])
+    {
+        app->workspace_change_queued = false;
+        PicoAgentManager_SetAcceptingWork(app->agents, !app->reload_queued);
+        return;
+    }
+
+    /* Stage every allocation needed for a usable replacement before the old
+     * manager or workspace is changed. The staged worker is idle and has no
+     * session or extension-owned state. */
+    PicoAgentManager *replacement = PicoAgentManager_Create(app);
+    if (!replacement)
+    {
+        WorkspacePreflightFailed(app, "Could not prepare an agent manager for the new workspace.");
+        return;
+    }
+    PicoAgent *initial = PicoAgent_Create(app);
+    if (!initial)
+    {
+        (void)PicoAgentManager_Destroy(replacement);
+        WorkspacePreflightFailed(app, "Could not prepare an agent for the new workspace.");
+        return;
+    }
+    PicoAgent_PrepareReload(initial);
+
+    PicoAgentManager *old = app->agents;
+    if (!PicoAgentManager_Destroy(old))
+    {
+        (void)PicoAgent_Destroy(initial);
+        (void)PicoAgentManager_Destroy(replacement);
+        app->terminal_shutdown = true;
+        g_pico_process_retired = true;
+        PicoOverlay_Notify(app, "A worker detached during workspace transition; Pico must now exit.");
+        return;
+    }
+
+    app->agents = replacement;
+    snprintf(app->workspace, sizeof(app->workspace), "%s", target);
+    app->pending_workspace[0] = '\0';
+    app->workspace_change_queued = false;
+    app->reload_queued = true;
+    PicoSettings_Load(app);
+    PicoSettings_InitAgent(app, initial);
+    if (!PicoAgentManager_AdoptInitial(replacement, initial))
+    {
+        (void)PicoAgent_Destroy(initial);
+        app->terminal_shutdown = true;
+        pico_status_warn(app, "Workspace replacement could not publish its prepared agent; Pico must exit.");
+        return;
+    }
+    PicoPlugins_Reload(app);
+    PicoChatSel_Clear(app);
+    memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
+    app->chat_follow_bottom = true;
+    app->chat_overflow = true;
+
+    char pretty[400];
+    FormatHomePath(target, pretty, sizeof(pretty));
+    char line[512];
+    snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
+    PicoOverlay_Notify(app, line);
+}
+
+void PicoApp_PumpLifecycle(PicoApp *app)
+{
+    if (!app || app->terminal_shutdown || g_pico_process_retired)
+    {
+        return;
+    }
+    PicoAgentManager_Pump(app->agents);
+    if (app->workspace_change_queued)
+    {
+        if (!PicoAgentManager_BlocksReload(app->agents))
+        {
+            ApplyWorkspaceChange(app);
+        }
+        return;
+    }
+    if (app->reload_queued && !PicoAgentManager_BlocksReload(app->agents))
+    {
+        PicoPlugins_Reload(app);
+    }
 }
 
 void PicoAgent_ClearMessages(PicoAgent *agent)
@@ -981,12 +1093,22 @@ void PicoApp_ClearMessages(PicoApp *app)
     }
 }
 
-void PicoApp_Free(PicoApp *app)
+PicoAppShutdownResult PicoApp_Free(PicoApp *app)
 {
-    /* A detached worker can still reach registrations and retained host state. */
+    if (!app)
+    {
+        return PICO_APP_SHUTDOWN_CLEAN;
+    }
+    if (g_pico_process_retired)
+    {
+        return PICO_APP_SHUTDOWN_RETAINED;
+    }
+    /* A detached worker can still reach registrations, auth, and its manager. */
     if (!PicoAgentManager_Destroy(app->agents))
     {
-        return;
+        app->terminal_shutdown = true;
+        g_pico_process_retired = true;
+        return PICO_APP_SHUTDOWN_RETAINED;
     }
     app->agents = NULL;
     PicoPlugins_Shutdown(app);
@@ -997,6 +1119,7 @@ void PicoApp_Free(PicoApp *app)
     free(app->models);
     free(app->agent_input);
     memset(app, 0, sizeof(*app));
+    return PICO_APP_SHUTDOWN_CLEAN;
 }
 
 static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
@@ -1110,7 +1233,16 @@ static void UpdateChatFollowFromUserScroll(PicoApp *app, bool over_chat, bool mo
 
 void PicoApp_Frame(PicoApp *app)
 {
-    if (!app || !PicoApp_ActiveAgent(app))
+    if (!app)
+    {
+        return;
+    }
+    if (app->terminal_shutdown)
+    {
+        CloseWindow();
+        return;
+    }
+    if (!PicoApp_ActiveAgent(app))
     {
         return;
     }
@@ -1133,11 +1265,7 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     PicoPlugins_Poll(app);
-    PicoAgentManager_Pump(app->agents);
-    if (app->reload_queued && !PicoAgentManager_BlocksReload(app->agents))
-    {
-        PicoPlugins_Reload(app);
-    }
+    PicoApp_PumpLifecycle(app);
 
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();

@@ -51,7 +51,9 @@ static void PrintUsage(const char *argv0)
             "  models[].base_url                 optional; omit to use the extension default\n"
             "  ~/.config/pico/SYSTEM.md          optional system prompt\n"
             "  <workspace>/AGENTS.md             optional project instructions\n"
-            "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n",
+            "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n"
+            "  ~/.config/pico/subagents/         named JSONC subagent profiles (see /docs subagents)\n"
+            "  F5 or /reload                     reload extensions and profiles after quiescence\n",
             argv0);
 }
 
@@ -138,10 +140,14 @@ int main(int argc, char **argv)
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
-    PicoApp_Free(&app);
+    PicoAppShutdownResult shutdown = PicoApp_Free(&app);
 
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();
+    if (shutdown == PICO_APP_SHUTDOWN_RETAINED)
+    {
+        fprintf(stderr, "Pico retained a blocked worker and is exiting without unloading extensions.\n");
+    }
     if (session_path[0])
     {
         fprintf(stderr, "Resume: ");

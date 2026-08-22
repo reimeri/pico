@@ -33,6 +33,11 @@ typedef enum PicoRole {
     PICO_ROLE_ASSISTANT,
 } PicoRole;
 
+typedef enum PicoAppShutdownResult {
+    PICO_APP_SHUTDOWN_CLEAN = 0,
+    PICO_APP_SHUTDOWN_RETAINED,
+} PicoAppShutdownResult;
+
 typedef enum PicoUiSlot {
     PICO_SLOT_SIDEBAR = 0,
     PICO_SLOT_MAIN,
@@ -369,10 +374,13 @@ typedef struct PicoApp {
     bool debug_enabled;
     bool safe_mode;
     bool reload_queued;
+    bool workspace_change_queued;
+    bool terminal_shutdown;
     const char *hovered_link;
     bool hovered_tool;
     bool hovered_clickable;
     char workspace[4096];
+    char pending_workspace[4096];
     char *status_warn; /* overlay; compile/load and failed pico_add_tool */
     PicoModel *models; /* immutable capabilities and configured defaults */
     int model_count;
@@ -418,15 +426,21 @@ const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider);
 void pico_llm_result_free(PicoLlmResult *r);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id);
-/* Main thread. Logs to the explicit agent's session. */
-void pico_session_log_custom(PicoApp *app, PicoAgentId agent_id,
-                             const char *ext, const char *data_json);
+/* Main thread. Logs to the explicit agent's session and reports durability. */
+PicoSessionWriteResult pico_session_log_custom(PicoApp *app, PicoAgentId agent_id,
+                                                const char *ext, const char *data_json);
 /* ON_COMPACT only. Takes ownership of malloc'd summary; NULL keeps default compaction. */
 void pico_agent_set_compact_summary(PicoApp *app, PicoAgentId agent_id, char *summary);
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
                  PicoSessionStart session_start, const char *session_file);
-void PicoApp_Free(PicoApp *app);
+/* RETAINED means a detached callback still owns execution services. Pico is
+ * permanently retired in this process and the caller must proceed to exit. */
+PicoAppShutdownResult PicoApp_Free(PicoApp *app);
+/* Main-thread lifecycle pump for embedders that do not call PicoApp_Frame. */
+void PicoApp_PumpLifecycle(PicoApp *app);
+/* True after a retained shutdown; plugin and app initialization are rejected. */
+bool PicoApp_ProcessRetired(void);
 void PicoApp_ClearMessages(PicoApp *app);
 void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *markdown);
 void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args);

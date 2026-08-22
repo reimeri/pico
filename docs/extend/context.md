@@ -62,6 +62,6 @@ Parse items with `json.h`. Treat all history strings as read-only and callback-s
 
 - Runs on the main thread immediately before queueing the provider request and receives the target `PicoAgentId`.
 - Maximum 64 hooks (`PICO_MAX_CONTEXT_HOOKS`).
-- `history_json`, every history item, and the effective `tools` catalog are core-owned and valid only during the callback.
+- `history_json`, every history item, and the effective `tools` catalog are core-owned and valid only during the callback. They are copied into the queued provider work before reload can proceed.
 - `extra_context` must be malloc'd; Pico frees it.
 - Do not mutate chat/composer state or call Clay from the callback.

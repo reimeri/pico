@@ -19,7 +19,7 @@ PicoAgentId active = pico_agent_active(app);
 pico_agent_select(app, active);
 ```
 
-`pico_agent_find` returns a copied snapshot by ID. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
+`pico_agent_find` returns a copied snapshot by ID. `PicoAgentInfo.persistence` is `PICO_SESSION_EPHEMERAL`, `PICO_SESSION_DURABLE`, or `PICO_SESSION_FAILED`; `resumable` is true only for a durable identity. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
 
 `pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. The message pointer is invalidated by pumping, transcript mutation, close, or workspace replacement.
 
@@ -73,7 +73,7 @@ pico_agent_set_compact_summary(app, event->agent_id, malloc_briefing);
 
 Pico takes ownership. A stale or mismatched ID is rejected.
 
-`pico_session_log_custom(app, agent_id, "myext", "{...}")` similarly targets an ID explicitly. Prefer replayable tool `details_json` for extension-owned session state.
+`pico_session_log_custom(app, agent_id, "myext", "{...}")` similarly targets an ID explicitly and returns `PICO_SESSION_WRITE_SKIPPED`, `_OK`, or `_FAILED`. Prefer replayable tool `details_json` for extension-owned session state.
 
 ## Worker callback context
 
@@ -99,3 +99,9 @@ Use `pico_tool_ask(ctx, ...)`, `pico_tool_set_child(ctx, pid)`, `pico_auth_copy_
 Main-thread hooks and apply callbacks are serialized, but worker callbacks from different agents may overlap. Tool, before-tool, and provider code must therefore be reentrant. Thread-safe process-global caches are allowed only when their meaning is independent of agent and runtime generation.
 
 Agent/session changes produced by worker code must travel through callback results and be applied on the main thread after generation validation. Pico intentionally provides no generic extension-state subsystem.
+
+## Reload, workspace, and shutdown
+
+Reload and workspace replacement stop accepting external turns/delegations, keep pumping current work and asks, and commit only after a full manager quiescence check. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn.
+
+`PicoApp_Free` returns `PICO_APP_SHUTDOWN_CLEAN` or `PICO_APP_SHUTDOWN_RETAINED`. Retained means one shared shutdown deadline expired and a callback was detached. Pico keeps every service and `.so` that callback can reach, permanently retires Pico in the process, and rejects later app/plugin initialization. The caller must proceed to process exit.

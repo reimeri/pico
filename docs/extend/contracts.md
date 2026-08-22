@@ -2,13 +2,15 @@
 
 Read this before writing an extension. Getting these wrong crashes Pico or silently no-ops.
 
-## Reload waits until idle
+## Reload and workspace quiescence
 
-`PicoPlugins_Reload` queues while any live agent is in `PICO_AGENT_LLM_WAIT`, `PICO_AGENT_TOOL_WAIT`, or `PICO_AGENT_COMPACT_WAIT`, while a delegation request/job is live, **or** while a force-cancelled worker is still inside a tool or provider call. A `.c` or subagent-profile file written in this turn does not load until that work finishes. Tell the user to wait, or use `/reload` after. Polling is ~0.5s; F5 and `/reload` request the same path. Once quiescent, extension registrations and the completely parsed subagent-profile snapshot replace their previous registries.
+`PicoPlugins_Reload` queues while any live or retired runtime has provider/tool work, pending calls, an offered-tool snapshot, a pending ask, undrained events, retained extension callbacks, or a delegation wait/job. A `.c` or subagent-profile file written in this turn does not load until that work finishes. Polling is ~0.5s; F5 and `/reload` request the same path. As soon as reload is queued, Pico refuses new external turns and delegations while continuing to pump existing follow-ups, cancellation, and asks. Once quiescent, idle runtimes release copied extension pointers, registrations are rebuilt, and the completely parsed profile snapshot replaces the old registry. Restricted live agents are revalidated, each live session is announced, and structured tool details are replayed.
+
+`/cd` is also queued, never synchronously waits, and uses the same barrier. `app->workspace` remains unchanged while old agents drain. Pico then destroys the old agent set, switches workspace/settings/registrations, revalidates user-global profiles, and publishes one fresh normal agent as one main-thread transition.
 
 A second Esc force-cancels a stuck turn: the UI goes idle and a new worker starts so the user can keep chatting, but reload still waits for the abandoned worker. That worker may outlive the turn; do not touch Clay, Raylib, or chat/composer state from it.
 
-On process exit, agent shutdown waits about one second. If a worker is still running, Pico retains its heap execution host plus every registration, auth store, builtin state, and user-extension `.so` handle that worker can reach. No extension `shutdown` callback runs and no handle is closed; process exit reclaims the retained state. The stack/UI `PicoApp` is never worker-owned.
+On process exit, every agent, delegation job, and retired runtime shares one absolute deadline of about one second. `PicoApp_Free` returns `PICO_APP_SHUTDOWN_CLEAN` when all workers join. If any callback remains blocked, it returns `PICO_APP_SHUTDOWN_RETAINED`: Pico detaches it and retains the heap execution host plus every registration, auth store, builtin state, and user-extension `.so` handle it can reach. No extension `shutdown`, `dlclose`, retained auth destruction, or curl cleanup occurs. Pico is then permanently retired in that process; later `PicoApp_Init` and plugin lifecycle attempts are rejected, and the caller must proceed to process exit. The stack/UI `PicoApp` is never worker-owned.
 
 `--safe` skips user extensions. Compile errors and failed `pico_add_tool` registrations set `app->status_warn` (overlay). `pico_status_warn` appends a line to that overlay.
 
@@ -61,7 +63,7 @@ Registrations are ignored when a limit is full, arguments are NULL, or the kind/
 - User subagent profiles: `~/.config/pico/subagents/` (or the matching `$XDG_CONFIG_HOME` path)
 - Extension discovery uses regular `.c` files, skips hidden names, and walks to depth 8.
 - Profile discovery uses only direct, regular, non-hidden `*.json` files and parses them as JSONC.
-- `/cd` changes `app->workspace` at runtime: new session, workspace settings, and a plugin reload. Read `app->workspace` when you use it. Assigning the field alone does not reload plugins or start a new session.
+- `/cd` queues a deferred workspace replacement: current work drains, then Pico creates a new session, loads workspace settings/plugins, and updates `app->workspace`. Read the field when you use it. Assigning it directly does not perform a transition.
 
 ## `PicoApp`
 
@@ -69,13 +71,13 @@ The struct is public. Prefer `pico_add_*` and the fields listed in the topic pag
 
 The model catalog in `PicoApp` is immutable while agents run. Each agent owns copied model/effort/context/compaction selection, so changing defaults or replaying a session does not mutate another live agent.
 
-`pico_session_log_custom(app, agent_id, "myext", "{…json…}")` appends a JSONL record to the explicit target on the main thread. Stale or mismatched targets are rejected. Session replay does not dispatch it back to extensions. For replayable tool-owned state, return validated structured `details_json` and register a tool apply callback instead. Apply receives the target ID. Details are replayed chronologically on resume and extension reload; use complete snapshots and make replay application idempotent.
+`pico_session_log_custom(app, agent_id, "myext", "{…json…}")` appends a JSONL record to the explicit target on the main thread and returns `PICO_SESSION_WRITE_SKIPPED`, `_OK`, or `_FAILED`. Skipped means the target is intentionally ephemeral. An open/write/fsync/close failure moves the target to `PICO_SESSION_FAILED`, rolls back a partial final line when the file supports truncation, preserves its ID/path and reservation until reset/close, warns in the overlay, and makes `PicoAgentInfo.resumable` false. Stale targets fail. Session replay does not dispatch custom records back to extensions. For replayable tool-owned state, return validated structured `details_json` and register a tool apply callback instead. Apply receives the target ID. Details are replayed chronologically on resume and extension reload; use complete snapshots and make replay application idempotent.
 
 ## Sessions and delegation
 
 Session JSONL schema version 3 requires a `kind` in every header. A subagent header also requires durable `profile` and `initial_purpose` metadata and may include `parent_session_id`. Pico does not replay older schemas. One manager reservation owns each open session path, and failed replay releases the reservation without publishing an agent.
 
-Fresh named delegation never uses ambient `resume_last`. Continuation resolves an exact session ID, requires the stored and requested profile names to match, and reapplies current profile purpose/model/effort/tools after replay. Only a session whose header and delegated user event were durably written is returned as `resumable`; write failure clears its reusable ID and path.
+Fresh named delegation never uses ambient `resume_last`. Continuation resolves an exact session ID, requires the stored and requested profile names to match, and reapplies current profile purpose/model/effort/tools after replay. Only a session whose header and delegated user event were durably written is returned as `resumable`; write failure preserves diagnostic identity but does not return a reusable ID in the delegation result.
 
 Delegation jobs and child/session ownership survive force cancellation until every worker, manager, and child reference releases them. Parent cancellation wakes the waiting generation immediately and requests child cancellation. A late child terminal event cannot publish to a replacement parent generation.
 

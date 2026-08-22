@@ -35,15 +35,24 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
 void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent);
 void PicoSession_Reset(PicoApp *app, PicoAgent *agent);
 void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent);
-void PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content, const char *display);
-void PicoSession_LogUsage(PicoApp *app, PicoAgent *agent, int input_tokens, int cached_tokens);
-void PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *content);
-void PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name,
-                             const char *args);
-void PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name,
-                               const char *output, bool is_error, const char *details_json);
-void PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent, const char *summary, int tokens_before);
-void PicoSession_LogModelChange(PicoApp *app, PicoAgent *agent, const char *model, const char *effort);
-void PicoSession_LogCustom(PicoApp *app, PicoAgent *agent, const char *ext, const char *data_json);
+PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
+                                             const char *content, const char *display);
+PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
+                                            int input_tokens, int cached_tokens);
+PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
+                                                const char *content);
+PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
+                                               const char *call_id, const char *name,
+                                               const char *args);
+PicoSessionWriteResult PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent,
+                                                 const char *call_id, const char *name,
+                                                 const char *output, bool is_error,
+                                                 const char *details_json);
+PicoSessionWriteResult PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent,
+                                                 const char *summary, int tokens_before);
+PicoSessionWriteResult PicoSession_LogModelChange(PicoApp *app, PicoAgent *agent,
+                                                  const char *model, const char *effort);
+PicoSessionWriteResult PicoSession_LogCustom(PicoApp *app, PicoAgent *agent,
+                                             const char *ext, const char *data_json);
 
 #endif

@@ -22,14 +22,14 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 6). ABI 6 makes worker callbacks context-based and main-thread callbacks agent-targeted; there is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 7). ABI 7 includes context-based concurrent worker callbacks, agent-targeted main-thread callbacks, copied persistence state/write results, and reported terminal shutdown; there is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload.
 - `shutdown` — release extension-owned memory/threads before `dlclose`.
 - `on_frame` — main thread, once per frame, `dt` in seconds.
 
-There is no unregister. Reload clears all registrations and calls `init` again (builtins too).
+There is no unregister. Reload clears all registrations and calls `init` again (builtins too). It then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
 
 ## Directories
 
@@ -51,6 +51,8 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 ## Reload
 
-F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** while the agent is in LLM/tool/compact wait. Tell the user to wait until idle, or run `/reload` after.
+F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** until every live/retired runtime, pending ask, offered catalog, event, and delegation job is quiescent. A queued reload prevents new turns and delegations. Do not cache registration pointers beyond their documented callback lifetime.
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.
+`/cd` queues a workspace transition behind the same barrier; `app->workspace` changes only when the old agent set can be replaced as one main-thread transition.
+
+Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.

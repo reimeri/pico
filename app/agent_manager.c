@@ -93,8 +93,11 @@ PicoAgentManager *PicoAgentManager_Create(PicoApp *app)
     }
     manager->app = app;
     pthread_mutex_init(&manager->delegation_mu, NULL);
+    pthread_mutex_init(&manager->lifecycle_mu, NULL);
+    manager->accepting_work = true;
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
     {
+        pthread_mutex_destroy(&manager->lifecycle_mu);
         pthread_mutex_destroy(&manager->delegation_mu);
         free(manager);
         return NULL;
@@ -232,6 +235,29 @@ static void PublishAgent(PicoAgentManager *manager, PicoAgent *agent, bool selec
     {
         manager->active_id = agent->id;
     }
+}
+
+bool PicoAgentManager_AdoptInitial(PicoAgentManager *manager, PicoAgent *agent)
+{
+    if (!manager || !agent || manager->count != 0 || PicoAgent_IsBusy(agent))
+    {
+        return false;
+    }
+    PicoAgent_RebindHost(manager->app, agent, manager);
+    if (agent->manager != manager)
+    {
+        return false;
+    }
+    agent->kind = PICO_AGENT_NORMAL;
+    agent->parent_id = 0;
+    agent->depth = 0;
+    agent->profile[0] = '\0';
+    agent->purpose[0] = '\0';
+    agent->parent_session_id[0] = '\0';
+    agent->persistence = PICO_SESSION_DURABLE;
+    agent->tool_policy_valid = true;
+    PublishAgent(manager, agent, true);
+    return true;
 }
 
 PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *options,
@@ -433,6 +459,29 @@ void PicoAgentManager_Pump(PicoAgentManager *manager)
     ProcessDelegationTerminals(manager);
 }
 
+bool PicoAgentManager_AcceptsNewWork(const PicoAgentManager *manager)
+{
+    if (!manager)
+    {
+        return true;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&manager->lifecycle_mu);
+    bool accepting = manager->accepting_work && !manager->retained_shutdown;
+    pthread_mutex_unlock((pthread_mutex_t *)&manager->lifecycle_mu);
+    return accepting;
+}
+
+void PicoAgentManager_SetAcceptingWork(PicoAgentManager *manager, bool accepting)
+{
+    if (!manager)
+    {
+        return;
+    }
+    pthread_mutex_lock(&manager->lifecycle_mu);
+    manager->accepting_work = accepting && !manager->retained_shutdown;
+    pthread_mutex_unlock(&manager->lifecycle_mu);
+}
+
 bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager)
 {
     if (!manager)
@@ -460,6 +509,55 @@ bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager)
     return false;
 }
 
+void PicoAgentManager_PrepareReload(PicoAgentManager *manager)
+{
+    if (!manager || PicoAgentManager_BlocksReload(manager))
+    {
+        return;
+    }
+    for (int i = 0; i < manager->count; i++)
+    {
+        PicoAgent_PrepareReload(manager->agents[i]);
+    }
+}
+
+void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager)
+{
+    if (!manager)
+    {
+        return;
+    }
+    for (int i = 0; i < manager->count; i++)
+    {
+        PicoAgent *agent = manager->agents[i];
+        if (!PicoAgent_RevalidateToolPolicy(manager->app, agent))
+        {
+            char line[384];
+            if (agent->profile[0])
+            {
+                snprintf(line, sizeof(line),
+                         "Agent %llu (profile %s) has a restricted tool policy containing an unavailable tool.",
+                         (unsigned long long)agent->id, agent->profile);
+            }
+            else
+            {
+                snprintf(line, sizeof(line),
+                         "Agent %llu has a restricted tool policy containing an unavailable tool.",
+                         (unsigned long long)agent->id);
+            }
+            pico_status_warn(manager->app, line);
+        }
+    }
+}
+
+void PicoAgentManager_NotifySessions(PicoAgentManager *manager)
+{
+    for (int i = 0; manager && i < manager->count; i++)
+    {
+        pico_run_hooks(manager->app, PICO_HOOK_ON_SESSION_RESET, manager->agents[i]->id);
+    }
+}
+
 bool PicoAgentManager_Destroy(PicoAgentManager *manager)
 {
     if (!manager)
@@ -470,6 +568,7 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     {
         return false;
     }
+    PicoAgentManager_SetAcceptingWork(manager, false);
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 1;
@@ -495,7 +594,11 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     }
     if (!clean)
     {
+        pthread_mutex_lock(&manager->lifecycle_mu);
         manager->retained_shutdown = true;
+        manager->accepting_work = false;
+        pthread_mutex_unlock(&manager->lifecycle_mu);
+        manager->app = NULL;
         return false;
     }
     DropDelegations(manager);
@@ -503,6 +606,7 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     {
         curl_global_cleanup();
     }
+    pthread_mutex_destroy(&manager->lifecycle_mu);
     pthread_mutex_destroy(&manager->delegation_mu);
     free(manager);
     return true;
@@ -974,7 +1078,13 @@ static void ProcessDelegationRequests(PicoAgentManager *manager)
         {
             break;
         }
-        if (!StartDelegation(manager, job))
+        if (!PicoAgentManager_AcceptsNewWork(manager))
+        {
+            PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                              "reload or workspace transition is pending", true);
+            RemoveDelegation(manager, job);
+        }
+        else if (!StartDelegation(manager, job))
         {
             RemoveDelegation(manager, job);
         }
@@ -1080,7 +1190,11 @@ char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
         *is_error = true;
     }
     PicoAgentManager *manager = PicoAgentContext_Manager(ctx);
-    if (!manager || !profile || !profile[0] || strlen(profile) > 64 ||
+    if (!manager || !PicoAgentManager_AcceptsNewWork(manager))
+    {
+        return JsonDup("{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"reload or workspace transition is pending\"}");
+    }
+    if (!profile || !profile[0] || strlen(profile) > 64 ||
         !task || !task[0] || strlen(task) > 64 * 1024 ||
         (session_id && strlen(session_id) >= 40))
     {
@@ -1115,11 +1229,28 @@ char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
         DelegationRelease(job);
         return result ? result : JsonDup("{\"status\":\"cancelled\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"parent cancelled delegation\"}");
     }
+    pthread_mutex_lock(&manager->lifecycle_mu);
+    if (!manager->accepting_work || manager->retained_shutdown)
+    {
+        pthread_mutex_unlock(&manager->lifecycle_mu);
+        PicoAgentContext_UnlockLive(ctx);
+        pthread_mutex_lock(&job->mu);
+        job->state = PICO_DELEGATION_ERROR;
+        job->result = DelegationResultJson(job, "error", NULL,
+                                           "reload or workspace transition is pending");
+        job->result_is_error = true;
+        pthread_mutex_unlock(&job->mu);
+        job->refs = 1;
+        char *result = JsonDup(job->result);
+        DelegationRelease(job);
+        return result;
+    }
     pthread_mutex_lock(&manager->delegation_mu);
     PicoDelegationJob **tail = &manager->delegations;
     while (*tail) tail = &(*tail)->next;
     *tail = job;
     pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_unlock(&manager->lifecycle_mu);
     PicoAgentContext_UnlockLive(ctx);
 
     pthread_mutex_lock(&job->mu);

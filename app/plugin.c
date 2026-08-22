@@ -431,6 +431,10 @@ static void ShutdownRange(PicoApp *app, bool users_only)
 
 void PicoPlugins_UnloadUser(PicoApp *app)
 {
+    if (PicoApp_ProcessRetired())
+    {
+        return;
+    }
     ShutdownRange(app, true);
     int w = 0;
     for (int i = 0; i < g_plugin_count; i++)
@@ -460,6 +464,10 @@ static void LoadUsers(PicoApp *app)
 
 void PicoPlugins_Load(PicoApp *app)
 {
+    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired())
+    {
+        return;
+    }
     g_plugin_count = 0;
     pico_clear_registrations(app);
     WarnClear(app);
@@ -469,12 +477,22 @@ void PicoPlugins_Load(PicoApp *app)
 
 void PicoPlugins_Reload(PicoApp *app)
 {
-    if (PicoAgentManager_BlocksReload(app->agents))
+    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired())
     {
-        app->reload_queued = true;
         return;
     }
-    app->reload_queued = false;
+    app->reload_queued = true;
+    PicoAgentManager_SetAcceptingWork(app->agents, false);
+    if (PicoAgentManager_BlocksReload(app->agents))
+    {
+        return;
+    }
+    PicoAgentManager_PrepareReload(app->agents);
+    if (PicoAgentManager_BlocksReload(app->agents))
+    {
+        return;
+    }
+
     PicoPlugins_UnloadUser(app);
     pico_clear_registrations(app);
     WarnClear(app);
@@ -487,11 +505,22 @@ void PicoPlugins_Reload(PicoApp *app)
     }
     LoadUsers(app);
     PicoAgentManager_LoadProfiles(app->agents);
+    PicoAgentManager_RevalidateToolPolicies(app->agents);
+    PicoAgentManager_NotifySessions(app->agents);
     PicoAgentManager_ReplayToolDetails(app->agents);
+    app->reload_queued = false;
+    if (!app->workspace_change_queued)
+    {
+        PicoAgentManager_SetAcceptingWork(app->agents, true);
+    }
 }
 
 void PicoPlugins_Shutdown(PicoApp *app)
 {
+    if (PicoApp_ProcessRetired())
+    {
+        return;
+    }
     ShutdownRange(app, false);
     g_plugin_count = 0;
     pico_clear_registrations(app);
@@ -526,6 +555,11 @@ static int CollectSources(const PicoApp *app, char paths[][4096], time_t *mtimes
 
 void PicoPlugins_Poll(PicoApp *app)
 {
+    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired() || app->reload_queued ||
+        app->workspace_change_queued)
+    {
+        return;
+    }
     if (app->safe_mode)
     {
         return;
@@ -585,6 +619,10 @@ void PicoPlugins_Poll(PicoApp *app)
 
 void PicoPlugins_OnFrame(PicoApp *app, float dt)
 {
+    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired())
+    {
+        return;
+    }
     for (int i = 0; i < g_plugin_count; i++)
     {
         if (g_plugins[i].ext.on_frame)

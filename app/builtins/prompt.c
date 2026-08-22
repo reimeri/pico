@@ -110,8 +110,9 @@ static void PromptRender(PicoApp *app)
     }
 }
 
-static void PromptAfterLayout(PicoApp *app)
+static void PromptAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     (void)app;
     if (!g_open || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {

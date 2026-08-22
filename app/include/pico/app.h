@@ -61,6 +61,7 @@ typedef enum PicoHook {
     PICO_HOOK_ON_CANCEL,
     PICO_HOOK_ON_ERROR,
     PICO_HOOK_ON_SESSION_RESET,
+    PICO_HOOK_ON_AGENT_DESTROY,
     PICO_HOOK_COUNT,
 } PicoHook;
 
@@ -133,7 +134,13 @@ typedef struct PicoScrollbar {
 struct PicoApp;
 
 typedef void (*PicoViewFn)(struct PicoApp *app);
-typedef void (*PicoHookFn)(struct PicoApp *app);
+
+typedef struct PicoHookEvent {
+    PicoHook hook;
+    PicoAgentId agent_id; /* zero only for app-global hooks without an agent target */
+} PicoHookEvent;
+
+typedef void (*PicoHookFn)(struct PicoApp *app, const PicoHookEvent *event);
 
 typedef struct PicoToolResult {
     char *output;       /* malloc; Pico frees */
@@ -141,8 +148,9 @@ typedef struct PicoToolResult {
     bool is_error;
 } PicoToolResult;
 
-typedef void (*PicoToolFn)(struct PicoApp *app, const char *args_json, PicoToolResult *out);
-typedef bool (*PicoToolApplyFn)(struct PicoApp *app, const char *details_json, bool replay);
+typedef void (*PicoToolFn)(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out);
+typedef bool (*PicoToolApplyFn)(struct PicoApp *app, PicoAgentId agent_id,
+                                const char *details_json, bool replay);
 typedef void (*PicoCmdFn)(struct PicoApp *app, const char *args);
 
 typedef struct PicoCompleteItem {
@@ -178,11 +186,6 @@ typedef struct PicoTool {
     PicoToolApplyFn apply; /* optional; main thread after success and during replay */
 } PicoTool;
 
-typedef enum PicoToolHook {
-    PICO_TOOL_BEFORE = 0,
-    PICO_TOOL_AFTER,
-} PicoToolHook;
-
 typedef struct PicoToolEvent {
     const char *name;
     const char *call_id;
@@ -196,12 +199,9 @@ typedef struct PicoToolEvent {
     char *result;             /* BEFORE+deny, or AFTER rewrite; malloc, Pico frees */
 } PicoToolEvent;
 
-typedef void (*PicoToolHookFn)(struct PicoApp *app, PicoToolEvent *ev);
-
-typedef struct PicoToolHookEntry {
-    PicoToolHook kind;
-    PicoToolHookFn fn;
-} PicoToolHookEntry;
+typedef void (*PicoToolBeforeFn)(PicoAgentContext *ctx, PicoToolEvent *event);
+typedef void (*PicoToolAfterFn)(struct PicoApp *app, PicoAgentId agent_id,
+                                PicoToolEvent *event);
 
 typedef struct PicoLlmEvent {
     bool compact;
@@ -213,16 +213,20 @@ typedef struct PicoLlmEvent {
     char *extra_instructions; /* malloc; core appends after this hook and frees */
 } PicoLlmEvent;
 
-typedef void (*PicoLlmHookFn)(struct PicoApp *app, PicoLlmEvent *ev);
+typedef void (*PicoLlmHookFn)(struct PicoApp *app, PicoAgentId agent_id,
+                              PicoLlmEvent *event);
 
 typedef struct PicoContextEvent {
     bool compact;
     const char *const *history_json; /* immutable base history for this request */
     int history_count;
+    const PicoTool *tools; /* final effective catalog for this request */
+    int tool_count;
     char *extra_context; /* optional malloc'd text; Pico appends request-only user context */
 } PicoContextEvent;
 
-typedef void (*PicoContextHookFn)(struct PicoApp *app, PicoContextEvent *ev);
+typedef void (*PicoContextHookFn)(struct PicoApp *app, PicoAgentId agent_id,
+                                  PicoContextEvent *event);
 
 typedef struct PicoCommand {
     const char *name;
@@ -262,6 +266,9 @@ enum {
 
 typedef struct PicoToolAsk {
     uint64_t id;
+    PicoAgentId agent_id;
+    const char *profile;
+    const char *purpose;
     const char *request_json;
 } PicoToolAsk;
 
@@ -297,13 +304,16 @@ typedef struct PicoLlmResult {
     int raw_count;
 } PicoLlmResult;
 
-typedef int (*PicoProviderStreamFn)(struct PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                                    PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out);
+typedef int (*PicoProviderStreamFn)(PicoAgentContext *ctx, const PicoLlmTurn *turn,
+                                    PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta,
+                                    void *user, PicoLlmResult *out);
 
 typedef struct PicoProvider {
     const char *name;
     PicoProviderStreamFn stream;
 } PicoProvider;
+
+typedef void (*PicoAuthLogoutFn)(struct PicoApp *app);
 
 typedef struct PicoAuth {
     const char *provider;
@@ -312,7 +322,7 @@ typedef struct PicoAuth {
      * completions and forwarded verbatim; the provider parses them. */
     const char *verbs;
     PicoCmdFn login;
-    PicoHookFn logout;
+    PicoAuthLogoutFn logout;
 } PicoAuth;
 
 typedef struct PicoSettings {
@@ -335,8 +345,10 @@ typedef struct PicoApp {
     int empty_view_count;
     PicoHookEntry hooks[PICO_MAX_HOOKS];
     int hook_count;
-    PicoToolHookEntry tool_hooks[PICO_MAX_TOOL_HOOKS];
-    int tool_hook_count;
+    PicoToolBeforeFn tool_before_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_before_hook_count;
+    PicoToolAfterFn tool_after_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_after_hook_count;
     PicoLlmHookFn llm_hooks[PICO_MAX_LLM_HOOKS];
     int llm_hook_count;
     PicoContextHookFn context_hooks[PICO_MAX_CONTEXT_HOOKS];
@@ -376,7 +388,8 @@ typedef struct PicoApp {
 void pico_add_view(PicoApp *app, PicoUiSlot slot, int z, PicoViewFn render);
 void pico_add_empty_view(PicoApp *app, PicoEmptyKind kind, int z, PicoViewFn render);
 void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn);
-void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn);
+void pico_add_tool_before_hook(PicoApp *app, PicoToolBeforeFn fn);
+void pico_add_tool_after_hook(PicoApp *app, PicoToolAfterFn fn);
 void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);
 void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn);
 /* Append a line to status_warn (extension-error overlay). */
@@ -386,12 +399,12 @@ bool pico_add_tool(PicoApp *app, const char *name, const char *description, cons
                    PicoToolFn run, PicoToolApplyFn apply);
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process
  * group. Call from the tool (worker thread) after fork; 0 clears. */
-void pico_tool_set_child(PicoApp *app, pid_t pid);
-/* Worker thread, inside PicoToolFn or a PICO_TOOL_BEFORE hook. Validates and
- * copies request_json. Invalid JSON/confirm schema returns an immediate OK
- * error answer. On OK, *answer_json is malloc'd and the caller frees it.
+void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid);
+/* Worker thread, inside PicoToolFn or a before-tool hook. Validates and copies
+ * request_json. Invalid JSON/confirm schema returns an immediate OK error
+ * answer. On OK, *answer_json is malloc'd and the caller frees it.
  * On CANCEL/FAIL, *answer_json is always set to NULL. */
-int pico_tool_ask(PicoApp *app, const char *request_json, char **answer_json);
+int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer_json);
 /* Main thread. False when no live ask exists. request_json is valid until
  * the next PicoAgent_Pump; do not retain it across frames. */
 bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out);
@@ -407,11 +420,12 @@ void pico_add_auth(PicoApp *app, const PicoAuth *a);
 const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider);
 void pico_llm_result_free(PicoLlmResult *r);
 void pico_clear_registrations(PicoApp *app);
-void pico_run_hooks(PicoApp *app, PicoHook hook);
+void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id);
 /* Main thread. Logs to the explicit agent's session. */
-void pico_session_log_custom(PicoApp *app, PicoAgent *agent, const char *ext, const char *data_json);
+void pico_session_log_custom(PicoApp *app, PicoAgentId agent_id,
+                             const char *ext, const char *data_json);
 /* ON_COMPACT only. Takes ownership of malloc'd summary; NULL keeps default compaction. */
-void pico_agent_set_compact_summary(PicoApp *app, char *summary);
+void pico_agent_set_compact_summary(PicoApp *app, PicoAgentId agent_id, char *summary);
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
                  PicoSessionStart session_start, const char *session_file);
@@ -449,8 +463,8 @@ bool Pico_ShortcutPressed(char letter);
 bool Pico_ShortcutRepeat(char letter);
 
 void PicoChat_Render(PicoApp *app);
-void PicoChat_HandlePointer(PicoApp *app);
-void PicoChat_DrawOverlay(PicoApp *app);
+void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event);
+void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event);
 bool PicoChatSel_HasSelection(const PicoApp *app);
 void PicoChatSel_Clear(PicoApp *app);
 void PicoChatSel_Copy(PicoApp *app);
@@ -458,7 +472,7 @@ bool PicoChatSel_PointerOverText(void);
 void PicoComposer_HandleInput(PicoApp *app);
 void PicoComposer_HandlePointer(PicoApp *app);
 void PicoComposer_Render(PicoApp *app);
-void PicoComposer_DrawOverlay(PicoApp *app);
+void PicoComposer_DrawOverlay(PicoApp *app, const PicoHookEvent *event);
 bool PicoComposer_HasSelection(const PicoApp *app);
 void PicoComposer_Copy(PicoApp *app);
 void PicoComposer_SetText(PicoApp *app, const char *text);

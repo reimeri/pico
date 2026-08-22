@@ -247,8 +247,9 @@ static void AppendFileBlock(JsonBuf *b, const char *abs, const char *body)
     JsonBuf_Puts(b, "</file>");
 }
 
-static void FilesBeforeSubmit(PicoApp *app)
+static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     if (app->submit_cancel || !app->composer.text)
     {
         return;

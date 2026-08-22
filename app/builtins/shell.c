@@ -32,7 +32,7 @@ static char *ExtractCommand(const char *args_json)
     return cmd;
 }
 
-static void ShRun(PicoApp *app, const char *args_json, PicoToolResult *out)
+static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
 {
     if (out)
     {
@@ -49,6 +49,8 @@ static void ShRun(PicoApp *app, const char *args_json, PicoToolResult *out)
         free(command);
         return;
     }
+
+    const char *workspace = pico_agent_context_workspace(ctx);
 
     int pipefd[2];
     if (pipe(pipefd) != 0)
@@ -82,9 +84,9 @@ static void ShRun(PicoApp *app, const char *args_json, PicoToolResult *out)
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
-        if (app->workspace[0])
+        if (workspace[0])
         {
-            if (chdir(app->workspace) != 0)
+            if (chdir(workspace) != 0)
             {
                 _exit(127);
             }
@@ -94,7 +96,7 @@ static void ShRun(PicoApp *app, const char *args_json, PicoToolResult *out)
     }
 
     setpgid(pid, pid);
-    pico_tool_set_child(app, pid);
+    pico_tool_set_child(ctx, pid);
     close(pipefd[1]);
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -107,7 +109,7 @@ static void ShRun(PicoApp *app, const char *args_json, PicoToolResult *out)
     close(pipefd[0]);
     int status = 0;
     waitpid(pid, &status, 0);
-    pico_tool_set_child(app, 0);
+    pico_tool_set_child(ctx, 0);
     free(command);
 
     if (b.len > (size_t)(SH_HEAD + SH_TAIL))

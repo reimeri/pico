@@ -83,17 +83,18 @@ void PicoAgent_DismissError(PicoAgent *agent)
     if (agent) { free(agent->error); agent->error = NULL; }
 }
 
-void pico_run_hooks(PicoApp *app, PicoHook hook)
+void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
 {
     if (!app)
     {
         return;
     }
+    PicoHookEvent event = {.hook = hook, .agent_id = agent_id};
     for (int i = 0; i < app->hook_count; i++)
     {
         if (app->hooks[i].hook == hook && app->hooks[i].fn)
         {
-            app->hooks[i].fn(app);
+            app->hooks[i].fn(app, &event);
         }
     }
 }
@@ -214,22 +215,24 @@ void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent)
     }
 }
 
-static void ResetHook(PicoApp *app)
+static void ResetHook(PicoApp *app, const PicoHookEvent *event)
 {
     (void)app;
+    (void)event;
     g_reset_hooks++;
 }
 
-static void ReplayTool(PicoApp *app, const char *args_json, PicoToolResult *out)
+static void ReplayTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
 {
-    (void)app;
+    (void)ctx;
     (void)args_json;
     (void)out;
 }
 
-static bool ReplayApply(PicoApp *app, const char *details_json, bool replay)
+static bool ReplayApply(PicoApp *app, PicoAgentId agent_id, const char *details_json, bool replay)
 {
     (void)app;
+    (void)agent_id;
     if (!replay)
     {
         return false;

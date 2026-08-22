@@ -7,9 +7,10 @@
 #include "pico/plugin.h"
 #include "json.h"
 
-static void ExtraLlm(PicoApp *app, PicoLlmEvent *ev)
+static void ExtraLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
 {
     (void)app;
+    (void)agent_id;
     ev->extra_instructions = JsonDup("Prefer short answers.");
 }
 

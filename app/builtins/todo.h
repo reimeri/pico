@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 
-bool PicoTodo_IsExpanded(void);
+struct PicoApp;
+bool PicoTodo_IsExpanded(const struct PicoApp *app);
 
 #endif

@@ -437,7 +437,8 @@ static void ApplyHeader(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int 
     free(key);
 }
 
-static void ApplyToolDetails(PicoApp *app, const char *name, const char *details, bool is_error)
+static void ApplyToolDetails(PicoApp *app, PicoAgent *agent, const char *name,
+                             const char *details, bool is_error)
 {
     size_t details_len = details ? strlen(details) : 0;
     if (!app || is_error || !name || !details || details_len > PICO_TOOL_DETAILS_MAX ||
@@ -452,7 +453,7 @@ static void ApplyToolDetails(PicoApp *app, const char *name, const char *details
         {
             if (tool->apply)
             {
-                (void)tool->apply(app, details, true);
+                (void)tool->apply(app, agent->id, details, true);
             }
             return;
         }
@@ -528,7 +529,7 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         {
             details = JsonRawDup(doc, details_tok);
         }
-        ApplyToolDetails(app, name, details, is_error);
+        ApplyToolDetails(app, agent, name, details, is_error);
         PicoAgent_SetLastToolOutput(agent, output, is_error);
         if (into_input)
         {
@@ -715,7 +716,7 @@ void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
             {
                 details = JsonRawDup(&doc, details_tok);
             }
-            ApplyToolDetails(app, name, details, is_error);
+            ApplyToolDetails(app, agent, name, details, is_error);
             free(name);
             free(details);
         }
@@ -812,7 +813,7 @@ void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
     {
         return;
     }
-    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET);
+    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, agent->id);
     PicoAgent_DismissError(agent);
     PicoAgent_ClearMessages(agent);
     PicoAgent_ClearInput(agent);

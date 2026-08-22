@@ -2,83 +2,106 @@
 
 Three families:
 
-- **Notifications** — `pico_add_hook`. No payload: `void (*)(PicoApp *)`. Main thread.
-- **Interceptors** — `pico_add_tool_hook` / `pico_add_llm_hook`. Event struct, can veto or rewrite. See below and `tools.md`.
-- **Request context** — `pico_add_context_hook`. Appends non-persistent context; see [context](context.md).
+- **Notifications** — `pico_add_hook`. Main thread, with a `PicoHookEvent` target.
+- **Tool interceptors** — `pico_add_tool_before_hook` and `pico_add_tool_after_hook`.
+- **LLM/request context** — `pico_add_llm_hook` and `pico_add_context_hook`, with a target agent ID.
 
 ```c
 pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
-pico_add_tool_hook(app, PICO_TOOL_BEFORE, MyBeforeTool);
+pico_add_tool_before_hook(app, MyBeforeTool);
+pico_add_tool_after_hook(app, MyAfterTool);
 pico_add_llm_hook(app, MyBeforeLlm);
 ```
 
-Notification hooks run in registration order. Max 64 (`PICO_MAX_HOOKS`).
+Callbacks run in registration order. Each family has its corresponding `PICO_MAX_*_HOOKS` limit.
 
-## Notification kinds
+## Notifications
 
-All of these run on the main thread.
+```c
+static void MyHook(PicoApp *app, const PicoHookEvent *event)
+{
+    PicoAgentId target = event->agent_id;
+}
+```
 
-- `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. Hit-testing, pointer.
-- `PICO_HOOK_AFTER_RENDER` — after `Clay_Raylib_Render`. Overlay drawing (Raylib).
-- `PICO_HOOK_BEFORE_SUBMIT` — user pressed send, before a message is added. Intercept `/commands`, rewrite prompt.
-- `PICO_HOOK_ON_SUBMIT` — after the user message is logged and the agent turn started.
-- `PICO_HOOK_ON_MESSAGE` — after `PicoApp_AddMessage`.
-- `PICO_HOOK_ON_COMPACT` — compaction starting. Custom briefing.
-- `PICO_HOOK_AFTER_COMPACT` — history was replaced with a briefing. The active agent snapshot remains `PICO_AGENT_COMPACT_WAIT` until `ON_TURN_END`.
-- `PICO_HOOK_ON_TURN_END` — the agent is idle after a finished turn. Not fired on cancel or error. Compact is not idle; this waits until compaction completes.
-- `PICO_HOOK_ON_CANCEL` — the user cancelled the turn (Esc / force-cancel). State is idle. Distinct from tool-hook deny.
-- `PICO_HOOK_ON_ERROR` — the active `PicoAgentInfo.state` is `PICO_AGENT_ERROR`.
-- `PICO_HOOK_ON_SESSION_RESET` — a new, resumed, ephemeral, or changed-workspace session is starting. Clear session-scoped extension state. Session replay apply callbacks run afterward.
+All notifications run on the main thread. Agent-scoped notifications carry the affected ID; layout/render and submit hooks carry the active ID.
+
+- `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. App-global UI work; target is active agent.
+- `PICO_HOOK_AFTER_RENDER` — after `Clay_Raylib_Render`. App-global UI work; target is active agent.
+- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the global composer submit for the active agent.
+- `PICO_HOOK_ON_SUBMIT` — the target user message was logged and its turn started.
+- `PICO_HOOK_ON_MESSAGE` — a message was added to the target transcript.
+- `PICO_HOOK_ON_COMPACT` — target compaction is starting.
+- `PICO_HOOK_AFTER_COMPACT` — target history was replaced with a briefing.
+- `PICO_HOOK_ON_TURN_END` — target became idle after a completed turn, not cancel/error.
+- `PICO_HOOK_ON_CANCEL` — target turn was cancelled.
+- `PICO_HOOK_ON_ERROR` — target entered `PICO_AGENT_ERROR`.
+- `PICO_HOOK_ON_SESSION_RESET` — target starts a new/resumed/ephemeral session; clear only that ID's session state.
+- `PICO_HOOK_ON_AGENT_DESTROY` — target is about to become invalid; remove its ID-keyed extension state.
 
 ## BEFORE_SUBMIT
 
-`PicoApp_Submit` clears `submit_cancel` and `agent_input`, then runs this hook.
-
-- Set `app->submit_cancel = true` to swallow the send (slash commands do this).
-- Set `app->agent_input` to a malloc'd string to send that text to the agent instead of the composer. The display still uses composer text. Pico frees `agent_input` after the turn starts.
-
-If any hook sets `submit_cancel`, later hooks still run, then submit returns without starting the agent.
-
-The builtin `commands` extension dispatches `/name` here. The builtin `files` extension expands `@path` into `agent_input`.
+`PicoApp_Submit` clears `submit_cancel` and `agent_input`, then runs the hook. Set `app->submit_cancel = true` to swallow the send. Set `app->agent_input` to a malloc'd replacement sent to the model; the composer text remains the display text and Pico frees the replacement.
 
 ## ON_COMPACT
 
-Call `pico_agent_set_compact_summary(app, briefing)` with a malloc'd briefing to skip the default LLM compact. Pico takes ownership. Do not call it outside `PICO_HOOK_ON_COMPACT`; leave it uncalled (or pass NULL) to keep the default.
+```c
+static void OnCompact(PicoApp *app, const PicoHookEvent *event)
+{
+    char *briefing = /* malloc */;
+    pico_agent_set_compact_summary(app, event->agent_id, briefing);
+}
+```
 
-`PICO_HOOK_AFTER_COMPACT` runs after that briefing is applied (custom or LLM). Then `PICO_HOOK_ON_TURN_END` if the agent goes idle.
+Call only during `PICO_HOOK_ON_COMPACT`. Pico takes ownership. A stale/mismatched ID is rejected and the string is freed.
 
-## Tool interceptors
+## Before-tool interceptor
 
-`pico_add_tool_hook(app, kind, fn)` with `PICO_TOOL_BEFORE` or `PICO_TOOL_AFTER`. Max 64 (`PICO_MAX_TOOL_HOOKS`). Callback is `void (*)(PicoApp *, PicoToolEvent *)`.
+```c
+static void Before(PicoAgentContext *ctx, PicoToolEvent *event)
+{
+    /* worker thread; callback-scoped ctx */
+}
 
-`PicoToolEvent`:
+pico_add_tool_before_hook(app, Before);
+```
 
-- `name`, `call_id`, `args_json` — current call; core-owned
-- `args_json_out` — BEFORE only: malloc'd rewrite; Pico frees. Later BEFORE hooks and the tool see the new args
-- `deny` — BEFORE only: skip remaining BEFORE hooks and do not call `run`
-- `output` — AFTER only: current output, including rewrites from earlier AFTER hooks; core-owned
-- `details_json` — AFTER only: validated structured details from the executed tool; core-owned and read-only
-- `executed` / `is_error` — AFTER only: outcome metadata. Denied calls have `executed = false` and `is_error = true`
-- `result` — malloc'd. BEFORE: used only with `deny` (default `User denied this tool.`). AFTER: replaces the output sent to the model
+Before hooks run on the worker immediately before the offered tool. They may rewrite `args_json_out`, set `deny`, set a malloc'd denial `result`, or call `pico_tool_ask(ctx, ...)`. First deny stops later before hooks. Cancellation wins over denial.
 
-**BEFORE** runs on the worker, in the tool slot, before `run`. Its `PicoApp *` is the restricted heap execution-host view described in [agents](agents.md), has no active agent/UI/session state, and must not be retained. You may call `pico_tool_ask`. First `deny` wins. After the hooks return, core checks cancel: Esc/`PICO_ASK_CANCEL` wins over deny and still does not call `run`. Overlay Deny is not Esc — set `deny` yourself (see `examples/permit_tool.c`).
+The callback may overlap worker callbacks for other agents. Do not use Clay/UI or mutate main-thread extension state.
 
-**AFTER** runs on the main thread when a result is about to go to the model (allow and deny). Skipped on turn cancel. `args_json` is read-only. Non-NULL `result` replaces output; later AFTER hooks see the new text.
+## After-tool interceptor
 
-Do not use Clay from BEFORE. Permission UI goes through `pico_tool_ask` + overlay, same as a tool. Structured details are applied before AFTER hooks; AFTER hooks can rewrite visible output but cannot rewrite authoritative details.
+```c
+static void After(PicoApp *app, PicoAgentId agent_id, PicoToolEvent *event)
+{
+    /* serialized main thread */
+}
+
+pico_add_tool_after_hook(app, After);
+```
+
+After hooks run on the main thread after structured details have been applied. A malloc'd `event->result` rewrites model-visible output; later hooks see the rewrite. They are skipped on turn cancellation.
+
+`PicoToolEvent` fields:
+
+- `name`, `call_id`, `args_json` — current call, core-owned.
+- `args_json_out` — before only; malloc'd replacement.
+- `deny` / `result` — before denial.
+- `output`, `details_json`, `executed`, `is_error` — after outcome.
+- `result` — after only; malloc'd output replacement.
+
+Hidden or unoffered calls invoke neither before nor after hooks.
 
 ## LLM interceptor
 
-`pico_add_llm_hook(app, fn)`. Max 64 (`PICO_MAX_LLM_HOOKS`). Main thread, every `QueueLlm` including compact.
+```c
+static void Llm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *event)
+{
+    event->extra_instructions = JsonDup("Prefer short answers.");
+}
+```
 
-`PicoLlmEvent`:
+LLM hooks run on the serialized main thread for every request, including compaction. They see only tools permitted by the agent policy. Set `exclude[i] = true` to hide a tool from this request. `extra_instructions` is malloc'd and appended for later hooks.
 
-- `compact`, `include_tools` — read-only. When `include_tools` is false, `exclude` is NULL and the catalog is omitted
-- `tools` / `tool_count` — current catalog
-- `exclude` — set `exclude[i] = true` to drop that tool from this round
-- `instructions` — current blob (core-owned)
-- `extra_instructions` — malloc'd; Pico appends it after this hook (`\n\n`) and frees it. Later hooks see the accumulated blob
-
-The provider receives a filtered copy of the catalog (`turn.tools`), not necessarily `app->tools`. Example: `examples/extra_instructions.c`.
-
-`/show-prompt` runs the same hooks with `compact = false` and `include_tools = true`, so the modal matches the next normal turn's system instructions. Request-context hooks are separate and are not shown there.
+The provider receives a retained copy of the final catalog. `/show-prompt` runs the same hooks with the active target.

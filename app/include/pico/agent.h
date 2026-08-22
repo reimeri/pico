@@ -53,4 +53,15 @@ typedef struct PicoAgentInfo {
 PicoAgentId pico_agent_id(const PicoAgent *agent);
 bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out);
 
+/* Worker callback context. All returned strings are read-only and valid only
+ * for the duration of the callback that received ctx. */
+PicoAgentId pico_agent_context_id(const PicoAgentContext *ctx);
+uint64_t pico_agent_context_generation(const PicoAgentContext *ctx);
+const char *pico_agent_context_workspace(const PicoAgentContext *ctx);
+const char *pico_agent_context_session_id(const PicoAgentContext *ctx);
+const char *pico_agent_context_profile(const PicoAgentContext *ctx);
+const char *pico_agent_context_purpose(const PicoAgentContext *ctx);
+bool pico_agent_context_safe_mode(const PicoAgentContext *ctx);
+bool pico_agent_context_cancelled(const PicoAgentContext *ctx);
+
 #endif

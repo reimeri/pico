@@ -82,19 +82,22 @@ void pico_add_hook(PicoApp *app, PicoHook hook, PicoHookFn fn)
     app->hook_count++;
 }
 
-void pico_add_tool_hook(PicoApp *app, PicoToolHook kind, PicoToolHookFn fn)
+void pico_add_tool_before_hook(PicoApp *app, PicoToolBeforeFn fn)
 {
-    if (!app || !fn || app->tool_hook_count >= PICO_MAX_TOOL_HOOKS)
+    if (!app || !fn || app->tool_before_hook_count >= PICO_MAX_TOOL_HOOKS)
     {
         return;
     }
-    if (kind != PICO_TOOL_BEFORE && kind != PICO_TOOL_AFTER)
+    app->tool_before_hooks[app->tool_before_hook_count++] = fn;
+}
+
+void pico_add_tool_after_hook(PicoApp *app, PicoToolAfterFn fn)
+{
+    if (!app || !fn || app->tool_after_hook_count >= PICO_MAX_TOOL_HOOKS)
     {
         return;
     }
-    app->tool_hooks[app->tool_hook_count].kind = kind;
-    app->tool_hooks[app->tool_hook_count].fn = fn;
-    app->tool_hook_count++;
+    app->tool_after_hooks[app->tool_after_hook_count++] = fn;
 }
 
 void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn)
@@ -301,8 +304,10 @@ void pico_clear_registrations(PicoApp *app)
     app->empty_view_count = 0;
     memset(app->hooks, 0, sizeof(app->hooks));
     app->hook_count = 0;
-    memset(app->tool_hooks, 0, sizeof(app->tool_hooks));
-    app->tool_hook_count = 0;
+    memset(app->tool_before_hooks, 0, sizeof(app->tool_before_hooks));
+    app->tool_before_hook_count = 0;
+    memset(app->tool_after_hooks, 0, sizeof(app->tool_after_hooks));
+    app->tool_after_hook_count = 0;
     memset(app->llm_hooks, 0, sizeof(app->llm_hooks));
     app->llm_hook_count = 0;
     memset(app->context_hooks, 0, sizeof(app->context_hooks));
@@ -319,13 +324,18 @@ void pico_clear_registrations(PicoApp *app)
     app->auth_count = 0;
 }
 
-void pico_run_hooks(PicoApp *app, PicoHook hook)
+void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
 {
+    if (!app)
+    {
+        return;
+    }
+    PicoHookEvent event = {.hook = hook, .agent_id = agent_id};
     for (int i = 0; i < app->hook_count; i++)
     {
         if (app->hooks[i].hook == hook && app->hooks[i].fn)
         {
-            app->hooks[i].fn(app);
+            app->hooks[i].fn(app, &event);
         }
     }
 }
@@ -425,7 +435,7 @@ void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const c
     }
     msg->doc = MdDocument_ParseEx(markdown ? markdown : "", len,
                                   role == PICO_ROLE_USER ? MD_PARSE_PRESERVE_NEWLINES : MD_PARSE_DEFAULT);
-    pico_run_hooks(app, PICO_HOOK_ON_MESSAGE);
+    pico_run_hooks(app, PICO_HOOK_ON_MESSAGE, agent->id);
 }
 
 void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text)
@@ -603,19 +613,21 @@ void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
     PicoAgent_SetLastToolOutput(PicoApp_ActiveAgent(app), output, is_error);
 }
 
-void pico_session_log_custom(PicoApp *app, PicoAgent *agent, const char *ext, const char *data_json)
+void pico_session_log_custom(PicoApp *app, PicoAgentId agent_id,
+                             const char *ext, const char *data_json)
 {
-    if (!app || !agent || agent != PicoApp_ActiveAgent(app))
+    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    if (!agent || agent->id != agent_id)
     {
         return;
     }
     PicoSession_LogCustom(app, agent, ext, data_json);
 }
 
-void pico_agent_set_compact_summary(PicoApp *app, char *summary)
+void pico_agent_set_compact_summary(PicoApp *app, PicoAgentId agent_id, char *summary)
 {
     PicoAgent *agent = PicoApp_ActiveAgent(app);
-    if (!agent)
+    if (!agent || agent->id != agent_id)
     {
         free(summary);
         return;
@@ -664,7 +676,7 @@ void PicoApp_Submit(PicoApp *app)
     free(app->agent_input);
     app->agent_input = NULL;
     app->submit_cancel = false;
-    pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT);
+    pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT, app->agent->id);
     if (app->submit_cancel)
     {
         free(app->agent_input);
@@ -688,7 +700,7 @@ void PicoApp_Submit(PicoApp *app)
     }
     free(app->agent_input);
     app->agent_input = NULL;
-    pico_run_hooks(app, PICO_HOOK_ON_SUBMIT);
+    pico_run_hooks(app, PICO_HOOK_ON_SUBMIT, app->agent->id);
 }
 
 void PicoApp_Cancel(PicoApp *app)
@@ -734,7 +746,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
         return;
     }
     PicoPlugins_Load(app);
-    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET);
+    pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, app->agent->id);
     PicoSession_Start(app, app->agent, session_start, session_file);
 }
 
@@ -933,6 +945,10 @@ void PicoApp_Free(PicoApp *app)
 {
     /* A detached worker can still reach any public PicoApp field, registered
      * callback, or builtin state. Process exit will reclaim all of it. */
+    if (app->agent)
+    {
+        pico_run_hooks(app, PICO_HOOK_ON_AGENT_DESTROY, app->agent->id);
+    }
     if (!PicoAgent_Destroy(app->agent))
     {
         return;
@@ -1093,7 +1109,7 @@ void PicoApp_Frame(PicoApp *app)
     bool had_exts = PicoExts_IsOpen();
     bool had_prompt = PicoPrompt_IsOpen();
     bool had_footer = PicoFooter_MenuOpen();
-    bool had_todo = PicoTodo_IsExpanded();
+    bool had_todo = PicoTodo_IsExpanded(app);
     PicoPlugins_OnFrame(app, GetFrameTime());
     if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_todo &&
         IsKeyPressed(KEY_ESCAPE))
@@ -1139,7 +1155,7 @@ void PicoApp_Frame(PicoApp *app)
     app->chat_overflow =
         scroll_data.found && scroll_data.contentDimensions.height > scroll_data.scrollContainerDimensions.height + 0.5f;
 
-    pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT);
+    pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, app->agent ? app->agent->id : 0);
 
     if (app->hovered_link || app->hovered_tool || app->hovered_clickable)
     {
@@ -1180,6 +1196,6 @@ void PicoApp_Frame(PicoApp *app)
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
-    pico_run_hooks(app, PICO_HOOK_AFTER_RENDER);
+    pico_run_hooks(app, PICO_HOOK_AFTER_RENDER, app->agent ? app->agent->id : 0);
     EndDrawing();
 }

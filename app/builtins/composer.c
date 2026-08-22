@@ -1021,8 +1021,9 @@ void PicoComposer_Render(PicoApp *app)
     }
 }
 
-void PicoComposer_DrawOverlay(PicoApp *app)
+void PicoComposer_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     PicoComposer *c = &app->composer;
     ComposerView v = GetComposerView(app);
     if (!v.found)
@@ -1086,8 +1087,9 @@ void PicoComposer_DrawOverlay(PicoApp *app)
     EndScissorMode();
 }
 
-static void ComposerAfterLayout(PicoApp *app)
+static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     ComposerView v = GetComposerView(app);
     if (v.wrap_width > 10)
     {

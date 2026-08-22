@@ -19,6 +19,12 @@ static const char kBriefPrompt[] =
     "Handoff brief: goals, constraints, progress, decisions, next steps, exact values; omit noise. "
     "Return text, not a tool call.";
 
+static pthread_mutex_t g_refresh_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_refresh_cv = PTHREAD_COND_INITIALIZER;
+static bool g_refreshing;
+static PicoLlmCancelFn g_refresh_owner_cancel;
+static void *g_refresh_owner_user;
+
 static void ResolveUrl(const char *base, char *out, size_t cap)
 {
     const char *src = base && base[0] ? base : kDefaultBase;
@@ -1079,7 +1085,8 @@ static char *HttpDetail(const char *body, const char *err, long http)
     return JsonDup(buf);
 }
 
-static bool ApplyTokenBody(PicoApp *app, PicoAuthEntry *auth, const char *body)
+static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
+                           const char *body)
 {
     JsonDoc doc;
     if (!body || JsonParse(&doc, body, strlen(body)) != 0)
@@ -1100,7 +1107,9 @@ static bool ApplyTokenBody(PicoApp *app, PicoAuthEntry *auth, const char *body)
         const char *use_refresh = (refresh && refresh[0]) ? refresh : (auth ? auth->refresh_token : NULL);
         char *account = PickAccountId(access, id_token, auth ? auth->account_id : NULL);
         long expires_at = (long)time(NULL) + expires_in;
-        if (!pico_auth_set_oauth(app, "openai", access, use_refresh, account, expires_at))
+        bool saved = ctx ? pico_auth_set_oauth_ctx(ctx, "openai", access, use_refresh, account, expires_at)
+                         : pico_auth_set_oauth(app, "openai", access, use_refresh, account, expires_at);
+        if (!saved && !ctx)
         {
             LoginNote("Warning: could not write `~/.config/pico/auth.json`. This session stays "
                       "signed in, but the login will not survive a restart.");
@@ -1108,7 +1117,14 @@ static bool ApplyTokenBody(PicoApp *app, PicoAuthEntry *auth, const char *body)
         if (auth)
         {
             pico_auth_entry_free(auth);
-            pico_auth_copy(app, "openai", auth);
+            if (ctx)
+            {
+                pico_auth_copy_ctx(ctx, "openai", auth);
+            }
+            else
+            {
+                pico_auth_copy(app, "openai", auth);
+            }
         }
         free(account);
     }
@@ -1119,12 +1135,68 @@ static bool ApplyTokenBody(PicoApp *app, PicoAuthEntry *auth, const char *body)
     return ok;
 }
 
-static bool RefreshOauth(PicoApp *app, PicoAuthEntry *auth, TurnCancel *tc)
+static bool OauthDue(const PicoAuthEntry *auth);
+
+static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel *tc)
 {
-    if (!auth || !auth->refresh_token || !auth->refresh_token[0])
+    if (!ctx || !auth)
     {
         return false;
     }
+
+    pthread_mutex_lock(&g_refresh_mu);
+    while (g_refreshing)
+    {
+        bool owner_abandoned = g_refresh_owner_cancel &&
+                               g_refresh_owner_cancel(g_refresh_owner_user);
+        if (owner_abandoned || (tc && TurnCancelled(tc)) ||
+            pico_agent_context_cancelled(ctx))
+        {
+            /* Do not race a rotating token. A replacement fails promptly while
+             * the abandoned owner unwinds and releases the refresh slot. */
+            pthread_mutex_unlock(&g_refresh_mu);
+            return false;
+        }
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 100000000L;
+        if (until.tv_nsec >= 1000000000L)
+        {
+            until.tv_sec++;
+            until.tv_nsec -= 1000000000L;
+        }
+        (void)pthread_cond_timedwait(&g_refresh_cv, &g_refresh_mu, &until);
+    }
+
+    PicoAuthEntry latest;
+    if (!pico_auth_copy_ctx(ctx, "openai", &latest))
+    {
+        pthread_mutex_unlock(&g_refresh_mu);
+        return false;
+    }
+    pico_auth_entry_free(auth);
+    *auth = latest;
+    if (strcmp(auth->active, PICO_AUTH_OAUTH) != 0)
+    {
+        pthread_mutex_unlock(&g_refresh_mu);
+        return false;
+    }
+    if (auth->access_token && auth->access_token[0] && !OauthDue(auth))
+    {
+        pthread_mutex_unlock(&g_refresh_mu);
+        return true;
+    }
+    if (!auth->refresh_token || !auth->refresh_token[0] ||
+        (tc && TurnCancelled(tc)) || pico_agent_context_cancelled(ctx))
+    {
+        pthread_mutex_unlock(&g_refresh_mu);
+        return false;
+    }
+    g_refreshing = true;
+    g_refresh_owner_cancel = tc ? tc->fn : NULL;
+    g_refresh_owner_user = tc ? tc->user : NULL;
+    pthread_mutex_unlock(&g_refresh_mu);
+
     const char *keys[] = {"grant_type", "refresh_token", "client_id"};
     const char *vals[] = {"refresh_token", auth->refresh_token, kClientId};
     char *form = pico_http_form_encode(keys, vals, 3);
@@ -1136,9 +1208,16 @@ static bool RefreshOauth(PicoApp *app, PicoAuthEntry *auth, TurnCancel *tc)
     int rc = PostRaw(url, form, "Content-Type: application/x-www-form-urlencoded",
                      tc ? TurnCancelled : NULL, tc, &http, &body, &err);
     free(form);
-    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(app, auth, body);
+    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(NULL, ctx, auth, body);
     free(body);
     free(err);
+
+    pthread_mutex_lock(&g_refresh_mu);
+    g_refreshing = false;
+    g_refresh_owner_cancel = NULL;
+    g_refresh_owner_user = NULL;
+    pthread_cond_broadcast(&g_refresh_cv);
+    pthread_mutex_unlock(&g_refresh_mu);
     return ok;
 }
 
@@ -1182,7 +1261,7 @@ static bool ExchangeDeviceCode(PicoApp *app, const char *code, const char *verif
     int rc = PostRaw(url, form, "Content-Type: application/x-www-form-urlencoded", LoginCancelled,
                      NULL, &http, &body, &err);
     free(form);
-    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(app, NULL, body);
+    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(app, NULL, NULL, body);
     if (ok)
     {
         LoginNote("Signed in with ChatGPT. Pico will use your Codex subscription.");
@@ -1710,27 +1789,27 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
     return auth->api_key;
 }
 
-static int OpenAiStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
 {
     if (out)
     {
         memset(out, 0, sizeof(*out));
     }
-    if (!app || !turn || !out)
+    if (!agent_ctx || !turn || !out)
     {
         return PICO_LLM_FAIL;
     }
 
     TurnCancel tc = {.fn = cancel, .user = user};
     PicoAuthEntry auth;
-    pico_auth_copy(app, "openai", &auth);
+    pico_auth_copy_ctx(agent_ctx, "openai", &auth);
     bool oauth = strcmp(auth.active, PICO_AUTH_OAUTH) == 0;
     if (oauth)
     {
         if (OauthDue(&auth) || !auth.access_token || !auth.access_token[0])
         {
-            if (!RefreshOauth(app, &auth, &tc))
+            if (!RefreshOauth(agent_ctx, &auth, &tc))
             {
                 pico_auth_entry_free(&auth);
                 if (TurnCancelled(&tc))
@@ -1778,7 +1857,7 @@ static int OpenAiStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn c
         JsonBuf_Free(&ctx.summary);
         free(ctx.error);
         ctx.error = NULL;
-        if (!RefreshOauth(app, &auth, &tc))
+        if (!RefreshOauth(agent_ctx, &auth, &tc))
         {
             free(body);
             pico_auth_entry_free(&auth);

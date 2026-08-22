@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "auth.h"
+#include "agent.h"
 #include "json.h"
 #include "settings.h"
 
@@ -383,18 +384,9 @@ const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider)
     return NULL;
 }
 
-bool pico_auth_copy(PicoApp *app, const char *provider, PicoAuthEntry *out)
+static bool AuthCopyLocked(PicoAuthStore *store, const char *provider, PicoAuthEntry *out)
 {
-    if (out)
-    {
-        memset(out, 0, sizeof(*out));
-    }
-    if (!app || !app->auth_store || !provider || !out)
-    {
-        return false;
-    }
-    pthread_mutex_lock(&app->auth_store->mu);
-    StoredAuth *e = Find(app->auth_store, provider);
+    StoredAuth *e = Find(store, provider);
     bool ok = e != NULL;
     if (ok)
     {
@@ -407,19 +399,62 @@ bool pico_auth_copy(PicoApp *app, const char *provider, PicoAuthEntry *out)
         out->account_id = e->account_id ? JsonDup(e->account_id) : NULL;
         out->expires_at = e->expires_at;
     }
-    pthread_mutex_unlock(&app->auth_store->mu);
     return ok;
 }
 
-bool pico_auth_set_oauth(PicoApp *app, const char *provider, const char *access, const char *refresh,
-                         const char *account_id, long expires_at)
+static bool AuthCopyStore(PicoAuthStore *store, const char *provider, PicoAuthEntry *out)
 {
-    if (!app || !app->auth_store || !provider || !provider[0])
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    if (!store || !provider || !out)
     {
         return false;
     }
-    pthread_mutex_lock(&app->auth_store->mu);
-    StoredAuth *e = Ensure(app->auth_store, provider);
+    pthread_mutex_lock(&store->mu);
+    bool ok = AuthCopyLocked(store, provider, out);
+    pthread_mutex_unlock(&store->mu);
+    return ok;
+}
+
+bool pico_auth_copy(PicoApp *app, const char *provider, PicoAuthEntry *out)
+{
+    return AuthCopyStore(app ? app->auth_store : NULL, provider, out);
+}
+
+bool pico_auth_copy_ctx(PicoAgentContext *ctx, const char *provider, PicoAuthEntry *out)
+{
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    PicoAuthStore *store = PicoAgentContext_AuthStore(ctx);
+    if (!store || !provider || !out)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&store->mu);
+    if (!PicoAgentContext_LockIfLive(ctx))
+    {
+        pthread_mutex_unlock(&store->mu);
+        return false;
+    }
+    bool ok = AuthCopyLocked(store, provider, out);
+    PicoAgentContext_UnlockLive(ctx);
+    pthread_mutex_unlock(&store->mu);
+    return ok;
+}
+
+static bool AuthSetOauthStore(PicoAuthStore *store, const char *provider, const char *access,
+                              const char *refresh, const char *account_id, long expires_at)
+{
+    if (!store || !provider || !provider[0])
+    {
+        return false;
+    }
+    pthread_mutex_lock(&store->mu);
+    StoredAuth *e = Ensure(store, provider);
     bool saved = false;
     if (e)
     {
@@ -428,9 +463,57 @@ bool pico_auth_set_oauth(PicoApp *app, const char *provider, const char *access,
         SetStr(&e->account_id, account_id);
         e->expires_at = expires_at;
         snprintf(e->active, sizeof(e->active), "%s", PICO_AUTH_OAUTH);
-        saved = SaveLocked(app->auth_store);
+        saved = SaveLocked(store);
     }
-    pthread_mutex_unlock(&app->auth_store->mu);
+    pthread_mutex_unlock(&store->mu);
+    return saved;
+}
+
+bool pico_auth_set_oauth(PicoApp *app, const char *provider, const char *access, const char *refresh,
+                         const char *account_id, long expires_at)
+{
+    return AuthSetOauthStore(app ? app->auth_store : NULL, provider, access, refresh,
+                             account_id, expires_at);
+}
+
+bool pico_auth_set_oauth_ctx(PicoAgentContext *ctx, const char *provider, const char *access,
+                             const char *refresh, const char *account_id, long expires_at)
+{
+    if (!provider || !provider[0])
+    {
+        return false;
+    }
+    PicoAuthStore *store = PicoAgentContext_AuthStore(ctx);
+    if (!store)
+    {
+        return false;
+    }
+
+    /* Lock auth first, then validate/lock the runtime. Mutate while both are
+     * held so retirement and the credential update have one atomic ordering.
+     * Release the runtime before persistence: cancellation never waits on
+     * the auth lock or filesystem I/O. */
+    pthread_mutex_lock(&store->mu);
+    if (!PicoAgentContext_LockIfLive(ctx))
+    {
+        pthread_mutex_unlock(&store->mu);
+        return false;
+    }
+    StoredAuth *e = Ensure(store, provider);
+    if (!e)
+    {
+        PicoAgentContext_UnlockLive(ctx);
+        pthread_mutex_unlock(&store->mu);
+        return false;
+    }
+    SetStr(&e->access_token, access);
+    SetStr(&e->refresh_token, refresh);
+    SetStr(&e->account_id, account_id);
+    e->expires_at = expires_at;
+    snprintf(e->active, sizeof(e->active), "%s", PICO_AUTH_OAUTH);
+    PicoAgentContext_UnlockLive(ctx);
+    bool saved = SaveLocked(store);
+    pthread_mutex_unlock(&store->mu);
     return saved;
 }
 

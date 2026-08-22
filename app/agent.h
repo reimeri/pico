@@ -18,6 +18,9 @@ bool PicoAgent_BlocksReload(const PicoAgent *agent);
 void PicoAgent_Compact(PicoApp *app, PicoAgent *agent);
 /* Malloc'd instructions for the next normal turn. Caller frees. */
 char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent);
+struct PicoAuthStore *PicoAgentContext_AuthStore(const PicoAgentContext *ctx);
+bool PicoAgentContext_LockIfLive(const PicoAgentContext *ctx);
+void PicoAgentContext_UnlockLive(const PicoAgentContext *ctx);
 
 const char *PicoAgent_CacheKey(const PicoAgent *agent);
 void PicoAgent_SetCacheKey(PicoAgent *agent, const char *key);

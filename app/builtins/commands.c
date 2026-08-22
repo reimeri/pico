@@ -900,8 +900,9 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     return 0;
 }
 
-static void CommandsBeforeSubmit(PicoApp *app)
+static void CommandsBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     if (app->submit_cancel || !app->composer.text)
     {
         return;

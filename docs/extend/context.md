@@ -8,9 +8,10 @@ Register on the main thread in `init` (full file: `examples/ephemeral_context.c`
 #include "pico/plugin.h"
 #include "json.h"
 
-static void AddReminder(PicoApp *app, PicoContextEvent *ev)
+static void AddReminder(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
 {
     (void)app;
+    (void)agent_id;
     if (ev->compact)
     {
         return;
@@ -32,6 +33,7 @@ static void Init(PicoApp *app)
 
 - `compact` — true for a compaction request.
 - `history_json` / `history_count` — immutable base history copied for this request.
+- `tools` / `tool_count` — final effective tool catalog after agent policy and LLM-hook exclusions.
 - `extra_context` — set to one malloc'd text value to append.
 
 Every context hook sees the same immutable base history. Context returned by an earlier hook is accumulated separately and cannot change a later hook's history-tail decisions.
@@ -58,8 +60,8 @@ Parse items with `json.h`. Treat all history strings as read-only and callback-s
 
 ## Contract
 
-- Runs on the main thread immediately before queueing the provider request.
+- Runs on the main thread immediately before queueing the provider request and receives the target `PicoAgentId`.
 - Maximum 64 hooks (`PICO_MAX_CONTEXT_HOOKS`).
-- `history_json` and every item are core-owned and valid only during the callback.
+- `history_json`, every history item, and the effective `tools` catalog are core-owned and valid only during the callback.
 - `extra_context` must be malloc'd; Pico frees it.
 - Do not mutate chat/composer state or call Clay from the callback.

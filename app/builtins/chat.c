@@ -427,8 +427,9 @@ void PicoChat_Render(PicoApp *app)
     }
 }
 
-void PicoChat_HandlePointer(PicoApp *app)
+void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     PicoChatSel_Clamp(app);
     if (app->status_warn || PicoUi_ModalOpen(app))
     {
@@ -588,8 +589,9 @@ static void PicoChat_DrawChevrons(PicoApp *app)
     EndScissorMode();
 }
 
-void PicoChat_DrawOverlay(PicoApp *app)
+void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     PicoChatSel_DrawOverlay(app);
     PicoChat_DrawChevrons(app);
 }

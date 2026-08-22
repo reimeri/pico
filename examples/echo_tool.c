@@ -14,9 +14,9 @@ static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to "
     "echo back\"}},\"required\":[\"text\"]}";
 
-static void EchoRun(PicoApp *app, const char *args_json, PicoToolResult *out)
+static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
 {
-    (void)app;
+    (void)ctx;
     if (out)
     {
         memset(out, 0, sizeof(*out));

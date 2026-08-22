@@ -412,8 +412,9 @@ void PicoFooter_Render(PicoApp *app)
     }
 }
 
-static void FooterAfterLayout(PicoApp *app)
+static void FooterAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(app->agent))
     {
         app->hovered_clickable = false;

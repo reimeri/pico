@@ -4,9 +4,10 @@
 #include "pico/plugin.h"
 #include "json.h"
 
-static void AddContext(PicoApp *app, PicoContextEvent *ev)
+static void AddContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
 {
     (void)app;
+    (void)agent_id;
     if (!ev->compact)
     {
         ev->extra_context = JsonDup("Verify the observable result before finishing.");

@@ -15,6 +15,7 @@ typedef enum PicoSessionPersistence {
 struct PicoAgent {
     PicoAgentId id;
     PicoAgentId parent_id;
+    uint64_t runtime_generation;
     PicoAgentKind kind;
     int depth;
     char profile[65];

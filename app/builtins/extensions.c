@@ -198,8 +198,9 @@ static void ExtsRender(PicoApp *app)
     }
 }
 
-static void ExtsAfterLayout(PicoApp *app)
+static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     (void)app;
     if (!g_open || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {

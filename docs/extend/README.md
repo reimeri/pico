@@ -18,7 +18,7 @@ Compile errors and failed tool registrations appear in the overlay. `/docs [topi
 Read the page that matches the work (`/docs <name>` or the file next to this README):
 
 - `anatomy` — entry point, lifecycle, compile
-- `agents` — opaque agent identity, copied snapshots, ownership, worker host
+- `agents` — agent/session identity, copied snapshots, callback context, concurrency
 - `views` — UI in a slot (sidebar, chat, footer, …) and the chat empty-state
 - `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool and LLM interceptors
 - `context` — request-only, non-persistent agent context
@@ -39,7 +39,7 @@ Copy-templates in the Pico source tree:
 - `examples/empty_banner.c` — empty-state banner above the Tools / Context / Skills cards
 - `examples/echo_tool.c` — tool + `json.h`
 - `examples/ask_tool.c` — `pico_tool_ask` + builtin confirm overlay
-- `examples/permit_tool.c` — `PICO_TOOL_BEFORE` permission prompt
+- `examples/permit_tool.c` — before-tool permission prompt
 - `examples/extra_instructions.c` — `pico_add_llm_hook` extra prompt line
 - `examples/ephemeral_context.c` — request-only context
 - `examples/time_cmd.c` — slash command

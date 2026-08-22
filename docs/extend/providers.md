@@ -13,10 +13,10 @@ An LLM provider implements one streaming turn. The builtin is `openai` (`app/bui
 #include "pico/http.h"
 #include "json.h"
 
-static int MyStream(PicoApp *app, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+static int MyStream(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                     PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
 {
-    (void)app;
+    (void)ctx;
     (void)turn;
     (void)cancel;
     if (on_delta)
@@ -39,7 +39,7 @@ Add a catalog entry with `"provider": "myllm"` or the builtin OpenAI path is use
 
 `PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `effort`, `compact`, `include_tools`, `input_json` / `input_count` (serialized history), `tools` / `tool_count`.
 
-`tools` is the catalog for this round: a copy of registered tools after `pico_add_llm_hook` excludes. It may be empty or a subset of `app->tools`. Pointers inside each `PicoTool` (name, description, params) stay extension-owned; reload is deferred while the worker is busy.
+`tools` is the retained effective catalog for this round after agent policy and `pico_add_llm_hook` exclusions. It may be empty or a subset of registered tools. Calls are authorized and resolved against this exact snapshot. Pointers inside each `PicoTool` stay extension-owned; reload is deferred while a runtime retains them.
 
 Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_THINKING_SUMMARY`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
 
@@ -60,6 +60,7 @@ HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_form_encode` in
 
 ## Contract
 
-- Stream runs on the **worker thread**. Its `PicoApp *` is the heap execution-host view described in [agents](agents.md), not the UI app. Do not retain it, use Clay, mutate UI, or inspect active-agent state. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
+- Stream runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never the UI app. Do not retain it, use Clay, mutate UI, or inspect agent state outside context accessors. Provider callbacks for different agents may overlap. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
 - `name` must outlive the extension. Max 16 providers (`PICO_MAX_PROVIDERS`).
-- Look up credentials with `pico_auth_copy` — see `auth.md`.
+- Look up credentials with `pico_auth_copy_ctx(ctx, ...)` — see `auth.md`.
+- Empty/duplicate call IDs, malformed call arrays, and more than 16 pending calls fail the provider round explicitly.

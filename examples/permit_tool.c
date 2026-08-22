@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void PermitBefore(PicoApp *app, PicoToolEvent *ev)
+static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
 {
     JsonBuf msg;
     JsonBuf_Init(&msg);
@@ -34,7 +34,7 @@ static void PermitBefore(PicoApp *app, PicoToolEvent *ev)
     char *request = JsonBuf_Steal(&req);
 
     char *answer = NULL;
-    int rc = pico_tool_ask(app, request, &answer);
+    int rc = pico_tool_ask(ctx, request, &answer);
     free(request);
     if (rc != PICO_ASK_OK)
     {
@@ -60,7 +60,7 @@ static void PermitBefore(PicoApp *app, PicoToolEvent *ev)
 
 static void PermitInit(PicoApp *app)
 {
-    pico_add_tool_hook(app, PICO_TOOL_BEFORE, PermitBefore);
+    pico_add_tool_before_hook(app, PermitBefore);
 }
 
 PicoExt pico_ext(void)

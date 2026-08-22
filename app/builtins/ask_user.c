@@ -346,7 +346,7 @@ char *PicoAskUser_BuildRequest(const char *args_json, char *error, size_t error_
     return result;
 }
 
-static void AskUserRun(PicoApp *app, const char *args_json, PicoToolResult *out)
+static void AskUserRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
 {
     if (!out)
     {
@@ -363,7 +363,7 @@ static void AskUserRun(PicoApp *app, const char *args_json, PicoToolResult *out)
     }
 
     char *answer = NULL;
-    int rc = pico_tool_ask(app, request, &answer);
+    int rc = pico_tool_ask(ctx, request, &answer);
     free(request);
     if (rc != PICO_ASK_OK)
     {
@@ -1200,8 +1200,9 @@ static bool PointerOver(Clay_String id)
     return Clay_PointerOver(CLAY_SID(id));
 }
 
-static void AskUserAfterLayout(PicoApp *app)
+static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
@@ -1262,12 +1263,22 @@ static void AskUserAfterLayout(PicoApp *app)
     }
 }
 
-static void AskUserInstructions(PicoApp *app, PicoLlmEvent *ev)
+static void AskUserContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
 {
     (void)app;
-    if (!ev->compact)
+    (void)agent_id;
+    bool offered = false;
+    for (int i = 0; ev && i < ev->tool_count; i++)
     {
-        ev->extra_instructions = JsonDup(
+        if (ev->tools[i].name && strcmp(ev->tools[i].name, "ask_user") == 0)
+        {
+            offered = true;
+            break;
+        }
+    }
+    if (ev && !ev->compact && offered)
+    {
+        ev->extra_context = JsonDup(
             "If implementation details are ambiguous, always use ask_user to resolve every open question, and do "
             "not begin implementation until all questions have been answered.");
     }
@@ -1281,7 +1292,7 @@ static void AskUserInit(PicoApp *app)
                   "allow_other=true for a required free-form Other choice; use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL);
-    pico_add_llm_hook(app, AskUserInstructions);
+    pico_add_context_hook(app, AskUserContext);
     pico_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
 }

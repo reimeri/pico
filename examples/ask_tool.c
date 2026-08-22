@@ -14,7 +14,7 @@ static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":"
     "\"Confirmation prompt\"}},\"required\":[\"message\"]}";
 
-static void AskRun(PicoApp *app, const char *args_json, PicoToolResult *out)
+static void AskRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
 {
     if (out)
     {
@@ -53,7 +53,7 @@ static void AskRun(PicoApp *app, const char *args_json, PicoToolResult *out)
     char *request = JsonBuf_Steal(&req);
 
     char *answer = NULL;
-    int rc = pico_tool_ask(app, request, &answer);
+    int rc = pico_tool_ask(ctx, request, &answer);
     free(request);
     if (rc != PICO_ASK_OK)
     {

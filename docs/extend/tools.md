@@ -12,9 +12,9 @@ Tools are functions the model can call. Register in `init`:
 static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}";
 
-static void EchoRun(PicoApp *app, const char *args_json, PicoToolResult *out)
+static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
 {
-    (void)app;
+    (void)ctx;
     memset(out, 0, sizeof(*out));
     JsonDoc doc;
     const char *src = args_json ? args_json : "";
@@ -39,15 +39,15 @@ static void EchoInit(PicoApp *app)
 }
 ```
 
-Full file: `examples/echo_tool.c`. Builtin reference: `app/builtins/shell.c` (`sh`). Asking the user: `examples/ask_tool.c` (`pico_tool_ask` + builtin confirm overlay). Wrapping builtins: `examples/permit_tool.c` (`PICO_TOOL_BEFORE`).
+Full file: `examples/echo_tool.c`. Builtin reference: `app/builtins/shell.c` (`sh`). Asking the user: `examples/ask_tool.c` (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: `examples/permit_tool.c` (a before-tool hook).
 
 ## Asking the user
 
-Call `pico_tool_ask` from the worker tool slot only (`PicoToolFn` or a `PICO_TOOL_BEFORE` hook). Pico validates and copies `request_json`, blocks the worker, and shows UI on the main thread. The caller continues after `pico_tool_answer` or Esc. Malformed JSON and builtin confirmations without a non-empty `message` return immediately with `PICO_ASK_OK` and `{"error":"invalid ask payload; fix it and try again"}` so the tool can pass that result back to the agent.
+Call `pico_tool_ask` from the worker tool slot only (`PicoToolFn` or `PicoToolBeforeFn`). Pico validates and copies `request_json`, blocks the worker, and shows UI on the main thread. The caller continues after `pico_tool_answer` or Esc. Malformed JSON and builtin confirmations without a non-empty `message` return immediately with `PICO_ASK_OK` and `{"error":"invalid ask payload; fix it and try again"}` so the tool can pass that result back to the agent.
 
 ```c
 char *answer = NULL;
-int rc = pico_tool_ask(app, "{\"type\":\"confirm\",\"message\":\"Proceed?\"}", &answer);
+int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"Proceed?\"}", &answer);
 if (rc != PICO_ASK_OK)
 {
     out->output = JsonDup("cancelled");
@@ -116,17 +116,17 @@ The modal preserves answers while moving Next/Back and returns them in question 
 }
 ```
 
-Controls: Up/Down, Space, or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline; Esc cancels the questionnaire and current turn. The builtin also adds a non-compaction system instruction requiring the agent to use `ask_user` before implementing ambiguous work.
+Controls: Up/Down, Space, or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline; Esc cancels the questionnaire and current turn. The builtin adds non-compaction request guidance only when `ask_user` is in that agent's final effective tool catalog.
 
 ## Wrapping tools
 
-You cannot replace a builtin by registering the same name. Use `pico_add_tool_hook` to intercept every call, including `sh`. See `hooks.md` for the event fields.
+You cannot replace a builtin by registering the same name. Use `pico_add_tool_before_hook` or `pico_add_tool_after_hook` to intercept offered calls, including `sh`. See `hooks.md` for the event fields.
 
 ```c
-static void PermitBefore(PicoApp *app, PicoToolEvent *ev)
+static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
 {
     char *answer = NULL;
-    int rc = pico_tool_ask(app, "{\"type\":\"confirm\",\"message\":\"Allow this tool?\"}", &answer);
+    int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"Allow this tool?\"}", &answer);
     if (rc != PICO_ASK_OK)
     {
         free(answer);
@@ -148,7 +148,7 @@ static void PermitBefore(PicoApp *app, PicoToolEvent *ev)
     }
 }
 
-pico_add_tool_hook(app, PICO_TOOL_BEFORE, PermitBefore);
+pico_add_tool_before_hook(app, PermitBefore);
 ```
 
 Deny skips `run` and sends `result` (or `User denied this tool.`) back to the model; the turn continues. Esc cancels the turn. Full file: `examples/permit_tool.c`.
@@ -158,10 +158,12 @@ Deny skips `run` and sends `result` (or `User denied this tool.`) back to the mo
 `PicoToolResult.details_json` optionally carries one JSON object (maximum `PICO_TOOL_DETAILS_MAX`) alongside the visible output. Details are not sent to the model. Pico validates them, stores them in the same session `tool_result` record, and passes them to the tool's optional main-thread apply callback after a successful live call and during session replay:
 
 ```c
-static bool ApplyState(PicoApp *app, const char *details_json, bool replay)
+static bool ApplyState(PicoApp *app, PicoAgentId agent_id,
+                       const char *details_json, bool replay)
 {
     (void)app;
     (void)replay;
+    /* Parse and update only extension state keyed by agent_id. */
     /* Parse into temporary state; swap only after complete validation. */
     return true;
 }
@@ -178,8 +180,9 @@ The apply callback returns `false` to reject details. A live rejection converts 
 - Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
-- Runs on the **worker thread**. Its `PicoApp *` is a heap execution-host view with copied workspace/registrations and retained auth, not the UI app; it has no active agent and must not be retained. Do not inspect transcript/session/settings/model state, call Clay, add views, or mutate chat UI. Returning output is enough; Pico shows it in the trace. See [agents](agents.md).
+- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoApp *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Worker callbacks from different agents may overlap. See [agents](agents.md).
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
-- If the tool forks a child, call `pico_tool_set_child(app, pid)` after spawn (and `pico_tool_set_child(app, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.
-- Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. Failed registration also appends a `status_warn` line with the tool name and reason (missing name/run, invalid schema, duplicate, or limit). The provider exposes the catalog after LLM-hook excludes.
+- If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.
+- Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. Failed registration also appends a `status_warn` line with the tool name and reason.
+- Pico applies agent policy before LLM-hook exclusions. Execution and apply resolve from the retained offered snapshot. Hidden/unoffered calls become controlled tool errors and invoke no before hook, tool, apply, or after hook. Malformed/duplicate/oversized call arrays fail the provider round.

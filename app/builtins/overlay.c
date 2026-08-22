@@ -283,8 +283,9 @@ static bool OverAsk(Clay_String id)
     return Clay_PointerOver(CLAY_SID(id));
 }
 
-static void OverlayAfterLayout(PicoApp *app)
+static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    (void)event;
     if (g_ask_show)
     {
         if (OverAsk(CLAY_STRING("AskApprove")) || OverAsk(CLAY_STRING("AskDeny")))

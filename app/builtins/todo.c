@@ -16,8 +16,13 @@
 #define TODO_EXPANDED_HEIGHT 420.0f
 #define TODO_GAP 8.0f
 
-static PicoTodoList g_todos;
-static bool g_expanded;
+typedef struct TodoAgentState {
+    PicoAgentId agent_id;
+    PicoTodoList todos;
+    bool expanded;
+} TodoAgentState;
+
+static TodoAgentState g_states[PICO_MAX_AGENTS];
 static float g_composer_width = TODO_EXPANDED_WIDTH;
 static float g_space_above = TODO_EXPANDED_HEIGHT;
 static char g_header[64];
@@ -42,21 +47,66 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
-bool PicoTodo_IsExpanded(void)
+static TodoAgentState *FindState(PicoAgentId agent_id, bool create)
 {
-    return g_expanded && g_todos.count > 0;
+    if (!agent_id)
+    {
+        return NULL;
+    }
+    TodoAgentState *empty = NULL;
+    for (int i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        if (g_states[i].agent_id == agent_id)
+        {
+            return &g_states[i];
+        }
+        if (!g_states[i].agent_id && !empty)
+        {
+            empty = &g_states[i];
+        }
+    }
+    if (create && empty)
+    {
+        empty->agent_id = agent_id;
+        return empty;
+    }
+    return NULL;
 }
 
-static void TodoReset(PicoApp *app)
+static TodoAgentState *ActiveState(const PicoApp *app)
 {
-    (void)app;
-    PicoTodoList_Free(&g_todos);
-    g_expanded = false;
+    return FindState(app && app->agent ? pico_agent_id(app->agent) : 0, false);
 }
 
-static void TodoRun(PicoApp *app, const char *args_json, PicoToolResult *out)
+bool PicoTodo_IsExpanded(const PicoApp *app)
+{
+    TodoAgentState *state = ActiveState(app);
+    return state && state->expanded && state->todos.count > 0;
+}
+
+static void ClearState(PicoAgentId agent_id)
+{
+    TodoAgentState *state = FindState(agent_id, false);
+    if (!state)
+    {
+        return;
+    }
+    PicoTodoList_Free(&state->todos);
+    memset(state, 0, sizeof(*state));
+}
+
+static void TodoReset(PicoApp *app, const PicoHookEvent *event)
 {
     (void)app;
+    if (event)
+    {
+        ClearState(event->agent_id);
+    }
+}
+
+static void TodoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+{
+    (void)ctx;
     if (!out)
     {
         return;
@@ -83,7 +133,7 @@ static void TodoRun(PicoApp *app, const char *args_json, PicoToolResult *out)
     PicoTodoList_Free(&parsed);
 }
 
-static bool TodoApply(PicoApp *app, const char *details_json, bool replay)
+static bool TodoApply(PicoApp *app, PicoAgentId agent_id, const char *details_json, bool replay)
 {
     (void)app;
     (void)replay;
@@ -94,11 +144,17 @@ static bool TodoApply(PicoApp *app, const char *details_json, bool replay)
         free(error);
         return false;
     }
-    PicoTodoList_Swap(&g_todos, &parsed);
-    PicoTodoList_Free(&parsed);
-    if (g_todos.count == 0)
+    TodoAgentState *state = FindState(agent_id, true);
+    if (!state)
     {
-        g_expanded = false;
+        PicoTodoList_Free(&parsed);
+        return false;
+    }
+    PicoTodoList_Swap(&state->todos, &parsed);
+    PicoTodoList_Free(&parsed);
+    if (state->todos.count == 0)
+    {
+        state->expanded = false;
     }
     return true;
 }
@@ -123,15 +179,25 @@ static bool LastInputIsSuccessfulTodo(const PicoContextEvent *ev)
     return match;
 }
 
-static void TodoContext(PicoApp *app, PicoContextEvent *ev)
+static void TodoContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
 {
     (void)app;
-    if (!ev || ev->compact || g_todos.count == 0 || PicoTodoList_AllCompleted(&g_todos) ||
-        LastInputIsSuccessfulTodo(ev))
+    bool offered = false;
+    for (int i = 0; ev && i < ev->tool_count; i++)
+    {
+        if (ev->tools[i].name && strcmp(ev->tools[i].name, "todo_update") == 0)
+        {
+            offered = true;
+            break;
+        }
+    }
+    TodoAgentState *state = FindState(agent_id, false);
+    if (!ev || !offered || !state || ev->compact || state->todos.count == 0 ||
+        PicoTodoList_AllCompleted(&state->todos) || LastInputIsSuccessfulTodo(ev))
     {
         return;
     }
-    ev->extra_context = PicoTodoList_FormatReminder(&g_todos);
+    ev->extra_context = PicoTodoList_FormatReminder(&state->todos);
 }
 
 static Clay_Color StatusColor(PicoTodoStatus status)
@@ -160,11 +226,11 @@ static const char *StatusLabel(PicoTodoStatus status)
     return "Pending";
 }
 
-static void RenderTodoRows(void)
+static void RenderTodoRows(TodoAgentState *state)
 {
-    for (int i = 0; i < g_todos.count; i++)
+    for (int i = 0; i < state->todos.count; i++)
     {
-        PicoTodoItem *todo = &g_todos.items[i];
+        PicoTodoItem *todo = &state->todos.items[i];
         CLAY(CLAY_IDI("TodoRow", i),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .padding = {10, 10, 8, 8},
@@ -197,14 +263,14 @@ static void RenderTodoRows(void)
 
 static void TodoRender(PicoApp *app)
 {
-    (void)app;
-    if (g_todos.count == 0)
+    TodoAgentState *state = ActiveState(app);
+    if (!state || state->todos.count == 0)
     {
         return;
     }
 
-    int completed = PicoTodoList_Completed(&g_todos);
-    snprintf(g_header, sizeof(g_header), "Todo %d/%d", completed, g_todos.count);
+    int completed = PicoTodoList_Completed(&state->todos);
+    snprintf(g_header, sizeof(g_header), "Todo %d/%d", completed, state->todos.count);
 
     float screen_w = (float)GetScreenWidth();
     float expanded_w = g_composer_width > 0 ? g_composer_width : TODO_EXPANDED_WIDTH;
@@ -229,8 +295,8 @@ static void TodoRender(PicoApp *app)
     {
         expanded_h = 150.0f;
     }
-    float width = g_expanded ? expanded_w : TODO_COLLAPSED_WIDTH;
-    float height = g_expanded ? expanded_h : TODO_COLLAPSED_HEIGHT;
+    float width = state->expanded ? expanded_w : TODO_COLLAPSED_WIDTH;
+    float height = state->expanded ? expanded_h : TODO_COLLAPSED_HEIGHT;
 
     CLAY(CLAY_ID("TodoPanel"),
          {.floating = {.offset = {.y = -TODO_GAP},
@@ -241,12 +307,12 @@ static void TodoRender(PicoApp *app)
                        .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
                        .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID},
           .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .padding = g_expanded ? (Clay_Padding){14, 14, 12, 12} : (Clay_Padding){12, 12, 8, 8},
+                     .padding = state->expanded ? (Clay_Padding){14, 14, 12, 12} : (Clay_Padding){12, 12, 8, 8},
                      .childGap = 10,
                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                      .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(height)}},
           .backgroundColor = COLOR_CONTENT_BG,
-          .cornerRadius = g_expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
+          .cornerRadius = state->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
           .border = {.color = COLOR_HR, .width = {1, 1, 1, 1}},
           .transition = {.handler = Clay_EaseOut,
                          .duration = 0.18f,
@@ -260,7 +326,7 @@ static void TodoRender(PicoApp *app)
             CLAY_TEXT(CStr(g_header),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
         }
-        if (g_expanded)
+        if (state->expanded)
         {
             CLAY(CLAY_ID("TodoListScroll"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -269,27 +335,28 @@ static void TodoRender(PicoApp *app)
                              .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
                   .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
             {
-                RenderTodoRows();
+                RenderTodoRows(state);
             }
         }
     }
 }
 
-static void TodoAfterLayout(PicoApp *app)
+static void TodoAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
+    TodoAgentState *state = FindState(event ? event->agent_id : 0, false);
     Clay_ElementData composer = Clay_GetElementData(CLAY_ID("Composer"));
     if (composer.found)
     {
         g_composer_width = composer.boundingBox.width;
         g_space_above = composer.boundingBox.y - 20.0f;
     }
-    if (g_todos.count == 0)
+    if (!state || state->todos.count == 0)
     {
         return;
     }
     bool over_panel = Clay_PointerOver(CLAY_ID("TodoPanel"));
     bool over_header = Clay_PointerOver(CLAY_ID("TodoPanelHeader"));
-    if ((!g_expanded && over_panel) || (g_expanded && over_header))
+    if ((!state->expanded && over_panel) || (state->expanded && over_header))
     {
         app->hovered_clickable = true;
     }
@@ -297,27 +364,27 @@ static void TodoAfterLayout(PicoApp *app)
     {
         return;
     }
-    if (!g_expanded && over_panel)
+    if (!state->expanded && over_panel)
     {
-        g_expanded = true;
+        state->expanded = true;
     }
-    else if (g_expanded && over_header)
+    else if (state->expanded && over_header)
     {
-        g_expanded = false;
+        state->expanded = false;
     }
-    else if (g_expanded && !over_panel)
+    else if (state->expanded && !over_panel)
     {
-        g_expanded = false;
+        state->expanded = false;
     }
 }
 
 static void TodoFrame(PicoApp *app, float dt)
 {
-    (void)app;
     (void)dt;
-    if (g_expanded && IsKeyPressed(KEY_ESCAPE))
+    TodoAgentState *state = ActiveState(app);
+    if (state && state->expanded && IsKeyPressed(KEY_ESCAPE))
     {
-        g_expanded = false;
+        state->expanded = false;
     }
 }
 
@@ -329,13 +396,21 @@ static void TodoInit(PicoApp *app)
                   kTodoParams, TodoRun, TodoApply);
     pico_add_context_hook(app, TodoContext);
     pico_add_hook(app, PICO_HOOK_ON_SESSION_RESET, TodoReset);
+    pico_add_hook(app, PICO_HOOK_ON_AGENT_DESTROY, TodoReset);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, TodoAfterLayout);
     pico_add_view(app, PICO_SLOT_OVERLAY, 5, TodoRender);
 }
 
 static void TodoShutdown(PicoApp *app)
 {
-    TodoReset(app);
+    (void)app;
+    for (int i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        if (g_states[i].agent_id)
+        {
+            ClearState(g_states[i].agent_id);
+        }
+    }
 }
 
 PicoExt pico_ext_todo(void)

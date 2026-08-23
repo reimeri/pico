@@ -13,6 +13,7 @@
 
 #include "clay/clay.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,13 @@ typedef enum FooterMenu {
     FOOTER_MENU_MODEL,
     FOOTER_MENU_EFFORT,
 } FooterMenu;
+
+typedef enum FooterStatusKind {
+    FOOTER_STATUS_IDLE = 0,
+    FOOTER_STATUS_RUNNING,
+    FOOTER_STATUS_WAITING_USER,
+    FOOTER_STATUS_ERROR,
+} FooterStatusKind;
 
 static char g_cwd[4096];
 static char g_state[64];
@@ -58,6 +66,40 @@ static const char *AgentStateName(const PicoApp *app)
             return "error";
         default:
             return "unknown";
+    }
+}
+
+static FooterStatusKind StatusKind(const PicoApp *app)
+{
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    switch (agent->state)
+    {
+        case PICO_AGENT_ERROR:
+            return FOOTER_STATUS_ERROR;
+        case PICO_AGENT_TOOL_WAIT:
+            return PicoAgent_AskUiOpen(agent) ? FOOTER_STATUS_WAITING_USER : FOOTER_STATUS_RUNNING;
+        case PICO_AGENT_LLM_WAIT:
+        case PICO_AGENT_COMPACT_WAIT:
+            return FOOTER_STATUS_RUNNING;
+        case PICO_AGENT_IDLE:
+        default:
+            return FOOTER_STATUS_IDLE;
+    }
+}
+
+static Clay_Color StatusDotColor(FooterStatusKind kind)
+{
+    switch (kind)
+    {
+        case FOOTER_STATUS_WAITING_USER:
+            return COLOR_STATUS_RUN;
+        case FOOTER_STATUS_ERROR:
+            return COLOR_STATUS_ERR;
+        case FOOTER_STATUS_RUNNING:
+            return COLOR_STATUS_ON;
+        case FOOTER_STATUS_IDLE:
+        default:
+            return COLOR_STATUS_OFF;
     }
 }
 
@@ -358,6 +400,68 @@ static void Chip(Clay_ElementId id, const char *text, bool open, bool with_menu,
     }
 }
 
+static void RenderStatus(PicoApp *app)
+{
+    FooterStatusKind kind = StatusKind(app);
+    Clay_ElementId id = CLAY_ID("FooterStatus");
+    CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(16), .height = CLAY_SIZING_FIXED(16)},
+                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}}})
+    {
+        if (kind == FOOTER_STATUS_RUNNING)
+        {
+            const float radius = 5.0f;
+            const float two_pi = 6.28318530718f;
+            float theta = (float)GetTime() * two_pi * 1.75f;
+            static const float alphas[3] = {1.0f, 0.5f, 0.22f};
+            for (int i = 0; i < 3; i++)
+            {
+                float angle = theta + (float)i * (two_pi / 3.0f);
+                Clay_Color color = COLOR_STATUS_ON;
+                color.a *= alphas[i];
+                CLAY(CLAY_IDI("FooterRunDot", i),
+                     {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                                   .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                                   .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_CENTER,
+                                                    .parent = CLAY_ATTACH_POINT_CENTER_CENTER},
+                                   .offset = {.x = radius * cosf(angle), .y = radius * sinf(angle)}},
+                      .layout = {.sizing = {.width = CLAY_SIZING_FIXED(4), .height = CLAY_SIZING_FIXED(4)}},
+                      .backgroundColor = color,
+                      .cornerRadius = CLAY_CORNER_RADIUS(2)})
+                {
+                }
+            }
+        }
+        else
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
+                          .backgroundColor = StatusDotColor(kind),
+                          .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+            }
+        }
+
+        if (Clay_PointerOver(id))
+        {
+            CLAY(CLAY_ID("FooterStatusTip"),
+                 {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                               .zIndex = 26,
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                               .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_BOTTOM,
+                                                .parent = CLAY_ATTACH_POINT_LEFT_TOP},
+                               .offset = {.y = -6}},
+                  .layout = {.padding = {8, 8, 4, 4}},
+                  .backgroundColor = COLOR_CONTENT_BG,
+                  .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+                CLAY_TEXT(CStr(g_state), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                          .fontSize = 13,
+                                                          .textColor = COLOR_TEXT,
+                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
+        }
+    }
+}
+
 void PicoFooter_Render(PicoApp *app)
 {
     const char *extra = "";
@@ -414,9 +518,9 @@ void PicoFooter_Render(PicoApp *app)
           .backgroundColor = COLOR_FOOTER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
+        RenderStatus(app);
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(10), .height = CLAY_SIZING_FIXED(1)}}}) {}
         Chip(CLAY_ID("FooterCwd"), g_cwd, false, false, app);
-        Sep();
-        MutedText(g_state);
         Sep();
         MutedText(g_tokens);
         if (g_extra[0])

@@ -301,11 +301,6 @@ void pico_llm_result_free(PicoLlmResult *r)
         free(r->calls[i].item_id);
     }
     free(r->calls);
-    for (int i = 0; i < r->raw_count; i++)
-    {
-        free(r->raw_items[i]);
-    }
-    free(r->raw_items);
     memset(r, 0, sizeof(*r));
 }
 

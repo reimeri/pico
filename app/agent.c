@@ -132,7 +132,6 @@ struct PicoAgentRt {
     int input_cap;
     char cache_key[33];
     char *instructions;
-    char *turn_provider;
     bool compacting;
     bool compact_no_tools;
 
@@ -373,16 +372,6 @@ static char *EncodeResult(const PicoLlmResult *r)
         JsonBuf_Puts(&b, ",\"item_id\":");
         JsonBuf_String(&b, r->calls[i].item_id ? r->calls[i].item_id : "");
         JsonBuf_Putc(&b, '}');
-    }
-    JsonBuf_Puts(&b, "],\"raw\":[");
-    n = r ? r->raw_count : 0;
-    for (int i = 0; i < n; i++)
-    {
-        if (i)
-        {
-            JsonBuf_Putc(&b, ',');
-        }
-        JsonBuf_Puts(&b, r->raw_items[i] && r->raw_items[i][0] ? r->raw_items[i] : "{}");
     }
     JsonBuf_Puts(&b, "]}");
     return JsonBuf_Steal(&b);
@@ -1096,8 +1085,6 @@ static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_
     rt->turn_think_cap = 0;
     rt->work = PICO_WORK_LLM;
     rt->work_stream = p->stream;
-    free(rt->turn_provider);
-    rt->turn_provider = Dup(p->name);
     rt->work_model = Dup(m->id);
     rt->work_base_url = Dup(m->base_url);
     rt->work_effort = Dup(PicoSettings_ActiveEffort(agent));
@@ -1221,18 +1208,6 @@ static char *BuildToolResult(const char *call_id, const char *name, const char *
     JsonBuf_String(&b, output ? output : "");
     JsonBuf_Puts(&b, ",\"is_error\":");
     JsonBuf_Bool(&b, is_error);
-    JsonBuf_Putc(&b, '}');
-    return JsonBuf_Steal(&b);
-}
-
-static char *BuildRawItem(const char *provider, const char *json)
-{
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"raw\",\"provider\":");
-    JsonBuf_String(&b, provider ? provider : "");
-    JsonBuf_Puts(&b, ",\"json\":");
-    JsonBuf_Puts(&b, json && json[0] ? json : "{}");
     JsonBuf_Putc(&b, '}');
     return JsonBuf_Steal(&b);
 }
@@ -1814,19 +1789,6 @@ static void IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
         TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
     }
 
-    const char *provider = rt->turn_provider ? rt->turn_provider : "";
-    int raw = JsonObjGet(&doc, 0, "raw");
-    if (JsonIsArray(&doc, raw))
-    {
-        int raw_count = JsonArrayLen(&doc, raw);
-        for (int i = 0; i < raw_count; i++)
-        {
-            char *item = JsonRawDup(&doc, JsonArrayAt(&doc, raw, i));
-            PushInput(rt, BuildRawItem(provider, item));
-            free(item);
-        }
-    }
-
     FinishAssistantHistory(app, agent, think, sig);
 
     int calls = JsonObjGet(&doc, 0, "calls");
@@ -2192,7 +2154,6 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt->work_tool_args);
     free(rt->work_call_id);
     free(rt->instructions);
-    free(rt->turn_provider);
     free(rt->ask_request);
     free(rt->ask_answer);
     free(rt->snap_request);

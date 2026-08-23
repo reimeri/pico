@@ -38,11 +38,6 @@ static void FreeResult(PicoLlmResult *r)
         free(r->calls[i].item_id);
     }
     free(r->calls);
-    for (int i = 0; i < r->raw_count; i++)
-    {
-        free(r->raw_items[i]);
-    }
-    free(r->raw_items);
     memset(r, 0, sizeof(*r));
 }
 
@@ -97,7 +92,6 @@ static void TestRequestConversion(void)
 {
     const char *input[] = {
         "{\"type\":\"user\",\"text\":\"hello\"}",
-        "{\"type\":\"raw\",\"provider\":\"openai\",\"json\":{\"type\":\"reasoning\",\"encrypted_content\":\"SECRET\"}}",
         "{\"type\":\"assistant\",\"text\":\"hi\",\"thinking\":\"why\",\"thinking_signature\":\"reasoning_content\"}",
         "{\"type\":\"tool_call\",\"call_id\":\"c1\",\"name\":\"sh\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\",\"item_id\":\"fc_x\"}",
         "{\"type\":\"tool_result\",\"call_id\":\"c1\",\"output\":\"ok\"}",
@@ -111,7 +105,7 @@ static void TestRequestConversion(void)
         .effort = "high",
         .include_tools = true,
         .input_json = input,
-        .input_count = 5,
+        .input_count = 4,
         .tools = tools,
         .tool_count = 1,
     };
@@ -129,7 +123,6 @@ static void TestRequestConversion(void)
     CheckContains(body, "\"tool_calls\"", true, "following tool_call items coalesce onto the assistant");
     CheckContains(body, "\"id\":\"c1\"", true, "Completions uses call_id as the tool id");
     CheckContains(body, "fc_x", false, "Responses function-call item ids are dropped");
-    CheckContains(body, "SECRET", false, "encrypted OpenAI raw items never go to Completions");
     CheckContains(body, "\"role\":\"tool\"", true, "tool results become tool messages");
     CheckContains(body, "\"tool_call_id\":\"c1\"", true, "tool results keep the Completions call id");
     free(body);
@@ -257,7 +250,6 @@ static void TestFeedChunks(void)
     Check(out.calls[0].item_id == NULL, "Completions does not invent Responses item ids");
     Check(out.input_tokens == 9, "prompt_tokens become input tokens");
     Check(out.cached_tokens == 3, "cached prompt tokens are recorded");
-    Check(out.raw_count == 0, "Completions follow-ups do not store raw Responses items");
     FreeResult(&out);
     pico_completions_ctx_free(&ctx);
 }

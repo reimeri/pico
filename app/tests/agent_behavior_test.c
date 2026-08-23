@@ -25,7 +25,6 @@ typedef enum TestMode {
     TEST_BLOCK,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
-    TEST_RAW_CONTINUATION,
     TEST_SIGNATURE_CONTINUATION,
     TEST_CATALOG_BLOCK,
     TEST_DUPLICATE_CALLS,
@@ -378,15 +377,6 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         return PICO_LLM_OK;
     }
 
-    if (mode == TEST_RAW_CONTINUATION)
-    {
-        out->raw_items = (char **)calloc(1, sizeof(char *));
-        if (out->raw_items)
-        {
-            out->raw_items[0] = JsonDup("{\"type\":\"provider_state\",\"id\":\"state-live\"}");
-            out->raw_count = 1;
-        }
-    }
     if (mode == TEST_SIGNATURE_CONTINUATION)
     {
         out->think_signature = JsonDup(
@@ -2566,27 +2556,8 @@ static int TestToolCallListArgs(void)
 static int TestCanonicalContinuationState(void)
 {
     const char *name = "canonical continuation state";
-    ResetTest(TEST_RAW_CONTINUATION, 1);
-    PicoApp app;
-    InitApp(&app);
-    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
-    if (!WaitForIdle(&app))
-    {
-        PicoApp_Free(&app);
-        return Fail(name, "raw continuation turn did not finish");
-    }
-    pthread_mutex_lock(&g_test.mu);
-    bool raw_ok = g_test.last_input && strstr(g_test.last_input, "state-live") &&
-                  strstr(g_test.last_input, "\"provider\":\"test\"");
-    pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
-    if (!raw_ok)
-    {
-        return Fail(name, "live same-provider raw state was not sent on the follow-up");
-    }
-
     ResetTest(TEST_SIGNATURE_CONTINUATION, 1);
+    PicoApp app;
     InitApp(&app);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
     PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");

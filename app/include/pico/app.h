@@ -312,8 +312,6 @@ typedef struct PicoLlmResult {
     char *think_signature;
     PicoLlmToolCall *calls;
     int call_count;
-    char **raw_items;
-    int raw_count;
 } PicoLlmResult;
 
 typedef int (*PicoProviderStreamFn)(PicoAgentContext *ctx, const PicoLlmTurn *turn,

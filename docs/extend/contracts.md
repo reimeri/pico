@@ -39,7 +39,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
 - `app->agent_input`: malloc if you set it; Pico frees.
 - `pico_agent_set_compact_summary(app, agent_id, summary)`: `summary` is malloc'd and ownership transfers to Pico.
-- `PicoLlmResult` strings/arrays, including each call's optional `item_id`, `think_signature`, and every `raw_items[]` entry: malloc; Pico calls `pico_llm_result_free`. Raw items are retained only in live history. Request converters must accept only raw items tagged for their provider; durable replay uses canonical thinking/signature/tool-call fields.
+- `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`. This includes the result-level `think_signature` and each call's optional `item_id`. Providers must project replay-critical state into canonical result fields; opaque provider-native output items are discarded.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
 
 ## HTTP helpers

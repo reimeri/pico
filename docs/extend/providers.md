@@ -55,8 +55,9 @@ Fill `PicoLlmResult` with malloc'd strings. Pico calls `pico_llm_result_free`. R
 
 - `assistant_text`, `think_text`, `think_signature` (opaque replay token: Completions uses `"reasoning_content"`; Responses stores the reasoning item JSON)
 - `calls[]` — `call_id`, `name`, `arguments` (JSON object text), optional `item_id` (Responses `function_call.id`)
-- `raw_items[]` — optional provider-native state for live follow-ups. Pico tags each item with the producing provider; request converters must replay only matching-provider items and ignore the rest. The builtin Responses converter does this, while Completions ignores all raw items. Raw items are not durable; session history persists thinking text, `thinking_signature`, and tool-call `item_id` instead.
 - `input_tokens`, `cached_tokens` report this completed provider call's input usage. `cached_tokens` is the cached portion of `input_tokens`. Pico ignores usage when `input_tokens <= 0` and clamps cached usage to the input range.
+
+Providers must project every replay-critical value into these canonical fields. Pico discards unrecognized provider-native output items rather than retaining opaque wire objects. Request converters rebuild the active provider's wire format from canonical history.
 
 Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.
 

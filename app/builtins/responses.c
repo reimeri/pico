@@ -169,15 +169,6 @@ static char *MapPicoItem(const char *json, const char *provider)
         free(id);
         free(output);
     }
-    else if (type && strcmp(type, "raw") == 0)
-    {
-        char *prov = JsonObjStr(&doc, 0, "provider");
-        if (prov && provider && strcmp(prov, provider) == 0)
-        {
-            out = JsonObjRaw(&doc, 0, "json");
-        }
-        free(prov);
-    }
     free(type);
     JsonFree(&doc);
     return out;
@@ -759,22 +750,6 @@ static bool GrowCalls(PicoLlmResult *out)
     return true;
 }
 
-static void AddRaw(PicoLlmResult *out, const char *json)
-{
-    if (!json || !json[0])
-    {
-        return;
-    }
-    char **next = (char **)realloc(out->raw_items, (size_t)(out->raw_count + 1) * sizeof(char *));
-    if (!next)
-    {
-        return;
-    }
-    out->raw_items = next;
-    out->raw_items[out->raw_count] = JsonDup(json);
-    out->raw_count++;
-}
-
 void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
 {
     out->input_tokens = c->input_tokens;
@@ -831,7 +806,6 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
             free(text);
             continue;
         }
-        char *raw = JsonRawDup(&doc, item);
         if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
         {
             int summary_tok = JsonObjGet(&doc, item, "summary");
@@ -844,15 +818,10 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
                 AppendThink(&think, content);
             }
             free(out->think_signature);
-            out->think_signature = JsonDup(raw);
+            out->think_signature = JsonRawDup(&doc, item);
             free(summary);
             free(content);
         }
-        else
-        {
-            AddRaw(out, raw);
-        }
-        free(raw);
     }
     JsonFree(&doc);
     JsonBuf_Free(&wrapped);

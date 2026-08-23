@@ -35,11 +35,6 @@ static void FreeResult(PicoLlmResult *result)
         free(result->calls[i].item_id);
     }
     free(result->calls);
-    for (int i = 0; i < result->raw_count; i++)
-    {
-        free(result->raw_items[i]);
-    }
-    free(result->raw_items);
     memset(result, 0, sizeof(*result));
 }
 
@@ -47,8 +42,6 @@ static void TestRequestOptions(void)
 {
     const char *input[] = {
         "{\"type\":\"user\",\"text\":\"hello\"}",
-        "{\"type\":\"raw\",\"provider\":\"hyper\",\"json\":{\"type\":\"reasoning\",\"id\":\"keep\"}}",
-        "{\"type\":\"raw\",\"provider\":\"openai\",\"json\":{\"type\":\"reasoning\",\"id\":\"drop\"}}",
     };
     PicoTool tools[] = {{.name = "test",
                          .description = "test tool",
@@ -60,7 +53,7 @@ static void TestRequestOptions(void)
         .effort = "high",
         .include_tools = true,
         .input_json = input,
-        .input_count = 3,
+        .input_count = 1,
         .tools = tools,
         .tool_count = 1,
     };
@@ -73,8 +66,6 @@ static void TestRequestOptions(void)
     CheckContains(body, "\"store\":false", true, "Hyper disables storage");
     CheckContains(body, "reasoning.encrypted_content", false, "Hyper omits encrypted reasoning include");
     CheckContains(body, "\"summary\":\"auto\"", false, "Hyper omits reasoning summary");
-    CheckContains(body, "\"id\":\"keep\"", true, "Hyper replays Hyper raw items");
-    CheckContains(body, "\"id\":\"drop\"", false, "Hyper excludes another provider's raw items");
     free(body);
 
     PicoResponsesBuildOpts openai = {
@@ -86,8 +77,6 @@ static void TestRequestOptions(void)
     body = pico_responses_build_request(&turn, &openai);
     CheckContains(body, "reasoning.encrypted_content", true, "OpenAI includes encrypted reasoning");
     CheckContains(body, "\"summary\":\"auto\"", true, "OpenAI requests reasoning summaries");
-    CheckContains(body, "\"id\":\"keep\"", false, "OpenAI excludes Hyper raw items");
-    CheckContains(body, "\"id\":\"drop\"", true, "OpenAI replays OpenAI raw items");
     free(body);
 }
 
@@ -197,29 +186,96 @@ static void TestSignatureReplay(void)
     free(body);
 }
 
-static void TestRawResultProjection(void)
+static void TestReasoningResultProjection(void)
 {
     PicoResponsesCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
     JsonBuf_Init(&ctx.items);
     JsonBuf_Init(&ctx.summary);
     JsonBuf_Puts(&ctx.items,
-                 "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],"
-                 "\"encrypted_content\":\"blob\"},{\"type\":\"provider_state\","
-                 "\"id\":\"state_1\"}");
+                 "{\"type\":\"reasoning\",\"id\":\"rs_projected\",\"summary\":[],"
+                 "\"encrypted_content\":\"secret_blob\"},{\"type\":\"function_call\","
+                 "\"id\":\"fc_projected\",\"call_id\":\"call_projected\",\"name\":\"sh\","
+                 "\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}");
     ctx.item_count = 2;
     PicoLlmResult result;
     memset(&result, 0, sizeof(result));
     pico_responses_fill_result(&ctx, &result);
-    Check(result.think_signature && strstr(result.think_signature, "rs_1"),
-          "reasoning items project to the canonical thinking signature");
-    Check(result.raw_count == 1 && result.raw_items && strstr(result.raw_items[0], "state_1"),
-          "non-reasoning provider-native items remain available for live replay");
-    if (result.raw_count == 1 && result.raw_items)
+    Check(result.think_signature && strstr(result.think_signature, "rs_projected") &&
+              strstr(result.think_signature, "secret_blob"),
+          "reasoning items project their id and encrypted content to the canonical signature");
+    Check(result.call_count == 1 && result.calls && result.calls[0].item_id &&
+              strcmp(result.calls[0].item_id, "fc_projected") == 0 && result.calls[0].call_id &&
+              strcmp(result.calls[0].call_id, "call_projected") == 0 && result.calls[0].name &&
+              strcmp(result.calls[0].name, "sh") == 0 && result.calls[0].arguments &&
+              strcmp(result.calls[0].arguments, "{\"cmd\":\"ls\"}") == 0,
+          "function calls project both ids, name, and arguments");
+
+    JsonBuf assistant;
+    JsonBuf_Init(&assistant);
+    JsonBuf_Puts(&assistant, "{\"type\":\"assistant\",\"text\":\"\",\"thinking_signature\":");
+    JsonBuf_String(&assistant, result.think_signature ? result.think_signature : "");
+    JsonBuf_Putc(&assistant, '}');
+    JsonBuf call;
+    JsonBuf_Init(&call);
+    JsonBuf_Puts(&call, "{\"type\":\"tool_call\",\"call_id\":");
+    JsonBuf_String(&call, result.calls && result.calls[0].call_id ? result.calls[0].call_id : "");
+    JsonBuf_Puts(&call, ",\"name\":");
+    JsonBuf_String(&call, result.calls && result.calls[0].name ? result.calls[0].name : "");
+    JsonBuf_Puts(&call, ",\"arguments\":");
+    JsonBuf_String(&call, result.calls && result.calls[0].arguments ? result.calls[0].arguments : "{}");
+    JsonBuf_Puts(&call, ",\"item_id\":");
+    JsonBuf_String(&call, result.calls && result.calls[0].item_id ? result.calls[0].item_id : "");
+    JsonBuf_Putc(&call, '}');
+    const char *input[] = {assistant.data, call.data};
+    PicoLlmTurn turn = {
+        .model = "gpt",
+        .input_json = input,
+        .input_count = 2,
+    };
+    PicoResponsesBuildOpts openai = {
+        .provider = "openai",
+        .store_false = true,
+        .include_encrypted_reasoning = true,
+    };
+    char *body = pico_responses_build_request(&turn, &openai);
+    CheckContains(body, "\"id\":\"rs_projected\"", true,
+                  "projected reasoning id replays to Responses");
+    CheckContains(body, "\"encrypted_content\":\"secret_blob\"", true,
+                  "projected encrypted reasoning replays to Responses");
+    CheckContains(body, "\"id\":\"fc_projected\"", true,
+                  "projected function-call item id replays to Responses");
+    CheckContains(body, "\"call_id\":\"call_projected\"", true,
+                  "projected tool call id replays to Responses");
+    JsonDoc request;
+    int parse_rc = body ? JsonParse(&request, body, strlen(body)) : -1;
+    Check(parse_rc == 0, "projected Responses request parses");
+    if (parse_rc == 0)
     {
-        Check(strstr(result.raw_items[0], "rs_1") == NULL,
-              "reasoning represented by the signature is not duplicated as raw history");
+        int request_input = JsonObjGet(&request, 0, "input");
+        int function_call = -1;
+        int input_count = JsonIsArray(&request, request_input) ? JsonArrayLen(&request, request_input) : 0;
+        for (int i = 0; i < input_count; i++)
+        {
+            int item = JsonArrayAt(&request, request_input, i);
+            if (JsonEq(&request, JsonObjGet(&request, item, "type"), "function_call"))
+            {
+                function_call = item;
+                break;
+            }
+        }
+        char *name = function_call >= 0 ? JsonObjStr(&request, function_call, "name") : NULL;
+        char *arguments = function_call >= 0 ? JsonObjStr(&request, function_call, "arguments") : NULL;
+        Check(name && strcmp(name, "sh") == 0, "projected function-call name replays to Responses");
+        Check(arguments && strcmp(arguments, "{\"cmd\":\"ls\"}") == 0,
+              "projected function-call arguments replay to Responses");
+        free(name);
+        free(arguments);
+        JsonFree(&request);
     }
+    free(body);
+    JsonBuf_Free(&assistant);
+    JsonBuf_Free(&call);
     FreeResult(&result);
     pico_responses_ctx_free(&ctx);
 }
@@ -230,6 +286,6 @@ int main(void)
     TestReasoningRemoval();
     TestRefreshDecision();
     TestSignatureReplay();
-    TestRawResultProjection();
+    TestReasoningResultProjection();
     return g_failed;
 }

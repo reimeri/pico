@@ -27,7 +27,9 @@ typedef struct PicoHttpPost {
     void *user; /* passed to both callbacks */
 } PicoHttpPost;
 
-/* Buffered JSON/form POST. `body` may be empty. `out_body` is malloc'd JSON/text. */
+/* Buffered JSON/form request. `body` may be empty; GET ignores it. Header strings and
+ * callback data must remain valid until the blocking call returns. Requests follow
+ * redirects and time out after 30 seconds. */
 typedef struct PicoHttpReq {
     const char *url;
     const char *body;
@@ -37,8 +39,13 @@ typedef struct PicoHttpReq {
     void *user;
 } PicoHttpReq;
 
+/* HTTP status is reported through `out_http`; a completed 4xx/5xx transfer still
+ * returns PICO_HTTP_OK. When set, `out_body` and `out_error` are malloc'd and caller-owned.
+ * Cancellation returns PICO_HTTP_CANCEL. SSE requests follow redirects and time out after
+ * 300 seconds; buffered GET/POST requests time out after 30 seconds. */
 int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error);
 int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error);
+int pico_http_get(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error);
 char *pico_http_form_encode(const char *const *keys, const char *const *vals, int n);
 
 #endif

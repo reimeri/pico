@@ -1,5 +1,6 @@
 // Copy to ~/.config/pico/settings.json or {workspace}/.pico/settings.json
-// Credentials live in ~/.config/pico/auth.json, env (PICO_API_KEY / OPENAI_API_KEY), or /login.
+// Credentials live in ~/.config/pico/auth.json, env (PICO_API_KEY / OPENAI_API_KEY / HYPER_API_KEY),
+// or `/login openai` / `/login hyper`.
 {
   // Active catalog id. Overridden by PICO_MODEL or OPENAI_MODEL. /model writes this key.
   "model": "gpt-5.6-sol",
@@ -14,6 +15,24 @@
       "context_limit": 1000000,
       "effort": ["none", "low", "medium", "high"],
       "selected_effort": "medium"
+    },
+    // Charm Hyper examples. Authenticate with HYPER_API_KEY or `/login hyper`.
+    // Effort lists follow Hyper's /v1/models catalog; `none` omits reasoning.
+    {
+      "name": "DeepSeek V4 Pro",
+      "id": "deepseek-v4-pro",
+      "provider": "hyper",
+      "context_limit": 1000000,
+      "effort": ["none", "high", "xhigh"],
+      "selected_effort": "high"
+    },
+    {
+      "name": "GLM 5.1",
+      "id": "glm-5.1",
+      "provider": "hyper",
+      "context_limit": 200000,
+      "effort": ["none", "high"],
+      "selected_effort": "high"
     }
   ],
 

@@ -1,12 +1,16 @@
 # Providers
 
-An LLM provider implements one streaming turn. The builtin is `openai` (`app/builtins/openai.c`). Models in `settings.json` name the provider:
+An LLM provider implements one streaming turn. Builtins are `openai` (`app/builtins/openai.c`) and `hyper` (`app/builtins/hyper.c`). Models in `settings.json` name the provider:
 
 ```json
 { "id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "context_limit": 128000 }
 ```
 
-`provider` must match `PicoProvider.name`. Optional `base_url` overrides the extension default.
+Hyper models use `"provider": "hyper"` at the fixed HTTPS base `https://hyper.charm.land/v1`. The catalog is static `settings.json`; Pico does not fetch Hyper's model list at runtime. Hyper rejects non-canonical `base_url` overrides so workspace settings cannot redirect Hyper credentials.
+
+Hyper's `/v1/responses` request matches OpenAI's with these differences: always `store: false`, no `include: ["reasoning.encrypted_content"]`, and `reasoning` is `{ "effort": "..." }` without `summary: "auto"`. Effort `none`/`off` omits `reasoning`. Authenticate with `HYPER_API_KEY` or `/login hyper`.
+
+`provider` must match `PicoProvider.name`. Providers may interpret optional `base_url` values; the builtin OpenAI provider accepts overrides, while Hyper only accepts its canonical endpoint.
 
 ```c
 #include "pico/plugin.h"
@@ -33,7 +37,7 @@ static void MyInit(PicoApp *app)
 }
 ```
 
-Add a catalog entry with `"provider": "myllm"` or the builtin OpenAI path is used instead.
+Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`) is used instead.
 
 ## Turn
 
@@ -56,7 +60,7 @@ Fill `PicoLlmResult` with malloc'd strings. Pico calls `pico_llm_result_free`. R
 
 Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.
 
-HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_form_encode` in `pico/http.h`.
+HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_http_form_encode` in `pico/http.h`. `pico_http_get` uses the same `PicoHttpReq` as POST and ignores `body`. Buffered requests return `PICO_HTTP_OK` when the transfer completes even for HTTP 4xx/5xx; inspect `out_http` for application status. See [contracts](contracts.md#http-helpers) for ownership, cancellation, redirects, and timeout behavior.
 
 ## Contract
 

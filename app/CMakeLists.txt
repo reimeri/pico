@@ -83,6 +83,9 @@ add_executable(pico
     builtins/commands.c
     builtins/files.c
     builtins/openai.c
+    builtins/hyper.c
+    builtins/hyper_auth.c
+    builtins/responses.c
     builtins/extensions.c
     builtins/prompt.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
@@ -124,6 +127,22 @@ if(BUILD_TESTING)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_json_tests)
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
+
+    add_executable(pico_responses_tests
+        tests/responses_test.c
+        builtins/responses.c
+        builtins/hyper_auth.c
+        json.c)
+    target_include_directories(pico_responses_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src
+        ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    pico_warnings_are_errors(pico_responses_tests)
+    target_compile_options(pico_responses_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_responses_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_responses_tests COMMAND pico_responses_tests)
 
     add_executable(pico_todo_tests
         tests/todo_test.c

@@ -55,4 +55,4 @@ F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** unt
 
 `/cd` queues a workspace transition behind the same barrier; `app->workspace` changes only when the old agent set can be replaced as one main-thread transition.
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `extensions`, `prompt`. `/extensions` lists them.
+Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `extensions`, `prompt`. `/extensions` lists them.

@@ -41,6 +41,12 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
 
+## HTTP helpers
+
+`pico_http_post_sse`, `pico_http_post`, and `pico_http_get` are blocking and may be called concurrently. Request URLs, bodies, headers, callbacks, and callback data must remain valid until the call returns. SSE requests follow redirects and time out after 300 seconds; buffered GET/POST requests follow redirects and time out after 30 seconds. GET ignores `PicoHttpReq.body`.
+
+`PICO_HTTP_OK` means the transport completed, not that the server returned a successful status. Always inspect `out_http`; HTTP 4xx/5xx responses still return `PICO_HTTP_OK`. If set, `out_body` and `out_error` are malloc'd and caller-owned. Cancellation is polled during transfer, returns `PICO_HTTP_CANCEL`, and leaves output strings unset. A callback returning false aborts SSE parsing so the callback's recorded application error can take precedence over a transport error.
+
 `PicoPlugins_Count` / `PicoPlugins_Get` return the loaded registry (builtins and user sources, including failed loads). Pointers in `PicoExtInfo` are valid until the next reload. `enabled` is currently true when the extension loaded; failed stubs are false.
 
 ## Limits

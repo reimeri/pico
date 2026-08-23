@@ -301,7 +301,8 @@ static int OnBodyXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_
     return BodyCancelled((BodyCtx *)clientp) ? 1 : 0;
 }
 
-int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error)
+static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, char **out_body,
+                           char **out_error)
 {
     if (out_http)
     {
@@ -350,12 +351,19 @@ int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char
         }
     }
 
-    const char *body = req->body ? req->body : "";
     curl_easy_setopt(curl, CURLOPT_URL, req->url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    if (get)
+    {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    }
+    else
+    {
+        const char *body = req->body ? req->body : "";
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+    }
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnBody);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnBodyXfer);
@@ -400,6 +408,16 @@ int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char
         JsonBuf_Free(&ctx.acc);
     }
     return PICO_HTTP_OK;
+}
+
+int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error)
+{
+    return BufferedRequest(req, false, out_http, out_body, out_error);
+}
+
+int pico_http_get(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error)
+{
+    return BufferedRequest(req, true, out_http, out_body, out_error);
 }
 
 static void FormPct(JsonBuf *b, const char *s)

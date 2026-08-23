@@ -27,6 +27,12 @@ static int TestScaleHelpers(void)
         return Fail("1.25 does not scale design 16 to 20");
     }
 
+    Pico_SetFontScale(1.5f);
+    if (Pico_FontPxU16(13) != 20 || Pico_FontPx(13) != 20.0f)
+    {
+        return Fail("1.5 does not round design 13 to 20 for atlas and draw");
+    }
+
     Pico_SetFontScale(3.0f);
     if (Pico_FontPxU16(64) != 192)
     {

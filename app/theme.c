@@ -77,20 +77,25 @@ float Pico_FontScale(void)
     return g_font_scale;
 }
 
-float Pico_FontPx(uint16_t design)
+static int RoundedFontPx(uint16_t design)
 {
-    return (float)design * g_font_scale;
-}
-
-uint16_t Pico_FontPxU16(uint16_t design)
-{
-    float px = Pico_FontPx(design);
+    float px = (float)design * g_font_scale;
     int n = px <= 0.0f ? 0 : (int)(px + 0.5f);
     if (n > UINT16_MAX)
     {
         n = UINT16_MAX;
     }
-    return (uint16_t)n;
+    return n;
+}
+
+float Pico_FontPx(uint16_t design)
+{
+    return (float)RoundedFontPx(design);
+}
+
+uint16_t Pico_FontPxU16(uint16_t design)
+{
+    return (uint16_t)RoundedFontPx(design);
 }
 
 Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)

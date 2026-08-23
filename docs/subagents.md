@@ -1,6 +1,6 @@
 # Subagents
 
-Pico can delegate a task to a hidden child agent through the builtin `subagent` tool. Every child uses a named user profile; calls cannot supply ad-hoc purpose, model, effort, or tool overrides.
+Pico can delegate a task to a child agent through the builtin `subagent` tool. Every child uses a named user profile; calls cannot supply ad-hoc purpose, model, effort, or tool overrides. Children are not selected as the main chat session. Click a `subagent` tool row to open a view-only nested chat of that child's session, both while it runs and after it finishes. The row also shows the child's live activity instead of a generic running placeholder.
 
 ## Profile directory
 
@@ -67,7 +67,7 @@ The model-facing tool accepts:
 }
 ```
 
-`profile` and `task` are required. A fresh child receives current system/workspace instructions, the profile purpose, and only the delegated task. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or prompt cache key. The parent waits synchronously while Pico pumps the hidden child.
+`profile` and `task` are required. A fresh child receives current system/workspace instructions, the profile purpose, and only the delegated task. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or prompt cache key. The parent waits synchronously while Pico pumps the child. Click the `subagent` row to watch that session; nested `subagent` rows inside the inspect chat open on a Back stack. Asks from the child still use the normal confirm/questionnaire overlays.
 
 The result identifies the profile, resolved model and effort, status, final answer, and whether the child can be resumed. A reusable result also includes its exact `session_id`.
 

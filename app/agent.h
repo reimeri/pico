@@ -48,9 +48,17 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
 void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text);
 void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args);
+void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
+                                const char *name, const char *args);
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error);
+void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
+                                     const char *output, bool is_error);
 void PicoAgent_ClearMessages(PicoAgent *agent);
+void PicoMessages_Free(PicoMessage *messages, int count);
+bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int *dst_count);
+void PicoMessages_PrepareDocs(PicoMessage *messages, int count);
 void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out);
 PicoAgentManager *PicoAgentContext_Manager(const PicoAgentContext *ctx);
+const char *PicoAgentContext_ToolCallId(const PicoAgentContext *ctx);
 
 #endif

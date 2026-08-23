@@ -13,6 +13,18 @@ typedef struct PicoSessionReservation {
     char path[4096];
 } PicoSessionReservation;
 
+typedef struct PicoSubagentSnapshot {
+    PicoAgentId child_id;
+    PicoAgentId parent_id;
+    char session_id[40];
+    char profile[65];
+    char purpose[1025];
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
+    PicoMessage *messages;
+    int message_count;
+} PicoSubagentSnapshot;
+
 struct PicoAgentManager {
     PicoApp *app; /* main-thread owner; never exposed to workers */
     PicoAgent *agents[PICO_MAX_AGENTS];
@@ -29,6 +41,9 @@ struct PicoAgentManager {
     int profile_count;
     pthread_mutex_t delegation_mu;
     struct PicoDelegationJob *delegations;
+    PicoSubagentSnapshot *snapshots;
+    int snapshot_count;
+    int snapshot_capacity;
     pthread_mutex_t lifecycle_mu;
     bool accepting_work;
     bool curl_initialized;
@@ -70,5 +85,22 @@ void PicoAgentManager_CancelDelegations(PicoAgentManager *manager, PicoAgentId p
                                         uint64_t runtime_generation);
 void PicoAgentManager_CancelChildDelegation(PicoAgentManager *manager, PicoAgentId child_id);
 bool PicoAgentManager_JobReferences(const PicoAgentManager *manager, PicoAgentId id);
+
+typedef struct PicoSubagentInspect {
+    PicoAgentId live_id;
+    char session_id[40];
+    char profile[65];
+    char purpose[1025];
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
+    char activity[256];
+    PicoAgentState state;
+    bool live;
+    const PicoMessage *messages;
+    int message_count;
+} PicoSubagentInspect;
+
+bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
+                                      PicoSubagentInspect *out);
 
 #endif

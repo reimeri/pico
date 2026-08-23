@@ -267,7 +267,8 @@ void PicoOverlay_OnFrame(PicoApp *app, float dt)
             g_notify_ttl = 0.0f;
         }
     }
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
+        PicoChat_InspectIsOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }

@@ -38,6 +38,7 @@ typedef struct PicoDelegationJob {
     char session_id[40];
     char model[128];
     char effort[PICO_EFFORT_LEN];
+    char *call_id;
     char *result;
     bool result_is_error;
 } PicoDelegationJob;
@@ -45,6 +46,7 @@ typedef struct PicoDelegationJob {
 static void ProcessDelegationRequests(PicoAgentManager *manager);
 static void ProcessDelegationTerminals(PicoAgentManager *manager);
 static void DropDelegations(PicoAgentManager *manager);
+static void LinkDelegationToolRows(PicoAgentManager *manager);
 
 static int FindIndex(const PicoAgentManager *manager, PicoAgentId id)
 {
@@ -456,6 +458,7 @@ void PicoAgentManager_Pump(PicoAgentManager *manager)
     {
         PicoAgent_Pump(manager->app, manager->agents[i]);
     }
+    LinkDelegationToolRows(manager);
     ProcessDelegationTerminals(manager);
 }
 
@@ -602,6 +605,15 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
         return false;
     }
     DropDelegations(manager);
+    for (int i = 0; i < manager->snapshot_count; i++)
+    {
+        PicoMessages_Free(manager->snapshots[i].messages, manager->snapshots[i].message_count);
+        memset(&manager->snapshots[i], 0, sizeof(manager->snapshots[i]));
+    }
+    free(manager->snapshots);
+    manager->snapshots = NULL;
+    manager->snapshot_count = 0;
+    manager->snapshot_capacity = 0;
     if (manager->curl_initialized)
     {
         curl_global_cleanup();
@@ -831,6 +843,7 @@ static void DelegationRelease(PicoDelegationJob *job)
     pthread_mutex_destroy(&job->mu);
     pthread_cond_destroy(&job->cv);
     free(job->task);
+    free(job->call_id);
     free(job->result);
     free(job);
 }
@@ -936,6 +949,336 @@ static const char *LastAssistantSince(const PicoAgent *agent, int message_start)
         }
     }
     return "";
+}
+
+static bool IsSubagentLine(const PicoTraceLine *line)
+{
+    return line && line->is_tool && line->tool_name && strcmp(line->tool_name, "subagent") == 0;
+}
+
+static PicoTraceLine *FindPendingSubagentLine(PicoAgent *parent)
+{
+    if (!parent)
+    {
+        return NULL;
+    }
+    for (int i = parent->message_count - 1; i >= 0; i--)
+    {
+        PicoMessage *msg = &parent->messages[i];
+        for (int t = msg->trace_count - 1; t >= 0; t--)
+        {
+            PicoTraceLine *line = &msg->trace[t];
+            if (IsSubagentLine(line) && !line->tool_output && line->child_id == 0)
+            {
+                return line;
+            }
+        }
+    }
+    return NULL;
+}
+
+static PicoTraceLine *FindSubagentLine(PicoAgent *parent, PicoAgentId child_id,
+                                       const char *call_id)
+{
+    if (!parent)
+    {
+        return NULL;
+    }
+    if (child_id)
+    {
+        for (int i = parent->message_count - 1; i >= 0; i--)
+        {
+            PicoMessage *msg = &parent->messages[i];
+            for (int t = msg->trace_count - 1; t >= 0; t--)
+            {
+                PicoTraceLine *line = &msg->trace[t];
+                if (IsSubagentLine(line) && line->child_id == child_id)
+                {
+                    return line;
+                }
+            }
+        }
+    }
+    if (call_id && call_id[0])
+    {
+        for (int i = parent->message_count - 1; i >= 0; i--)
+        {
+            PicoMessage *msg = &parent->messages[i];
+            for (int t = msg->trace_count - 1; t >= 0; t--)
+            {
+                PicoTraceLine *line = &msg->trace[t];
+                if (IsSubagentLine(line) && !line->child_id && !line->tool_output &&
+                    line->tool_call_id && strcmp(line->tool_call_id, call_id) == 0)
+                {
+                    return line;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static void StampSubagentLine(PicoTraceLine *line, PicoAgentId child_id, const char *session_id)
+{
+    if (!line)
+    {
+        return;
+    }
+    if (child_id)
+    {
+        line->child_id = child_id;
+    }
+    if (session_id && session_id[0])
+    {
+        snprintf(line->child_session_id, sizeof(line->child_session_id), "%s", session_id);
+    }
+}
+
+static void CopySessionIdFromOutput(const char *output, char *out, size_t cap)
+{
+    if (!output || !out || cap == 0)
+    {
+        return;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, output, strlen(output)) != 0 || !JsonIsObject(&doc, 0))
+    {
+        return;
+    }
+    char *id = JsonObjStr(&doc, 0, "session_id");
+    if (id && id[0])
+    {
+        snprintf(out, cap, "%s", id);
+    }
+    free(id);
+    JsonFree(&doc);
+}
+
+static PicoSubagentSnapshot *FindSnapshot(PicoAgentManager *manager, PicoAgentId child_id,
+                                          const char *session_id)
+{
+    if (!manager)
+    {
+        return NULL;
+    }
+    if (child_id)
+    {
+        for (int i = 0; i < manager->snapshot_count; i++)
+        {
+            if (manager->snapshots[i].child_id == child_id)
+            {
+                return &manager->snapshots[i];
+            }
+        }
+    }
+    if (session_id && session_id[0])
+    {
+        for (int i = 0; i < manager->snapshot_count; i++)
+        {
+            if (manager->snapshots[i].session_id[0] &&
+                strcmp(manager->snapshots[i].session_id, session_id) == 0)
+            {
+                return &manager->snapshots[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+static PicoSubagentSnapshot *AllocSnapshot(PicoAgentManager *manager)
+{
+    if (!manager)
+    {
+        return NULL;
+    }
+    if (manager->snapshot_count >= manager->snapshot_capacity)
+    {
+        int next_capacity = manager->snapshot_capacity == 0 ? 16 : manager->snapshot_capacity * 2;
+        PicoSubagentSnapshot *next = (PicoSubagentSnapshot *)realloc(
+            manager->snapshots, (size_t)next_capacity * sizeof(PicoSubagentSnapshot));
+        if (!next)
+        {
+            return NULL;
+        }
+        memset(&next[manager->snapshot_capacity], 0,
+               (size_t)(next_capacity - manager->snapshot_capacity) * sizeof(PicoSubagentSnapshot));
+        manager->snapshots = next;
+        manager->snapshot_capacity = next_capacity;
+    }
+    PicoSubagentSnapshot *slot = &manager->snapshots[manager->snapshot_count++];
+    memset(slot, 0, sizeof(*slot));
+    return slot;
+}
+
+static void SnapshotChild(PicoAgentManager *manager, const PicoAgent *child)
+{
+    if (!manager || !child)
+    {
+        return;
+    }
+    PicoSubagentSnapshot *slot = FindSnapshot(manager, child->id, child->session_id);
+    if (!slot)
+    {
+        slot = AllocSnapshot(manager);
+    }
+    if (!slot)
+    {
+        return;
+    }
+    PicoMessages_Free(slot->messages, slot->message_count);
+    slot->messages = NULL;
+    slot->message_count = 0;
+    slot->child_id = child->id;
+    slot->parent_id = child->parent_id;
+    snprintf(slot->session_id, sizeof(slot->session_id), "%s", child->session_id);
+    snprintf(slot->profile, sizeof(slot->profile), "%s", child->profile);
+    snprintf(slot->purpose, sizeof(slot->purpose), "%s", child->purpose);
+    snprintf(slot->model, sizeof(slot->model), "%s", child->model);
+    snprintf(slot->effort, sizeof(slot->effort), "%s", child->effort);
+    (void)PicoMessages_Copy(child->messages, child->message_count, &slot->messages,
+                            &slot->message_count);
+}
+
+static void FillInspectFromAgent(PicoSubagentInspect *out, const PicoAgent *child)
+{
+    out->live_id = child->id;
+    out->live = true;
+    out->state = child->state;
+    snprintf(out->session_id, sizeof(out->session_id), "%s", child->session_id);
+    snprintf(out->profile, sizeof(out->profile), "%s", child->profile);
+    snprintf(out->purpose, sizeof(out->purpose), "%s", child->purpose);
+    snprintf(out->model, sizeof(out->model), "%s", child->model);
+    snprintf(out->effort, sizeof(out->effort), "%s", child->effort);
+    snprintf(out->activity, sizeof(out->activity), "%s", child->activity);
+    out->messages = child->messages;
+    out->message_count = child->message_count;
+}
+
+static void FillInspectFromSnapshot(PicoSubagentInspect *out, const PicoSubagentSnapshot *slot)
+{
+    out->live_id = 0;
+    out->live = false;
+    out->state = PICO_AGENT_IDLE;
+    snprintf(out->session_id, sizeof(out->session_id), "%s", slot->session_id);
+    snprintf(out->profile, sizeof(out->profile), "%s", slot->profile);
+    snprintf(out->purpose, sizeof(out->purpose), "%s", slot->purpose);
+    snprintf(out->model, sizeof(out->model), "%s", slot->model);
+    snprintf(out->effort, sizeof(out->effort), "%s", slot->effort);
+    out->activity[0] = '\0';
+    out->messages = slot->messages;
+    out->message_count = slot->message_count;
+}
+
+static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *session_id)
+{
+    if (!manager || !manager->app || !session_id || !session_id[0] ||
+        FindSnapshot(manager, 0, session_id))
+    {
+        return FindSnapshot(manager, 0, session_id) != NULL;
+    }
+    PicoMessage *messages = NULL;
+    int count = 0;
+    if (PicoSession_LoadTranscript(manager->app, session_id, &messages, &count) != 0)
+    {
+        return false;
+    }
+    PicoMessages_PrepareDocs(messages, count);
+    PicoSubagentSnapshot *slot = AllocSnapshot(manager);
+    if (!slot)
+    {
+        PicoMessages_Free(messages, count);
+        return false;
+    }
+    slot->messages = messages;
+    slot->message_count = count;
+    snprintf(slot->session_id, sizeof(slot->session_id), "%s", session_id);
+    PicoSessionHeader header;
+    char path[4096];
+    if (PicoSession_Resolve(manager->app, session_id, false, path, sizeof(path)) == 0 &&
+        PicoSession_ReadHeader(path, &header) == 0)
+    {
+        snprintf(slot->profile, sizeof(slot->profile), "%s", header.profile);
+        snprintf(slot->purpose, sizeof(slot->purpose), "%s", header.initial_purpose);
+        snprintf(slot->model, sizeof(slot->model), "%s", header.model);
+    }
+    return true;
+}
+
+static void LinkDelegationToolRows(PicoAgentManager *manager)
+{
+    PicoDelegationJob *jobs[PICO_MAX_AGENTS * 2];
+    int count = 0;
+    pthread_mutex_lock(&manager->delegation_mu);
+    for (PicoDelegationJob *it = manager->delegations;
+         it && count < (int)(sizeof(jobs) / sizeof(jobs[0])); it = it->next)
+    {
+        jobs[count++] = it;
+    }
+    pthread_mutex_unlock(&manager->delegation_mu);
+    for (int i = 0; i < count; i++)
+    {
+        PicoDelegationJob *job = jobs[i];
+        pthread_mutex_lock(&job->mu);
+        PicoAgentId parent_id = job->parent_id;
+        PicoAgentId child_id = job->child_id;
+        char session_id[40];
+        snprintf(session_id, sizeof(session_id), "%s", job->session_id);
+        pthread_mutex_unlock(&job->mu);
+        if (!child_id)
+        {
+            continue;
+        }
+        PicoAgent *parent = PicoAgentManager_Find(manager, parent_id);
+        PicoAgent *child = PicoAgentManager_Find(manager, child_id);
+        const char *sid = session_id[0] ? session_id :
+                          (child && child->session_id[0] ? child->session_id : NULL);
+        PicoTraceLine *line = FindSubagentLine(parent, child_id, job->call_id);
+        if (!line)
+        {
+            line = FindPendingSubagentLine(parent);
+        }
+        StampSubagentLine(line, child_id, sid);
+    }
+}
+
+bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
+                                      PicoSubagentInspect *out)
+{
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    if (!app || !app->agents || !line || !out)
+    {
+        return false;
+    }
+    PicoAgentManager *manager = app->agents;
+    char session_id[40];
+    snprintf(session_id, sizeof(session_id), "%s", line->child_session_id);
+    if (!session_id[0])
+    {
+        CopySessionIdFromOutput(line->tool_output, session_id, sizeof(session_id));
+    }
+    if (line->child_id)
+    {
+        PicoAgent *child = PicoAgentManager_Find(manager, line->child_id);
+        if (child)
+        {
+            FillInspectFromAgent(out, child);
+            return true;
+        }
+    }
+    PicoSubagentSnapshot *slot = FindSnapshot(manager, line->child_id, session_id);
+    if (!slot && session_id[0] && LoadSnapshotFromSession(manager, session_id))
+    {
+        slot = FindSnapshot(manager, 0, session_id);
+    }
+    if (!slot)
+    {
+        return false;
+    }
+    FillInspectFromSnapshot(out, slot);
+    return true;
 }
 
 static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
@@ -1094,6 +1437,14 @@ static void ProcessDelegationRequests(PicoAgentManager *manager)
 static void CloseDelegationChild(PicoAgentManager *manager, PicoDelegationJob *job,
                                  PicoAgentId child_id)
 {
+    PicoAgent *child = child_id ? PicoAgentManager_Find(manager, child_id) : NULL;
+    PicoAgent *parent = PicoAgentManager_Find(manager, job->parent_id);
+    if (child)
+    {
+        PicoTraceLine *line = FindSubagentLine(parent, child_id, job->call_id);
+        StampSubagentLine(line, child_id, child->session_id[0] ? child->session_id : NULL);
+        SnapshotChild(manager, child);
+    }
     pthread_mutex_lock(&job->mu);
     job->child_id = 0;
     pthread_mutex_unlock(&job->mu);
@@ -1214,7 +1565,9 @@ char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
     snprintf(job->profile, sizeof(job->profile), "%s", profile);
     snprintf(job->session_id, sizeof(job->session_id), "%s", session_id ? session_id : "");
     job->task = JsonDup(task);
-    if (!job->task)
+    const char *call_id = PicoAgentContext_ToolCallId(ctx);
+    job->call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
+    if (!job->task || (call_id && call_id[0] && !job->call_id))
     {
         job->refs = 1;
         DelegationRelease(job);

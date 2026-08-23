@@ -67,6 +67,7 @@ struct PicoAgentContext {
     char session_id[40];
     char profile[65];
     char purpose[1025];
+    const char *tool_call_id;
     bool safe_mode;
     struct PicoAuthStore *auth_store;
 };
@@ -919,9 +920,11 @@ static void *WorkerMain(void *arg)
                 memset(&result, 0, sizeof(result));
                 if (tool_fn)
                 {
+                    rt->context.tool_call_id = call_id;
                     t_agent_context = &rt->context;
                     tool_fn(&rt->context, tool_args ? tool_args : "{}", &result);
                     t_agent_context = NULL;
+                    rt->context.tool_call_id = NULL;
                     bool details_valid = false;
                     result.details_json = ValidateToolDetails(result.details_json, &details_valid);
                     if (!details_valid)
@@ -1258,6 +1261,7 @@ static void PopLastMessage(PicoApp *app, PicoAgent *agent)
     {
         free(agent->messages[i].trace[t].text);
         free(agent->messages[i].trace[t].tool_name);
+        free(agent->messages[i].trace[t].tool_call_id);
         free(agent->messages[i].trace[t].tool_args);
         free(agent->messages[i].trace[t].tool_output);
         MdDocument_Free(&agent->messages[i].trace[t].doc);
@@ -1438,13 +1442,14 @@ static void TraceSetThinkSummary(PicoApp *app, PicoAgent *agent, int idx, const 
     ReparseThinkSummary(line);
 }
 
-static void TraceAddTool(PicoApp *app, PicoAgent *agent, int idx, const char *name, const char *args_json)
+static void TraceAddTool(PicoApp *app, PicoAgent *agent, int idx, const char *call_id,
+                         const char *name, const char *args_json)
 {
     if (idx < 0 || idx >= agent->message_count)
     {
         return;
     }
-    PicoAgent_AddToolCall(app, agent, name, args_json);
+    PicoAgent_AddToolCallWithId(app, agent, call_id, name, args_json);
 }
 
 static void TraceSetLastToolOutput(PicoApp *app, PicoAgent *agent, int idx, const char *output, bool is_error)
@@ -1684,7 +1689,8 @@ static void StartNextTool(PicoApp *app, PicoAgent *agent)
                                   error ? error : "unoffered tool", true, NULL);
         if (rt->stream_msg >= 0)
         {
-            TraceAddTool(app, agent, rt->stream_msg, call->name ? call->name : "tool",
+            TraceAddTool(app, agent, rt->stream_msg, call->call_id,
+                         call->name ? call->name : "tool",
                          call->arguments ? call->arguments : "{}");
             TraceSetLastToolOutput(app, agent, rt->stream_msg,
                                    error ? error : "unoffered tool", true);
@@ -1883,7 +1889,9 @@ static void OnToolStart(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
     free(line);
     if (rt->stream_msg >= 0)
     {
-        TraceAddTool(app, agent, rt->stream_msg, name, args);
+        PicoPendingCall *call = rt->pending_next < rt->pending_count
+                                    ? &rt->pending[rt->pending_next] : NULL;
+        TraceAddTool(app, agent, rt->stream_msg, call ? call->call_id : NULL, name, args);
     }
 }
 
@@ -1938,7 +1946,8 @@ static void OnToolDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev, bool fai
     {
         if (CountToolTrace(&agent->messages[rt->stream_msg]) <= rt->pending_next)
         {
-            TraceAddTool(app, agent, rt->stream_msg, name[0] ? name : "tool",
+            TraceAddTool(app, agent, rt->stream_msg, call ? call->call_id : call_id,
+                         name[0] ? name : "tool",
                          call && call->arguments ? call->arguments : "{}");
         }
         TraceSetLastToolOutput(app, agent, rt->stream_msg, use, is_error);
@@ -2932,6 +2941,11 @@ bool pico_agent_context_cancelled(const PicoAgentContext *ctx)
 PicoAgentManager *PicoAgentContext_Manager(const PicoAgentContext *ctx)
 {
     return AgentContextActive(ctx) ? ctx->manager : NULL;
+}
+
+const char *PicoAgentContext_ToolCallId(const PicoAgentContext *ctx)
+{
+    return AgentContextActive(ctx) && ctx->tool_call_id ? ctx->tool_call_id : "";
 }
 
 struct PicoAuthStore *PicoAgentContext_AuthStore(const PicoAgentContext *ctx)

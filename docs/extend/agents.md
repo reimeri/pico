@@ -21,7 +21,7 @@ pico_agent_select(app, active);
 
 `pico_agent_find` returns a copied snapshot by ID. `PicoAgentInfo.persistence` is `PICO_SESSION_EPHEMERAL`, `PICO_SESSION_DURABLE`, or `PICO_SESSION_FAILED`; `resumable` is true only for a durable identity. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
 
-`pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. The message pointer is invalidated by pumping, transcript mutation, close, or workspace replacement.
+`pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. Tool trace rows include their provider `tool_call_id`; builtin subagent rows also expose the linked runtime `child_id` and durable `child_session_id` when available. The message and all nested string pointers are invalidated by pumping, transcript mutation, close, or workspace replacement.
 
 ## Named subagent profiles
 
@@ -55,7 +55,7 @@ A fresh child gets current workspace/system instructions, a clearly delimited pr
 
 Supplying `session_id` reserves and replays exactly that prior subagent session. The stored profile must match. Transcript/provider history, usage, compaction state, and prompt cache are restored, then model, effort, purpose, and tools are refreshed from the current profile and parent. A model change rotates the cache key. The delegated task is appended to the same JSONL session.
 
-The parent remains in tool wait while the hidden child runs. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. Parent cancellation wakes the parent generation and cascades to the child. Late child completion cannot publish into a replacement generation.
+The parent remains in tool wait while the child runs. Click the `subagent` tool row to inspect the child's transcript without selecting it. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. Parent cancellation wakes the parent generation and cascades to the child. Late child completion cannot publish into a replacement generation.
 
 ## Asks
 

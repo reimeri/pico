@@ -636,3 +636,212 @@ static int TestSubagentDirectChildCancellation(void)
     return cancelled && reported
                ? 0 : Fail(name, "direct child cancellation was not published as cancelled");
 }
+
+static int TestSubagentLiveInspect(void)
+{
+    const char *name = "subagent live inspect";
+    char temp[] = "/tmp/pico-subagent-inspect-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail(name, "could not create config directory");
+    }
+    char dir[4096];
+    char path[4096];
+    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Inspect while running\",\"tools\":[]}",
+                              dir, sizeof(dir), path, sizeof(path)))
+    {
+        rmdir(temp);
+        return Fail(name, "could not write profile");
+    }
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_DELEGATION_CHILD_BLOCK, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoExt extension = pico_ext_subagent();
+    extension.init(&app);
+    PicoAgentManager_LoadProfiles(app.agents);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
+             "{\"profile\":\"exploration\",\"task\":\"delegated inspect task\"}");
+    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoApp_AddToolCall(&app, "subagent", "{\"task\":\"older pending row\"}");
+    PicoAgent_StartTurn(&app, parent, "parent inspect request");
+
+    PicoAgentId child_id = 0;
+    PicoTraceLine *live_line = NULL;
+    for (int i = 0; i < 3000 && !child_id; i++)
+    {
+        PicoAgentManager_Pump(app.agents);
+        live_line = LastToolTrace(&app);
+        if (live_line && live_line->child_id)
+        {
+            child_id = live_line->child_id;
+            break;
+        }
+        SleepOneMs();
+    }
+
+    PicoSubagentInspect live;
+    memset(&live, 0, sizeof(live));
+    PicoTraceLine *older = parent->message_count > 0 && parent->messages[0].trace_count > 0
+                               ? &parent->messages[0].trace[0] : NULL;
+    bool linked = child_id && live_line && live_line->child_id == child_id &&
+                  live_line->tool_call_id && live_line->tool_call_id[0] &&
+                  older && older->child_id == 0 &&
+                  PicoAgentManager_InspectSubagent(&app, live_line, &live) && live.live &&
+                  live.live_id == child_id;
+    bool readable = false;
+    if (linked)
+    {
+        int n = pico_agent_message_count(&app, child_id);
+        const PicoMessage *first = pico_agent_message(&app, child_id, 0);
+        readable = n > 0 && first && first->role == PICO_ROLE_USER && first->source &&
+                   strstr(first->source, "delegated inspect task");
+    }
+
+    PicoAgent_Cancel(parent);
+    bool idle = WaitForManagerIdle(&app);
+    PicoTraceLine *done_line = LastToolTrace(&app);
+    PicoSubagentInspect done;
+    memset(&done, 0, sizeof(done));
+    PicoAgentInfo gone;
+    bool snapshot = done_line && done_line->child_id == child_id &&
+                    PicoAgentManager_InspectSubagent(&app, done_line, &done) && !done.live &&
+                    done.message_count > 0 && done.messages && done.messages[0].source &&
+                    strstr(done.messages[0].source, "delegated inspect task") &&
+                    !pico_agent_find(&app, child_id, &gone);
+
+    PicoApp_Free(&app);
+    unlink(path);
+    rmdir(dir);
+    rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return linked && readable && idle && snapshot
+               ? 0 : Fail(name, "live child transcript was not linked or snapshot was lost after close");
+}
+
+static int TestSubagentInspectRetention(void)
+{
+    const char *name = "subagent inspect retention";
+    char temp[] = "/tmp/pico-subagent-inspect-retain-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail(name, "could not create config directory");
+    }
+    char dir[4096];
+    char path[4096];
+    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Retain completed transcript\",\"tools\":[]}",
+                              dir, sizeof(dir), path, sizeof(path)))
+    {
+        rmdir(temp);
+        return Fail(name, "could not write profile");
+    }
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_DELEGATION, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoExt extension = pico_ext_subagent();
+    extension.init(&app);
+    PicoAgentManager_LoadProfiles(app.agents);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
+             "{\"profile\":\"exploration\",\"task\":\"retained child\"}");
+    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoTraceLine first;
+    memset(&first, 0, sizeof(first));
+    bool completed = true;
+    for (int i = 0; i < PICO_MAX_AGENTS * 2 + 1; i++)
+    {
+        pthread_mutex_lock(&g_test.mu);
+        g_test.provider_tools_issued = 0;
+        pthread_mutex_unlock(&g_test.mu);
+        PicoAgent_StartTurn(&app, parent, "delegate again");
+        if (!WaitForManagerIdle(&app))
+        {
+            completed = false;
+            break;
+        }
+        PicoTraceLine *line = LastToolTrace(&app);
+        if (!line || !line->child_id)
+        {
+            completed = false;
+            break;
+        }
+        if (i == 0)
+        {
+            first.child_id = line->child_id;
+        }
+    }
+    PicoSubagentInspect inspect;
+    memset(&inspect, 0, sizeof(inspect));
+    bool retained = completed && first.child_id &&
+                    PicoAgentManager_InspectSubagent(&app, &first, &inspect) &&
+                    !inspect.live && inspect.message_count > 0 && inspect.messages &&
+                    inspect.messages[0].source && strstr(inspect.messages[0].source, "retained child");
+
+    PicoApp_Free(&app);
+    unlink(path);
+    rmdir(dir);
+    rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return retained ? 0 : Fail(name, "an older ephemeral child transcript was evicted");
+}
+
+static int TestSubagentInspectThenContinue(void)
+{
+    const char *name = "subagent inspect then continue";
+    char temp[] = "/tmp/pico-subagent-inspect-continue-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail(name, "could not create config directory");
+    }
+    char dir[4096];
+    char path[4096];
+    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Current profile purpose\"}",
+                              dir, sizeof(dir), path, sizeof(path)))
+    {
+        rmdir(temp);
+        return Fail(name, "could not write profile");
+    }
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_DELEGATION, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoExt extension = pico_ext_subagent();
+    extension.init(&app);
+    PicoAgentManager_LoadProfiles(app.agents);
+    ConfigureFakeSession("exploration");
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
+             "{\"profile\":\"exploration\",\"task\":\"first look\","
+             "\"session_id\":\"continued-child\"}");
+    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent_StartTurn(&app, parent, "first");
+    bool first = WaitForManagerIdle(&app);
+    PicoTraceLine *trace = LastToolTrace(&app);
+    PicoSubagentInspect inspect;
+    memset(&inspect, 0, sizeof(inspect));
+    bool inspected = first && trace &&
+                     PicoAgentManager_InspectSubagent(&app, trace, &inspect) &&
+                     inspect.message_count > 0;
+
+    pthread_mutex_lock(&g_test.mu);
+    g_test.provider_tools_issued = 0;
+    pthread_mutex_unlock(&g_test.mu);
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
+             "{\"profile\":\"exploration\",\"task\":\"second look\","
+             "\"session_id\":\"continued-child\"}");
+    PicoAgent_StartTurn(&app, parent, "second");
+    bool second = WaitForManagerIdle(&app);
+    PicoTraceLine *again = LastToolTrace(&app);
+    bool continued = second && again && !again->tool_error && again->tool_output &&
+                     strstr(again->tool_output, "\"session_id\":\"continued-child\"");
+
+    PicoApp_Free(&app);
+    unlink(path);
+    rmdir(dir);
+    rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return inspected && continued
+               ? 0 : Fail(name, "inspecting a child blocked later continuation of the same session");
+}

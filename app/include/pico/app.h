@@ -85,11 +85,14 @@ typedef struct PicoTraceLine {
     char *text;
     bool is_tool;
     char *tool_name;
+    char *tool_call_id;
     char *tool_args;
     char *tool_output;
     bool tool_error;
     bool expanded;
     int think_steps;
+    PicoAgentId child_id;
+    char child_session_id[40];
     MdDocument doc;
 } PicoTraceLine;
 
@@ -476,6 +479,7 @@ bool Pico_ShortcutRepeat(char letter);
 void PicoChat_Render(PicoApp *app);
 void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event);
 void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event);
+bool PicoChat_InspectIsOpen(void);
 bool PicoChatSel_HasSelection(const PicoApp *app);
 void PicoChatSel_Clear(PicoApp *app);
 void PicoChatSel_Copy(PicoApp *app);

@@ -24,7 +24,7 @@ Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tool
 
 Reload is deferred while any live worker is busy, and while any force-cancelled worker is still in a tool or provider call, so those pointers stay valid until the call returns. That includes a worker blocked in `pico_tool_ask` or the builtin `subagent` tool.
 
-Named delegation is a worker/main-thread handshake: the parent tool waits on a core-owned job without holding manager locks; the main thread creates and pumps the hidden child. Worker callbacks may therefore run for a child while its parent worker is blocked. Child asks are still published through the normal global ask routing.
+Named delegation is a worker/main-thread handshake: the parent tool waits on a core-owned job without holding manager locks; the main thread creates and pumps the child. Worker callbacks may therefore run for a child while its parent worker is blocked. Child asks are still published through the normal global ask routing. The builtin chat inspects a child from its parent `subagent` tool row without selecting that child.
 
 ## Ownership
 
@@ -33,6 +33,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
 - `pico_tool_pending_ask` `request_json`: the oldest live ask across all agents; valid until the next manager pump. Do not retain it across frames.
 - `pico_subagent_profile_info`: copies the complete profile snapshot into caller storage. Profile strings and tool names in that copy are caller-owned values, not registry pointers.
+- `pico_agent_message` and nested `PicoTraceLine` strings such as `tool_call_id`: borrowed main-thread transcript storage, invalidated by pumping, transcript mutation, close, or workspace replacement.
 - `PicoAgentContext *` and all strings returned by its accessors: callback-scoped; never retain them.
 - `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.

@@ -18,6 +18,7 @@ static char g_config_dir[4096];
 static int g_restored_value;
 static int g_reset_hooks;
 static char g_status_warning[512];
+static int g_reserve_calls;
 
 static int Fail(const char *message)
 {
@@ -33,6 +34,7 @@ bool Pico_ConfigDir(char *out, size_t cap)
 bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner, const char *path)
 {
     (void)manager; (void)owner; (void)path;
+    g_reserve_calls++;
     return true;
 }
 
@@ -207,14 +209,54 @@ void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, con
     (void)app; (void)agent; (void)name; (void)args_json;
 }
 
+void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
+                                const char *name, const char *args_json)
+{
+    (void)app; (void)agent; (void)call_id; (void)name; (void)args_json;
+}
+
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error)
 {
     (void)agent; (void)output; (void)is_error;
 }
 
+void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
+                                     const char *output, bool is_error)
+{
+    (void)agent; (void)call_id; (void)output; (void)is_error;
+}
+
 void PicoAgent_ClearMessages(PicoAgent *agent)
 {
     (void)agent;
+}
+
+void PicoMessages_Free(PicoMessage *messages, int count)
+{
+    if (!messages)
+    {
+        return;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        free(messages[i].source);
+        for (int t = 0; t < messages[i].trace_count; t++)
+        {
+            free(messages[i].trace[t].text);
+            free(messages[i].trace[t].tool_name);
+            free(messages[i].trace[t].tool_call_id);
+            free(messages[i].trace[t].tool_args);
+            free(messages[i].trace[t].tool_output);
+        }
+        free(messages[i].trace);
+    }
+    free(messages);
+}
+
+void PicoMessages_PrepareDocs(PicoMessage *messages, int count)
+{
+    (void)messages;
+    (void)count;
 }
 
 PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent)
@@ -344,6 +386,12 @@ int main(void)
     snprintf(child_agent.purpose, sizeof(child_agent.purpose), "Review carefully");
     snprintf(child_agent.parent_session_id, sizeof(child_agent.parent_session_id), "parent-session");
     PicoSession_LogUser(&writer, &child_agent, "delegated task", "delegated task");
+    PicoSession_LogAssistant(&writer, &child_agent, "child findings");
+    PicoSession_LogToolCall(&writer, &child_agent, "child-call-1", "subagent", "{\"task\":\"nested\"}");
+    PicoSession_LogToolCall(&writer, &child_agent, "child-call-2", "sh", "{\"command\":\"true\"}");
+    PicoSession_LogToolResult(&writer, &child_agent, "child-call-1", "subagent",
+                              "{\"session_id\":\"nested-child\"}", false, NULL);
+    PicoSession_LogToolResult(&writer, &child_agent, "child-call-2", "sh", "ok", false, NULL);
     PicoSessionHeader child_header;
     if (!child_agent.session_path[0] || PicoSession_ReadHeader(child_agent.session_path, &child_header) != 0 ||
         child_header.version != 3 || child_header.kind != PICO_AGENT_SUBAGENT ||
@@ -353,6 +401,25 @@ int main(void)
     {
         return Fail("subagent session header did not preserve durable profile metadata");
     }
+    int reserves_before_load = g_reserve_calls;
+    PicoMessage *loaded = NULL;
+    int loaded_n = 0;
+    if (PicoSession_LoadTranscript(&writer, child_agent.session_id, &loaded, &loaded_n) != 0 ||
+        loaded_n < 2 || !loaded || !loaded[0].source || strcmp(loaded[0].source, "delegated task") != 0 ||
+        !loaded[1].source || strcmp(loaded[1].source, "child findings") != 0 ||
+        loaded[1].trace_count != 2 || !loaded[1].trace[0].tool_call_id ||
+        strcmp(loaded[1].trace[0].tool_call_id, "child-call-1") != 0 ||
+        !loaded[1].trace[0].tool_output ||
+        strcmp(loaded[1].trace[0].tool_output, "{\"session_id\":\"nested-child\"}") != 0 ||
+        !loaded[1].trace[1].tool_call_id ||
+        strcmp(loaded[1].trace[1].tool_call_id, "child-call-2") != 0 ||
+        !loaded[1].trace[1].tool_output || strcmp(loaded[1].trace[1].tool_output, "ok") != 0 ||
+        g_reserve_calls != reserves_before_load)
+    {
+        PicoMessages_Free(loaded, loaded_n);
+        return Fail("read-only child transcript load reserved the session or dropped messages");
+    }
+    PicoMessages_Free(loaded, loaded_n);
 
     PicoSessionInfo *listed = NULL;
     int listed_n = PicoSession_List(&writer, &listed, true);

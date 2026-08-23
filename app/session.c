@@ -662,7 +662,7 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         char *call_id = JsonObjStr(doc, obj, "call_id");
         char *name = JsonObjStr(doc, obj, "name");
         char *args = JsonObjStr(doc, obj, "arguments");
-        PicoAgent_AddToolCall(app, agent, name, args);
+        PicoAgent_AddToolCallWithId(app, agent, call_id, name, args);
         if (into_input)
         {
             PicoAgent_PushHistoryFunctionCall(agent, call_id, name, args);
@@ -684,7 +684,7 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
             details = JsonRawDup(doc, details_tok);
         }
         ApplyToolDetails(app, agent, name, details, is_error);
-        PicoAgent_SetLastToolOutput(agent, output, is_error);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, output, is_error);
         if (into_input)
         {
             PicoAgent_PushHistoryFunctionOutput(agent, call_id, name, output, is_error);
@@ -1083,6 +1083,237 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     JsonFree(&doc);
     free(line);
     return valid ? 0 : -1;
+}
+
+static void LoadedTranscriptFree(PicoMessage *messages, int count)
+{
+    if (!messages)
+    {
+        return;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        free(messages[i].source);
+        for (int t = 0; t < messages[i].trace_count; t++)
+        {
+            free(messages[i].trace[t].text);
+            free(messages[i].trace[t].tool_name);
+            free(messages[i].trace[t].tool_call_id);
+            free(messages[i].trace[t].tool_args);
+            free(messages[i].trace[t].tool_output);
+        }
+        free(messages[i].trace);
+    }
+    free(messages);
+}
+
+static bool LoadedAddMessage(PicoMessage **messages, int *count, int *capacity,
+                             PicoRole role, const char *text)
+{
+    if (*count >= *capacity)
+    {
+        int next = *capacity == 0 ? 8 : *capacity * 2;
+        PicoMessage *grown = (PicoMessage *)realloc(*messages, (size_t)next * sizeof(PicoMessage));
+        if (!grown)
+        {
+            return false;
+        }
+        *messages = grown;
+        *capacity = next;
+    }
+    PicoMessage *msg = &(*messages)[(*count)++];
+    memset(msg, 0, sizeof(*msg));
+    msg->role = role;
+    msg->source = JsonDup(text ? text : "");
+    return msg->source != NULL;
+}
+
+static bool LoadedAppendAssistant(PicoMessage **messages, int *count, int *capacity,
+                                  const char *text)
+{
+    if (*count <= 0 || (*messages)[*count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        return LoadedAddMessage(messages, count, capacity, PICO_ROLE_ASSISTANT, text);
+    }
+    if (!text || !text[0])
+    {
+        return true;
+    }
+    PicoMessage *msg = &(*messages)[*count - 1];
+    size_t old = msg->source ? strlen(msg->source) : 0;
+    size_t n = strlen(text);
+    char *next = (char *)realloc(msg->source, old + n + 1);
+    if (!next)
+    {
+        return false;
+    }
+    memcpy(next + old, text, n + 1);
+    msg->source = next;
+    return true;
+}
+
+static bool LoadedAddTool(PicoMessage **messages, int *count, int *capacity,
+                          const char *call_id, const char *name, const char *args)
+{
+    if (*count <= 0 || (*messages)[*count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        if (!LoadedAddMessage(messages, count, capacity, PICO_ROLE_ASSISTANT, ""))
+        {
+            return false;
+        }
+    }
+    PicoMessage *msg = &(*messages)[*count - 1];
+    PicoTraceLine *next =
+        (PicoTraceLine *)realloc(msg->trace, (size_t)(msg->trace_count + 1) * sizeof(PicoTraceLine));
+    if (!next)
+    {
+        return false;
+    }
+    msg->trace = next;
+    PicoTraceLine *line = &msg->trace[msg->trace_count++];
+    memset(line, 0, sizeof(*line));
+    line->is_tool = true;
+    line->tool_name = JsonDup(name && name[0] ? name : "tool");
+    line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
+    line->tool_args = JsonDup(args ? args : "");
+    return line->tool_name != NULL && (!call_id || !call_id[0] || line->tool_call_id != NULL);
+}
+
+static void LoadedSetOutput(PicoMessage *messages, int count, const char *call_id,
+                            const char *output, bool is_error)
+{
+    if (count <= 0)
+    {
+        return;
+    }
+    for (int i = count - 1; i >= 0; i--)
+    {
+        PicoMessage *msg = &messages[i];
+        for (int t = msg->trace_count - 1; t >= 0; t--)
+        {
+            PicoTraceLine *line = &msg->trace[t];
+            if (line->is_tool && call_id && call_id[0] && line->tool_call_id &&
+                strcmp(line->tool_call_id, call_id) == 0)
+            {
+                free(line->tool_output);
+                line->tool_output = JsonDup(output ? output : "");
+                line->tool_error = is_error;
+                return;
+            }
+        }
+    }
+}
+
+int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
+                               PicoMessage **out, int *out_count)
+{
+    if (out)
+    {
+        *out = NULL;
+    }
+    if (out_count)
+    {
+        *out_count = 0;
+    }
+    if (!app || !id || !id[0] || !out || !out_count)
+    {
+        return -1;
+    }
+    char path[4096];
+    if (PicoSession_Resolve(app, id, false, path, sizeof(path)) != 0)
+    {
+        return -1;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return -1;
+    }
+    PicoMessage *messages = NULL;
+    int count = 0;
+    int capacity = 0;
+    char *buf = NULL;
+    size_t buf_cap = 0;
+    bool failed = false;
+    while (getline(&buf, &buf_cap, f) != -1)
+    {
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+        {
+            buf[--len] = '\0';
+        }
+        if (len == 0)
+        {
+            continue;
+        }
+        JsonDoc doc;
+        if (JsonParse(&doc, buf, len) != 0 || !JsonIsObject(&doc, 0))
+        {
+            if (doc.toks)
+            {
+                JsonFree(&doc);
+            }
+            continue;
+        }
+        char *type = JsonObjStr(&doc, 0, "type");
+        if (type && strcmp(type, "message") == 0)
+        {
+            char *role = JsonObjStr(&doc, 0, "role");
+            char *content = JsonObjStr(&doc, 0, "content");
+            if (role && strcmp(role, "user") == 0)
+            {
+                char *display = JsonObjStr(&doc, 0, "display");
+                const char *text = display && display[0] ? display : (content ? content : "");
+                failed = !LoadedAddMessage(&messages, &count, &capacity, PICO_ROLE_USER, text);
+                free(display);
+            }
+            else if (role && strcmp(role, "assistant") == 0)
+            {
+                failed = !LoadedAppendAssistant(&messages, &count, &capacity, content ? content : "");
+            }
+            free(role);
+            free(content);
+        }
+        else if (type && strcmp(type, "tool_call") == 0)
+        {
+            char *call_id = JsonObjStr(&doc, 0, "call_id");
+            char *name = JsonObjStr(&doc, 0, "name");
+            char *args = JsonObjStr(&doc, 0, "arguments");
+            failed = !LoadedAddTool(&messages, &count, &capacity, call_id, name, args);
+            free(call_id);
+            free(name);
+            free(args);
+        }
+        else if (type && strcmp(type, "tool_result") == 0)
+        {
+            char *call_id = JsonObjStr(&doc, 0, "call_id");
+            char *output = JsonObjStr(&doc, 0, "output");
+            bool is_error = JsonEq(&doc, JsonObjGet(&doc, 0, "is_error"), "true");
+            LoadedSetOutput(messages, count, call_id, output, is_error);
+            free(call_id);
+            free(output);
+        }
+        free(type);
+        JsonFree(&doc);
+        if (failed)
+        {
+            break;
+        }
+    }
+    if (ferror(f))
+    {
+        failed = true;
+    }
+    free(buf);
+    fclose(f);
+    if (failed)
+    {
+        LoadedTranscriptFree(messages, count);
+        return -1;
+    }
+    *out = messages;
+    *out_count = count;
+    return 0;
 }
 
 int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,

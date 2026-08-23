@@ -948,6 +948,43 @@ int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
     return 0;
 }
 
+int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
+                               PicoMessage **out, int *out_count)
+{
+    (void)app;
+    if (out)
+    {
+        *out = NULL;
+    }
+    if (out_count)
+    {
+        *out_count = 0;
+    }
+    if (!g_fake_session.enabled || !g_fake_session.resolve_ok || !id ||
+        strcmp(id, g_fake_session.id) != 0)
+    {
+        return -1;
+    }
+    PicoMessage *messages = (PicoMessage *)calloc(2, sizeof(PicoMessage));
+    if (!messages)
+    {
+        return -1;
+    }
+    messages[0].role = PICO_ROLE_USER;
+    messages[0].source = JsonDup("previous delegated context");
+    messages[1].role = PICO_ROLE_ASSISTANT;
+    messages[1].source = JsonDup("previous answer");
+    if (out)
+    {
+        *out = messages;
+    }
+    if (out_count)
+    {
+        *out_count = 2;
+    }
+    return 0;
+}
+
 int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path, bool append_interrupted)
 {
     (void)append_interrupted;
@@ -1021,6 +1058,15 @@ void PicoChatSel_Clear(PicoApp *app)
     {
         app->chat_sel.msg = -1;
     }
+}
+
+bool PicoChat_InspectIsOpen(void)
+{
+    return false;
+}
+
+void PicoChat_InspectClose(void)
+{
 }
 
 static void InitApp(PicoApp *app)
@@ -2562,6 +2608,9 @@ int main(void)
     failed |= TestSubagentParentCancellation();
     failed |= TestSubagentCancellationBeforeEnqueue();
     failed |= TestSubagentDirectChildCancellation();
+    failed |= TestSubagentLiveInspect();
+    failed |= TestSubagentInspectRetention();
+    failed |= TestSubagentInspectThenContinue();
     failed |= TestSubagentSessionContinuation();
     failed |= TestSubagentContinuationEmptyAnswer();
     failed |= TestSubagentResumeFailures();

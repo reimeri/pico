@@ -31,6 +31,11 @@ int PicoSession_Open(PicoApp *app, PicoAgent *agent, const char *id);
 int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
                         char *path, size_t path_cap);
 int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out);
+/* Read a durable session's visible transcript without reserving the file.
+ * Messages have source/tool strings; markdown documents are empty until
+ * PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */
+int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
+                               PicoMessage **out, int *out_count);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
                        bool append_interrupted);

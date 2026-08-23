@@ -9,6 +9,7 @@
 #include "json.h"
 #include "richtext.h"
 #include "settings.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
@@ -41,6 +42,8 @@ typedef struct InspectFrame {
 static InspectFrame g_inspect[PICO_MAX_DELEGATION_DEPTH + 1];
 static int g_inspect_n;
 static bool g_inspect_follow = true;
+static bool g_inspect_overflow;
+static PicoScrollbar g_inspect_bar;
 static bool g_inspect_pressed_dim;
 static bool g_inspect_pressed_back;
 static bool g_inspect_pressed_tool;
@@ -552,40 +555,8 @@ void PicoChat_Render(PicoApp *app)
 
         if (app->chat_overflow)
         {
-            Clay_ScrollContainerData scroll_data =
-                Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-            float track_h = scroll_data.found ? scroll_data.scrollContainerDimensions.height : 0;
-            float content_h = scroll_data.found ? scroll_data.contentDimensions.height : 1;
-            float thumb_h = content_h > 0 ? (track_h / content_h) * track_h : track_h;
-            if (thumb_h < 16)
-            {
-                thumb_h = 16;
-            }
-            float thumb_y = 0;
-            if (scroll_data.found && scroll_data.scrollPosition && content_h > 0)
-            {
-                thumb_y = -(scroll_data.scrollPosition->y / content_h) * track_h;
-            }
-
-            CLAY(CLAY_ID("ChatScrollTrack"),
-                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                        .height = CLAY_SIZING_GROW(0)}}})
-            {
-                CLAY(CLAY_ID("ChatScrollBarHandle"),
-                     {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                                   .offset = {.y = thumb_y},
-                                   .zIndex = 1,
-                                   .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
-                                                    .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
-                      .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                            .height = CLAY_SIZING_FIXED(thumb_h)}},
-                      .backgroundColor = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle")))
-                                             ? COLOR_SCROLLBAR_HOVER
-                                             : COLOR_SCROLLBAR,
-                      .cornerRadius = CLAY_CORNER_RADIUS((float)SCROLLBAR_WIDTH / 2.0f)})
-                {
-                }
-            }
+            PicoScrollbar_Render(CLAY_STRING("ChatScroll"), CLAY_STRING("ChatScrollTrack"),
+                                 CLAY_STRING("ChatScrollBarHandle"));
         }
     }
 }
@@ -633,6 +604,8 @@ void PicoChat_InspectClose(void)
     g_inspect_pressed_dim = false;
     g_inspect_pressed_back = false;
     g_inspect_pressed_tool = false;
+    g_inspect_overflow = false;
+    memset(&g_inspect_bar, 0, sizeof(g_inspect_bar));
 }
 
 static void InspectCaptureLine(InspectFrame *frame, const PicoTraceLine *line)
@@ -840,37 +813,53 @@ static void InspectRender(PicoApp *app)
                     }
                 }
             }
-            CLAY(CLAY_ID("SubagentChatScroll"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .childGap = 12,
-                             .sizing = {.width = CLAY_SIZING_GROW(0),
-                                        .height = CLAY_SIZING_GROW(0)}},
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+            CLAY(CLAY_ID("SubagentChatRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = SCROLLBAR_GAP,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
             {
-                if (found && inspect.message_count > 0)
+                CLAY(CLAY_ID("SubagentChatScroll"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .childGap = 12,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_GROW(0)}},
+                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
-                    PicoAgent *owner =
-                        inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
-                    TranscriptView view = {
-                        .app = app,
-                        .messages = inspect.messages,
-                        .message_count = inspect.message_count,
-                        .state = inspect.state,
-                        .activity = inspect.activity,
-                        .owner = owner,
-                        .id_ns = g_inspect_n,
-                        .selectable = false,
-                    };
-                    RenderTranscript(&view, card_w - 48.0f);
+                    if (found && inspect.message_count > 0)
+                    {
+                        PicoAgent *owner =
+                            inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+                        TranscriptView view = {
+                            .app = app,
+                            .messages = inspect.messages,
+                            .message_count = inspect.message_count,
+                            .state = inspect.state,
+                            .activity = inspect.activity,
+                            .owner = owner,
+                            .id_ns = g_inspect_n,
+                            .selectable = false,
+                        };
+                        float transcript_w = card_w - 48.0f;
+                        if (g_inspect_overflow)
+                        {
+                            transcript_w -= (float)(SCROLLBAR_WIDTH + SCROLLBAR_GAP);
+                        }
+                        RenderTranscript(&view, transcript_w);
+                    }
+                    else if (fallback && fallback[0])
+                    {
+                        RenderToolOutput(NULL, fallback);
+                    }
+                    else
+                    {
+                        CLAY_TEXT(CLAY_STRING("No transcript"),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC, .fontSize = 14, .textColor = COLOR_MUTED}));
+                    }
                 }
-                else if (fallback && fallback[0])
+                if (g_inspect_overflow)
                 {
-                    RenderToolOutput(NULL, fallback);
-                }
-                else
-                {
-                    CLAY_TEXT(CLAY_STRING("No transcript"),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC, .fontSize = 14, .textColor = COLOR_MUTED}));
+                    PicoScrollbar_Render(CLAY_STRING("SubagentChatScroll"), CLAY_STRING("SubagentChatScrollTrack"),
+                                         CLAY_STRING("SubagentChatScrollHandle"));
                 }
             }
         }
@@ -883,7 +872,8 @@ static void InspectHandlePointer(PicoApp *app)
     {
         return;
     }
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatScroll"))) &&
+    g_inspect_overflow = PicoScrollbar_Overflows(CLAY_STRING("SubagentChatScroll"));
+    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatRow"))) &&
         GetMouseWheelMove() != 0.0f)
     {
         g_inspect_follow = false;
@@ -1168,6 +1158,12 @@ static void ChatOnFrame(PicoApp *app, float dt)
     if (g_inspect_n <= 0)
     {
         return;
+    }
+    PicoScrollbar_UpdateDrag(&g_inspect_bar, CLAY_STRING("SubagentChatScroll"),
+                             CLAY_STRING("SubagentChatScrollHandle"));
+    if (g_inspect_bar.mouse_down)
+    {
+        g_inspect_follow = false;
     }
     if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
         PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)))

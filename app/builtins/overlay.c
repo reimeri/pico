@@ -3,6 +3,7 @@
 #include "../agent_internal.h"
 #include "overlay.h"
 #include "json.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
@@ -19,6 +20,8 @@ static float g_notify_ttl;
 static uint64_t g_ask_id;
 static bool g_ask_show;
 static char *g_ask_msg;
+static bool g_ask_overflow;
+static PicoScrollbar g_ask_bar;
 
 void PicoOverlay_Notify(PicoApp *app, const char *text)
 {
@@ -58,6 +61,8 @@ static void ClearAskUi(void)
     g_ask_msg = NULL;
     g_ask_id = 0;
     g_ask_show = false;
+    g_ask_overflow = false;
+    memset(&g_ask_bar, 0, sizeof(g_ask_bar));
 }
 
 static void RejectInvalidAsk(PicoApp *app, uint64_t id)
@@ -161,17 +166,28 @@ static void RenderAsk(PicoApp *app)
         {
             CLAY_TEXT(CLAY_STRING("Confirm"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
-            CLAY(CLAY_ID("AskModalScroll"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .padding = {0, 8, 0, 0},
+            CLAY(CLAY_ID("AskModalScrollRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = SCROLLBAR_GAP,
                              .sizing = {.width = CLAY_SIZING_GROW(0),
-                                        .height = CLAY_SIZING_FIT(0, body_h)}},
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                                        .height = CLAY_SIZING_FIT(0, body_h)}}})
             {
-                CLAY_TEXT(CStr(g_ask_msg), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                             .fontSize = 14,
-                                                             .textColor = COLOR_TEXT,
-                                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                CLAY(CLAY_ID("AskModalScroll"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_GROW(0)}},
+                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                {
+                    CLAY_TEXT(CStr(g_ask_msg), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                 .fontSize = 14,
+                                                                 .textColor = COLOR_TEXT,
+                                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                }
+                if (g_ask_overflow)
+                {
+                    PicoScrollbar_Render(CLAY_STRING("AskModalScroll"), CLAY_STRING("AskModalScrollTrack"),
+                                         CLAY_STRING("AskModalScrollHandle"));
+                }
             }
             CLAY(CLAY_ID("AskModalButtons"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -257,6 +273,11 @@ void PicoOverlay_Render(PicoApp *app)
 
 void PicoOverlay_OnFrame(PicoApp *app, float dt)
 {
+    if (g_ask_show)
+    {
+        PicoScrollbar_UpdateDrag(&g_ask_bar, CLAY_STRING("AskModalScroll"),
+                                 CLAY_STRING("AskModalScrollHandle"));
+    }
     if (g_notify)
     {
         g_notify_ttl -= dt;
@@ -290,6 +311,7 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
     (void)event;
     if (g_ask_show)
     {
+        g_ask_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskModalScroll"));
         if (OverAsk(CLAY_STRING("AskApprove")) || OverAsk(CLAY_STRING("AskDeny")))
         {
             app->hovered_clickable = true;

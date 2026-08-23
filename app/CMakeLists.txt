@@ -71,6 +71,7 @@ add_executable(pico
     usage.c
     chat_sel.c
     text_range.c
+    scrollbar.c
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
@@ -136,6 +137,19 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_text_range_tests)
     add_test(NAME pico_text_range_tests COMMAND pico_text_range_tests)
 
+    add_executable(pico_scrollbar_tests
+        tests/scrollbar_test.c
+        scrollbar.c)
+    target_include_directories(pico_scrollbar_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_scrollbar_tests)
+    target_compile_options(pico_scrollbar_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_scrollbar_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_scrollbar_tests COMMAND pico_scrollbar_tests)
+
     add_executable(pico_responses_tests
         tests/responses_test.c
         builtins/responses.c
@@ -184,6 +198,7 @@ if(BUILD_TESTING)
         tests/subagent_test.c
         tests/clay_impl.c
         app.c
+        scrollbar.c
         agent.c
         agent_manager.c
         subagent_config.c

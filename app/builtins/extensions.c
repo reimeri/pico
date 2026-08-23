@@ -1,14 +1,19 @@
 #include "pico/plugin.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
 #include <string.h>
 
 static bool g_open;
+static bool g_overflow;
+static PicoScrollbar g_scrollbar;
 
 void PicoExts_Close(void)
 {
     g_open = false;
+    g_overflow = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
 bool PicoExts_IsOpen(void)
@@ -185,14 +190,25 @@ static void ExtsRender(PicoApp *app)
             CLAY_TEXT(CLAY_STRING("Extensions"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
 
-            CLAY(CLAY_ID("ExtModalScroll"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .childGap = 10,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+            CLAY(CLAY_ID("ExtModalScrollRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = SCROLLBAR_GAP,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
             {
-                RenderSection(true, CLAY_STRING("Built-in"));
-                RenderSection(false, CLAY_STRING("User"));
+                CLAY(CLAY_ID("ExtModalScroll"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .childGap = 10,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                {
+                    RenderSection(true, CLAY_STRING("Built-in"));
+                    RenderSection(false, CLAY_STRING("User"));
+                }
+                if (g_overflow)
+                {
+                    PicoScrollbar_Render(CLAY_STRING("ExtModalScroll"), CLAY_STRING("ExtModalScrollTrack"),
+                                         CLAY_STRING("ExtModalScrollHandle"));
+                }
             }
         }
     }
@@ -202,7 +218,12 @@ static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
     (void)app;
-    if (!g_open || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    if (!g_open)
+    {
+        return;
+    }
+    g_overflow = PicoScrollbar_Overflows(CLAY_STRING("ExtModalScroll"));
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return;
     }
@@ -220,7 +241,13 @@ static void ExtsOnFrame(PicoApp *app, float dt)
 {
     (void)app;
     (void)dt;
-    if (g_open && IsKeyPressed(KEY_ESCAPE))
+    if (!g_open)
+    {
+        return;
+    }
+    PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("ExtModalScroll"),
+                             CLAY_STRING("ExtModalScrollHandle"));
+    if (IsKeyPressed(KEY_ESCAPE))
     {
         PicoExts_Close();
     }

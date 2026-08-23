@@ -8,6 +8,7 @@
 #include "chat_sel.h"
 #include "json.h"
 #include "overlay.h"
+#include "scrollbar.h"
 #include "builtins/chat.h"
 #include "builtins/todo.h"
 
@@ -1324,33 +1325,10 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
     return Clay_EndLayout(GetFrameTime());
 }
 
-static void UpdateChatScrollbarDrag(PicoApp *app, Clay_Vector2 mouse)
+static void UpdateChatScrollbarDrag(PicoApp *app)
 {
-    PicoScrollbar *drag = &app->chat_scrollbar;
-    if (!IsMouseButtonDown(0))
-    {
-        drag->mouse_down = false;
-    }
-    if (IsMouseButtonDown(0) && !drag->mouse_down &&
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
-    {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-        if (data.found)
-        {
-            drag->click_origin = mouse;
-            drag->position_origin = *data.scrollPosition;
-            drag->mouse_down = true;
-        }
-    }
-    else if (drag->mouse_down)
-    {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-        if (data.found && data.contentDimensions.height > 0)
-        {
-            float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;
-            data.scrollPosition->y = drag->position_origin.y + (drag->click_origin.y - mouse.y) * ratio;
-        }
-    }
+    PicoScrollbar_UpdateDrag(&app->chat_scrollbar, CLAY_STRING("ChatScroll"),
+                             CLAY_STRING("ChatScrollBarHandle"));
 }
 
 #define CHAT_FOLLOW_SLACK 8.0f
@@ -1421,6 +1399,7 @@ void PicoApp_Frame(PicoApp *app)
 
     PicoPlugins_Poll(app);
     PicoApp_PumpLifecycle(app);
+    PicoScrollbar_BeginFrame();
 
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
@@ -1452,28 +1431,25 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
-    bool composer_bar_drag = app->composer_scrollbar.mouse_down;
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
     bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
     bool modal_open = PicoUi_ModalOpen(app);
-    Clay_SetPointerState(mouse_position,
-                         IsMouseButtonDown(0) && !app->chat_scrollbar.mouse_down && !composer_bar_drag);
-    Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
-
     if (!modal_open)
     {
-        UpdateChatScrollbarDrag(app, mouse_position);
+        UpdateChatScrollbarDrag(app);
     }
-    Clay_UpdateScrollContainers(modal_open || (!over_composer && !over_chat && !composer_bar_drag &&
-                                               !app->chat_sel.mouse_selecting),
-                                (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
+    bool bar_drag = PicoScrollbar_AnyDragging();
+    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !bar_drag);
+    Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
+
+    Clay_UpdateScrollContainers(
+        !bar_drag && (modal_open || (!over_composer && !over_chat && !app->chat_sel.mouse_selecting)),
+        (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app);
 
-    Clay_ScrollContainerData scroll_data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    app->chat_overflow =
-        scroll_data.found && scroll_data.contentDimensions.height > scroll_data.scrollContainerDimensions.height + 0.5f;
+    app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
 

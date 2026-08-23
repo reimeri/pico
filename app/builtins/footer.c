@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "overlay.h"
 #include "settings.h"
+#include "scrollbar.h"
 #include "tinyfiledialogs.h"
 #include "usage.h"
 
@@ -33,6 +34,7 @@ static FooterMenu g_menu;
 static int g_selected;
 static bool g_want_folder;
 static bool g_esc_block;
+static PicoScrollbar g_scrollbar;
 
 bool PicoFooter_MenuOpen(void)
 {
@@ -274,48 +276,66 @@ static void RenderMenu(PicoApp *app)
                      .childGap = 2,
                      .sizing = {.width = CLAY_SIZING_FIT(180, 420),
                                 .height = scroll ? CLAY_SIZING_FIXED(h) : CLAY_SIZING_FIT(0)}},
-          .clip = {.vertical = scroll,
-                   .horizontal = false,
-                   .childOffset = scroll ? Clay_GetScrollOffset() : (Clay_Vector2){0}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        for (int i = 0; i < n; i++)
+        CLAY(CLAY_ID("FooterMenuRow"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = SCROLLBAR_GAP,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
         {
-            const char *label = "";
-            const char *detail = "";
-            if (g_menu == FOOTER_MENU_MODEL)
+            CLAY(CLAY_ID("FooterMenuScroll"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 2,
+                             .sizing = {.width = CLAY_SIZING_GROW(0),
+                                        .height = scroll ? CLAY_SIZING_GROW(0) : CLAY_SIZING_FIT(0)}},
+                  .clip = {.vertical = scroll,
+                           .horizontal = false,
+                           .childOffset = scroll ? Clay_GetScrollOffset() : (Clay_Vector2){0}}})
             {
-                PicoModel *m = &app->models[i];
-                label = m->name[0] ? m->name : m->id;
-                detail = m->name[0] ? m->id : "";
-            }
-            else
-            {
-                PicoModel *m = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
-                label = m ? m->effort[i] : "";
-            }
-            Clay_Color bg = i == g_selected ? COLOR_CODE_BG : COLOR_CONTENT_BG;
-            CLAY(CLAY_IDI("FooterMenuItem", i),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = 8,
-                             .padding = {8, 8, 4, 4},
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                  .backgroundColor = bg,
-                  .cornerRadius = CLAY_CORNER_RADIUS(4)})
-            {
-                CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                        .fontSize = 14,
-                                                        .textColor = COLOR_TEXT,
-                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                if (detail[0])
+                for (int i = 0; i < n; i++)
                 {
-                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
-                    CLAY_TEXT(CStr(detail), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                             .fontSize = 13,
-                                                             .textColor = COLOR_MUTED,
-                                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    const char *label = "";
+                    const char *detail = "";
+                    if (g_menu == FOOTER_MENU_MODEL)
+                    {
+                        PicoModel *m = &app->models[i];
+                        label = m->name[0] ? m->name : m->id;
+                        detail = m->name[0] ? m->id : "";
+                    }
+                    else
+                    {
+                        PicoModel *m = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+                        label = m ? m->effort[i] : "";
+                    }
+                    Clay_Color bg = i == g_selected ? COLOR_CODE_BG : COLOR_CONTENT_BG;
+                    CLAY(CLAY_IDI("FooterMenuItem", i),
+                         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                     .childGap = 8,
+                                     .padding = {8, 8, 4, 4},
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                          .backgroundColor = bg,
+                          .cornerRadius = CLAY_CORNER_RADIUS(4)})
+                    {
+                        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                                .fontSize = 14,
+                                                                .textColor = COLOR_TEXT,
+                                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        if (detail[0])
+                        {
+                            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+                            CLAY_TEXT(CStr(detail), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                     .fontSize = 13,
+                                                                     .textColor = COLOR_MUTED,
+                                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        }
+                    }
                 }
+            }
+            if (scroll)
+            {
+                PicoScrollbar_Render(CLAY_STRING("FooterMenuScroll"), CLAY_STRING("FooterMenuScrollTrack"),
+                                     CLAY_STRING("FooterMenuScrollHandle"));
             }
         }
     }
@@ -488,6 +508,8 @@ static void FooterOnFrame(PicoApp *app, float dt)
     g_esc_block = false;
     if (g_menu != FOOTER_MENU_NONE)
     {
+        PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("FooterMenuScroll"),
+                                 CLAY_STRING("FooterMenuScrollHandle"));
         int n = MenuCount(app);
         if (IsKeyPressed(KEY_ESCAPE))
         {

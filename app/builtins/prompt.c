@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "agent.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
@@ -8,12 +9,16 @@
 
 static bool g_open;
 static char *g_text;
+static bool g_overflow;
+static PicoScrollbar g_scrollbar;
 
 void PicoPrompt_Close(void)
 {
     g_open = false;
     free(g_text);
     g_text = NULL;
+    g_overflow = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
 bool PicoPrompt_IsOpen(void)
@@ -95,16 +100,27 @@ static void PromptRender(PicoApp *app)
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 
-            CLAY(CLAY_ID("PromptModalScroll"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .padding = {12, 12, 10, 10},
-                             .childGap = 0,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                  .backgroundColor = COLOR_CODE_BG,
-                  .cornerRadius = CLAY_CORNER_RADIUS(6),
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+            CLAY(CLAY_ID("PromptModalScrollRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = SCROLLBAR_GAP,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
             {
-                RenderPromptText();
+                CLAY(CLAY_ID("PromptModalScroll"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .padding = {12, 12, 10, 10},
+                                 .childGap = 0,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                      .backgroundColor = COLOR_CODE_BG,
+                      .cornerRadius = CLAY_CORNER_RADIUS(6),
+                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                {
+                    RenderPromptText();
+                }
+                if (g_overflow)
+                {
+                    PicoScrollbar_Render(CLAY_STRING("PromptModalScroll"), CLAY_STRING("PromptModalScrollTrack"),
+                                         CLAY_STRING("PromptModalScrollHandle"));
+                }
             }
         }
     }
@@ -114,7 +130,12 @@ static void PromptAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
     (void)app;
-    if (!g_open || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    if (!g_open)
+    {
+        return;
+    }
+    g_overflow = PicoScrollbar_Overflows(CLAY_STRING("PromptModalScroll"));
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return;
     }
@@ -132,7 +153,13 @@ static void PromptOnFrame(PicoApp *app, float dt)
 {
     (void)app;
     (void)dt;
-    if (g_open && IsKeyPressed(KEY_ESCAPE))
+    if (!g_open)
+    {
+        return;
+    }
+    PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("PromptModalScroll"),
+                             CLAY_STRING("PromptModalScrollHandle"));
+    if (IsKeyPressed(KEY_ESCAPE))
     {
         PicoPrompt_Close();
     }

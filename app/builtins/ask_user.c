@@ -6,6 +6,7 @@
 #include "pico/theme.h"
 #include "builtins/ask_user.h"
 #include "json.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
@@ -81,9 +82,11 @@ typedef struct AskUiState {
     int seen_cursor;
     int seen_length;
     bool text_overflow;
+    bool body_overflow;
     bool suppress_chars;
     float text_box_max;
     PicoScrollbar scrollbar;
+    PicoScrollbar body_scrollbar;
 } AskUiState;
 
 static AskUiState g_ui;
@@ -152,9 +155,11 @@ static void ClearQuestions(void)
     g_ui.seen_cursor = -1;
     g_ui.seen_length = -1;
     g_ui.text_overflow = false;
+    g_ui.body_overflow = false;
     g_ui.suppress_chars = false;
     g_ui.text_box_max = 120.0f;
     memset(&g_ui.scrollbar, 0, sizeof(g_ui.scrollbar));
+    memset(&g_ui.body_scrollbar, 0, sizeof(g_ui.body_scrollbar));
 }
 
 static void SetToolError(PicoToolResult *out, const char *message)
@@ -1226,34 +1231,10 @@ static void HandleTextKeys(PicoApp *app, AskQuestion *q)
 
 static void UpdateAskScrollbarDrag(void)
 {
-    PicoScrollbar *drag = &g_ui.scrollbar;
-    Clay_Vector2 mouse = {.x = GetMousePosition().x, .y = GetMousePosition().y};
-    if (!IsMouseButtonDown(0))
-    {
-        drag->mouse_down = false;
-    }
-    if (IsMouseButtonDown(0) && !drag->mouse_down &&
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollHandle"))))
-    {
-        Clay_ScrollContainerData data =
-            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
-        if (data.found && data.scrollPosition)
-        {
-            drag->click_origin = mouse;
-            drag->position_origin = *data.scrollPosition;
-            drag->mouse_down = true;
-        }
-    }
-    else if (drag->mouse_down)
-    {
-        Clay_ScrollContainerData data =
-            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
-        if (data.found && data.scrollPosition && data.contentDimensions.height > 0)
-        {
-            float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;
-            data.scrollPosition->y = drag->position_origin.y + (drag->click_origin.y - mouse.y) * ratio;
-        }
-    }
+    PicoScrollbar_UpdateDrag(&g_ui.scrollbar, CLAY_STRING("AskUserTextScroll"),
+                             CLAY_STRING("AskUserTextScrollHandle"));
+    PicoScrollbar_UpdateDrag(&g_ui.body_scrollbar, CLAY_STRING("AskUserBody"),
+                             CLAY_STRING("AskUserBodyHandle"));
 }
 
 static void AskUserOnFrame(PicoApp *app, float dt)
@@ -1432,40 +1413,8 @@ static void RenderTextQuestion(const AskQuestion *q)
             }
             if (g_ui.text_overflow)
             {
-                Clay_ScrollContainerData scroll_data =
-                    Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
-                float track_h = scroll_data.found ? scroll_data.scrollContainerDimensions.height : 0;
-                float content_h = scroll_data.found ? scroll_data.contentDimensions.height : 1;
-                float thumb_h = content_h > 0 ? (track_h / content_h) * track_h : track_h;
-                if (thumb_h < 16)
-                {
-                    thumb_h = 16;
-                }
-                float thumb_y = 0;
-                if (scroll_data.found && scroll_data.scrollPosition && content_h > 0)
-                {
-                    thumb_y = -(scroll_data.scrollPosition->y / content_h) * track_h;
-                }
-                CLAY(CLAY_ID("AskUserTextScrollTrack"),
-                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                            .height = CLAY_SIZING_GROW(0)}}})
-                {
-                    CLAY(CLAY_ID("AskUserTextScrollHandle"),
-                         {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                                       .offset = {.y = thumb_y},
-                                       .zIndex = 1,
-                                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
-                                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
-                          .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                                .height = CLAY_SIZING_FIXED(thumb_h)}},
-                          .backgroundColor =
-                              Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollHandle")))
-                                  ? COLOR_SCROLLBAR_HOVER
-                                  : COLOR_SCROLLBAR,
-                          .cornerRadius = CLAY_CORNER_RADIUS((float)SCROLLBAR_WIDTH / 2.0f)})
-                    {
-                    }
-                }
+                PicoScrollbar_Render(CLAY_STRING("AskUserTextScroll"), CLAY_STRING("AskUserTextScrollTrack"),
+                                     CLAY_STRING("AskUserTextScrollHandle"));
             }
         }
     }
@@ -1553,24 +1502,34 @@ static void AskUserRender(PicoApp *app)
                           CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13, .textColor = COLOR_MUTED}));
             }
 
-            CLAY(CLAY_ID("AskUserBody"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .childGap = 12,
-                             .padding = {0, 8, 0, 0},
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0, body_max)}},
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+            CLAY(CLAY_ID("AskUserBodyRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = SCROLLBAR_GAP,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0, body_max)}}})
             {
-                CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                             .fontSize = 16,
-                                                             .textColor = COLOR_TEXT,
-                                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                if (q->kind == ASK_QUESTION_SELECT)
+                CLAY(CLAY_ID("AskUserBody"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .childGap = 12,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
-                    RenderSelectQuestion(q);
+                    CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                                 .fontSize = 16,
+                                                                 .textColor = COLOR_TEXT,
+                                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                    if (q->kind == ASK_QUESTION_SELECT)
+                    {
+                        RenderSelectQuestion(q);
+                    }
+                    else
+                    {
+                        RenderTextQuestion(q);
+                    }
                 }
-                else
+                if (g_ui.body_overflow)
                 {
-                    RenderTextQuestion(q);
+                    PicoScrollbar_Render(CLAY_STRING("AskUserBody"), CLAY_STRING("AskUserBodyTrack"),
+                                         CLAY_STRING("AskUserBodyHandle"));
                 }
             }
 
@@ -1719,16 +1678,14 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
         {
             g_ui.wrap_width = scroll_box.boundingBox.width;
         }
-        Clay_ScrollContainerData scroll =
-            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
-        g_ui.text_overflow =
-            scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
+        g_ui.text_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserTextScroll"));
         EnsureAskCaretVisible(q);
     }
     else
     {
         g_ui.text_overflow = false;
     }
+    g_ui.body_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserBody"));
 
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {

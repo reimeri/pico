@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "text_range.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
@@ -1041,39 +1042,8 @@ void PicoComposer_Render(PicoApp *app)
             }
             if (app->composer_overflow)
             {
-                Clay_ScrollContainerData scroll_data =
-                    Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
-                float track_h = scroll_data.found ? scroll_data.scrollContainerDimensions.height : 0;
-                float content_h_scroll = scroll_data.found ? scroll_data.contentDimensions.height : 1;
-                float thumb_h = content_h_scroll > 0 ? (track_h / content_h_scroll) * track_h : track_h;
-                if (thumb_h < 16)
-                {
-                    thumb_h = 16;
-                }
-                float thumb_y = 0;
-                if (scroll_data.found && scroll_data.scrollPosition && content_h_scroll > 0)
-                {
-                    thumb_y = -(scroll_data.scrollPosition->y / content_h_scroll) * track_h;
-                }
-                CLAY(CLAY_ID("CompScrollTrack"),
-                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                            .height = CLAY_SIZING_GROW(0)}}})
-                {
-                    CLAY(CLAY_ID("CompScrollBarHandle"),
-                         {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                                       .offset = {.y = thumb_y},
-                                       .zIndex = 1,
-                                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
-                                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
-                          .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                                .height = CLAY_SIZING_FIXED(thumb_h)}},
-                          .backgroundColor = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle")))
-                                                 ? COLOR_SCROLLBAR_HOVER
-                                                 : COLOR_SCROLLBAR,
-                          .cornerRadius = CLAY_CORNER_RADIUS((float)SCROLLBAR_WIDTH / 2.0f)})
-                    {
-                    }
-                }
+                PicoScrollbar_Render(CLAY_STRING("ComposerScroll"), CLAY_STRING("CompScrollTrack"),
+                                     CLAY_STRING("CompScrollBarHandle"));
             }
         }
         PicoComplete_Render(app);
@@ -1154,9 +1124,7 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
     {
         s_wrap_width = v.wrap_width;
     }
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
-    app->composer_overflow =
-        scroll.found && scroll.contentDimensions.height > scroll.scrollContainerDimensions.height + 0.5f;
+    app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
     if (!PicoUi_ModalOpen(app))
     {
         if (!PicoComplete_HandlePointer(app))
@@ -1169,32 +1137,8 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
 
 static void UpdateComposerScrollbarDrag(PicoApp *app)
 {
-    PicoScrollbar *drag = &app->composer_scrollbar;
-    Clay_Vector2 mouse = {.x = GetMousePosition().x, .y = GetMousePosition().y};
-    if (!IsMouseButtonDown(0))
-    {
-        drag->mouse_down = false;
-    }
-    if (IsMouseButtonDown(0) && !drag->mouse_down &&
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))))
-    {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
-        if (data.found && data.scrollPosition)
-        {
-            drag->click_origin = mouse;
-            drag->position_origin = *data.scrollPosition;
-            drag->mouse_down = true;
-        }
-    }
-    else if (drag->mouse_down)
-    {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
-        if (data.found && data.scrollPosition && data.contentDimensions.height > 0)
-        {
-            float ratio = data.contentDimensions.height / data.scrollContainerDimensions.height;
-            data.scrollPosition->y = drag->position_origin.y + (drag->click_origin.y - mouse.y) * ratio;
-        }
-    }
+    PicoScrollbar_UpdateDrag(&app->composer_scrollbar, CLAY_STRING("ComposerScroll"),
+                             CLAY_STRING("CompScrollBarHandle"));
 }
 
 static void ComposerFrame(PicoApp *app, float dt)

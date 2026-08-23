@@ -2,6 +2,7 @@
 #include "todo.h"
 #include "todo_model.h"
 #include "json.h"
+#include "scrollbar.h"
 
 #include "clay/clay.h"
 
@@ -26,6 +27,8 @@ static TodoAgentState g_states[PICO_MAX_AGENTS];
 static float g_composer_width = TODO_EXPANDED_WIDTH;
 static float g_space_above = TODO_EXPANDED_HEIGHT;
 static char g_header[64];
+static bool g_overflow;
+static PicoScrollbar g_scrollbar;
 
 static const char *kTodoParams =
     "{\"type\":\"object\",\"properties\":{\"todos\":{\"type\":\"array\",\"maxItems\":30,"
@@ -327,14 +330,24 @@ static void TodoRender(PicoApp *app)
         }
         if (state->expanded)
         {
-            CLAY(CLAY_ID("TodoListScroll"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .padding = {0, 6, 0, 0},
-                             .childGap = 8,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+            CLAY(CLAY_ID("TodoListScrollRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = SCROLLBAR_GAP,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
             {
-                RenderTodoRows(state);
+                CLAY(CLAY_ID("TodoListScroll"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .childGap = 8,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                {
+                    RenderTodoRows(state);
+                }
+                if (g_overflow)
+                {
+                    PicoScrollbar_Render(CLAY_STRING("TodoListScroll"), CLAY_STRING("TodoListScrollTrack"),
+                                         CLAY_STRING("TodoListScrollHandle"));
+                }
             }
         }
     }
@@ -351,7 +364,16 @@ static void TodoAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
     if (!state || state->todos.count == 0)
     {
+        g_overflow = false;
         return;
+    }
+    if (state->expanded)
+    {
+        g_overflow = PicoScrollbar_Overflows(CLAY_STRING("TodoListScroll"));
+    }
+    else
+    {
+        g_overflow = false;
     }
     bool over_panel = Clay_PointerOver(CLAY_ID("TodoPanel"));
     bool over_header = Clay_PointerOver(CLAY_ID("TodoPanelHeader"));
@@ -381,9 +403,14 @@ static void TodoFrame(PicoApp *app, float dt)
 {
     (void)dt;
     TodoAgentState *state = ActiveState(app);
-    if (state && state->expanded && IsKeyPressed(KEY_ESCAPE))
+    if (state && state->expanded)
     {
-        state->expanded = false;
+        PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("TodoListScroll"),
+                                 CLAY_STRING("TodoListScrollHandle"));
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            state->expanded = false;
+        }
     }
 }
 

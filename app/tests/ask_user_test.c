@@ -61,12 +61,11 @@ int main(void)
     failed |= ExpectRequest(
         "mixed questionnaire",
         "{\"questions\":[{\"id\":\"target\",\"question\":\"Which?\",\"kind\":\"select\","
-        "\"options\":[\"CLI\",\"GUI\"],\"allow_other\":true},{\"id\":\"notes\","
-        "\"question\":\"Notes?\",\"kind\":\"text\",\"options\":\"ignored\","
-        "\"allow_other\":\"ignored\"}]}",
+        "\"options\":[\"CLI\",\"GUI\"]},{\"id\":\"notes\","
+        "\"question\":\"Notes?\",\"kind\":\"text\",\"options\":\"ignored\"}]}",
         "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":[{\"id\":\"target\","
-        "\"question\":\"Which?\",\"kind\":\"select\",\"options\":[\"CLI\",\"GUI\"],"
-        "\"allow_other\":true},{\"id\":\"notes\",\"question\":\"Notes?\",\"kind\":\"text\"}]}");
+        "\"question\":\"Which?\",\"kind\":\"select\",\"options\":[\"CLI\",\"GUI\"]},"
+        "{\"id\":\"notes\",\"question\":\"Notes?\",\"kind\":\"text\"}]}");
 
     failed |= ExpectError(
         "duplicate ids",
@@ -77,11 +76,6 @@ int main(void)
         "select requires options",
         "{\"questions\":[{\"id\":\"choice\",\"question\":\"Choose?\",\"kind\":\"select\"}]}",
         "needs between 1 and 20 options");
-    failed |= ExpectError(
-        "select allow_other type",
-        "{\"questions\":[{\"id\":\"choice\",\"question\":\"Choose?\",\"kind\":\"select\","
-        "\"options\":[\"A\"],\"allow_other\":\"yes\"}]}",
-        "allow_other must be a boolean");
     failed |= ExpectError("empty questionnaire", "{\"questions\":[]}", "between 1 and 24 items");
 
     char *too_many = BuildQuestionList(25);

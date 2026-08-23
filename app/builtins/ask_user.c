@@ -30,9 +30,7 @@ static const char *kAskUserParams =
     "\"description\":\"select requires options; text accepts a free-form answer.\"},"
     "\"options\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":20,"
     "\"items\":{\"type\":\"string\"},"
-    "\"description\":\"Required for select questions and ignored for text questions.\"},"
-    "\"allow_other\":{\"type\":\"boolean\","
-    "\"description\":\"For select questions, add an Other option that requires a free-form answer; ignored for text questions.\"}"
+    "\"description\":\"Required for select questions and ignored for text questions.\"}"
     "},\"required\":[\"id\",\"question\",\"kind\"]}}},"
     "\"required\":[\"questions\"]}";
 
@@ -47,7 +45,6 @@ typedef struct AskQuestion {
     AskQuestionKind kind;
     char **options;
     int option_count;
-    bool allow_other;
     int selected;
     int focus;
     char *text;
@@ -237,14 +234,6 @@ char *PicoAskUser_BuildRequest(const char *args_json, char *error, size_t error_
         bool is_select = kind && strcmp(kind, "select") == 0;
         int options_tok = JsonObjGet(&doc, qtok, "options");
         int option_count = is_select ? JsonArrayLen(&doc, options_tok) : 0;
-        int allow_other_tok = JsonObjGet(&doc, qtok, "allow_other");
-        bool allow_other = is_select && JsonEq(&doc, allow_other_tok, "true");
-        if (ok && is_select && allow_other_tok >= 0 && !allow_other &&
-            !JsonEq(&doc, allow_other_tok, "false"))
-        {
-            snprintf(error, error_cap, "question %d allow_other must be a boolean", i + 1);
-            ok = false;
-        }
         if (ok && is_select &&
             (!JsonIsArray(&doc, options_tok) || option_count < 1 || option_count > ASK_USER_MAX_OPTIONS))
         {
@@ -299,10 +288,6 @@ char *PicoAskUser_BuildRequest(const char *args_json, char *error, size_t error_
                     JsonBuf_String(&request, options[j]);
                 }
                 JsonBuf_Putc(&request, ']');
-            }
-            if (allow_other)
-            {
-                JsonBuf_Puts(&request, ",\"allow_other\":true");
             }
             JsonBuf_Putc(&request, '}');
         }
@@ -409,7 +394,6 @@ static bool ParseUiQuestion(const JsonDoc *doc, int qtok, AskQuestion *q, AskQue
     if (strcmp(kind, "select") == 0)
     {
         q->kind = ASK_QUESTION_SELECT;
-        q->allow_other = JsonEq(doc, JsonObjGet(doc, qtok, "allow_other"), "true");
         int options_tok = JsonObjGet(doc, qtok, "options");
         q->option_count = JsonArrayLen(doc, options_tok);
         if (!JsonIsArray(doc, options_tok) || q->option_count < 1 || q->option_count > ASK_USER_MAX_OPTIONS)
@@ -437,17 +421,14 @@ static bool ParseUiQuestion(const JsonDoc *doc, int qtok, AskQuestion *q, AskQue
         }
         q->selected = -1;
         q->focus = 0;
-        if (q->allow_other)
+        q->text = JsonDup("");
+        if (!q->text)
         {
-            q->text = JsonDup("");
-            if (!q->text)
-            {
-                snprintf(error, error_cap, "out of memory");
-                free(kind);
-                return false;
-            }
-            q->text_cap = 1;
+            snprintf(error, error_cap, "out of memory");
+            free(kind);
+            return false;
         }
+        q->text_cap = 1;
     }
     else if (strcmp(kind, "text") == 0)
     {
@@ -593,7 +574,7 @@ static bool QuestionAnswered(const AskQuestion *q)
     {
         return false;
     }
-    return q->allow_other && q->selected == q->option_count ? HasNonSpace(q->text) : true;
+    return q->selected == q->option_count ? HasNonSpace(q->text) : true;
 }
 
 static void SetValidation(const char *message)
@@ -820,7 +801,7 @@ static void HandleSelectKeys(PicoApp *app, AskQuestion *q)
 {
     bool up = IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP);
     bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN);
-    int choice_count = q->option_count + (q->allow_other ? 1 : 0);
+    int choice_count = q->option_count + 1;
     if (up)
     {
         q->focus = q->selected < 0 ? 0 : q->selected;
@@ -846,7 +827,7 @@ static void HandleSelectKeys(PicoApp *app, AskQuestion *q)
         q->selected = q->focus;
         g_ui.validation[0] = '\0';
     }
-    if (q->allow_other && q->selected == q->option_count)
+    if (q->selected == q->option_count)
     {
         HandleTextKeys(app, q);
         return;
@@ -1013,7 +994,7 @@ static void RenderTextQuestion(const AskQuestion *q);
 
 static void RenderSelectQuestion(const AskQuestion *q)
 {
-    int choice_count = q->option_count + (q->allow_other ? 1 : 0);
+    int choice_count = q->option_count + 1;
     for (int i = 0; i < choice_count; i++)
     {
         Clay_ElementId eid = CLAY_IDI("AskUserOption", i);
@@ -1042,7 +1023,7 @@ static void RenderSelectQuestion(const AskQuestion *q)
                                                      .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }
     }
-    if (q->allow_other && q->selected == q->option_count)
+    if (q->selected == q->option_count)
     {
         RenderTextQuestion(q);
     }
@@ -1217,7 +1198,7 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
     if (q->kind == ASK_QUESTION_SELECT)
     {
-        int choice_count = q->option_count + (q->allow_other ? 1 : 0);
+        int choice_count = q->option_count + 1;
         for (int i = 0; i < choice_count; i++)
         {
             if (Clay_PointerOver(CLAY_IDI("AskUserOption", i)))
@@ -1233,7 +1214,7 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
     if (q->kind == ASK_QUESTION_SELECT)
     {
-        int choice_count = q->option_count + (q->allow_other ? 1 : 0);
+        int choice_count = q->option_count + 1;
         for (int i = 0; i < choice_count; i++)
         {
             if (Clay_PointerOver(CLAY_IDI("AskUserOption", i)))
@@ -1246,7 +1227,7 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
         }
     }
     if ((q->kind == ASK_QUESTION_TEXT ||
-         (q->kind == ASK_QUESTION_SELECT && q->allow_other && q->selected == q->option_count)) &&
+         (q->kind == ASK_QUESTION_SELECT && q->selected == q->option_count)) &&
         PointerOver(CLAY_STRING("AskUserTextBox")))
     {
         q->cursor = q->text_len;
@@ -1289,8 +1270,8 @@ static void AskUserInit(PicoApp *app)
 {
     pico_add_tool(app, "ask_user",
                   "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
-                  "in one call. Use kind 'select' with options for a single choice, optionally setting "
-                  "allow_other=true for a required free-form Other choice; use kind 'text' for a free-form answer. "
+                  "in one call. Use kind 'select' with options for a single choice; select questions always include a "
+                  "required free-form Other choice. Use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL);
     pico_add_llm_hook(app, AskUserLlm);

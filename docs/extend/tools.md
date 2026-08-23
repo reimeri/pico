@@ -91,8 +91,7 @@ The `ask-user` builtin registers the model-facing `ask_user` tool and a custom q
       "id": "target",
       "question": "Which interface should this target?",
       "kind": "select",
-      "options": ["CLI", "GUI"],
-      "allow_other": true
+      "options": ["CLI", "GUI"]
     },
     {
       "id": "constraints",
@@ -103,7 +102,7 @@ The `ask-user` builtin registers the model-facing `ask_user` tool and a custom q
 }
 ```
 
-Every question is required. A call contains 1–24 questions with unique, non-empty IDs of at most 128 UTF-8 bytes. `kind` is `select` or `text`. Select questions contain 1–20 non-empty options and may set boolean `allow_other`; choosing **Other…** requires text. Text questions accept up to 16 KiB and ignore `options` and `allow_other`. The complete request and answer remain subject to the 64 KiB ask limits.
+Every question is required. A call contains 1–24 questions with unique, non-empty IDs of at most 128 UTF-8 bytes. `kind` is `select` or `text`. Select questions contain 1–20 non-empty options and always include **Other…**, which offers free-form input. Text questions accept up to 16 KiB and ignore `options`. The complete request and answer remain subject to the 64 KiB ask limits.
 
 The modal preserves answers while moving Next/Back and returns them in question order:
 

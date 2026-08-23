@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "text_range.h"
 
 #include "clay/clay.h"
 
@@ -75,25 +76,20 @@ static int Utf8Prev(const char *s, int pos)
     return pos;
 }
 
-static bool IsWordByte(unsigned char c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 0x80;
-}
-
 static int PrevWord(const char *s, int pos)
 {
     while (pos > 0 && isspace((unsigned char)s[pos - 1]))
     {
         pos--;
     }
-    while (pos > 0 && IsWordByte((unsigned char)s[pos - 1]))
+    while (pos > 0 && PicoText_IsWordByte((unsigned char)s[pos - 1]))
     {
         pos--;
     }
-    if (pos > 0 && !IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
+    if (pos > 0 && !PicoText_IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
     {
         pos--;
-        while (pos > 0 && !IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
+        while (pos > 0 && !PicoText_IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
         {
             pos--;
         }
@@ -107,13 +103,13 @@ static int NextWord(const char *s, int length, int pos)
     {
         pos++;
     }
-    while (pos < length && IsWordByte((unsigned char)s[pos]))
+    while (pos < length && PicoText_IsWordByte((unsigned char)s[pos]))
     {
         pos++;
     }
-    if (pos < length && !IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
+    if (pos < length && !PicoText_IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
     {
-        while (pos < length && !IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
+        while (pos < length && !PicoText_IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
         {
             pos++;
         }
@@ -869,6 +865,67 @@ void PicoComposer_HandleInput(PicoApp *app)
     PicoComplete_Refresh(app);
 }
 
+static void ComposerUnitRange(const PicoComposer *c, int pos, int granularity, int *from, int *to)
+{
+    const char *text = c->text ? c->text : "";
+    if (granularity >= 3)
+    {
+        PicoText_ParaRange(text, c->length, pos, from, to);
+    }
+    else
+    {
+        PicoText_WordRange(text, c->length, pos, from, to);
+    }
+}
+
+static void ComposerSelectUnit(PicoComposer *c, int pos, int granularity)
+{
+    c->granularity = granularity;
+    if (granularity <= 1)
+    {
+        c->unit_from = pos;
+        c->unit_to = pos;
+        MoveCursor(c, pos, IsShiftDown());
+        return;
+    }
+    int from = pos;
+    int to = pos;
+    ComposerUnitRange(c, pos, granularity, &from, &to);
+    c->unit_from = from;
+    c->unit_to = to;
+    c->sel_anchor = from;
+    c->cursor = to;
+    s_goal_x = -1;
+    NoteCaretActivity();
+}
+
+static void ComposerExtendUnit(PicoComposer *c, int pos)
+{
+    if (c->granularity <= 1)
+    {
+        MoveCursor(c, pos, true);
+        return;
+    }
+    int from = pos;
+    int to = pos;
+    ComposerUnitRange(c, pos, c->granularity, &from, &to);
+    int span_from = 0;
+    int span_to = 0;
+    PicoText_UnionRange(c->unit_from, c->unit_to, from, to, &span_from, &span_to);
+    if (pos >= c->unit_from)
+    {
+        c->sel_anchor = c->unit_from;
+        c->cursor = span_to;
+    }
+    else
+    {
+        c->sel_anchor = c->unit_to;
+        c->cursor = span_from;
+    }
+    s_goal_x = -1;
+    NoteCaretActivity();
+}
+
 void PicoComposer_HandlePointer(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
@@ -882,6 +939,7 @@ void PicoComposer_HandlePointer(PicoApp *app)
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             c->mouse_selecting = false;
+            PicoClickSeq_Reset(&c->click_seq);
         }
         return;
     }
@@ -889,7 +947,8 @@ void PicoComposer_HandlePointer(PicoApp *app)
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over)
     {
         int pos = OffsetAtPoint(app, mouse.x, mouse.y);
-        MoveCursor(c, pos, IsShiftDown());
+        int count = PicoClickSeq_Press(&c->click_seq, GetTime(), mouse.x, mouse.y);
+        ComposerSelectUnit(c, pos, count);
         c->mouse_selecting = true;
         PicoChatSel_Clear(app);
     }
@@ -899,7 +958,7 @@ void PicoComposer_HandlePointer(PicoApp *app)
     }
     else if (c->mouse_selecting)
     {
-        MoveCursor(c, OffsetAtPoint(app, mouse.x, mouse.y), true);
+        ComposerExtendUnit(c, OffsetAtPoint(app, mouse.x, mouse.y));
     }
 }
 

@@ -1,6 +1,7 @@
 #include "chat_sel.h"
 
 #include "pico/app.h"
+#include "text_range.h"
 
 #include "raylib.h"
 
@@ -374,6 +375,10 @@ void PicoChatSel_Clear(PicoApp *app)
     app->chat_sel.mouse_selecting = false;
     app->chat_sel.dragging = false;
     app->chat_sel.pressed_tool = false;
+    app->chat_sel.granularity = 1;
+    app->chat_sel.unit_from = 0;
+    app->chat_sel.unit_to = 0;
+    PicoClickSeq_Reset(&app->chat_sel.click_seq);
 }
 
 void PicoChatSel_Copy(PicoApp *app)
@@ -440,6 +445,97 @@ void PicoChatSel_Clamp(PicoApp *app)
     if (app->chat_sel.cursor < 0)
     {
         app->chat_sel.cursor = 0;
+    }
+}
+
+static bool MsgText(int msg, const char **text, int *len)
+{
+    if (msg < 0 || msg >= s_msg_n || !s_msgs[msg].text)
+    {
+        return false;
+    }
+    *text = s_msgs[msg].text;
+    *len = s_msgs[msg].len;
+    return true;
+}
+
+static void UnitRange(const char *text, int len, int pos, int granularity, int *from, int *to)
+{
+    if (granularity >= 3)
+    {
+        PicoText_ParaRange(text, len, pos, from, to);
+    }
+    else
+    {
+        PicoText_WordRange(text, len, pos, from, to);
+    }
+}
+
+void PicoChatSel_SelectUnitAt(PicoApp *app, int msg, int pos, int granularity)
+{
+    if (!app)
+    {
+        return;
+    }
+    if (granularity < 1)
+    {
+        granularity = 1;
+    }
+    app->chat_sel.msg = msg;
+    app->chat_sel.granularity = granularity;
+    const char *text = NULL;
+    int len = 0;
+    if (granularity <= 1 || !MsgText(msg, &text, &len))
+    {
+        app->chat_sel.anchor = pos;
+        app->chat_sel.cursor = pos;
+        app->chat_sel.unit_from = pos;
+        app->chat_sel.unit_to = pos;
+        return;
+    }
+    int from = pos;
+    int to = pos;
+    UnitRange(text, len, pos, granularity, &from, &to);
+    app->chat_sel.unit_from = from;
+    app->chat_sel.unit_to = to;
+    app->chat_sel.anchor = from;
+    app->chat_sel.cursor = to;
+}
+
+void PicoChatSel_ExtendUnitTo(PicoApp *app, int pos)
+{
+    if (!app)
+    {
+        return;
+    }
+    int granularity = app->chat_sel.granularity;
+    if (granularity <= 1)
+    {
+        app->chat_sel.cursor = pos;
+        return;
+    }
+    const char *text = NULL;
+    int len = 0;
+    if (!MsgText(app->chat_sel.msg, &text, &len))
+    {
+        app->chat_sel.cursor = pos;
+        return;
+    }
+    int from = pos;
+    int to = pos;
+    UnitRange(text, len, pos, granularity, &from, &to);
+    int span_from = 0;
+    int span_to = 0;
+    PicoText_UnionRange(app->chat_sel.unit_from, app->chat_sel.unit_to, from, to, &span_from, &span_to);
+    if (pos >= app->chat_sel.unit_from)
+    {
+        app->chat_sel.anchor = app->chat_sel.unit_from;
+        app->chat_sel.cursor = span_to;
+    }
+    else
+    {
+        app->chat_sel.anchor = app->chat_sel.unit_to;
+        app->chat_sel.cursor = span_from;
     }
 }
 

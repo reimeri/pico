@@ -991,6 +991,7 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
             app->chat_sel.mouse_selecting = false;
             app->chat_sel.dragging = false;
             app->chat_sel.pressed_tool = false;
+            PicoClickSeq_Reset(&app->chat_sel.click_seq);
         }
         return;
     }
@@ -1017,8 +1018,6 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
             }
         }
 
-        int msg = -1;
-        int pos = PicoChatSel_OffsetAtPoint(app, mouse.x, mouse.y, -1, &msg);
         app->chat_sel.mouse_selecting = true;
         app->chat_sel.dragging = false;
         app->chat_sel.press_x = mouse.x;
@@ -1026,10 +1025,24 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
         app->chat_sel.pressed_tool = tool_idx >= 0;
         app->chat_sel.tool_msg = tool_msg;
         app->chat_sel.tool_idx = tool_idx;
-        app->chat_sel.msg = msg;
-        app->chat_sel.anchor = pos;
-        app->chat_sel.cursor = pos;
         app->composer.sel_anchor = app->composer.cursor;
+        if (tool_idx >= 0)
+        {
+            PicoClickSeq_Reset(&app->chat_sel.click_seq);
+            app->chat_sel.granularity = 1;
+            app->chat_sel.msg = -1;
+            app->chat_sel.anchor = 0;
+            app->chat_sel.cursor = 0;
+            app->chat_sel.unit_from = 0;
+            app->chat_sel.unit_to = 0;
+        }
+        else
+        {
+            int msg = -1;
+            int pos = PicoChatSel_OffsetAtPoint(app, mouse.x, mouse.y, -1, &msg);
+            int count = PicoClickSeq_Press(&app->chat_sel.click_seq, GetTime(), mouse.x, mouse.y);
+            PicoChatSel_SelectUnitAt(app, msg, pos, count);
+        }
     }
 
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
@@ -1074,12 +1087,19 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
         {
             int msg = app->chat_sel.msg;
             int pos = PicoChatSel_OffsetAtPoint(app, mouse.x, mouse.y, msg, &msg);
-            if (app->chat_sel.msg < 0)
+            if (app->chat_sel.pressed_tool || app->chat_sel.granularity <= 1)
             {
-                app->chat_sel.msg = msg;
-                app->chat_sel.anchor = pos;
+                if (app->chat_sel.msg < 0)
+                {
+                    app->chat_sel.msg = msg;
+                    app->chat_sel.anchor = pos;
+                }
+                app->chat_sel.cursor = pos;
             }
-            app->chat_sel.cursor = pos;
+            else
+            {
+                PicoChatSel_ExtendUnitTo(app, pos);
+            }
         }
     }
 }

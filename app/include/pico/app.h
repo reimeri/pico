@@ -11,6 +11,7 @@
 #include "markdown.h"
 #include "pico/agent.h"
 #include "pico/theme.h"
+#include "text_range.h"
 
 #define PICO_MAX_SLOT_VIEWS 16
 #define PICO_MAX_EMPTY_VIEWS 16
@@ -115,6 +116,10 @@ typedef struct PicoChatSelect {
     int tool_idx;
     float press_x;
     float press_y;
+    int granularity;
+    int unit_from;
+    int unit_to;
+    PicoClickSeq click_seq;
 } PicoChatSelect;
 
 typedef struct PicoComposer {
@@ -124,6 +129,10 @@ typedef struct PicoComposer {
     int cursor;
     int sel_anchor;
     bool mouse_selecting;
+    int granularity;
+    int unit_from;
+    int unit_to;
+    PicoClickSeq click_seq;
 } PicoComposer;
 
 typedef struct PicoScrollbar {

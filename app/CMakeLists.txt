@@ -70,6 +70,7 @@ add_executable(pico
     session.c
     usage.c
     chat_sel.c
+    text_range.c
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
@@ -127,6 +128,13 @@ if(BUILD_TESTING)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_json_tests)
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
+
+    add_executable(pico_text_range_tests
+        tests/text_range_test.c
+        text_range.c)
+    target_include_directories(pico_text_range_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_text_range_tests)
+    add_test(NAME pico_text_range_tests COMMAND pico_text_range_tests)
 
     add_executable(pico_responses_tests
         tests/responses_test.c

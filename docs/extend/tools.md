@@ -39,7 +39,7 @@ static void EchoInit(PicoApp *app)
 }
 ```
 
-Full file: `examples/echo_tool.c`. Builtin reference: `app/builtins/shell.c` (`sh`). Asking the user: `examples/ask_tool.c` (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: `examples/permit_tool.c` (a before-tool hook).
+Full file: [`../../examples/echo_tool.c`](../../examples/echo_tool.c). Builtin reference: [`../../builtins/shell.c`](../../builtins/shell.c) (`sh`). Asking the user: [`../../examples/ask_tool.c`](../../examples/ask_tool.c) (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: [`../../examples/permit_tool.c`](../../examples/permit_tool.c) (a before-tool hook).
 
 ## Asking the user
 
@@ -150,7 +150,7 @@ static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
 pico_add_tool_before_hook(app, PermitBefore);
 ```
 
-Deny skips `run` and sends `result` (or `User denied this tool.`) back to the model; the turn continues. Esc cancels the turn. Full file: `examples/permit_tool.c`.
+Deny skips `run` and sends `result` (or `User denied this tool.`) back to the model; the turn continues. Esc cancels the turn. Full file: [`../../examples/permit_tool.c`](../../examples/permit_tool.c).
 
 ## Structured details and replay
 

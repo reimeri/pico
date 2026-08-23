@@ -11,11 +11,11 @@ Pico creates this directory when it starts:
 
 Pico does not create or install profile files. Only direct, regular, non-hidden `*.json` files are discovered. The filename stem is the profile name and must match `[A-Za-z0-9][A-Za-z0-9._-]*` (at most 64 bytes).
 
-To install the repository examples:
+To install the bundled examples (paths from this file):
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/pico/subagents"
-cp examples/subagents/exploration.json examples/subagents/review.json \
+cp ../examples/subagents/exploration.json ../examples/subagents/review.json \
   "${XDG_CONFIG_HOME:-$HOME/.config}/pico/subagents/"
 ```
 

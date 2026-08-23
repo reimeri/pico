@@ -1,6 +1,6 @@
 # Providers
 
-An LLM provider implements one streaming turn. Builtins are `openai` (`app/builtins/openai.c`) and `hyper` (`app/builtins/hyper.c`). Models in `settings.json` name the provider:
+An LLM provider implements one streaming turn. Builtins are `openai` ([`../../builtins/openai.c`](../../builtins/openai.c)) and `hyper` ([`../../builtins/hyper.c`](../../builtins/hyper.c)). Shared request/stream helpers: [`../../builtins/responses.c`](../../builtins/responses.c). Models in `settings.json` name the provider:
 
 ```json
 { "id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "context_limit": 128000 }

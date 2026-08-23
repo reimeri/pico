@@ -11,6 +11,7 @@
 #include "overlay.h"
 #include "pico/auth.h"
 #include "json.h"
+#include "docs_path.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -21,13 +22,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-
-#ifndef PICO_DOCS
-#define PICO_DOCS ""
-#endif
-#ifndef PICO_USER_DOCS
-#define PICO_USER_DOCS ""
-#endif
 
 #include "raylib.h"
 
@@ -235,60 +229,28 @@ static const char *const kDocTopics[] = {
     "README", "subagents", "anatomy", "agents", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
 };
 
-static void DocsTopicName(char *out, size_t cap, const char *args)
-{
-    while (args && *args && isspace((unsigned char)*args))
-    {
-        args++;
-    }
-    if (!args || !args[0] || FoldEq(args, "readme") || FoldEq(args, "index"))
-    {
-        snprintf(out, cap, "README");
-        return;
-    }
-    size_t n = 0;
-    for (; args[n] && n + 1 < cap; n++)
-    {
-        unsigned char c = (unsigned char)args[n];
-        if (!(isalnum(c) || c == '_' || c == '-'))
-        {
-            break;
-        }
-        out[n] = (char)Fold(c);
-    }
-    out[n] = '\0';
-    if (FoldEq(out, "readme") || FoldEq(out, "index"))
-    {
-        snprintf(out, cap, "README");
-    }
-}
-
 static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);
 
 static void CmdDocs(PicoApp *app, const char *args)
 {
     ClearComposer(app);
     app->submit_cancel = true;
-    if (!PICO_DOCS[0])
-    {
-        Note(app, "Extension docs path is not configured.");
-        return;
-    }
-    char topic[64];
-    DocsTopicName(topic, sizeof(topic), args);
-    if (!topic[0])
+    char rel[256];
+    if (!Pico_DocsRelPath(args, rel, sizeof(rel)))
     {
         Note(app, "Unknown docs topic. Try `/docs`.");
         return;
     }
-    char path[4096];
-    if (FoldEq(topic, "subagents") && PICO_USER_DOCS[0])
+    const char *dir = Pico_DocsAppDir();
+    if (!dir || !dir[0])
     {
-        snprintf(path, sizeof(path), "%s/subagents.md", PICO_USER_DOCS);
+        dir = GetApplicationDirectory();
     }
-    else
+    char path[4096];
+    if (!Pico_DocsJoin(dir, rel, path, sizeof(path)))
     {
-        snprintf(path, sizeof(path), "%s/%s.md", PICO_DOCS, topic);
+        Note(app, "Extension docs path is not configured.");
+        return;
     }
     size_t len = 0;
     char *src = Pico_ReadFile(path, &len);

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "settings.h"
+#include "docs_path.h"
 #include "json.h"
 #include "overlay.h"
 #include "path.h"
@@ -1128,18 +1129,32 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
     {
         AppendFile(&b, path);
     }
-#ifndef PICO_DOCS
-#define PICO_DOCS ""
-#endif
-    if (PICO_DOCS[0])
+    char docs[4096];
+    if (Pico_DocsFile("README", docs, sizeof(docs)))
     {
         if (b.len)
         {
             JsonBuf_Puts(&b, "\n\n");
         }
         JsonBuf_Puts(&b, "If the user asks about Pico or wants to extend it, read ");
-        JsonBuf_Puts(&b, PICO_DOCS);
-        JsonBuf_Puts(&b, "/README.md.");
+        JsonBuf_Puts(&b, docs);
+        JsonBuf_Puts(&b, ". That file is shipped with Pico, not in the workspace. ");
+        JsonBuf_Puts(&b, "Topic pages are in the same directory as that README. ");
+        char examples[4096];
+        if (Pico_DocsJoin(Pico_DocsAppDir(), "examples", examples, sizeof(examples)))
+        {
+            JsonBuf_Puts(&b, "Example sources and subagent profiles are in ");
+            JsonBuf_Puts(&b, examples);
+            JsonBuf_Puts(&b, ". ");
+        }
+        char builtins[4096];
+        if (Pico_DocsJoin(Pico_DocsAppDir(), "builtins", builtins, sizeof(builtins)))
+        {
+            JsonBuf_Puts(&b, "Reference builtin sources (sh, openai, hyper; compiled into Pico) are in ");
+            JsonBuf_Puts(&b, builtins);
+            JsonBuf_Puts(&b, ". ");
+        }
+        JsonBuf_Puts(&b, "Resolve relative paths in those pages from the file that contains them.");
     }
     return JsonBuf_Steal(&b);
 }

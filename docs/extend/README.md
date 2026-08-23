@@ -29,23 +29,35 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `auth` — `/login` `/logout` and credentials
 - `contracts` — threads, ownership, limits, reload
 
-Always read `contracts.md` before shipping an extension. For user-facing profile setup and continuation, see [`../subagents.md`](../subagents.md) or `/docs subagents`.
+Always read [`contracts.md`](contracts.md) before shipping an extension. For user-facing profile setup and continuation, see [`../subagents.md`](../subagents.md) or `/docs subagents`.
+
+## Layout
+
+This file is shipped with Pico as `docs/extend/README.md` next to the executable, not in the user's workspace. Topic pages listed above are in this directory. The subagent guide is [`../subagents.md`](../subagents.md). Example sources are two directories up, in [`../../examples/`](../../examples/) (sibling of `docs/`). Reference builtin sources (compiled into Pico; read them, do not load them as user extensions) are in [`../../builtins/`](../../builtins/). Resolve every relative path in these pages from the file that contains it.
 
 ## Examples
 
-Copy-templates in the Pico source tree:
+Copy-templates (paths from this README):
 
-- `examples/hello.c` — sidebar view
-- `examples/empty_banner.c` — empty-state banner above the Tools / Context / Skills cards
-- `examples/echo_tool.c` — tool + `json.h`
-- `examples/ask_tool.c` — `pico_tool_ask` + builtin confirm overlay
-- `examples/permit_tool.c` — before-tool permission prompt
-- `examples/extra_instructions.c` — `pico_add_llm_hook` extra prompt line
-- `examples/ephemeral_context.c` — request-only context
-- `examples/time_cmd.c` — slash command
-- `examples/subagents/exploration.json` — read-only exploration profile
-- `examples/subagents/review.json` — read-only review profile
+- [`../../examples/hello.c`](../../examples/hello.c) — sidebar view
+- [`../../examples/empty_banner.c`](../../examples/empty_banner.c) — empty-state banner above the Tools / Context / Skills cards
+- [`../../examples/echo_tool.c`](../../examples/echo_tool.c) — tool + `json.h`
+- [`../../examples/ask_tool.c`](../../examples/ask_tool.c) — `pico_tool_ask` + builtin confirm overlay
+- [`../../examples/permit_tool.c`](../../examples/permit_tool.c) — before-tool permission prompt
+- [`../../examples/extra_instructions.c`](../../examples/extra_instructions.c) — `pico_add_llm_hook` extra prompt line
+- [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c) — request-only context
+- [`../../examples/time_cmd.c`](../../examples/time_cmd.c) — slash command
+- [`../../examples/subagents/exploration.json`](../../examples/subagents/exploration.json) — read-only exploration profile
+- [`../../examples/subagents/review.json`](../../examples/subagents/review.json) — read-only review profile
 
 The JSON profiles are examples only. Copy or adapt them under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`); Pico does not install them automatically. Their `sh` allowlist limits the exposed tool catalog, not the shell commands that tool may execute.
+
+## Reference builtins
+
+These are the in-app implementations, shipped for reading. They are not loaded from this folder.
+
+- [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`
+- [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c))
+- [`../../builtins/hyper.c`](../../builtins/hyper.c) — Hyper provider (uses responses plus [`../../builtins/hyper_auth.c`](../../builtins/hyper_auth.c))
 
 Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/agent.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat the private app-level `agent.h`, `agent_internal.h`, `session.h`, or `settings.h` as API.

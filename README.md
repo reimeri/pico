@@ -51,6 +51,8 @@ cmake -S app --preset release && cmake --build app/build/release
 
 Tests: `ctest --test-dir app/build/debug --output-on-failure`
 
+A relocatable copy of the build output needs `pico`, `resources/` (fonts), `docs/` (markdown for `/docs` and the agent hint), `examples/` (templates the docs link to), and `builtins/` (reference sources for `sh`, OpenAI, and Hyper).
+
 The cwd is the workspace. `pico -h` lists flags. Sign in with `/login openai` / `/login hyper`, or `PICO_API_KEY` / `OPENAI_API_KEY` / `HYPER_API_KEY`.
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.

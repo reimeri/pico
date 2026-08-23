@@ -54,4 +54,4 @@ static void MyInit(PicoApp *app)
 - Auth storage is process-global and mutex-protected. Worker callbacks for different agents may overlap safely when using context variants. Builtin OpenAI and Hyper OAuth refresh are each single-flight; waiters recheck the latest token, and a replacement fails promptly instead of racing an abandoned rotating-token exchange.
 - If shutdown detaches a callback, Pico retains the auth store and skips auth destruction so callback-scoped access cannot observe freed credentials. Pico then rejects reinitialization and must exit.
 - Max 16 auth providers (`PICO_MAX_AUTH`).
-- Builtin references: `app/builtins/openai.c`, `app/builtins/hyper.c` (`HYPER_API_KEY`, `/login hyper`).
+- Builtin OpenAI and Hyper: [`../../builtins/openai.c`](../../builtins/openai.c), [`../../builtins/hyper.c`](../../builtins/hyper.c) (`HYPER_API_KEY`, `/login hyper`).

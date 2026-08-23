@@ -4,6 +4,7 @@
 #include "agent_manager.h"
 #include "session.h"
 #include "settings.h"
+#include "docs_path.h"
 #include "auth.h"
 #include "chat_sel.h"
 #include "json.h"
@@ -782,6 +783,7 @@ void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mo
     }
     PicoChat_InspectClose();
     memset(app, 0, sizeof(*app));
+    Pico_DocsSetAppDir(GetApplicationDirectory());
     if (g_pico_process_retired)
     {
         app->terminal_shutdown = true;

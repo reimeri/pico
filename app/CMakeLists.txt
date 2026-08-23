@@ -71,6 +71,7 @@ add_executable(pico
     markdown.c
     richtext.c
     json.c
+    docs_path.c
     settings.c
     auth.c
     http.c
@@ -108,9 +109,6 @@ pico_warnings_are_errors(pico)
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
-get_filename_component(PICO_DOCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../docs/extend" ABSOLUTE)
-get_filename_component(PICO_USER_DOCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../docs" ABSOLUTE)
-
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -124,9 +122,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
     "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
     "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
-    "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\""
-    "PICO_DOCS=\"${PICO_DOCS_DIR}\""
-    "PICO_USER_DOCS=\"${PICO_USER_DOCS_DIR}\"")
+    "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
 
 target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
@@ -240,7 +236,8 @@ if(BUILD_TESTING)
         builtins/todo_model.c
         json.c
         usage.c
-        theme.c)
+        theme.c
+        docs_path.c)
     target_include_directories(pico_agent_behavior_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -272,7 +269,8 @@ if(BUILD_TESTING)
     add_executable(pico_settings_agent_tests
         tests/settings_agent_test.c
         settings.c
-        json.c)
+        json.c
+        docs_path.c)
     target_include_directories(pico_settings_agent_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -287,7 +285,8 @@ if(BUILD_TESTING)
         tests/font_scale_test.c
         settings.c
         json.c
-        theme.c)
+        theme.c
+        docs_path.c)
     target_include_directories(pico_font_scale_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -297,6 +296,13 @@ if(BUILD_TESTING)
     target_compile_options(pico_font_scale_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_font_scale_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_font_scale_tests COMMAND pico_font_scale_tests)
+
+    add_executable(pico_docs_path_tests
+        tests/docs_path_test.c
+        docs_path.c)
+    target_include_directories(pico_docs_path_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_docs_path_tests)
+    add_test(NAME pico_docs_path_tests COMMAND pico_docs_path_tests)
 endif()
 
 add_custom_command(
@@ -304,6 +310,31 @@ add_custom_command(
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/resources
         ${CMAKE_CURRENT_BINARY_DIR}/resources)
+
+add_custom_command(
+        TARGET pico POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../docs
+        ${CMAKE_CURRENT_BINARY_DIR}/docs)
+
+add_custom_command(
+        TARGET pico POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../examples
+        ${CMAKE_CURRENT_BINARY_DIR}/examples)
+
+set(_pico_ref_builtins
+    shell.c openai.c hyper.c responses.c responses.h hyper_auth.c hyper_auth.h)
+foreach(_f IN LISTS _pico_ref_builtins)
+    add_custom_command(
+            TARGET pico POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/builtins
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/builtins/${_f}
+            ${CMAKE_CURRENT_BINARY_DIR}/builtins/${_f})
+endforeach()
+unset(_pico_ref_builtins)
+unset(_f)
 
 foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd)
     add_custom_command(

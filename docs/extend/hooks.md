@@ -102,6 +102,8 @@ static void Llm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *event)
 }
 ```
 
+Full file: [`../../examples/extra_instructions.c`](../../examples/extra_instructions.c).
+
 LLM hooks run on the serialized main thread for every request, including compaction. They see only tools permitted by the agent policy. Hooks run twice per request in registration order: first a filtering pass where `exclude[i] = true` hides a tool from this request (any `extra_instructions` set during this pass is discarded), then an instructions pass where every hook sees the final exclusion set and malloc'd `extra_instructions` is appended under a shared `## Additional instructions` section for later hooks. The heading is omitted when no hook contributes a non-empty extra.
 
 The provider receives a retained copy of the final catalog. `/show-prompt` runs the same hooks with the active target. Reload cannot unload hooks while a runtime retains a callback/catalog snapshot; it waits for full quiescence and releases idle snapshots first.

@@ -23,7 +23,7 @@ static void HelloInit(PicoApp *app)
 }
 ```
 
-Full file: `examples/hello.c`.
+Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
 ## Slots
 
@@ -53,7 +53,7 @@ Kinds:
 
 ABOVE/BELOW sit in the same max-900 column as the cards. REPLACE callbacks are children of `ChatContent` (full width); you own the layout.
 
-Full file for a banner: `examples/empty_banner.c`.
+Full file for a banner: [`../../examples/empty_banner.c`](../../examples/empty_banner.c).
 
 Replace the whole empty state:
 

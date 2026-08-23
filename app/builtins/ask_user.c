@@ -1231,8 +1231,8 @@ static void HandleTextKeys(PicoApp *app, AskQuestion *q)
 
 static void UpdateAskScrollbarDrag(void)
 {
-    PicoScrollbar_UpdateDrag(&g_ui.scrollbar, CLAY_STRING("AskUserTextScroll"),
-                             CLAY_STRING("AskUserTextScrollHandle"));
+    PicoScrollbar_UpdateDragOverlay(&g_ui.scrollbar, CLAY_STRING("AskUserTextScroll"),
+                                    CLAY_STRING("AskUserTextScrollHandle"));
     PicoScrollbar_UpdateDrag(&g_ui.body_scrollbar, CLAY_STRING("AskUserBody"),
                              CLAY_STRING("AskUserBodyHandle"));
 }
@@ -1367,55 +1367,49 @@ static void RenderTextQuestion(const AskQuestion *q)
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        CLAY(CLAY_ID("AskUserTextRow"),
-             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                         .childGap = SCROLLBAR_GAP,
-                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+        CLAY(CLAY_ID("AskUserTextScroll"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+              .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
-            CLAY(CLAY_ID("AskUserTextScroll"),
+            CLAY(CLAY_ID("AskUserTextContent"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
             {
-                CLAY(CLAY_ID("AskUserTextContent"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
+                if (empty)
                 {
-                    if (empty)
+                    CLAY_TEXT(CLAY_STRING("Type your answer…"),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = ASK_USER_TEXT_FONT,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                }
+                else
+                {
+                    for (int i = 0; i < g_ui.line_count; i++)
                     {
-                        CLAY_TEXT(CLAY_STRING("Type your answer…"),
-                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                    .fontSize = ASK_USER_TEXT_FONT,
-                                                    .textColor = COLOR_MUTED,
-                                                    .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                    }
-                    else
-                    {
-                        for (int i = 0; i < g_ui.line_count; i++)
+                        CLAY(CLAY_IDI("AskUserTextLine", i),
+                             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                    .height = CLAY_SIZING_FIXED(g_ui.line_height)}}})
                         {
-                            CLAY(CLAY_IDI("AskUserTextLine", i),
-                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
-                                                        .height = CLAY_SIZING_FIXED(g_ui.line_height)}}})
+                            if (g_ui.lines[i].length > 0)
                             {
-                                if (g_ui.lines[i].length > 0)
-                                {
-                                    Clay_String text = {.length = (int32_t)g_ui.lines[i].length,
-                                                        .chars = q->text + g_ui.lines[i].start};
-                                    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                      .fontSize = ASK_USER_TEXT_FONT,
-                                                                      .textColor = COLOR_TEXT,
-                                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                                }
+                                Clay_String text = {.length = (int32_t)g_ui.lines[i].length,
+                                                    .chars = q->text + g_ui.lines[i].start};
+                                CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                  .fontSize = ASK_USER_TEXT_FONT,
+                                                                  .textColor = COLOR_TEXT,
+                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
                             }
                         }
                     }
                 }
             }
-            if (g_ui.text_overflow)
-            {
-                PicoScrollbar_Render(CLAY_STRING("AskUserTextScroll"), CLAY_STRING("AskUserTextScrollTrack"),
-                                     CLAY_STRING("AskUserTextScrollHandle"));
-            }
+        }
+        if (g_ui.text_overflow)
+        {
+            PicoScrollbar_RenderOverlay(CLAY_STRING("AskUserTextScroll"), CLAY_STRING("AskUserTextScrollTrack"),
+                                        CLAY_STRING("AskUserTextScrollHandle"));
         }
     }
     CLAY_TEXT(CLAY_STRING("Enter next  •  Shift+Enter newline  •  Shift+Tab back"),

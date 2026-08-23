@@ -100,27 +100,21 @@ static void PromptRender(PicoApp *app)
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 
-            CLAY(CLAY_ID("PromptModalScrollRow"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = SCROLLBAR_GAP,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+            CLAY(CLAY_ID("PromptModalScroll"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .padding = {12, 12, 10, 10},
+                             .childGap = 0,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                  .backgroundColor = COLOR_CODE_BG,
+                  .cornerRadius = CLAY_CORNER_RADIUS(6),
+                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
             {
-                CLAY(CLAY_ID("PromptModalScroll"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .padding = {12, 12, 10, 10},
-                                 .childGap = 0,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                      .backgroundColor = COLOR_CODE_BG,
-                      .cornerRadius = CLAY_CORNER_RADIUS(6),
-                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
-                {
-                    RenderPromptText();
-                }
-                if (g_overflow)
-                {
-                    PicoScrollbar_Render(CLAY_STRING("PromptModalScroll"), CLAY_STRING("PromptModalScrollTrack"),
-                                         CLAY_STRING("PromptModalScrollHandle"));
-                }
+                RenderPromptText();
+            }
+            if (g_overflow)
+            {
+                PicoScrollbar_RenderOverlay(CLAY_STRING("PromptModalScroll"), CLAY_STRING("PromptModalScrollTrack"),
+                                            CLAY_STRING("PromptModalScrollHandle"));
             }
         }
     }
@@ -157,8 +151,8 @@ static void PromptOnFrame(PicoApp *app, float dt)
     {
         return;
     }
-    PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("PromptModalScroll"),
-                             CLAY_STRING("PromptModalScrollHandle"));
+    PicoScrollbar_UpdateDragOverlay(&g_scrollbar, CLAY_STRING("PromptModalScroll"),
+                                    CLAY_STRING("PromptModalScrollHandle"));
     if (IsKeyPressed(KEY_ESCAPE))
     {
         PicoPrompt_Close();

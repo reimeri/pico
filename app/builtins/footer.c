@@ -41,12 +41,19 @@ static char g_effort[PICO_EFFORT_LEN];
 static FooterMenu g_menu;
 static int g_selected;
 static bool g_want_folder;
+static bool g_folder_painted;
 static bool g_esc_block;
 static PicoScrollbar g_scrollbar;
 
 bool PicoFooter_MenuOpen(void)
 {
-    return g_menu != FOOTER_MENU_NONE || g_esc_block;
+    return g_menu != FOOTER_MENU_NONE || g_esc_block || g_want_folder;
+}
+
+static void ClearFolderRequest(void)
+{
+    g_want_folder = false;
+    g_folder_painted = false;
 }
 
 static const char *AgentStateName(const PicoApp *app)
@@ -291,7 +298,59 @@ static void RequestFolder(PicoApp *app)
         PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
         return;
     }
+    if (!FolderDialogGraphic())
+    {
+        PicoOverlay_Notify(app, "Folder dialog unavailable. Install zenity or kdialog.");
+        return;
+    }
     g_want_folder = true;
+    g_folder_painted = false;
+}
+
+static void RenderFolderModal(PicoApp *app)
+{
+    (void)app;
+    if (!g_want_folder)
+    {
+        return;
+    }
+
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
+    float card_w = sw < 520.0f ? sw - 48.0f : 420.0f;
+    if (card_w < 260.0f)
+    {
+        card_w = 260.0f;
+    }
+
+    CLAY(CLAY_ID("FolderModalDim"),
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+                       .zIndex = 43,
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
+                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
+          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                     .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
+          .backgroundColor = {0, 0, 0, 140}})
+    {
+        CLAY(CLAY_ID("FolderModalCard"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .padding = {20, 20, 16, 16},
+                         .childGap = 8,
+                         .sizing = {.width = CLAY_SIZING_FIXED(card_w)}},
+              .backgroundColor = COLOR_CONTENT_BG,
+              .cornerRadius = CLAY_CORNER_RADIUS(8)})
+        {
+            CLAY_TEXT(CLAY_STRING("Select a workspace folder"),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+            CLAY_TEXT(CLAY_STRING("To continue choose a workspace folder in the opened file dialog."),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                        .fontSize = 14,
+                                        .textColor = COLOR_TEXT,
+                                        .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+        }
+    }
+    g_folder_painted = true;
 }
 
 static void RenderMenu(PicoApp *app)
@@ -343,7 +402,7 @@ static void RenderMenu(PicoApp *app)
                     {
                         PicoModel *m = &app->models[i];
                         label = m->name[0] ? m->name : m->id;
-                        detail = m->name[0] ? m->id : "";
+                        detail = m->provider;
                     }
                     else
                     {
@@ -541,7 +600,7 @@ void PicoFooter_Render(PicoApp *app)
 static void FooterAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)))
+    if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)) || g_want_folder)
     {
         app->hovered_clickable = false;
         return;
@@ -636,23 +695,25 @@ static void FooterOnFrame(PicoApp *app, float dt)
         }
     }
 
-    if (!g_want_folder)
+    if (!g_want_folder || !g_folder_painted)
     {
         return;
     }
-    g_want_folder = false;
     if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
     {
+        ClearFolderRequest();
         PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
         return;
     }
     if (!FolderDialogGraphic())
     {
+        ClearFolderRequest();
         PicoOverlay_Notify(app, "Folder dialog unavailable. Install zenity or kdialog.");
         return;
     }
     const char *start = app->workspace[0] ? app->workspace : NULL;
     char *path = tinyfd_selectFolderDialog("Workspace", start);
+    ClearFolderRequest();
     if (path && path[0])
     {
         PicoApp_ChangeWorkspace(app, path);
@@ -662,6 +723,7 @@ static void FooterOnFrame(PicoApp *app, float dt)
 static void FooterInit(PicoApp *app)
 {
     pico_add_view(app, PICO_SLOT_FOOTER, 0, PicoFooter_Render);
+    pico_add_view(app, PICO_SLOT_OVERLAY, 40, RenderFolderModal);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, FooterAfterLayout);
 }
 

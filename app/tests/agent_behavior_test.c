@@ -24,6 +24,9 @@ typedef enum TestMode {
     TEST_INVALID,
     TEST_BLOCK,
     TEST_PROVIDER_BLOCK,
+    TEST_PROVIDER_THINK_BLOCK,
+    TEST_RAW_CONTINUATION,
+    TEST_SIGNATURE_CONTINUATION,
     TEST_CATALOG_BLOCK,
     TEST_DUPLICATE_CALLS,
     TEST_EMPTY_CALL_ID,
@@ -76,6 +79,7 @@ typedef struct TestState {
     int provider_cached_tokens;
     int usage_log_count;
     bool emit_think_summaries;
+    char logged_thinking[256];
     int life_turn_end;
     int life_cancel;
     int life_error;
@@ -173,6 +177,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.provider_cached_tokens = 0;
     g_test.usage_log_count = 0;
     g_test.emit_think_summaries = false;
+    g_test.logged_thinking[0] = '\0';
     g_test.life_turn_end = 0;
     g_test.life_cancel = 0;
     g_test.life_error = 0;
@@ -301,6 +306,22 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         }
         return PICO_LLM_CANCEL;
     }
+    if (mode == TEST_PROVIDER_THINK_BLOCK)
+    {
+        if (on_delta)
+        {
+            on_delta(user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
+        }
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_entered = true;
+        pthread_cond_broadcast(&g_test.cv);
+        pthread_mutex_unlock(&g_test.mu);
+        while (!cancel(user))
+        {
+            SleepOneMs();
+        }
+        return PICO_LLM_CANCEL;
+    }
     if (mode == TEST_CONCURRENT_REVERSE)
     {
         pthread_mutex_lock(&g_test.mu);
@@ -355,6 +376,21 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         out->assistant_text = JsonDup("done");
         return PICO_LLM_OK;
+    }
+
+    if (mode == TEST_RAW_CONTINUATION)
+    {
+        out->raw_items = (char **)calloc(1, sizeof(char *));
+        if (out->raw_items)
+        {
+            out->raw_items[0] = JsonDup("{\"type\":\"provider_state\",\"id\":\"state-live\"}");
+            out->raw_count = 1;
+        }
+    }
+    if (mode == TEST_SIGNATURE_CONTINUATION)
+    {
+        out->think_signature = JsonDup(
+            "{\"type\":\"reasoning\",\"id\":\"rs-only\",\"encrypted_content\":\"blob\"}");
     }
 
     int emitted = mode == TEST_TOO_MANY_CALLS ? 17 :
@@ -844,11 +880,14 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *content)
+PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *content,
+                                                const char *thinking, const char *thinking_signature)
 {
     (void)app;
     (void)agent;
     (void)content;
+    (void)thinking_signature;
+    snprintf(g_test.logged_thinking, sizeof(g_test.logged_thinking), "%s", thinking ? thinking : "");
     return PICO_SESSION_WRITE_OK;
 }
 
@@ -865,13 +904,15 @@ PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *args)
+PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *args,
+                                               const char *item_id)
 {
     (void)app;
     (void)agent;
     (void)call_id;
     (void)name;
     (void)args;
+    (void)item_id;
     return PICO_SESSION_WRITE_OK;
 }
 
@@ -1003,7 +1044,7 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path, bool ap
     PicoAgent_AddMessage(app, agent, PICO_ROLE_USER, "previous delegated context");
     PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "previous answer");
     PicoAgent_PushHistoryUser(agent, "previous delegated context");
-    PicoAgent_PushHistoryAssistant(agent, "previous answer");
+    PicoAgent_PushHistoryAssistant(agent, "previous answer", NULL, NULL);
     PicoAgent_SetCacheKey(agent, g_fake_session.cache_key);
     g_fake_session.replay_count++;
     return 0;
@@ -2522,6 +2563,81 @@ static int TestToolCallListArgs(void)
 #include "subagent_config_test.c"
 #include "subagent_test.c"
 
+static int TestCanonicalContinuationState(void)
+{
+    const char *name = "canonical continuation state";
+    ResetTest(TEST_RAW_CONTINUATION, 1);
+    PicoApp app;
+    InitApp(&app);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "raw continuation turn did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool raw_ok = g_test.last_input && strstr(g_test.last_input, "state-live") &&
+                  strstr(g_test.last_input, "\"provider\":\"test\"");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    if (!raw_ok)
+    {
+        return Fail(name, "live same-provider raw state was not sent on the follow-up");
+    }
+
+    ResetTest(TEST_SIGNATURE_CONTINUATION, 1);
+    InitApp(&app);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "signature continuation turn did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool signature_ok = g_test.last_input && strstr(g_test.last_input, "rs-only") &&
+                        strstr(g_test.last_input, "thinking_signature");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return signature_ok ? 0 : Fail(name, "signature-only assistant state was not sent on the follow-up");
+}
+
+static int TestCancelledThinkingPersistence(void)
+{
+    const char *name = "cancelled thinking persistence";
+    ResetTest(TEST_PROVIDER_THINK_BLOCK, 0);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "thinking provider did not start");
+    }
+    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "cancelled thinking provider did not return idle");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool logged = strcmp(g_test.logged_thinking, "partial-think") == 0;
+    g_test.mode = TEST_SINGLE;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "continue");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "follow-up after cancellation did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool history = g_test.last_input && strstr(g_test.last_input, "\"thinking\":\"partial-think\"");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return logged && history ? 0 : Fail(name, "cancelled thinking was not logged and replayed");
+}
+
 static int TestThinkSummaryCoalesce(void)
 {
     const char *name = "think summaries coalesce until a tool";
@@ -2616,6 +2732,8 @@ int main(void)
     failed |= TestSubagentResumeFailures();
     failed |= TestSubagentChildAsk();
     failed |= TestSubagentDelegationCaps();
+    failed |= TestCanonicalContinuationState();
+    failed |= TestCancelledThinkingPersistence();
     failed |= TestThinkSummaryCoalesce();
     /* Retained shutdown permanently retires Pico in this process, so run last. */
     failed |= TestShutdownTimeout();

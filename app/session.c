@@ -649,10 +649,19 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         else if (role && strcmp(role, "assistant") == 0)
         {
             PicoAgent_AppendAssistant(app, agent, content ? content : "");
-            if (into_input && content && content[0])
+            char *thinking = JsonObjStr(doc, obj, "thinking");
+            char *signature = JsonObjStr(doc, obj, "thinking_signature");
+            if (thinking && thinking[0])
             {
-                PicoAgent_PushHistoryAssistant(agent, content);
+                PicoAgent_AppendThink(app, agent, thinking);
             }
+            if (into_input &&
+                ((content && content[0]) || (thinking && thinking[0]) || (signature && signature[0])))
+            {
+                PicoAgent_PushHistoryAssistant(agent, content, thinking, signature);
+            }
+            free(thinking);
+            free(signature);
         }
         free(role);
         free(content);
@@ -662,14 +671,16 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         char *call_id = JsonObjStr(doc, obj, "call_id");
         char *name = JsonObjStr(doc, obj, "name");
         char *args = JsonObjStr(doc, obj, "arguments");
+        char *item_id = JsonObjStr(doc, obj, "item_id");
         PicoAgent_AddToolCallWithId(app, agent, call_id, name, args);
         if (into_input)
         {
-            PicoAgent_PushHistoryFunctionCall(agent, call_id, name, args);
+            PicoAgent_PushHistoryFunctionCall(agent, call_id, name, args, item_id);
         }
         free(call_id);
         free(name);
         free(args);
+        free(item_id);
     }
     else if (strcmp(type, "tool_result") == 0)
     {
@@ -1462,9 +1473,11 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
 }
 
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
-                                                const char *content)
+                                                const char *content, const char *thinking,
+                                                const char *thinking_signature)
 {
-    if (!content || !content[0])
+    if ((!content || !content[0]) && (!thinking || !thinking[0]) &&
+        (!thinking_signature || !thinking_signature[0]))
     {
         return PICO_SESSION_WRITE_SKIPPED;
     }
@@ -1473,7 +1486,17 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, pre);
     JsonBuf_Puts(&b, ",\"role\":\"assistant\",\"content\":");
-    JsonBuf_String(&b, content);
+    JsonBuf_String(&b, content ? content : "");
+    if (thinking && thinking[0])
+    {
+        JsonBuf_Puts(&b, ",\"thinking\":");
+        JsonBuf_String(&b, thinking);
+    }
+    if (thinking_signature && thinking_signature[0])
+    {
+        JsonBuf_Puts(&b, ",\"thinking_signature\":");
+        JsonBuf_String(&b, thinking_signature);
+    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     PicoSessionWriteResult result = AppendLine(app, agent, line);
@@ -1484,7 +1507,7 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
 
 PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
                                                const char *call_id, const char *name,
-                                               const char *args)
+                                               const char *args, const char *item_id)
 {
     char *pre = EventPrefix("tool_call");
     JsonBuf b;
@@ -1496,6 +1519,11 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
     JsonBuf_String(&b, name ? name : "");
     JsonBuf_Puts(&b, ",\"arguments\":");
     JsonBuf_String(&b, args ? args : "{}");
+    if (item_id && item_id[0])
+    {
+        JsonBuf_Puts(&b, ",\"item_id\":");
+        JsonBuf_String(&b, item_id);
+    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     PicoSessionWriteResult result = AppendLine(app, agent, line);

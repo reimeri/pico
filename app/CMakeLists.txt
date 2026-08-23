@@ -100,6 +100,7 @@ add_executable(pico
     builtins/hyper.c
     builtins/hyper_auth.c
     builtins/responses.c
+    builtins/completions.c
     builtins/extensions.c
     builtins/prompt.c
     builtins/diff.c
@@ -202,6 +203,21 @@ if(BUILD_TESTING)
     target_compile_options(pico_responses_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_responses_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_responses_tests COMMAND pico_responses_tests)
+
+    add_executable(pico_completions_tests
+        tests/completions_test.c
+        builtins/completions.c
+        json.c)
+    target_include_directories(pico_completions_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src
+        ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    pico_warnings_are_errors(pico_completions_tests)
+    target_compile_options(pico_completions_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_completions_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_completions_tests COMMAND pico_completions_tests)
 
     add_executable(pico_todo_tests
         tests/todo_test.c
@@ -333,7 +349,7 @@ add_custom_command(
         ${CMAKE_CURRENT_BINARY_DIR}/examples)
 
 set(_pico_ref_builtins
-    shell.c openai.c hyper.c responses.c responses.h hyper_auth.c hyper_auth.h)
+    shell.c openai.c hyper.c responses.c responses.h completions.c completions.h hyper_auth.c hyper_auth.h)
 foreach(_f IN LISTS _pico_ref_builtins)
     add_custom_command(
             TARGET pico POST_BUILD

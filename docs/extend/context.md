@@ -42,13 +42,13 @@ History items use Pico's provider-neutral JSON forms:
 
 ```json
 {"type":"user","text":"..."}
-{"type":"assistant","text":"..."}
-{"type":"tool_call","call_id":"...","name":"...","arguments":"..."}
+{"type":"assistant","text":"...","thinking":"...","thinking_signature":"..."}
+{"type":"tool_call","call_id":"...","name":"...","arguments":"...","item_id":"..."}
 {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false}
 {"type":"raw","provider":"...","json":{}}
 ```
 
-Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
+`thinking`, `thinking_signature`, and `item_id` are optional. Raw items carry live provider-native state and are not written to durable sessions. Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
 
 ## Choosing the right hook
 

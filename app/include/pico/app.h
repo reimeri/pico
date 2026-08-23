@@ -300,6 +300,7 @@ typedef struct PicoLlmToolCall {
     char *call_id;
     char *name;
     char *arguments;
+    char *item_id;
 } PicoLlmToolCall;
 
 typedef struct PicoLlmResult {
@@ -308,6 +309,7 @@ typedef struct PicoLlmResult {
     int cached_tokens;
     char *assistant_text;
     char *think_text;
+    char *think_signature;
     PicoLlmToolCall *calls;
     int call_count;
     char **raw_items;

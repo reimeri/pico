@@ -21,6 +21,28 @@ static void CheckContains(const char *text, const char *needle, bool expected, c
     Check(text && ((strstr(text, needle) != NULL) == expected), message);
 }
 
+static void FreeResult(PicoLlmResult *result)
+{
+    free(result->error);
+    free(result->assistant_text);
+    free(result->think_text);
+    free(result->think_signature);
+    for (int i = 0; i < result->call_count; i++)
+    {
+        free(result->calls[i].call_id);
+        free(result->calls[i].name);
+        free(result->calls[i].arguments);
+        free(result->calls[i].item_id);
+    }
+    free(result->calls);
+    for (int i = 0; i < result->raw_count; i++)
+    {
+        free(result->raw_items[i]);
+    }
+    free(result->raw_items);
+    memset(result, 0, sizeof(*result));
+}
+
 static void TestRequestOptions(void)
 {
     const char *input[] = {
@@ -100,25 +122,6 @@ static void TestReasoningRemoval(void)
     Check(pico_responses_body_without_reasoning("not json") == NULL, "invalid JSON is rejected");
 }
 
-static void TestCanonicalUrl(void)
-{
-    const char *canonical = "https://hyper.charm.land/v1";
-    char out[128];
-    Check(pico_responses_resolve_canonical_url(NULL, canonical, out, sizeof(out)) &&
-              strcmp(out, "https://hyper.charm.land/v1/responses") == 0,
-          "empty override uses canonical Hyper endpoint");
-    Check(pico_responses_resolve_canonical_url("https://hyper.charm.land/v1/", canonical, out,
-                                                sizeof(out)),
-          "canonical base with trailing slash is accepted");
-    Check(pico_responses_resolve_canonical_url("https://hyper.charm.land/v1/responses", canonical, out,
-                                                sizeof(out)),
-          "canonical responses endpoint is accepted");
-    Check(!pico_responses_resolve_canonical_url("http://hyper.charm.land/v1", canonical, out, sizeof(out)),
-          "plaintext Hyper endpoint is rejected");
-    Check(!pico_responses_resolve_canonical_url("https://attacker.example/v1", canonical, out, sizeof(out)),
-          "another origin is rejected");
-}
-
 static void TestRefreshDecision(void)
 {
     time_t now = 1000;
@@ -132,11 +135,101 @@ static void TestRefreshDecision(void)
           "the request that received the 401 performs the refresh");
 }
 
+static void TestSignatureReplay(void)
+{
+    const char *openai_input[] = {
+        "{\"type\":\"user\",\"text\":\"hello\"}",
+        "{\"type\":\"assistant\",\"text\":\"ok\",\"thinking\":\"why\","
+        "\"thinking_signature\":\"{\\\"type\\\":\\\"reasoning\\\",\\\"id\\\":\\\"rs_1\\\",\\\"encrypted_content\\\":\\\"blob\\\"}\"}",
+        "{\"type\":\"tool_call\",\"call_id\":\"c1\",\"name\":\"sh\",\"arguments\":\"{}\",\"item_id\":\"fc_1\"}",
+        "{\"type\":\"tool_result\",\"call_id\":\"c1\",\"output\":\"done\"}",
+    };
+    PicoLlmTurn turn = {
+        .model = "gpt",
+        .effort = "high",
+        .input_json = openai_input,
+        .input_count = 4,
+    };
+    PicoResponsesBuildOpts openai = {
+        .provider = "openai",
+        .store_false = true,
+        .include_encrypted_reasoning = true,
+        .reasoning_summary_auto = true,
+    };
+    char *body = pico_responses_build_request(&turn, &openai);
+    Check(body && JsonValidSyntax(body, strlen(body)), "OpenAI request with signatures is valid JSON");
+    CheckContains(body, "\"id\":\"rs_1\"", true, "OpenAI replays the stored reasoning item id");
+    CheckContains(body, "\"encrypted_content\":\"blob\"", true, "OpenAI replays encrypted reasoning");
+    CheckContains(body, "\"id\":\"fc_1\"", true, "OpenAI replays the stored function_call item id");
+    CheckContains(body, "\"call_id\":\"c1\"", true, "OpenAI keeps the tool call_id");
+    free(body);
+
+    const char *hyper_input[] = {
+        "{\"type\":\"user\",\"text\":\"hello\"}",
+        "{\"type\":\"assistant\",\"text\":\"ok\",\"thinking\":\"why\",\"thinking_signature\":\"reasoning_content\"}",
+        "{\"type\":\"tool_call\",\"call_id\":\"c1\",\"name\":\"sh\",\"arguments\":\"{}\"}",
+        "{\"type\":\"tool_result\",\"call_id\":\"c1\",\"output\":\"done\"}",
+    };
+    turn.input_json = hyper_input;
+    body = pico_responses_build_request(&turn, &openai);
+    CheckContains(body, "\"type\":\"reasoning\"", false,
+                  "Hyper thinking signatures are not sent as OpenAI reasoning items");
+    CheckContains(body, "\"encrypted_content\":", false, "Hyper-to-OpenAI omits encrypted reasoning");
+    CheckContains(body, "\"id\":\"fc_", false, "Hyper-to-OpenAI reconstructs function_call without an item id");
+    CheckContains(body, "\"call_id\":\"c1\"", true, "Hyper-to-OpenAI still sends call_id");
+    CheckContains(body, "\"type\":\"function_call\"", true, "Hyper-to-OpenAI reconstructs function_call items");
+    free(body);
+
+    const char *signature_only_input[] = {
+        "{\"type\":\"user\",\"text\":\"hello\"}",
+        "{\"type\":\"assistant\",\"text\":\"\",\"thinking_signature\":"
+        "\"{\\\"type\\\":\\\"reasoning\\\",\\\"id\\\":\\\"rs_only\\\","
+        "\\\"encrypted_content\\\":\\\"blob\\\"}\"}",
+        "{\"type\":\"tool_call\",\"call_id\":\"c2\",\"name\":\"sh\",\"arguments\":\"{}\"}",
+    };
+    turn.input_json = signature_only_input;
+    turn.input_count = 3;
+    body = pico_responses_build_request(&turn, &openai);
+    CheckContains(body, "\"id\":\"rs_only\"", true,
+                  "signature-only assistant turns replay encrypted reasoning");
+    CheckContains(body, "\"type\":\"output_text\"", false,
+                  "signature-only turns do not invent an empty assistant message");
+    free(body);
+}
+
+static void TestRawResultProjection(void)
+{
+    PicoResponsesCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    JsonBuf_Init(&ctx.items);
+    JsonBuf_Init(&ctx.summary);
+    JsonBuf_Puts(&ctx.items,
+                 "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],"
+                 "\"encrypted_content\":\"blob\"},{\"type\":\"provider_state\","
+                 "\"id\":\"state_1\"}");
+    ctx.item_count = 2;
+    PicoLlmResult result;
+    memset(&result, 0, sizeof(result));
+    pico_responses_fill_result(&ctx, &result);
+    Check(result.think_signature && strstr(result.think_signature, "rs_1"),
+          "reasoning items project to the canonical thinking signature");
+    Check(result.raw_count == 1 && result.raw_items && strstr(result.raw_items[0], "state_1"),
+          "non-reasoning provider-native items remain available for live replay");
+    if (result.raw_count == 1 && result.raw_items)
+    {
+        Check(strstr(result.raw_items[0], "rs_1") == NULL,
+              "reasoning represented by the signature is not duplicated as raw history");
+    }
+    FreeResult(&result);
+    pico_responses_ctx_free(&ctx);
+}
+
 int main(void)
 {
     TestRequestOptions();
     TestReasoningRemoval();
-    TestCanonicalUrl();
     TestRefreshDecision();
+    TestSignatureReplay();
+    TestRawResultProjection();
     return g_failed;
 }

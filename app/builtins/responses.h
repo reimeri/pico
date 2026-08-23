@@ -5,7 +5,8 @@
 #include "pico/http.h"
 #include "json.h"
 
-/* Internal Responses-API helper shared by the openai and hyper builtins. */
+/* Internal Responses-API helper used by the openai builtin. Completions
+ * helpers for Hyper live in completions.c. */
 
 typedef struct PicoResponsesCtx {
     PicoLlmCancelFn cancel;
@@ -33,8 +34,6 @@ typedef struct PicoResponsesBuildOpts {
 } PicoResponsesBuildOpts;
 
 void pico_responses_resolve_url(const char *base, const char *fallback, char *out, size_t cap);
-bool pico_responses_resolve_canonical_url(const char *base, const char *canonical_base, char *out,
-                                          size_t cap);
 char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesBuildOpts *opts);
 char *pico_responses_body_without_reasoning(const char *body);
 

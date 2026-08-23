@@ -4,7 +4,7 @@
 #include "pico/http.h"
 #include "pico/auth.h"
 #include "json.h"
-#include "builtins/responses.h"
+#include "builtins/completions.h"
 #include "builtins/hyper_auth.h"
 
 #include <pthread.h>
@@ -24,15 +24,21 @@ static bool g_refreshing;
 static PicoLlmCancelFn g_refresh_owner_cancel;
 static void *g_refresh_owner_user;
 
+static bool EffortOn(const char *effort)
+{
+    return effort && effort[0] && strcmp(effort, "none") != 0 && strcmp(effort, "off") != 0;
+}
+
 static char *BuildRequest(const PicoLlmTurn *turn)
 {
-    PicoResponsesBuildOpts opts = {
+    PicoCompletionsBuildOpts opts = {
         .provider = "hyper",
         .store_false = true,
-        .include_encrypted_reasoning = false,
-        .reasoning_summary_auto = false,
+        .thinking = PICO_COMPLETIONS_THINKING_DEEPSEEK,
+        .requires_reasoning_content = EffortOn(turn->effort),
+        .max_tokens_field = "max_tokens",
     };
-    return pico_responses_build_request(turn, &opts);
+    return pico_completions_build_request(turn, &opts);
 }
 
 #define PICO_DEVICE_MAX_NOTES 8
@@ -949,7 +955,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
     }
 
     char url[1024];
-    if (!pico_responses_resolve_canonical_url(turn->base_url, kDefaultBase, url, sizeof(url)))
+    if (!pico_completions_resolve_canonical_url(turn->base_url, kDefaultBase, url, sizeof(url)))
     {
         pico_auth_entry_free(&auth);
         out->error = JsonDup("Hyper requests must use `https://hyper.charm.land/v1`.");
@@ -964,11 +970,11 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
     }
 
     const char *bearer = BearerOf(&auth, oauth);
-    PicoResponsesCtx ctx;
-    int rc = pico_responses_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
+    PicoCompletionsCtx ctx;
+    int rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
-        pico_responses_ctx_free(&ctx);
+        pico_completions_ctx_free(&ctx);
         if (!RefreshOauth(agent_ctx, &auth, &tc, true))
         {
             free(body);
@@ -982,16 +988,16 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
             return PICO_LLM_FAIL;
         }
         bearer = BearerOf(&auth, true);
-        rc = pico_responses_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
+        rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
     }
     if (rc == PICO_LLM_FAIL && ctx.error && strstr(ctx.error, "easoning"))
     {
-        char *stripped = pico_responses_body_without_reasoning(body);
+        char *stripped = pico_completions_body_without_thinking(body);
         if (stripped)
         {
-            pico_responses_ctx_free(&ctx);
-            rc = pico_responses_post(url, stripped, BearerOf(&auth, oauth), NULL, 0, cancel, on_delta,
-                                     user, &ctx);
+            pico_completions_ctx_free(&ctx);
+            rc = pico_completions_post(url, stripped, BearerOf(&auth, oauth), NULL, 0, cancel, on_delta,
+                                       user, &ctx);
             free(stripped);
         }
     }
@@ -1001,28 +1007,24 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
     {
         return PICO_LLM_CANCEL;
     }
-    pico_responses_fill_result(&ctx, out);
-    JsonBuf_Free(&ctx.items);
-    JsonBuf_Free(&ctx.summary);
+    pico_completions_fill_result(&ctx, out);
+    bool saw_text = ctx.saw_text;
+    pico_completions_ctx_free(&ctx);
     if (rc != PICO_LLM_OK)
     {
         if (!out->error)
         {
-            out->error = ctx.error ? ctx.error : JsonDup("LLM request failed");
-            ctx.error = NULL;
+            out->error = JsonDup("LLM request failed");
         }
-        free(ctx.error);
         return PICO_LLM_FAIL;
     }
-    if (!out->error && !ctx.saw_text && !out->assistant_text && out->call_count == 0 && !out->think_text)
+    if (!out->error && !saw_text && !out->assistant_text && out->call_count == 0 && !out->think_text)
     {
         char buf[sizeof(url) + 32];
         snprintf(buf, sizeof(buf), "empty response from %s", url);
         out->error = JsonDup(buf);
-        free(ctx.error);
         return PICO_LLM_FAIL;
     }
-    free(ctx.error);
     return PICO_LLM_OK;
 }
 

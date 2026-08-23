@@ -31,26 +31,6 @@ void pico_responses_resolve_url(const char *base, const char *fallback, char *ou
     snprintf(out + n, cap - n, "/responses");
 }
 
-bool pico_responses_resolve_canonical_url(const char *base, const char *canonical_base, char *out,
-                                          size_t cap)
-{
-    if (!canonical_base || !canonical_base[0] || !out || cap == 0)
-    {
-        return false;
-    }
-    char canonical[1024];
-    char requested[1024];
-    pico_responses_resolve_url(NULL, canonical_base, canonical, sizeof(canonical));
-    pico_responses_resolve_url(base, canonical_base, requested, sizeof(requested));
-    if (strcmp(requested, canonical) != 0 || strlen(canonical) >= cap)
-    {
-        out[0] = '\0';
-        return false;
-    }
-    snprintf(out, cap, "%s", canonical);
-    return true;
-}
-
 static char *BuildResponsesMessage(const char *role, const char *text, bool assistant)
 {
     JsonBuf b;
@@ -63,6 +43,40 @@ static char *BuildResponsesMessage(const char *role, const char *text, bool assi
     JsonBuf_String(&b, text ? text : "");
     JsonBuf_Puts(&b, "}]}");
     return JsonBuf_Steal(&b);
+}
+
+static bool IsReasoningSignature(const char *sig)
+{
+    if (!sig)
+    {
+        return false;
+    }
+    while (*sig == ' ' || *sig == '\n' || *sig == '\r' || *sig == '\t')
+    {
+        sig++;
+    }
+    if (*sig != '{')
+    {
+        return false;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, sig, strlen(sig)) != 0)
+    {
+        return false;
+    }
+    bool ok = JsonIsObject(&doc, 0);
+    char *type = JsonObjStr(&doc, 0, "type");
+    if (ok && type && strcmp(type, "reasoning") != 0)
+    {
+        ok = false;
+    }
+    if (ok && !type && JsonObjGet(&doc, 0, "encrypted_content") < 0)
+    {
+        ok = false;
+    }
+    free(type);
+    JsonFree(&doc);
+    return ok;
 }
 
 static char *MapPicoItem(const char *json, const char *provider)
@@ -87,8 +101,32 @@ static char *MapPicoItem(const char *json, const char *provider)
     else if (type && strcmp(type, "assistant") == 0)
     {
         char *text = JsonObjStr(&doc, 0, "text");
-        out = BuildResponsesMessage("assistant", text, true);
+        char *sig = JsonObjStr(&doc, 0, "thinking_signature");
+        bool has_text = text && text[0];
+        if (provider && strcmp(provider, "openai") == 0 && IsReasoningSignature(sig))
+        {
+            if (has_text)
+            {
+                char *msg = BuildResponsesMessage("assistant", text, true);
+                JsonBuf b;
+                JsonBuf_Init(&b);
+                JsonBuf_Puts(&b, sig);
+                JsonBuf_Putc(&b, ',');
+                JsonBuf_Puts(&b, msg);
+                free(msg);
+                out = JsonBuf_Steal(&b);
+            }
+            else
+            {
+                out = JsonDup(sig);
+            }
+        }
+        else if (has_text)
+        {
+            out = BuildResponsesMessage("assistant", text, true);
+        }
         free(text);
+        free(sig);
     }
     else if (type && strcmp(type, "tool_call") == 0)
     {
@@ -98,16 +136,23 @@ static char *MapPicoItem(const char *json, const char *provider)
         char *name = JsonObjStr(&doc, 0, "name");
         char *args = JsonObjStr(&doc, 0, "arguments");
         char *id = JsonObjStr(&doc, 0, "call_id");
+        char *item_id = JsonObjStr(&doc, 0, "item_id");
         JsonBuf_String(&b, name ? name : "");
         JsonBuf_Puts(&b, ",\"arguments\":");
         JsonBuf_String(&b, args ? args : "{}");
         JsonBuf_Puts(&b, ",\"call_id\":");
         JsonBuf_String(&b, id ? id : "");
+        if (item_id && item_id[0])
+        {
+            JsonBuf_Puts(&b, ",\"id\":");
+            JsonBuf_String(&b, item_id);
+        }
         JsonBuf_Putc(&b, '}');
         out = JsonBuf_Steal(&b);
         free(name);
         free(args);
         free(id);
+        free(item_id);
     }
     else if (type && strcmp(type, "tool_result") == 0)
     {
@@ -773,6 +818,7 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
             call->call_id = JsonObjStr(&doc, item, "call_id");
             call->name = JsonObjStr(&doc, item, "name");
             call->arguments = JsonObjStr(&doc, item, "arguments");
+            call->item_id = JsonObjStr(&doc, item, "id");
             continue;
         }
         if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "message"))
@@ -786,7 +832,6 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
             continue;
         }
         char *raw = JsonRawDup(&doc, item);
-        AddRaw(out, raw);
         if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
         {
             int summary_tok = JsonObjGet(&doc, item, "summary");
@@ -798,8 +843,14 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
             {
                 AppendThink(&think, content);
             }
+            free(out->think_signature);
+            out->think_signature = JsonDup(raw);
             free(summary);
             free(content);
+        }
+        else
+        {
+            AddRaw(out, raw);
         }
         free(raw);
     }

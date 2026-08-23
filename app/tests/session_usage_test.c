@@ -19,6 +19,9 @@ static int g_restored_value;
 static int g_reset_hooks;
 static char g_status_warning[512];
 static int g_reserve_calls;
+static char g_last_think[2048];
+static char g_last_sig[4096];
+static char g_last_item_id[128];
 
 static int Fail(const char *message)
 {
@@ -138,18 +141,30 @@ void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
     (void)text;
 }
 
-void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text)
+void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const char *thinking,
+                                    const char *signature)
 {
     (void)agent;
+    snprintf(g_last_think, sizeof(g_last_think), "%s", thinking ? thinking : "");
+    snprintf(g_last_sig, sizeof(g_last_sig), "%s", signature ? signature : "");
     (void)text;
 }
 
-void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args)
+void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args,
+                                       const char *item_id)
 {
     (void)agent;
     (void)call_id;
     (void)name;
     (void)args;
+    snprintf(g_last_item_id, sizeof(g_last_item_id), "%s", item_id ? item_id : "");
+}
+
+void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text)
+{
+    (void)app;
+    (void)agent;
+    (void)text;
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
@@ -338,6 +353,72 @@ static bool AppendRaw(const char *path, const char *line)
     return true;
 }
 
+static int TestThinkingRoundTrip(void)
+{
+    PicoApp app;
+    PicoAgent agent;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    const char *sig =
+        "{\"type\":\"reasoning\",\"id\":\"rs_test\",\"encrypted_content\":\"blob\"}";
+    PicoSession_LogAssistant(&app, &agent, "visible", "think-hard", sig);
+    PicoSession_LogToolCall(&app, &agent, "call-1", "sh", "{}", "fc_abc");
+    if (!agent.session_path[0])
+    {
+        return Fail("thinking log did not create a session file");
+    }
+    size_t n = 0;
+    char *file = Pico_ReadFile(agent.session_path, &n);
+    if (!file || !strstr(file, "\"thinking\":\"think-hard\"") || !strstr(file, "encrypted_content") ||
+        !strstr(file, "\"item_id\":\"fc_abc\""))
+    {
+        free(file);
+        return Fail("session file omitted thinking, signature, or tool-call item_id");
+    }
+    free(file);
+
+    g_last_think[0] = '\0';
+    g_last_sig[0] = '\0';
+    g_last_item_id[0] = '\0';
+    PicoApp reader;
+    PicoAgent reader_agent;
+    memset(&reader, 0, sizeof(reader));
+    memset(&reader_agent, 0, sizeof(reader_agent));
+    reader_agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, agent.session_path);
+    if (strcmp(g_last_think, "think-hard") != 0 || !strstr(g_last_sig, "rs_test") ||
+        strcmp(g_last_item_id, "fc_abc") != 0)
+    {
+        unlink(agent.session_path);
+        return Fail("session replay did not restore thinking, signature, or item_id");
+    }
+    unlink(agent.session_path);
+
+    PicoAgent signature_only;
+    memset(&signature_only, 0, sizeof(signature_only));
+    signature_only.persistence = PICO_SESSION_DURABLE;
+    snprintf(signature_only.model, sizeof(signature_only.model), "saved-model");
+    PicoSession_LogAssistant(&app, &signature_only, "", NULL, sig);
+    if (!signature_only.session_path[0])
+    {
+        return Fail("signature-only assistant did not create a session file");
+    }
+    g_last_think[0] = '\0';
+    g_last_sig[0] = '\0';
+    memset(&reader, 0, sizeof(reader));
+    memset(&reader_agent, 0, sizeof(reader_agent));
+    reader_agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, signature_only.session_path);
+    bool signature_restored = strcmp(g_last_think, "") == 0 && strstr(g_last_sig, "rs_test");
+    unlink(signature_only.session_path);
+    return signature_restored ? 0 : Fail("session replay dropped a signature-only assistant event");
+}
+
 int main(void)
 {
     char temp[] = "/tmp/pico-session-usage-XXXXXX";
@@ -357,7 +438,7 @@ int main(void)
     snprintf(writer.settings.model, sizeof(writer.settings.model), "default-model");
     PicoSession_LogUsage(&writer, &writer_agent, 100, 20);
     PicoSession_LogUsage(&writer, &writer_agent, 200, 150);
-    PicoSession_LogAssistant(&writer, &writer_agent, "assistant response");
+    PicoSession_LogAssistant(&writer, &writer_agent, "assistant response", NULL, NULL);
     PicoSession_LogCompaction(&writer, &writer_agent, "brief", 200);
     PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
     PicoSession_LogToolResult(&writer, &writer_agent, "state-2", "state_test", "failed", true, "{\"value\":8}");
@@ -386,9 +467,9 @@ int main(void)
     snprintf(child_agent.purpose, sizeof(child_agent.purpose), "Review carefully");
     snprintf(child_agent.parent_session_id, sizeof(child_agent.parent_session_id), "parent-session");
     PicoSession_LogUser(&writer, &child_agent, "delegated task", "delegated task");
-    PicoSession_LogAssistant(&writer, &child_agent, "child findings");
-    PicoSession_LogToolCall(&writer, &child_agent, "child-call-1", "subagent", "{\"task\":\"nested\"}");
-    PicoSession_LogToolCall(&writer, &child_agent, "child-call-2", "sh", "{\"command\":\"true\"}");
+    PicoSession_LogAssistant(&writer, &child_agent, "child findings", NULL, NULL);
+    PicoSession_LogToolCall(&writer, &child_agent, "child-call-1", "subagent", "{\"task\":\"nested\"}", NULL);
+    PicoSession_LogToolCall(&writer, &child_agent, "child-call-2", "sh", "{\"command\":\"true\"}", NULL);
     PicoSession_LogToolResult(&writer, &child_agent, "child-call-1", "subagent",
                               "{\"session_id\":\"nested-child\"}", false, NULL);
     PicoSession_LogToolResult(&writer, &child_agent, "child-call-2", "sh", "ok", false, NULL);
@@ -615,5 +696,9 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
+    if (TestThinkingRoundTrip() != 0)
+    {
+        return 1;
+    }
     return 0;
 }

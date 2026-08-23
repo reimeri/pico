@@ -39,14 +39,16 @@ void PicoAgent_SetCacheKey(PicoAgent *agent, const char *key);
 void PicoAgent_RotateCacheKey(PicoAgent *agent);
 void PicoAgent_ClearInput(PicoAgent *agent);
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text);
-void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text);
+void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const char *thinking,
+                                    const char *signature);
 void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name,
-                                       const char *args);
+                                       const char *args, const char *item_id);
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
                                          const char *output, bool is_error);
 
 void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text);
+void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text);
 void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args);
 void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args);

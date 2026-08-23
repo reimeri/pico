@@ -1,6 +1,6 @@
 # Providers
 
-An LLM provider implements one streaming turn. Builtins are `openai` ([`../../builtins/openai.c`](../../builtins/openai.c)) and `hyper` ([`../../builtins/hyper.c`](../../builtins/hyper.c)). Shared request/stream helpers: [`../../builtins/responses.c`](../../builtins/responses.c). Models in `settings.json` name the provider:
+An LLM provider implements one streaming turn. Builtins are `openai` ([`../../builtins/openai.c`](../../builtins/openai.c)) and `hyper` ([`../../builtins/hyper.c`](../../builtins/hyper.c)). Shared request/stream helpers: [`../../builtins/responses.c`](../../builtins/responses.c) for OpenAI, and [`../../builtins/completions.c`](../../builtins/completions.c) for Hyper and other OpenAI-compatible Chat Completions providers. Models in `settings.json` name the provider:
 
 ```json
 { "id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "context_limit": 128000 }
@@ -8,7 +8,7 @@ An LLM provider implements one streaming turn. Builtins are `openai` ([`../../bu
 
 Hyper models use `"provider": "hyper"` at the fixed HTTPS base `https://hyper.charm.land/v1`. The catalog is static `settings.json`; Pico does not fetch Hyper's model list at runtime. Hyper rejects non-canonical `base_url` overrides so workspace settings cannot redirect Hyper credentials.
 
-Hyper's `/v1/responses` request matches OpenAI's with these differences: always `store: false`, no `include: ["reasoning.encrypted_content"]`, and `reasoning` is `{ "effort": "..." }` without `summary: "auto"`. Effort `none`/`off` omits `reasoning`. Authenticate with `HYPER_API_KEY` or `/login hyper`.
+Hyper talks to `POST https://hyper.charm.land/v1/chat/completions`. Requests use `store: false`, `stream_options: { "include_usage": true }`, `max_tokens` when set, and DeepSeek thinking (`thinking: { "type": "enabled"|"disabled" }` plus `reasoning_effort` when effort is on). If the model is reasoning, replayed assistant messages include `reasoning_content` (the stored thinking text, or `""`). A reasoning-compatibility retry removes the root thinking controls and historical message-level `reasoning_content`. Encrypted OpenAI reasoning blobs and Responses `function_call` item ids are dropped. Authenticate with `HYPER_API_KEY` or `/login hyper`. Hyper rejects non-canonical `base_url` values; only `https://hyper.charm.land/v1` or `https://hyper.charm.land/v1/chat/completions` are accepted.
 
 `provider` must match `PicoProvider.name`. Providers may interpret optional `base_url` values; the builtin OpenAI provider accepts overrides, while Hyper only accepts its canonical endpoint.
 
@@ -53,9 +53,9 @@ Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THI
 
 Fill `PicoLlmResult` with malloc'd strings. Pico calls `pico_llm_result_free`. Return `PICO_LLM_OK`, `PICO_LLM_FAIL` (set `out->error`), or `PICO_LLM_CANCEL`.
 
-- `assistant_text`, `think_text`
-- `calls[]` — `call_id`, `name`, `arguments` (JSON object text)
-- `raw_items[]` — optional provider-native items replayed on the next turn
+- `assistant_text`, `think_text`, `think_signature` (opaque replay token: Completions uses `"reasoning_content"`; Responses stores the reasoning item JSON)
+- `calls[]` — `call_id`, `name`, `arguments` (JSON object text), optional `item_id` (Responses `function_call.id`)
+- `raw_items[]` — optional provider-native state for live follow-ups. Pico tags each item with the producing provider; request converters must replay only matching-provider items and ignore the rest. The builtin Responses converter does this, while Completions ignores all raw items. Raw items are not durable; session history persists thinking text, `thinking_signature`, and tool-call `item_id` instead.
 - `input_tokens`, `cached_tokens` report this completed provider call's input usage. `cached_tokens` is the cached portion of `input_tokens`. Pico ignores usage when `input_tokens <= 0` and clamps cached usage to the input range.
 
 Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.

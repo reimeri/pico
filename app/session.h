@@ -47,10 +47,11 @@ PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
 PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens);
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
-                                                const char *content);
+                                                const char *content, const char *thinking,
+                                                const char *thinking_signature);
 PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
                                                const char *call_id, const char *name,
-                                               const char *args);
+                                               const char *args, const char *item_id);
 PicoSessionWriteResult PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent,
                                                  const char *call_id, const char *name,
                                                  const char *output, bool is_error,

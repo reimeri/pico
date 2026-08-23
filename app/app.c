@@ -292,11 +292,13 @@ void pico_llm_result_free(PicoLlmResult *r)
     free(r->error);
     free(r->assistant_text);
     free(r->think_text);
+    free(r->think_signature);
     for (int i = 0; i < r->call_count; i++)
     {
         free(r->calls[i].call_id);
         free(r->calls[i].name);
         free(r->calls[i].arguments);
+        free(r->calls[i].item_id);
     }
     free(r->calls);
     for (int i = 0; i < r->raw_count; i++)

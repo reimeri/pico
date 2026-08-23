@@ -29,6 +29,7 @@ typedef struct PicoPendingCall {
     char *call_id;
     char *name;
     char *arguments;
+    char *item_id;
 } PicoPendingCall;
 
 typedef enum PicoAgentEvType {
@@ -112,6 +113,9 @@ struct PicoAgentRt {
     char *think;
     size_t think_len;
     size_t think_cap;
+    char *turn_think;
+    size_t turn_think_len;
+    size_t turn_think_cap;
     char *summary;
     size_t summary_len;
     size_t summary_cap;
@@ -165,7 +169,8 @@ typedef enum PicoWorkerContext {
 static __thread PicoWorkerContext t_worker_context;
 
 static void SetErrorState(PicoApp *app, PicoAgent *agent, const char *msg);
-static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent);
+static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent, const char *thinking,
+                                   const char *signature);
 static void RefreshWorkerContext(PicoAgentRt *rt, const PicoApp *app, const PicoAgent *agent);
 static char *BuildUserItem(const char *text);
 static void *WorkerMain(void *arg);
@@ -211,6 +216,7 @@ static void ClearPending(PicoAgentRt *rt)
         free(rt->pending[i].call_id);
         free(rt->pending[i].name);
         free(rt->pending[i].arguments);
+        free(rt->pending[i].item_id);
         memset(&rt->pending[i], 0, sizeof(rt->pending[i]));
     }
     rt->pending_count = 0;
@@ -348,6 +354,8 @@ static char *EncodeResult(const PicoLlmResult *r)
     JsonBuf_String(&b, r && r->assistant_text ? r->assistant_text : "");
     JsonBuf_Puts(&b, ",\"think_text\":");
     JsonBuf_String(&b, r && r->think_text ? r->think_text : "");
+    JsonBuf_Puts(&b, ",\"think_signature\":");
+    JsonBuf_String(&b, r && r->think_signature ? r->think_signature : "");
     JsonBuf_Puts(&b, ",\"calls\":[");
     int n = r ? r->call_count : 0;
     for (int i = 0; i < n; i++)
@@ -362,6 +370,8 @@ static char *EncodeResult(const PicoLlmResult *r)
         JsonBuf_String(&b, r->calls[i].name ? r->calls[i].name : "");
         JsonBuf_Puts(&b, ",\"arguments\":");
         JsonBuf_String(&b, r->calls[i].arguments ? r->calls[i].arguments : "{}");
+        JsonBuf_Puts(&b, ",\"item_id\":");
+        JsonBuf_String(&b, r->calls[i].item_id ? r->calls[i].item_id : "");
         JsonBuf_Putc(&b, '}');
     }
     JsonBuf_Puts(&b, "],\"raw\":[");
@@ -441,6 +451,7 @@ static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
     if (kind == PICO_LLM_DELTA_THINKING)
     {
         BufAppend(&rt->think, &rt->think_len, &rt->think_cap, s, n);
+        BufAppend(&rt->turn_think, &rt->turn_think_len, &rt->turn_think_cap, s, n);
     }
     else if (kind == PICO_LLM_DELTA_STATUS)
     {
@@ -1079,6 +1090,10 @@ static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_
         free(tools);
         return false;
     }
+    free(rt->turn_think);
+    rt->turn_think = NULL;
+    rt->turn_think_len = 0;
+    rt->turn_think_cap = 0;
     rt->work = PICO_WORK_LLM;
     rt->work_stream = p->stream;
     free(rt->turn_provider);
@@ -1155,17 +1170,27 @@ static char *BuildUserItem(const char *text)
     return JsonBuf_Steal(&b);
 }
 
-static char *BuildAssistantItem(const char *text)
+static char *BuildAssistantItem(const char *text, const char *thinking, const char *signature)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "{\"type\":\"assistant\",\"text\":");
     JsonBuf_String(&b, text ? text : "");
+    if (thinking && thinking[0])
+    {
+        JsonBuf_Puts(&b, ",\"thinking\":");
+        JsonBuf_String(&b, thinking);
+    }
+    if (signature && signature[0])
+    {
+        JsonBuf_Puts(&b, ",\"thinking_signature\":");
+        JsonBuf_String(&b, signature);
+    }
     JsonBuf_Putc(&b, '}');
     return JsonBuf_Steal(&b);
 }
 
-static char *BuildToolCall(const char *call_id, const char *name, const char *args)
+static char *BuildToolCall(const char *call_id, const char *name, const char *args, const char *item_id)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -1175,6 +1200,11 @@ static char *BuildToolCall(const char *call_id, const char *name, const char *ar
     JsonBuf_String(&b, name ? name : "");
     JsonBuf_Puts(&b, ",\"arguments\":");
     JsonBuf_String(&b, args ? args : "{}");
+    if (item_id && item_id[0])
+    {
+        JsonBuf_Puts(&b, ",\"item_id\":");
+        JsonBuf_String(&b, item_id);
+    }
     JsonBuf_Putc(&b, '}');
     return JsonBuf_Steal(&b);
 }
@@ -1527,6 +1557,10 @@ static void GoIdle(PicoApp *app, PicoAgent *agent)
     PicoAgentRt *rt = agent->runtime;
     pthread_mutex_lock(&rt->mu);
     bool may_release_tools = !rt->busy && !rt->retired;
+    free(rt->turn_think);
+    rt->turn_think = NULL;
+    rt->turn_think_len = 0;
+    rt->turn_think_cap = 0;
     pthread_mutex_unlock(&rt->mu);
     if (may_release_tools)
     {
@@ -1555,11 +1589,20 @@ static void ApplyCancel(PicoApp *app, PicoAgent *agent)
         pico_run_hooks(app, PICO_HOOK_ON_CANCEL, agent->id);
         return;
     }
-    FinishAssistantHistory(app, agent);
-    if (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
+    pthread_mutex_lock(&rt->mu);
+    char *thinking = Dup(rt->turn_think);
+    pthread_mutex_unlock(&rt->mu);
+    FinishAssistantHistory(app, agent, thinking, NULL);
+    if (rt->stream_msg >= 0 &&
+        (!MessageSourceEmpty(agent, rt->stream_msg) || (thinking && thinking[0])))
     {
-        PicoSession_LogAssistant(app, agent, agent->messages[rt->stream_msg].source);
+        PicoSession_LogAssistant(app, agent,
+                                 MessageSourceEmpty(agent, rt->stream_msg)
+                                     ? ""
+                                     : agent->messages[rt->stream_msg].source,
+                                 thinking, NULL);
     }
+    free(thinking);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
         PopLastMessage(app, agent);
@@ -1730,12 +1773,16 @@ static void StartLlm(PicoApp *app, PicoAgent *agent)
     }
 }
 
-static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent)
+static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent, const char *thinking,
+                                   const char *signature)
 {
     PicoAgentRt *rt = agent->runtime;
-    if (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
+    const char *text = (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
+                           ? agent->messages[rt->stream_msg].source
+                           : "";
+    if ((text && text[0]) || (thinking && thinking[0]) || (signature && signature[0]))
     {
-        PushInput(rt, BuildAssistantItem(agent->messages[rt->stream_msg].source));
+        PushInput(rt, BuildAssistantItem(text, thinking, signature));
     }
 }
 
@@ -1744,13 +1791,13 @@ static void IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
     PicoAgentRt *rt = agent->runtime;
     if (!payload)
     {
-        FinishAssistantHistory(app, agent);
+        FinishAssistantHistory(app, agent, NULL, NULL);
         return;
     }
     JsonDoc doc;
     if (JsonParse(&doc, payload, strlen(payload)) != 0)
     {
-        FinishAssistantHistory(app, agent);
+        FinishAssistantHistory(app, agent, NULL, NULL);
         return;
     }
 
@@ -1761,25 +1808,26 @@ static void IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
     }
 
     char *think = JsonObjStr(&doc, 0, "think_text");
+    char *sig = JsonObjStr(&doc, 0, "think_signature");
     if (think && think[0] && rt->stream_msg >= 0 && !HasThinkTrace(&agent->messages[rt->stream_msg]))
     {
         TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
     }
 
-    const char *prov = rt->turn_provider ? rt->turn_provider : "";
+    const char *provider = rt->turn_provider ? rt->turn_provider : "";
     int raw = JsonObjGet(&doc, 0, "raw");
     if (JsonIsArray(&doc, raw))
     {
-        int n = JsonArrayLen(&doc, raw);
-        for (int i = 0; i < n; i++)
+        int raw_count = JsonArrayLen(&doc, raw);
+        for (int i = 0; i < raw_count; i++)
         {
             char *item = JsonRawDup(&doc, JsonArrayAt(&doc, raw, i));
-            PushInput(rt, BuildRawItem(prov, item));
+            PushInput(rt, BuildRawItem(provider, item));
             free(item);
         }
     }
 
-    FinishAssistantHistory(app, agent);
+    FinishAssistantHistory(app, agent, think, sig);
 
     int calls = JsonObjGet(&doc, 0, "calls");
     int n = JsonIsArray(&doc, calls) ? JsonArrayLen(&doc, calls) : 0;
@@ -1790,11 +1838,13 @@ static void IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
         call->call_id = JsonObjStr(&doc, item, "call_id");
         call->name = JsonObjStr(&doc, item, "name");
         call->arguments = JsonObjStr(&doc, item, "arguments");
-        PushInput(rt, BuildToolCall(call->call_id, call->name, call->arguments));
+        call->item_id = JsonObjStr(&doc, item, "item_id");
+        PushInput(rt, BuildToolCall(call->call_id, call->name, call->arguments, call->item_id));
     }
 
     free(assistant);
     free(think);
+    free(sig);
     JsonFree(&doc);
 }
 
@@ -1836,13 +1886,23 @@ static void OnLlmDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
         return;
     }
     IngestResult(app, agent, ev->payload);
-    if (rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
+    char *think = ResultStr(ev->payload, "think_text");
+    char *sig = ResultStr(ev->payload, "think_signature");
+    if (rt->stream_msg >= 0 &&
+        (!MessageSourceEmpty(agent, rt->stream_msg) || (think && think[0]) || (sig && sig[0])))
     {
-        PicoSession_LogAssistant(app, agent, agent->messages[rt->stream_msg].source);
+        PicoSession_LogAssistant(app, agent,
+                                 MessageSourceEmpty(agent, rt->stream_msg)
+                                     ? ""
+                                     : agent->messages[rt->stream_msg].source,
+                                 think, sig);
     }
+    free(think);
+    free(sig);
     for (int i = 0; i < rt->pending_count; i++)
     {
-        PicoSession_LogToolCall(app, agent, rt->pending[i].call_id, rt->pending[i].name, rt->pending[i].arguments);
+        PicoSession_LogToolCall(app, agent, rt->pending[i].call_id, rt->pending[i].name,
+                                rt->pending[i].arguments, rt->pending[i].item_id);
     }
     if (rt->pending_count > 0)
     {
@@ -2115,6 +2175,7 @@ static void FreeRt(PicoAgentRt *rt)
     ClearPending(rt);
     free(rt->stream);
     free(rt->think);
+    free(rt->turn_think);
     free(rt->summary);
     free(rt->work_model);
     free(rt->work_base_url);
@@ -2852,20 +2913,40 @@ void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
     if (agent && agent->runtime) PushInput(agent->runtime, BuildUserItem(text));
 }
 
-void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text)
+void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const char *thinking,
+                                    const char *signature)
 {
-    if (agent && agent->runtime) PushInput(agent->runtime, BuildAssistantItem(text));
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildAssistantItem(text, thinking, signature));
 }
 
-void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args)
+void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args,
+                                       const char *item_id)
 {
-    if (agent && agent->runtime) PushInput(agent->runtime, BuildToolCall(call_id, name, args));
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildToolCall(call_id, name, args, item_id));
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
                                          const char *output, bool is_error)
 {
     if (agent && agent->runtime) PushFunctionOutput(agent->runtime, call_id, name, output, is_error);
+}
+
+void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text)
+{
+    if (!agent || !text || !text[0] || agent->message_count <= 0)
+    {
+        return;
+    }
+    int idx = agent->message_count - 1;
+    if (agent->messages[idx].role != PICO_ROLE_ASSISTANT)
+    {
+        return;
+    }
+    if (HasThinkTrace(&agent->messages[idx]))
+    {
+        return;
+    }
+    TraceAppendThink(app, agent, idx, text, strlen(text));
 }
 
 char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent)

@@ -2309,7 +2309,7 @@ static bool AskUserRegistered(const PicoApp *app)
     return app && app->tool_count == 1 && app->tools[0].name &&
            strcmp(app->tools[0].name, "ask_user") == 0 && app->tools[0].run &&
            app->llm_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
-           app->hook_count == 1;
+           app->hook_count == 2;
 }
 
 static int TestAskUserHiddenOmitsGuidance(void)

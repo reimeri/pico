@@ -184,7 +184,8 @@ if(BUILD_TESTING)
         builtins/todo.c
         builtins/todo_model.c
         json.c
-        usage.c)
+        usage.c
+        theme.c)
     target_include_directories(pico_agent_behavior_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include

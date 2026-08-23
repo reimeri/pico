@@ -115,7 +115,7 @@ The modal preserves answers while moving Next/Back and returns them in question 
 }
 ```
 
-Controls: Up/Down, Space, or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline; Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
+Controls: Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
 
 ## Wrapping tools
 

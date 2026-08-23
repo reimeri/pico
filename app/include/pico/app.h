@@ -342,6 +342,7 @@ typedef struct PicoSettings {
     bool compact_enabled;
     bool context_limit_set;
     bool resume_last;
+    double font_scale;
 } PicoSettings;
 
 typedef struct PicoApp {

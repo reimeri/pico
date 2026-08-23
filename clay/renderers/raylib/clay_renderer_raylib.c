@@ -9,6 +9,7 @@
 #define CLAY_COLOR_TO_RAYLIB_COLOR(color) (Color) { .r = (unsigned char)roundf(color.r), .g = (unsigned char)roundf(color.g), .b = (unsigned char)roundf(color.b), .a = (unsigned char)roundf(color.a) }
 
 extern Font Pico_FontAt(uint16_t fontId, uint16_t fontSize);
+extern float Pico_FontPx(uint16_t design);
 
 Camera Raylib_camera;
 
@@ -223,7 +224,7 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 // Raylib uses standard C strings so isn't compatible with cheap slices, we need to clone the string to append null terminator
                 memcpy(temp_render_buffer, textData->stringContents.chars, textData->stringContents.length);
                 temp_render_buffer[textData->stringContents.length] = '\0';
-                DrawTextEx(fontToUse, temp_render_buffer, (Vector2){roundf(boundingBox.x), roundf(boundingBox.y)}, (float)textData->fontSize, (float)textData->letterSpacing, CLAY_COLOR_TO_RAYLIB_COLOR(textData->textColor));
+                DrawTextEx(fontToUse, temp_render_buffer, (Vector2){roundf(boundingBox.x), roundf(boundingBox.y)}, Pico_FontPx(textData->fontSize), Pico_FontPx(textData->letterSpacing), CLAY_COLOR_TO_RAYLIB_COLOR(textData->textColor));
     
                 break;
             }

@@ -159,7 +159,7 @@ static void RenderToolOutput(const TranscriptView *view, const char *output)
             Clay_String s = {.length = length > 0 ? length : 1, .chars = length > 0 ? line : " "};
             ViewText(view, s, (Clay_TextElementConfig){.fontId = FONT_MONO,
                                                        .fontSize = 14,
-                                                       .lineHeight = 18,
+                                                       .lineHeight = Pico_FontPxU16(18),
                                                        .textColor = COLOR_CODE_TEXT,
                                                        .wrapMode = CLAY_TEXT_WRAP_WORDS});
             ViewBreak(view);
@@ -1111,7 +1111,8 @@ static void PicoChat_DrawChevrons(PicoApp *app)
 
     Font font = Pico_FontAt(FONT_REGULAR, 15);
     const char *glyph = "\xE2\x80\xBA";
-    Vector2 size = MeasureTextEx(font, glyph, 15.0f, 0.0f);
+    float glyph_px = Pico_FontPx(15);
+    Vector2 size = MeasureTextEx(font, glyph, glyph_px, 0.0f);
     TranscriptView main = MainTranscriptView(app);
 
     for (int i = 0; i < PicoApp_ActiveAgent(app)->message_count; i++)
@@ -1138,7 +1139,7 @@ static void PicoChat_DrawChevrons(PicoApp *app)
             Vector2 center = {roundf(box.x + box.width * 0.5f), roundf(box.y + box.height * 0.5f)};
             Color color = ClayToRay(hovered ? COLOR_TOOL_NAME_HOVER : COLOR_TOOL_CHEVRON);
             DrawTextPro(font, glyph, center, (Vector2){size.x * 0.5f, size.y * 0.5f},
-                        line->expanded ? 90.0f : 0.0f, 15.0f, 0.0f, color);
+                        line->expanded ? 90.0f : 0.0f, glyph_px, 0.0f, color);
         }
     }
 

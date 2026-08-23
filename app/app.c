@@ -1063,7 +1063,12 @@ static void ApplyWorkspaceChange(PicoApp *app)
     app->pending_workspace[0] = '\0';
     app->workspace_change_queued = false;
     app->reload_queued = true;
+    float prev_font_scale = Pico_FontScale();
     PicoSettings_Load(app);
+    if (Pico_FontScale() != prev_font_scale)
+    {
+        Clay_ResetMeasureTextCache();
+    }
     PicoSettings_InitAgent(app, initial);
     if (!PicoAgentManager_AdoptInitial(replacement, initial))
     {

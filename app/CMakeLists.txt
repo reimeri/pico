@@ -282,6 +282,21 @@ if(BUILD_TESTING)
     target_compile_options(pico_settings_agent_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_settings_agent_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_settings_agent_tests COMMAND pico_settings_agent_tests)
+
+    add_executable(pico_font_scale_tests
+        tests/font_scale_test.c
+        settings.c
+        json.c
+        theme.c)
+    target_include_directories(pico_font_scale_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_font_scale_tests)
+    target_compile_options(pico_font_scale_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_font_scale_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_font_scale_tests COMMAND pico_font_scale_tests)
 endif()
 
 add_custom_command(

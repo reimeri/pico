@@ -226,8 +226,8 @@ static float LineHeight(const SelHit *hit, Font font, float box_h, int nlines)
     {
         return (float)hit->line_height;
     }
-    Vector2 sample = MeasureTextEx(font, "Hg", (float)hit->font_size, 0);
-    return sample.y > 1 ? sample.y : (float)hit->font_size;
+    Vector2 sample = MeasureTextEx(font, "Hg", Pico_FontPx(hit->font_size), 0);
+    return sample.y > 1 ? sample.y : Pico_FontPx(hit->font_size);
 }
 
 static int OffsetOnLine(Font font, float font_size, const char *s, int start, int length, float x)
@@ -550,7 +550,7 @@ static int HitOffset(PicoApp *app, const SelHit *hit, Clay_BoundingBox box, floa
     int len = hit->length < available ? hit->length : available;
     const char *s = b->text + hit->start;
     Font font = Pico_FontAt(hit->font_id, hit->font_size);
-    float size = (float)hit->font_size;
+    float size = Pico_FontPx(hit->font_size);
     bool wrap = hit->wrap != CLAY_TEXT_WRAP_NONE;
     WrapLine lines[SEL_MAX_WRAP_LINES];
     int nlines = WrapRun(font, size, s, len, wrap ? box.width : 0, wrap, lines, SEL_MAX_WRAP_LINES);
@@ -691,7 +691,7 @@ void PicoChatSel_DrawOverlay(PicoApp *app)
         }
         Clay_BoundingBox box = el.boundingBox;
         Font font = Pico_FontAt(hit->font_id, hit->font_size);
-        float size = (float)hit->font_size;
+        float size = Pico_FontPx(hit->font_size);
         const char *s = s_msgs[msg].text + hit->start;
         int len = hit->length;
         bool wrap = hit->wrap != CLAY_TEXT_WRAP_NONE;

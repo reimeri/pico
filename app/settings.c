@@ -5,7 +5,9 @@
 #include "overlay.h"
 #include "path.h"
 #include "session.h"
+#include "theme_internal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,6 +121,30 @@ static bool ParseRatio(const char *s, double *out)
         end++;
     }
     if (*end != '\0' || v < 0.0 || v > 1.0)
+    {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+static bool ParseFontScale(const char *s, double *out)
+{
+    if (!s || !s[0] || !out)
+    {
+        return false;
+    }
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (end == s)
+    {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t')
+    {
+        end++;
+    }
+    if (*end != '\0' || !isfinite(v) || v < 0.5 || v > 3.0)
     {
         return false;
     }
@@ -267,6 +293,16 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     if (resume >= 0)
     {
         s->resume_last = JsonEq(doc, resume, "true") || JsonEq(doc, resume, "1");
+    }
+    char *font_scale = JsonObjRaw(doc, obj, "font_scale");
+    if (font_scale)
+    {
+        double scale;
+        if (ParseFontScale(font_scale, &scale))
+        {
+            s->font_scale = scale;
+        }
+        free(font_scale);
     }
     free(model);
 }
@@ -561,6 +597,7 @@ void PicoSettings_Load(PicoApp *app)
     s->context_limit = 128000;
     s->compact_enabled = true;
     s->compact_ratio = 0.9;
+    s->font_scale = 1.0;
 
     char dir[4096];
     if (Pico_ConfigDir(dir, sizeof(dir)))
@@ -616,6 +653,15 @@ void PicoSettings_Load(PicoApp *app)
             }
         }
     }
+    const char *font_scale = getenv("PICO_FONT_SCALE");
+    if (font_scale && font_scale[0])
+    {
+        double scale;
+        if (ParseFontScale(font_scale, &scale))
+        {
+            s->font_scale = scale;
+        }
+    }
 
     free(app->models);
     app->models = catalog;
@@ -631,6 +677,7 @@ void PicoSettings_Load(PicoApp *app)
             snprintf(m->default_effort, sizeof(m->default_effort), "%s", effort);
         }
     }
+    Pico_SetFontScale((float)s->font_scale);
 }
 
 static bool WriteFile(const char *path, const char *data, size_t len)

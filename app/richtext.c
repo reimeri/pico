@@ -3,6 +3,7 @@
 
 #include "richtext.h"
 #include "chat_sel.h"
+#include "pico/theme.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +67,7 @@ typedef struct RtLine {
 typedef struct RtCache {
     float width;
     uint16_t font_size;
+    float font_scale;
     RtLine *lines; // arena owned
     int line_count;
 } RtCache;
@@ -100,7 +102,7 @@ static Clay_TextElementConfig TextConfigFor(const RichTextStyle *style, bool bol
     Clay_TextElementConfig config = {0};
     config.fontId = FontFor(style, bold, italic, code);
     config.fontSize = style->font_size;
-    config.lineHeight = style->line_height > 0 ? style->line_height : style->font_size;
+    config.lineHeight = Pico_FontPxU16(style->line_height > 0 ? style->line_height : style->font_size);
     config.wrapMode = CLAY_TEXT_WRAP_NONE;
     config.textColor = code ? style->code_text_color : style->text_color;
     if (is_link)
@@ -377,6 +379,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
     RtCache *cache = (RtCache *)MdArena_Alloc(arena, sizeof(RtCache), 8);
     cache->width = available_width;
     cache->font_size = style->font_size;
+    cache->font_scale = Pico_FontScale();
     cache->line_count = scratch_line_count;
     cache->lines = (RtLine *)MdArena_Alloc(arena, (size_t)scratch_line_count * sizeof(RtLine), 8);
     for (int l = 0; l < scratch_line_count; l++)
@@ -480,7 +483,7 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
 static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitState *emit)
 {
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
-    uint16_t row_h = style->line_height > 0 ? style->line_height : style->font_size;
+    uint16_t row_h = Pico_FontPxU16(style->line_height > 0 ? style->line_height : style->font_size);
     CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
@@ -520,7 +523,8 @@ void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_wi
                               const RichTextStyle *style, RichTextEmitState *emit)
 {
     RtCache *cache = (RtCache *)block->wrap_cache;
-    if (!cache || cache->width != available_width || cache->font_size != style->font_size)
+    if (!cache || cache->width != available_width || cache->font_size != style->font_size ||
+        cache->font_scale != Pico_FontScale())
     {
         cache = BuildWrapCache(block, arena, available_width, style);
         block->wrap_cache = cache;

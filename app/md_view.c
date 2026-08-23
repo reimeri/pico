@@ -110,6 +110,7 @@ const char *MdView_HoveredLink(void)
 typedef struct {
     float available_width;
     uint16_t font_size;
+    float font_scale;
     int col_count;
     float *col_widths;
 } MdTableWrapCache;
@@ -133,7 +134,7 @@ static float *TableColWidths(MdBlock *block, MdArena *arena, float available_wid
     MdTable *table = &block->table;
     MdTableWrapCache *cache = (MdTableWrapCache *)block->wrap_cache;
     if (cache && cache->available_width == available_width && cache->font_size == base_style->font_size &&
-        cache->col_count == table->col_count)
+        cache->font_scale == Pico_FontScale() && cache->col_count == table->col_count)
     {
         return cache->col_widths;
     }
@@ -252,6 +253,7 @@ static float *TableColWidths(MdBlock *block, MdArena *arena, float available_wid
     cache = (MdTableWrapCache *)MdArena_Alloc(arena, sizeof(MdTableWrapCache), 8);
     cache->available_width = available_width;
     cache->font_size = base_style->font_size;
+    cache->font_scale = Pico_FontScale();
     cache->col_count = cols;
     cache->col_widths = widths;
     block->wrap_cache = cache;
@@ -455,7 +457,7 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
                     {
                         PicoChatSel_Text(text, (Clay_TextElementConfig){.fontId = FONT_MONO,
                                                                        .fontSize = 16,
-                                                                       .lineHeight = 20,
+                                                                       .lineHeight = Pico_FontPxU16(20),
                                                                        .textColor = COLOR_CODE_TEXT,
                                                                        .wrapMode = CLAY_TEXT_WRAP_NONE});
                     }

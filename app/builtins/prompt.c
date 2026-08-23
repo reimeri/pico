@@ -42,7 +42,7 @@ static void RenderPromptText(void)
         Clay_String s = {.length = length > 0 ? length : 1, .chars = length > 0 ? line : " "};
         CLAY_TEXT(s, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                       .fontSize = 13,
-                                      .lineHeight = 18,
+                                      .lineHeight = Pico_FontPxU16(18),
                                       .textColor = color,
                                       .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         line = newline ? newline + 1 : NULL;

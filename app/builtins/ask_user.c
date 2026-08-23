@@ -673,6 +673,11 @@ static int Utf8Encode(int cp, char out[4])
     return 4;
 }
 
+static float AskTextPx(void)
+{
+    return Pico_FontPx(ASK_USER_TEXT_FONT);
+}
+
 static Font AskTextFont(void)
 {
     return Pico_FontAt(FONT_REGULAR, ASK_USER_TEXT_FONT);
@@ -711,8 +716,8 @@ static float MeasureSlice(Font font, const char *s, int start, int length, float
 static int WrapAskText(const AskQuestion *q, Font font, float max_width, AskLine *lines, int max_lines,
                        float *line_height)
 {
-    Vector2 sample = MeasureTextEx(font, "Hg", ASK_USER_TEXT_FONT, 0);
-    *line_height = sample.y > 1 ? sample.y : (float)ASK_USER_TEXT_FONT;
+    Vector2 sample = MeasureTextEx(font, "Hg", AskTextPx(), 0);
+    *line_height = sample.y > 1 ? sample.y : AskTextPx();
     if (!q->text || q->text_len == 0)
     {
         lines[0].start = 0;
@@ -741,7 +746,7 @@ static int WrapAskText(const AskQuestion *q, Font font, float max_width, AskLine
         while (i < q->text_len && q->text[i] != '\n')
         {
             int next = Utf8Next(q->text, q->text_len, i);
-            float ch_w = MeasureSlice(font, q->text, i, next - i, ASK_USER_TEXT_FONT);
+            float ch_w = MeasureSlice(font, q->text, i, next - i, AskTextPx());
             if (width + ch_w > max_width && i > line_start)
             {
                 if (break_at > line_start)
@@ -848,7 +853,7 @@ static int OffsetOnLine(const AskQuestion *q, AskLine line, float target_x)
     while (pos < end)
     {
         int next = Utf8Next(q->text, q->text_len, pos);
-        float ch_w = MeasureSlice(font, q->text, pos, next - pos, ASK_USER_TEXT_FONT);
+        float ch_w = MeasureSlice(font, q->text, pos, next - pos, AskTextPx());
         if (width + ch_w * 0.5f >= target_x)
         {
             return pos;
@@ -889,7 +894,7 @@ static void MoveTextVertical(AskQuestion *q, int dir)
     {
         take = 0;
     }
-    float x = MeasureSlice(AskTextFont(), q->text ? q->text : "", from.start, take, ASK_USER_TEXT_FONT);
+    float x = MeasureSlice(AskTextFont(), q->text ? q->text : "", from.start, take, AskTextPx());
     q->cursor = OffsetOnLine(q, g_ui.lines[next], x);
     NoteCaretActivity();
 }
@@ -1356,7 +1361,7 @@ static void RenderTextQuestion(const AskQuestion *q)
     g_ui.line_count = WrapAskText(q, AskTextFont(), wrap, g_ui.lines, ASK_USER_MAX_LINES, &g_ui.line_height);
     if (g_ui.line_height < 1.0f)
     {
-        g_ui.line_height = (float)ASK_USER_TEXT_FONT;
+        g_ui.line_height = AskTextPx();
     }
 
     CLAY(CLAY_ID("AskUserTextBox"),
@@ -1572,7 +1577,7 @@ static int OffsetAtPoint(const AskQuestion *q, float x, float y)
     {
         return 0;
     }
-    float line_height = g_ui.line_height > 1 ? g_ui.line_height : (float)ASK_USER_TEXT_FONT;
+    float line_height = g_ui.line_height > 1 ? g_ui.line_height : AskTextPx();
     int line_i = (int)(local_y / line_height);
     if (line_i >= g_ui.line_count)
     {
@@ -1594,7 +1599,7 @@ static int OffsetAtPoint(const AskQuestion *q, float x, float y)
     while (pos < end)
     {
         int next = Utf8Next(q->text, q->text_len, pos);
-        float ch_w = MeasureSlice(font, q->text, pos, next - pos, ASK_USER_TEXT_FONT);
+        float ch_w = MeasureSlice(font, q->text, pos, next - pos, AskTextPx());
         if (width + ch_w * 0.5f >= local_x)
         {
             return pos;
@@ -1785,9 +1790,9 @@ static void AskUserDrawOverlay(PicoApp *app, const PicoHookEvent *event)
     {
         take = 0;
     }
-    float line_height = g_ui.line_height > 1 ? g_ui.line_height : (float)ASK_USER_TEXT_FONT;
+    float line_height = g_ui.line_height > 1 ? g_ui.line_height : AskTextPx();
     float x = scroll_box.boundingBox.x +
-              MeasureSlice(AskTextFont(), q->text ? q->text : "", line.start, take, ASK_USER_TEXT_FONT);
+              MeasureSlice(AskTextFont(), q->text ? q->text : "", line.start, take, AskTextPx());
     float y = scroll_box.boundingBox.y + (float)line_i * line_height + scroll_y;
     BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
     Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g, (unsigned char)COLOR_CURSOR.b, 255};

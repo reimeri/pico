@@ -257,7 +257,7 @@ static void RenderTodoRows(TodoAgentState *state)
             CLAY_TEXT(CStr(todo->text),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = 14,
-                                        .lineHeight = 19,
+                                        .lineHeight = Pico_FontPxU16(19),
                                         .textColor = todo->status == PICO_TODO_COMPLETED ? COLOR_MUTED : COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }

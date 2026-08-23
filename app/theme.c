@@ -1,4 +1,4 @@
-#include "pico/theme.h"
+#include "theme_internal.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -6,8 +6,11 @@
 #include <string.h>
 
 #define PICO_FONT_SIZE_MIN 8
-#define PICO_FONT_SIZE_MAX 64
+#define PICO_FONT_SIZE_MAX 128
 #define PICO_FONT_SIZE_SLOTS (PICO_FONT_SIZE_MAX - PICO_FONT_SIZE_MIN + 1)
+#define PICO_FONT_SCALE_MIN 0.5f
+#define PICO_FONT_SCALE_MAX 3.0f
+#define PICO_FONT_SCALE_DEFAULT 1.0f
 
 static const char *kFontPaths[FONT_COUNT] = {
     "resources/Roboto-Regular.ttf",
@@ -22,6 +25,7 @@ static int g_codepoint_count;
 static Font g_fonts[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_ready[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_owned[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
+static float g_font_scale = PICO_FONT_SCALE_DEFAULT;
 
 static void EnsureCodepoints(void)
 {
@@ -59,13 +63,43 @@ static int SizeIndex(uint16_t fontSize)
     return size - PICO_FONT_SIZE_MIN;
 }
 
+void Pico_SetFontScale(float scale)
+{
+    if (!(scale >= PICO_FONT_SCALE_MIN && scale <= PICO_FONT_SCALE_MAX))
+    {
+        return;
+    }
+    g_font_scale = scale;
+}
+
+float Pico_FontScale(void)
+{
+    return g_font_scale;
+}
+
+float Pico_FontPx(uint16_t design)
+{
+    return (float)design * g_font_scale;
+}
+
+uint16_t Pico_FontPxU16(uint16_t design)
+{
+    float px = Pico_FontPx(design);
+    int n = px <= 0.0f ? 0 : (int)(px + 0.5f);
+    if (n > UINT16_MAX)
+    {
+        n = UINT16_MAX;
+    }
+    return (uint16_t)n;
+}
+
 Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
 {
     if (fontId >= FONT_COUNT)
     {
         fontId = FONT_REGULAR;
     }
-    int idx = SizeIndex(fontSize);
+    int idx = SizeIndex(Pico_FontPxU16(fontSize));
     if (g_font_ready[fontId][idx])
     {
         return g_fonts[fontId][idx];
@@ -116,7 +150,7 @@ Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConf
     memcpy(buffer, text.chars, (size_t)text.length);
     buffer[text.length] = '\0';
 
-    Vector2 size = MeasureTextEx(font, buffer, (float)config->fontSize, (float)config->letterSpacing);
+    Vector2 size = MeasureTextEx(font, buffer, Pico_FontPx(config->fontSize), Pico_FontPx(config->letterSpacing));
     return (Clay_Dimensions){.width = size.x, .height = size.y};
 }
 

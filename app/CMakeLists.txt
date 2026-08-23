@@ -6,6 +6,9 @@ include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
+if(UNIX AND NOT APPLE)
+    set(GLFW_BUILD_WAYLAND ON CACHE BOOL "Build the bundled GLFW with Wayland support" FORCE)
+endif()
 
 FetchContent_Declare(
     raylib
@@ -32,6 +35,13 @@ unset(_pico_policy_version_minimum_defined)
 
 target_compile_options(raylib PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wno-unused-result>)
+
+# Raylib 5.5 never sets GLFW_SCALE_FRAMEBUFFER; wrap glfwCreateWindow in rcore
+# (which includes the desktop backend) so Wayland gets a 1:1 window/framebuffer
+# (raylib #5564).
+set_property(SOURCE "${raylib_SOURCE_DIR}/src/rcore.c"
+    TARGET_DIRECTORY raylib
+    PROPERTY COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/pico_glfw_scale.h")
 
 if(MSVC)
     set(PICO_WARNINGS_AS_ERRORS_OPTION /WX)
@@ -120,6 +130,28 @@ target_compile_definitions(pico PRIVATE
 
 target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
+
+# GLFW dlopens Wayland/Xcursor instead of linking them. On Nix those .so files are
+# not on the default loader path, so put their directories on pico's RUNPATH.
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PICO_WAYLAND REQUIRED wayland-client wayland-cursor wayland-egl xkbcommon)
+    set(_pico_dlopen_rpath ${PICO_WAYLAND_LIBRARY_DIRS})
+    pkg_check_modules(PICO_XCURSOR xcursor)
+    if(PICO_XCURSOR_FOUND)
+        list(APPEND _pico_dlopen_rpath ${PICO_XCURSOR_LIBRARY_DIRS})
+    endif()
+    pkg_check_modules(PICO_LIBDECOR libdecor-0)
+    if(PICO_LIBDECOR_FOUND)
+        list(APPEND _pico_dlopen_rpath ${PICO_LIBDECOR_LIBRARY_DIRS})
+    endif()
+    list(REMOVE_DUPLICATES _pico_dlopen_rpath)
+    foreach(_dir IN LISTS _pico_dlopen_rpath)
+        target_link_options(pico PRIVATE "LINKER:-rpath,${_dir}")
+    endforeach()
+    unset(_pico_dlopen_rpath)
+    unset(_dir)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

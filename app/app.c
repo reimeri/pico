@@ -1364,12 +1364,43 @@ static void UpdateChatFollowFromUserScroll(PicoApp *app, bool over_chat, bool mo
     app->chat_follow_bottom = ChatScrollAtBottom(data);
 }
 
+/* Wayland delivers the first xdg_toplevel configure during glfwCreateWindow,
+ * before raylib registers WindowSizeCallback, so CORE.Window.screen stays at
+ * the 1100x800 create hint while the surface is already tiled. Invoke the
+ * callback with the real size so viewport, layout, and mouse hit-tests match. */
+static void SyncRaylibWindowSize(void)
+{
+    GLFWwindow *win = GetWindowHandle();
+    if (!win)
+    {
+        return;
+    }
+    int width = 0;
+    int height = 0;
+    glfwGetWindowSize(win, &width, &height);
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+    if (width == GetScreenWidth() && height == GetScreenHeight())
+    {
+        return;
+    }
+    GLFWwindowsizefun prev = glfwSetWindowSizeCallback(win, NULL);
+    glfwSetWindowSizeCallback(win, prev);
+    if (prev)
+    {
+        prev(win, width, height);
+    }
+}
+
 void PicoApp_Frame(PicoApp *app)
 {
     if (!app)
     {
         return;
     }
+    SyncRaylibWindowSize();
     if (app->terminal_shutdown)
     {
         CloseWindow();

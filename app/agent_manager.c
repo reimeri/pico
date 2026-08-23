@@ -1281,6 +1281,27 @@ bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
     return true;
 }
 
+static char *UnknownProfileError(const PicoAgentManager *manager)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "unknown subagent profile; available: ");
+    if (!manager || manager->profile_count <= 0)
+    {
+        JsonBuf_Puts(&b, "(none)");
+        return JsonBuf_Steal(&b);
+    }
+    for (int i = 0; i < manager->profile_count; i++)
+    {
+        if (i > 0)
+        {
+            JsonBuf_Puts(&b, ", ");
+        }
+        JsonBuf_Puts(&b, manager->profiles[i].name);
+    }
+    return JsonBuf_Steal(&b);
+}
+
 static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
 {
     PicoApp *app = manager->app;
@@ -1294,8 +1315,10 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
     const PicoSubagentProfileInfo *profile = PicoSubagentConfig_Find(manager, job->profile);
     if (!profile)
     {
+        char *message = UnknownProfileError(manager);
         PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
-                          "unknown subagent profile", true);
+                          message ? message : "unknown subagent profile", true);
+        free(message);
         return false;
     }
     char model[128];

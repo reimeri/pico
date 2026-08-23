@@ -765,7 +765,8 @@ static void InspectRender(PicoApp *app)
         card_h = sh - 48.0f;
     }
 
-    char title[192];
+    static char title[192];
+    static char meta[256];
     const char *status = found && inspect.live ? "Running" : "Done";
     if (found && inspect.profile[0])
     {
@@ -775,7 +776,6 @@ static void InspectRender(PicoApp *app)
     {
         snprintf(title, sizeof(title), "Subagent · %s", status);
     }
-    char meta[256];
     meta[0] = '\0';
     if (found)
     {

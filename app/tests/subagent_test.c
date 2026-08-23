@@ -360,7 +360,8 @@ static int TestSubagentResumeFailures(void)
     trace = LastToolTrace(&app);
     bool unknown = trace && trace->tool_error && trace->tool_output &&
                    strstr(trace->tool_output, "\"profile\":\"missing\"") &&
-                   strstr(trace->tool_output, "unknown subagent profile");
+                   strstr(trace->tool_output, "unknown subagent profile") &&
+                   strstr(trace->tool_output, "exploration");
 
     ResetTest(TEST_DELEGATION, 1);
     ConfigureFakeSession("exploration");

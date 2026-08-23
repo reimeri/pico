@@ -69,7 +69,7 @@ The model-facing tool accepts:
 
 `profile` and `task` are required. A fresh child receives current system/workspace instructions, the profile purpose, and only the delegated task. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or prompt cache key. The parent waits synchronously while Pico pumps the child. Click the `subagent` row to watch that session; nested `subagent` rows inside the inspect chat open on a Back stack. Asks from the child still use the normal confirm/questionnaire overlays.
 
-The result identifies the profile, resolved model and effort, status, final answer, and whether the child can be resumed. A reusable result also includes its exact `session_id`.
+The result identifies the profile, resolved model and effort, status, final answer, and whether the child can be resumed. A reusable result also includes its exact `session_id`. If `profile` is not a discovered name, the tool fails and the error lists the profiles that are currently available.
 
 ## Continuing a child session
 

@@ -55,7 +55,7 @@ A fresh child gets current workspace/system instructions, a clearly delimited pr
 
 Supplying `session_id` reserves and replays exactly that prior subagent session. The stored profile must match. Transcript/provider history, usage, compaction state, and prompt cache are restored, then model, effort, purpose, and tools are refreshed from the current profile and parent. A model change rotates the cache key. The delegated task is appended to the same JSONL session.
 
-The parent remains in tool wait while the child runs. Click the `subagent` tool row to inspect the child's transcript without selecting it. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. Parent cancellation wakes the parent generation and cascades to the child. Late child completion cannot publish into a replacement generation.
+The parent remains in tool wait while the child runs. Click the `subagent` tool row to inspect the child's transcript without selecting it. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. An unknown `profile` fails and lists the currently available profile names in `final_answer`. Parent cancellation wakes the parent generation and cascades to the child. Late child completion cannot publish into a replacement generation.
 
 ## Asks
 

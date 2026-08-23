@@ -580,6 +580,7 @@ void PicoFooter_Render(PicoApp *app)
         RenderStatus(app);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(10), .height = CLAY_SIZING_FIXED(1)}}}) {}
         Chip(CLAY_ID("FooterCwd"), g_cwd, false, false, app);
+        PicoDiff_RenderChip(app);
         Sep();
         MutedText(g_tokens);
         if (g_extra[0])

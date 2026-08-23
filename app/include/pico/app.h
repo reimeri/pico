@@ -510,6 +510,8 @@ void PicoComplete_Close(void);
 bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoApp *app);
 bool PicoFooter_MenuOpen(void);
+bool PicoDiff_IsOpen(void);
+void PicoDiff_RenderChip(PicoApp *app);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);
 void PicoExts_Close(void);

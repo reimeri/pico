@@ -29,5 +29,6 @@ PicoExt pico_ext_openai(void);
 PicoExt pico_ext_hyper(void);
 PicoExt pico_ext_extensions(void);
 PicoExt pico_ext_prompt(void);
+PicoExt pico_ext_diff(void);
 
 #endif

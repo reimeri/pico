@@ -771,7 +771,7 @@ void PicoApp_Cancel(PicoApp *app)
 bool PicoUi_ModalOpen(const PicoApp *app)
 {
     return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-           PicoChat_InspectIsOpen() || PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
+           PicoChat_InspectIsOpen() || PicoDiff_IsOpen() || PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
@@ -1444,10 +1444,11 @@ void PicoApp_Frame(PicoApp *app)
     bool had_exts = PicoExts_IsOpen();
     bool had_prompt = PicoPrompt_IsOpen();
     bool had_footer = PicoFooter_MenuOpen();
+    bool had_diff = PicoDiff_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
     bool had_inspect = PicoChat_InspectIsOpen();
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_todo &&
+    if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_diff && !had_todo &&
         !had_inspect && IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgent *active = PicoApp_ActiveAgent(app);

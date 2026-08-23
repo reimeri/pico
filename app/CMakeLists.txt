@@ -82,6 +82,7 @@ add_executable(pico
     usage.c
     chat_sel.c
     text_range.c
+    diff_lines.c
     scrollbar.c
     builtins/chat.c
     builtins/composer.c
@@ -101,6 +102,7 @@ add_executable(pico
     builtins/responses.c
     builtins/extensions.c
     builtins/prompt.c
+    builtins/diff.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
 
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
@@ -164,6 +166,13 @@ if(BUILD_TESTING)
     target_include_directories(pico_text_range_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_text_range_tests)
     add_test(NAME pico_text_range_tests COMMAND pico_text_range_tests)
+
+    add_executable(pico_diff_lines_tests
+        tests/diff_lines_test.c
+        diff_lines.c)
+    target_include_directories(pico_diff_lines_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_diff_lines_tests)
+    add_test(NAME pico_diff_lines_tests COMMAND pico_diff_lines_tests)
 
     add_executable(pico_scrollbar_tests
         tests/scrollbar_test.c

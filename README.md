@@ -7,6 +7,7 @@ A small C99 AI agent harness with a native chat UI. The core is a loader, agent 
 ## Features
 
 - Markdown chat UI, composer, and footer
+- Git working-tree indicator in the footer (`+adds -dels`) with a unified diff modal (Myers line diff; untracked files shown as fully added)
 - OpenAI-compatible models (API key or ChatGPT `/login openai`)
 - Charm Hyper (`HYPER_API_KEY` or `/login hyper`)
 - Workspace tools (`sh`), structured `ask_user` questionnaires, built-in agent TODO tracking, sessions, compaction

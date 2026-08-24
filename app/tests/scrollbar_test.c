@@ -23,6 +23,28 @@ static int ExpectFloat(const char *test, const char *what, float got, float want
     return 0;
 }
 
+static int TestPinToBottom(void)
+{
+    const char *test = "pin_to_bottom";
+    float scroll_y = -100.0f;
+    if (!PicoScrollbar_PinToBottom(100.0f, 260.0f, &scroll_y) ||
+        ExpectFloat(test, "grown content", scroll_y, -160.0f))
+    {
+        return Fail(test, "content growth did not request a corrected bottom layout");
+    }
+    if (PicoScrollbar_PinToBottom(100.0f, 260.0f, &scroll_y))
+    {
+        return Fail(test, "an already pinned viewport requested another layout");
+    }
+    scroll_y = -20.0f;
+    if (!PicoScrollbar_PinToBottom(100.0f, 80.0f, &scroll_y) ||
+        ExpectFloat(test, "fitting content", scroll_y, 0.0f))
+    {
+        return Fail(test, "fitting content was not reset to the top");
+    }
+    return 0;
+}
+
 static int TestExactFit(void)
 {
     const char *test = "exact_fit";
@@ -85,6 +107,7 @@ static int TestMinThumb(void)
 int main(void)
 {
     int failed = 0;
+    failed |= TestPinToBottom();
     failed |= TestExactFit();
     failed |= TestOverflowEnds();
     failed |= TestMinThumb();

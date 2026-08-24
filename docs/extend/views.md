@@ -79,7 +79,7 @@ static void CustomEmptyInit(PicoApp *app)
 
 ## Contract
 
-- Render callbacks run on the **main thread** inside Clay layout. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`). `fontSize` values are design pixels; Pico multiplies them by `font_scale` from `settings.json` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16`.
+- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`). `fontSize` values are design pixels; Pico multiplies them by `font_scale` from `settings.json` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16`.
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`).
 - Do not call Clay from a tool or provider callback (worker thread).

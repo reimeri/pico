@@ -16,7 +16,7 @@ On process exit, every agent, delegation job, and retired runtime shares one abs
 
 ## Threads
 
-Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout. Agent-scoped callbacks receive a `PicoAgentId`; keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized.
+Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout. Agent-scoped callbacks receive a `PicoAgentId`; keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized. View render callbacks are declarative and may run more than once per displayed frame during same-frame reflow; keep durable state changes, I/O, and input consumption in `on_frame` or hooks.
 
 Worker thread: `PicoToolFn`, `PicoToolBeforeFn`, `PicoProviderStreamFn`. They receive a callback-scoped opaque `PicoAgentContext *`, never the UI `PicoApp *`. Do not retain it. Worker callbacks from different agents may overlap and must be reentrant. Use context accessors, `pico_tool_ask`, `pico_tool_set_child`, and `pico_auth_copy_ctx`; do not touch UI, transcript, session, settings, model catalog, or unsynchronized agent-scoped extension state. `pico_tool_ask` may be called only from a tool or before-tool callback. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 

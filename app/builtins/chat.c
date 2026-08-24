@@ -952,6 +952,30 @@ static void InspectHandlePointer(PicoApp *app)
     g_inspect_pressed_tool = false;
 }
 
+void PicoChat_HandleToolRelease(PicoApp *app)
+{
+    if (!app || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
+        !app->chat_sel.mouse_selecting || app->chat_sel.dragging || !app->chat_sel.pressed_tool ||
+        app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= PicoApp_ActiveAgent(app)->message_count)
+    {
+        return;
+    }
+
+    PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
+    int t = app->chat_sel.tool_idx;
+    if (t < 0 || t >= msg->trace_count || !msg->trace[t].is_tool || IsSubagentTool(&msg->trace[t]))
+    {
+        return;
+    }
+
+    TranscriptView main = MainTranscriptView(app);
+    if (Clay_PointerOver(ToolRowId(&main, app->chat_sel.tool_msg, t)))
+    {
+        msg->trace[t].expanded = !msg->trace[t].expanded;
+        app->chat_sel.pressed_tool = false;
+    }
+}
+
 void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;

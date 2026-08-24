@@ -29,6 +29,26 @@ bool PicoScrollbar_Overflows(Clay_String container_id)
     return data.found && data.contentDimensions.height > data.scrollContainerDimensions.height + 0.5f;
 }
 
+bool PicoScrollbar_PinToBottom(float viewport_h, float content_h, float *scroll_y)
+{
+    if (!scroll_y)
+    {
+        return false;
+    }
+    float target = viewport_h - content_h;
+    if (target > 0.0f)
+    {
+        target = 0.0f;
+    }
+    float delta = *scroll_y - target;
+    if (delta >= -0.01f && delta <= 0.01f)
+    {
+        return false;
+    }
+    *scroll_y = target;
+    return true;
+}
+
 PicoScrollbarThumb PicoScrollbar_Metrics(float track_h, float content_h, float scroll_y)
 {
     PicoScrollbarThumb thumb = {0};

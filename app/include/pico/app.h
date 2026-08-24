@@ -519,6 +519,7 @@ bool Pico_ShortcutPressed(char letter);
 bool Pico_ShortcutRepeat(char letter);
 
 void PicoChat_Render(PicoApp *app);
+void PicoChat_HandleToolRelease(PicoApp *app);
 void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event);
 void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event);
 bool PicoChat_InspectIsOpen(void);

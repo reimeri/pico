@@ -15,6 +15,7 @@ typedef struct PicoScrollbarThumb {
 void PicoScrollbar_BeginFrame(void);
 bool PicoScrollbar_Overflows(Clay_String container_id);
 PicoScrollbarThumb PicoScrollbar_Metrics(float track_h, float content_h, float scroll_y);
+bool PicoScrollbar_PinToBottom(float viewport_h, float content_h, float *scroll_y);
 void PicoScrollbar_Render(Clay_String container_id, Clay_String track_id, Clay_String handle_id);
 /* Same thumb, floated on the right edge of container_id so it sits inside a text box. */
 void PicoScrollbar_RenderOverlay(Clay_String container_id, Clay_String track_id, Clay_String handle_id);

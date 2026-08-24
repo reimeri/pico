@@ -1284,7 +1284,7 @@ PicoAppShutdownResult PicoApp_Free(PicoApp *app)
     return PICO_APP_SHUTDOWN_CLEAN;
 }
 
-static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
+static Clay_RenderCommandArray CreateShellLayout(PicoApp *app, float delta_time)
 {
     Clay_BeginLayout();
     MdView_BeginFrame();
@@ -1331,7 +1331,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
     RunSlot(app, PICO_SLOT_OVERLAY);
 
     app->hovered_link = MdView_HoveredLink();
-    return Clay_EndLayout(GetFrameTime());
+    return Clay_EndLayout(delta_time);
 }
 
 static void UpdateChatScrollbarDrag(PicoApp *app)
@@ -1482,13 +1482,14 @@ void PicoApp_Frame(PicoApp *app)
     bool bar_drag = PicoScrollbar_AnyDragging();
     Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !bar_drag);
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
+    PicoChat_HandleToolRelease(app);
 
     Clay_UpdateScrollContainers(
         !bar_drag && (modal_open || (!over_composer && !over_chat && !app->chat_sel.mouse_selecting)),
         (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
-    Clay_RenderCommandArray render_commands = CreateShellLayout(app);
+    Clay_RenderCommandArray render_commands = CreateShellLayout(app, GetFrameTime());
 
     app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
@@ -1517,10 +1518,14 @@ void PicoApp_Frame(PicoApp *app)
     if (app->chat_follow_bottom)
     {
         Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-        if (data.found && data.scrollPosition &&
-            data.contentDimensions.height > data.scrollContainerDimensions.height)
+        if (data.found &&
+            PicoScrollbar_PinToBottom(data.scrollContainerDimensions.height, data.contentDimensions.height,
+                                      data.scrollPosition ? &data.scrollPosition->y : NULL))
         {
-            data.scrollPosition->y = data.scrollContainerDimensions.height - data.contentDimensions.height;
+            /* Clay has already generated command bounds with the prior offset.
+             * Rebuild once so the corrected bottom offset is visible this frame. */
+            render_commands = CreateShellLayout(app, 0.0f);
+            app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         }
     }
 

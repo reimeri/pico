@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__linux__)
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+
 #define PICO_FONT_SIZE_MIN 8
 #define PICO_FONT_SIZE_MAX 128
 #define PICO_FONT_SIZE_SLOTS (PICO_FONT_SIZE_MAX - PICO_FONT_SIZE_MIN + 1)
@@ -195,9 +200,37 @@ void Pico_UnloadFonts(Font *fonts)
 
 static bool needs_clay_reinit = false;
 
+static void ReportClayInternalError(Clay_String error_text)
+{
+    if (error_text.chars)
+    {
+        fprintf(stderr, "%.*s\n", error_text.length, error_text.chars);
+    }
+    else
+    {
+        fputs("Clay encountered an unspecified internal error.\n", stderr);
+    }
+#if defined(__linux__)
+    void *frames[32];
+    int frame_count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+    if (frame_count > 0)
+    {
+        fputs("Clay failure backtrace:\n", stderr);
+        backtrace_symbols_fd(frames, frame_count, STDERR_FILENO);
+    }
+#endif
+}
+
 void Pico_HandleClayErrors(Clay_ErrorData error_data)
 {
-    printf("%s\n", error_data.errorText.chars);
+    if (error_data.errorType == CLAY_ERROR_TYPE_INTERNAL_ERROR)
+    {
+        ReportClayInternalError(error_data.errorText);
+    }
+    else
+    {
+        printf("%.*s\n", error_data.errorText.length, error_data.errorText.chars);
+    }
     if (error_data.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED)
     {
         needs_clay_reinit = true;

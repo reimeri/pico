@@ -1070,6 +1070,9 @@ Clay_CornerRadius Clay__CornerRadius_DEFAULT = CLAY__DEFAULT_STRUCT;
 Clay_BorderWidth Clay__BorderWidth_DEFAULT = CLAY__DEFAULT_STRUCT;
 
 // The below functions define array bounds checking and convenience functions for a provided type.
+#define CLAY__ARRAY_ERROR(operation)                                                                            \
+    CLAY_STRING("Clay attempted to make an out of bounds array access in " operation                           \
+                ". This is an internal error and is likely a bug.")
 #define CLAY__ARRAY_DEFINE_FUNCTIONS(typeName, arrayName)                                                       \
                                                                                                                 \
 typedef struct                                                                                                  \
@@ -1086,19 +1089,19 @@ arrayName arrayName##_Allocate_Arena(int32_t capacity, Clay_Arena *arena) {     
 }                                                                                                               \
                                                                                                                 \
 typeName *arrayName##_Get(arrayName *array, int32_t index) {                                                    \
-    return Clay__Array_RangeCheck(index, array->length) ? &array->internalArray[index] : &typeName##_DEFAULT;   \
+    return Clay__Array_RangeCheck(index, array->length, CLAY__ARRAY_ERROR(#arrayName "_Get")) ? &array->internalArray[index] : &typeName##_DEFAULT;   \
 }                                                                                                               \
                                                                                                                 \
 typeName arrayName##_GetValue(arrayName *array, int32_t index) {                                                \
-    return Clay__Array_RangeCheck(index, array->length) ? array->internalArray[index] : typeName##_DEFAULT;     \
+    return Clay__Array_RangeCheck(index, array->length, CLAY__ARRAY_ERROR(#arrayName "_GetValue")) ? array->internalArray[index] : typeName##_DEFAULT;     \
 }                                                                                                               \
                                                                                                                 \
 typeName *arrayName##_GetCheckCapacity(arrayName *array, int32_t index) {                                                    \
-    return Clay__Array_RangeCheck(index, array->capacity) ? &array->internalArray[index] : &typeName##_DEFAULT;   \
+    return Clay__Array_RangeCheck(index, array->capacity, CLAY__ARRAY_ERROR(#arrayName "_GetCheckCapacity")) ? &array->internalArray[index] : &typeName##_DEFAULT;   \
 }                                                                                                               \
                                                                                                                 \
 typeName *arrayName##_Add(arrayName *array, typeName item) {                                                    \
-    if (Clay__Array_AddCapacityCheck(array->length, array->capacity)) {                                         \
+    if (Clay__Array_AddCapacityCheck(array->length, array->capacity, CLAY__ARRAY_ERROR(#arrayName "_Add"))) {                                         \
         array->internalArray[array->length++] = item;                                                           \
         return &array->internalArray[array->length - 1];                                                        \
     }                                                                                                           \
@@ -1106,11 +1109,11 @@ typeName *arrayName##_Add(arrayName *array, typeName item) {                    
 }                                                                                                               \
                                                                                                                 \
 typeName *arrayName##Slice_Get(arrayName##Slice *slice, int32_t index) {                                        \
-    return Clay__Array_RangeCheck(index, slice->length) ? &slice->internalArray[index] : &typeName##_DEFAULT;   \
+    return Clay__Array_RangeCheck(index, slice->length, CLAY__ARRAY_ERROR(#arrayName "Slice_Get")) ? &slice->internalArray[index] : &typeName##_DEFAULT;   \
 }                                                                                                               \
                                                                                                                 \
 typeName arrayName##_RemoveSwapback(arrayName *array, int32_t index) {                                          \
-	if (Clay__Array_RangeCheck(index, array->length)) {                                                         \
+	if (Clay__Array_RangeCheck(index, array->length, CLAY__ARRAY_ERROR(#arrayName "_RemoveSwapback"))) {                                                         \
 		array->length--;                                                                                        \
 		typeName removed = array->internalArray[index];                                                         \
 		array->internalArray[index] = array->internalArray[array->length];                                      \
@@ -1120,7 +1123,7 @@ typeName arrayName##_RemoveSwapback(arrayName *array, int32_t index) {          
 }                                                                                                               \
                                                                                                                 \
 typeName* arrayName##_Set(arrayName *array, int32_t index, typeName value) {                                    \
-	if (Clay__Array_RangeCheck(index, array->capacity)) {                                                       \
+	if (Clay__Array_RangeCheck(index, array->capacity, CLAY__ARRAY_ERROR(#arrayName "_Set"))) {                        \
 		array->internalArray[index] = value;                                                                    \
 		array->length = index < array->length ? array->length : index + 1;                                      \
         return &array->internalArray[index];\
@@ -1129,7 +1132,7 @@ typeName* arrayName##_Set(arrayName *array, int32_t index, typeName value) {    
 }                                                                                                               \
                                                                                                                 \
 typeName* arrayName##_Set_DontTouchLength(arrayName *array, int32_t index, typeName value) {                                    \
-	if (Clay__Array_RangeCheck(index, array->capacity)) {                                                       \
+	if (Clay__Array_RangeCheck(index, array->capacity, CLAY__ARRAY_ERROR(#arrayName "_Set_DontTouchLength"))) {     \
 		array->internalArray[index] = value;                                                                    \
         return &array->internalArray[index];\
 	}                                                                                                           \
@@ -1181,8 +1184,8 @@ typedef struct {
 Clay__WarningArray Clay__WarningArray_Allocate_Arena(int32_t capacity, Clay_Arena *arena);
 Clay__Warning *Clay__WarningArray_Add(Clay__WarningArray *array, Clay__Warning item);
 void* Clay__Array_Allocate_Arena(int32_t capacity, uint32_t itemSize, Clay_Arena *arena);
-bool Clay__Array_RangeCheck(int32_t index, int32_t length);
-bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity);
+bool Clay__Array_RangeCheck(int32_t index, int32_t length, Clay_String operation);
+bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity, Clay_String operation);
 
 CLAY__ARRAY_DEFINE(bool, Clay__boolArray)
 CLAY__ARRAY_DEFINE(int32_t, Clay__int32_tArray)
@@ -3995,7 +3998,7 @@ void* Clay__Array_Allocate_Arena(int32_t capacity, uint32_t itemSize, Clay_Arena
     return CLAY__NULL;
 }
 
-bool Clay__Array_RangeCheck(int32_t index, int32_t length)
+bool Clay__Array_RangeCheck(int32_t index, int32_t length, Clay_String operation)
 {
     if (index < length && index >= 0) {
         return true;
@@ -4003,12 +4006,12 @@ bool Clay__Array_RangeCheck(int32_t index, int32_t length)
     Clay_Context* context = Clay_GetCurrentContext();
     context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
             .errorType = CLAY_ERROR_TYPE_INTERNAL_ERROR,
-            .errorText = CLAY_STRING("Clay attempted to make an out of bounds array access. This is an internal error and is likely a bug."),
+            .errorText = operation,
             .userData = context->errorHandler.userData });
     return false;
 }
 
-bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity)
+bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity, Clay_String operation)
 {
     if (length < capacity) {
         return true;
@@ -4016,7 +4019,7 @@ bool Clay__Array_AddCapacityCheck(int32_t length, int32_t capacity)
     Clay_Context* context = Clay_GetCurrentContext();
     context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
         .errorType = CLAY_ERROR_TYPE_INTERNAL_ERROR,
-        .errorText = CLAY_STRING("Clay attempted to make an out of bounds array access. This is an internal error and is likely a bug."),
+        .errorText = operation,
         .userData = context->errorHandler.userData });
     return false;
 }

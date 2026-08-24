@@ -1,4 +1,5 @@
 #include "builtins/completions.h"
+#include "canonical.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -206,8 +207,8 @@ static void TestToolOnlyReasoningContent(void)
     };
     PicoCompletionsBuildOpts opts = HyperOpts(true);
     char *body = pico_completions_build_request(&turn, &opts);
-    CheckContains(body, "\"reasoning_content\":\"\"", true,
-                  "DeepSeek tool-only turns still send empty reasoning_content");
+    CheckContains(body, "\"content\":null,\"reasoning_content\":\"\"", true,
+                  "DeepSeek tool-only turns use null content and empty reasoning_content");
     CheckContains(body, "\"tool_calls\"", true, "orphan tool_call items still become assistant tool_calls");
     free(body);
 }
@@ -292,28 +293,124 @@ static void TestFeedChunks(void)
     pico_completions_ctx_free(&ctx);
 }
 
-static void TestInterleavedOutputOrder(void)
+static void TestAssistantAggregation(void)
 {
     PicoCompletionsCtx ctx;
     pico_completions_ctx_init(&ctx);
     const char *text = "{\"choices\":[{\"delta\":{\"content\":\"before\"}}]}";
-    const char *tool =
+    const char *tool1 =
         "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\","
         "\"function\":{\"name\":\"sh\",\"arguments\":\"{}\"}}]}}]}";
     const char *refusal = "{\"choices\":[{\"delta\":{\"refusal\":\"after\"}}]}";
+    const char *thinking = "{\"choices\":[{\"delta\":{\"reasoning_content\":\"why\"}}]}";
+    const char *tool2 =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\","
+        "\"function\":{\"name\":\"sh\",\"arguments\":\"{}\"}}]}}]}";
     Check(pico_completions_feed(&ctx, text, strlen(text)) &&
-              pico_completions_feed(&ctx, tool, strlen(tool)) &&
-              pico_completions_feed(&ctx, refusal, strlen(refusal)),
+              pico_completions_feed(&ctx, tool1, strlen(tool1)) &&
+              pico_completions_feed(&ctx, refusal, strlen(refusal)) &&
+              pico_completions_feed(&ctx, thinking, strlen(thinking)) &&
+              pico_completions_feed(&ctx, tool2, strlen(tool2)),
           "interleaved completion chunks are accepted");
     PicoLlmResult out;
     memset(&out, 0, sizeof(out));
     pico_completions_fill_result(&ctx, &out);
     Check(out.item_count == 3 && out.items[0].kind == PICO_LLM_ITEM_ASSISTANT &&
+              out.items[0].part_count == 2 &&
               out.items[0].parts[0].kind == PICO_LLM_PART_TEXT &&
+              out.items[0].parts[1].kind == PICO_LLM_PART_REFUSAL &&
+              out.items[0].thinking && strcmp(out.items[0].thinking, "why") == 0 &&
+              out.items[1].kind == PICO_LLM_ITEM_TOOL_CALL && out.items[1].call_id &&
+              strcmp(out.items[1].call_id, "c1") == 0 &&
+              out.items[2].kind == PICO_LLM_ITEM_TOOL_CALL && out.items[2].call_id &&
+              strcmp(out.items[2].call_id, "c2") == 0,
+          "one assistant item precedes all Chat Completions tool calls");
+    FreeResult(&out);
+    pico_completions_ctx_free(&ctx);
+}
+
+static void TestThinkingToolContinuation(void)
+{
+    PicoCompletionsCtx ctx;
+    pico_completions_ctx_init(&ctx);
+    const char *thinking = "{\"choices\":[{\"delta\":{\"reasoning_content\":\"why\"}}]}";
+    const char *tools =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":["
+        "{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"sh\",\"arguments\":\"{}\"}},"
+        "{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"sh\",\"arguments\":\"{}\"}}]}}]}";
+    Check(pico_completions_feed(&ctx, tools, strlen(tools)) &&
+              pico_completions_feed(&ctx, thinking, strlen(thinking)),
+          "parallel calls followed by thinking-only output are accepted");
+
+    PicoLlmResult out;
+    memset(&out, 0, sizeof(out));
+    pico_completions_fill_result(&ctx, &out);
+    Check(out.item_count == 3 && out.items[0].kind == PICO_LLM_ITEM_ASSISTANT &&
+              out.items[0].part_count == 0 && out.items[0].thinking &&
+              strcmp(out.items[0].thinking, "why") == 0 &&
               out.items[1].kind == PICO_LLM_ITEM_TOOL_CALL &&
-              out.items[2].kind == PICO_LLM_ITEM_ASSISTANT &&
-              out.items[2].parts[0].kind == PICO_LLM_PART_REFUSAL,
-          "tool calls retain stream order relative to text and refusal parts");
+              out.items[2].kind == PICO_LLM_ITEM_TOOL_CALL,
+          "thinking-only assistant precedes both parallel calls");
+
+    char *input[6] = {
+        pico_canonical_user_text("use both tools"),
+        pico_canonical_item_json(&out.items[0]),
+        pico_canonical_item_json(&out.items[1]),
+        pico_canonical_item_json(&out.items[2]),
+        pico_canonical_tool_result_json("c1", "sh", "one", false),
+        pico_canonical_tool_result_json("c2", "sh", "two", false),
+    };
+    const char *input_json[6];
+    for (int i = 0; i < 6; i++)
+    {
+        input_json[i] = input[i];
+    }
+    PicoLlmTurn turn = {
+        .model = "kimi-k3",
+        .effort = "high",
+        .input_json = input_json,
+        .input_count = 6,
+    };
+    PicoCompletionsBuildOpts opts = HyperOpts(true);
+    char *body = pico_completions_build_request(&turn, &opts);
+    JsonDoc doc;
+    int parsed = body ? JsonParse(&doc, body, strlen(body)) : -1;
+    bool replay_ok = false;
+    if (parsed == 0)
+    {
+        int messages = JsonObjGet(&doc, 0, "messages");
+        int assistant = JsonArrayAt(&doc, messages, 1);
+        int calls = JsonObjGet(&doc, assistant, "tool_calls");
+        int first = JsonArrayAt(&doc, calls, 0);
+        int second = JsonArrayAt(&doc, calls, 1);
+        int first_tool = JsonArrayAt(&doc, messages, 2);
+        int second_tool = JsonArrayAt(&doc, messages, 3);
+        char *first_id = JsonObjStr(&doc, first, "id");
+        char *second_id = JsonObjStr(&doc, second, "id");
+        char *first_result_id = JsonObjStr(&doc, first_tool, "tool_call_id");
+        char *second_result_id = JsonObjStr(&doc, second_tool, "tool_call_id");
+        replay_ok = JsonArrayLen(&doc, messages) == 4 &&
+                    JsonEq(&doc, JsonObjGet(&doc, assistant, "role"), "assistant") &&
+                    JsonEq(&doc, JsonObjGet(&doc, assistant, "content"), "null") &&
+                    JsonEq(&doc, JsonObjGet(&doc, assistant, "reasoning_content"), "why") &&
+                    JsonArrayLen(&doc, calls) == 2 && first_id && strcmp(first_id, "c1") == 0 &&
+                    second_id && strcmp(second_id, "c2") == 0 &&
+                    JsonEq(&doc, JsonObjGet(&doc, first_tool, "role"), "tool") &&
+                    first_result_id && strcmp(first_result_id, "c1") == 0 &&
+                    JsonEq(&doc, JsonObjGet(&doc, second_tool, "role"), "tool") &&
+                    second_result_id && strcmp(second_result_id, "c2") == 0;
+        free(first_id);
+        free(second_id);
+        free(first_result_id);
+        free(second_result_id);
+        JsonFree(&doc);
+    }
+    Check(replay_ok, "parallel calls round-trip as one assistant followed by matching tool results");
+    free(body);
+    for (int i = 0; i < 6; i++)
+    {
+        free(input[i]);
+    }
     FreeResult(&out);
     pico_completions_ctx_free(&ctx);
 }
@@ -388,7 +485,8 @@ int main(void)
     TestToolOnlyReasoningContent();
     TestWithoutThinking();
     TestFeedChunks();
-    TestInterleavedOutputOrder();
+    TestAssistantAggregation();
+    TestThinkingToolContinuation();
     TestUnsupportedCompletionOutput();
     TestRefusalAndImage();
     return g_failed;

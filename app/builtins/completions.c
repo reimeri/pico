@@ -192,9 +192,13 @@ static void FlushAssistant(JsonBuf *b, int *wrote, const PicoLlmPart *parts, int
         JsonBuf_Puts(b, content ? content : "[]");
         free(content);
     }
-    else
+    else if (has_text)
     {
         JsonBuf_String(b, text ? text : "");
+    }
+    else
+    {
+        JsonBuf_Puts(b, "null");
     }
     if (refusal && refusal[0])
     {
@@ -1121,6 +1125,16 @@ void pico_completions_ctx_init(PicoCompletionsCtx *c)
     JsonBuf_Init(&c->think);
 }
 
+static void SetResultProjectionError(PicoLlmResult *out)
+{
+    int input_tokens = out->input_tokens;
+    int cached_tokens = out->cached_tokens;
+    pico_llm_result_free(out);
+    out->input_tokens = input_tokens;
+    out->cached_tokens = cached_tokens;
+    out->error = JsonDup("out of memory");
+}
+
 void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out)
 {
     if (!c || !out)
@@ -1135,47 +1149,67 @@ void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out)
         c->error = NULL;
         return;
     }
+    /* A Chat Completions choice is one assistant message. Content, reasoning, and
+     * tool_calls are sibling fields on that message, not independently ordered
+     * output items. Keep one canonical assistant item before all of its calls so
+     * continuation replay can reconstruct the required assistant/tool sequence. */
     PicoLlmItem *assistant = NULL;
-    int thinking_item = -1;
+    if (c->output_count > 0 || c->think.len)
+    {
+        assistant = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        if (!assistant)
+        {
+            SetResultProjectionError(out);
+            return;
+        }
+    }
+    for (int i = 0; assistant && i < c->output_count; i++)
+    {
+        PicoCompletionsOutput *entry = &c->output[i];
+        if (!entry->tool_call)
+        {
+            int before = assistant->part_count;
+            bool added = pico_llm_item_add_part(assistant, entry->part.kind, entry->part.text,
+                                                entry->part.path, entry->part.url, entry->part.mime);
+            PicoLlmPart *part = added && assistant->part_count == before + 1
+                                    ? &assistant->parts[before]
+                                    : NULL;
+            bool copied = part && (!entry->part.text || part->text) &&
+                          (!entry->part.path || part->path) && (!entry->part.url || part->url) &&
+                          (!entry->part.mime || part->mime);
+            if (!copied)
+            {
+                SetResultProjectionError(out);
+                return;
+            }
+        }
+    }
+    if (assistant && c->think.len)
+    {
+        assistant->thinking = JsonBuf_Steal(&c->think);
+        assistant->thinking_signature = JsonDup("reasoning_content");
+        if (!assistant->thinking || !assistant->thinking_signature)
+        {
+            SetResultProjectionError(out);
+            return;
+        }
+    }
     for (int i = 0; i < c->output_count; i++)
     {
         PicoCompletionsOutput *entry = &c->output[i];
-        if (entry->tool_call)
+        if (!entry->tool_call || entry->call_index < 0 || entry->call_index >= c->call_count)
         {
-            assistant = NULL;
-            if (entry->call_index < 0 || entry->call_index >= c->call_count)
-            {
-                continue;
-            }
-            PicoCompletionsCall *call = &c->calls[entry->call_index];
-            const char *args = call->arguments.len ? call->arguments.data : "{}";
-            pico_llm_result_add_tool_call(out, call->id, call->name, args, NULL);
             continue;
         }
-        if (!assistant)
+        PicoCompletionsCall *call = &c->calls[entry->call_index];
+        const char *args = call->arguments.len ? call->arguments.data : "{}";
+        int before = out->item_count;
+        bool added = pico_llm_result_add_tool_call(out, call->id, call->name, args, NULL);
+        PicoLlmItem *projected = added && out->item_count == before + 1 ? &out->items[before] : NULL;
+        if (!projected || !projected->call_id || !projected->name || !projected->arguments)
         {
-            assistant = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
-            if (thinking_item < 0 && assistant)
-            {
-                thinking_item = out->item_count - 1;
-            }
-        }
-        if (assistant)
-        {
-            pico_llm_item_add_part(assistant, entry->part.kind, entry->part.text, entry->part.path,
-                                   entry->part.url, entry->part.mime);
-        }
-    }
-    if (c->think.len)
-    {
-        if (thinking_item < 0 && pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT))
-        {
-            thinking_item = out->item_count - 1;
-        }
-        if (thinking_item >= 0)
-        {
-            out->items[thinking_item].thinking = JsonBuf_Steal(&c->think);
-            out->items[thinking_item].thinking_signature = JsonDup("reasoning_content");
+            SetResultProjectionError(out);
+            return;
         }
     }
 }

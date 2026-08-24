@@ -136,6 +136,33 @@ static void FormatCwd(const char *workspace, char *out, size_t cap)
     snprintf(out, cap, "%s", real);
 }
 
+
+static const char *FormatTokens(int tokens)
+{
+    static char buf[32];
+    if (tokens < 1000)
+    {
+        snprintf(buf, sizeof(buf), "%d", tokens);
+    }
+    else if (tokens < 10000)
+    {
+        snprintf(buf, sizeof(buf), "%.2fk", tokens / 1000.0);
+    }
+    else if (tokens < 100000)
+    {
+        snprintf(buf, sizeof(buf), "%.1fk", tokens / 1000.0);
+    }
+    else if (tokens < 1000000)
+    {
+        snprintf(buf, sizeof(buf), "%dk", (int)((tokens + 500) / 1000));
+    }
+    else
+    {
+        snprintf(buf, sizeof(buf), "%.2fM", tokens / 1000000.0);
+    }
+    return buf;
+}
+
 static Clay_String CStr(const char *s)
 {
     if (!s)
@@ -540,15 +567,19 @@ void PicoFooter_Render(PicoApp *app)
     FormatCwd(app->workspace, g_cwd, sizeof(g_cwd));
     snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app));
     snprintf(g_extra, sizeof(g_extra), "%s", extra);
+    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    char used[32];
+    char limit[32];
+    snprintf(used, sizeof(used), "%s", FormatTokens(agent->tokens_used));
+    snprintf(limit, sizeof(limit), "%s", FormatTokens(agent->context_limit));
     int cache_percent = 0;
     if (PicoUsage_SessionPercent(PicoApp_ActiveAgent(app), &cache_percent))
     {
-        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens  ·  %d%% cache", PicoApp_ActiveAgent(app)->tokens_used,
-                 PicoApp_ActiveAgent(app)->context_limit, cache_percent);
+        snprintf(g_tokens, sizeof(g_tokens), "%s / %s tokens  ·  %d%% cache", used, limit, cache_percent);
     }
     else
     {
-        snprintf(g_tokens, sizeof(g_tokens), "%d / %d tokens", PicoApp_ActiveAgent(app)->tokens_used, PicoApp_ActiveAgent(app)->context_limit);
+        snprintf(g_tokens, sizeof(g_tokens), "%s / %s tokens", used, limit);
     }
 
     PicoModel *active = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));

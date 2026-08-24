@@ -1289,9 +1289,12 @@ static Clay_RenderCommandArray CreateShellLayout(PicoApp *app)
     Clay_BeginLayout();
     MdView_BeginFrame();
 
+    /* The shell owns the viewport height. A vertical GROW root can retain Clay's
+     * sub-pixel compression remainder and feed it back through scrolling. */
     CLAY(CLAY_ID("Root"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
+                     .sizing = {.width = CLAY_SIZING_GROW(0),
+                                .height = CLAY_SIZING_FIXED((float)GetScreenHeight())},
                      .padding = {CONTENT_PADDING, 12, 16, 12},
                      .childGap = 6},
           .backgroundColor = COLOR_BG})

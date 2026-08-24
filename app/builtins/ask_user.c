@@ -1299,7 +1299,8 @@ static void RenderButton(Clay_String id, const char *label, bool enabled, bool p
     CLAY(eid, {.layout = {.padding = {14, 14, 9, 9}}, .backgroundColor = bg,
                .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = text}));
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = text,
+                                                .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
 }
 
@@ -1350,7 +1351,8 @@ static void RenderSelectQuestion(const AskQuestion *q)
     else
     {
         CLAY_TEXT(CLAY_STRING("Up/Down or 1-N select  •  Enter next"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED}));
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED,
+                                    .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
 }
 
@@ -1418,7 +1420,8 @@ static void RenderTextQuestion(const AskQuestion *q)
         }
     }
     CLAY_TEXT(CLAY_STRING("Enter next  •  Shift+Enter newline  •  Shift+Tab back"),
-              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED}));
+              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED,
+                                .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 }
 
 static void AskUserRender(PicoApp *app)
@@ -1485,7 +1488,7 @@ static void AskUserRender(PicoApp *app)
                          .padding = {22, 22, 18, 18},
                          .childGap = 12,
                          .sizing = {.width = CLAY_SIZING_FIXED(card_w), .height = CLAY_SIZING_FIXED(card_h)}},
-              .clip = {.vertical = true, .horizontal = true},
+              .clip = {.vertical = true, .horizontal = false},
               .backgroundColor = COLOR_CONTENT_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(9)})
         {
@@ -1495,10 +1498,12 @@ static void AskUserRender(PicoApp *app)
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
                 CLAY_TEXT(CLAY_STRING("Clarifying questions"),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT,
+                                            .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                 CLAY_TEXT(CStr(g_ui.progress),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13, .textColor = COLOR_MUTED}));
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13, .textColor = COLOR_MUTED,
+                                            .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
 
             CLAY(CLAY_ID("AskUserBodyRow"),

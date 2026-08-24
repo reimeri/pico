@@ -43,12 +43,14 @@ void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent);
 void PicoSession_Reset(PicoApp *app, PicoAgent *agent);
 void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent);
 PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
-                                             const char *content, const char *display);
+                                             const char *content, const char *display,
+                                             const char *parts_json);
 PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens);
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
                                                 const char *content, const char *thinking,
-                                                const char *thinking_signature);
+                                                const char *thinking_signature,
+                                                const char *parts_json);
 PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
                                                const char *call_id, const char *name,
                                                const char *args, const char *item_id);

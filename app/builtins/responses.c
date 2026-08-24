@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "builtins/responses.h"
+#include "canonical.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,6 +80,114 @@ static bool IsReasoningSignature(const char *sig)
     return ok;
 }
 
+static char *PartMediaUrl(const PicoLlmPart *part)
+{
+    if (part->url && part->url[0])
+    {
+        return JsonDup(part->url);
+    }
+    if (part->path && part->path[0])
+    {
+        return pico_canonical_data_url(part->path, part->mime);
+    }
+    return NULL;
+}
+
+static char *BuildResponsesParts(const char *role, const PicoLlmPart *parts, int n, bool assistant)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"message\",\"role\":");
+    JsonBuf_String(&b, role ? role : "user");
+    JsonBuf_Puts(&b, ",\"content\":[");
+    int wrote = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const PicoLlmPart *p = &parts[i];
+        if (p->kind == PICO_LLM_PART_TEXT)
+        {
+            if (wrote)
+            {
+                JsonBuf_Putc(&b, ',');
+            }
+            JsonBuf_Puts(&b, "{\"type\":");
+            JsonBuf_String(&b, assistant ? "output_text" : "input_text");
+            JsonBuf_Puts(&b, ",\"text\":");
+            JsonBuf_String(&b, p->text ? p->text : "");
+            JsonBuf_Putc(&b, '}');
+            wrote++;
+        }
+        else if (p->kind == PICO_LLM_PART_REFUSAL)
+        {
+            if (wrote)
+            {
+                JsonBuf_Putc(&b, ',');
+            }
+            JsonBuf_Puts(&b, "{\"type\":\"refusal\",\"refusal\":");
+            JsonBuf_String(&b, p->text ? p->text : "");
+            JsonBuf_Putc(&b, '}');
+            wrote++;
+        }
+        else if (p->kind == PICO_LLM_PART_IMAGE)
+        {
+            char *url = PartMediaUrl(p);
+            if (!url)
+            {
+                continue;
+            }
+            if (wrote)
+            {
+                JsonBuf_Putc(&b, ',');
+            }
+            JsonBuf_Puts(&b, "{\"type\":\"input_image\",\"image_url\":");
+            JsonBuf_String(&b, url);
+            JsonBuf_Putc(&b, '}');
+            free(url);
+            wrote++;
+        }
+        else if (p->kind == PICO_LLM_PART_AUDIO)
+        {
+            char *data = (p->path && p->path[0]) ? pico_canonical_file_base64(p->path, NULL) : NULL;
+            char *fmt = pico_canonical_audio_format(p->path, p->mime);
+            if (wrote)
+            {
+                JsonBuf_Putc(&b, ',');
+            }
+            if (data)
+            {
+                JsonBuf_Puts(&b, "{\"type\":\"input_audio\",\"input_audio\":{\"data\":");
+                JsonBuf_String(&b, data);
+                JsonBuf_Puts(&b, ",\"format\":");
+                JsonBuf_String(&b, fmt && fmt[0] ? fmt : "wav");
+                JsonBuf_Puts(&b, "}}");
+            }
+            else
+            {
+                char *url = PartMediaUrl(p);
+                if (!url)
+                {
+                    if (wrote)
+                    {
+                        /* comma already written; emit empty text to keep JSON valid */
+                        JsonBuf_Puts(&b, "{\"type\":\"input_text\",\"text\":\"\"}");
+                    }
+                    free(fmt);
+                    continue;
+                }
+                JsonBuf_Puts(&b, "{\"type\":\"input_audio\",\"audio_url\":");
+                JsonBuf_String(&b, url);
+                JsonBuf_Putc(&b, '}');
+                free(url);
+            }
+            free(data);
+            free(fmt);
+            wrote++;
+        }
+    }
+    JsonBuf_Puts(&b, "]}");
+    return JsonBuf_Steal(&b);
+}
+
 static char *MapPicoItem(const char *json, const char *provider)
 {
     if (!json || !json[0])
@@ -94,20 +203,40 @@ static char *MapPicoItem(const char *json, const char *provider)
     char *out = NULL;
     if (type && strcmp(type, "user") == 0)
     {
-        char *text = JsonObjStr(&doc, 0, "text");
-        out = BuildResponsesMessage("user", text, false);
-        free(text);
+        PicoLlmPart *parts = NULL;
+        int n = 0;
+        pico_canonical_parse_parts(&doc, 0, &parts, &n);
+        if (pico_canonical_parts_have_media(parts, n))
+        {
+            out = BuildResponsesParts("user", parts, n, false);
+        }
+        else
+        {
+            char *plain = pico_canonical_plain_text(parts, n);
+            out = BuildResponsesMessage("user", plain, false);
+            free(plain);
+        }
+        pico_canonical_free_parts(parts, n);
     }
     else if (type && strcmp(type, "assistant") == 0)
     {
-        char *text = JsonObjStr(&doc, 0, "text");
+        PicoLlmPart *parts = NULL;
+        int n = 0;
+        pico_canonical_parse_parts(&doc, 0, &parts, &n);
+        char *plain = pico_canonical_plain_text(parts, n);
         char *sig = JsonObjStr(&doc, 0, "thinking_signature");
-        bool has_text = text && text[0];
+        bool structured = pico_canonical_parts_need_log(parts, n);
+        bool has_visible = (plain && plain[0]) || pico_canonical_parts_have_media(parts, n);
+        char *msg = NULL;
+        if (has_visible)
+        {
+            msg = structured ? BuildResponsesParts("assistant", parts, n, true)
+                             : BuildResponsesMessage("assistant", plain, true);
+        }
         if (provider && strcmp(provider, "openai") == 0 && IsReasoningSignature(sig))
         {
-            if (has_text)
+            if (msg)
             {
-                char *msg = BuildResponsesMessage("assistant", text, true);
                 JsonBuf b;
                 JsonBuf_Init(&b);
                 JsonBuf_Puts(&b, sig);
@@ -121,11 +250,12 @@ static char *MapPicoItem(const char *json, const char *provider)
                 out = JsonDup(sig);
             }
         }
-        else if (has_text)
+        else
         {
-            out = BuildResponsesMessage("assistant", text, true);
+            out = msg;
         }
-        free(text);
+        pico_canonical_free_parts(parts, n);
+        free(plain);
         free(sig);
     }
     else if (type && strcmp(type, "tool_call") == 0)
@@ -174,11 +304,53 @@ static char *MapPicoItem(const char *json, const char *provider)
     return out;
 }
 
+static bool ResponsesInputMediaValid(const char *json)
+{
+    JsonDoc doc;
+    if (!json || JsonParse(&doc, json, strlen(json)) != 0)
+    {
+        return false;
+    }
+    char *type = JsonObjStr(&doc, 0, "type");
+    bool content = type && (strcmp(type, "user") == 0 || strcmp(type, "assistant") == 0);
+    PicoLlmPart *parts = NULL;
+    int n = 0;
+    bool valid = !content || pico_canonical_parse_parts(&doc, 0, &parts, &n);
+    for (int i = 0; valid && i < n; i++)
+    {
+        PicoLlmPart *part = &parts[i];
+        if (part->kind != PICO_LLM_PART_IMAGE && part->kind != PICO_LLM_PART_AUDIO)
+        {
+            continue;
+        }
+        if (part->url && part->url[0])
+        {
+            continue;
+        }
+        char *data = (part->path && part->path[0])
+                         ? pico_canonical_file_base64(part->path, NULL)
+                         : NULL;
+        valid = data != NULL;
+        free(data);
+    }
+    pico_canonical_free_parts(parts, n);
+    free(type);
+    JsonFree(&doc);
+    return valid;
+}
+
 char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesBuildOpts *opts)
 {
     if (!turn || !opts)
     {
         return NULL;
+    }
+    for (int i = 0; i < turn->input_count; i++)
+    {
+        if (!ResponsesInputMediaValid(turn->input_json[i]))
+        {
+            return NULL;
+        }
     }
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -737,17 +909,184 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
     return !c->failed;
 }
 
-static bool GrowCalls(PicoLlmResult *out)
+static void FailUnsupported(PicoLlmResult *out, const char *type)
 {
-    PicoLlmToolCall *next =
-        (PicoLlmToolCall *)realloc(out->calls, (size_t)(out->call_count + 1) * sizeof(PicoLlmToolCall));
-    if (!next)
+    char buf[192];
+    snprintf(buf, sizeof(buf), "unsupported output: %s", type && type[0] ? type : "unknown");
+    if (out && !out->error)
+    {
+        out->error = JsonDup(buf);
+    }
+}
+
+static bool HasAnnotations(const JsonDoc *doc, int obj)
+{
+    int ann = JsonObjGet(doc, obj, "annotations");
+    if (ann < 0)
     {
         return false;
     }
-    out->calls = next;
-    memset(&out->calls[out->call_count], 0, sizeof(PicoLlmToolCall));
+    if (JsonIsArray(doc, ann))
+    {
+        return JsonArrayLen(doc, ann) > 0;
+    }
     return true;
+}
+
+static char *ContentPartUrl(const JsonDoc *doc, int part)
+{
+    char *url = JsonObjStr(doc, part, "url");
+    if (url && url[0])
+    {
+        return url;
+    }
+    free(url);
+    int image_url = JsonObjGet(doc, part, "image_url");
+    if (JsonIsObject(doc, image_url))
+    {
+        return JsonObjStr(doc, image_url, "url");
+    }
+    if (image_url >= 0)
+    {
+        return JsonStrDup(doc, image_url);
+    }
+    int audio = JsonObjGet(doc, part, "input_audio");
+    if (audio < 0)
+    {
+        audio = JsonObjGet(doc, part, "audio");
+    }
+    if (JsonIsObject(doc, audio))
+    {
+        char *data = JsonObjStr(doc, audio, "data");
+        char *format = JsonObjStr(doc, audio, "format");
+        if (data && data[0])
+        {
+            JsonBuf b;
+            JsonBuf_Init(&b);
+            JsonBuf_Puts(&b, "data:audio/");
+            JsonBuf_Puts(&b, format && format[0] ? format : "wav");
+            JsonBuf_Puts(&b, ";base64,");
+            JsonBuf_Puts(&b, data);
+            free(data);
+            free(format);
+            return JsonBuf_Steal(&b);
+        }
+        free(data);
+        free(format);
+        return JsonObjStr(doc, audio, "url");
+    }
+    return NULL;
+}
+
+static bool ProjectMessageParts(PicoLlmItem *item, PicoLlmResult *out, const JsonDoc *doc, int message)
+{
+    if (HasAnnotations(doc, message))
+    {
+        FailUnsupported(out, "annotations");
+        return false;
+    }
+    int content = JsonObjGet(doc, message, "content");
+    if (JsonIsArray(doc, content))
+    {
+        int n = JsonArrayLen(doc, content);
+        for (int i = 0; i < n; i++)
+        {
+            int part = JsonArrayAt(doc, content, i);
+            if (HasAnnotations(doc, part))
+            {
+                FailUnsupported(out, "annotations");
+                return false;
+            }
+            char *type = JsonObjStr(doc, part, "type");
+            const char *t = type ? type : "";
+            bool ok = true;
+            if (strcmp(t, "output_text") == 0 || strcmp(t, "text") == 0 || strcmp(t, "input_text") == 0)
+            {
+                char *text = JsonObjStr(doc, part, "text");
+                ok = pico_llm_item_add_part(item, PICO_LLM_PART_TEXT, text ? text : "", NULL, NULL, NULL);
+                free(text);
+            }
+            else if (strcmp(t, "output_refusal") == 0 || strcmp(t, "refusal") == 0)
+            {
+                char *text = JsonObjStr(doc, part, "text");
+                if (!text)
+                {
+                    text = JsonObjStr(doc, part, "refusal");
+                }
+                ok = pico_llm_item_add_part(item, PICO_LLM_PART_REFUSAL, text ? text : "", NULL, NULL, NULL);
+                free(text);
+            }
+            else if (strcmp(t, "input_image") == 0 || strcmp(t, "output_image") == 0 ||
+                     strcmp(t, "image") == 0 || strcmp(t, "image_url") == 0)
+            {
+                char *url = ContentPartUrl(doc, part);
+                char *mime = JsonObjStr(doc, part, "mime");
+                ok = pico_llm_item_add_part(item, PICO_LLM_PART_IMAGE, NULL, NULL, url, mime);
+                free(url);
+                free(mime);
+            }
+            else if (strcmp(t, "input_audio") == 0 || strcmp(t, "output_audio") == 0 ||
+                     strcmp(t, "audio") == 0)
+            {
+                char *url = ContentPartUrl(doc, part);
+                char *mime = JsonObjStr(doc, part, "mime");
+                ok = pico_llm_item_add_part(item, PICO_LLM_PART_AUDIO, NULL, NULL, url, mime);
+                free(url);
+                free(mime);
+            }
+            else
+            {
+                FailUnsupported(out, t[0] ? t : "unknown");
+                free(type);
+                return false;
+            }
+            free(type);
+            if (!ok)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    char *text = JsonStrDup(doc, content);
+    bool ok = true;
+    if (text && text[0])
+    {
+        ok = pico_llm_item_add_part(item, PICO_LLM_PART_TEXT, text, NULL, NULL, NULL);
+    }
+    free(text);
+    return ok;
+}
+
+static void AttachThink(PicoLlmItem *item, JsonBuf *think, char **sig)
+{
+    if (!item)
+    {
+        return;
+    }
+    if (think && think->len)
+    {
+        free(item->thinking);
+        item->thinking = JsonBuf_Steal(think);
+        JsonBuf_Init(think);
+    }
+    if (sig && *sig)
+    {
+        free(item->thinking_signature);
+        item->thinking_signature = *sig;
+        *sig = NULL;
+    }
+}
+
+static PicoLlmItem *FlushPendingAssistant(PicoLlmResult *out, JsonBuf *think, char **sig)
+{
+    if ((!think || !think->len) && (!sig || !*sig))
+    {
+        return NULL;
+    }
+    PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+    AttachThink(item, think, sig);
+    return item;
 }
 
 void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
@@ -778,35 +1117,44 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
     int n = JsonArrayLen(&doc, 0);
     JsonBuf think;
     JsonBuf_Init(&think);
-    JsonBuf assistant;
-    JsonBuf_Init(&assistant);
-    for (int i = 0; i < n; i++)
+    char *pending_sig = NULL;
+    PicoLlmItem *last_asst = NULL;
+    for (int i = 0; i < n && !out->error; i++)
     {
         int item = JsonArrayAt(&doc, 0, i);
-        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "function_call"))
+        char *type = JsonObjStr(&doc, item, "type");
+        if (!type || !type[0])
         {
-            if (!GrowCalls(out))
-            {
-                continue;
-            }
-            PicoLlmToolCall *call = &out->calls[out->call_count++];
-            call->call_id = JsonObjStr(&doc, item, "call_id");
-            call->name = JsonObjStr(&doc, item, "name");
-            call->arguments = JsonObjStr(&doc, item, "arguments");
-            call->item_id = JsonObjStr(&doc, item, "id");
-            continue;
+            FailUnsupported(out, "unknown");
+            free(type);
+            break;
         }
-        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "message"))
+        if (strcmp(type, "function_call") == 0)
         {
-            char *text = ContentText(&doc, JsonObjGet(&doc, item, "content"));
-            if (text && text[0])
-            {
-                JsonBuf_Puts(&assistant, text);
-            }
-            free(text);
-            continue;
+            FlushPendingAssistant(out, &think, &pending_sig);
+            last_asst = NULL;
+            char *call_id = JsonObjStr(&doc, item, "call_id");
+            char *name = JsonObjStr(&doc, item, "name");
+            char *arguments = JsonObjStr(&doc, item, "arguments");
+            char *item_id = JsonObjStr(&doc, item, "id");
+            pico_llm_result_add_tool_call(out, call_id, name, arguments, item_id);
+            free(call_id);
+            free(name);
+            free(arguments);
+            free(item_id);
         }
-        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning"))
+        else if (strcmp(type, "message") == 0)
+        {
+            PicoLlmItem *asst = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+            if (!asst || !ProjectMessageParts(asst, out, &doc, item))
+            {
+                free(type);
+                break;
+            }
+            AttachThink(asst, &think, &pending_sig);
+            last_asst = asst;
+        }
+        else if (strcmp(type, "reasoning") == 0)
         {
             int summary_tok = JsonObjGet(&doc, item, "summary");
             EmitSummaryParts(c, &doc, summary_tok, i);
@@ -817,30 +1165,29 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
             {
                 AppendThink(&think, content);
             }
-            free(out->think_signature);
-            out->think_signature = JsonRawDup(&doc, item);
+            free(pending_sig);
+            pending_sig = JsonRawDup(&doc, item);
             free(summary);
             free(content);
+            if (last_asst)
+            {
+                AttachThink(last_asst, &think, &pending_sig);
+            }
         }
+        else
+        {
+            FailUnsupported(out, type);
+        }
+        free(type);
+    }
+    if (!out->error)
+    {
+        FlushPendingAssistant(out, &think, &pending_sig);
     }
     JsonFree(&doc);
     JsonBuf_Free(&wrapped);
-    if (assistant.len)
-    {
-        out->assistant_text = JsonBuf_Steal(&assistant);
-    }
-    else
-    {
-        JsonBuf_Free(&assistant);
-    }
-    if (think.len)
-    {
-        out->think_text = JsonBuf_Steal(&think);
-    }
-    else
-    {
-        JsonBuf_Free(&think);
-    }
+    JsonBuf_Free(&think);
+    free(pending_sig);
 }
 
 void pico_responses_ctx_free(PicoResponsesCtx *c)

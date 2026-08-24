@@ -7,6 +7,7 @@
 #include "docs_path.h"
 #include "auth.h"
 #include "chat_sel.h"
+#include "canonical.h"
 #include "json.h"
 #include "overlay.h"
 #include "scrollbar.h"
@@ -281,27 +282,6 @@ const PicoProvider *pico_find_provider(const PicoApp *app, const char *name)
         }
     }
     return NULL;
-}
-
-void pico_llm_result_free(PicoLlmResult *r)
-{
-    if (!r)
-    {
-        return;
-    }
-    free(r->error);
-    free(r->assistant_text);
-    free(r->think_text);
-    free(r->think_signature);
-    for (int i = 0; i < r->call_count; i++)
-    {
-        free(r->calls[i].call_id);
-        free(r->calls[i].name);
-        free(r->calls[i].arguments);
-        free(r->calls[i].item_id);
-    }
-    free(r->calls);
-    memset(r, 0, sizeof(*r));
 }
 
 void pico_clear_registrations(PicoApp *app)
@@ -732,20 +712,39 @@ void PicoApp_Submit(PicoApp *app)
 
     free(app->agent_input);
     app->agent_input = NULL;
+    free(app->agent_parts);
+    app->agent_parts = NULL;
     app->submit_cancel = false;
     pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT, active->id);
     if (app->submit_cancel)
     {
         free(app->agent_input);
         app->agent_input = NULL;
+        free(app->agent_parts);
+        app->agent_parts = NULL;
         return;
+    }
+    if (app->agent_parts)
+    {
+        char *normalized = NULL;
+        if (!pico_canonical_normalize_user_parts(app->agent_parts, &normalized))
+        {
+            free(app->agent_input);
+            app->agent_input = NULL;
+            free(app->agent_parts);
+            app->agent_parts = NULL;
+            pico_status_warn(app, "Submit hook returned invalid canonical user parts.");
+            return;
+        }
+        free(app->agent_parts);
+        app->agent_parts = normalized;
     }
 
     const char *display = c->text;
     const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : display;
     PicoApp_AddMessage(app, PICO_ROLE_USER, display);
     app->chat_follow_bottom = true;
-    PicoSession_LogUser(app, active, agent, display);
+    PicoSession_LogUser(app, active, agent, display, app->agent_parts);
     PicoAgent_StartTurn(app, active, agent);
 
     c->length = 0;
@@ -757,6 +756,8 @@ void PicoApp_Submit(PicoApp *app)
     }
     free(app->agent_input);
     app->agent_input = NULL;
+    free(app->agent_parts);
+    app->agent_parts = NULL;
     pico_run_hooks(app, PICO_HOOK_ON_SUBMIT, active->id);
 }
 
@@ -1278,6 +1279,7 @@ PicoAppShutdownResult PicoApp_Free(PicoApp *app)
     free(app->status_warn);
     free(app->models);
     free(app->agent_input);
+    free(app->agent_parts);
     memset(app, 0, sizeof(*app));
     return PICO_APP_SHUTDOWN_CLEAN;
 }

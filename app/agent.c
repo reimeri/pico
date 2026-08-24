@@ -2,7 +2,9 @@
 
 #include "agent.h"
 #include "agent_manager.h"
+#include "canonical.h"
 #include "json.h"
+#include "path.h"
 #include "session.h"
 #include "settings.h"
 #include "usage.h"
@@ -100,6 +102,7 @@ struct PicoAgentRt {
     int work_input_count;
     bool work_compact;
     bool work_include_tools;
+    bool work_vision;
     PicoTool *work_tools;
     int work_tool_count;
     char *work_tool_name;
@@ -171,7 +174,7 @@ static void SetErrorState(PicoApp *app, PicoAgent *agent, const char *msg);
 static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent, const char *thinking,
                                    const char *signature);
 static void RefreshWorkerContext(PicoAgentRt *rt, const PicoApp *app, const PicoAgent *agent);
-static char *BuildUserItem(const char *text);
+static char *BuildUserItem(const char *text, const char *parts_json);
 static void *WorkerMain(void *arg);
 static bool AgentContextActive(const PicoAgentContext *ctx);
 
@@ -349,49 +352,111 @@ static char *EncodeResult(const PicoLlmResult *r)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"assistant_text\":");
-    JsonBuf_String(&b, r && r->assistant_text ? r->assistant_text : "");
-    JsonBuf_Puts(&b, ",\"think_text\":");
-    JsonBuf_String(&b, r && r->think_text ? r->think_text : "");
-    JsonBuf_Puts(&b, ",\"think_signature\":");
-    JsonBuf_String(&b, r && r->think_signature ? r->think_signature : "");
-    JsonBuf_Puts(&b, ",\"calls\":[");
-    int n = r ? r->call_count : 0;
+    JsonBuf_Puts(&b, "{\"items\":[");
+    int n = r ? r->item_count : 0;
     for (int i = 0; i < n; i++)
     {
         if (i)
         {
             JsonBuf_Putc(&b, ',');
         }
-        JsonBuf_Puts(&b, "{\"call_id\":");
-        JsonBuf_String(&b, r->calls[i].call_id ? r->calls[i].call_id : "");
-        JsonBuf_Puts(&b, ",\"name\":");
-        JsonBuf_String(&b, r->calls[i].name ? r->calls[i].name : "");
-        JsonBuf_Puts(&b, ",\"arguments\":");
-        JsonBuf_String(&b, r->calls[i].arguments ? r->calls[i].arguments : "{}");
-        JsonBuf_Puts(&b, ",\"item_id\":");
-        JsonBuf_String(&b, r->calls[i].item_id ? r->calls[i].item_id : "");
-        JsonBuf_Putc(&b, '}');
+        char *json = pico_canonical_item_json(&r->items[i]);
+        JsonBuf_Puts(&b, json ? json : "{}");
+        free(json);
     }
     JsonBuf_Puts(&b, "]}");
     return JsonBuf_Steal(&b);
 }
 
+static int ResultItems(const char *payload, JsonDoc *doc)
+{
+    if (!payload || !doc)
+    {
+        return -1;
+    }
+    memset(doc, 0, sizeof(*doc));
+    if (JsonParse(doc, payload, strlen(payload)) != 0)
+    {
+        return -1;
+    }
+    int items = JsonObjGet(doc, 0, "items");
+    return JsonIsArray(doc, items) ? items : -1;
+}
+
 static int ResultCallCount(const char *payload)
 {
-    if (!payload)
-    {
-        return 0;
-    }
     JsonDoc doc;
-    if (JsonParse(&doc, payload, strlen(payload)) != 0)
+    int items = ResultItems(payload, &doc);
+    if (items < 0)
     {
         return 0;
     }
-    int arr = JsonObjGet(&doc, 0, "calls");
-    int n = JsonIsArray(&doc, arr) ? JsonArrayLen(&doc, arr) : 0;
+    int n = JsonArrayLen(&doc, items);
+    int count = 0;
+    for (int i = 0; i < n; i++)
+    {
+        int item = JsonArrayAt(&doc, items, i);
+        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "tool_call"))
+        {
+            count++;
+        }
+    }
     JsonFree(&doc);
-    return n;
+    return count;
+}
+
+static char *ResultAssistantText(const char *payload)
+{
+    JsonDoc doc;
+    int items = ResultItems(payload, &doc);
+    if (items < 0)
+    {
+        return NULL;
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf refusal;
+    JsonBuf_Init(&refusal);
+    int n = JsonArrayLen(&doc, items);
+    for (int i = 0; i < n; i++)
+    {
+        int item = JsonArrayAt(&doc, items, i);
+        if (!JsonEq(&doc, JsonObjGet(&doc, item, "type"), "assistant"))
+        {
+            continue;
+        }
+        PicoLlmPart *parts = NULL;
+        int part_n = 0;
+        if (!pico_canonical_parse_parts(&doc, item, &parts, &part_n))
+        {
+            continue;
+        }
+        char *text = pico_canonical_compact_text(parts, part_n);
+        if (text && text[0])
+        {
+            JsonBuf_Puts(&b, text);
+        }
+        else
+        {
+            for (int p = 0; p < part_n; p++)
+            {
+                if (parts[p].kind == PICO_LLM_PART_REFUSAL && parts[p].text)
+                {
+                    JsonBuf_Puts(&refusal, parts[p].text);
+                }
+            }
+        }
+        free(text);
+        pico_canonical_free_parts(parts, part_n);
+    }
+    JsonFree(&doc);
+    if (b.len)
+    {
+        JsonBuf_Free(&refusal);
+        return JsonBuf_Steal(&b);
+    }
+    JsonBuf_Free(&b);
+    return JsonBuf_Steal(&refusal);
 }
 
 static char *ResultStr(const char *payload, const char *key)
@@ -690,30 +755,68 @@ static void RunLlmHooks(PicoApp *app, PicoAgent *agent, bool compact, bool inclu
     *tool_count = kept;
 }
 
-static char *ValidateLlmToolCalls(const PicoLlmResult *result)
+static char *ValidateLlmResult(const PicoLlmResult *result)
 {
-    if (!result || result->call_count < 0 || result->call_count > PICO_MAX_PENDING_CALLS)
+    if (!result || result->item_count < 0 || (result->item_count > 0 && !result->items))
     {
-        return Dup("provider returned too many or an invalid number of tool calls");
+        return Dup("provider returned a malformed result item array");
     }
-    if (result->call_count > 0 && !result->calls)
+    int call_count = 0;
+    for (int i = 0; i < result->item_count; i++)
     {
-        return Dup("provider returned a malformed tool call array");
-    }
-    for (int i = 0; i < result->call_count; i++)
-    {
-        const PicoLlmToolCall *call = &result->calls[i];
-        if (!call->call_id || !call->call_id[0])
+        const PicoLlmItem *item = &result->items[i];
+        if (item->kind == PICO_LLM_ITEM_ASSISTANT)
+        {
+            if (item->part_count < 0 || (item->part_count > 0 && !item->parts))
+            {
+                return Dup("provider returned a malformed assistant parts array");
+            }
+            for (int p = 0; p < item->part_count; p++)
+            {
+                const PicoLlmPart *part = &item->parts[p];
+                if (part->kind == PICO_LLM_PART_TEXT || part->kind == PICO_LLM_PART_REFUSAL)
+                {
+                    if (!part->text)
+                    {
+                        return Dup("provider returned a malformed text part");
+                    }
+                }
+                else if (part->kind == PICO_LLM_PART_IMAGE || part->kind == PICO_LLM_PART_AUDIO)
+                {
+                    if ((!part->path || !part->path[0]) && (!part->url || !part->url[0]))
+                    {
+                        return Dup("provider returned a malformed media part");
+                    }
+                }
+                else
+                {
+                    return Dup("provider returned an unsupported result part kind");
+                }
+            }
+            continue;
+        }
+        if (item->kind != PICO_LLM_ITEM_TOOL_CALL)
+        {
+            return Dup("provider returned an unsupported result item kind");
+        }
+        call_count++;
+        if (call_count > PICO_MAX_PENDING_CALLS)
+        {
+            return Dup("provider returned too many or an invalid number of tool calls");
+        }
+        if (!item->call_id || !item->call_id[0])
         {
             return Dup("provider returned a tool call with an empty call id");
         }
-        if (!call->name || !call->name[0] || !call->arguments)
+        if (!item->name || !item->name[0] || !item->arguments)
         {
             return Dup("provider returned a malformed tool call");
         }
         for (int j = 0; j < i; j++)
         {
-            if (strcmp(result->calls[j].call_id, call->call_id) == 0)
+            const PicoLlmItem *prev = &result->items[j];
+            if (prev->kind == PICO_LLM_ITEM_TOOL_CALL && prev->call_id &&
+                strcmp(prev->call_id, item->call_id) == 0)
             {
                 return Dup("provider returned duplicate tool call ids");
             }
@@ -796,6 +899,7 @@ static void *WorkerMain(void *arg)
         int input_count = rt->work_input_count;
         bool compact = rt->work_compact;
         bool include_tools = rt->work_include_tools;
+        bool vision = rt->work_vision;
         PicoTool *work_tools = rt->work_tools;
         int work_tool_count = rt->work_tool_count;
         char *tool_name = rt->work_tool_name;
@@ -813,6 +917,7 @@ static void *WorkerMain(void *arg)
         rt->work_input_count = 0;
         rt->work_compact = false;
         rt->work_include_tools = false;
+        rt->work_vision = false;
         rt->work_tools = NULL;
         rt->work_tool_count = 0;
         rt->work_tool_name = NULL;
@@ -840,6 +945,7 @@ static void *WorkerMain(void *arg)
             turn.effort = effort;
             turn.compact = compact;
             turn.include_tools = include_tools;
+            turn.vision = vision;
             turn.input_json = (const char *const *)input;
             turn.input_count = input_count;
             turn.tools = work_tools;
@@ -866,16 +972,10 @@ static void *WorkerMain(void *arg)
             }
             else
             {
-                char *call_error = ValidateLlmToolCalls(&result);
+                char *call_error = ValidateLlmResult(&result);
                 if (call_error)
                 {
                     PostEvent(rt, PICO_AEV_LLM_FAIL, call_error, NULL, 0, 0);
-                    if (!result.calls || result.call_count < 0)
-                    {
-                        /* A missing or negative-length array cannot be traversed safely. */
-                        result.calls = NULL;
-                        result.call_count = 0;
-                    }
                 }
                 else
                 {
@@ -1017,7 +1117,7 @@ static void RunContextHooks(PicoApp *app, PicoAgent *agent, bool compact,
     input = next;
     for (int i = 0; i < extra_count; i++)
     {
-        input[base_count + i] = BuildUserItem(extras[i]);
+        input[base_count + i] = BuildUserItem(extras[i], NULL);
         free(extras[i]);
     }
     *input_inout = input;
@@ -1066,6 +1166,25 @@ static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_
     RunLlmHooks(app, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
     RunContextHooks(app, agent, compact, tools, tool_count, &input, &input_count);
 
+    if (!m->vision)
+    {
+        for (int i = 0; i < input_count; i++)
+        {
+            if (pico_canonical_json_has_media(input[i]))
+            {
+                for (int j = 0; j < input_count; j++)
+                {
+                    free(input[j]);
+                }
+                free(input);
+                free(instructions);
+                free(tools);
+                SetErrorState(app, agent, "model does not accept images");
+                return false;
+            }
+        }
+    }
+
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
     {
@@ -1092,6 +1211,7 @@ static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_
     rt->work_cache_key = Dup(rt->cache_key);
     rt->work_compact = compact;
     rt->work_include_tools = include_tools;
+    rt->work_vision = m->vision;
     ClearOfferedTools(rt);
     rt->offered_tools = tools;
     rt->offered_tool_count = tool_count;
@@ -1147,69 +1267,67 @@ static PicoTool *FindOfferedTool(PicoAgentRt *rt, const char *name)
     return NULL;
 }
 
-static char *BuildUserItem(const char *text)
+static char *BuildUserItem(const char *text, const char *parts_json)
 {
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"user\",\"text\":");
-    JsonBuf_String(&b, text ? text : "");
-    JsonBuf_Putc(&b, '}');
-    return JsonBuf_Steal(&b);
+    if (parts_json && parts_json[0] == '[')
+    {
+        JsonBuf b;
+        JsonBuf_Init(&b);
+        JsonBuf_Puts(&b, "{\"type\":\"user\",\"parts\":");
+        JsonBuf_Puts(&b, parts_json);
+        JsonBuf_Putc(&b, '}');
+        return JsonBuf_Steal(&b);
+    }
+    return pico_canonical_user_text(text);
 }
 
 static char *BuildAssistantItem(const char *text, const char *thinking, const char *signature)
 {
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"assistant\",\"text\":");
-    JsonBuf_String(&b, text ? text : "");
-    if (thinking && thinking[0])
+    PicoLlmPart part;
+    memset(&part, 0, sizeof(part));
+    int n = 0;
+    if (text && text[0])
     {
-        JsonBuf_Puts(&b, ",\"thinking\":");
-        JsonBuf_String(&b, thinking);
+        part.kind = PICO_LLM_PART_TEXT;
+        part.text = (char *)text;
+        n = 1;
     }
-    if (signature && signature[0])
+    return pico_canonical_assistant_json(n ? &part : NULL, n, thinking, signature);
+}
+
+static char *BuildAssistantItemFromParts(const char *parts_json, const char *thinking,
+                                         const char *signature)
+{
+    if (parts_json && parts_json[0] == '[')
     {
-        JsonBuf_Puts(&b, ",\"thinking_signature\":");
-        JsonBuf_String(&b, signature);
+        JsonBuf b;
+        JsonBuf_Init(&b);
+        JsonBuf_Puts(&b, "{\"type\":\"assistant\",\"parts\":");
+        JsonBuf_Puts(&b, parts_json);
+        if (thinking && thinking[0])
+        {
+            JsonBuf_Puts(&b, ",\"thinking\":");
+            JsonBuf_String(&b, thinking);
+        }
+        if (signature && signature[0])
+        {
+            JsonBuf_Puts(&b, ",\"thinking_signature\":");
+            JsonBuf_String(&b, signature);
+        }
+        JsonBuf_Putc(&b, '}');
+        return JsonBuf_Steal(&b);
     }
-    JsonBuf_Putc(&b, '}');
-    return JsonBuf_Steal(&b);
+    return BuildAssistantItem(NULL, thinking, signature);
 }
 
 static char *BuildToolCall(const char *call_id, const char *name, const char *args, const char *item_id)
 {
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"tool_call\",\"call_id\":");
-    JsonBuf_String(&b, call_id ? call_id : "");
-    JsonBuf_Puts(&b, ",\"name\":");
-    JsonBuf_String(&b, name ? name : "");
-    JsonBuf_Puts(&b, ",\"arguments\":");
-    JsonBuf_String(&b, args ? args : "{}");
-    if (item_id && item_id[0])
-    {
-        JsonBuf_Puts(&b, ",\"item_id\":");
-        JsonBuf_String(&b, item_id);
-    }
-    JsonBuf_Putc(&b, '}');
-    return JsonBuf_Steal(&b);
+    return pico_canonical_tool_call_json(call_id, name, args, item_id);
 }
 
 static char *BuildToolResult(const char *call_id, const char *name, const char *output, bool is_error)
 {
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"tool_result\",\"call_id\":");
-    JsonBuf_String(&b, call_id ? call_id : "");
-    JsonBuf_Puts(&b, ",\"name\":");
-    JsonBuf_String(&b, name ? name : "");
-    JsonBuf_Puts(&b, ",\"output\":");
-    JsonBuf_String(&b, output ? output : "");
-    JsonBuf_Puts(&b, ",\"is_error\":");
-    JsonBuf_Bool(&b, is_error);
-    JsonBuf_Putc(&b, '}');
-    return JsonBuf_Steal(&b);
+    return pico_canonical_tool_result_json(call_id, name, output, is_error);
 }
 
 static void AppendMessageText(PicoApp *app, PicoAgent *agent, int idx, const char *s, size_t n)
@@ -1575,7 +1693,7 @@ static void ApplyCancel(PicoApp *app, PicoAgent *agent)
                                  MessageSourceEmpty(agent, rt->stream_msg)
                                      ? ""
                                      : agent->messages[rt->stream_msg].source,
-                                 thinking, NULL);
+                                 thinking, NULL, NULL);
     }
     free(thinking);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
@@ -1742,7 +1860,7 @@ static void StartLlm(PicoApp *app, PicoAgent *agent)
     SetActivity(app, agent, "Thinking…");
     free(agent->error);
     agent->error = NULL;
-    if (!QueueLlm(app, agent, false, true))
+    if (!QueueLlm(app, agent, false, true) && agent->state != PICO_AGENT_ERROR)
     {
         SetErrorState(app, agent, "Failed to start model request");
     }
@@ -1761,65 +1879,201 @@ static void FinishAssistantHistory(PicoApp *app, PicoAgent *agent, const char *t
     }
 }
 
-static void IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
+static bool PersistMediaParts(PicoApp *app, PicoAgent *agent, PicoLlmPart *parts, int n)
+{
+    char dir[4096];
+    const char *sid = agent->session_id[0] ? agent->session_id : "tmp";
+    if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico/media/%s",
+                         app->workspace[0] ? app->workspace : ".", sid))
+    {
+        return false;
+    }
+    for (int i = 0; i < n; i++)
+    {
+        PicoLlmPart *p = &parts[i];
+        if ((p->kind != PICO_LLM_PART_IMAGE && p->kind != PICO_LLM_PART_AUDIO) ||
+            (p->path && p->path[0]))
+        {
+            continue;
+        }
+        if (p->url && strncmp(p->url, "data:", 5) == 0)
+        {
+            char *path = pico_canonical_persist_data_url(dir, p->url);
+            if (!path)
+            {
+                return false;
+            }
+            free(p->path);
+            p->path = path;
+            free(p->url);
+            p->url = NULL;
+        }
+    }
+    return true;
+}
+
+static bool IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
 {
     PicoAgentRt *rt = agent->runtime;
     if (!payload)
     {
         FinishAssistantHistory(app, agent, NULL, NULL);
-        return;
+        return true;
     }
     JsonDoc doc;
-    if (JsonParse(&doc, payload, strlen(payload)) != 0)
+    int items = ResultItems(payload, &doc);
+    if (items < 0)
     {
+        JsonFree(&doc);
         FinishAssistantHistory(app, agent, NULL, NULL);
-        return;
+        return true;
     }
 
-    char *assistant = JsonObjStr(&doc, 0, "assistant_text");
-    if (rt->stream_msg >= 0 && MessageSourceEmpty(agent, rt->stream_msg) && assistant && assistant[0])
+    int n = JsonArrayLen(&doc, items);
+    JsonBuf staged;
+    JsonBuf_Init(&staged);
+    JsonBuf_Puts(&staged, "{\"items\":[");
+    bool stage_ok = true;
+    for (int i = 0; i < n && stage_ok; i++)
     {
-        SetMessageText(app, agent, rt->stream_msg, assistant);
+        int obj = JsonArrayAt(&doc, items, i);
+        char *type = JsonObjStr(&doc, obj, "type");
+        char *json = NULL;
+        if (type && strcmp(type, "assistant") == 0)
+        {
+            PicoLlmPart *parts = NULL;
+            int part_n = 0;
+            char *think = JsonObjStr(&doc, obj, "thinking");
+            char *sig = JsonObjStr(&doc, obj, "thinking_signature");
+            stage_ok = pico_canonical_parse_parts(&doc, obj, &parts, &part_n) &&
+                       PersistMediaParts(app, agent, parts, part_n);
+            if (stage_ok)
+            {
+                json = pico_canonical_assistant_json(parts, part_n, think, sig);
+                stage_ok = json != NULL;
+            }
+            pico_canonical_free_parts(parts, part_n);
+            free(think);
+            free(sig);
+        }
+        else if (type && strcmp(type, "tool_call") == 0)
+        {
+            char *call_id = JsonObjStr(&doc, obj, "call_id");
+            char *name = JsonObjStr(&doc, obj, "name");
+            char *arguments = JsonObjStr(&doc, obj, "arguments");
+            char *item_id = JsonObjStr(&doc, obj, "item_id");
+            json = pico_canonical_tool_call_json(call_id, name, arguments, item_id);
+            stage_ok = json != NULL;
+            free(call_id);
+            free(name);
+            free(arguments);
+            free(item_id);
+        }
+        else
+        {
+            stage_ok = false;
+        }
+        if (stage_ok)
+        {
+            if (i)
+            {
+                JsonBuf_Putc(&staged, ',');
+            }
+            JsonBuf_Puts(&staged, json);
+        }
+        free(json);
+        free(type);
     }
-
-    char *think = JsonObjStr(&doc, 0, "think_text");
-    char *sig = JsonObjStr(&doc, 0, "think_signature");
-    if (think && think[0] && rt->stream_msg >= 0 && !HasThinkTrace(&agent->messages[rt->stream_msg]))
+    JsonBuf_Puts(&staged, "]}");
+    JsonFree(&doc);
+    char *staged_json = JsonBuf_Steal(&staged);
+    if (!stage_ok || ResultItems(staged_json, &doc) < 0)
     {
-        TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
+        if (doc.toks)
+        {
+            JsonFree(&doc);
+        }
+        free(staged_json);
+        SetErrorState(app, agent, "failed to persist provider media");
+        return false;
     }
+    items = JsonObjGet(&doc, 0, "items");
 
-    FinishAssistantHistory(app, agent, think, sig);
-
-    int calls = JsonObjGet(&doc, 0, "calls");
-    int n = JsonIsArray(&doc, calls) ? JsonArrayLen(&doc, calls) : 0;
+    JsonBuf visible;
+    JsonBuf_Init(&visible);
     for (int i = 0; i < n; i++)
     {
-        int item = JsonArrayAt(&doc, calls, i);
-        PicoPendingCall *call = &rt->pending[rt->pending_count++];
-        call->call_id = JsonObjStr(&doc, item, "call_id");
-        call->name = JsonObjStr(&doc, item, "name");
-        call->arguments = JsonObjStr(&doc, item, "arguments");
-        call->item_id = JsonObjStr(&doc, item, "item_id");
-        PushInput(rt, BuildToolCall(call->call_id, call->name, call->arguments, call->item_id));
+        int obj = JsonArrayAt(&doc, items, i);
+        char *type = JsonObjStr(&doc, obj, "type");
+        if (type && strcmp(type, "assistant") == 0)
+        {
+            PicoLlmPart *parts = NULL;
+            int part_n = 0;
+            pico_canonical_parse_parts(&doc, obj, &parts, &part_n);
+            char *display = pico_canonical_display(parts, part_n);
+            char *think = JsonObjStr(&doc, obj, "thinking");
+            char *sig = JsonObjStr(&doc, obj, "thinking_signature");
+            if (display && display[0])
+            {
+                JsonBuf_Puts(&visible, display);
+            }
+            if (think && think[0] && rt->stream_msg >= 0 &&
+                !HasThinkTrace(&agent->messages[rt->stream_msg]))
+            {
+                TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
+            }
+            PushInput(rt, pico_canonical_assistant_json(parts, part_n, think, sig));
+            if ((display && display[0]) || (think && think[0]) || (sig && sig[0]) ||
+                pico_canonical_parts_need_log(parts, part_n))
+            {
+                char *parts_json = pico_canonical_parts_need_log(parts, part_n)
+                                       ? pico_canonical_parts_json(parts, part_n)
+                                       : NULL;
+                PicoSession_LogAssistant(app, agent, display ? display : "", think, sig, parts_json);
+                free(parts_json);
+            }
+            pico_canonical_free_parts(parts, part_n);
+            free(display);
+            free(think);
+            free(sig);
+        }
+        else if (type && strcmp(type, "tool_call") == 0)
+        {
+            if (rt->pending_count < PICO_MAX_PENDING_CALLS)
+            {
+                PicoPendingCall *call = &rt->pending[rt->pending_count++];
+                call->call_id = JsonObjStr(&doc, obj, "call_id");
+                call->name = JsonObjStr(&doc, obj, "name");
+                call->arguments = JsonObjStr(&doc, obj, "arguments");
+                call->item_id = JsonObjStr(&doc, obj, "item_id");
+                PushInput(rt, pico_canonical_tool_call_json(call->call_id, call->name, call->arguments,
+                                                            call->item_id));
+                PicoSession_LogToolCall(app, agent, call->call_id, call->name, call->arguments,
+                                        call->item_id);
+            }
+        }
+        free(type);
     }
-
-    free(assistant);
-    free(think);
-    free(sig);
+    if (rt->stream_msg >= 0 && visible.len)
+    {
+        SetMessageText(app, agent, rt->stream_msg, visible.data);
+    }
+    JsonBuf_Free(&visible);
     JsonFree(&doc);
+    free(staged_json);
+    return true;
 }
 
 static void OnLlmDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
 {
     PicoAgentRt *rt = agent->runtime;
-    int normalized_cached = 0;
-    if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
-    {
-        PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached);
-    }
     if (rt->compacting)
     {
+        int normalized_cached = 0;
+        if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
+        {
+            PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached);
+        }
         if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
             rt->compact_no_tools = true;
@@ -1829,7 +2083,7 @@ static void OnLlmDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
             }
             return;
         }
-        char *text = ResultStr(ev->payload, "assistant_text");
+        char *text = ResultAssistantText(ev->payload);
         if ((!text || !text[0]) && rt->stream_msg >= 0 && !MessageSourceEmpty(agent, rt->stream_msg))
         {
             free(text);
@@ -1847,24 +2101,14 @@ static void OnLlmDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
         SetErrorState(app, agent, "Compaction failed");
         return;
     }
-    IngestResult(app, agent, ev->payload);
-    char *think = ResultStr(ev->payload, "think_text");
-    char *sig = ResultStr(ev->payload, "think_signature");
-    if (rt->stream_msg >= 0 &&
-        (!MessageSourceEmpty(agent, rt->stream_msg) || (think && think[0]) || (sig && sig[0])))
+    if (!IngestResult(app, agent, ev->payload))
     {
-        PicoSession_LogAssistant(app, agent,
-                                 MessageSourceEmpty(agent, rt->stream_msg)
-                                     ? ""
-                                     : agent->messages[rt->stream_msg].source,
-                                 think, sig);
+        return;
     }
-    free(think);
-    free(sig);
-    for (int i = 0; i < rt->pending_count; i++)
+    int normalized_cached = 0;
+    if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
     {
-        PicoSession_LogToolCall(app, agent, rt->pending[i].call_id, rt->pending[i].name,
-                                rt->pending[i].arguments, rt->pending[i].item_id);
+        PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached);
     }
     if (rt->pending_count > 0)
     {
@@ -2425,7 +2669,7 @@ void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
         free(agent->runtime->instructions);
         agent->runtime->instructions = JsonBuf_Steal(&instructions);
     }
-    PushInput(agent->runtime, BuildUserItem(user_text));
+    PushInput(agent->runtime, BuildUserItem(user_text, app->agent_parts));
     StartLlm(app, agent);
 }
 
@@ -2871,13 +3115,33 @@ void PicoAgent_ClearInput(PicoAgent *agent)
 
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
 {
-    if (agent && agent->runtime) PushInput(agent->runtime, BuildUserItem(text));
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildUserItem(text, NULL));
+}
+
+void PicoAgent_PushHistoryUserParts(PicoAgent *agent, const char *text, const char *parts_json)
+{
+    if (agent && agent->runtime) PushInput(agent->runtime, BuildUserItem(text, parts_json));
 }
 
 void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const char *thinking,
                                     const char *signature)
 {
     if (agent && agent->runtime) PushInput(agent->runtime, BuildAssistantItem(text, thinking, signature));
+}
+
+void PicoAgent_PushHistoryAssistantParts(PicoAgent *agent, const char *text, const char *thinking,
+                                         const char *signature, const char *parts_json)
+{
+    if (!agent || !agent->runtime)
+    {
+        return;
+    }
+    if (parts_json && parts_json[0] == '[')
+    {
+        PushInput(agent->runtime, BuildAssistantItemFromParts(parts_json, thinking, signature));
+        return;
+    }
+    PushInput(agent->runtime, BuildAssistantItem(text, thinking, signature));
 }
 
 void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args,

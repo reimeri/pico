@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int g_failed;
 
@@ -22,23 +23,7 @@ static void CheckContains(const char *text, const char *needle, bool expected, c
 
 static void FreeResult(PicoLlmResult *r)
 {
-    if (!r)
-    {
-        return;
-    }
-    free(r->error);
-    free(r->assistant_text);
-    free(r->think_text);
-    free(r->think_signature);
-    for (int i = 0; i < r->call_count; i++)
-    {
-        free(r->calls[i].call_id);
-        free(r->calls[i].name);
-        free(r->calls[i].arguments);
-        free(r->calls[i].item_id);
-    }
-    free(r->calls);
-    memset(r, 0, sizeof(*r));
+    pico_llm_result_free(r);
 }
 
 static PicoCompletionsBuildOpts HyperOpts(bool reasoning)
@@ -132,6 +117,55 @@ static void TestRequestConversion(void)
     body = pico_completions_build_request(&turn, &opts);
     CheckContains(body, "\"thinking\":{\"type\":\"disabled\"}", true, "effort none disables DeepSeek thinking");
     CheckContains(body, "reasoning_effort", false, "disabled thinking omits reasoning_effort");
+    free(body);
+}
+
+static void TestImageRequestConversion(void)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/pico-completions-media-%ld.png", (long)getpid());
+    FILE *f = fopen(path, "wb");
+    Check(f != NULL, "Completions media fixture opens");
+    if (!f)
+    {
+        return;
+    }
+    fwrite("PNG", 1, 3, f);
+    fclose(f);
+
+    char item[1024];
+    snprintf(item, sizeof(item),
+             "{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"see\"},"
+             "{\"type\":\"image\",\"path\":\"%s\",\"mime\":\"image/png\"}]}", path);
+    const char *input[] = {item};
+    PicoLlmTurn turn = {
+        .model = "vision-model",
+        .vision = true,
+        .input_json = input,
+        .input_count = 1,
+    };
+    PicoCompletionsBuildOpts opts = HyperOpts(false);
+    char *body = pico_completions_build_request(&turn, &opts);
+    Check(body && strstr(body, "\"type\":\"image_url\"") &&
+              strstr(body, "data:image/png;base64,UE5H"),
+          "Completions reads an image path into image_url at request time");
+    free(body);
+    unlink(path);
+    body = pico_completions_build_request(&turn, &opts);
+    Check(body == NULL, "Completions fails request projection when an image path is unreadable");
+    free(body);
+}
+
+static void TestRefusalRequestReplay(void)
+{
+    const char *input[] = {
+        "{\"type\":\"assistant\",\"parts\":[{\"type\":\"refusal\",\"text\":\"nope\"}]}"
+    };
+    PicoLlmTurn turn = {.model = "model", .input_json = input, .input_count = 1};
+    PicoCompletionsBuildOpts opts = HyperOpts(false);
+    char *body = pico_completions_build_request(&turn, &opts);
+    Check(body && strstr(body, "\"content\":\"\",\"refusal\":\"nope\""),
+          "canonical refusal replays through the Completions refusal field");
     free(body);
 }
 
@@ -237,19 +271,109 @@ static void TestFeedChunks(void)
     PicoLlmResult out;
     memset(&out, 0, sizeof(out));
     pico_completions_fill_result(&ctx, &out);
-    Check(out.assistant_text && strcmp(out.assistant_text, "Hi") == 0, "content deltas assemble");
-    Check(out.think_text && strcmp(out.think_text, "why") == 0, "reasoning deltas assemble");
-    Check(out.think_signature && strcmp(out.think_signature, "reasoning_content") == 0,
+    Check(out.item_count >= 2 && out.items[0].kind == PICO_LLM_ITEM_ASSISTANT &&
+              out.items[0].part_count == 1 && out.items[0].parts[0].kind == PICO_LLM_PART_TEXT &&
+              out.items[0].parts[0].text && strcmp(out.items[0].parts[0].text, "Hi") == 0,
+          "content deltas assemble");
+    Check(out.items[0].thinking && strcmp(out.items[0].thinking, "why") == 0,
+          "reasoning deltas assemble");
+    Check(out.items[0].thinking_signature && strcmp(out.items[0].thinking_signature, "reasoning_content") == 0,
           "Completions thinking signature is the field name");
-    Check(out.call_count == 1 && out.calls && out.calls[0].call_id &&
-              strcmp(out.calls[0].call_id, "c1") == 0,
+    Check(out.items[1].kind == PICO_LLM_ITEM_TOOL_CALL && out.items[1].call_id &&
+              strcmp(out.items[1].call_id, "c1") == 0,
           "tool-call id is captured");
-    Check(out.calls[0].name && strcmp(out.calls[0].name, "sh") == 0, "tool-call name is captured");
-    Check(out.calls[0].arguments && strcmp(out.calls[0].arguments, "{}") == 0,
+    Check(out.items[1].name && strcmp(out.items[1].name, "sh") == 0, "tool-call name is captured");
+    Check(out.items[1].arguments && strcmp(out.items[1].arguments, "{}") == 0,
           "split tool-call arguments concatenate");
-    Check(out.calls[0].item_id == NULL, "Completions does not invent Responses item ids");
+    Check(out.items[1].item_id == NULL, "Completions does not invent Responses item ids");
     Check(out.input_tokens == 9, "prompt_tokens become input tokens");
     Check(out.cached_tokens == 3, "cached prompt tokens are recorded");
+    FreeResult(&out);
+    pico_completions_ctx_free(&ctx);
+}
+
+static void TestInterleavedOutputOrder(void)
+{
+    PicoCompletionsCtx ctx;
+    pico_completions_ctx_init(&ctx);
+    const char *text = "{\"choices\":[{\"delta\":{\"content\":\"before\"}}]}";
+    const char *tool =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\","
+        "\"function\":{\"name\":\"sh\",\"arguments\":\"{}\"}}]}}]}";
+    const char *refusal = "{\"choices\":[{\"delta\":{\"refusal\":\"after\"}}]}";
+    Check(pico_completions_feed(&ctx, text, strlen(text)) &&
+              pico_completions_feed(&ctx, tool, strlen(tool)) &&
+              pico_completions_feed(&ctx, refusal, strlen(refusal)),
+          "interleaved completion chunks are accepted");
+    PicoLlmResult out;
+    memset(&out, 0, sizeof(out));
+    pico_completions_fill_result(&ctx, &out);
+    Check(out.item_count == 3 && out.items[0].kind == PICO_LLM_ITEM_ASSISTANT &&
+              out.items[0].parts[0].kind == PICO_LLM_PART_TEXT &&
+              out.items[1].kind == PICO_LLM_ITEM_TOOL_CALL &&
+              out.items[2].kind == PICO_LLM_ITEM_ASSISTANT &&
+              out.items[2].parts[0].kind == PICO_LLM_PART_REFUSAL,
+          "tool calls retain stream order relative to text and refusal parts");
+    FreeResult(&out);
+    pico_completions_ctx_free(&ctx);
+}
+
+static void TestUnsupportedCompletionOutput(void)
+{
+    PicoCompletionsCtx ctx;
+    pico_completions_ctx_init(&ctx);
+    const char *annotations =
+        "{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\","
+        "\"annotations\":[{\"type\":\"citation\"}]}]}}]}";
+    Check(!pico_completions_feed(&ctx, annotations, strlen(annotations)),
+          "Completions rejects non-empty output annotations");
+    PicoLlmResult out;
+    memset(&out, 0, sizeof(out));
+    pico_completions_fill_result(&ctx, &out);
+    Check(out.error && strstr(out.error, "unsupported output: annotations"),
+          "Completions reports annotations as unsupported output");
+    FreeResult(&out);
+    pico_completions_ctx_free(&ctx);
+
+    pico_completions_ctx_init(&ctx);
+    const char *unknown = "{\"choices\":[{\"delta\":{\"video\":{}}}]}";
+    Check(!pico_completions_feed(&ctx, unknown, strlen(unknown)),
+          "Completions rejects unknown output fields");
+    memset(&out, 0, sizeof(out));
+    pico_completions_fill_result(&ctx, &out);
+    Check(out.error && strstr(out.error, "unsupported output: video"),
+          "Completions reports an unknown output field");
+    FreeResult(&out);
+    pico_completions_ctx_free(&ctx);
+}
+
+static void TestRefusalAndImage(void)
+{
+    PicoCompletionsCtx ctx;
+    pico_completions_ctx_init(&ctx);
+    const char *refusal = "{\"choices\":[{\"delta\":{\"refusal\":\"nope\"}}]}";
+    Check(pico_completions_feed(&ctx, refusal, strlen(refusal)), "refusal chunk is accepted");
+    PicoLlmResult out;
+    memset(&out, 0, sizeof(out));
+    pico_completions_fill_result(&ctx, &out);
+    Check(out.error == NULL && out.item_count == 1 && out.items[0].part_count == 1 &&
+              out.items[0].parts[0].kind == PICO_LLM_PART_REFUSAL && out.items[0].parts[0].text &&
+              strcmp(out.items[0].parts[0].text, "nope") == 0,
+          "delta.refusal projects as a refusal part");
+    FreeResult(&out);
+    pico_completions_ctx_free(&ctx);
+
+    pico_completions_ctx_init(&ctx);
+    const char *image =
+        "{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"image_url\",\"image_url\":"
+        "{\"url\":\"https://x/a.png\"}}]}}]}";
+    Check(pico_completions_feed(&ctx, image, strlen(image)), "image_url chunk is accepted");
+    memset(&out, 0, sizeof(out));
+    pico_completions_fill_result(&ctx, &out);
+    Check(out.error == NULL && out.item_count == 1 && out.items[0].part_count == 1 &&
+              out.items[0].parts[0].kind == PICO_LLM_PART_IMAGE && out.items[0].parts[0].url &&
+              strcmp(out.items[0].parts[0].url, "https://x/a.png") == 0,
+          "image_url content part projects");
     FreeResult(&out);
     pico_completions_ctx_free(&ctx);
 }
@@ -258,9 +382,14 @@ int main(void)
 {
     TestUrls();
     TestRequestConversion();
+    TestImageRequestConversion();
+    TestRefusalRequestReplay();
     TestEncryptedSignatureDropped();
     TestToolOnlyReasoningContent();
     TestWithoutThinking();
     TestFeedChunks();
+    TestInterleavedOutputOrder();
+    TestUnsupportedCompletionOutput();
+    TestRefusalAndImage();
     return g_failed;
 }

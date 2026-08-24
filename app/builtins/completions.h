@@ -18,7 +18,14 @@ typedef struct PicoCompletionsCall {
     char *name;
     JsonBuf arguments;
     int index;
+    bool ordered;
 } PicoCompletionsCall;
+
+typedef struct PicoCompletionsOutput {
+    bool tool_call;
+    int call_index;
+    PicoLlmPart part;
+} PicoCompletionsOutput;
 
 typedef struct PicoCompletionsCtx {
     PicoLlmCancelFn cancel;
@@ -26,6 +33,8 @@ typedef struct PicoCompletionsCtx {
     void *user;
     JsonBuf text;
     JsonBuf think;
+    PicoCompletionsOutput *output;
+    int output_count;
     PicoCompletionsCall *calls;
     int call_count;
     int input_tokens;

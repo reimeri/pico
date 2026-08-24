@@ -71,6 +71,7 @@ add_executable(pico
     markdown.c
     richtext.c
     json.c
+    canonical.c
     docs_path.c
     settings.c
     auth.c
@@ -192,6 +193,7 @@ if(BUILD_TESTING)
         tests/responses_test.c
         builtins/responses.c
         builtins/hyper_auth.c
+        canonical.c
         json.c)
     target_include_directories(pico_responses_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -207,6 +209,7 @@ if(BUILD_TESTING)
     add_executable(pico_completions_tests
         tests/completions_test.c
         builtins/completions.c
+        canonical.c
         json.c)
     target_include_directories(pico_completions_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -260,6 +263,7 @@ if(BUILD_TESTING)
         builtins/todo.c
         builtins/todo_model.c
         json.c
+        canonical.c
         usage.c
         theme.c
         docs_path.c)
@@ -279,6 +283,7 @@ if(BUILD_TESTING)
     add_executable(pico_session_usage_tests
         tests/session_usage_test.c
         session.c
+        canonical.c
         json.c
         usage.c)
     target_include_directories(pico_session_usage_tests PRIVATE
@@ -290,6 +295,21 @@ if(BUILD_TESTING)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
+
+    add_executable(pico_files_tests
+        tests/files_test.c
+        builtins/files.c
+        canonical.c
+        json.c)
+    target_include_directories(pico_files_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_files_tests)
+    target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
     add_executable(pico_settings_agent_tests
         tests/settings_agent_test.c

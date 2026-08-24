@@ -38,8 +38,9 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
 - `app->agent_input`: malloc if you set it; Pico frees.
+- `app->agent_parts`: optional malloc'd JSON array of canonical user parts; Pico frees.
 - `pico_agent_set_compact_summary(app, agent_id, summary)`: `summary` is malloc'd and ownership transfers to Pico.
-- `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`. This includes the result-level `think_signature` and each call's optional `item_id`. Providers must project replay-critical state into canonical result fields; opaque provider-native output items are discarded.
+- `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`. This includes every nested item/part string (`thinking` / `thinking_signature` on assistant items, `item_id` on tool-call items, `path` / `url` / `mime` on media parts). Providers must project replay-critical state into canonical result items; unknown provider-native output types fail the turn instead of being dropped. Do not store file bytes in history or result JSON.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
 
 ## HTTP helpers

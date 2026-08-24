@@ -2,8 +2,10 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
+#include "canonical.h"
 #include "json.h"
 #include "path.h"
+#include "settings.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -248,14 +250,17 @@ static void AppendFileBlock(JsonBuf *b, const char *abs, const char *body)
     JsonBuf_Puts(b, "</file>");
 }
 
-static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
+char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
+                                 char **parts_json_out)
 {
-    (void)event;
-    if (app->submit_cancel || !app->composer.text)
+    if (parts_json_out)
     {
-        return;
+        *parts_json_out = NULL;
     }
-    const char *text = app->composer.text;
+    if (!text || !text[0])
+    {
+        return NULL;
+    }
     char *paths[32];
     int path_n = 0;
     for (int i = 0; text[i] && path_n < 32; i++)
@@ -286,7 +291,7 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
         {
             snprintf(joined, sizeof(joined), "%s", rel);
         }
-        else if (!PicoPath_Format(joined, sizeof(joined), "%s/%s", app->workspace, rel))
+        else if (!PicoPath_Format(joined, sizeof(joined), "%s/%s", workspace ? workspace : ".", rel))
         {
             continue;
         }
@@ -304,18 +309,32 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
     }
     if (path_n == 0)
     {
-        return;
+        return NULL;
     }
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, text);
+    PicoLlmPart media[32];
+    memset(media, 0, sizeof(media));
+    int media_n = 0;
     for (int i = 0; i < path_n; i++)
     {
+        bool image = pico_canonical_is_image_path(paths[i]);
+        bool audio = pico_canonical_is_audio_path(paths[i]);
+        if (vision && (image || audio) && media_n < 32)
+        {
+            media[media_n].kind = image ? PICO_LLM_PART_IMAGE : PICO_LLM_PART_AUDIO;
+            media[media_n].path = paths[i];
+            media[media_n].mime = (char *)pico_canonical_mime_for_path(paths[i]);
+            media_n++;
+            continue;
+        }
         size_t len = 0;
         char *src = Pico_ReadFile(paths[i], &len);
         if (!src)
         {
             free(paths[i]);
+            paths[i] = NULL;
             continue;
         }
         if (memchr(src, '\0', len > 4096 ? 4096 : len))
@@ -332,8 +351,51 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
         }
         free(src);
         free(paths[i]);
+        paths[i] = NULL;
     }
-    app->agent_input = JsonBuf_Steal(&b);
+    char *inline_text = JsonBuf_Steal(&b);
+    if (media_n > 0 && parts_json_out)
+    {
+        PicoLlmPart parts[33];
+        memset(parts, 0, sizeof(parts));
+        int n = 0;
+        parts[n].kind = PICO_LLM_PART_TEXT;
+        parts[n].text = inline_text ? inline_text : (char *)"";
+        n++;
+        for (int i = 0; i < media_n; i++)
+        {
+            parts[n++] = media[i];
+        }
+        *parts_json_out = pico_canonical_parts_json(parts, n);
+    }
+    for (int i = 0; i < media_n; i++)
+    {
+        free(media[i].path);
+    }
+    return inline_text;
+}
+
+static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
+{
+    (void)event;
+    if (app->submit_cancel || !app->composer.text)
+    {
+        return;
+    }
+    bool vision = false;
+    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+    if (model)
+    {
+        vision = model->vision;
+    }
+    char *parts = NULL;
+    char *expanded = pico_files_expand_mentions(app->workspace, app->composer.text, vision, &parts);
+    if (!expanded)
+    {
+        return;
+    }
+    app->agent_input = expanded;
+    app->agent_parts = parts;
 }
 
 static void FilesInit(PicoApp *app)

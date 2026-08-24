@@ -1018,7 +1018,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
         }
         return PICO_LLM_FAIL;
     }
-    if (!out->error && !saw_text && !out->assistant_text && out->call_count == 0 && !out->think_text)
+    if (!out->error && !saw_text && !pico_llm_result_has_output(out))
     {
         char buf[sizeof(url) + 32];
         snprintf(buf, sizeof(buf), "empty response from %s", url);

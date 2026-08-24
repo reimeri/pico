@@ -638,30 +638,42 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         if (role && strcmp(role, "user") == 0)
         {
             char *display = JsonObjStr(doc, obj, "display");
+            char *parts = JsonObjRaw(doc, obj, "parts");
             PicoAgent_AddMessage(app, agent, PICO_ROLE_USER,
                                display && display[0] ? display : (content ? content : ""));
             if (into_input)
             {
-                PicoAgent_PushHistoryUser(agent, content ? content : "");
+                if (parts && parts[0] == '[')
+                {
+                    PicoAgent_PushHistoryUserParts(agent, content ? content : "", parts);
+                }
+                else
+                {
+                    PicoAgent_PushHistoryUser(agent, content ? content : "");
+                }
             }
             free(display);
+            free(parts);
         }
         else if (role && strcmp(role, "assistant") == 0)
         {
             PicoAgent_AppendAssistant(app, agent, content ? content : "");
             char *thinking = JsonObjStr(doc, obj, "thinking");
             char *signature = JsonObjStr(doc, obj, "thinking_signature");
+            char *parts = JsonObjRaw(doc, obj, "parts");
             if (thinking && thinking[0])
             {
                 PicoAgent_AppendThink(app, agent, thinking);
             }
             if (into_input &&
-                ((content && content[0]) || (thinking && thinking[0]) || (signature && signature[0])))
+                ((content && content[0]) || (thinking && thinking[0]) || (signature && signature[0]) ||
+                 (parts && parts[0] == '[')))
             {
-                PicoAgent_PushHistoryAssistant(agent, content, thinking, signature);
+                PicoAgent_PushHistoryAssistantParts(agent, content, thinking, signature, parts);
             }
             free(thinking);
             free(signature);
+            free(parts);
         }
         free(role);
         free(content);
@@ -1428,7 +1440,8 @@ void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
 }
 
 PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
-                                             const char *content, const char *display)
+                                             const char *content, const char *display,
+                                             const char *parts_json)
 {
     char *pre = EventPrefix("message");
     JsonBuf b;
@@ -1440,6 +1453,11 @@ PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
     {
         JsonBuf_Puts(&b, ",\"display\":");
         JsonBuf_String(&b, display);
+    }
+    if (parts_json && parts_json[0] == '[')
+    {
+        JsonBuf_Puts(&b, ",\"parts\":");
+        JsonBuf_Puts(&b, parts_json);
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
@@ -1474,10 +1492,12 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
 
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
                                                 const char *content, const char *thinking,
-                                                const char *thinking_signature)
+                                                const char *thinking_signature,
+                                                const char *parts_json)
 {
+    bool has_parts = parts_json && parts_json[0] == '[';
     if ((!content || !content[0]) && (!thinking || !thinking[0]) &&
-        (!thinking_signature || !thinking_signature[0]))
+        (!thinking_signature || !thinking_signature[0]) && !has_parts)
     {
         return PICO_SESSION_WRITE_SKIPPED;
     }
@@ -1496,6 +1516,11 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
     {
         JsonBuf_Puts(&b, ",\"thinking_signature\":");
         JsonBuf_String(&b, thinking_signature);
+    }
+    if (has_parts)
+    {
+        JsonBuf_Puts(&b, ",\"parts\":");
+        JsonBuf_Puts(&b, parts_json);
     }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);

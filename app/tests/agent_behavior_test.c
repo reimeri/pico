@@ -35,6 +35,10 @@ typedef enum TestMode {
     TEST_DELEGATION_CHILD_BLOCK,
     TEST_DELEGATION_CHILD_ASK,
     TEST_DELEGATION_CHILD_EMPTY,
+    TEST_ITEM_ORDER,
+    TEST_ITEM_ORDER_REVERSE,
+    TEST_MALFORMED_RESULT,
+    TEST_MEDIA_PERSIST_FAIL,
 } TestMode;
 
 typedef struct TestState {
@@ -79,6 +83,7 @@ typedef struct TestState {
     int usage_log_count;
     bool emit_think_summaries;
     char logged_thinking[256];
+    char session_item_order[64];
     int life_turn_end;
     int life_cancel;
     int life_error;
@@ -177,6 +182,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.usage_log_count = 0;
     g_test.emit_think_summaries = false;
     g_test.logged_thinking[0] = '\0';
+    g_test.session_item_order[0] = '\0';
     g_test.life_turn_end = 0;
     g_test.life_cancel = 0;
     g_test.life_error = 0;
@@ -294,6 +300,44 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         out->error = JsonDup("provider failed");
         return PICO_LLM_FAIL;
     }
+    if (mode == TEST_MALFORMED_RESULT)
+    {
+        out->item_count = 1;
+        out->items = NULL;
+        return PICO_LLM_OK;
+    }
+    if (mode == TEST_MEDIA_PERSIST_FAIL)
+    {
+        pico_llm_result_add_text(out, "must not commit");
+        PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        if (item)
+        {
+            pico_llm_item_add_part(item, PICO_LLM_PART_IMAGE, NULL, NULL,
+                                   "data:image/png;base64,not-valid", "image/png");
+        }
+        return PICO_LLM_OK;
+    }
+    if (mode == TEST_ITEM_ORDER || mode == TEST_ITEM_ORDER_REVERSE)
+    {
+        out->input_tokens = tokens;
+        out->cached_tokens = cached_tokens;
+        if (!issue_tool)
+        {
+            pico_llm_result_add_text(out, "done");
+            return PICO_LLM_OK;
+        }
+        if (mode == TEST_ITEM_ORDER)
+        {
+            pico_llm_result_add_text(out, "hello");
+            pico_llm_result_add_tool_call(out, "call-order", "missing_tool", "{}", NULL);
+        }
+        else
+        {
+            pico_llm_result_add_tool_call(out, "call-order", "missing_tool", "{}", NULL);
+            pico_llm_result_add_text(out, "hello");
+        }
+        return PICO_LLM_OK;
+    }
 
     out->input_tokens = tokens;
     out->cached_tokens = cached_tokens;
@@ -335,7 +379,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
             pthread_cond_wait(&g_test.cv, &g_test.mu);
         }
         pthread_mutex_unlock(&g_test.mu);
-        out->assistant_text = JsonDup(entered == 1 ? "first finished" : "second finished");
+        pico_llm_result_add_text(out, entered == 1 ? "first finished" : "second finished");
         return PICO_LLM_OK;
     }
     if (mode == TEST_CATALOG_BLOCK)
@@ -368,29 +412,26 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
 
     if (!issue_tool && mode == TEST_DELEGATION_CHILD_EMPTY && child_turn)
     {
-        out->assistant_text = JsonDup("");
         return PICO_LLM_OK;
     }
     if (!issue_tool)
     {
-        out->assistant_text = JsonDup("done");
+        pico_llm_result_add_text(out, "done");
         return PICO_LLM_OK;
     }
 
     if (mode == TEST_SIGNATURE_CONTINUATION)
     {
-        out->think_signature = JsonDup(
-            "{\"type\":\"reasoning\",\"id\":\"rs-only\",\"encrypted_content\":\"blob\"}");
+        PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        if (item)
+        {
+            item->thinking_signature = JsonDup(
+                "{\"type\":\"reasoning\",\"id\":\"rs-only\",\"encrypted_content\":\"blob\"}");
+        }
     }
 
     int emitted = mode == TEST_TOO_MANY_CALLS ? 17 :
                   (mode == TEST_DUPLICATE_CALLS ? 2 : 1);
-    out->calls = (PicoLlmToolCall *)calloc((size_t)emitted, sizeof(PicoLlmToolCall));
-    if (!out->calls)
-    {
-        out->error = JsonDup("allocation failed");
-        return PICO_LLM_FAIL;
-    }
     for (int i = 0; i < emitted; i++)
     {
         char call_id[32];
@@ -403,11 +444,8 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         {
             snprintf(call_id, sizeof(call_id), "call-%d-0", call_number);
         }
-        out->calls[i].call_id = JsonDup(call_id);
-        out->calls[i].name = JsonDup(tool_name);
-        out->calls[i].arguments = JsonDup(tool_args);
+        pico_llm_result_add_tool_call(out, call_id, tool_name, tool_args, NULL);
     }
-    out->call_count = emitted;
     return PICO_LLM_OK;
 }
 
@@ -871,22 +909,28 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
 }
 
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *content,
-                                                const char *thinking, const char *thinking_signature)
+                                                const char *thinking, const char *thinking_signature,
+                                                const char *parts_json)
 {
     (void)app;
     (void)agent;
     (void)content;
     (void)thinking_signature;
+    (void)parts_json;
     snprintf(g_test.logged_thinking, sizeof(g_test.logged_thinking), "%s", thinking ? thinking : "");
+    strncat(g_test.session_item_order, "A",
+            sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content, const char *display)
+PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content,
+                                           const char *display, const char *parts_json)
 {
     (void)app;
     (void)agent;
     (void)content;
     (void)display;
+    (void)parts_json;
     if (g_fake_session.enabled)
     {
         g_fake_session.log_user_count++;
@@ -903,6 +947,8 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, c
     (void)name;
     (void)args;
     (void)item_id;
+    strncat(g_test.session_item_order, "T",
+            sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
     return PICO_SESSION_WRITE_OK;
 }
 
@@ -2553,6 +2599,88 @@ static int TestToolCallListArgs(void)
 #include "subagent_config_test.c"
 #include "subagent_test.c"
 
+static int TestResultItemOrder(TestMode mode, bool assistant_first, const char *name)
+{
+    ResetTest(mode, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "item-order turn did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    const char *input = g_test.last_input ? g_test.last_input : "";
+    const char *asst = strstr(input, "\"type\":\"assistant\"");
+    const char *call = strstr(input, "\"type\":\"tool_call\"");
+    bool history_ok = asst && call && (assistant_first ? asst < call : call < asst);
+    bool session_ok = assistant_first
+                          ? strncmp(g_test.session_item_order, "AT", 2) == 0
+                          : strncmp(g_test.session_item_order, "TA", 2) == 0;
+    bool ok = history_ok && session_ok;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "result item order was not preserved in history");
+}
+
+static int TestMalformedCanonicalResult(void)
+{
+    const char *name = "malformed canonical result";
+    ResetTest(TEST_MALFORMED_RESULT, 0);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    for (int i = 0; i < 3000 && PicoApp_ActiveAgent(&app)->state != PICO_AGENT_ERROR; i++)
+    {
+        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+        SleepOneMs();
+    }
+    bool ok = PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
+              PicoApp_ActiveAgent(&app)->error &&
+              strstr(PicoApp_ActiveAgent(&app)->error, "malformed result item array");
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "malformed public result did not fail safely");
+}
+
+static int TestMediaPersistenceFailureIsAtomic(void)
+{
+    const char *name = "media persistence failure is atomic";
+    ResetTest(TEST_MEDIA_PERSIST_FAIL, 0);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    for (int i = 0; i < 3000 && PicoApp_ActiveAgent(&app)->state != PICO_AGENT_ERROR; i++)
+    {
+        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+        SleepOneMs();
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool no_result_events = g_test.session_item_order[0] == '\0';
+    pthread_mutex_unlock(&g_test.mu);
+    bool ok = no_result_events && PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
+              PicoApp_ActiveAgent(&app)->error &&
+              strstr(PicoApp_ActiveAgent(&app)->error, "failed to persist provider media");
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "part of a failed media result was logged");
+}
+
+static int TestNonVisionMediaRejected(void)
+{
+    const char *name = "non-vision media rejection";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    app.agent_parts = JsonDup(
+        "[{\"type\":\"text\",\"text\":\"see\"},{\"type\":\"image\",\"path\":\"/tmp/pic.png\"}]");
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "see");
+    bool ok = PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
+              PicoApp_ActiveAgent(&app)->error &&
+              strcmp(PicoApp_ActiveAgent(&app)->error, "model does not accept images") == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "media history was not rejected with the capability error");
+}
+
 static int TestCanonicalContinuationState(void)
 {
     const char *name = "canonical continuation state";
@@ -2704,6 +2832,11 @@ int main(void)
     failed |= TestSubagentChildAsk();
     failed |= TestSubagentDelegationCaps();
     failed |= TestCanonicalContinuationState();
+    failed |= TestResultItemOrder(TEST_ITEM_ORDER, true, "assistant then tool_call history order");
+    failed |= TestResultItemOrder(TEST_ITEM_ORDER_REVERSE, false, "tool_call then assistant history order");
+    failed |= TestMalformedCanonicalResult();
+    failed |= TestMediaPersistenceFailureIsAtomic();
+    failed |= TestNonVisionMediaRejected();
     failed |= TestCancelledThinkingPersistence();
     failed |= TestThinkSummaryCoalesce();
     /* Retained shutdown permanently retires Pico in this process, so run last. */

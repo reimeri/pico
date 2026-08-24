@@ -39,8 +39,11 @@ void PicoAgent_SetCacheKey(PicoAgent *agent, const char *key);
 void PicoAgent_RotateCacheKey(PicoAgent *agent);
 void PicoAgent_ClearInput(PicoAgent *agent);
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text);
+void PicoAgent_PushHistoryUserParts(PicoAgent *agent, const char *text, const char *parts_json);
 void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const char *thinking,
                                     const char *signature);
+void PicoAgent_PushHistoryAssistantParts(PicoAgent *agent, const char *text, const char *thinking,
+                                         const char *signature, const char *parts_json);
 void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name,
                                        const char *args, const char *item_id);
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,

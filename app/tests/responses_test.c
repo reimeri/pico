@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int g_failed;
 
@@ -23,19 +24,7 @@ static void CheckContains(const char *text, const char *needle, bool expected, c
 
 static void FreeResult(PicoLlmResult *result)
 {
-    free(result->error);
-    free(result->assistant_text);
-    free(result->think_text);
-    free(result->think_signature);
-    for (int i = 0; i < result->call_count; i++)
-    {
-        free(result->calls[i].call_id);
-        free(result->calls[i].name);
-        free(result->calls[i].arguments);
-        free(result->calls[i].item_id);
-    }
-    free(result->calls);
-    memset(result, 0, sizeof(*result));
+    pico_llm_result_free(result);
 }
 
 static void TestRequestOptions(void)
@@ -77,6 +66,42 @@ static void TestRequestOptions(void)
     body = pico_responses_build_request(&turn, &openai);
     CheckContains(body, "reasoning.encrypted_content", true, "OpenAI includes encrypted reasoning");
     CheckContains(body, "\"summary\":\"auto\"", true, "OpenAI requests reasoning summaries");
+    free(body);
+}
+
+static void TestImageRequestConversion(void)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/pico-responses-media-%ld.png", (long)getpid());
+    FILE *f = fopen(path, "wb");
+    Check(f != NULL, "Responses media fixture opens");
+    if (!f)
+    {
+        return;
+    }
+    fwrite("PNG", 1, 3, f);
+    fclose(f);
+
+    char item[1024];
+    snprintf(item, sizeof(item),
+             "{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"see\"},"
+             "{\"type\":\"image\",\"path\":\"%s\",\"mime\":\"image/png\"}]}", path);
+    const char *input[] = {item};
+    PicoLlmTurn turn = {
+        .model = "vision-model",
+        .vision = true,
+        .input_json = input,
+        .input_count = 1,
+    };
+    PicoResponsesBuildOpts opts = {.provider = "openai"};
+    char *body = pico_responses_build_request(&turn, &opts);
+    Check(body && strstr(body, "\"type\":\"input_image\"") &&
+              strstr(body, "data:image/png;base64,UE5H"),
+          "Responses reads an image path into input_image at request time");
+    free(body);
+    unlink(path);
+    body = pico_responses_build_request(&turn, &opts);
+    Check(body == NULL, "Responses fails request projection when an image path is unreadable");
     free(body);
 }
 
@@ -201,31 +226,32 @@ static void TestReasoningResultProjection(void)
     PicoLlmResult result;
     memset(&result, 0, sizeof(result));
     pico_responses_fill_result(&ctx, &result);
-    Check(result.think_signature && strstr(result.think_signature, "rs_projected") &&
-              strstr(result.think_signature, "secret_blob"),
+    Check(result.item_count >= 2 && result.items[0].kind == PICO_LLM_ITEM_ASSISTANT &&
+              result.items[0].thinking_signature && strstr(result.items[0].thinking_signature, "rs_projected") &&
+              strstr(result.items[0].thinking_signature, "secret_blob"),
           "reasoning items project their id and encrypted content to the canonical signature");
-    Check(result.call_count == 1 && result.calls && result.calls[0].item_id &&
-              strcmp(result.calls[0].item_id, "fc_projected") == 0 && result.calls[0].call_id &&
-              strcmp(result.calls[0].call_id, "call_projected") == 0 && result.calls[0].name &&
-              strcmp(result.calls[0].name, "sh") == 0 && result.calls[0].arguments &&
-              strcmp(result.calls[0].arguments, "{\"cmd\":\"ls\"}") == 0,
+    Check(result.items[1].kind == PICO_LLM_ITEM_TOOL_CALL && result.items[1].item_id &&
+              strcmp(result.items[1].item_id, "fc_projected") == 0 && result.items[1].call_id &&
+              strcmp(result.items[1].call_id, "call_projected") == 0 && result.items[1].name &&
+              strcmp(result.items[1].name, "sh") == 0 && result.items[1].arguments &&
+              strcmp(result.items[1].arguments, "{\"cmd\":\"ls\"}") == 0,
           "function calls project both ids, name, and arguments");
 
     JsonBuf assistant;
     JsonBuf_Init(&assistant);
     JsonBuf_Puts(&assistant, "{\"type\":\"assistant\",\"text\":\"\",\"thinking_signature\":");
-    JsonBuf_String(&assistant, result.think_signature ? result.think_signature : "");
+    JsonBuf_String(&assistant, result.items[0].thinking_signature ? result.items[0].thinking_signature : "");
     JsonBuf_Putc(&assistant, '}');
     JsonBuf call;
     JsonBuf_Init(&call);
     JsonBuf_Puts(&call, "{\"type\":\"tool_call\",\"call_id\":");
-    JsonBuf_String(&call, result.calls && result.calls[0].call_id ? result.calls[0].call_id : "");
+    JsonBuf_String(&call, result.items[1].call_id ? result.items[1].call_id : "");
     JsonBuf_Puts(&call, ",\"name\":");
-    JsonBuf_String(&call, result.calls && result.calls[0].name ? result.calls[0].name : "");
+    JsonBuf_String(&call, result.items[1].name ? result.items[1].name : "");
     JsonBuf_Puts(&call, ",\"arguments\":");
-    JsonBuf_String(&call, result.calls && result.calls[0].arguments ? result.calls[0].arguments : "{}");
+    JsonBuf_String(&call, result.items[1].arguments ? result.items[1].arguments : "{}");
     JsonBuf_Puts(&call, ",\"item_id\":");
-    JsonBuf_String(&call, result.calls && result.calls[0].item_id ? result.calls[0].item_id : "");
+    JsonBuf_String(&call, result.items[1].item_id ? result.items[1].item_id : "");
     JsonBuf_Putc(&call, '}');
     const char *input[] = {assistant.data, call.data};
     PicoLlmTurn turn = {
@@ -280,12 +306,85 @@ static void TestReasoningResultProjection(void)
     pico_responses_ctx_free(&ctx);
 }
 
+static void FillFromItems(const char *items, PicoLlmResult *result)
+{
+    PicoResponsesCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    JsonBuf_Init(&ctx.items);
+    JsonBuf_Init(&ctx.summary);
+    JsonBuf_Puts(&ctx.items, items);
+    ctx.item_count = 1;
+    memset(result, 0, sizeof(*result));
+    pico_responses_fill_result(&ctx, result);
+    pico_responses_ctx_free(&ctx);
+}
+
+static void TestRefusalProjection(void)
+{
+    PicoLlmResult result;
+    FillFromItems("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+                  "{\"type\":\"output_refusal\",\"text\":\"nope\"}]}",
+                  &result);
+    Check(result.error == NULL && pico_llm_result_has_output(&result) && result.item_count == 1 &&
+              result.items[0].part_count == 1 && result.items[0].parts[0].kind == PICO_LLM_PART_REFUSAL &&
+              result.items[0].parts[0].text && strcmp(result.items[0].parts[0].text, "nope") == 0,
+          "output_refusal becomes a refusal part and is not an empty response");
+    pico_llm_result_free(&result);
+}
+
+static void TestRefusalRequestReplay(void)
+{
+    const char *input[] = {
+        "{\"type\":\"assistant\",\"parts\":[{\"type\":\"refusal\",\"text\":\"nope\"}]}"
+    };
+    PicoLlmTurn turn = {.model = "gpt", .input_json = input, .input_count = 1};
+    PicoResponsesBuildOpts opts = {.provider = "openai"};
+    char *body = pico_responses_build_request(&turn, &opts);
+    Check(body && strstr(body, "\"type\":\"refusal\",\"refusal\":\"nope\""),
+          "canonical refusal replays with the Responses refusal wire shape");
+    free(body);
+}
+
+static void TestUnsupportedWebSearch(void)
+{
+    PicoLlmResult result;
+    FillFromItems("{\"type\":\"web_search_call\",\"id\":\"ws1\"}", &result);
+    Check(result.error && strstr(result.error, "unsupported output: web_search_call"),
+          "web_search_call fails closed");
+    pico_llm_result_free(&result);
+}
+
+static void TestAnnotations(void)
+{
+    PicoLlmResult empty_ann;
+    FillFromItems("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+                  "{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]}]}",
+                  &empty_ann);
+    Check(empty_ann.error == NULL && empty_ann.item_count == 1 && empty_ann.items[0].part_count == 1 &&
+              empty_ann.items[0].parts[0].kind == PICO_LLM_PART_TEXT,
+          "empty annotations on output_text still project text");
+    pico_llm_result_free(&empty_ann);
+
+    PicoLlmResult nonempty;
+    FillFromItems("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+                  "{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[{\"type\":\"url_citation\"}]}]}",
+                  &nonempty);
+    Check(nonempty.error && strstr(nonempty.error, "unsupported output: annotations"),
+          "non-empty annotations fail closed");
+    pico_llm_result_free(&nonempty);
+}
+
 int main(void)
 {
     TestRequestOptions();
+    TestImageRequestConversion();
     TestReasoningRemoval();
     TestRefreshDecision();
     TestSignatureReplay();
     TestReasoningResultProjection();
+    TestRefusalProjection();
+    TestRefusalRequestReplay();
+    TestUnsupportedWebSearch();
+    TestAnnotations();
     return g_failed;
 }

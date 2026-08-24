@@ -1416,7 +1416,7 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
     job->state = PICO_DELEGATION_RUNNING;
     pthread_mutex_unlock(&job->mu);
     PicoAgent_AddMessage(app, child, PICO_ROLE_USER, job->task);
-    PicoSession_LogUser(app, child, job->task, job->task);
+    PicoSession_LogUser(app, child, job->task, job->task, NULL);
     PicoAgent_StartTurn(app, child, job->task);
     return true;
 }

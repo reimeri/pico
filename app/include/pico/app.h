@@ -290,28 +290,51 @@ typedef struct PicoLlmTurn {
     const char *effort;
     bool compact;
     bool include_tools;
+    bool vision;
     const char *const *input_json;
     int input_count;
     const PicoTool *tools;
     int tool_count;
 } PicoLlmTurn;
 
-typedef struct PicoLlmToolCall {
+typedef enum PicoLlmPartKind {
+    PICO_LLM_PART_TEXT = 0,
+    PICO_LLM_PART_REFUSAL,
+    PICO_LLM_PART_IMAGE,
+    PICO_LLM_PART_AUDIO,
+} PicoLlmPartKind;
+
+typedef struct PicoLlmPart {
+    PicoLlmPartKind kind;
+    char *text;
+    char *path;
+    char *url;
+    char *mime;
+} PicoLlmPart;
+
+typedef enum PicoLlmItemKind {
+    PICO_LLM_ITEM_ASSISTANT = 0,
+    PICO_LLM_ITEM_TOOL_CALL,
+} PicoLlmItemKind;
+
+typedef struct PicoLlmItem {
+    PicoLlmItemKind kind;
+    PicoLlmPart *parts;
+    int part_count;
+    char *thinking;
+    char *thinking_signature;
     char *call_id;
     char *name;
     char *arguments;
     char *item_id;
-} PicoLlmToolCall;
+} PicoLlmItem;
 
 typedef struct PicoLlmResult {
     char *error;
     int input_tokens;
     int cached_tokens;
-    char *assistant_text;
-    char *think_text;
-    char *think_signature;
-    PicoLlmToolCall *calls;
-    int call_count;
+    PicoLlmItem *items;
+    int item_count;
 } PicoLlmResult;
 
 typedef int (*PicoProviderStreamFn)(PicoAgentContext *ctx, const PicoLlmTurn *turn,
@@ -377,6 +400,7 @@ typedef struct PicoApp {
     struct PicoAuthStore *auth_store;
     bool submit_cancel;
     char *agent_input;
+    char *agent_parts; /* optional malloc'd JSON array of canonical user parts */
     PicoScrollbar chat_scrollbar;
     PicoScrollbar composer_scrollbar;
     PicoChatSelect chat_sel;
@@ -437,6 +461,14 @@ const PicoProvider *pico_find_provider(const PicoApp *app, const char *name);
 void pico_add_auth(PicoApp *app, const PicoAuth *a);
 const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider);
 void pico_llm_result_free(PicoLlmResult *r);
+PicoLlmItem *pico_llm_result_add_item(PicoLlmResult *r, PicoLlmItemKind kind);
+bool pico_llm_item_add_part(PicoLlmItem *item, PicoLlmPartKind kind, const char *text, const char *path,
+                            const char *url, const char *mime);
+bool pico_llm_result_add_text(PicoLlmResult *r, const char *text);
+bool pico_llm_result_add_refusal(PicoLlmResult *r, const char *text);
+bool pico_llm_result_add_tool_call(PicoLlmResult *r, const char *call_id, const char *name,
+                                   const char *arguments, const char *item_id);
+bool pico_llm_result_has_output(const PicoLlmResult *r);
 void pico_clear_registrations(PicoApp *app);
 void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id);
 /* Main thread. Logs to the explicit agent's session and reports durability. */

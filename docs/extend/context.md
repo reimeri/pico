@@ -41,13 +41,13 @@ Every context hook sees the same immutable base history. Context returned by an 
 History items use Pico's provider-neutral JSON forms:
 
 ```json
-{"type":"user","text":"..."}
-{"type":"assistant","text":"...","thinking":"...","thinking_signature":"..."}
+{"type":"user","parts":[{"type":"text","text":"..."},{"type":"image","path":"...","mime":"image/png"}]}
+{"type":"assistant","parts":[{"type":"text","text":"..."},{"type":"refusal","text":"..."}],"thinking":"...","thinking_signature":"..."}
 {"type":"tool_call","call_id":"...","name":"...","arguments":"...","item_id":"..."}
 {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false}
 ```
 
-`thinking`, `thinking_signature`, and `item_id` are optional. Provider-native state appears only after a provider projects it into these canonical fields. Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
+`thinking`, `thinking_signature`, and `item_id` are optional. User and assistant content is an ordered `parts` array (`text`, `refusal`, `image`, `audio`). Image/audio parts reference a `path` (optional `mime` / `url`); they never store bytes. Provider-native state appears only after a provider projects it into these canonical fields. Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
 
 ## Choosing the right hook
 

@@ -63,6 +63,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_files,
     pico_ext_openai,
     pico_ext_hyper,
+    pico_ext_xai,
     pico_ext_extensions,
     pico_ext_prompt,
     pico_ext_diff,

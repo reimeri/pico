@@ -1,6 +1,6 @@
 # Providers
 
-An LLM provider implements one streaming turn. Builtins are `openai` ([`../../builtins/openai.c`](../../builtins/openai.c)) and `hyper` ([`../../builtins/hyper.c`](../../builtins/hyper.c)). Shared request/stream helpers: [`../../builtins/responses.c`](../../builtins/responses.c) for OpenAI, and [`../../builtins/completions.c`](../../builtins/completions.c) for Hyper and other OpenAI-compatible Chat Completions providers. Models in `settings.json` name the provider:
+An LLM provider implements one streaming turn. Builtins are `openai` ([`../../builtins/openai.c`](../../builtins/openai.c)), `hyper` ([`../../builtins/hyper.c`](../../builtins/hyper.c)), and `xai` ([`../../builtins/xai.c`](../../builtins/xai.c)). Shared request/stream helpers: [`../../builtins/responses.c`](../../builtins/responses.c) for OpenAI, and [`../../builtins/completions.c`](../../builtins/completions.c) for Hyper, xAI, and other OpenAI-compatible Chat Completions providers. Models in `settings.json` name the provider:
 
 ```json
 { "id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "context_limit": 128000 }
@@ -10,7 +10,9 @@ Hyper models use `"provider": "hyper"` at the fixed HTTPS base `https://hyper.ch
 
 Hyper talks to `POST https://hyper.charm.land/v1/chat/completions`. Requests use `store: false`, `stream_options: { "include_usage": true }`, `max_tokens` when set, and DeepSeek thinking (`thinking: { "type": "enabled"|"disabled" }` plus `reasoning_effort` when effort is on). Each completion choice projects to one canonical assistant item followed by all of that message's tool-call items, regardless of streamed field order. Replay folds those items back into one assistant message; a tool-only message uses `content: null`. If the model is reasoning, replayed assistant messages include `reasoning_content` (the stored thinking text, or `""`). A reasoning-compatibility retry removes the root thinking controls and historical message-level `reasoning_content`. Encrypted OpenAI reasoning blobs and Responses `function_call` item ids are dropped. Authenticate with `HYPER_API_KEY` or `/login hyper`. Hyper rejects non-canonical `base_url` values; only `https://hyper.charm.land/v1` or `https://hyper.charm.land/v1/chat/completions` are accepted.
 
-`provider` must match `PicoProvider.name`. Providers may interpret optional `base_url` values; the builtin OpenAI provider accepts overrides, while Hyper only accepts its canonical endpoint.
+xAI talks to `POST https://api.x.ai/v1/chat/completions`. Requests use `store: false` and `stream_options: { "include_usage": true }`. Incoming `reasoning` / `reasoning_content` still streams; Pico does not send DeepSeek `thinking` or `reasoning_effort`. Authenticate with `XAI_API_KEY` or `/login xai`. xAI rejects non-canonical `base_url` values; only `https://api.x.ai/v1` or `https://api.x.ai/v1/chat/completions` are accepted.
+
+`provider` must match `PicoProvider.name`. Providers may interpret optional `base_url` values; the builtin OpenAI provider accepts overrides, while Hyper and xAI only accept their canonical endpoints.
 
 ```c
 #include "pico/plugin.h"

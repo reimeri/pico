@@ -100,6 +100,8 @@ add_executable(pico
     builtins/openai.c
     builtins/hyper.c
     builtins/hyper_auth.c
+    builtins/xai.c
+    builtins/xai_auth.c
     builtins/responses.c
     builtins/completions.c
     builtins/extensions.c
@@ -221,6 +223,14 @@ if(BUILD_TESTING)
     target_compile_options(pico_completions_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_completions_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_completions_tests COMMAND pico_completions_tests)
+
+    add_executable(pico_xai_auth_tests
+        tests/xai_auth_test.c
+        builtins/xai_auth.c
+        json.c)
+    target_include_directories(pico_xai_auth_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_xai_auth_tests)
+    add_test(NAME pico_xai_auth_tests COMMAND pico_xai_auth_tests)
 
     add_executable(pico_todo_tests
         tests/todo_test.c
@@ -369,7 +379,7 @@ add_custom_command(
         ${CMAKE_CURRENT_BINARY_DIR}/examples)
 
 set(_pico_ref_builtins
-    shell.c openai.c hyper.c responses.c responses.h completions.c completions.h hyper_auth.c hyper_auth.h)
+    shell.c openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h completions.c completions.h hyper_auth.c hyper_auth.h)
 foreach(_f IN LISTS _pico_ref_builtins)
     add_custom_command(
             TARGET pico POST_BUILD

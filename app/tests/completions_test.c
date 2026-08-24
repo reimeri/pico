@@ -72,6 +72,19 @@ static void TestUrls(void)
     Check(!pico_completions_resolve_canonical_url("https://attacker.example/v1", canonical, out,
                                                   sizeof(out)),
           "another origin is rejected");
+
+    const char *xai = "https://api.x.ai/v1";
+    Check(pico_completions_resolve_canonical_url(NULL, xai, out, sizeof(out)) &&
+              strcmp(out, "https://api.x.ai/v1/chat/completions") == 0,
+          "empty override uses canonical xAI Completions endpoint");
+    Check(pico_completions_resolve_canonical_url("https://api.x.ai/v1/chat/completions", xai, out,
+                                                 sizeof(out)),
+          "canonical xAI Completions endpoint is accepted");
+    Check(!pico_completions_resolve_canonical_url("http://api.x.ai/v1", xai, out, sizeof(out)),
+          "plaintext xAI endpoint is rejected");
+    Check(!pico_completions_resolve_canonical_url("https://attacker.example/v1", xai, out,
+                                                  sizeof(out)),
+          "another origin is rejected for xAI");
 }
 
 static void TestRequestConversion(void)

@@ -59,5 +59,6 @@ These are the in-app implementations, shipped for reading. They are not loaded f
 - [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`
 - [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c))
 - [`../../builtins/hyper.c`](../../builtins/hyper.c) — Hyper provider (uses [`../../builtins/completions.c`](../../builtins/completions.c) plus [`../../builtins/hyper_auth.c`](../../builtins/hyper_auth.c))
+- [`../../builtins/xai.c`](../../builtins/xai.c) — xAI provider (uses [`../../builtins/completions.c`](../../builtins/completions.c) plus [`../../builtins/xai_auth.c`](../../builtins/xai_auth.c))
 
 Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/agent.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat the private app-level `agent.h`, `agent_internal.h`, `session.h`, or `settings.h` as API.

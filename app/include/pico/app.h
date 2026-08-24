@@ -363,7 +363,6 @@ typedef struct PicoSettings {
     int context_limit;
     double compact_ratio;
     bool compact_enabled;
-    bool context_limit_set;
     bool resume_last;
     double font_scale;
 } PicoSettings;

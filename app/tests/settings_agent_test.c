@@ -9,7 +9,56 @@ static int Fail(const char *message)
     return 1;
 }
 
-int main(void)
+static int TestModelContextBeatsFallback(void)
+{
+    PicoApp app;
+    PicoAgent agent;
+    PicoModel model;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    memset(&model, 0, sizeof(model));
+
+    snprintf(model.id, sizeof(model.id), "grok-4.6");
+    snprintf(model.name, sizeof(model.name), "Grok 4.6");
+    model.context_limit = 500000;
+    app.models = &model;
+    app.model_count = 1;
+    snprintf(app.settings.model, sizeof(app.settings.model), "grok-4.6");
+    app.settings.context_limit = 1000000;
+
+    PicoSettings_InitAgent(&app, &agent);
+    if (agent.context_limit != 500000)
+    {
+        return Fail("selected model context_limit lost to root/env fallback");
+    }
+    return 0;
+}
+
+static int TestFallbackWhenModelHasNoLimit(void)
+{
+    PicoApp app;
+    PicoAgent agent;
+    PicoModel model;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    memset(&model, 0, sizeof(model));
+
+    snprintf(model.id, sizeof(model.id), "custom");
+    snprintf(model.name, sizeof(model.name), "Custom");
+    app.models = &model;
+    app.model_count = 1;
+    snprintf(app.settings.model, sizeof(app.settings.model), "custom");
+    app.settings.context_limit = 128000;
+
+    PicoSettings_InitAgent(&app, &agent);
+    if (agent.context_limit != 128000)
+    {
+        return Fail("missing model context_limit did not use root/env fallback");
+    }
+    return 0;
+}
+
+static int TestPerAgentSelection(void)
 {
     PicoApp app;
     PicoAgent first;
@@ -58,4 +107,19 @@ int main(void)
         return Fail("one agent mutated another agent or the immutable catalog");
     }
     return 0;
+}
+
+int main(void)
+{
+    int rc = TestPerAgentSelection();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestModelContextBeatsFallback();
+    if (rc)
+    {
+        return rc;
+    }
+    return TestFallbackWhenModelHasNoLimit();
 }

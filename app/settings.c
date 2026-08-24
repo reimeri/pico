@@ -287,7 +287,6 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     if (limit > 0)
     {
         s->context_limit = limit;
-        s->context_limit_set = true;
     }
     ApplyCompactAt(s, doc, obj);
     int resume = JsonObjGet(doc, obj, "resume_last");
@@ -460,11 +459,7 @@ void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent)
     const PicoModel *m = PicoSettings_ActiveModelConst(app, agent);
     snprintf(agent->model_name, sizeof(agent->model_name), "%s",
              m && m->name[0] ? m->name : agent->model);
-    if (app->settings.context_limit_set)
-    {
-        agent->context_limit = app->settings.context_limit;
-    }
-    else if (m && m->context_limit > 0)
+    if (m && m->context_limit > 0)
     {
         agent->context_limit = m->context_limit;
     }
@@ -628,7 +623,6 @@ void PicoSettings_Load(PicoApp *app)
         if (n > 0)
         {
             s->context_limit = n;
-            s->context_limit_set = true;
         }
     }
     const char *resume = getenv("PICO_RESUME_LAST");

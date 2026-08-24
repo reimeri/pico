@@ -48,7 +48,7 @@
     }
   ],
 
-  // Optional hard override of the selected model's context window. Overridden by PICO_CONTEXT_LIMIT.
+  // Fallback when the selected model has no context_limit. Also set by PICO_CONTEXT_LIMIT.
   // "context_limit": 1000000,
 
   // Fraction of context_limit at which to compact (0.9 = 90%). null disables.

@@ -798,9 +798,10 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
         PicoMessage *msg = (PicoMessage *)&view->messages[i];
         bool user = msg->role == PICO_ROLE_USER;
         Clay_Color bg = user ? COLOR_USER_BG : COLOR_ASSISTANT_BG;
+        Clay_Padding pad = user ? (Clay_Padding){16, 16, 12, 12} : (Clay_Padding){16, 16, 0, 0};
         CLAY(MessageId(view, i),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .padding = {16, 16, 12, 12},
+                         .padding = pad,
                          .childGap = 8,
                          .sizing = {.width = CLAY_SIZING_GROW(0)}},
               .backgroundColor = bg,
@@ -867,7 +868,7 @@ void PicoChat_Render(PicoApp *app)
             }
             CLAY(CLAY_ID("ChatContent"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .childGap = 16,
+                             .childGap = 8,
                              .padding = {4, 4, 8, 8},
                              .childAlignment = align,
                              .sizing = content_size}})
@@ -1159,7 +1160,7 @@ static void InspectRender(PicoApp *app)
             {
                 CLAY(CLAY_ID("SubagentChatScroll"),
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = 12,
+                                 .childGap = 8,
                                  .sizing = {.width = CLAY_SIZING_GROW(0),
                                             .height = CLAY_SIZING_GROW(0)}},
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})

@@ -598,6 +598,30 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
     }
 }
 
+void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
+                                   const char *args)
+{
+    if (!agent || !call_id || !call_id[0])
+    {
+        return;
+    }
+    for (int i = agent->message_count - 1; i >= 0; i--)
+    {
+        PicoMessage *message = &agent->messages[i];
+        for (int t = message->trace_count - 1; t >= 0; t--)
+        {
+            PicoTraceLine *line = &message->trace[t];
+            if (line->is_tool && line->tool_call_id &&
+                strcmp(line->tool_call_id, call_id) == 0)
+            {
+                free(line->tool_args);
+                line->tool_args = FormatToolProps(args);
+                return;
+            }
+        }
+    }
+}
+
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                                      const char *output, bool is_error)
 {

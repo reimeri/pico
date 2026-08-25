@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -468,7 +469,7 @@ static int CreateNew(PicoApp *app, PicoAgent *agent)
     Pico_IsoTime(ts, sizeof(ts), false);
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":3,\"id\":");
+    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":4,\"id\":");
     JsonBuf_String(&b, agent->session_id);
     JsonBuf_Puts(&b, ",\"timestamp\":");
     JsonBuf_String(&b, ts);
@@ -591,6 +592,59 @@ static void ApplyHeader(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int 
     free(key);
 }
 
+static bool StartsAssistantGroup(const PicoMessage *messages, int count,
+                                 int message_group, int *active_group)
+{
+    bool starts = !active_group || *active_group != message_group || count <= 0 ||
+                  messages[count - 1].role != PICO_ROLE_ASSISTANT;
+    if (active_group)
+    {
+        *active_group = message_group;
+    }
+    return starts;
+}
+
+static bool HasNonWhitespace(const char *text)
+{
+    if (!text)
+    {
+        return false;
+    }
+    while (*text == ' ' || *text == '\n' || *text == '\t' || *text == '\r')
+    {
+        text++;
+    }
+    return *text != '\0';
+}
+
+static bool JsonObjNonNegativeInt(const JsonDoc *doc, int obj, const char *key, int *out)
+{
+    int tok = JsonObjGet(doc, obj, key);
+    int start = JsonTokStart(doc, tok);
+    int end = JsonTokEnd(doc, tok);
+    if (tok < 0 || start < 0 || end <= start || (size_t)end > doc->len ||
+        (start > 0 && (size_t)end < doc->len &&
+         doc->src[start - 1] == '"' && doc->src[end] == '"'))
+    {
+        return false;
+    }
+    int value = 0;
+    for (int i = start; i < end; i++)
+    {
+        unsigned char c = (unsigned char)doc->src[i];
+        if (c < '0' || c > '9' || value > (INT_MAX - (int)(c - '0')) / 10)
+        {
+            return false;
+        }
+        value = value * 10 + (int)(c - '0');
+    }
+    if (out)
+    {
+        *out = value;
+    }
+    return true;
+}
+
 static void ApplyToolDetails(PicoApp *app, PicoAgent *agent, const char *name,
                              const char *details, bool is_error)
 {
@@ -614,7 +668,8 @@ static void ApplyToolDetails(PicoApp *app, PicoAgent *agent, const char *name,
     }
 }
 
-static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int obj, bool into_input)
+static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int obj,
+                       bool into_input, int *active_group)
 {
     char *type = JsonObjStr(doc, obj, "type");
     if (!type)
@@ -637,6 +692,10 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         char *content = JsonObjStr(doc, obj, "content");
         if (role && strcmp(role, "user") == 0)
         {
+            if (active_group)
+            {
+                *active_group = -1;
+            }
             char *display = JsonObjStr(doc, obj, "display");
             char *parts = JsonObjRaw(doc, obj, "parts");
             PicoAgent_AddMessage(app, agent, PICO_ROLE_USER,
@@ -657,7 +716,18 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         }
         else if (role && strcmp(role, "assistant") == 0)
         {
-            PicoAgent_AppendAssistant(app, agent, content ? content : "");
+            const char *text = content ? content : "";
+            int message_group = -1;
+            (void)JsonObjNonNegativeInt(doc, obj, "message_group", &message_group);
+            if (StartsAssistantGroup(agent->messages, agent->message_count,
+                                     message_group, active_group))
+            {
+                PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
+            }
+            else
+            {
+                PicoAgent_AppendAssistant(app, agent, text);
+            }
             char *thinking = JsonObjStr(doc, obj, "thinking");
             char *signature = JsonObjStr(doc, obj, "thinking_signature");
             char *parts = JsonObjRaw(doc, obj, "parts");
@@ -684,6 +754,13 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
         char *name = JsonObjStr(doc, obj, "name");
         char *args = JsonObjStr(doc, obj, "arguments");
         char *item_id = JsonObjStr(doc, obj, "item_id");
+        int message_group = -1;
+        (void)JsonObjNonNegativeInt(doc, obj, "message_group", &message_group);
+        if (StartsAssistantGroup(agent->messages, agent->message_count,
+                                 message_group, active_group))
+        {
+            PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
+        }
         PicoAgent_AddToolCallWithId(app, agent, call_id, name, args);
         if (into_input)
         {
@@ -838,7 +915,7 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
             bool subagent = kind && strcmp(kind, "subagent") == 0 &&
                             profile && profile[0] && purpose && purpose[0];
             valid_header = type && strcmp(type, "session") == 0 &&
-                           header_id && header_id[0] && version == 3 &&
+                           header_id && header_id[0] && version == 4 &&
                            (normal || subagent);
             free(header_id);
             free(kind);
@@ -850,6 +927,19 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
                 JsonFree(&doc);
                 goto invalid;
             }
+        }
+        bool requires_group = type && strcmp(type, "tool_call") == 0;
+        if (type && strcmp(type, "message") == 0)
+        {
+            char *role = JsonObjStr(&doc, 0, "role");
+            requires_group = role && strcmp(role, "assistant") == 0;
+            free(role);
+        }
+        if (requires_group && !JsonObjNonNegativeInt(&doc, 0, "message_group", NULL))
+        {
+            free(type);
+            JsonFree(&doc);
+            goto invalid;
         }
         if (type && strcmp(type, "compaction") == 0)
         {
@@ -872,6 +962,7 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
     }
 
     PicoAgent_ClearInput(agent);
+    int active_group = -1;
     for (int i = 0; i < n; i++)
     {
         JsonDoc doc;
@@ -880,7 +971,7 @@ int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path,
             continue;
         }
         bool into_input = (last_compact < 0) || (i >= last_compact);
-        ReplayLine(app, agent, &doc, 0, into_input);
+        ReplayLine(app, agent, &doc, 0, into_input, &active_group);
         JsonFree(&doc);
     }
 
@@ -1095,7 +1186,7 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     if (purpose) snprintf(out->initial_purpose, sizeof(out->initial_purpose), "%s", purpose);
     if (parent) snprintf(out->parent_session_id, sizeof(out->parent_session_id), "%s", parent);
     if (model) snprintf(out->model, sizeof(out->model), "%s", model);
-    bool valid = out->version == 3 && out->id[0] && kind_valid &&
+    bool valid = out->version == 4 && out->id[0] && kind_valid &&
                  (out->kind == PICO_AGENT_NORMAL || (out->profile[0] && out->initial_purpose[0]));
     free(id);
     free(kind);
@@ -1152,9 +1243,9 @@ static bool LoadedAddMessage(PicoMessage **messages, int *count, int *capacity,
 }
 
 static bool LoadedAppendAssistant(PicoMessage **messages, int *count, int *capacity,
-                                  const char *text)
+                                  int message_group, int *active_group, const char *text)
 {
-    if (*count <= 0 || (*messages)[*count - 1].role != PICO_ROLE_ASSISTANT)
+    if (StartsAssistantGroup(*messages, *count, message_group, active_group))
     {
         return LoadedAddMessage(messages, count, capacity, PICO_ROLE_ASSISTANT, text);
     }
@@ -1176,9 +1267,10 @@ static bool LoadedAppendAssistant(PicoMessage **messages, int *count, int *capac
 }
 
 static bool LoadedAddTool(PicoMessage **messages, int *count, int *capacity,
-                          const char *call_id, const char *name, const char *args)
+                          int message_group, int *active_group, const char *call_id,
+                          const char *name, const char *args)
 {
-    if (*count <= 0 || (*messages)[*count - 1].role != PICO_ROLE_ASSISTANT)
+    if (StartsAssistantGroup(*messages, *count, message_group, active_group))
     {
         if (!LoadedAddMessage(messages, count, capacity, PICO_ROLE_ASSISTANT, ""))
         {
@@ -1200,6 +1292,60 @@ static bool LoadedAddTool(PicoMessage **messages, int *count, int *capacity,
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
     line->tool_args = JsonDup(args ? args : "");
     return line->tool_name != NULL && (!call_id || !call_id[0] || line->tool_call_id != NULL);
+}
+
+static bool LoadedAddThink(PicoMessage **messages, int *count, int *capacity,
+                           const char *text)
+{
+    PicoMessage *msg;
+    PicoTraceLine *line = NULL;
+    size_t old;
+    size_t n;
+    char *next_text;
+
+    if (!text || !text[0])
+    {
+        return true;
+    }
+    if (*count <= 0 || (*messages)[*count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        if (!LoadedAddMessage(messages, count, capacity, PICO_ROLE_ASSISTANT, ""))
+        {
+            return false;
+        }
+    }
+    msg = &(*messages)[*count - 1];
+    if (msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+        msg->trace[msg->trace_count - 1].think_steps == 0)
+    {
+        line = &msg->trace[msg->trace_count - 1];
+        if (HasNonWhitespace(line->text))
+        {
+            return true;
+        }
+    }
+    else
+    {
+        PicoTraceLine *next =
+            (PicoTraceLine *)realloc(msg->trace, (size_t)(msg->trace_count + 1) * sizeof(PicoTraceLine));
+        if (!next)
+        {
+            return false;
+        }
+        msg->trace = next;
+        line = &msg->trace[msg->trace_count++];
+        memset(line, 0, sizeof(*line));
+    }
+    old = line->text ? strlen(line->text) : 0;
+    n = strlen(text);
+    next_text = (char *)realloc(line->text, old + n + 1);
+    if (!next_text)
+    {
+        return false;
+    }
+    memcpy(next_text + old, text, n + 1);
+    line->text = next_text;
+    return true;
 }
 
 static void LoadedSetOutput(PicoMessage *messages, int count, const char *call_id,
@@ -1258,6 +1404,8 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
     char *buf = NULL;
     size_t buf_cap = 0;
     bool failed = false;
+    bool valid_header = false;
+    int active_group = -1;
     while (getline(&buf, &buf_cap, f) != -1)
     {
         size_t len = strlen(buf);
@@ -1279,12 +1427,17 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
             continue;
         }
         char *type = JsonObjStr(&doc, 0, "type");
-        if (type && strcmp(type, "message") == 0)
+        if (type && strcmp(type, "session") == 0)
+        {
+            valid_header = JsonObjInt(&doc, 0, "version", 0) == 4;
+        }
+        else if (type && strcmp(type, "message") == 0)
         {
             char *role = JsonObjStr(&doc, 0, "role");
             char *content = JsonObjStr(&doc, 0, "content");
             if (role && strcmp(role, "user") == 0)
             {
+                active_group = -1;
                 char *display = JsonObjStr(&doc, 0, "display");
                 const char *text = display && display[0] ? display : (content ? content : "");
                 failed = !LoadedAddMessage(&messages, &count, &capacity, PICO_ROLE_USER, text);
@@ -1292,7 +1445,14 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
             }
             else if (role && strcmp(role, "assistant") == 0)
             {
-                failed = !LoadedAppendAssistant(&messages, &count, &capacity, content ? content : "");
+                char *thinking = JsonObjStr(&doc, 0, "thinking");
+                int message_group = -1;
+                failed = !JsonObjNonNegativeInt(&doc, 0, "message_group", &message_group) ||
+                         !LoadedAppendAssistant(&messages, &count, &capacity,
+                                                message_group, &active_group,
+                                                content ? content : "") ||
+                         !LoadedAddThink(&messages, &count, &capacity, thinking);
+                free(thinking);
             }
             free(role);
             free(content);
@@ -1302,7 +1462,10 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
             char *call_id = JsonObjStr(&doc, 0, "call_id");
             char *name = JsonObjStr(&doc, 0, "name");
             char *args = JsonObjStr(&doc, 0, "arguments");
-            failed = !LoadedAddTool(&messages, &count, &capacity, call_id, name, args);
+            int message_group = -1;
+            failed = !JsonObjNonNegativeInt(&doc, 0, "message_group", &message_group) ||
+                     !LoadedAddTool(&messages, &count, &capacity, message_group,
+                                    &active_group, call_id, name, args);
             free(call_id);
             free(name);
             free(args);
@@ -1323,7 +1486,7 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
             break;
         }
     }
-    if (ferror(f))
+    if (ferror(f) || !valid_header)
     {
         failed = true;
     }
@@ -1491,11 +1654,16 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
 }
 
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
-                                                const char *content, const char *thinking,
+                                                int message_group, const char *content,
+                                                const char *thinking,
                                                 const char *thinking_signature,
                                                 const char *parts_json)
 {
     bool has_parts = parts_json && parts_json[0] == '[';
+    if (message_group < 0)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
     if ((!content || !content[0]) && (!thinking || !thinking[0]) &&
         (!thinking_signature || !thinking_signature[0]) && !has_parts)
     {
@@ -1505,7 +1673,9 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, pre);
-    JsonBuf_Puts(&b, ",\"role\":\"assistant\",\"content\":");
+    JsonBuf_Puts(&b, ",\"role\":\"assistant\",\"message_group\":");
+    JsonBuf_Int(&b, message_group);
+    JsonBuf_Puts(&b, ",\"content\":");
     JsonBuf_String(&b, content ? content : "");
     if (thinking && thinking[0])
     {
@@ -1531,13 +1701,20 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
 }
 
 PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
-                                               const char *call_id, const char *name,
-                                               const char *args, const char *item_id)
+                                               int message_group, const char *call_id,
+                                               const char *name, const char *args,
+                                               const char *item_id)
 {
+    if (message_group < 0)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
     char *pre = EventPrefix("tool_call");
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, pre);
+    JsonBuf_Puts(&b, ",\"message_group\":");
+    JsonBuf_Int(&b, message_group);
     JsonBuf_Puts(&b, ",\"call_id\":");
     JsonBuf_String(&b, call_id ? call_id : "");
     JsonBuf_Puts(&b, ",\"name\":");

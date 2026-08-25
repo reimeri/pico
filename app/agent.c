@@ -1436,16 +1436,11 @@ static bool MessageEmpty(const PicoAgent *agent, int idx)
     return true;
 }
 
-static bool HasThinkTrace(const PicoMessage *m)
+static bool HasTrailingThinkTrace(const PicoMessage *m)
 {
-    for (int t = 0; t < m->trace_count; t++)
-    {
-        if (!m->trace[t].is_tool && !Blank(m->trace[t].text))
-        {
-            return true;
-        }
-    }
-    return false;
+    return m && m->trace_count > 0 &&
+           !m->trace[m->trace_count - 1].is_tool &&
+           !Blank(m->trace[m->trace_count - 1].text);
 }
 
 static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
@@ -1575,6 +1570,24 @@ static void TraceAddTool(PicoApp *app, PicoAgent *agent, int idx, const char *ca
     PicoAgent_AddToolCallWithId(app, agent, call_id, name, args_json);
 }
 
+static bool TraceHasToolCall(const PicoAgent *agent, int idx, const char *call_id)
+{
+    if (!agent || idx < 0 || idx >= agent->message_count || !call_id || !call_id[0])
+    {
+        return false;
+    }
+    const PicoMessage *message = &agent->messages[idx];
+    for (int t = 0; t < message->trace_count; t++)
+    {
+        if (message->trace[t].is_tool && message->trace[t].tool_call_id &&
+            strcmp(message->trace[t].tool_call_id, call_id) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void TraceSetLastToolOutput(PicoApp *app, PicoAgent *agent, int idx, const char *output, bool is_error)
 {
     if (idx < 0 || idx >= agent->message_count)
@@ -1641,6 +1654,8 @@ static void AbortRemainingCalls(PicoApp *app, PicoAgent *agent, PicoAgentRt *rt)
         PushFunctionOutput(rt, rt->pending[i].call_id, rt->pending[i].name, "(interrupted)", true);
         PicoSession_LogToolResult(app, agent, rt->pending[i].call_id, rt->pending[i].name,
                                   "(interrupted)", true, NULL);
+        PicoAgent_SetToolOutputByCallId(agent, rt->pending[i].call_id,
+                                        "(interrupted)", true);
     }
     ClearPending(rt);
 }
@@ -1689,7 +1704,7 @@ static void ApplyCancel(PicoApp *app, PicoAgent *agent)
     if (rt->stream_msg >= 0 &&
         (!MessageSourceEmpty(agent, rt->stream_msg) || (thinking && thinking[0])))
     {
-        PicoSession_LogAssistant(app, agent,
+        PicoSession_LogAssistant(app, agent, rt->stream_msg,
                                  MessageSourceEmpty(agent, rt->stream_msg)
                                      ? ""
                                      : agent->messages[rt->stream_msg].source,
@@ -1825,11 +1840,8 @@ static void StartNextTool(PicoApp *app, PicoAgent *agent)
                                   error ? error : "unoffered tool", true, NULL);
         if (rt->stream_msg >= 0)
         {
-            TraceAddTool(app, agent, rt->stream_msg, call->call_id,
-                         call->name ? call->name : "tool",
-                         call->arguments ? call->arguments : "{}");
-            TraceSetLastToolOutput(app, agent, rt->stream_msg,
-                                   error ? error : "unoffered tool", true);
+            PicoAgent_SetToolOutputByCallId(agent, call->call_id,
+                                            error ? error : "unoffered tool", true);
         }
         free(error);
         rt->pending_next++;
@@ -2018,7 +2030,7 @@ static bool IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
                 JsonBuf_Puts(&visible, display);
             }
             if (think && think[0] && rt->stream_msg >= 0 &&
-                !HasThinkTrace(&agent->messages[rt->stream_msg]))
+                !HasTrailingThinkTrace(&agent->messages[rt->stream_msg]))
             {
                 TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
             }
@@ -2029,7 +2041,8 @@ static bool IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
                 char *parts_json = pico_canonical_parts_need_log(parts, part_n)
                                        ? pico_canonical_parts_json(parts, part_n)
                                        : NULL;
-                PicoSession_LogAssistant(app, agent, display ? display : "", think, sig, parts_json);
+                PicoSession_LogAssistant(app, agent, rt->stream_msg,
+                                         display ? display : "", think, sig, parts_json);
                 free(parts_json);
             }
             pico_canonical_free_parts(parts, part_n);
@@ -2048,8 +2061,13 @@ static bool IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
                 call->item_id = JsonObjStr(&doc, obj, "item_id");
                 PushInput(rt, pico_canonical_tool_call_json(call->call_id, call->name, call->arguments,
                                                             call->item_id));
-                PicoSession_LogToolCall(app, agent, call->call_id, call->name, call->arguments,
-                                        call->item_id);
+                if (rt->stream_msg >= 0)
+                {
+                    TraceAddTool(app, agent, rt->stream_msg, call->call_id,
+                                 call->name, call->arguments);
+                }
+                PicoSession_LogToolCall(app, agent, rt->stream_msg, call->call_id, call->name,
+                                        call->arguments, call->item_id);
             }
         }
         free(type);
@@ -2119,23 +2137,6 @@ static void OnLlmDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
     FinishTurn(app, agent);
 }
 
-static int CountToolTrace(const PicoMessage *m)
-{
-    int n = 0;
-    if (!m)
-    {
-        return 0;
-    }
-    for (int t = 0; t < m->trace_count; t++)
-    {
-        if (m->trace[t].is_tool)
-        {
-            n++;
-        }
-    }
-    return n;
-}
-
 static void OnToolStart(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -2157,7 +2158,15 @@ static void OnToolStart(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev)
     {
         PicoPendingCall *call = rt->pending_next < rt->pending_count
                                     ? &rt->pending[rt->pending_next] : NULL;
-        TraceAddTool(app, agent, rt->stream_msg, call ? call->call_id : NULL, name, args);
+        if (call && TraceHasToolCall(agent, rt->stream_msg, call->call_id))
+        {
+            PicoAgent_SetToolArgsByCallId(agent, call->call_id, args);
+        }
+        else
+        {
+            TraceAddTool(app, agent, rt->stream_msg,
+                         call ? call->call_id : NULL, name, args);
+        }
     }
 }
 
@@ -2210,13 +2219,13 @@ static void OnToolDone(PicoApp *app, PicoAgent *agent, PicoAgentEv *ev, bool fai
     PicoSession_LogToolResult(app, agent, call_id, name, use, is_error, details);
     if (rt->stream_msg >= 0)
     {
-        if (CountToolTrace(&agent->messages[rt->stream_msg]) <= rt->pending_next)
+        if (!TraceHasToolCall(agent, rt->stream_msg, call_id))
         {
             TraceAddTool(app, agent, rt->stream_msg, call ? call->call_id : call_id,
                          name[0] ? name : "tool",
                          call && call->arguments ? call->arguments : "{}");
         }
-        TraceSetLastToolOutput(app, agent, rt->stream_msg, use, is_error);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, use, is_error);
     }
     rt->pending_next++;
     free(output);
@@ -3163,11 +3172,8 @@ void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text)
         return;
     }
     int idx = agent->message_count - 1;
-    if (agent->messages[idx].role != PICO_ROLE_ASSISTANT)
-    {
-        return;
-    }
-    if (HasThinkTrace(&agent->messages[idx]))
+    if (agent->messages[idx].role != PICO_ROLE_ASSISTANT ||
+        HasTrailingThinkTrace(&agent->messages[idx]))
     {
         return;
     }

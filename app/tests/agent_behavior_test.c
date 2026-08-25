@@ -37,6 +37,8 @@ typedef enum TestMode {
     TEST_DELEGATION_CHILD_EMPTY,
     TEST_ITEM_ORDER,
     TEST_ITEM_ORDER_REVERSE,
+    TEST_MULTI_ASSISTANT_ITEMS,
+    TEST_INTERLEAVED_TRACE_ITEMS,
     TEST_MALFORMED_RESULT,
     TEST_MEDIA_PERSIST_FAIL,
 } TestMode;
@@ -84,6 +86,8 @@ typedef struct TestState {
     bool emit_think_summaries;
     char logged_thinking[256];
     char session_item_order[64];
+    int session_message_groups[64];
+    int session_message_group_count;
     int life_turn_end;
     int life_cancel;
     int life_error;
@@ -183,6 +187,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.emit_think_summaries = false;
     g_test.logged_thinking[0] = '\0';
     g_test.session_item_order[0] = '\0';
+    g_test.session_message_group_count = 0;
     g_test.life_turn_end = 0;
     g_test.life_cancel = 0;
     g_test.life_error = 0;
@@ -314,6 +319,32 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         {
             pico_llm_item_add_part(item, PICO_LLM_PART_IMAGE, NULL, NULL,
                                    "data:image/png;base64,not-valid", "image/png");
+        }
+        return PICO_LLM_OK;
+    }
+    if (mode == TEST_MULTI_ASSISTANT_ITEMS)
+    {
+        pico_llm_result_add_text(out, "hello");
+        pico_llm_result_add_text(out, "world");
+        return PICO_LLM_OK;
+    }
+    if (mode == TEST_INTERLEAVED_TRACE_ITEMS)
+    {
+        if (!issue_tool)
+        {
+            pico_llm_result_add_text(out, "done");
+            return PICO_LLM_OK;
+        }
+        PicoLlmItem *first = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        if (first)
+        {
+            first->thinking = JsonDup("think-before");
+        }
+        pico_llm_result_add_tool_call(out, "call-order", "missing_tool", "{}", NULL);
+        PicoLlmItem *second = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        if (second)
+        {
+            second->thinking = JsonDup("think-after");
         }
         return PICO_LLM_OK;
     }
@@ -908,7 +939,8 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, const char *content,
+PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
+                                                int message_group, const char *content,
                                                 const char *thinking, const char *thinking_signature,
                                                 const char *parts_json)
 {
@@ -920,6 +952,10 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent, 
     snprintf(g_test.logged_thinking, sizeof(g_test.logged_thinking), "%s", thinking ? thinking : "");
     strncat(g_test.session_item_order, "A",
             sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
+    if (g_test.session_message_group_count < 64)
+    {
+        g_test.session_message_groups[g_test.session_message_group_count++] = message_group;
+    }
     return PICO_SESSION_WRITE_OK;
 }
 
@@ -938,7 +974,9 @@ PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *args,
+PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
+                                               int message_group, const char *call_id,
+                                               const char *name, const char *args,
                                                const char *item_id)
 {
     (void)app;
@@ -949,6 +987,10 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent, c
     (void)item_id;
     strncat(g_test.session_item_order, "T",
             sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
+    if (g_test.session_message_group_count < 64)
+    {
+        g_test.session_message_groups[g_test.session_message_group_count++] = message_group;
+    }
     return PICO_SESSION_WRITE_OK;
 }
 
@@ -2618,10 +2660,75 @@ static int TestResultItemOrder(TestMode mode, bool assistant_first, const char *
     bool session_ok = assistant_first
                           ? strncmp(g_test.session_item_order, "AT", 2) == 0
                           : strncmp(g_test.session_item_order, "TA", 2) == 0;
-    bool ok = history_ok && session_ok;
+    bool grouping_ok = g_test.session_message_group_count >= 2 &&
+                       g_test.session_message_groups[0] == g_test.session_message_groups[1];
+    bool ok = history_ok && session_ok && grouping_ok;
     pthread_mutex_unlock(&g_test.mu);
     PicoApp_Free(&app);
     return ok ? 0 : Fail(name, "result item order was not preserved in history");
+}
+
+static int TestMultipleAssistantItemsShareMessageGroup(void)
+{
+    const char *name = "multiple assistant items share one live message group";
+    ResetTest(TEST_MULTI_ASSISTANT_ITEMS, 0);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "multi-item turn did not finish");
+    }
+    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    bool live_ok = agent->message_count >= 1 &&
+                   agent->messages[agent->message_count - 1].role == PICO_ROLE_ASSISTANT &&
+                   agent->messages[agent->message_count - 1].source &&
+                   strcmp(agent->messages[agent->message_count - 1].source, "helloworld") == 0;
+    pthread_mutex_lock(&g_test.mu);
+    bool persisted_ok = strcmp(g_test.session_item_order, "AA") == 0 &&
+                        g_test.session_message_group_count == 2 &&
+                        g_test.session_message_groups[0] == g_test.session_message_groups[1];
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return live_ok && persisted_ok
+               ? 0
+               : Fail(name, "live grouping and persisted message_group values diverged");
+}
+
+static int TestInterleavedTraceItemsKeepCanonicalOrder(void)
+{
+    const char *name = "interleaved assistant and tool traces keep canonical order";
+    ResetTest(TEST_INTERLEAVED_TRACE_ITEMS, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "interleaved trace turn did not finish");
+    }
+    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoMessage *message = agent->message_count > 0
+                               ? &agent->messages[agent->message_count - 1] : NULL;
+    bool live_ok = message && message->role == PICO_ROLE_ASSISTANT &&
+                   message->trace_count == 3 &&
+                   !message->trace[0].is_tool && message->trace[0].text &&
+                   strcmp(message->trace[0].text, "think-before") == 0 &&
+                   message->trace[1].is_tool && message->trace[1].tool_call_id &&
+                   strcmp(message->trace[1].tool_call_id, "call-order") == 0 &&
+                   !message->trace[2].is_tool && message->trace[2].text &&
+                   strcmp(message->trace[2].text, "think-after") == 0;
+    pthread_mutex_lock(&g_test.mu);
+    bool persisted_ok = strncmp(g_test.session_item_order, "ATA", 3) == 0 &&
+                        g_test.session_message_group_count >= 3 &&
+                        g_test.session_message_groups[0] == g_test.session_message_groups[1] &&
+                        g_test.session_message_groups[1] == g_test.session_message_groups[2];
+    pthread_mutex_unlock(&g_test.mu);
+    PicoApp_Free(&app);
+    return live_ok && persisted_ok
+               ? 0
+               : Fail(name, "live trace order diverged from persisted item order");
 }
 
 static int TestMalformedCanonicalResult(void)
@@ -2834,6 +2941,8 @@ int main(void)
     failed |= TestCanonicalContinuationState();
     failed |= TestResultItemOrder(TEST_ITEM_ORDER, true, "assistant then tool_call history order");
     failed |= TestResultItemOrder(TEST_ITEM_ORDER_REVERSE, false, "tool_call then assistant history order");
+    failed |= TestMultipleAssistantItemsShareMessageGroup();
+    failed |= TestInterleavedTraceItemsKeepCanonicalOrder();
     failed |= TestMalformedCanonicalResult();
     failed |= TestMediaPersistenceFailureIsAtomic();
     failed |= TestNonVisionMediaRejected();

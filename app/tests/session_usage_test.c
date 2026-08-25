@@ -31,6 +31,8 @@ static int Fail(const char *message)
     return 1;
 }
 
+void PicoMessages_Free(PicoMessage *messages, int count);
+
 bool Pico_ConfigDir(char *out, size_t cap)
 {
     return PicoPath_Format(out, cap, "%s", g_config_dir);
@@ -176,11 +178,75 @@ void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, co
     snprintf(g_last_item_id, sizeof(g_last_item_id), "%s", item_id ? item_id : "");
 }
 
+static bool StubGrowMessages(PicoAgent *agent)
+{
+    if (agent->message_count < agent->message_capacity)
+    {
+        return true;
+    }
+    int capacity = agent->message_capacity == 0 ? 8 : agent->message_capacity * 2;
+    PicoMessage *next = (PicoMessage *)realloc(agent->messages, (size_t)capacity * sizeof(PicoMessage));
+    if (!next)
+    {
+        return false;
+    }
+    agent->messages = next;
+    agent->message_capacity = capacity;
+    return true;
+}
+
+static PicoTraceLine *StubPushTrace(PicoMessage *message, bool is_tool)
+{
+    PicoTraceLine *next =
+        (PicoTraceLine *)realloc(message->trace, (size_t)(message->trace_count + 1) * sizeof(PicoTraceLine));
+    if (!next)
+    {
+        return NULL;
+    }
+    message->trace = next;
+    PicoTraceLine *line = &message->trace[message->trace_count++];
+    memset(line, 0, sizeof(*line));
+    line->is_tool = is_tool;
+    return line;
+}
+
 void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text)
 {
+    PicoMessage *message;
+    PicoTraceLine *line;
+    size_t old;
+    size_t n;
+    char *next;
+
     (void)app;
-    (void)agent;
-    (void)text;
+    if (!agent || !text || !text[0] || agent->message_count <= 0 ||
+        agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        return;
+    }
+    message = &agent->messages[agent->message_count - 1];
+    if (message->trace_count > 0 && !message->trace[message->trace_count - 1].is_tool &&
+        message->trace[message->trace_count - 1].think_steps == 0)
+    {
+        line = &message->trace[message->trace_count - 1];
+    }
+    else
+    {
+        line = StubPushTrace(message, false);
+    }
+    if (!line)
+    {
+        return;
+    }
+    old = line->text ? strlen(line->text) : 0;
+    n = strlen(text);
+    next = (char *)realloc(line->text, old + n + 1);
+    if (!next)
+    {
+        return;
+    }
+    memcpy(next + old, text, n + 1);
+    line->text = next;
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
@@ -227,39 +293,144 @@ void PicoApp_ClearMessages(PicoApp *app)
 
 void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *text)
 {
-    (void)app; (void)agent; (void)role; (void)text;
+    PicoMessage *message;
+
+    (void)app;
+    if (!agent || !StubGrowMessages(agent))
+    {
+        return;
+    }
+    message = &agent->messages[agent->message_count++];
+    memset(message, 0, sizeof(*message));
+    message->role = role;
+    message->source = JsonDup(text ? text : "");
 }
 
 void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text)
 {
-    (void)app; (void)agent; (void)text;
+    PicoMessage *message;
+    size_t old;
+    size_t n;
+    char *next;
+
+    if (!agent)
+    {
+        return;
+    }
+    if (!text)
+    {
+        text = "";
+    }
+    if (agent->message_count <= 0 || agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
+        return;
+    }
+    if (!text[0])
+    {
+        return;
+    }
+    message = &agent->messages[agent->message_count - 1];
+    old = message->source ? strlen(message->source) : 0;
+    n = strlen(text);
+    next = (char *)realloc(message->source, old + n + 1);
+    if (!next)
+    {
+        return;
+    }
+    memcpy(next + old, text, n + 1);
+    message->source = next;
 }
 
 void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args_json)
 {
-    (void)app; (void)agent; (void)name; (void)args_json;
+    PicoAgent_AddToolCallWithId(app, agent, NULL, name, args_json);
 }
 
 void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args_json)
 {
-    (void)app; (void)agent; (void)call_id; (void)name; (void)args_json;
+    PicoMessage *message;
+    PicoTraceLine *line;
+
+    if (!agent)
+    {
+        return;
+    }
+    if (agent->message_count <= 0 || agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
+    }
+    message = &agent->messages[agent->message_count - 1];
+    line = StubPushTrace(message, true);
+    if (!line)
+    {
+        return;
+    }
+    line->tool_name = JsonDup(name && name[0] ? name : "tool");
+    line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
+    line->tool_args = JsonDup(args_json ? args_json : "");
 }
 
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error)
 {
-    (void)agent; (void)output; (void)is_error;
+    PicoMessage *message;
+    int t;
+
+    if (!agent || agent->message_count <= 0)
+    {
+        return;
+    }
+    message = &agent->messages[agent->message_count - 1];
+    for (t = message->trace_count - 1; t >= 0; t--)
+    {
+        if (message->trace[t].is_tool)
+        {
+            free(message->trace[t].tool_output);
+            message->trace[t].tool_output = JsonDup(output ? output : "");
+            message->trace[t].tool_error = is_error;
+            return;
+        }
+    }
 }
 
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                                      const char *output, bool is_error)
 {
-    (void)agent; (void)call_id; (void)output; (void)is_error;
+    int i;
+
+    if (!agent || !call_id || !call_id[0])
+    {
+        return;
+    }
+    for (i = agent->message_count - 1; i >= 0; i--)
+    {
+        PicoMessage *message = &agent->messages[i];
+        int t;
+        for (t = message->trace_count - 1; t >= 0; t--)
+        {
+            PicoTraceLine *line = &message->trace[t];
+            if (line->is_tool && line->tool_call_id && strcmp(line->tool_call_id, call_id) == 0)
+            {
+                free(line->tool_output);
+                line->tool_output = JsonDup(output ? output : "");
+                line->tool_error = is_error;
+                return;
+            }
+        }
+    }
 }
 
 void PicoAgent_ClearMessages(PicoAgent *agent)
 {
-    (void)agent;
+    if (!agent)
+    {
+        return;
+    }
+    PicoMessages_Free(agent->messages, agent->message_count);
+    agent->messages = NULL;
+    agent->message_count = 0;
+    agent->message_capacity = 0;
 }
 
 void PicoMessages_Free(PicoMessage *messages, int count)
@@ -380,8 +551,8 @@ static int TestThinkingRoundTrip(void)
     snprintf(app.workspace, sizeof(app.workspace), "/workspace");
     const char *sig =
         "{\"type\":\"reasoning\",\"id\":\"rs_test\",\"encrypted_content\":\"blob\"}";
-    PicoSession_LogAssistant(&app, &agent, "visible", "think-hard", sig, NULL);
-    PicoSession_LogToolCall(&app, &agent, "call-1", "sh", "{}", "fc_abc");
+    PicoSession_LogAssistant(&app, &agent, 1, "visible", "think-hard", sig, NULL);
+    PicoSession_LogToolCall(&app, &agent, 1, "call-1", "sh", "{}", "fc_abc");
     if (!agent.session_path[0])
     {
         return Fail("thinking log did not create a session file");
@@ -418,7 +589,7 @@ static int TestThinkingRoundTrip(void)
     memset(&signature_only, 0, sizeof(signature_only));
     signature_only.persistence = PICO_SESSION_DURABLE;
     snprintf(signature_only.model, sizeof(signature_only.model), "saved-model");
-    PicoSession_LogAssistant(&app, &signature_only, "", NULL, sig, NULL);
+    PicoSession_LogAssistant(&app, &signature_only, 1, "", NULL, sig, NULL);
     if (!signature_only.session_path[0])
     {
         return Fail("signature-only assistant did not create a session file");
@@ -435,6 +606,97 @@ static int TestThinkingRoundTrip(void)
     return signature_restored ? 0 : Fail("session replay dropped a signature-only assistant event");
 }
 
+static bool TranscriptMatchesLiveGroups(const PicoMessage *messages, int count)
+{
+    return count == 4 &&
+           messages[0].role == PICO_ROLE_USER &&
+           messages[0].source && strcmp(messages[0].source, "task") == 0 &&
+           messages[1].role == PICO_ROLE_ASSISTANT &&
+           messages[1].source && strcmp(messages[1].source, "firstsecondafter") == 0 &&
+           messages[1].trace_count == 3 &&
+           !messages[1].trace[0].is_tool &&
+           messages[1].trace[0].text && strcmp(messages[1].trace[0].text, "think-1") == 0 &&
+           messages[1].trace[1].is_tool &&
+           messages[1].trace[1].tool_call_id &&
+           strcmp(messages[1].trace[1].tool_call_id, "call-1") == 0 &&
+           messages[1].trace[1].tool_output &&
+           strcmp(messages[1].trace[1].tool_output, "ok-1") == 0 &&
+           !messages[1].trace[2].is_tool &&
+           messages[1].trace[2].text &&
+           strcmp(messages[1].trace[2].text, "think-after-tool") == 0 &&
+           messages[2].role == PICO_ROLE_ASSISTANT &&
+           messages[2].source && strcmp(messages[2].source, "third") == 0 &&
+           messages[2].trace_count == 1 &&
+           !messages[2].trace[0].is_tool &&
+           messages[2].trace[0].text && strcmp(messages[2].trace[0].text, "think-2") == 0 &&
+           messages[3].role == PICO_ROLE_ASSISTANT &&
+           messages[3].source && strcmp(messages[3].source, "fourth") == 0 &&
+           messages[3].trace_count == 2 &&
+           messages[3].trace[0].is_tool &&
+           messages[3].trace[0].tool_call_id &&
+           strcmp(messages[3].trace[0].tool_call_id, "call-2") == 0 &&
+           messages[3].trace[0].tool_output &&
+           strcmp(messages[3].trace[0].tool_output, "ok-2") == 0 &&
+           !messages[3].trace[1].is_tool &&
+           messages[3].trace[1].text && strcmp(messages[3].trace[1].text, "think-3") == 0;
+}
+
+static int TestTranscriptMessageGroups(void)
+{
+    PicoApp writer;
+    PicoAgent writer_agent;
+    PicoApp reader;
+    PicoAgent reader_agent;
+    PicoMessage *loaded = NULL;
+    int loaded_n = 0;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
+    snprintf(writer.workspace, sizeof(writer.workspace), "/workspace");
+    PicoSession_LogUser(&writer, &writer_agent, "task", "task", NULL);
+    PicoSession_LogAssistant(&writer, &writer_agent, 1, "first", "think-1", NULL, NULL);
+    PicoSession_LogAssistant(&writer, &writer_agent, 1, "second", NULL, NULL, NULL);
+    PicoSession_LogToolCall(&writer, &writer_agent, 1, "call-1", "sh",
+                            "{\"command\":\"true\"}", NULL);
+    PicoSession_LogToolResult(&writer, &writer_agent, "call-1", "sh", "ok-1", false, NULL);
+    PicoSession_LogAssistant(&writer, &writer_agent, 1, "after", "think-after-tool", NULL, NULL);
+    PicoSession_LogAssistant(&writer, &writer_agent, 2, "third", "think-2", NULL, NULL);
+    PicoSession_LogToolCall(&writer, &writer_agent, 3, "call-2", "sh",
+                            "{\"command\":\"true\"}", NULL);
+    PicoSession_LogToolResult(&writer, &writer_agent, "call-2", "sh", "ok-2", false, NULL);
+    PicoSession_LogAssistant(&writer, &writer_agent, 3, "fourth", "think-3", NULL, NULL);
+    if (!writer_agent.session_path[0])
+    {
+        return Fail("message-group log did not create a session file");
+    }
+
+    if (PicoSession_LoadTranscript(&writer, writer_agent.session_id, &loaded, &loaded_n) != 0 ||
+        !TranscriptMatchesLiveGroups(loaded, loaded_n))
+    {
+        PicoMessages_Free(loaded, loaded_n);
+        unlink(writer_agent.session_path);
+        return Fail("read-only transcript did not preserve explicit assistant message groups");
+    }
+    PicoMessages_Free(loaded, loaded_n);
+
+    memset(&reader, 0, sizeof(reader));
+    memset(&reader_agent, 0, sizeof(reader_agent));
+    reader_agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, writer_agent.session_path);
+    if (!TranscriptMatchesLiveGroups(reader_agent.messages, reader_agent.message_count))
+    {
+        PicoAgent_ClearMessages(&reader_agent);
+        unlink(writer_agent.session_path);
+        return Fail("session replay did not preserve explicit assistant message groups");
+    }
+    PicoAgent_ClearMessages(&reader_agent);
+    unlink(writer_agent.session_path);
+    return 0;
+}
+
 static int TestPartsReplay(void)
 {
     PicoApp app;
@@ -446,7 +708,7 @@ static int TestPartsReplay(void)
     snprintf(app.workspace, sizeof(app.workspace), "/workspace");
     const char *parts =
         "[{\"type\":\"refusal\",\"text\":\"nope\"},{\"type\":\"image\",\"path\":\"/tmp/pic.png\"}]";
-    PicoSession_LogAssistant(&app, &agent, "nope", NULL, NULL, parts);
+    PicoSession_LogAssistant(&app, &agent, 1, "nope", NULL, NULL, parts);
     if (!agent.session_path[0])
     {
         return Fail("parts log did not create a session file");
@@ -484,7 +746,7 @@ int main(void)
     snprintf(writer.settings.model, sizeof(writer.settings.model), "default-model");
     PicoSession_LogUsage(&writer, &writer_agent, 100, 20);
     PicoSession_LogUsage(&writer, &writer_agent, 200, 150);
-    PicoSession_LogAssistant(&writer, &writer_agent, "assistant response", NULL, NULL, NULL);
+    PicoSession_LogAssistant(&writer, &writer_agent, 0, "assistant response", NULL, NULL, NULL);
     PicoSession_LogCompaction(&writer, &writer_agent, "brief", 200);
     PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
     PicoSession_LogToolResult(&writer, &writer_agent, "state-2", "state_test", "failed", true, "{\"value\":8}");
@@ -496,11 +758,11 @@ int main(void)
 
     size_t file_len = 0;
     char *file = Pico_ReadFile(writer_agent.session_path, &file_len);
-    if (!file || !strstr(file, "\"version\":3") || !strstr(file, "\"kind\":\"normal\"") ||
+    if (!file || !strstr(file, "\"version\":4") || !strstr(file, "\"kind\":\"normal\"") ||
         !strstr(file, "\"type\":\"usage\"") || strstr(file, "\"usage\":{"))
     {
         free(file);
-        return Fail("session schema did not use version 3 headers and dedicated usage events");
+        return Fail("session schema did not use version 4 headers and dedicated usage events");
     }
     free(file);
 
@@ -513,15 +775,17 @@ int main(void)
     snprintf(child_agent.purpose, sizeof(child_agent.purpose), "Review carefully");
     snprintf(child_agent.parent_session_id, sizeof(child_agent.parent_session_id), "parent-session");
     PicoSession_LogUser(&writer, &child_agent, "delegated task", "delegated task", NULL);
-    PicoSession_LogAssistant(&writer, &child_agent, "child findings", NULL, NULL, NULL);
-    PicoSession_LogToolCall(&writer, &child_agent, "child-call-1", "subagent", "{\"task\":\"nested\"}", NULL);
-    PicoSession_LogToolCall(&writer, &child_agent, "child-call-2", "sh", "{\"command\":\"true\"}", NULL);
+    PicoSession_LogAssistant(&writer, &child_agent, 1, "child findings", NULL, NULL, NULL);
+    PicoSession_LogToolCall(&writer, &child_agent, 1, "child-call-1", "subagent",
+                            "{\"task\":\"nested\"}", NULL);
+    PicoSession_LogToolCall(&writer, &child_agent, 1, "child-call-2", "sh",
+                            "{\"command\":\"true\"}", NULL);
     PicoSession_LogToolResult(&writer, &child_agent, "child-call-1", "subagent",
                               "{\"session_id\":\"nested-child\"}", false, NULL);
     PicoSession_LogToolResult(&writer, &child_agent, "child-call-2", "sh", "ok", false, NULL);
     PicoSessionHeader child_header;
     if (!child_agent.session_path[0] || PicoSession_ReadHeader(child_agent.session_path, &child_header) != 0 ||
-        child_header.version != 3 || child_header.kind != PICO_AGENT_SUBAGENT ||
+        child_header.version != 4 || child_header.kind != PICO_AGENT_SUBAGENT ||
         strcmp(child_header.profile, "review") != 0 ||
         strcmp(child_header.initial_purpose, "Review carefully") != 0 ||
         strcmp(child_header.parent_session_id, "parent-session") != 0)
@@ -698,10 +962,10 @@ int main(void)
     char bad_kind_path[4096];
     snprintf(bad_kind_path, sizeof(bad_kind_path), "%s/bad-kind.jsonl", temp);
     if (!AppendRaw(bad_kind_path,
-                   "{\"type\":\"session\",\"version\":3,\"id\":\"bad\","
+                   "{\"type\":\"session\",\"version\":4,\"id\":\"bad\","
                    "\"kind\":\"unknown\",\"model\":\"saved-model\"}"))
     {
-        return Fail("could not create invalid version 3 header");
+        return Fail("could not create invalid version 4 header");
     }
     PicoSessionHeader invalid_header;
     PicoAgent bad_kind_agent;
@@ -709,13 +973,52 @@ int main(void)
     if (PicoSession_ReadHeader(bad_kind_path, &invalid_header) == 0 ||
         PicoSession_Replay(&opened, &bad_kind_agent, bad_kind_path, false) == 0)
     {
-        return Fail("version 3 session accepted an unknown agent kind");
+        return Fail("version 4 session accepted an unknown agent kind");
+    }
+
+    char missing_group_path[4096];
+    snprintf(missing_group_path, sizeof(missing_group_path), "%s/missing-group.jsonl", temp);
+    if (!AppendRaw(missing_group_path,
+                   "{\"type\":\"session\",\"version\":4,\"id\":\"missing-group\","
+                   "\"kind\":\"normal\",\"model\":\"saved-model\"}") ||
+        !AppendRaw(missing_group_path,
+                   "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"lost\"}") ||
+        PicoSession_ReadHeader(missing_group_path, &invalid_header) != 0 ||
+        PicoSession_Replay(&opened, &bad_kind_agent, missing_group_path, false) == 0)
+    {
+        return Fail("version 4 session accepted an assistant event without message_group");
+    }
+
+    char typed_group_path[4096];
+    snprintf(typed_group_path, sizeof(typed_group_path), "%s/typed-group.jsonl", temp);
+    if (!AppendRaw(typed_group_path,
+                   "{\"type\":\"session\",\"version\":4,\"id\":\"typed-group\","
+                   "\"kind\":\"normal\",\"model\":\"saved-model\"}") ||
+        !AppendRaw(typed_group_path,
+                   "{\"type\":\"message\",\"role\":\"assistant\","
+                   "\"message_group\":\"1\",\"content\":\"lost\"}") ||
+        PicoSession_Replay(&opened, &bad_kind_agent, typed_group_path, false) == 0)
+    {
+        return Fail("version 4 session accepted a non-integer assistant message_group");
+    }
+
+    char typed_tool_group_path[4096];
+    snprintf(typed_tool_group_path, sizeof(typed_tool_group_path), "%s/typed-tool-group.jsonl", temp);
+    if (!AppendRaw(typed_tool_group_path,
+                   "{\"type\":\"session\",\"version\":4,\"id\":\"typed-tool-group\","
+                   "\"kind\":\"normal\",\"model\":\"saved-model\"}") ||
+        !AppendRaw(typed_tool_group_path,
+                   "{\"type\":\"tool_call\",\"message_group\":true,"
+                   "\"call_id\":\"call\",\"name\":\"sh\",\"arguments\":\"{}\"}") ||
+        PicoSession_Replay(&opened, &bad_kind_agent, typed_tool_group_path, false) == 0)
+    {
+        return Fail("version 4 session accepted a non-integer tool message_group");
     }
 
     char incomplete_child_path[4096];
     snprintf(incomplete_child_path, sizeof(incomplete_child_path), "%s/incomplete-child.jsonl", temp);
     if (!AppendRaw(incomplete_child_path,
-                   "{\"type\":\"session\",\"version\":3,\"id\":\"bad-child\","
+                   "{\"type\":\"session\",\"version\":4,\"id\":\"bad-child\","
                    "\"kind\":\"subagent\",\"profile\":\"review\","
                    "\"model\":\"saved-model\"}") ||
         PicoSession_ReadHeader(incomplete_child_path, &invalid_header) == 0)
@@ -739,10 +1042,14 @@ int main(void)
 
     unlink(empty_path);
     unlink(bad_kind_path);
+    unlink(missing_group_path);
+    unlink(typed_group_path);
+    unlink(typed_tool_group_path);
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0)
+    if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
+        TestTranscriptMessageGroups() != 0)
     {
         return 1;
     }

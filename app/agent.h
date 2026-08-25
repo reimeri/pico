@@ -56,6 +56,8 @@ void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, con
 void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args);
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error);
+void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
+                                   const char *args);
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                                      const char *output, bool is_error);
 void PicoAgent_ClearMessages(PicoAgent *agent);

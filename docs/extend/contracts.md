@@ -83,7 +83,7 @@ The model catalog in `PicoApp` is immutable while agents run. Each agent owns co
 
 ## Sessions and delegation
 
-Session JSONL schema version 3 requires a `kind` in every header. A subagent header also requires durable `profile` and `initial_purpose` metadata and may include `parent_session_id`. Pico does not replay older schemas. One manager reservation owns each open session path, and failed replay releases the reservation without publishing an agent.
+Session JSONL schema version 4 requires a `kind` in every header. A subagent header also requires durable `profile` and `initial_purpose` metadata and may include `parent_session_id`. Every assistant-message and tool-call event carries a non-negative `message_group`; consecutive events with the same group restore into the same assistant bubble, while a changed group starts a new bubble. This preserves the live transcript independently of provider item boundaries. Pico does not replay older schemas. One manager reservation owns each open session path, and failed replay releases the reservation without publishing an agent.
 
 Fresh named delegation never uses ambient `resume_last`. Continuation resolves an exact session ID, requires the stored and requested profile names to match, and reapplies current profile purpose/model/effort/tools after replay. Only a session whose header and delegated user event were durably written is returned as `resumable`; write failure preserves diagnostic identity but does not return a reusable ID in the delegation result.
 

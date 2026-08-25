@@ -32,8 +32,8 @@ int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
                         char *path, size_t path_cap);
 int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out);
 /* Read a durable session's visible transcript without reserving the file.
- * Messages have source/tool strings; markdown documents are empty until
- * PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */
+ * Messages have source, reasoning, and tool strings; markdown documents are
+ * empty until PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */
 int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
                                PicoMessage **out, int *out_count);
 /* Replay a fully validated file into an unpublished/reserved agent. */
@@ -48,12 +48,14 @@ PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent,
 PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens);
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
-                                                const char *content, const char *thinking,
+                                                int message_group, const char *content,
+                                                const char *thinking,
                                                 const char *thinking_signature,
                                                 const char *parts_json);
 PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
-                                               const char *call_id, const char *name,
-                                               const char *args, const char *item_id);
+                                               int message_group, const char *call_id,
+                                               const char *name, const char *args,
+                                               const char *item_id);
 PicoSessionWriteResult PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent,
                                                  const char *call_id, const char *name,
                                                  const char *output, bool is_error,

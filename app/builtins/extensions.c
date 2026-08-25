@@ -97,6 +97,10 @@ static void RenderRow(int index, const PicoExtInfo *info)
     {
         bg = (Clay_Color){54, 54, 66, 255};
     }
+    if (!info->enabled)
+    {
+        bg.a = 150;
+    }
 
     CLAY(CLAY_IDI("ExtModalRow", index),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,

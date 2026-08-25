@@ -7,11 +7,14 @@
 
 #include "clay/clay.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define NOTIFY_TTL 5.0f
+#define NOTIFY_TOAST_RADIUS 8.0f
+#define NOTIFY_TIMER_H 3.0f
 #define INVALID_ASK_ANSWER "{\"error\":\"invalid ask payload; fix it and try again\"}"
 
 static char *g_notify;
@@ -237,6 +240,25 @@ static void RenderError(PicoApp *app)
     }
 }
 
+static Color ClayToRay(Clay_Color c)
+{
+    return (Color){(unsigned char)c.r, (unsigned char)c.g, (unsigned char)c.b, (unsigned char)c.a};
+}
+
+static float NotifyRemaining(void)
+{
+    float remaining = g_notify_ttl / NOTIFY_TTL;
+    if (remaining < 0.0f)
+    {
+        return 0.0f;
+    }
+    if (remaining > 1.0f)
+    {
+        return 1.0f;
+    }
+    return remaining;
+}
+
 static void RenderToast(PicoApp *app)
 {
     if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
@@ -252,15 +274,24 @@ static void RenderToast(PicoApp *app)
                                         .parent = CLAY_ATTACH_POINT_CENTER_TOP},
                        .offset = {.y = y}},
           .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .padding = {16, 16, 12, 12},
                      .sizing = {.width = CLAY_SIZING_FIT(200, 720)}},
           .backgroundColor = COLOR_CONTENT_BG,
-          .cornerRadius = CLAY_CORNER_RADIUS(8)})
+          .cornerRadius = CLAY_CORNER_RADIUS(NOTIFY_TOAST_RADIUS)})
     {
-        CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                          .fontSize = 14,
-                                          .textColor = COLOR_TEXT,
-                                          .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+        CLAY(CLAY_ID("NotifyToastBody"),
+             {.layout = {.padding = {16, 16, 12, 12},
+                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                              .fontSize = 14,
+                                              .textColor = COLOR_TEXT,
+                                              .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+        }
+        CLAY(CLAY_ID("NotifyToastTimer"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                    .height = CLAY_SIZING_FIXED(NOTIFY_TIMER_H)}}})
+        {
+        }
     }
 }
 
@@ -352,10 +383,54 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
+static void OverlayAfterRender(PicoApp *app, const PicoHookEvent *event)
+{
+    (void)app;
+    (void)event;
+    if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
+    {
+        return;
+    }
+    Clay_ElementData toast = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("NotifyToast")));
+    if (!toast.found || toast.boundingBox.width <= 0.0f || toast.boundingBox.height <= 0.0f)
+    {
+        return;
+    }
+    Clay_BoundingBox b = toast.boundingBox;
+    float remaining = NotifyRemaining();
+    float min_dim = b.width < b.height ? b.width : b.height;
+    float roundness = min_dim > 0.0f ? (NOTIFY_TOAST_RADIUS * 2.0f) / min_dim : 0.0f;
+    Rectangle rec = {b.x, b.y, b.width, b.height};
+    int x0 = (int)roundf(b.x);
+    int y1 = (int)roundf(b.y + b.height);
+    int x1 = (int)roundf(b.x + b.width);
+    int bar = (int)roundf(NOTIFY_TIMER_H);
+    if (bar < 1)
+    {
+        bar = 1;
+    }
+    int width = x1 - x0;
+    if (width <= 0)
+    {
+        return;
+    }
+    BeginScissorMode(x0, y1 - bar, width, bar);
+    DrawRectangleRounded(rec, roundness, 8, ClayToRay(COLOR_HR));
+    EndScissorMode();
+    int fill = (int)roundf((float)width * remaining);
+    if (fill > 0)
+    {
+        BeginScissorMode(x0, y1 - bar, fill, bar);
+        DrawRectangleRounded(rec, roundness, 8, ClayToRay(COLOR_LINK));
+        EndScissorMode();
+    }
+}
+
 static void OverlayInit(PicoApp *app)
 {
     pico_add_view(app, PICO_SLOT_OVERLAY, 0, PicoOverlay_Render);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, OverlayAfterLayout);
+    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, OverlayAfterRender);
 }
 
 PicoExt pico_ext_overlay(void)

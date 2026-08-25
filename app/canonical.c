@@ -614,6 +614,27 @@ char *pico_canonical_user_text(const char *text)
     return pico_canonical_user_json(&part, 1);
 }
 
+char *pico_canonical_context_json(const PicoLlmPart *parts, int n)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"context\",\"parts\":");
+    char *parts_json = pico_canonical_parts_json(parts, n);
+    JsonBuf_Puts(&b, parts_json ? parts_json : "[]");
+    free(parts_json);
+    JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
+}
+
+char *pico_canonical_context_text(const char *text)
+{
+    PicoLlmPart part;
+    memset(&part, 0, sizeof(part));
+    part.kind = PICO_LLM_PART_TEXT;
+    part.text = (char *)(text ? text : "");
+    return pico_canonical_context_json(&part, 1);
+}
+
 char *pico_canonical_assistant_json(const PicoLlmPart *parts, int n, const char *thinking,
                                     const char *signature)
 {

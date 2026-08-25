@@ -1094,7 +1094,7 @@ static const char *FirstEnv(const char *a, const char *b)
 
 static void OpenAiInit(PicoApp *app)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "openai", .stream = OpenAiStream});
+    pico_add_provider(app, &(PicoProvider){.name = "openai", .stream = OpenAiStream, .map_context = true});
     pico_add_auth(app, &(PicoAuth){.provider = "openai",
                                    .help = "ChatGPT device-code or API key",
                                    .verbs = "key cancel",

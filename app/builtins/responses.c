@@ -218,6 +218,16 @@ static char *MapPicoItem(const char *json, const char *provider)
         }
         pico_canonical_free_parts(parts, n);
     }
+    else if (type && strcmp(type, "context") == 0)
+    {
+        PicoLlmPart *parts = NULL;
+        int n = 0;
+        pico_canonical_parse_parts(&doc, 0, &parts, &n);
+        char *plain = pico_canonical_plain_text(parts, n);
+        out = BuildResponsesMessage("developer", plain, false);
+        free(plain);
+        pico_canonical_free_parts(parts, n);
+    }
     else if (type && strcmp(type, "assistant") == 0)
     {
         PicoLlmPart *parts = NULL;

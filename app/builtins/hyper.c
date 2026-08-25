@@ -1030,7 +1030,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
 
 static void HyperInit(PicoApp *app)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "hyper", .stream = HyperStream});
+    pico_add_provider(app, &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true});
     pico_add_auth(app, &(PicoAuth){.provider = "hyper",
                                    .help = "Hyper device-code or API key",
                                    .verbs = "key cancel",

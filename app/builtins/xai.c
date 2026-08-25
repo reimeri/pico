@@ -892,7 +892,7 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
 
 static void XaiInit(PicoApp *app)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "xai", .stream = XaiStream});
+    pico_add_provider(app, &(PicoProvider){.name = "xai", .stream = XaiStream, .map_context = true});
     pico_add_auth(app, &(PicoAuth){.provider = "xai",
                                    .help = "xAI device-code or API key",
                                    .verbs = "key cancel",

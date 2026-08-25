@@ -1,6 +1,6 @@
 # Request context
 
-Request-context hooks append low-priority, non-persistent text to an LLM request without changing system instructions or saved agent history.
+Request-context hooks append app-authored, request-only text to an LLM request without changing system instructions or saved agent history.
 
 Register on the main thread in `init` (full file: [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c)):
 
@@ -25,7 +25,9 @@ static void Init(PicoApp *app)
 }
 ```
 
-`extra_context` is malloc'd text. Pico wraps it as a user-context input item, appends it only to the copied input for that request, and frees it. It is not added to the live history, session JSONL, compaction summary, or system instructions.
+`extra_context` is malloc'd text. Pico wraps it as a canonical `context` input item, appends it only to the copied input for that request, and frees it. It is not a user utterance, is not merged into `instructions`, and is not added to the live history, session JSONL, or compaction summary.
+
+Providers must map `type: "context"` to a non-user role (`PicoProvider.map_context`). Builtin Responses uses `developer`; builtin Completions uses a trailing `system` message. Pico fails the turn if `input_json` contains a context item and the provider did not set `map_context`.
 
 ## Event
 
@@ -45,13 +47,14 @@ History items use Pico's provider-neutral JSON forms:
 {"type":"assistant","parts":[{"type":"text","text":"..."},{"type":"refusal","text":"..."}],"thinking":"...","thinking_signature":"..."}
 {"type":"tool_call","call_id":"...","name":"...","arguments":"...","item_id":"..."}
 {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false}
+{"type":"context","parts":[{"type":"text","text":"..."}]}
 ```
 
-`thinking`, `thinking_signature`, and `item_id` are optional. User and assistant content is an ordered `parts` array (`text`, `refusal`, `image`, `audio`). Image/audio parts reference a `path` (optional `mime` / `url`); they never store bytes. Provider-native state appears only after a provider projects it into these canonical fields. Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
+`context` items are request-only. Pico appends them after wrapping `extra_context`; they never appear in the hook's `history_json`. `thinking`, `thinking_signature`, and `item_id` are optional. User and assistant content is an ordered `parts` array (`text`, `refusal`, `image`, `audio`). Image/audio parts reference a `path` (optional `mime` / `url`); they never store bytes. Provider-native state appears only after a provider projects it into these canonical fields. Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
 
 ## Choosing the right hook
 
-- Use a context hook for dynamic reminders or session state that should be lower priority and billed only for the current request.
+- Use a context hook for dynamic reminders or session state that should be billed only for the current request and must not look like a user message.
 - Use `pico_add_llm_hook` when changing system instructions or filtering tools.
 - Use normal user/assistant history when content must persist and replay.
 

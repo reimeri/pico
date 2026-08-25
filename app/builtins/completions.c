@@ -378,6 +378,23 @@ char *pico_completions_build_request(const PicoLlmTurn *turn, const PicoCompleti
             wrote++;
             pico_canonical_free_parts(parts, n);
         }
+        else if (strcmp(type, "context") == 0)
+        {
+            PicoLlmPart *parts = NULL;
+            int n = 0;
+            pico_canonical_parse_parts(&doc, 0, &parts, &n);
+            char *plain = pico_canonical_plain_text(parts, n);
+            if (wrote)
+            {
+                JsonBuf_Putc(&b, ',');
+            }
+            JsonBuf_Puts(&b, "{\"role\":\"system\",\"content\":");
+            JsonBuf_String(&b, plain ? plain : "");
+            JsonBuf_Putc(&b, '}');
+            wrote++;
+            free(plain);
+            pico_canonical_free_parts(parts, n);
+        }
         else if (strcmp(type, "assistant") == 0)
         {
             PicoLlmPart *parts = NULL;

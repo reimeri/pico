@@ -12,6 +12,8 @@ bool pico_canonical_normalize_user_parts(const char *json, char **canonical_out)
 char *pico_canonical_parts_json(const PicoLlmPart *parts, int n);
 char *pico_canonical_user_json(const PicoLlmPart *parts, int n);
 char *pico_canonical_user_text(const char *text);
+char *pico_canonical_context_json(const PicoLlmPart *parts, int n);
+char *pico_canonical_context_text(const char *text);
 char *pico_canonical_assistant_json(const PicoLlmPart *parts, int n, const char *thinking,
                                     const char *signature);
 char *pico_canonical_tool_call_json(const char *call_id, const char *name, const char *arguments,

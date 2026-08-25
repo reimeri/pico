@@ -134,6 +134,53 @@ static void TestRequestConversion(void)
     free(body);
 }
 
+static void TestContextItemConversion(void)
+{
+    PicoLlmPart assistant_part;
+    memset(&assistant_part, 0, sizeof(assistant_part));
+    assistant_part.kind = PICO_LLM_PART_TEXT;
+    assistant_part.text = "hi";
+    char *user = pico_canonical_user_text("hello");
+    char *assistant = pico_canonical_assistant_json(&assistant_part, 1, NULL, NULL);
+    char *context = pico_canonical_context_text("ephemeral-reminder");
+    const char *input[] = {user, assistant, context};
+    PicoLlmTurn turn = {
+        .model = "kimi",
+        .instructions = "be brief",
+        .effort = "none",
+        .input_json = input,
+        .input_count = 3,
+    };
+    PicoCompletionsBuildOpts opts = HyperOpts(false);
+    char *body = pico_completions_build_request(&turn, &opts);
+    Check(body && JsonValidSyntax(body, strlen(body)), "Completions context request is valid JSON");
+    JsonDoc doc;
+    int parsed = body ? JsonParse(&doc, body, strlen(body)) : -1;
+    Check(parsed == 0, "Completions context request parses");
+    if (parsed == 0)
+    {
+        int messages = JsonObjGet(&doc, 0, "messages");
+        int n = JsonIsArray(&doc, messages) ? JsonArrayLen(&doc, messages) : 0;
+        int first = n > 0 ? JsonArrayAt(&doc, messages, 0) : -1;
+        int last = n > 0 ? JsonArrayAt(&doc, messages, n - 1) : -1;
+        int user_msg = n > 1 ? JsonArrayAt(&doc, messages, 1) : -1;
+        bool ok = n == 4 && JsonEq(&doc, JsonObjGet(&doc, first, "role"), "system") &&
+                  JsonEq(&doc, JsonObjGet(&doc, first, "content"), "be brief") &&
+                  JsonEq(&doc, JsonObjGet(&doc, user_msg, "role"), "user") &&
+                  JsonEq(&doc, JsonObjGet(&doc, user_msg, "content"), "hello") &&
+                  JsonEq(&doc, JsonObjGet(&doc, last, "role"), "system") &&
+                  JsonEq(&doc, JsonObjGet(&doc, last, "content"), "ephemeral-reminder") &&
+                  !JsonEq(&doc, JsonObjGet(&doc, last, "role"), "user") &&
+                  !JsonEq(&doc, JsonObjGet(&doc, last, "role"), "developer");
+        Check(ok, "context item is a trailing system message after history");
+        JsonFree(&doc);
+    }
+    free(body);
+    free(user);
+    free(assistant);
+    free(context);
+}
+
 static void TestImageRequestConversion(void)
 {
     char path[256];
@@ -492,6 +539,7 @@ int main(void)
 {
     TestUrls();
     TestRequestConversion();
+    TestContextItemConversion();
     TestImageRequestConversion();
     TestRefusalRequestReplay();
     TestEncryptedSignatureDropped();

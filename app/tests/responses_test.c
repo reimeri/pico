@@ -1,5 +1,6 @@
 #include "builtins/hyper_auth.h"
 #include "builtins/responses.h"
+#include "canonical.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +68,58 @@ static void TestRequestOptions(void)
     CheckContains(body, "reasoning.encrypted_content", true, "OpenAI includes encrypted reasoning");
     CheckContains(body, "\"summary\":\"auto\"", true, "OpenAI requests reasoning summaries");
     free(body);
+}
+
+static void TestContextItemConversion(void)
+{
+    PicoLlmPart assistant_part;
+    memset(&assistant_part, 0, sizeof(assistant_part));
+    assistant_part.kind = PICO_LLM_PART_TEXT;
+    assistant_part.text = "hi";
+    char *user = pico_canonical_user_text("hello");
+    char *assistant = pico_canonical_assistant_json(&assistant_part, 1, NULL, NULL);
+    char *context = pico_canonical_context_text("ephemeral-reminder");
+    const char *input[] = {user, assistant, context};
+    PicoLlmTurn turn = {
+        .model = "model",
+        .instructions = "instructions",
+        .cache_key = "cache",
+        .input_json = input,
+        .input_count = 3,
+    };
+    PicoResponsesBuildOpts openai = {
+        .provider = "openai",
+        .store_false = true,
+    };
+    char *body = pico_responses_build_request(&turn, &openai);
+    Check(body && JsonValidSyntax(body, strlen(body)), "Responses context request is valid JSON");
+    JsonDoc doc;
+    int parsed = body ? JsonParse(&doc, body, strlen(body)) : -1;
+    Check(parsed == 0, "Responses context request parses");
+    if (parsed == 0)
+    {
+        int arr = JsonObjGet(&doc, 0, "input");
+        int n = JsonIsArray(&doc, arr) ? JsonArrayLen(&doc, arr) : 0;
+        int last = n > 0 ? JsonArrayAt(&doc, arr, n - 1) : -1;
+        int first = n > 0 ? JsonArrayAt(&doc, arr, 0) : -1;
+        int content = last >= 0 ? JsonObjGet(&doc, last, "content") : -1;
+        int text_part = JsonIsArray(&doc, content) && JsonArrayLen(&doc, content) > 0
+                            ? JsonArrayAt(&doc, content, 0)
+                            : -1;
+        char *last_text = text_part >= 0 ? JsonObjStr(&doc, text_part, "text") : NULL;
+        bool ok = n == 3 && JsonEq(&doc, JsonObjGet(&doc, first, "role"), "user") &&
+                  JsonEq(&doc, JsonObjGet(&doc, last, "type"), "message") &&
+                  JsonEq(&doc, JsonObjGet(&doc, last, "role"), "developer") && last_text &&
+                  strcmp(last_text, "ephemeral-reminder") == 0 &&
+                  !JsonEq(&doc, JsonObjGet(&doc, last, "role"), "user");
+        Check(ok, "context item is a trailing developer message, not user");
+        free(last_text);
+        JsonFree(&doc);
+    }
+    free(body);
+    free(user);
+    free(assistant);
+    free(context);
 }
 
 static void TestImageRequestConversion(void)
@@ -377,6 +430,7 @@ static void TestAnnotations(void)
 int main(void)
 {
     TestRequestOptions();
+    TestContextItemConversion();
     TestImageRequestConversion();
     TestReasoningRemoval();
     TestRefreshDecision();

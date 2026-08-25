@@ -1187,11 +1187,35 @@ static void RunContextHooks(PicoApp *app, PicoAgent *agent, bool compact,
     input = next;
     for (int i = 0; i < extra_count; i++)
     {
-        input[base_count + i] = BuildUserItem(extras[i], NULL);
+        input[base_count + i] = pico_canonical_context_text(extras[i]);
         free(extras[i]);
     }
     *input_inout = input;
     *count_inout = base_count + extra_count;
+}
+
+static bool InputHasContextItem(char **input, int count)
+{
+    for (int i = 0; i < count; i++)
+    {
+        if (!input[i] || !input[i][0])
+        {
+            continue;
+        }
+        JsonDoc doc;
+        memset(&doc, 0, sizeof(doc));
+        if (JsonParse(&doc, input[i], strlen(input[i])) != 0)
+        {
+            continue;
+        }
+        bool match = JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "context");
+        JsonFree(&doc);
+        if (match)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_tools)
@@ -1235,6 +1259,22 @@ static bool QueueLlm(PicoApp *app, PicoAgent *agent, bool compact, bool include_
     int tool_count = 0;
     RunLlmHooks(app, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
     RunContextHooks(app, agent, compact, tools, tool_count, &input, &input_count);
+
+    if (InputHasContextItem(input, input_count) && !p->map_context)
+    {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Provider `%s` does not map context input items.",
+                 p->name ? p->name : "?");
+        for (int i = 0; i < input_count; i++)
+        {
+            free(input[i]);
+        }
+        free(input);
+        free(instructions);
+        free(tools);
+        SetErrorState(app, agent, buf);
+        return false;
+    }
 
     if (!m->vision)
     {

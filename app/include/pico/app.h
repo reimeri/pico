@@ -238,7 +238,7 @@ typedef struct PicoContextEvent {
     int history_count;
     const PicoTool *tools; /* final effective catalog for this request */
     int tool_count;
-    char *extra_context; /* optional malloc'd text; Pico appends request-only user context */
+    char *extra_context; /* optional malloc'd text; Pico appends a request-only context item */
 } PicoContextEvent;
 
 typedef void (*PicoContextHookFn)(struct PicoApp *app, PicoAgentId agent_id,
@@ -288,6 +288,16 @@ typedef struct PicoToolAsk {
     const char *request_json;
 } PicoToolAsk;
 
+/* Provider-facing request. input_json is canonical items, oldest first:
+ *   {"type":"user","parts":[{"type":"text","text":"..."},{"type":"image","path":"...","mime":"..."}]}
+ *   {"type":"assistant","parts":[{"type":"text","text":"..."}],"thinking":"...","thinking_signature":"..."}
+ *   {"type":"tool_call","call_id":"...","name":"...","arguments":"...","item_id":"..."}
+ *   {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false}
+ *   {"type":"context","parts":[{"type":"text","text":"..."}]}
+ * `thinking`, `thinking_signature`, and `item_id` are optional. User/assistant
+ * parts may also be `refusal`, `image`, or `audio` (`path`, optional `mime` / `url`).
+ * `context` is request-only extra_context: text parts only, not persisted in
+ * history. Map it to a non-user role. Pico refuses the turn unless map_context. */
 typedef struct PicoLlmTurn {
     const char *model;
     const char *base_url;
@@ -350,6 +360,7 @@ typedef int (*PicoProviderStreamFn)(PicoAgentContext *ctx, const PicoLlmTurn *tu
 typedef struct PicoProvider {
     const char *name;
     PicoProviderStreamFn stream;
+    bool map_context; /* stream maps type:context items to a non-user role */
 } PicoProvider;
 
 typedef void (*PicoAuthLogoutFn)(struct PicoApp *app);

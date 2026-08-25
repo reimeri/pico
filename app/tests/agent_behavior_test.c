@@ -1213,7 +1213,7 @@ static void InitApp(PicoApp *app)
         snprintf(app->models[0].id, sizeof(app->models[0].id), "test-model");
         snprintf(app->models[0].provider, sizeof(app->models[0].provider), "test");
     }
-    pico_add_provider(app, &(PicoProvider){.name = "test", .stream = FakeProvider});
+    pico_add_provider(app, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
     pico_add_tool(app, "ask_test", "test", "{}", AskTool, NULL);
     app->agents = PicoAgentManager_Create(app);
     PicoAgentCreateOptions options = {
@@ -2039,10 +2039,47 @@ static int TestRequestOnlyContext(void)
     bool ok = g_test.context_saw_base_tail &&
               g_test.context_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) && g_test.last_input &&
               CountOccurrences(g_test.last_input, "ephemeral-context") == 1 &&
+              strstr(g_test.last_input, "\"type\":\"context\"") != NULL &&
+              strstr(g_test.last_input,
+                     "{\"type\":\"context\",\"parts\":[{\"type\":\"text\",\"text\":\"ephemeral-context\"}]}") !=
+                  NULL &&
               (!g_test.last_instructions || strstr(g_test.last_instructions, "ephemeral-context") == NULL);
     pthread_mutex_unlock(&g_test.mu);
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "context persisted, entered instructions, or changed the next hook's base history");
+    return ok ? 0 : Fail(name, "context persisted, entered instructions, used a user item, or changed the next hook's base history");
+}
+
+static int SilentProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                          PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+{
+    (void)ctx;
+    (void)turn;
+    (void)cancel;
+    (void)on_delta;
+    (void)user;
+    pico_llm_result_add_text(out, "ok");
+    return PICO_LLM_OK;
+}
+
+static int TestUnmappedContextFails(void)
+{
+    const char *name = "unmapped context items fail the turn";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_provider(&app, &(PicoProvider){.name = "legacy", .stream = SilentProvider});
+    snprintf(app.models[0].provider, sizeof(app.models[0].provider), "legacy");
+    pico_add_context_hook(&app, AddEphemeralContext);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "hello");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "turn did not finish");
+    }
+    bool ok = PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoApp_ActiveAgent(&app)->error &&
+              strstr(PicoApp_ActiveAgent(&app)->error, "does not map context") != NULL;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "provider without map_context dropped context instead of failing");
 }
 
 static int TestLlmExtraInstructions(void)
@@ -2945,6 +2982,7 @@ int main(void)
     failed |= TestInvalidDetailsFailClosed();
     failed |= TestDeniedDetailsDoNotApply();
     failed |= TestRequestOnlyContext();
+    failed |= TestUnmappedContextFails();
     failed |= TestLlmExtraInstructions();
     failed |= TestBuildInstructionsMatchTurn();
     failed |= TestAgentPolicyPrecedesLlmHooks();

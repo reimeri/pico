@@ -1,5 +1,6 @@
 #include "canonical.h"
 #include "json.h"
+#include "pico/app.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 
 char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
                                  char **parts_json_out);
+int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max);
+void pico_files_reset(void);
 
 static int g_failed;
 
@@ -20,13 +23,51 @@ static void Check(bool ok, const char *message)
     }
 }
 
-int main(void)
+static bool WriteFile(const char *path, const char *body)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        return false;
+    }
+    size_t n = strlen(body);
+    bool ok = fwrite(body, 1, n, f) == n;
+    fclose(f);
+    return ok;
+}
+
+static bool QueryHas(PicoApp *app, const char *prefix, const char *label)
+{
+    PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
+    memset(items, 0, sizeof(items));
+    int n = pico_files_complete(app, prefix, items, PICO_MAX_COMPLETE_ITEMS);
+    for (int i = 0; i < n; i++)
+    {
+        if (strcmp(items[i].label, label) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void SetComposer(PicoApp *app, char *buf, size_t cap, const char *text)
+{
+    snprintf(buf, cap, "%s", text ? text : "");
+    app->composer.text = buf;
+    app->composer.length = (int)strlen(buf);
+    app->composer.capacity = (int)cap;
+    app->composer.cursor = app->composer.length;
+}
+
+static void TestMentionImagePart(void)
 {
     char temp[] = "/tmp/pico-files-XXXXXX";
     if (!mkdtemp(temp))
     {
         fprintf(stderr, "FAIL: could not create temp dir\n");
-        return 1;
+        g_failed = 1;
+        return;
     }
     char path[4096];
     snprintf(path, sizeof(path), "%s/pic.png", temp);
@@ -34,7 +75,9 @@ int main(void)
     if (!f)
     {
         fprintf(stderr, "FAIL: could not write image\n");
-        return 1;
+        g_failed = 1;
+        rmdir(temp);
+        return;
     }
     fwrite("PNG\0bin", 1, 7, f);
     fclose(f);
@@ -60,5 +103,82 @@ int main(void)
     free(normalized);
     unlink(path);
     rmdir(temp);
+}
+
+static void TestCompleteRebuildsAtTokenStart(void)
+{
+    char temp[] = "/tmp/pico-files-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        fprintf(stderr, "FAIL: could not create complete temp dir\n");
+        g_failed = 1;
+        return;
+    }
+    char old_path[4096];
+    char new_path[4096];
+    snprintf(old_path, sizeof(old_path), "%s/old.txt", temp);
+    snprintf(new_path, sizeof(new_path), "%s/new.txt", temp);
+    if (!WriteFile(old_path, "old\n"))
+    {
+        fprintf(stderr, "FAIL: could not write old.txt\n");
+        g_failed = 1;
+        rmdir(temp);
+        return;
+    }
+
+    PicoApp *app = (PicoApp *)calloc(1, sizeof(PicoApp));
+    if (!app)
+    {
+        fprintf(stderr, "FAIL: could not allocate PicoApp\n");
+        g_failed = 1;
+        unlink(old_path);
+        rmdir(temp);
+        return;
+    }
+    snprintf(app->workspace, sizeof(app->workspace), "%s", temp);
+    app->completers[0] = (PicoCompleter){
+        .trigger = '@',
+        .bol_only = false,
+        .query = pico_files_complete,
+    };
+    app->completer_count = 1;
+    char composer[64];
+    pico_files_reset();
+    SetComposer(app, composer, sizeof(composer), "@");
+    PicoComplete_Refresh(app);
+    bool saw_old = QueryHas(app, "", "old.txt");
+
+    if (!WriteFile(new_path, "new\n"))
+    {
+        fprintf(stderr, "FAIL: could not write new.txt\n");
+        g_failed = 1;
+        pico_files_reset();
+        free(app);
+        unlink(old_path);
+        rmdir(temp);
+        return;
+    }
+    SetComposer(app, composer, sizeof(composer), "@n");
+    PicoComplete_Refresh(app);
+    bool same_token_misses_new = saw_old && !QueryHas(app, "n", "new.txt");
+    Check(same_token_misses_new,
+          "a file created after @ is typed stays out of the active token snapshot");
+
+    PicoComposer_ReplaceRange(app, 0, app->composer.length, "@");
+    PicoComplete_Refresh(app);
+    Check(QueryHas(app, "", "new.txt"),
+          "replacing a mention at the same offset starts a fresh file snapshot");
+
+    pico_files_reset();
+    free(app);
+    unlink(old_path);
+    unlink(new_path);
+    rmdir(temp);
+}
+
+int main(void)
+{
+    TestMentionImagePart();
+    TestCompleteRebuildsAtTokenStart();
     return g_failed;
 }

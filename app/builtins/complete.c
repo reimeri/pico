@@ -1,6 +1,7 @@
 #include "pico/plugin.h"
 
 #include "clay/clay.h"
+#include "complete_internal.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -14,6 +15,10 @@ typedef struct CompleteState {
     int selected;
     int token_start;
     int token_end;
+    bool token_active;
+    int active_token_start;
+    char active_trigger;
+    uint64_t token_id;
     int count;
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
 } CompleteState;
@@ -30,6 +35,37 @@ void PicoComplete_Close(void)
 bool PicoComplete_IsOpen(void)
 {
     return g_complete.open;
+}
+
+void PicoComplete_BeforeEdit(int from, int to)
+{
+    if (g_complete.token_active && from <= g_complete.active_token_start &&
+        to > g_complete.active_token_start)
+    {
+        g_complete.token_active = false;
+    }
+}
+
+uint64_t PicoComplete_TokenId(void)
+{
+    return g_complete.token_id;
+}
+
+static void TrackToken(int start, char trigger)
+{
+    if (g_complete.token_active && g_complete.active_token_start == start &&
+        g_complete.active_trigger == trigger)
+    {
+        return;
+    }
+    g_complete.token_active = true;
+    g_complete.active_token_start = start;
+    g_complete.active_trigger = trigger;
+    g_complete.token_id++;
+    if (g_complete.token_id == 0)
+    {
+        g_complete.token_id++;
+    }
 }
 
 static void Dismiss(PicoApp *app)
@@ -189,8 +225,10 @@ void PicoComplete_Refresh(PicoApp *app)
     {
         PicoComplete_Close();
         g_complete.dismissed = false;
+        g_complete.token_active = false;
         return;
     }
+    TrackToken(start, app->composer.text[start]);
     if (g_complete.dismissed && start == g_complete.dismissed_start &&
         app->composer.length == g_complete.dismissed_len)
     {

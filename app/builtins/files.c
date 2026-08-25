@@ -3,6 +3,7 @@
 
 #include "pico/plugin.h"
 #include "canonical.h"
+#include "complete_internal.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -23,6 +24,7 @@
 static char **g_files;
 static int g_file_count;
 static bool g_scanned;
+static uint64_t g_token_id;
 
 static bool SkipDirName(const char *name)
 {
@@ -164,11 +166,13 @@ static const char *BaseName(const char *path)
     return slash ? slash + 1 : path;
 }
 
-static int FileQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
+int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
 {
-    if (!g_scanned)
+    uint64_t token_id = PicoComplete_TokenId();
+    if (!g_scanned || token_id != g_token_id)
     {
         FilesRebuild(app);
+        g_token_id = token_id;
     }
     int n = 0;
     for (int pass = 0; pass < 2 && n < max; pass++)
@@ -400,15 +404,20 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
 
 static void FilesInit(PicoApp *app)
 {
-    FilesRebuild(app);
-    pico_add_completer(app, '@', false, FileQuery, NULL);
+    pico_add_completer(app, '@', false, pico_files_complete, NULL);
     pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
+}
+
+void pico_files_reset(void)
+{
+    FilesClear();
+    g_token_id = 0;
 }
 
 static void FilesShutdown(PicoApp *app)
 {
     (void)app;
-    FilesClear();
+    pico_files_reset();
 }
 
 PicoExt pico_ext_files(void)

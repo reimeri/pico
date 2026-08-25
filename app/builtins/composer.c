@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "complete_internal.h"
 #include "text_range.h"
 #include "scrollbar.h"
 
@@ -547,6 +548,7 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     {
         return;
     }
+    PicoComplete_BeforeEdit(from, to);
     memmove(c->text + from, c->text + to, (size_t)(c->length - to));
     c->length -= (to - from);
     c->cursor = from;

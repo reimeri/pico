@@ -1502,11 +1502,13 @@ void PicoApp_Frame(PicoApp *app)
     {
         PicoExts_Toggle();
     }
+#ifdef PICO_CLAY_DEBUG
     if (IsKeyPressed(KEY_F3))
     {
         app->debug_enabled = !app->debug_enabled;
         Clay_SetDebugModeEnabled(app->debug_enabled);
     }
+#endif
     if (IsKeyPressed(KEY_F12))
     {
         TakeScreenshot("pico_screenshot.png");

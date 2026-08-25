@@ -125,6 +125,7 @@ target_include_directories(pico PUBLIC
 
 target_compile_definitions(pico PRIVATE
     $<$<CONFIG:Debug>:PICO_DEBUG_SSE_CAPTURE=1>
+    $<$<CONFIG:Debug>:PICO_CLAY_DEBUG=1>
     "PICO_VERSION=\"${PROJECT_VERSION}\""
     "PICO_CC=\"${CMAKE_C_COMPILER}\""
     "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""

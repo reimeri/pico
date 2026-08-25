@@ -134,6 +134,9 @@ int main(int argc, char **argv)
             Clay_Initialize(memory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()},
                             (Clay_ErrorHandler){Pico_HandleClayErrors, 0});
             Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
+#ifdef PICO_CLAY_DEBUG
+            Clay_SetDebugModeEnabled(app.debug_enabled);
+#endif
             Pico_ClearClayReinit();
         }
         PicoApp_Frame(&app);

@@ -122,6 +122,9 @@ struct PicoAgentRt {
     char *summary;
     size_t summary_len;
     size_t summary_cap;
+    char **summary_parts;
+    int summary_part_count;
+    int summary_part_cap;
     int summary_steps;
     bool summary_new_step;
     char status[128];
@@ -343,6 +346,68 @@ static void BufSet(char **buf, size_t *len, size_t *cap, const char *s, size_t n
     }
 }
 
+static void ClearSummaryParts(PicoAgentRt *rt)
+{
+    if (!rt)
+    {
+        return;
+    }
+    if (rt->summary_parts)
+    {
+        for (int i = 0; i < rt->summary_part_count; i++)
+        {
+            free(rt->summary_parts[i]);
+        }
+        free(rt->summary_parts);
+    }
+    rt->summary_parts = NULL;
+    rt->summary_part_count = 0;
+    rt->summary_part_cap = 0;
+}
+
+static void SummaryPartSet(PicoAgentRt *rt, int index, const char *s, size_t n)
+{
+    if (!rt || index < 0)
+    {
+        return;
+    }
+    if (index >= rt->summary_part_cap)
+    {
+        int cap = rt->summary_part_cap == 0 ? 4 : rt->summary_part_cap;
+        while (cap <= index)
+        {
+            cap *= 2;
+        }
+        char **next = (char **)realloc(rt->summary_parts, (size_t)cap * sizeof(char *));
+        if (!next)
+        {
+            return;
+        }
+        for (int i = rt->summary_part_cap; i < cap; i++)
+        {
+            next[i] = NULL;
+        }
+        rt->summary_parts = next;
+        rt->summary_part_cap = cap;
+    }
+    if (index >= rt->summary_part_count)
+    {
+        rt->summary_part_count = index + 1;
+    }
+    char *copy = (char *)malloc(n + 1);
+    if (!copy)
+    {
+        return;
+    }
+    if (s && n)
+    {
+        memcpy(copy, s, n);
+    }
+    copy[n] = '\0';
+    free(rt->summary_parts[index]);
+    rt->summary_parts[index] = copy;
+}
+
 static void SetActivity(PicoApp *app, PicoAgent *agent, const char *msg)
 {
     snprintf(agent->activity, sizeof(agent->activity), "%s", msg ? msg : "");
@@ -493,6 +558,10 @@ static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
                 rt->summary_new_step = false;
             }
             BufSet(&rt->summary, &rt->summary_len, &rt->summary_cap, s, n);
+            if (rt->summary_steps > 0)
+            {
+                SummaryPartSet(rt, rt->summary_steps - 1, s, n);
+            }
         }
         pthread_mutex_unlock(&rt->mu);
         return;
@@ -933,6 +1002,7 @@ static void *WorkerMain(void *arg)
             rt->summary = NULL;
             rt->summary_len = 0;
             rt->summary_cap = 0;
+            ClearSummaryParts(rt);
             rt->summary_steps = 0;
             rt->summary_new_step = false;
             pthread_mutex_unlock(&rt->mu);
@@ -1330,6 +1400,9 @@ static char *BuildToolResult(const char *call_id, const char *name, const char *
     return pico_canonical_tool_result_json(call_id, name, output, is_error);
 }
 
+static bool Blank(const char *s);
+static int FreezeTrailingThinkMs(PicoMessage *m);
+
 static void AppendMessageText(PicoApp *app, PicoAgent *agent, int idx, const char *s, size_t n)
 {
     if (idx < 0 || idx >= agent->message_count || !s || n == 0)
@@ -1338,6 +1411,10 @@ static void AppendMessageText(PicoApp *app, PicoAgent *agent, int idx, const cha
     }
     PicoMessage *m = &agent->messages[idx];
     size_t old = m->source ? strlen(m->source) : 0;
+    if (old == 0)
+    {
+        FreezeTrailingThinkMs(m);
+    }
     char *next = (char *)realloc(m->source, old + n + 1);
     if (!next)
     {
@@ -1367,6 +1444,10 @@ static void SetMessageText(PicoApp *app, PicoAgent *agent, int idx, const char *
         return;
     }
     PicoMessage *m = &agent->messages[idx];
+    if (!Blank(text))
+    {
+        FreezeTrailingThinkMs(m);
+    }
     free(m->source);
     m->source = Dup(text ? text : "");
     ReparseMessage(app, agent, idx);
@@ -1382,12 +1463,7 @@ static void PopLastMessage(PicoApp *app, PicoAgent *agent)
     free(agent->messages[i].source);
     for (int t = 0; t < agent->messages[i].trace_count; t++)
     {
-        free(agent->messages[i].trace[t].text);
-        free(agent->messages[i].trace[t].tool_name);
-        free(agent->messages[i].trace[t].tool_call_id);
-        free(agent->messages[i].trace[t].tool_args);
-        free(agent->messages[i].trace[t].tool_output);
-        MdDocument_Free(&agent->messages[i].trace[t].doc);
+        PicoTraceLine_Release(&agent->messages[i].trace[t]);
     }
     free(agent->messages[i].trace);
     MdDocument_Free(&agent->messages[i].doc);
@@ -1436,11 +1512,116 @@ static bool MessageEmpty(const PicoAgent *agent, int idx)
     return true;
 }
 
+static PicoTraceLine *TrailingThinkLine(PicoMessage *m)
+{
+    if (!m || m->trace_count <= 0)
+    {
+        return NULL;
+    }
+    PicoTraceLine *line = &m->trace[m->trace_count - 1];
+    return line->is_tool ? NULL : line;
+}
+
+static char *TrailingThinkPartsJson(PicoMessage *m)
+{
+    PicoTraceLine *line = TrailingThinkLine(m);
+    if (!line || line->think_part_count <= 0 || !line->think_parts)
+    {
+        return NULL;
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Putc(&b, '[');
+    for (int i = 0; i < line->think_part_count; i++)
+    {
+        if (i)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_String(&b, line->think_parts[i] ? line->think_parts[i] : "");
+    }
+    JsonBuf_Putc(&b, ']');
+    return JsonBuf_Steal(&b);
+}
+
 static bool HasTrailingThinkTrace(const PicoMessage *m)
 {
     return m && m->trace_count > 0 &&
            !m->trace[m->trace_count - 1].is_tool &&
            !Blank(m->trace[m->trace_count - 1].text);
+}
+
+static double ThinkNow(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+void PicoTraceLine_Release(PicoTraceLine *line)
+{
+    if (!line)
+    {
+        return;
+    }
+    free(line->text);
+    free(line->tool_name);
+    free(line->tool_call_id);
+    free(line->tool_args);
+    free(line->tool_output);
+    if (line->think_parts)
+    {
+        for (int i = 0; i < line->think_part_count; i++)
+        {
+            free(line->think_parts[i]);
+        }
+        free(line->think_parts);
+    }
+    MdDocument_Free(&line->doc);
+    memset(line, 0, sizeof(*line));
+}
+
+static void ThinkLineStart(PicoTraceLine *line)
+{
+    if (!line || line->think_ms > 0 || line->think_t0 > 0.0)
+    {
+        return;
+    }
+    line->think_t0 = ThinkNow();
+    if (line->think_t0 <= 0.0)
+    {
+        line->think_t0 = 0.000000001;
+    }
+}
+
+void PicoTraceLine_FreezeThink(PicoTraceLine *line)
+{
+    if (!line || line->think_ms > 0 || line->think_t0 <= 0.0)
+    {
+        return;
+    }
+    double elapsed = ThinkNow() - line->think_t0;
+    if (elapsed < 0.0)
+    {
+        elapsed = 0.0;
+    }
+    int ms = (int)(elapsed * 1000.0 + 0.5);
+    if (ms < 1)
+    {
+        ms = 1;
+    }
+    line->think_ms = ms;
+}
+
+static int FreezeTrailingThinkMs(PicoMessage *m)
+{
+    PicoTraceLine *line = TrailingThinkLine(m);
+    if (!line)
+    {
+        return 0;
+    }
+    PicoTraceLine_FreezeThink(line);
+    return line->think_ms;
 }
 
 static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
@@ -1479,6 +1660,7 @@ static void TraceAppendThink(PicoApp *app, PicoAgent *agent, int idx, const char
     {
         return;
     }
+    ThinkLineStart(line);
     size_t old = line->text ? strlen(line->text) : 0;
     char *next = (char *)realloc(line->text, old + n + 1);
     if (!next)
@@ -1493,31 +1675,48 @@ static void TraceAppendThink(PicoApp *app, PicoAgent *agent, int idx, const char
 static void ReparseThinkSummary(PicoTraceLine *line)
 {
     MdDocument_Free(&line->doc);
-    const char *text = line->text ? line->text : "";
-    size_t tlen = strlen(text);
-    if (line->think_steps > 1)
+    const char *text = NULL;
+    if (line->think_part_count > 0 && line->think_parts)
     {
-        char prefix[32];
-        int plen = snprintf(prefix, sizeof(prefix), "%dx ", line->think_steps);
-        if (plen < 0)
-        {
-            line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
-            return;
-        }
-        size_t n = (size_t)plen + tlen;
-        char *src = (char *)malloc(n + 1);
-        if (!src)
-        {
-            line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
-            return;
-        }
-        memcpy(src, prefix, (size_t)plen);
-        memcpy(src + plen, text, tlen + 1);
-        line->doc = MdDocument_ParseEx(src, n, MD_PARSE_DEFAULT);
-        free(src);
-        return;
+        text = line->think_parts[line->think_part_count - 1];
     }
-    line->doc = MdDocument_ParseEx(text, tlen, MD_PARSE_DEFAULT);
+    if (!text)
+    {
+        text = line->text ? line->text : "";
+    }
+    line->doc = MdDocument_ParseEx(text, strlen(text), MD_PARSE_DEFAULT);
+}
+
+static bool ThinkPartSet(PicoTraceLine *line, int index, const char *s, size_t n)
+{
+    if (!line || index < 0 || !s)
+    {
+        return false;
+    }
+    if (index >= line->think_part_count)
+    {
+        char **next = (char **)realloc(line->think_parts, (size_t)(index + 1) * sizeof(char *));
+        if (!next)
+        {
+            return false;
+        }
+        for (int i = line->think_part_count; i <= index; i++)
+        {
+            next[i] = NULL;
+        }
+        line->think_parts = next;
+        line->think_part_count = index + 1;
+    }
+    char *copy = (char *)malloc(n + 1);
+    if (!copy)
+    {
+        return false;
+    }
+    memcpy(copy, s, n);
+    copy[n] = '\0';
+    free(line->think_parts[index]);
+    line->think_parts[index] = copy;
+    return true;
 }
 
 static void TraceSetThinkSummary(PicoApp *app, PicoAgent *agent, int idx, const char *s, size_t n, int steps)
@@ -1545,18 +1744,34 @@ static void TraceSetThinkSummary(PicoApp *app, PicoAgent *agent, int idx, const 
     {
         return;
     }
-    char *next = (char *)realloc(line->text, n + 1);
-    if (!next)
+    ThinkLineStart(line);
+    int index = (steps > 0 ? steps : line->think_steps) - 1;
+    if (index < 0)
+    {
+        index = 0;
+    }
+    if (!ThinkPartSet(line, index, s, n))
     {
         return;
     }
-    memcpy(next, s, n);
-    next[n] = '\0';
-    line->text = next;
-    if (steps > 0)
+    line->think_steps = line->think_part_count;
+    char *latest = line->think_parts[line->think_part_count - 1];
+    size_t latest_n = latest ? strlen(latest) : 0;
+    char *next = (char *)realloc(line->text, latest_n + 1);
+    if (!next)
     {
-        line->think_steps = steps;
+        ReparseThinkSummary(line);
+        return;
     }
+    if (latest)
+    {
+        memcpy(next, latest, latest_n + 1);
+    }
+    else
+    {
+        next[0] = '\0';
+    }
+    line->text = next;
     ReparseThinkSummary(line);
 }
 
@@ -1675,6 +1890,10 @@ static void GoIdle(PicoApp *app, PicoAgent *agent)
         ClearOfferedTools(rt);
     }
     agent->state = PICO_AGENT_IDLE;
+    if (rt->stream_msg >= 0 && rt->stream_msg < agent->message_count)
+    {
+        FreezeTrailingThinkMs(&agent->messages[rt->stream_msg]);
+    }
     rt->stream_msg = -1;
     rt->stream_dirty = false;
     rt->compacting = false;
@@ -1701,15 +1920,20 @@ static void ApplyCancel(PicoApp *app, PicoAgent *agent)
     char *thinking = Dup(rt->turn_think);
     pthread_mutex_unlock(&rt->mu);
     FinishAssistantHistory(app, agent, thinking, NULL);
+    char *thinking_parts = rt->stream_msg >= 0 && rt->stream_msg < agent->message_count
+                               ? TrailingThinkPartsJson(&agent->messages[rt->stream_msg])
+                               : NULL;
     if (rt->stream_msg >= 0 &&
-        (!MessageSourceEmpty(agent, rt->stream_msg) || (thinking && thinking[0])))
+        (!MessageSourceEmpty(agent, rt->stream_msg) || (thinking && thinking[0]) || thinking_parts))
     {
+        int think_ms = FreezeTrailingThinkMs(&agent->messages[rt->stream_msg]);
         PicoSession_LogAssistant(app, agent, rt->stream_msg,
                                  MessageSourceEmpty(agent, rt->stream_msg)
                                      ? ""
                                      : agent->messages[rt->stream_msg].source,
-                                 thinking, NULL, NULL);
+                                 thinking, NULL, NULL, thinking_parts, think_ms);
     }
+    free(thinking_parts);
     free(thinking);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
@@ -2035,16 +2259,23 @@ static bool IngestResult(PicoApp *app, PicoAgent *agent, const char *payload)
                 TraceAppendThink(app, agent, rt->stream_msg, think, strlen(think));
             }
             PushInput(rt, pico_canonical_assistant_json(parts, part_n, think, sig));
+            char *thinking_parts_json =
+                rt->stream_msg >= 0 ? TrailingThinkPartsJson(&agent->messages[rt->stream_msg]) : NULL;
             if ((display && display[0]) || (think && think[0]) || (sig && sig[0]) ||
-                pico_canonical_parts_need_log(parts, part_n))
+                pico_canonical_parts_need_log(parts, part_n) || thinking_parts_json)
             {
                 char *parts_json = pico_canonical_parts_need_log(parts, part_n)
                                        ? pico_canonical_parts_json(parts, part_n)
                                        : NULL;
+                int think_ms = rt->stream_msg >= 0
+                                   ? FreezeTrailingThinkMs(&agent->messages[rt->stream_msg])
+                                   : 0;
                 PicoSession_LogAssistant(app, agent, rt->stream_msg,
-                                         display ? display : "", think, sig, parts_json);
+                                         display ? display : "", think, sig, parts_json,
+                                         thinking_parts_json, think_ms);
                 free(parts_json);
             }
+            free(thinking_parts_json);
             pico_canonical_free_parts(parts, part_n);
             free(display);
             free(think);
@@ -2392,6 +2623,7 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt->think);
     free(rt->turn_think);
     free(rt->summary);
+    ClearSummaryParts(rt);
     free(rt->work_model);
     free(rt->work_base_url);
     free(rt->work_effort);
@@ -3012,6 +3244,19 @@ void PicoAgent_Pump(PicoApp *app, PicoAgent *agent)
     char *summary = rt->summary;
     size_t summary_len = rt->summary_len;
     int summary_steps = rt->summary_steps;
+    char **summary_parts = NULL;
+    int summary_part_count = rt->summary_part_count;
+    if (summary && summary_len && summary_part_count > 0 && rt->summary_parts)
+    {
+        summary_parts = (char **)calloc((size_t)summary_part_count, sizeof(char *));
+        if (summary_parts)
+        {
+            for (int i = 0; i < summary_part_count; i++)
+            {
+                summary_parts[i] = rt->summary_parts[i] ? Dup(rt->summary_parts[i]) : NULL;
+            }
+        }
+    }
     rt->summary = NULL;
     rt->summary_len = 0;
     rt->summary_cap = 0;
@@ -3040,9 +3285,31 @@ void PicoAgent_Pump(PicoApp *app, PicoAgent *agent)
 
     if (summary && summary_len && rt->stream_msg >= 0)
     {
-        TraceSetThinkSummary(app, agent, rt->stream_msg, summary, summary_len, summary_steps);
+        if (summary_parts && summary_part_count > 0)
+        {
+            for (int i = 0; i < summary_part_count; i++)
+            {
+                if (summary_parts[i] && summary_parts[i][0])
+                {
+                    TraceSetThinkSummary(app, agent, rt->stream_msg, summary_parts[i],
+                                         strlen(summary_parts[i]), i + 1);
+                }
+            }
+        }
+        else
+        {
+            TraceSetThinkSummary(app, agent, rt->stream_msg, summary, summary_len, summary_steps);
+        }
     }
     free(summary);
+    if (summary_parts)
+    {
+        for (int i = 0; i < summary_part_count; i++)
+        {
+            free(summary_parts[i]);
+        }
+        free(summary_parts);
+    }
 
     if (status[0])
     {
@@ -3165,7 +3432,7 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
     if (agent && agent->runtime) PushFunctionOutput(agent->runtime, call_id, name, output, is_error);
 }
 
-void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text)
+void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text, int think_ms)
 {
     if (!agent || !text || !text[0] || agent->message_count <= 0)
     {
@@ -3178,6 +3445,41 @@ void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text)
         return;
     }
     TraceAppendThink(app, agent, idx, text, strlen(text));
+    PicoTraceLine *line = TrailingThinkLine(&agent->messages[idx]);
+    if (!line)
+    {
+        return;
+    }
+    line->think_t0 = 0.0;
+    if (think_ms > 0 && line->think_ms == 0)
+    {
+        line->think_ms = think_ms;
+    }
+}
+
+void PicoAgent_AppendThinkSummary(PicoApp *app, PicoAgent *agent, const char *text,
+                                  int step, int think_ms)
+{
+    if (!agent || !text || !text[0] || step <= 0 || agent->message_count <= 0)
+    {
+        return;
+    }
+    int idx = agent->message_count - 1;
+    if (agent->messages[idx].role != PICO_ROLE_ASSISTANT)
+    {
+        return;
+    }
+    TraceSetThinkSummary(app, agent, idx, text, strlen(text), step);
+    PicoTraceLine *line = TrailingThinkLine(&agent->messages[idx]);
+    if (!line)
+    {
+        return;
+    }
+    line->think_t0 = 0.0;
+    if (think_ms > 0 && line->think_ms == 0)
+    {
+        line->think_ms = think_ms;
+    }
 }
 
 char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent)

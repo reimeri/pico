@@ -51,7 +51,9 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
                                                 int message_group, const char *content,
                                                 const char *thinking,
                                                 const char *thinking_signature,
-                                                const char *parts_json);
+                                                const char *parts_json,
+                                                const char *thinking_parts_json,
+                                                int thinking_ms);
 PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
                                                int message_group, const char *call_id,
                                                const char *name, const char *args,

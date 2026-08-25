@@ -559,6 +559,10 @@ void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *cal
         PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
     }
     PicoMessage *m = &agent->messages[agent->message_count - 1];
+    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool)
+    {
+        PicoTraceLine_FreezeThink(&m->trace[m->trace_count - 1]);
+    }
     PicoTraceLine *next =
         (PicoTraceLine *)realloc(m->trace, (size_t)(m->trace_count + 1) * sizeof(PicoTraceLine));
     if (!next)
@@ -1146,12 +1150,7 @@ void PicoMessages_Free(PicoMessage *messages, int count)
         free(messages[i].source);
         for (int t = 0; t < messages[i].trace_count; t++)
         {
-            free(messages[i].trace[t].text);
-            free(messages[i].trace[t].tool_name);
-            free(messages[i].trace[t].tool_call_id);
-            free(messages[i].trace[t].tool_args);
-            free(messages[i].trace[t].tool_output);
-            MdDocument_Free(&messages[i].trace[t].doc);
+            PicoTraceLine_Release(&messages[i].trace[t]);
         }
         free(messages[i].trace);
         MdDocument_Free(&messages[i].doc);
@@ -1225,7 +1224,9 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
                 PicoTraceLine *to = &copy[i].trace[t];
                 to->is_tool = from->is_tool;
                 to->tool_error = from->tool_error;
+                to->expanded = from->expanded;
                 to->think_steps = from->think_steps;
+                to->think_ms = from->think_ms;
                 to->child_id = from->child_id;
                 snprintf(to->child_session_id, sizeof(to->child_session_id), "%s",
                          from->child_session_id);
@@ -1234,6 +1235,22 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
                 to->tool_call_id = from->tool_call_id ? JsonDup(from->tool_call_id) : NULL;
                 to->tool_args = from->tool_args ? JsonDup(from->tool_args) : NULL;
                 to->tool_output = from->tool_output ? JsonDup(from->tool_output) : NULL;
+                if (from->think_part_count > 0 && from->think_parts)
+                {
+                    to->think_parts =
+                        (char **)calloc((size_t)from->think_part_count, sizeof(char *));
+                    if (!to->think_parts)
+                    {
+                        PicoMessages_Free(copy, i + 1);
+                        return false;
+                    }
+                    to->think_part_count = from->think_part_count;
+                    for (int p = 0; p < from->think_part_count; p++)
+                    {
+                        to->think_parts[p] =
+                            from->think_parts[p] ? JsonDup(from->think_parts[p]) : NULL;
+                    }
+                }
             }
         }
     }
@@ -1254,12 +1271,7 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
         free(agent->messages[i].source);
         for (int t = 0; t < agent->messages[i].trace_count; t++)
         {
-            free(agent->messages[i].trace[t].text);
-            free(agent->messages[i].trace[t].tool_name);
-            free(agent->messages[i].trace[t].tool_call_id);
-            free(agent->messages[i].trace[t].tool_args);
-            free(agent->messages[i].trace[t].tool_output);
-            MdDocument_Free(&agent->messages[i].trace[t].doc);
+            PicoTraceLine_Release(&agent->messages[i].trace[t]);
         }
         free(agent->messages[i].trace);
         MdDocument_Free(&agent->messages[i].doc);
@@ -1379,6 +1391,45 @@ static bool ChatScrollAtBottom(Clay_ScrollContainerData data)
     }
     float bottom = data.scrollContainerDimensions.height - data.contentDimensions.height;
     return data.scrollPosition->y <= bottom + CHAT_FOLLOW_SLACK;
+}
+
+static void ApplyPaneWheel(Clay_String container_id, Clay_Vector2 delta)
+{
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(container_id));
+    if (!data.found || !data.scrollPosition)
+    {
+        return;
+    }
+    if (data.config.vertical)
+    {
+        float overflow = data.contentDimensions.height - data.scrollContainerDimensions.height;
+        float min_y = overflow > 0.0f ? -overflow : 0.0f;
+        float y = data.scrollPosition->y + delta.y * 10.0f;
+        if (y > 0.0f)
+        {
+            y = 0.0f;
+        }
+        else if (y < min_y)
+        {
+            y = min_y;
+        }
+        data.scrollPosition->y = y;
+    }
+    if (data.config.horizontal)
+    {
+        float overflow = data.contentDimensions.width - data.scrollContainerDimensions.width;
+        float min_x = overflow > 0.0f ? -overflow : 0.0f;
+        float x = data.scrollPosition->x + delta.x * 10.0f;
+        if (x > 0.0f)
+        {
+            x = 0.0f;
+        }
+        else if (x < min_x)
+        {
+            x = min_x;
+        }
+        data.scrollPosition->x = x;
+    }
 }
 
 static void UpdateChatFollowFromUserScroll(PicoApp *app, bool over_chat, bool modal_open, float wheel_y)
@@ -1512,9 +1563,20 @@ void PicoApp_Frame(PicoApp *app)
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
     PicoChat_HandleToolRelease(app);
 
+    /* Think headers clip long titles, which Clay treats as nested scrollers that
+     * would eat the wheel. Route it to the chat / inspect pane instead. */
+    bool over_inspect = PicoChat_InspectIsOpen() &&
+                        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
+    bool pane_wheel = over_inspect || (over_chat && !modal_open);
+    Clay_Vector2 wheel = {.x = mouse_delta.x, .y = mouse_delta.y};
     Clay_UpdateScrollContainers(
         !bar_drag && (modal_open || (!over_composer && !over_chat && !app->chat_sel.mouse_selecting)),
-        (Clay_Vector2){mouse_delta.x, mouse_delta.y}, GetFrameTime());
+        pane_wheel ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
+    if (pane_wheel)
+    {
+        ApplyPaneWheel(over_inspect ? CLAY_STRING("SubagentChatScroll") : CLAY_STRING("ChatScroll"),
+                       wheel);
+    }
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
     Clay_RenderCommandArray render_commands = CreateShellLayout(app, GetFrameTime());

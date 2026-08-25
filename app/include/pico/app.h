@@ -94,6 +94,10 @@ typedef struct PicoTraceLine {
     bool tool_error;
     bool expanded;
     int think_steps;
+    char **think_parts;
+    int think_part_count;
+    double think_t0;
+    int think_ms;
     PicoAgentId child_id;
     char child_session_id[40];
     MdDocument doc;

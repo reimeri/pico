@@ -10,6 +10,7 @@
 #include "richtext.h"
 #include "settings.h"
 #include "scrollbar.h"
+#include "markdown.h"
 
 #include "clay/clay.h"
 
@@ -19,6 +20,24 @@
 #include <string.h>
 
 #define TOOL_OUTPUT_MAX_LINES 100
+#define THINK_SHEEN_PERIOD 1.4f
+#define THINK_SHEEN_BAND 56.0f
+
+static const float kThinkBriefMaxSec = 10.0f;
+static const float kThinkDeepMaxSec = 60.0f;
+
+typedef struct ThinkLabelBlock {
+    struct ThinkLabelBlock *next;
+    size_t len;
+    size_t cap;
+    char data[];
+} ThinkLabelBlock;
+
+static ThinkLabelBlock *g_think_label_blocks;
+static ThinkLabelBlock *g_think_label_block;
+static MdDocument *g_think_docs;
+static int g_think_doc_count;
+static int g_think_doc_cap;
 
 typedef struct TranscriptView {
     PicoApp *app;
@@ -140,6 +159,229 @@ static Clay_ElementId ToolChevronId(const TranscriptView *view, int message_inde
     return ToolElementId(view, message_index, trace_index, CLAY_STRING("ToolChevron"));
 }
 
+static Clay_ElementId ThinkRowId(const TranscriptView *view, int message_index, int trace_index)
+{
+    return ToolElementId(view, message_index, trace_index, CLAY_STRING("ThinkRow"));
+}
+
+static Clay_ElementId ThinkLabelId(const TranscriptView *view, int message_index, int trace_index)
+{
+    return ToolElementId(view, message_index, trace_index, CLAY_STRING("ThinkLabel"));
+}
+
+static Clay_ElementId ThinkChevronId(const TranscriptView *view, int message_index, int trace_index)
+{
+    return ToolElementId(view, message_index, trace_index, CLAY_STRING("ThinkChevron"));
+}
+
+static Clay_ElementId ThinkSynthId(const TranscriptView *view, int message_index)
+{
+    return ToolElementId(view, message_index, 0, CLAY_STRING("ThinkSynth"));
+}
+
+static void ThinkFrameReset(void)
+{
+    for (ThinkLabelBlock *block = g_think_label_blocks; block; block = block->next)
+    {
+        block->len = 0;
+    }
+    g_think_label_block = g_think_label_blocks;
+    for (int i = 0; i < g_think_doc_count; i++)
+    {
+        MdDocument_Free(&g_think_docs[i]);
+    }
+    g_think_doc_count = 0;
+}
+
+static void ThinkFrameFree(void)
+{
+    ThinkFrameReset();
+    while (g_think_label_blocks)
+    {
+        ThinkLabelBlock *next = g_think_label_blocks->next;
+        free(g_think_label_blocks);
+        g_think_label_blocks = next;
+    }
+    g_think_label_block = NULL;
+    free(g_think_docs);
+    g_think_docs = NULL;
+    g_think_doc_cap = 0;
+}
+
+static const char *ThinkLabelDup(const char *s)
+{
+    size_t n = s ? strlen(s) : 0;
+    size_t need = n + 1;
+    ThinkLabelBlock *block = g_think_label_block;
+    while (block && block->cap - block->len < need)
+    {
+        block = block->next;
+    }
+    if (!block)
+    {
+        size_t cap = 2048;
+        while (cap < need)
+        {
+            cap *= 2;
+        }
+        block = (ThinkLabelBlock *)malloc(sizeof(*block) + cap);
+        if (!block)
+        {
+            return "";
+        }
+        block->next = NULL;
+        block->len = 0;
+        block->cap = cap;
+        if (!g_think_label_blocks)
+        {
+            g_think_label_blocks = block;
+        }
+        else
+        {
+            ThinkLabelBlock *tail = g_think_label_blocks;
+            while (tail->next)
+            {
+                tail = tail->next;
+            }
+            tail->next = block;
+        }
+    }
+    g_think_label_block = block;
+    char *out = block->data + block->len;
+    if (s)
+    {
+        memcpy(out, s, n);
+    }
+    out[n] = '\0';
+    block->len += need;
+    return out;
+}
+
+static MdDocument *ThinkDocumentPush(const char *text)
+{
+    if (g_think_doc_count >= g_think_doc_cap)
+    {
+        int cap = g_think_doc_cap == 0 ? 8 : g_think_doc_cap * 2;
+        MdDocument *next = (MdDocument *)realloc(g_think_docs, (size_t)cap * sizeof(MdDocument));
+        if (!next)
+        {
+            return NULL;
+        }
+        g_think_docs = next;
+        g_think_doc_cap = cap;
+    }
+    MdDocument *doc = &g_think_docs[g_think_doc_count++];
+    *doc = MdDocument_ParseEx(text, strlen(text), MD_PARSE_DEFAULT);
+    return doc;
+}
+
+static const char *ThoughtLabel(int think_ms)
+{
+    if (think_ms <= 0)
+    {
+        return "Thought";
+    }
+    float sec = (float)think_ms / 1000.0f;
+    if (sec < kThinkBriefMaxSec)
+    {
+        return "Thought briefly";
+    }
+    if (sec < kThinkDeepMaxSec)
+    {
+        return "Thought deeply";
+    }
+    return "Thought very deeply";
+}
+
+static void FlattenSummary(const char *md, char *out, size_t cap)
+{
+    if (!out || cap == 0)
+    {
+        return;
+    }
+    out[0] = '\0';
+    if (!md || !md[0])
+    {
+        return;
+    }
+    MdDocument doc = MdDocument_ParseEx(md, strlen(md), MD_PARSE_DEFAULT);
+    size_t n = 0;
+    for (int b = 0; b < doc.block_count && n + 1 < cap; b++)
+    {
+        MdBlock *block = &doc.blocks[b];
+        for (int c = 0; c < block->chunk_count && n + 1 < cap; c++)
+        {
+            const char *text = block->chunks[c].text;
+            int length = block->chunks[c].length;
+            if (!text || length <= 0)
+            {
+                continue;
+            }
+            if (n > 0 && n + 1 < cap)
+            {
+                out[n++] = ' ';
+            }
+            size_t room = cap - 1 - n;
+            size_t take = (size_t)length < room ? (size_t)length : room;
+            memcpy(out + n, text, take);
+            n += take;
+        }
+    }
+    out[n] = '\0';
+    MdDocument_Free(&doc);
+    if (n == 0)
+    {
+        snprintf(out, cap, "%s", md);
+    }
+}
+
+static const char *LatestSummary(const PicoTraceLine *line)
+{
+    if (line && line->think_part_count > 0 && line->think_parts &&
+        line->think_parts[line->think_part_count - 1] &&
+        line->think_parts[line->think_part_count - 1][0])
+    {
+        return line->think_parts[line->think_part_count - 1];
+    }
+    return line && line->text ? line->text : "";
+}
+
+static bool ThinkHasSummary(const PicoTraceLine *line)
+{
+    return line && (line->think_steps >= 1 || line->think_part_count > 0);
+}
+
+static bool ThinkHasBody(const PicoTraceLine *line)
+{
+    if (!line || line->is_tool)
+    {
+        return false;
+    }
+    if (line->think_part_count > 0)
+    {
+        return true;
+    }
+    return line->text && line->text[0];
+}
+
+static const char *ThinkHeaderText(const PicoTraceLine *line, bool live)
+{
+    char flat[512];
+    if (ThinkHasSummary(line))
+    {
+        FlattenSummary(LatestSummary(line), flat, sizeof(flat));
+        if (flat[0])
+        {
+            return ThinkLabelDup(flat);
+        }
+    }
+    if (live)
+    {
+        return "Thinking…";
+    }
+    return ThoughtLabel(line ? line->think_ms : 0);
+}
+
 static void RenderToolOutput(const TranscriptView *view, const char *output)
 {
     const char *text = (output && output[0]) ? output : "(empty)";
@@ -176,8 +418,17 @@ static void RenderToolOutput(const TranscriptView *view, const char *output)
     }
 }
 
-static void RenderThinkSummary(const TranscriptView *view, PicoTraceLine *line, float available_width)
+static void RenderThinkMarkdown(const TranscriptView *view, const char *text, float available_width)
 {
+    if (!text || !text[0])
+    {
+        return;
+    }
+    MdDocument *doc = ThinkDocumentPush(text);
+    if (!doc)
+    {
+        return;
+    }
     RichTextStyle style = {
         .font_regular = FONT_ITALIC,
         .font_bold = FONT_BOLD_ITALIC,
@@ -193,14 +444,120 @@ static void RenderThinkSummary(const TranscriptView *view, PicoTraceLine *line, 
         .link_hover_color = COLOR_MUTED,
     };
     RichTextEmitState emit = {0};
-    for (int b = 0; b < line->doc.block_count; b++)
+    for (int b = 0; b < doc->block_count; b++)
     {
-        MdBlock *block = &line->doc.blocks[b];
+        MdBlock *block = &doc->blocks[b];
         if (!block->chunks || block->chunk_count <= 0)
         {
             continue;
         }
-        RichText_RenderParagraph(block, &line->doc.arena, available_width, &style, &emit);
+        RichText_RenderParagraph(block, &doc->arena, available_width, &style, &emit);
+    }
+    ViewBreak(view);
+}
+
+static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, float available_width)
+{
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .padding = {12, 12, 10, 10},
+                             .childGap = 8,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                  .backgroundColor = COLOR_CODE_BG,
+                  .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        if (ThinkHasSummary(line) && line->think_part_count > 0)
+        {
+            for (int i = 0; i < line->think_part_count; i++)
+            {
+                RenderThinkMarkdown(view, line->think_parts[i], available_width - 24.0f);
+            }
+        }
+        else if (line->text && line->text[0])
+        {
+            ViewText(view, ViewCStr(line->text),
+                     (Clay_TextElementConfig){.fontId = FONT_ITALIC,
+                                              .fontSize = 15,
+                                              .textColor = COLOR_MUTED,
+                                              .wrapMode = CLAY_TEXT_WRAP_WORDS});
+            ViewBreak(view);
+        }
+    }
+}
+
+static bool ThinkBurstLive(const TranscriptView *view, int message_index, int trace_index)
+{
+    if (!view || message_index != view->message_count - 1 || view->state != PICO_AGENT_LLM_WAIT)
+    {
+        return false;
+    }
+    const PicoMessage *msg = &view->messages[message_index];
+    if (msg->source && msg->source[0])
+    {
+        return false;
+    }
+    return trace_index == msg->trace_count - 1;
+}
+
+static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int message_index,
+                            int trace_index, float available_width)
+{
+    if (!ThinkHasBody(line))
+    {
+        return;
+    }
+    Clay_ElementId row_id = ThinkRowId(view, message_index, trace_index);
+    Clay_ElementId label_id = ThinkLabelId(view, message_index, trace_index);
+    bool hovered = Clay_PointerOver(row_id);
+    if (hovered)
+    {
+        view->app->hovered_tool = true;
+    }
+    bool live = ThinkBurstLive(view, message_index, trace_index);
+    const char *label = ThinkHeaderText(line, live);
+    Clay_Color color = hovered ? COLOR_TOOL_NAME_HOVER : COLOR_MUTED;
+
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 6,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = 8,
+                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                            .clip = {.horizontal = true, .vertical = true}})
+            {
+                ViewText(view, ViewCStr(label),
+                         (Clay_TextElementConfig){.fontId = FONT_ITALIC,
+                                                  .fontSize = 15,
+                                                  .textColor = color,
+                                                  .wrapMode = CLAY_TEXT_WRAP_NONE});
+            }
+            CLAY(ThinkChevronId(view, message_index, trace_index),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_GROW(0)}}})
+            {
+            }
+        }
+        if (line->expanded)
+        {
+            RenderThinkBody(view, line, available_width);
+        }
+    }
+    ViewBreak(view);
+}
+
+static void RenderSyntheticThink(const TranscriptView *view, int message_index)
+{
+    Clay_ElementId label_id = ThinkSynthId(view, message_index);
+    CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                    .clip = {.horizontal = true, .vertical = true}})
+    {
+        CLAY_TEXT(CLAY_STRING("Thinking…"),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
+                                    .fontSize = 15,
+                                    .textColor = COLOR_MUTED,
+                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
     ViewBreak(view);
 }
@@ -453,9 +810,9 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
             {
                 PicoChatSel_SetMessage(i);
             }
-            bool has_trace = msg->trace_count > 0;
             bool has_source = msg->source && msg->source[0];
             bool live = !user && i == view->message_count - 1 && OwnerWaiting(view);
+            bool live_llm = live && view->state == PICO_AGENT_LLM_WAIT;
             for (int t = 0; t < msg->trace_count; t++)
             {
                 PicoTraceLine *line = &msg->trace[t];
@@ -464,32 +821,13 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
                     RenderToolLine(view, line, i, t);
                     continue;
                 }
-                const char *text = line->text;
-                if (!text || !text[0])
-                {
-                    continue;
-                }
-                if (line->think_steps >= 1 && line->doc.block_count > 0)
-                {
-                    RenderThinkSummary(view, line, available_width);
-                    continue;
-                }
-                ViewText(view, ViewCStr(text),
-                         (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                                  .fontSize = 15,
-                                                  .textColor = COLOR_MUTED,
-                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS});
-                ViewBreak(view);
+                RenderThinkLine(view, line, i, t, available_width);
             }
-            if (!has_trace && live && !has_source)
+            bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+                                  ThinkHasBody(&msg->trace[msg->trace_count - 1]);
+            if (live_llm && !has_source && !trailing_think)
             {
-                const char *label = view->activity && view->activity[0] ? view->activity : "Thinking…";
-                ViewText(view, ViewCStr(label),
-                         (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                                  .fontSize = 15,
-                                                  .textColor = COLOR_MUTED,
-                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS});
-                ViewBreak(view);
+                RenderSyntheticThink(view, i);
             }
             if (has_source)
             {
@@ -507,6 +845,7 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
 void PicoChat_Render(PicoApp *app)
 {
     app->hovered_tool = false;
+    ThinkFrameReset();
     PicoChatSel_BeginFrame(PicoApp_ActiveAgent(app)->message_count);
     CLAY(CLAY_ID("ChatRow"),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -866,6 +1205,24 @@ static void InspectRender(PicoApp *app)
     }
 }
 
+static Clay_ElementId TraceRowId(const TranscriptView *view, const PicoTraceLine *line,
+                                 int message_index, int trace_index)
+{
+    return line && line->is_tool ? ToolRowId(view, message_index, trace_index)
+                                 : ThinkRowId(view, message_index, trace_index);
+}
+
+static bool HitTraceRow(const TranscriptView *view, const PicoTraceLine *line, int message_index,
+                        int trace_index)
+{
+    if (!line)
+    {
+        return false;
+    }
+    return Clay_PointerOver(TraceRowId(view, line, message_index, trace_index)) &&
+           (line->is_tool || ThinkHasBody(line));
+}
+
 static void InspectHandlePointer(PicoApp *app)
 {
     if (g_inspect_n <= 0)
@@ -904,7 +1261,8 @@ static void InspectHandlePointer(PicoApp *app)
             const PicoMessage *msg = &view.messages[i];
             for (int t = 0; t < msg->trace_count; t++)
             {
-                if (msg->trace[t].is_tool && Clay_PointerOver(ToolRowId(&view, i, t)))
+                if ((msg->trace[t].is_tool || ThinkHasBody(&msg->trace[t])) &&
+                    HitTraceRow(&view, &msg->trace[t], i, t))
                 {
                     tool_msg = i;
                     tool_idx = t;
@@ -941,10 +1299,14 @@ static void InspectHandlePointer(PicoApp *app)
     else if (g_inspect_pressed_tool && tool_idx >= 0 && tool_msg == g_inspect_tool_msg &&
              tool_idx == g_inspect_tool_idx && found && tool_msg < inspect.message_count)
     {
-        const PicoTraceLine *line = &inspect.messages[tool_msg].trace[tool_idx];
+        PicoTraceLine *line = (PicoTraceLine *)&inspect.messages[tool_msg].trace[tool_idx];
         if (IsSubagentTool(line))
         {
             InspectPushLine(line, inspect.live_id);
+        }
+        else
+        {
+            line->expanded = !line->expanded;
         }
     }
     g_inspect_pressed_dim = false;
@@ -963,13 +1325,13 @@ void PicoChat_HandleToolRelease(PicoApp *app)
 
     PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
     int t = app->chat_sel.tool_idx;
-    if (t < 0 || t >= msg->trace_count || !msg->trace[t].is_tool || IsSubagentTool(&msg->trace[t]))
+    if (t < 0 || t >= msg->trace_count || IsSubagentTool(&msg->trace[t]))
     {
         return;
     }
 
     TranscriptView main = MainTranscriptView(app);
-    if (Clay_PointerOver(ToolRowId(&main, app->chat_sel.tool_msg, t)))
+    if (HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
     {
         msg->trace[t].expanded = !msg->trace[t].expanded;
         app->chat_sel.pressed_tool = false;
@@ -1019,7 +1381,8 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
             PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[i];
             for (int t = 0; t < msg->trace_count; t++)
             {
-                if (msg->trace[t].is_tool && Clay_PointerOver(ToolRowId(&main, i, t)))
+                if ((msg->trace[t].is_tool || ThinkHasBody(&msg->trace[t])) &&
+                    HitTraceRow(&main, &msg->trace[t], i, t))
                 {
                     tool_msg = i;
                     tool_idx = t;
@@ -1066,8 +1429,8 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
         {
             PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
             int t = app->chat_sel.tool_idx;
-            if (t >= 0 && t < msg->trace_count && msg->trace[t].is_tool &&
-                Clay_PointerOver(ToolRowId(&main, app->chat_sel.tool_msg, t)))
+            if (t >= 0 && t < msg->trace_count &&
+                HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
             {
                 if (IsSubagentTool(&msg->trace[t]))
                 {
@@ -1123,38 +1486,37 @@ static Color ClayToRay(Clay_Color c)
     return (Color){(unsigned char)c.r, (unsigned char)c.g, (unsigned char)c.b, (unsigned char)c.a};
 }
 
-static void PicoChat_DrawChevrons(PicoApp *app)
+static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
 {
-    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    if (!scroll.found || !app->fonts)
+    if (!view || !view->messages)
     {
         return;
     }
-    Clay_BoundingBox clip = scroll.boundingBox;
     BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
-
     Font font = Pico_FontAt(FONT_REGULAR, 15);
     const char *glyph = "\xE2\x80\xBA";
     float glyph_px = Pico_FontPx(15);
     Vector2 size = MeasureTextEx(font, glyph, glyph_px, 0.0f);
-    TranscriptView main = MainTranscriptView(app);
-
-    for (int i = 0; i < PicoApp_ActiveAgent(app)->message_count; i++)
+    for (int i = 0; i < view->message_count; i++)
     {
-        PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[i];
+        PicoMessage *msg = (PicoMessage *)&view->messages[i];
         for (int t = 0; t < msg->trace_count; t++)
         {
             PicoTraceLine *line = &msg->trace[t];
-            if (!line->is_tool)
+            bool think = !line->is_tool && ThinkHasBody(line);
+            if (!line->is_tool && !think)
             {
                 continue;
             }
-            bool hovered = Clay_PointerOver(ToolRowId(&main, i, t));
+            Clay_ElementId row_id = TraceRowId(view, line, i, t);
+            Clay_ElementId chevron_id =
+                line->is_tool ? ToolChevronId(view, i, t) : ThinkChevronId(view, i, t);
+            bool hovered = Clay_PointerOver(row_id);
             if (!hovered && !line->expanded)
             {
                 continue;
             }
-            Clay_ElementData el = Clay_GetElementData(ToolChevronId(&main, i, t));
+            Clay_ElementData el = Clay_GetElementData(chevron_id);
             if (!el.found)
             {
                 continue;
@@ -1166,8 +1528,185 @@ static void PicoChat_DrawChevrons(PicoApp *app)
                         line->expanded ? 90.0f : 0.0f, glyph_px, 0.0f, color);
         }
     }
-
     EndScissorMode();
+}
+
+static void PicoChat_DrawChevrons(PicoApp *app)
+{
+    if (!app->fonts)
+    {
+        return;
+    }
+    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    if (scroll.found)
+    {
+        TranscriptView main = MainTranscriptView(app);
+        DrawTraceChevrons(&main, scroll.boundingBox);
+    }
+    if (g_inspect_n > 0)
+    {
+        PicoSubagentInspect inspect;
+        memset(&inspect, 0, sizeof(inspect));
+        const char *fallback = NULL;
+        if (InspectCurrent(app, &inspect, &fallback) && inspect.message_count > 0)
+        {
+            Clay_ElementData sub = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
+            if (sub.found)
+            {
+                PicoAgent *owner =
+                    inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+                TranscriptView view = {
+                    .app = app,
+                    .messages = inspect.messages,
+                    .message_count = inspect.message_count,
+                    .state = inspect.state,
+                    .activity = inspect.activity,
+                    .owner = owner,
+                    .id_ns = g_inspect_n,
+                    .selectable = false,
+                };
+                DrawTraceChevrons(&view, sub.boundingBox);
+            }
+        }
+    }
+}
+
+static void IntersectScissor(Clay_BoundingBox a, Clay_BoundingBox b, Rectangle *out)
+{
+    float x1 = a.x > b.x ? a.x : b.x;
+    float y1 = a.y > b.y ? a.y : b.y;
+    float x2 = (a.x + a.width) < (b.x + b.width) ? (a.x + a.width) : (b.x + b.width);
+    float y2 = (a.y + a.height) < (b.y + b.height) ? (a.y + a.height) : (b.y + b.height);
+    out->x = x1;
+    out->y = y1;
+    out->width = x2 > x1 ? x2 - x1 : 0;
+    out->height = y2 > y1 ? y2 - y1 : 0;
+}
+
+static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, const char *text)
+{
+    Clay_ElementData el = Clay_GetElementData(label_id);
+    if (!el.found || !text || !text[0])
+    {
+        return;
+    }
+    Clay_BoundingBox box = el.boundingBox;
+    Rectangle vis;
+    IntersectScissor(clip, box, &vis);
+    if (vis.width <= 0.5f || vis.height <= 0.5f)
+    {
+        return;
+    }
+    float period = THINK_SHEEN_PERIOD;
+    float t = fmodf((float)GetTime(), period) / period;
+    if (t < 0.0f)
+    {
+        t += 1.0f;
+    }
+    float band = THINK_SHEEN_BAND * Pico_FontScale();
+    if (band < 24.0f)
+    {
+        band = 24.0f;
+    }
+    float x = box.x - band + t * (box.width + band * 2.0f);
+    Rectangle band_rect = {x, box.y, band, box.height};
+    Rectangle sheen;
+    IntersectScissor((Clay_BoundingBox){band_rect.x, band_rect.y, band_rect.width, band_rect.height},
+                     (Clay_BoundingBox){vis.x, vis.y, vis.width, vis.height}, &sheen);
+    if (sheen.width <= 0.5f || sheen.height <= 0.5f)
+    {
+        return;
+    }
+    BeginBlendMode(BLEND_ADDITIVE);
+    DrawRectangleGradientH((int)sheen.x, (int)sheen.y, (int)sheen.width, (int)sheen.height,
+                           (Color){255, 255, 255, 0}, (Color){255, 255, 255, 40});
+    EndBlendMode();
+    BeginScissorMode((int)sheen.x, (int)sheen.y, (int)(sheen.width + 0.5f), (int)(sheen.height + 0.5f));
+    Font font = Pico_FontAt(FONT_ITALIC, 15);
+    float px = Pico_FontPx(15);
+    DrawTextEx(font, text, (Vector2){roundf(box.x), roundf(box.y)}, px, 0.0f, ClayToRay(COLOR_TEXT));
+    EndScissorMode();
+}
+
+static void PicoChat_DrawThinkSheen(PicoApp *app)
+{
+    if (!app || !app->fonts)
+    {
+        return;
+    }
+    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    if (!scroll.found)
+    {
+        return;
+    }
+    TranscriptView main = MainTranscriptView(app);
+    int last = main.message_count - 1;
+    if (last < 0 || main.state != PICO_AGENT_LLM_WAIT)
+    {
+        return;
+    }
+    PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[last];
+    if (msg->role != PICO_ROLE_ASSISTANT || (msg->source && msg->source[0]))
+    {
+        return;
+    }
+    if (msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+        ThinkHasBody(&msg->trace[msg->trace_count - 1]))
+    {
+        int t = msg->trace_count - 1;
+        PicoTraceLine *line = &msg->trace[t];
+        DrawThinkSheenLabel(ThinkLabelId(&main, last, t), scroll.boundingBox,
+                            ThinkHeaderText(line, true));
+        return;
+    }
+    DrawThinkSheenLabel(ThinkSynthId(&main, last), scroll.boundingBox, "Thinking…");
+}
+
+static void PicoChat_DrawInspectSheen(PicoApp *app)
+{
+    if (g_inspect_n <= 0)
+    {
+        return;
+    }
+    PicoSubagentInspect inspect;
+    memset(&inspect, 0, sizeof(inspect));
+    const char *fallback = NULL;
+    if (!InspectCurrent(app, &inspect, &fallback) || inspect.state != PICO_AGENT_LLM_WAIT ||
+        inspect.message_count <= 0)
+    {
+        return;
+    }
+    Clay_ElementData sub = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
+    if (!sub.found)
+    {
+        return;
+    }
+    PicoAgent *owner = inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+    TranscriptView view = {
+        .app = app,
+        .messages = inspect.messages,
+        .message_count = inspect.message_count,
+        .state = inspect.state,
+        .activity = inspect.activity,
+        .owner = owner,
+        .id_ns = g_inspect_n,
+        .selectable = false,
+    };
+    int last = inspect.message_count - 1;
+    const PicoMessage *msg = &inspect.messages[last];
+    if (msg->role != PICO_ROLE_ASSISTANT || (msg->source && msg->source[0]))
+    {
+        return;
+    }
+    if (msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+        ThinkHasBody(&msg->trace[msg->trace_count - 1]))
+    {
+        int t = msg->trace_count - 1;
+        DrawThinkSheenLabel(ThinkLabelId(&view, last, t), sub.boundingBox,
+                            ThinkHeaderText(&msg->trace[t], true));
+        return;
+    }
+    DrawThinkSheenLabel(ThinkSynthId(&view, last), sub.boundingBox, "Thinking…");
 }
 
 void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
@@ -1175,6 +1714,8 @@ void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
     (void)event;
     PicoChatSel_DrawOverlay(app);
     PicoChat_DrawChevrons(app);
+    PicoChat_DrawThinkSheen(app);
+    PicoChat_DrawInspectSheen(app);
 }
 
 static void ChatOnFrame(PicoApp *app, float dt)
@@ -1201,6 +1742,12 @@ static void ChatOnFrame(PicoApp *app, float dt)
     }
 }
 
+static void ChatShutdown(PicoApp *app)
+{
+    (void)app;
+    ThinkFrameFree();
+}
+
 static void ChatInit(PicoApp *app)
 {
     pico_add_view(app, PICO_SLOT_MAIN, 0, PicoChat_Render);
@@ -1216,6 +1763,7 @@ PicoExt pico_ext_chat(void)
         .name = "chat",
         .description = "Chat transcript",
         .init = ChatInit,
+        .shutdown = ChatShutdown,
         .on_frame = ChatOnFrame,
     };
 }

@@ -84,6 +84,7 @@ typedef struct TestState {
     int provider_cached_tokens;
     int usage_log_count;
     bool emit_think_summaries;
+    bool logged_thinking_parts;
     char logged_thinking[256];
     char session_item_order[64];
     int session_message_groups[64];
@@ -185,6 +186,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.provider_cached_tokens = 0;
     g_test.usage_log_count = 0;
     g_test.emit_think_summaries = false;
+    g_test.logged_thinking_parts = false;
     g_test.logged_thinking[0] = '\0';
     g_test.session_item_order[0] = '\0';
     g_test.session_message_group_count = 0;
@@ -451,6 +453,10 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         return PICO_LLM_OK;
     }
 
+    if (emit_summaries)
+    {
+        (void)pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+    }
     if (mode == TEST_SIGNATURE_CONTINUATION)
     {
         PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
@@ -942,13 +948,21 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
 PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
                                                 int message_group, const char *content,
                                                 const char *thinking, const char *thinking_signature,
-                                                const char *parts_json)
+                                                const char *parts_json,
+                                                const char *thinking_parts_json,
+                                                int thinking_ms)
 {
     (void)app;
     (void)agent;
     (void)content;
     (void)thinking_signature;
     (void)parts_json;
+    if (thinking_parts_json && strstr(thinking_parts_json, "**first**") &&
+        strstr(thinking_parts_json, "**second**"))
+    {
+        g_test.logged_thinking_parts = true;
+    }
+    (void)thinking_ms;
     snprintf(g_test.logged_thinking, sizeof(g_test.logged_thinking), "%s", thinking ? thinking : "");
     strncat(g_test.session_item_order, "A",
             sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
@@ -2869,11 +2883,42 @@ static int TestThinkSummaryCoalesce(void)
         }
     }
     bool ok = msg && msg->trace_count == 3 && !msg->trace[0].is_tool && msg->trace[0].think_steps == 2 &&
-              msg->trace[0].text && strcmp(msg->trace[0].text, "**second**") == 0 && msg->trace[1].is_tool &&
+              msg->trace[0].think_part_count == 2 && msg->trace[0].think_parts &&
+              msg->trace[0].think_parts[0] && strcmp(msg->trace[0].think_parts[0], "**first**") == 0 &&
+              msg->trace[0].think_parts[1] && strcmp(msg->trace[0].think_parts[1], "**second**") == 0 &&
+              msg->trace[0].text && strcmp(msg->trace[0].text, "**second**") == 0 &&
+              (!msg->trace[0].text || !strstr(msg->trace[0].text, "2x ")) && msg->trace[1].is_tool &&
               !msg->trace[2].is_tool && msg->trace[2].think_steps == 1 && msg->trace[2].text &&
-              strcmp(msg->trace[2].text, "**third**") == 0;
+              strcmp(msg->trace[2].text, "**third**") == 0 && g_test.logged_thinking_parts;
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "consecutive summaries did not replace with Nx, or tool did not reset");
+    return ok ? 0 : Fail(name, "consecutive summaries did not keep every step, or tool did not reset");
+}
+
+static int TestRestoredThinkKeepsUnknownDuration(void)
+{
+    const char *name = "restored thinking does not invent a duration";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoAgent_AddMessage(&app, agent, PICO_ROLE_ASSISTANT, "answer");
+    PicoAgent_AppendThink(&app, agent, "historic-cot", 0);
+    PicoAgent_AddToolCallWithId(&app, agent, "c1", "echo_test", "{}");
+    PicoAgent_AppendThink(&app, agent, "later-cot", 0);
+    PicoMessage *msg = agent->message_count > 0 ? &agent->messages[agent->message_count - 1] : NULL;
+    bool unknown = msg && msg->trace_count == 3 && !msg->trace[0].is_tool && msg->trace[0].think_ms == 0 &&
+                   msg->trace[1].is_tool && !msg->trace[2].is_tool && msg->trace[2].think_ms == 0;
+    PicoAgent_AddMessage(&app, agent, PICO_ROLE_ASSISTANT, "timed");
+    PicoAgent_AppendThink(&app, agent, "stored-cot", 12500);
+    PicoAgent_AddToolCallWithId(&app, agent, "c2", "echo_test", "{}");
+    PicoMessage *timed = &agent->messages[agent->message_count - 1];
+    bool kept = timed->trace_count >= 1 && !timed->trace[0].is_tool && timed->trace[0].think_ms == 12500;
+    PicoApp_Free(&app);
+    if (!unknown)
+    {
+        return Fail(name, "replay-style restore invented a duration after a following tool");
+    }
+    return kept ? 0 : Fail(name, "stored thinking_ms was not kept across a following tool");
 }
 
 int main(void)
@@ -2948,6 +2993,7 @@ int main(void)
     failed |= TestNonVisionMediaRejected();
     failed |= TestCancelledThinkingPersistence();
     failed |= TestThinkSummaryCoalesce();
+    failed |= TestRestoredThinkKeepsUnknownDuration();
     /* Retained shutdown permanently retires Pico in this process, so run last. */
     failed |= TestShutdownTimeout();
     return failed ? 1 : 0;

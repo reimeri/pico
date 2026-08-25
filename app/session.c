@@ -668,6 +668,29 @@ static void ApplyToolDetails(PicoApp *app, PicoAgent *agent, const char *name,
     }
 }
 
+static bool ReplayThinkParts(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int obj,
+                             int thinking_ms)
+{
+    int parts = JsonObjGet(doc, obj, "thinking_parts");
+    if (!JsonIsArray(doc, parts))
+    {
+        return false;
+    }
+    int count = JsonArrayLen(doc, parts);
+    bool restored = false;
+    for (int i = 0; i < count; i++)
+    {
+        char *text = JsonStrDup(doc, JsonArrayAt(doc, parts, i));
+        if (text && text[0])
+        {
+            PicoAgent_AppendThinkSummary(app, agent, text, i + 1, thinking_ms);
+            restored = true;
+        }
+        free(text);
+    }
+    return restored;
+}
+
 static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int obj,
                        bool into_input, int *active_group)
 {
@@ -731,9 +754,12 @@ static void ReplayLine(PicoApp *app, PicoAgent *agent, const JsonDoc *doc, int o
             char *thinking = JsonObjStr(doc, obj, "thinking");
             char *signature = JsonObjStr(doc, obj, "thinking_signature");
             char *parts = JsonObjRaw(doc, obj, "parts");
-            if (thinking && thinking[0])
+            int thinking_ms = 0;
+            (void)JsonObjNonNegativeInt(doc, obj, "thinking_ms", &thinking_ms);
+            bool restored_summary = ReplayThinkParts(app, agent, doc, obj, thinking_ms);
+            if (!restored_summary && thinking && thinking[0])
             {
-                PicoAgent_AppendThink(app, agent, thinking);
+                PicoAgent_AppendThink(app, agent, thinking, thinking_ms);
             }
             if (into_input &&
                 ((content && content[0]) || (thinking && thinking[0]) || (signature && signature[0]) ||
@@ -1210,11 +1236,7 @@ static void LoadedTranscriptFree(PicoMessage *messages, int count)
         free(messages[i].source);
         for (int t = 0; t < messages[i].trace_count; t++)
         {
-            free(messages[i].trace[t].text);
-            free(messages[i].trace[t].tool_name);
-            free(messages[i].trace[t].tool_call_id);
-            free(messages[i].trace[t].tool_args);
-            free(messages[i].trace[t].tool_output);
+            PicoTraceLine_Release(&messages[i].trace[t]);
         }
         free(messages[i].trace);
     }
@@ -1295,7 +1317,7 @@ static bool LoadedAddTool(PicoMessage **messages, int *count, int *capacity,
 }
 
 static bool LoadedAddThink(PicoMessage **messages, int *count, int *capacity,
-                           const char *text)
+                           const char *text, int think_ms)
 {
     PicoMessage *msg;
     PicoTraceLine *line = NULL;
@@ -1345,6 +1367,105 @@ static bool LoadedAddThink(PicoMessage **messages, int *count, int *capacity,
     }
     memcpy(next_text + old, text, n + 1);
     line->text = next_text;
+    if (think_ms > 0 && line->think_ms == 0)
+    {
+        line->think_ms = think_ms;
+    }
+    return true;
+}
+
+static bool LoadedAddThinkParts(PicoMessage **messages, int *count, int *capacity,
+                                const JsonDoc *doc, int obj, int think_ms, bool *restored)
+{
+    if (restored)
+    {
+        *restored = false;
+    }
+    int parts = JsonObjGet(doc, obj, "thinking_parts");
+    if (!JsonIsArray(doc, parts))
+    {
+        return true;
+    }
+    int part_count = JsonArrayLen(doc, parts);
+    if (part_count <= 0)
+    {
+        return true;
+    }
+    char **copies = (char **)calloc((size_t)part_count, sizeof(char *));
+    if (!copies)
+    {
+        return false;
+    }
+    bool ok = true;
+    for (int i = 0; i < part_count; i++)
+    {
+        copies[i] = JsonStrDup(doc, JsonArrayAt(doc, parts, i));
+        if (!copies[i])
+        {
+            ok = false;
+            break;
+        }
+    }
+    if (!ok)
+    {
+        for (int i = 0; i < part_count; i++)
+        {
+            free(copies[i]);
+        }
+        free(copies);
+        return false;
+    }
+    if (*count <= 0 || (*messages)[*count - 1].role != PICO_ROLE_ASSISTANT)
+    {
+        if (!LoadedAddMessage(messages, count, capacity, PICO_ROLE_ASSISTANT, ""))
+        {
+            for (int i = 0; i < part_count; i++)
+            {
+                free(copies[i]);
+            }
+            free(copies);
+            return false;
+        }
+    }
+    PicoMessage *msg = &(*messages)[*count - 1];
+    PicoTraceLine *line = NULL;
+    if (msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+        msg->trace[msg->trace_count - 1].think_steps > 0)
+    {
+        line = &msg->trace[msg->trace_count - 1];
+        PicoTraceLine_Release(line);
+    }
+    else
+    {
+        PicoTraceLine *next =
+            (PicoTraceLine *)realloc(msg->trace, (size_t)(msg->trace_count + 1) * sizeof(PicoTraceLine));
+        if (!next)
+        {
+            for (int i = 0; i < part_count; i++)
+            {
+                free(copies[i]);
+            }
+            free(copies);
+            return false;
+        }
+        msg->trace = next;
+        line = &msg->trace[msg->trace_count++];
+        memset(line, 0, sizeof(*line));
+    }
+    line->think_parts = copies;
+    line->think_part_count = part_count;
+    line->think_steps = part_count;
+    line->think_ms = think_ms > 0 ? think_ms : 0;
+    line->text = JsonDup(copies[part_count - 1]);
+    if (!line->text)
+    {
+        PicoTraceLine_Release(line);
+        return false;
+    }
+    if (restored)
+    {
+        *restored = true;
+    }
     return true;
 }
 
@@ -1447,11 +1568,17 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
             {
                 char *thinking = JsonObjStr(&doc, 0, "thinking");
                 int message_group = -1;
+                int thinking_ms = 0;
+                (void)JsonObjNonNegativeInt(&doc, 0, "thinking_ms", &thinking_ms);
+                bool restored_summary = false;
                 failed = !JsonObjNonNegativeInt(&doc, 0, "message_group", &message_group) ||
                          !LoadedAppendAssistant(&messages, &count, &capacity,
                                                 message_group, &active_group,
                                                 content ? content : "") ||
-                         !LoadedAddThink(&messages, &count, &capacity, thinking);
+                         !LoadedAddThinkParts(&messages, &count, &capacity, &doc, 0,
+                                              thinking_ms, &restored_summary) ||
+                         (!restored_summary &&
+                          !LoadedAddThink(&messages, &count, &capacity, thinking, thinking_ms));
                 free(thinking);
             }
             free(role);
@@ -1657,15 +1784,18 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
                                                 int message_group, const char *content,
                                                 const char *thinking,
                                                 const char *thinking_signature,
-                                                const char *parts_json)
+                                                const char *parts_json,
+                                                const char *thinking_parts_json,
+                                                int thinking_ms)
 {
     bool has_parts = parts_json && parts_json[0] == '[';
+    bool has_thinking_parts = thinking_parts_json && thinking_parts_json[0] == '[';
     if (message_group < 0)
     {
         return PICO_SESSION_WRITE_FAILED;
     }
     if ((!content || !content[0]) && (!thinking || !thinking[0]) &&
-        (!thinking_signature || !thinking_signature[0]) && !has_parts)
+        (!thinking_signature || !thinking_signature[0]) && !has_parts && !has_thinking_parts)
     {
         return PICO_SESSION_WRITE_SKIPPED;
     }
@@ -1681,6 +1811,16 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
     {
         JsonBuf_Puts(&b, ",\"thinking\":");
         JsonBuf_String(&b, thinking);
+    }
+    if (has_thinking_parts)
+    {
+        JsonBuf_Puts(&b, ",\"thinking_parts\":");
+        JsonBuf_Puts(&b, thinking_parts_json);
+    }
+    if (thinking_ms > 0 && ((thinking && thinking[0]) || has_thinking_parts))
+    {
+        JsonBuf_Puts(&b, ",\"thinking_ms\":");
+        JsonBuf_Int(&b, thinking_ms);
     }
     if (thinking_signature && thinking_signature[0])
     {

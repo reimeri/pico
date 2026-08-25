@@ -51,7 +51,11 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
 
 void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text);
-void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text);
+void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text, int think_ms);
+void PicoAgent_AppendThinkSummary(PicoApp *app, PicoAgent *agent, const char *text,
+                                  int step, int think_ms);
+void PicoTraceLine_Release(PicoTraceLine *line);
+void PicoTraceLine_FreezeThink(PicoTraceLine *line);
 void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args);
 void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args);

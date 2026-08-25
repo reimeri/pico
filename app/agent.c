@@ -2921,7 +2921,8 @@ bool PicoAgent_Destroy(PicoAgent *agent)
 
 void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text)
 {
-    if (!app || !agent || !agent->runtime || !user_text || !user_text[0])
+    bool has_parts = app && app->agent_parts && app->agent_parts[0] == '[';
+    if (!app || !agent || !agent->runtime || ((!user_text || !user_text[0]) && !has_parts))
     {
         return;
     }

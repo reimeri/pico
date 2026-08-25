@@ -1,14 +1,29 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "pico/plugin.h"
+#include "canonical.h"
 #include "complete_internal.h"
+#include "composer_internal.h"
+#include "json.h"
+#include "path.h"
+#include "settings.h"
 #include "text_range.h"
 #include "scrollbar.h"
 
 #include "clay/clay.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define PASTE_TEMP_THRESHOLD 4096
@@ -18,6 +33,11 @@
 #define COMPOSER_MAX_LINES 256
 #define COMPOSER_MIN_HEIGHT 56
 #define COMPOSER_MAX_GROW_LINES 10
+#define COMPOSER_MAX_ATTACH 32
+#define ATTACH_THUMB 56
+#define ATTACH_REMOVE 18
+#define CLIP_IMAGE_MAX (32 * 1024 * 1024)
+#define CLIP_PROCESS_TIMEOUT_SECONDS 1.5
 #define CARET_BLINK_HZ 2.0
 
 static Font ComposerFont(void)
@@ -258,6 +278,789 @@ static int s_seen_cursor = -1;
 static int s_seen_length = -1;
 static float s_goal_x = -1;
 static double s_caret_blink_at;
+
+typedef struct ComposerAttach {
+    char path[4096];
+    Texture2D thumb;
+    bool loaded;
+    bool owned;
+} ComposerAttach;
+
+static ComposerAttach g_attach[COMPOSER_MAX_ATTACH];
+static int g_attach_n;
+static int g_preview = -1;
+static Texture2D g_preview_tex;
+static bool g_preview_loaded;
+
+static void ClosePreview(void)
+{
+    if (g_preview_loaded)
+    {
+        UnloadTexture(g_preview_tex);
+    }
+    memset(&g_preview_tex, 0, sizeof(g_preview_tex));
+    g_preview_loaded = false;
+    g_preview = -1;
+}
+
+static void LoadThumb(ComposerAttach *a)
+{
+    a->loaded = false;
+    memset(&a->thumb, 0, sizeof(a->thumb));
+    if (!IsWindowReady())
+    {
+        return;
+    }
+    Image img = LoadImage(a->path);
+    if (!img.data)
+    {
+        return;
+    }
+    int max_side = img.width > img.height ? img.width : img.height;
+    if (max_side > ATTACH_THUMB)
+    {
+        float scale = (float)ATTACH_THUMB / (float)max_side;
+        int w = (int)((float)img.width * scale + 0.5f);
+        int h = (int)((float)img.height * scale + 0.5f);
+        if (w < 1)
+        {
+            w = 1;
+        }
+        if (h < 1)
+        {
+            h = 1;
+        }
+        ImageResize(&img, w, h);
+    }
+    a->thumb = LoadTextureFromImage(img);
+    UnloadImage(img);
+    a->loaded = a->thumb.id != 0;
+}
+
+static void UnloadAttach(ComposerAttach *a, bool delete_owned)
+{
+    if (a->loaded)
+    {
+        UnloadTexture(a->thumb);
+    }
+    if (delete_owned && a->owned && a->path[0])
+    {
+        unlink(a->path);
+    }
+    memset(a, 0, sizeof(*a));
+}
+
+static void ClearAttachments(bool delete_owned)
+{
+    ClosePreview();
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        UnloadAttach(&g_attach[i], delete_owned);
+    }
+    g_attach_n = 0;
+}
+
+void PicoComposer_ReleaseAttachments(void)
+{
+    ClearAttachments(false);
+}
+
+void PicoComposer_DiscardAttachments(void)
+{
+    ClearAttachments(true);
+}
+
+bool PicoComposer_HasAttachments(const PicoApp *app)
+{
+    (void)app;
+    return g_attach_n > 0;
+}
+
+bool PicoComposer_PreviewOpen(void)
+{
+    return g_preview >= 0;
+}
+
+int pico_composer_attachment_count(void)
+{
+    return g_attach_n;
+}
+
+bool pico_composer_attach_path(const char *path, bool owned)
+{
+    if (!path || !path[0] || g_attach_n >= COMPOSER_MAX_ATTACH)
+    {
+        return false;
+    }
+    char resolved[4096];
+    if (!realpath(path, resolved) || !pico_canonical_is_image_path(resolved))
+    {
+        return false;
+    }
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        if (strcmp(g_attach[i].path, resolved) == 0)
+        {
+            return true;
+        }
+    }
+    ComposerAttach *a = &g_attach[g_attach_n];
+    memset(a, 0, sizeof(*a));
+    snprintf(a->path, sizeof(a->path), "%s", resolved);
+    a->owned = owned;
+    LoadThumb(a);
+    g_attach_n++;
+    return true;
+}
+
+bool pico_composer_remove_at(int index)
+{
+    if (index < 0 || index >= g_attach_n)
+    {
+        return false;
+    }
+    if (g_preview == index)
+    {
+        ClosePreview();
+    }
+    else if (g_preview > index)
+    {
+        g_preview--;
+    }
+    UnloadAttach(&g_attach[index], true);
+    if (index < g_attach_n - 1)
+    {
+        memmove(&g_attach[index], &g_attach[index + 1],
+                (size_t)(g_attach_n - index - 1) * sizeof(g_attach[0]));
+    }
+    g_attach_n--;
+    memset(&g_attach[g_attach_n], 0, sizeof(g_attach[0]));
+    return true;
+}
+
+bool pico_composer_submit_ready(const char *text, int length)
+{
+    if (g_attach_n > 0)
+    {
+        return true;
+    }
+    if (!text || length <= 0)
+    {
+        return false;
+    }
+    int start = 0;
+    int end = length;
+    while (start < end && (text[start] == ' ' || text[start] == '\n' || text[start] == '\t'))
+    {
+        start++;
+    }
+    while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\n' || text[end - 1] == '\t'))
+    {
+        end--;
+    }
+    return end > start;
+}
+
+static bool PathInParts(const PicoLlmPart *parts, int n, const char *path)
+{
+    for (int i = 0; i < n; i++)
+    {
+        if (parts[i].path && path && strcmp(parts[i].path, path) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+char *pico_composer_merge_parts(const char *text, const char *existing_parts)
+{
+    PicoLlmPart *parts = NULL;
+    int n = 0;
+    if (existing_parts)
+    {
+        if (existing_parts[0] != '[')
+        {
+            return NULL;
+        }
+        JsonBuf wrap;
+        JsonBuf_Init(&wrap);
+        JsonBuf_Puts(&wrap, "{\"parts\":");
+        JsonBuf_Puts(&wrap, existing_parts);
+        JsonBuf_Putc(&wrap, '}');
+        char *obj = JsonBuf_Steal(&wrap);
+        JsonDoc doc;
+        memset(&doc, 0, sizeof(doc));
+        bool parsed = obj && JsonParse(&doc, obj, strlen(obj)) == 0 &&
+                      pico_canonical_parse_parts(&doc, 0, &parts, &n) && n > 0;
+        if (doc.toks)
+        {
+            JsonFree(&doc);
+        }
+        free(obj);
+        if (!parsed)
+        {
+            pico_canonical_free_parts(parts, n);
+            return NULL;
+        }
+    }
+    else
+    {
+        parts = (PicoLlmPart *)calloc(1, sizeof(PicoLlmPart));
+        if (!parts)
+        {
+            return NULL;
+        }
+        parts[0].kind = PICO_LLM_PART_TEXT;
+        parts[0].text = JsonDup(text ? text : "");
+        if (!parts[0].text)
+        {
+            free(parts);
+            return NULL;
+        }
+        n = 1;
+    }
+    int extra = 0;
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        if (!PathInParts(parts, n, g_attach[i].path))
+        {
+            extra++;
+        }
+    }
+    if (extra > 0)
+    {
+        PicoLlmPart *grown = (PicoLlmPart *)realloc(parts, (size_t)(n + extra) * sizeof(PicoLlmPart));
+        if (!grown)
+        {
+            pico_canonical_free_parts(parts, n);
+            return NULL;
+        }
+        parts = grown;
+        memset(parts + n, 0, (size_t)extra * sizeof(PicoLlmPart));
+        for (int i = 0; i < g_attach_n; i++)
+        {
+            if (PathInParts(parts, n, g_attach[i].path))
+            {
+                continue;
+            }
+            parts[n].kind = PICO_LLM_PART_IMAGE;
+            parts[n].path = JsonDup(g_attach[i].path);
+            parts[n].mime = JsonDup(pico_canonical_mime_for_path(g_attach[i].path));
+            if (!parts[n].path || !parts[n].mime)
+            {
+                pico_canonical_free_parts(parts, n + 1);
+                return NULL;
+            }
+            n++;
+        }
+    }
+    char *json = pico_canonical_parts_json(parts, n);
+    pico_canonical_free_parts(parts, n);
+    return json;
+}
+
+char *pico_composer_display_message(const char *text)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    if (text && text[0])
+    {
+        JsonBuf_Puts(&b, text);
+    }
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        if (b.len > 0)
+        {
+            JsonBuf_Puts(&b, "\n\n");
+        }
+        JsonBuf_Puts(&b, "![](");
+        JsonBuf_Puts(&b, g_attach[i].path);
+        JsonBuf_Putc(&b, ')');
+    }
+    return JsonBuf_Steal(&b);
+}
+
+bool PicoComposer_ApplyAttachments(PicoApp *app)
+{
+    if (!app || g_attach_n <= 0)
+    {
+        return true;
+    }
+    const char *text = app->agent_input && app->agent_input[0] ? app->agent_input
+                                                              : (app->composer.text ? app->composer.text : "");
+    char *merged = pico_composer_merge_parts(text, app->agent_parts);
+    if (!merged)
+    {
+        return false;
+    }
+    free(app->agent_parts);
+    app->agent_parts = merged;
+    return true;
+}
+
+static bool ComposerMediaDir(const PicoApp *app, char *out, size_t cap)
+{
+    const char *ws = (app && app->workspace[0]) ? app->workspace : "/tmp";
+    return PicoPath_Format(out, cap, "%s/.pico/media/composer", ws);
+}
+
+#if defined(__linux__)
+static const char *ImageExtFromBytes(const unsigned char *b, size_t n)
+{
+    if (n >= 8 && memcmp(b, "\x89PNG\r\n\x1a\n", 8) == 0)
+    {
+        return "png";
+    }
+    if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF)
+    {
+        return "jpg";
+    }
+    if (n >= 12 && memcmp(b, "RIFF", 4) == 0 && memcmp(b + 8, "WEBP", 4) == 0)
+    {
+        return "webp";
+    }
+    if (n >= 6 && (memcmp(b, "GIF87a", 6) == 0 || memcmp(b, "GIF89a", 6) == 0))
+    {
+        return "gif";
+    }
+    if (n >= 2 && b[0] == 'B' && b[1] == 'M')
+    {
+        return "bmp";
+    }
+    return NULL;
+}
+
+typedef struct ClipboardProcess {
+    pid_t pid;
+    int fd;
+    int command;
+    unsigned char *bytes;
+    size_t length;
+    size_t capacity;
+    double deadline;
+    double terminate_deadline;
+    bool active;
+    bool terminating;
+} ClipboardProcess;
+
+static ClipboardProcess g_clip_process = {.fd = -1};
+static pid_t g_clip_reap[8];
+static int g_clip_reap_count;
+
+static const char *const kClipboardCommands[][8] = {
+    {"wl-paste", "--type", "image/png", NULL},
+    {"wl-paste", "--type", "image/jpeg", NULL},
+    {"wl-paste", "--type", "image/webp", NULL},
+    {"xclip", "-selection", "clipboard", "-t", "image/png", "-o", NULL},
+    {"xclip", "-selection", "clipboard", "-t", "image/jpeg", "-o", NULL},
+    {"xclip", "-selection", "clipboard", "-t", "image/webp", "-o", NULL},
+};
+
+static double MonotonicSeconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+static void ClipboardProcessQueueReap(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+    if (g_clip_reap_count < (int)(sizeof(g_clip_reap) / sizeof(g_clip_reap[0])))
+    {
+        g_clip_reap[g_clip_reap_count++] = pid;
+    }
+}
+
+static void ClipboardProcessPumpReapers(void)
+{
+    for (int i = 0; i < g_clip_reap_count;)
+    {
+        pid_t waited = waitpid(g_clip_reap[i], NULL, WNOHANG);
+        if (waited == g_clip_reap[i] || (waited < 0 && errno == ECHILD))
+        {
+            g_clip_reap[i] = g_clip_reap[--g_clip_reap_count];
+            continue;
+        }
+        i++;
+    }
+}
+
+static void ClipboardProcessKillAndReap(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+    kill(pid, SIGKILL);
+    double deadline = MonotonicSeconds() + 0.05;
+    for (;;)
+    {
+        pid_t waited = waitpid(pid, NULL, WNOHANG);
+        if (waited == pid || (waited < 0 && errno == ECHILD))
+        {
+            return;
+        }
+        if (waited < 0 && errno != EINTR)
+        {
+            return;
+        }
+        if (MonotonicSeconds() >= deadline)
+        {
+            ClipboardProcessQueueReap(pid);
+            return;
+        }
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
+        nanosleep(&pause, NULL);
+    }
+}
+
+static void ClipboardProcessResetAttempt(void)
+{
+    if (g_clip_process.fd >= 0)
+    {
+        close(g_clip_process.fd);
+    }
+    g_clip_process.fd = -1;
+    g_clip_process.pid = 0;
+    free(g_clip_process.bytes);
+    g_clip_process.bytes = NULL;
+    g_clip_process.length = 0;
+    g_clip_process.capacity = 0;
+    g_clip_process.terminate_deadline = 0;
+    g_clip_process.terminating = false;
+}
+
+static void ClipboardProcessClear(void)
+{
+    ClipboardProcessResetAttempt();
+    memset(&g_clip_process, 0, sizeof(g_clip_process));
+    g_clip_process.fd = -1;
+}
+
+void PicoComposer_CancelClipboardPaste(void)
+{
+    if (g_clip_process.pid > 0)
+    {
+        if (g_clip_process.fd >= 0)
+        {
+            close(g_clip_process.fd);
+            g_clip_process.fd = -1;
+        }
+        ClipboardProcessKillAndReap(g_clip_process.pid);
+    }
+    ClipboardProcessClear();
+}
+
+static bool ClipboardProcessSpawn(void)
+{
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+    {
+        return false;
+    }
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        int null_fd = open("/dev/null", O_WRONLY);
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0 ||
+            (null_fd >= 0 && dup2(null_fd, STDERR_FILENO) < 0))
+        {
+            _exit(126);
+        }
+        close(pipefd[1]);
+        if (null_fd >= 0)
+        {
+            close(null_fd);
+        }
+        execvp(kClipboardCommands[g_clip_process.command][0],
+               (char *const *)kClipboardCommands[g_clip_process.command]);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    if (pid < 0)
+    {
+        close(pipefd[0]);
+        return false;
+    }
+    int flags = fcntl(pipefd[0], F_GETFL, 0);
+    if (flags < 0 || fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK) != 0)
+    {
+        close(pipefd[0]);
+        ClipboardProcessKillAndReap(pid);
+        return false;
+    }
+    g_clip_process.pid = pid;
+    g_clip_process.fd = pipefd[0];
+    return true;
+}
+
+static bool ClipboardProcessAppend(const unsigned char *bytes, size_t n)
+{
+    if (n > CLIP_IMAGE_MAX - g_clip_process.length)
+    {
+        return false;
+    }
+    size_t needed = g_clip_process.length + n;
+    if (needed > g_clip_process.capacity)
+    {
+        size_t capacity = g_clip_process.capacity ? g_clip_process.capacity : 4096;
+        while (capacity < needed)
+        {
+            size_t next = capacity * 2;
+            capacity = next > CLIP_IMAGE_MAX ? CLIP_IMAGE_MAX : next;
+        }
+        unsigned char *grown = (unsigned char *)realloc(g_clip_process.bytes, capacity);
+        if (!grown)
+        {
+            return false;
+        }
+        g_clip_process.bytes = grown;
+        g_clip_process.capacity = capacity;
+    }
+    memcpy(g_clip_process.bytes + g_clip_process.length, bytes, n);
+    g_clip_process.length += n;
+    return true;
+}
+
+static bool ClipboardProcessDrain(void)
+{
+    unsigned char chunk[8192];
+    for (;;)
+    {
+        ssize_t got = read(g_clip_process.fd, chunk, sizeof(chunk));
+        if (got > 0)
+        {
+            if (!ClipboardProcessAppend(chunk, (size_t)got))
+            {
+                return false;
+            }
+            continue;
+        }
+        if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+        {
+            return got == 0;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        return true;
+    }
+}
+#endif
+
+static unsigned char *ClipboardImageBytes(size_t *out_n, const char **out_ext, bool *raylib_alloc)
+{
+    *out_n = 0;
+    *out_ext = NULL;
+    *raylib_alloc = false;
+#if !defined(__linux__)
+    Image img = GetClipboardImage();
+    if (img.data && img.width > 0 && img.height > 0)
+    {
+        int size = 0;
+        unsigned char *png = ExportImageToMemory(img, ".png", &size);
+        UnloadImage(img);
+        if (png && size > 0)
+        {
+            *out_n = (size_t)size;
+            *out_ext = "png";
+            *raylib_alloc = true;
+            return png;
+        }
+        if (png)
+        {
+            MemFree(png);
+        }
+    }
+    else if (img.data)
+    {
+        UnloadImage(img);
+    }
+#endif
+    return NULL;
+}
+
+static bool PersistClipboardImage(PicoApp *app, const unsigned char *bytes, size_t n, const char *ext)
+{
+    char dir[4096];
+    if (!ComposerMediaDir(app, dir, sizeof(dir)))
+    {
+        return false;
+    }
+    char *path = pico_canonical_persist_bytes(dir, ext && ext[0] ? ext : "png", bytes, n);
+    if (!path)
+    {
+        return false;
+    }
+    bool ok = pico_composer_attach_path(path, true);
+    free(path);
+    return ok;
+}
+
+static bool PasteClipboardImage(PicoApp *app)
+{
+    if (g_attach_n >= COMPOSER_MAX_ATTACH)
+    {
+        pico_status_warn(app, "Too many attached images.");
+        return true;
+    }
+    size_t n = 0;
+    const char *ext = NULL;
+    bool raylib_alloc = false;
+    unsigned char *bytes = ClipboardImageBytes(&n, &ext, &raylib_alloc);
+    if (!bytes)
+    {
+        return false;
+    }
+    bool ok = PersistClipboardImage(app, bytes, n, ext);
+    if (raylib_alloc)
+    {
+        MemFree(bytes);
+    }
+    else
+    {
+        free(bytes);
+    }
+    if (!ok)
+    {
+        pico_status_warn(app, "Could not attach the pasted image.");
+    }
+    return true;
+}
+
+static void PasteClipboard(PicoComposer *c);
+
+#if defined(__linux__)
+static bool ClipboardProcessStartNext(void)
+{
+    ClipboardProcessResetAttempt();
+    int count = (int)(sizeof(kClipboardCommands) / sizeof(kClipboardCommands[0]));
+    while (g_clip_process.command < count)
+    {
+        if (ClipboardProcessSpawn())
+        {
+            return true;
+        }
+        g_clip_process.command++;
+    }
+    return false;
+}
+
+static void ClipboardProcessFallback(PicoApp *app)
+{
+    ClipboardProcessClear();
+    PasteClipboard(&app->composer);
+}
+
+bool PicoComposer_ClipboardPasteBusy(void)
+{
+    return g_clip_process.active;
+}
+
+void PicoComposer_BeginClipboardPaste(PicoApp *app)
+{
+    if (g_clip_process.active)
+    {
+        return;
+    }
+    if (g_attach_n >= COMPOSER_MAX_ATTACH)
+    {
+        pico_status_warn(app, "Too many attached images.");
+        return;
+    }
+    g_clip_process.active = true;
+    g_clip_process.command = 0;
+    g_clip_process.deadline = MonotonicSeconds() + CLIP_PROCESS_TIMEOUT_SECONDS;
+    if (!ClipboardProcessStartNext())
+    {
+        ClipboardProcessFallback(app);
+    }
+}
+
+static void ClipboardProcessTerminate(void)
+{
+    if (g_clip_process.terminating)
+    {
+        return;
+    }
+    if (g_clip_process.pid > 0)
+    {
+        kill(g_clip_process.pid, SIGKILL);
+    }
+    g_clip_process.terminate_deadline = MonotonicSeconds() + 0.05;
+    if (g_clip_process.fd >= 0)
+    {
+        close(g_clip_process.fd);
+        g_clip_process.fd = -1;
+    }
+    g_clip_process.terminating = true;
+}
+
+void PicoComposer_PumpClipboardPaste(PicoApp *app)
+{
+    ClipboardProcessPumpReapers();
+    if (!g_clip_process.active || g_clip_process.pid <= 0)
+    {
+        return;
+    }
+    if (!g_clip_process.terminating && !ClipboardProcessDrain())
+    {
+        ClipboardProcessTerminate();
+    }
+    if (!g_clip_process.terminating && MonotonicSeconds() >= g_clip_process.deadline)
+    {
+        ClipboardProcessTerminate();
+    }
+
+    int status = 0;
+    pid_t waited = waitpid(g_clip_process.pid, &status, WNOHANG);
+    if (waited == 0 || (waited < 0 && errno == EINTR))
+    {
+        if (g_clip_process.terminating &&
+            MonotonicSeconds() >= g_clip_process.terminate_deadline)
+        {
+            ClipboardProcessQueueReap(g_clip_process.pid);
+            g_clip_process.pid = 0;
+            g_clip_process.command++;
+            if (MonotonicSeconds() >= g_clip_process.deadline || !ClipboardProcessStartNext())
+            {
+                ClipboardProcessFallback(app);
+            }
+        }
+        return;
+    }
+    bool exited_ok = waited == g_clip_process.pid && !g_clip_process.terminating &&
+                     WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (exited_ok && g_clip_process.fd >= 0 && !ClipboardProcessDrain())
+    {
+        exited_ok = false;
+    }
+    const char *ext = exited_ok ? ImageExtFromBytes(g_clip_process.bytes, g_clip_process.length) : NULL;
+    if (ext)
+    {
+        bool attached = PersistClipboardImage(app, g_clip_process.bytes, g_clip_process.length, ext);
+        ClipboardProcessClear();
+        if (!attached)
+        {
+            pico_status_warn(app, "Could not attach the pasted image.");
+        }
+        return;
+    }
+
+    g_clip_process.command++;
+    if (MonotonicSeconds() >= g_clip_process.deadline || !ClipboardProcessStartNext())
+    {
+        ClipboardProcessFallback(app);
+    }
+}
+#endif
 
 static void MoveCursor(PicoComposer *c, int pos, bool extend);
 
@@ -684,6 +1487,22 @@ void PicoComposer_Copy(PicoApp *app)
     free(copy);
 }
 
+static void OpenPreview(int index)
+{
+    if (index < 0 || index >= g_attach_n)
+    {
+        return;
+    }
+    ClosePreview();
+    g_preview = index;
+    if (!IsWindowReady())
+    {
+        return;
+    }
+    g_preview_tex = LoadTexture(g_attach[index].path);
+    g_preview_loaded = g_preview_tex.id != 0;
+}
+
 static void PasteClipboard(PicoComposer *c)
 {
     const char *clip = GetClipboardText();
@@ -835,7 +1654,14 @@ void PicoComposer_HandleInput(PicoApp *app)
 
     if (ctrl && Pico_ShortcutPressed('v'))
     {
-        PasteClipboard(c);
+        if (!PasteClipboardImage(app))
+        {
+#if defined(__linux__)
+            PicoComposer_BeginClipboardPaste(app);
+#else
+            PasteClipboard(c);
+#endif
+        }
     }
 
     if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && !shift)
@@ -934,6 +1760,49 @@ static void ComposerExtendUnit(PicoComposer *c, int pos)
     NoteCaretActivity();
 }
 
+bool PicoComposer_PointerOverAttachments(void)
+{
+    return g_attach_n > 0 &&
+           Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ComposerAttachStrip")));
+}
+
+bool PicoComposer_PointerOverAttachmentRemove(void)
+{
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        if (Clay_PointerOver(CLAY_IDI("CompAttachRemove", i)))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ComposerHandleAttachPointer(void)
+{
+    if (g_attach_n <= 0 || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        return PicoComposer_PointerOverAttachments();
+    }
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        if (Clay_PointerOver(CLAY_IDI("CompAttachRemove", i)))
+        {
+            pico_composer_remove_at(i);
+            return true;
+        }
+    }
+    for (int i = 0; i < g_attach_n; i++)
+    {
+        if (Clay_PointerOver(CLAY_IDI("CompAttach", i)))
+        {
+            OpenPreview(i);
+            return true;
+        }
+    }
+    return PicoComposer_PointerOverAttachments();
+}
+
 void PicoComposer_HandlePointer(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
@@ -984,13 +1853,29 @@ void PicoComposer_Render(PicoApp *app)
         line_height = ComposerPx();
     }
 
-    float content_h = (float)line_count * line_height;
-    float box_h = content_h + (float)COMPOSER_PAD_Y * 2;
-    if (box_h < (float)COMPOSER_MIN_HEIGHT)
+    bool vision = true;
+    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+    if (model)
     {
-        box_h = (float)COMPOSER_MIN_HEIGHT;
+        vision = model->vision;
     }
-    float max_h = (float)COMPOSER_MAX_GROW_LINES * line_height + (float)COMPOSER_PAD_Y * 2;
+    float attach_h = 0;
+    if (g_attach_n > 0)
+    {
+        attach_h = (float)ATTACH_THUMB + 8.0f;
+        if (!vision)
+        {
+            attach_h += 18.0f;
+        }
+    }
+
+    float content_h = (float)line_count * line_height;
+    float box_h = content_h + (float)COMPOSER_PAD_Y * 2 + attach_h;
+    if (box_h < (float)COMPOSER_MIN_HEIGHT + attach_h)
+    {
+        box_h = (float)COMPOSER_MIN_HEIGHT + attach_h;
+    }
+    float max_h = (float)COMPOSER_MAX_GROW_LINES * line_height + (float)COMPOSER_PAD_Y * 2 + attach_h;
     if (box_h > max_h)
     {
         box_h = max_h;
@@ -998,11 +1883,93 @@ void PicoComposer_Render(PicoApp *app)
 
     CLAY(CLAY_ID("Composer"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = g_attach_n > 0 ? 8 : 0,
                      .padding = {COMPOSER_PAD_X, COMPOSER_PAD_X, COMPOSER_PAD_Y, COMPOSER_PAD_Y},
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(box_h)}},
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
+        if (g_attach_n > 0)
+        {
+            CLAY(CLAY_ID("ComposerAttachStrip"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 4,
+                             .sizing = {.width = CLAY_SIZING_GROW(0),
+                                        .height = CLAY_SIZING_FIT(0)}}})
+            {
+                CLAY(CLAY_ID("ComposerAttachRow"),
+                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = 8,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_FIXED((float)ATTACH_THUMB)}}})
+                {
+                    for (int i = 0; i < g_attach_n; i++)
+                    {
+                        ComposerAttach *a = &g_attach[i];
+                        float thumb_w = (float)ATTACH_THUMB;
+                        float thumb_h = (float)ATTACH_THUMB;
+                        if (a->loaded && a->thumb.width > 0 && a->thumb.height > 0)
+                        {
+                            if (a->thumb.width >= a->thumb.height)
+                            {
+                                thumb_h = (float)ATTACH_THUMB * ((float)a->thumb.height / (float)a->thumb.width);
+                            }
+                            else
+                            {
+                                thumb_w = (float)ATTACH_THUMB * ((float)a->thumb.width / (float)a->thumb.height);
+                            }
+                        }
+                        CLAY(CLAY_IDI("CompAttach", i),
+                             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)ATTACH_THUMB),
+                                                    .height = CLAY_SIZING_FIXED((float)ATTACH_THUMB)},
+                                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                              .backgroundColor = COLOR_CODE_BG,
+                              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                        {
+                            if (a->loaded)
+                            {
+                                CLAY(CLAY_IDI("CompAttachImg", i),
+                                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(thumb_w),
+                                                            .height = CLAY_SIZING_FIXED(thumb_h)}},
+                                      .image = {.imageData = &a->thumb}})
+                                {
+                                }
+                            }
+                            if (Clay_Hovered())
+                            {
+                                CLAY(CLAY_IDI("CompAttachRemove", i),
+                                     {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                                                   .zIndex = 4,
+                                                   .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP,
+                                                                    .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
+                                                   .offset = {-3, 3}},
+                                      .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)ATTACH_REMOVE),
+                                                            .height = CLAY_SIZING_FIXED((float)ATTACH_REMOVE)},
+                                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
+                                                                    .y = CLAY_ALIGN_Y_CENTER}},
+                                      .backgroundColor = Clay_Hovered() ? (Clay_Color){50, 28, 32, 240}
+                                                                        : (Clay_Color){20, 20, 24, 220},
+                                      .cornerRadius = CLAY_CORNER_RADIUS(9)})
+                                {
+                                    CLAY_TEXT(CLAY_STRING("×"),
+                                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                                .fontSize = 12,
+                                                                .textColor = COLOR_TEXT}));
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!vision)
+                {
+                    CLAY_TEXT(CLAY_STRING("This model doesn't accept images"),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = 12,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+            }
+        }
         CLAY(CLAY_ID("ComposerRow"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = SCROLLBAR_GAP,
@@ -1054,6 +2021,65 @@ void PicoComposer_Render(PicoApp *app)
             }
         }
         PicoComplete_Render(app);
+    }
+}
+
+static void ComposerPreviewRender(PicoApp *app)
+{
+    (void)app;
+    if (g_preview < 0)
+    {
+        return;
+    }
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
+    float img_w = 0;
+    float img_h = 0;
+    if (g_preview_loaded && g_preview_tex.width > 0 && g_preview_tex.height > 0)
+    {
+        float max_w = sw - 48.0f;
+        float max_h = sh - 48.0f;
+        if (max_w < 32.0f)
+        {
+            max_w = 32.0f;
+        }
+        if (max_h < 32.0f)
+        {
+            max_h = 32.0f;
+        }
+        float scale = 1.0f;
+        if ((float)g_preview_tex.width > max_w)
+        {
+            scale = max_w / (float)g_preview_tex.width;
+        }
+        if ((float)g_preview_tex.height * scale > max_h)
+        {
+            scale = max_h / (float)g_preview_tex.height;
+        }
+        img_w = (float)g_preview_tex.width * scale;
+        img_h = (float)g_preview_tex.height * scale;
+    }
+
+    CLAY(CLAY_ID("ComposerPreviewDim"),
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+                       .zIndex = 50,
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
+                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
+          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                     .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
+          .backgroundColor = {0, 0, 0, 180}})
+    {
+        if (g_preview_loaded && img_w > 1 && img_h > 1)
+        {
+            CLAY(CLAY_ID("ComposerPreviewImage"),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(img_w),
+                                        .height = CLAY_SIZING_FIXED(img_h)}},
+                  .aspectRatio = (float)g_preview_tex.width / (float)g_preview_tex.height,
+                  .image = {.imageData = &g_preview_tex}})
+            {
+            }
+        }
     }
 }
 
@@ -1132,9 +2158,22 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
         s_wrap_width = v.wrap_width;
     }
     app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
+    if (g_preview >= 0)
+    {
+        if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            ClosePreview();
+        }
+        EnsureCaretVisible(app);
+        return;
+    }
     if (!PicoUi_ModalOpen(app))
     {
-        if (!PicoComplete_HandlePointer(app))
+        if (ComposerHandleAttachPointer())
+        {
+            /* strip consumed the click */
+        }
+        else if (!PicoComplete_HandlePointer(app))
         {
             PicoComposer_HandlePointer(app);
         }
@@ -1151,6 +2190,9 @@ static void UpdateComposerScrollbarDrag(PicoApp *app)
 static void ComposerFrame(PicoApp *app, float dt)
 {
     (void)dt;
+#if defined(__linux__)
+    PicoComposer_PumpClipboardPaste(app);
+#endif
     PicoComposer_HandleInput(app);
     if (!PicoUi_ModalOpen(app))
     {
@@ -1161,8 +2203,18 @@ static void ComposerFrame(PicoApp *app, float dt)
 static void ComposerInit(PicoApp *app)
 {
     pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
+    pico_add_view(app, PICO_SLOT_OVERLAY, 25, ComposerPreviewRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ComposerAfterLayout);
     pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoComposer_DrawOverlay);
+}
+
+static void ComposerShutdown(PicoApp *app)
+{
+    (void)app;
+#if defined(__linux__)
+    PicoComposer_CancelClipboardPaste();
+#endif
+    PicoComposer_DiscardAttachments();
 }
 
 PicoExt pico_ext_composer(void)
@@ -1172,6 +2224,7 @@ PicoExt pico_ext_composer(void)
         .name = "composer",
         .description = "Prompt input",
         .init = ComposerInit,
+        .shutdown = ComposerShutdown,
         .on_frame = ComposerFrame,
     };
 }

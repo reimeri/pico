@@ -1,6 +1,7 @@
 #include "pico/plugin.h"
 
 #include "../agent_internal.h"
+#include "../composer_internal.h"
 #include "overlay.h"
 #include "json.h"
 #include "scrollbar.h"
@@ -320,7 +321,7 @@ void PicoOverlay_OnFrame(PicoApp *app, float dt)
         }
     }
     if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-        PicoChat_InspectIsOpen() || !IsKeyPressed(KEY_ESCAPE))
+        PicoChat_InspectIsOpen() || PicoComposer_PreviewOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }

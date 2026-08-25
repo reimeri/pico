@@ -41,9 +41,9 @@ All notifications run on the main thread. Agent-scoped notifications carry the a
 
 ## BEFORE_SUBMIT
 
-`PicoApp_Submit` clears `submit_cancel`, `agent_input`, and `agent_parts`, then runs the hook. Set `app->submit_cancel = true` to swallow the send. Set `app->agent_input` to a malloc'd replacement sent to the model; the composer text remains the display text and Pico frees the replacement.
+`PicoApp_Submit` clears `submit_cancel`, `agent_input`, and `agent_parts`, then runs the hook. Set `app->submit_cancel = true` to swallow the send. Set `app->agent_input` to a malloc'd replacement sent to the model; the composer text remains the display text and Pico frees the replacement. Whitespace-only composer text is skipped unless pasted image attachments are present.
 
-For structured input, set `app->agent_parts` to a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When `agent_parts` is set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. Pico frees `agent_parts` after submit or cancellation.
+For structured input, set `app->agent_parts` to a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When `agent_parts` is set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. After the hook, Pico validates `agent_parts`, then appends any pasted composer images (or builds `[text, image…]` when hooks left parts unset). Invalid hook parts reject the submission without discarding the composer draft. Pasted images also block submission, preserving the draft, when the active model does not support vision. Chat display may include markdown images for those files; `agent_input` and the text part stay as typed/hook text. Pico frees `agent_parts` after submit or cancellation.
 
 ## ON_COMPACT
 

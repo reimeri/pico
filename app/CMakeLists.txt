@@ -344,6 +344,24 @@ if(BUILD_TESTING)
     target_link_libraries(pico_files_tests PRIVATE raylib)
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
+    add_executable(pico_composer_tests
+        tests/composer_test.c
+        builtins/complete.c
+        builtins/composer.c
+        builtins/files.c
+        canonical.c
+        json.c)
+    target_include_directories(pico_composer_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_composer_tests)
+    target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_composer_tests PRIVATE raylib)
+    add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
+
     add_executable(pico_settings_agent_tests
         tests/settings_agent_test.c
         settings.c

@@ -8,6 +8,7 @@
 #include "auth.h"
 #include "chat_sel.h"
 #include "canonical.h"
+#include "composer_internal.h"
 #include "json.h"
 #include "overlay.h"
 #include "scrollbar.h"
@@ -710,12 +711,20 @@ void PicoApp_Submit(PicoApp *app)
     }
 
     PicoComposer *c = &app->composer;
-    if (!c->text || c->length <= 0)
+    bool has_attach = PicoComposer_HasAttachments(app);
+    PicoModel *model = PicoSettings_ActiveModel(app, active);
+    if (has_attach && model && !model->vision)
     {
+        free(app->agent_input);
+        app->agent_input = NULL;
+        free(app->agent_parts);
+        app->agent_parts = NULL;
+        app->submit_cancel = false;
+        pico_status_warn(app, "This model doesn't accept images.");
         return;
     }
     int start = 0;
-    int end = c->length;
+    int end = (c->text && c->length > 0) ? c->length : 0;
     while (start < end && (c->text[start] == ' ' || c->text[start] == '\n' || c->text[start] == '\t'))
     {
         start++;
@@ -724,19 +733,32 @@ void PicoApp_Submit(PicoApp *app)
     {
         end--;
     }
-    if (end <= start)
+    if (end <= start && !has_attach)
     {
         return;
     }
-    if (start > 0)
+    if (end <= start)
     {
-        memmove(c->text, c->text + start, (size_t)(end - start));
-        end -= start;
+        if (c->text)
+        {
+            c->text[0] = '\0';
+        }
+        c->length = 0;
+        c->cursor = 0;
+        c->sel_anchor = 0;
     }
-    c->length = end;
-    c->text[c->length] = '\0';
-    c->cursor = c->length;
-    c->sel_anchor = c->length;
+    else
+    {
+        if (start > 0)
+        {
+            memmove(c->text, c->text + start, (size_t)(end - start));
+            end -= start;
+        }
+        c->length = end;
+        c->text[c->length] = '\0';
+        c->cursor = c->length;
+        c->sel_anchor = c->length;
+    }
 
     free(app->agent_input);
     app->agent_input = NULL;
@@ -767,9 +789,20 @@ void PicoApp_Submit(PicoApp *app)
         free(app->agent_parts);
         app->agent_parts = normalized;
     }
+    if (!PicoComposer_ApplyAttachments(app))
+    {
+        free(app->agent_input);
+        app->agent_input = NULL;
+        free(app->agent_parts);
+        app->agent_parts = NULL;
+        pico_status_warn(app, "Could not prepare the attached images.");
+        return;
+    }
 
-    const char *display = c->text;
-    const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : display;
+    const char *typed = c->text ? c->text : "";
+    const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : typed;
+    char *display_owned = has_attach ? pico_composer_display_message(typed) : NULL;
+    const char *display = display_owned ? display_owned : typed;
     PicoApp_AddMessage(app, PICO_ROLE_USER, display);
     app->chat_follow_bottom = true;
     PicoSession_LogUser(app, active, agent, display, app->agent_parts);
@@ -782,6 +815,8 @@ void PicoApp_Submit(PicoApp *app)
     {
         c->text[0] = '\0';
     }
+    PicoComposer_ReleaseAttachments();
+    free(display_owned);
     free(app->agent_input);
     app->agent_input = NULL;
     free(app->agent_parts);
@@ -797,7 +832,8 @@ void PicoApp_Cancel(PicoApp *app)
 bool PicoUi_ModalOpen(const PicoApp *app)
 {
     return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-           PicoChat_InspectIsOpen() || PicoDiff_IsOpen() || PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
+           PicoChat_InspectIsOpen() || PicoDiff_IsOpen() || PicoComposer_PreviewOpen() ||
+           PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
@@ -1530,9 +1566,10 @@ void PicoApp_Frame(PicoApp *app)
     bool had_diff = PicoDiff_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
     bool had_inspect = PicoChat_InspectIsOpen();
+    bool had_preview = PicoComposer_PreviewOpen();
     PicoPlugins_OnFrame(app, GetFrameTime());
     if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_diff && !had_todo &&
-        !had_inspect && IsKeyPressed(KEY_ESCAPE))
+        !had_inspect && !had_preview && IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgent *active = PicoApp_ActiveAgent(app);
         if (PicoAgent_IsBusy(active))
@@ -1587,15 +1624,20 @@ void PicoApp_Frame(PicoApp *app)
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
 
-    if (app->hovered_link || app->hovered_tool || app->hovered_clickable)
+    if (!modal_open && PicoComposer_PointerOverAttachmentRemove())
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }
-    else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
+    else if ((!modal_open && PicoComposer_PointerOverAttachments()) ||
+             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
              Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack"))) ||
              Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
     {
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+    }
+    else if (app->hovered_link || app->hovered_tool || app->hovered_clickable)
+    {
+        SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }
     else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))) || PicoChatSel_PointerOverText() ||
              app->chat_sel.mouse_selecting)

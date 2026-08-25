@@ -1202,8 +1202,60 @@ void PicoChat_InspectClose(void)
 {
 }
 
+static bool g_composer_has_attachment;
+
+bool PicoComposer_HasAttachments(const PicoApp *app)
+{
+    (void)app;
+    return g_composer_has_attachment;
+}
+
+bool PicoComposer_PointerOverAttachments(void)
+{
+    return false;
+}
+
+bool PicoComposer_PointerOverAttachmentRemove(void)
+{
+    return false;
+}
+
+bool PicoComposer_ApplyAttachments(PicoApp *app)
+{
+    if (!g_composer_has_attachment)
+    {
+        return true;
+    }
+    free(app->agent_parts);
+    app->agent_parts = JsonDup(
+        "[{\"type\":\"text\",\"text\":\"\"},{\"type\":\"image\",\"path\":\"/tmp/pasted.png\"}]");
+    return app->agent_parts != NULL;
+}
+
+void PicoComposer_ReleaseAttachments(void)
+{
+    g_composer_has_attachment = false;
+}
+
+void PicoComposer_DiscardAttachments(void)
+{
+    g_composer_has_attachment = false;
+}
+
+char *pico_composer_display_message(const char *text)
+{
+    (void)text;
+    return g_composer_has_attachment ? JsonDup("![](/tmp/pasted.png)") : NULL;
+}
+
+bool PicoComposer_PreviewOpen(void)
+{
+    return false;
+}
+
 static void InitApp(PicoApp *app)
 {
+    g_composer_has_attachment = false;
     memset(app, 0, sizeof(*app));
     app->settings.compact_enabled = false;
     app->models = (PicoModel *)calloc(1, sizeof(PicoModel));
@@ -1649,6 +1701,58 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
               app.status_warn && strstr(app.status_warn, "restricted tool policy");
     PicoApp_Free(&app);
     return ok ? 0 : Fail(name, "invalid policy persisted a stranded turn or cleared the draft");
+}
+
+static int TestImageOnlySubmitStartsTurn(void)
+{
+    const char *name = "image-only submit starts turn";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    app.models[0].vision = true;
+    app.composer.text = JsonDup("");
+    app.composer.capacity = 1;
+    g_composer_has_attachment = true;
+
+    PicoApp_Submit(&app);
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "image-only turn did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool sent = g_test.last_input && strstr(g_test.last_input, "pasted.png") &&
+                strstr(g_test.last_input, "\"type\":\"image\"");
+    pthread_mutex_unlock(&g_test.mu);
+    bool ok = sent && !g_composer_has_attachment && app.composer.length == 0;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "image-only input was not sent as canonical media");
+}
+
+static int TestNonVisionSubmitPreservesDraft(void)
+{
+    const char *name = "non-vision submit preserves draft";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    app.models[0].vision = false;
+    app.composer.text = JsonDup("  keep this draft  ");
+    app.composer.length = (int)strlen(app.composer.text);
+    app.composer.capacity = app.composer.length + 1;
+    app.composer.cursor = app.composer.length;
+    app.composer.sel_anchor = app.composer.length;
+    g_composer_has_attachment = true;
+
+    PicoApp_Submit(&app);
+    bool ok = !PicoAgent_IsBusy(PicoApp_ActiveAgent(&app)) &&
+              pico_agent_message_count(&app, pico_agent_active(&app)) == 0 &&
+              g_composer_has_attachment &&
+              app.composer.length == (int)strlen("  keep this draft  ") &&
+              strcmp(app.composer.text, "  keep this draft  ") == 0 &&
+              app.status_warn && strstr(app.status_warn, "doesn't accept images");
+    g_composer_has_attachment = false;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "unsupported image submit cleared or started the draft");
 }
 
 static int TestInvalidPayload(void)
@@ -2970,6 +3074,8 @@ int main(void)
     failed |= TestReloadQuiescence();
     failed |= TestDeferredWorkspaceChange();
     failed |= TestInvalidRestrictedPolicyPreservesSubmit();
+    failed |= TestImageOnlySubmitStartsTurn();
+    failed |= TestNonVisionSubmitPreservesDraft();
     failed |= TestInvalidPayload();
     failed |= TestRetiredRuntimeCap();
     failed |= TestBeforeForceCancel();

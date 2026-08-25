@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/http.h"
+#include "http_capture.h"
 #include "json.h"
 
 #ifndef PICO_VERSION
@@ -19,6 +20,7 @@ typedef struct HttpCtx {
     JsonBuf acc;
     bool saw_sse;
     bool json_abort;
+    PicoHttpCapture capture;
 } HttpCtx;
 
 static bool Cancelled(HttpCtx *c)
@@ -144,7 +146,12 @@ static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     HttpCtx *c = (HttpCtx *)userdata;
     size_t n = size * nmemb;
-    if (n == 0 || Cancelled(c))
+    if (n == 0)
+    {
+        return 0;
+    }
+    PicoHttpCapture_Write(&c->capture, ptr, n);
+    if (Cancelled(c))
     {
         return 0;
     }
@@ -194,10 +201,13 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     ctx.on_json = req->on_json;
     ctx.user = req->user;
     JsonBuf_Init(&ctx.acc);
+    PicoHttpCapture_Begin(&ctx.capture);
 
     CURL *curl = curl_easy_init();
     if (!curl)
     {
+        PicoHttpCapture_Finish(&ctx.capture, req->url, 0, "transport_error",
+                               (int)CURLE_FAILED_INIT, "curl_easy_init failed");
         JsonBuf_Free(&ctx.acc);
         if (out_error)
         {
@@ -245,6 +255,25 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     {
         DrainSse(&ctx, true);
     }
+    const char *outcome = "completed";
+    if (cancelled || rc == CURLE_ABORTED_BY_CALLBACK)
+    {
+        outcome = "cancelled";
+    }
+    else if (ctx.json_abort)
+    {
+        outcome = "callback_aborted";
+    }
+    else if (rc != CURLE_OK)
+    {
+        outcome = "transport_error";
+    }
+    else if (http >= 400)
+    {
+        outcome = "http_error";
+    }
+    PicoHttpCapture_Finish(&ctx.capture, req->url, http, outcome, (int)rc,
+                           rc == CURLE_OK ? "" : curl_easy_strerror(rc));
     JsonBuf_Free(&ctx.acc);
 
     /* An aborting callback already recorded why it stopped, so report success

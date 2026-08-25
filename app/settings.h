@@ -2,8 +2,7 @@
 #define PICO_SETTINGS_H
 
 #include "agent_internal.h"
-
-bool Pico_ConfigDir(char *out, size_t cap);
+#include "config.h"
 void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);

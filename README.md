@@ -53,6 +53,12 @@ cmake -S app --preset release && cmake --build app/build/release
 
 Tests: `ctest --test-dir app/build/debug --output-on-failure`
 
+Debug builds save each raw SSE response under
+`$XDG_CONFIG_HOME/pico/debug/sse/` (or `~/.config/pico/debug/sse/`) as a private
+`.sse` file with companion `.json` metadata. Only the newest 100 completed capture
+pairs are retained. These files can contain prompts, reasoning, tool arguments, and
+outputs; handle them as sensitive data. Release builds do not capture responses.
+
 A relocatable copy of the build output needs `pico`, `resources/` (fonts), `docs/` (markdown for `/docs` and the agent hint), `examples/` (templates the docs link to), and `builtins/` (reference sources for `sh`, OpenAI, Hyper, and xAI).
 
 The cwd is the workspace. `pico -h` lists flags. Sign in with `/login openai` / `/login hyper` / `/login xai`, or `PICO_API_KEY` / `OPENAI_API_KEY` / `HYPER_API_KEY` / `XAI_API_KEY`.

@@ -76,6 +76,7 @@ add_executable(pico
     settings.c
     auth.c
     http.c
+    http_capture.c
     agent.c
     agent_manager.c
     subagent_config.c
@@ -123,6 +124,7 @@ target_include_directories(pico PUBLIC
     ${raylib_SOURCE_DIR}/src/external/glfw/include)
 
 target_compile_definitions(pico PRIVATE
+    $<$<CONFIG:Debug>:PICO_DEBUG_SSE_CAPTURE=1>
     "PICO_VERSION=\"${PROJECT_VERSION}\""
     "PICO_CC=\"${CMAKE_C_COMPILER}\""
     "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
@@ -163,6 +165,23 @@ if(BUILD_TESTING)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_json_tests)
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
+
+    add_executable(pico_http_capture_tests
+        tests/http_capture_test.c
+        http_capture.c
+        json.c)
+    target_include_directories(pico_http_capture_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(pico_http_capture_tests PRIVATE PICO_DEBUG_SSE_CAPTURE=1)
+    pico_warnings_are_errors(pico_http_capture_tests)
+    target_link_libraries(pico_http_capture_tests PRIVATE Threads::Threads)
+    add_test(NAME pico_http_capture_tests COMMAND pico_http_capture_tests)
+
+    add_executable(pico_http_capture_release_tests
+        tests/http_capture_release_test.c
+        http_capture.c)
+    target_include_directories(pico_http_capture_release_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_http_capture_release_tests)
+    add_test(NAME pico_http_capture_release_tests COMMAND pico_http_capture_release_tests)
 
     add_executable(pico_text_range_tests
         tests/text_range_test.c

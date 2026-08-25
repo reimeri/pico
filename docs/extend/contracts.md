@@ -49,7 +49,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 
 `PICO_HTTP_OK` means the transport completed, not that the server returned a successful status. Always inspect `out_http`; HTTP 4xx/5xx responses still return `PICO_HTTP_OK`. If set, `out_body` and `out_error` are malloc'd and caller-owned. Cancellation is polled during transfer, returns `PICO_HTTP_CANCEL`, and leaves output strings unset. A callback returning false aborts SSE parsing so the callback's recorded application error can take precedence over a transport error.
 
-`PicoPlugins_Count` / `PicoPlugins_Get` return the loaded registry (builtins and user sources, including failed loads). Pointers in `PicoExtInfo` are valid until the next reload. `enabled` is currently true when the extension loaded; failed stubs are false.
+`PicoPlugins_Count` / `PicoPlugins_Get` return the loaded registry (builtins and user sources, including failed loads). Pointers in `PicoExtInfo` are valid until the next reload. `loaded` is true when compile/`dlopen` succeeded (builtins always). `enabled` is independent: a loaded extension is off when its `name` is in user `settings.json` `disabled_extensions`. Disabled extensions skip `init` and `on_frame`; `shutdown` runs only if that extension was initialized. Failed stubs are not enabled. The builtin `extensions` manager cannot be disabled. Click a row in `/extensions` (or F2) to toggle; Pico reloads to drop or restore registrations.
 
 ## Limits
 

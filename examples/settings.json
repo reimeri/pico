@@ -62,4 +62,8 @@
   // Multiplier for all UI text. 1.0 is current sizes. Restart to apply.
   // Overridden by PICO_FONT_SCALE. Range 0.5-3.0.
   "font_scale": 1.0
+
+  // Extension names to skip init/on_frame for. User settings only; `/extensions` or F2 toggles this.
+  // The builtin "extensions" manager cannot be disabled.
+  // "disabled_extensions": ["todos"]
 }

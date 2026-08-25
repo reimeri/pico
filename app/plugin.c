@@ -3,6 +3,7 @@
 #include "agent_manager.h"
 #include "path.h"
 #include "session.h"
+#include "settings.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -44,6 +45,8 @@ typedef struct LoadedPlugin {
     void *handle;
     PicoExt ext;
     bool builtin;
+    bool enabled;
+    bool inited;
 } LoadedPlugin;
 
 static LoadedPlugin g_plugins[PICO_MAX_USER_PLUGINS + 16];
@@ -68,6 +71,47 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_prompt,
     pico_ext_diff,
 };
+
+static bool ExtPinned(const char *name)
+{
+    return name && name[0] && strcmp(name, "extensions") == 0;
+}
+
+static bool ExtDisabled(const PicoApp *app, const char *name)
+{
+    if (!app || !name || !name[0] || ExtPinned(name))
+    {
+        return false;
+    }
+    for (int i = 0; i < app->settings.disabled_extension_count; i++)
+    {
+        if (strcmp(app->settings.disabled_extensions[i], name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ActivatePlugin(PicoApp *app, LoadedPlugin *p)
+{
+    bool loaded = p->builtin || p->handle != NULL;
+    p->enabled = loaded && !ExtDisabled(app, p->ext.name);
+    if (ExtPinned(p->ext.name))
+    {
+        p->enabled = loaded;
+    }
+    p->inited = false;
+    if (!p->enabled)
+    {
+        return;
+    }
+    if (p->ext.init)
+    {
+        p->ext.init(app);
+    }
+    p->inited = true;
+}
 
 static void WarnClear(PicoApp *app)
 {
@@ -312,10 +356,7 @@ static int LoadSo(PicoApp *app, const char *src, const char *so, time_t mtime)
     p->handle = handle;
     p->ext = ext;
     p->builtin = false;
-    if (ext.init)
-    {
-        ext.init(app);
-    }
+    ActivatePlugin(app, p);
     return 0;
 }
 
@@ -414,10 +455,7 @@ static void LoadBuiltins(PicoApp *app)
         memset(p, 0, sizeof(*p));
         p->builtin = true;
         p->ext = kBuiltins[i]();
-        if (p->ext.init)
-        {
-            p->ext.init(app);
-        }
+        ActivatePlugin(app, p);
     }
 }
 
@@ -429,10 +467,11 @@ static void ShutdownRange(PicoApp *app, bool users_only)
         {
             continue;
         }
-        if (g_plugins[i].ext.shutdown)
+        if (g_plugins[i].inited && g_plugins[i].ext.shutdown)
         {
             g_plugins[i].ext.shutdown(app);
         }
+        g_plugins[i].inited = false;
         if (g_plugins[i].handle)
         {
             dlclose(g_plugins[i].handle);
@@ -514,9 +553,9 @@ void PicoPlugins_Reload(PicoApp *app)
     WarnClear(app);
     for (int i = 0; i < g_plugin_count; i++)
     {
-        if (g_plugins[i].builtin && g_plugins[i].ext.init)
+        if (g_plugins[i].builtin)
         {
-            g_plugins[i].ext.init(app);
+            ActivatePlugin(app, &g_plugins[i]);
         }
     }
     LoadUsers(app);
@@ -646,7 +685,7 @@ void PicoPlugins_OnFrame(PicoApp *app, float dt)
     }
     for (int i = 0; i < g_plugin_count; i++)
     {
-        if (g_plugins[i].ext.on_frame)
+        if (g_plugins[i].enabled && g_plugins[i].ext.on_frame)
         {
             g_plugins[i].ext.on_frame(app, dt);
         }
@@ -670,6 +709,34 @@ bool PicoPlugins_Get(int index, PicoExtInfo *out)
     out->source = (p->builtin || p->source[0] == '\0') ? NULL : p->source;
     out->builtin = p->builtin;
     out->loaded = p->builtin || p->handle != NULL;
-    out->enabled = out->loaded;
+    out->enabled = p->enabled;
+    return true;
+}
+
+bool PicoPlugins_SetEnabled(PicoApp *app, int index, bool enabled)
+{
+    PicoExtInfo info;
+    if (!app || !PicoPlugins_Get(index, &info))
+    {
+        return false;
+    }
+    if (!info.loaded || !info.name || !info.name[0] || ExtPinned(info.name))
+    {
+        return false;
+    }
+    if (info.enabled == enabled)
+    {
+        return true;
+    }
+    if (!PicoSettings_SetExtensionDisabled(app, info.name, !enabled))
+    {
+        return false;
+    }
+    g_plugins[index].enabled = enabled;
+    app->reload_queued = true;
+    if (app->agents)
+    {
+        PicoAgentManager_SetAcceptingWork(app->agents, false);
+    }
     return true;
 }

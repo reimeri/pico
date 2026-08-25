@@ -16,9 +16,32 @@ void PicoExts_Close(void)
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
+void PicoExts_Open(void)
+{
+    PicoPrompt_Close();
+    g_open = true;
+}
+
+void PicoExts_Toggle(void)
+{
+    if (g_open)
+    {
+        PicoExts_Close();
+    }
+    else
+    {
+        PicoExts_Open();
+    }
+}
+
 bool PicoExts_IsOpen(void)
 {
     return g_open;
+}
+
+static bool RowToggleable(const PicoExtInfo *info)
+{
+    return info && info->loaded && info->name && info->name[0] && strcmp(info->name, "extensions") != 0;
 }
 
 static Clay_String CStr(const char *s)
@@ -67,13 +90,21 @@ static void RenderRow(int index, const PicoExtInfo *info)
         desc = info->description;
     }
 
+    bool toggleable = RowToggleable(info);
+    bool hover = toggleable && Clay_PointerOver(CLAY_IDI("ExtModalRow", index));
+    Clay_Color bg = info->loaded ? COLOR_CODE_BG : COLOR_ERROR_BG;
+    if (hover)
+    {
+        bg = (Clay_Color){54, 54, 66, 255};
+    }
+
     CLAY(CLAY_IDI("ExtModalRow", index),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                      .childGap = 12,
                      .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                      .padding = {10, 10, 8, 8},
                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
-          .backgroundColor = info->loaded ? COLOR_CODE_BG : COLOR_ERROR_BG,
+          .backgroundColor = bg,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -217,12 +248,27 @@ static void ExtsRender(PicoApp *app)
 static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    (void)app;
     if (!g_open)
     {
         return;
     }
     g_overflow = PicoScrollbar_Overflows(CLAY_STRING("ExtModalScroll"));
+    int n = PicoPlugins_Count();
+    int over_row = -1;
+    for (int i = 0; i < n; i++)
+    {
+        PicoExtInfo info;
+        if (!PicoPlugins_Get(i, &info) || !RowToggleable(&info))
+        {
+            continue;
+        }
+        if (Clay_PointerOver(CLAY_IDI("ExtModalRow", i)))
+        {
+            over_row = i;
+            break;
+        }
+    }
+    app->hovered_clickable = over_row >= 0;
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return;
@@ -239,7 +285,6 @@ static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
 
 static void ExtsOnFrame(PicoApp *app, float dt)
 {
-    (void)app;
     (void)dt;
     if (!g_open)
     {
@@ -250,21 +295,39 @@ static void ExtsOnFrame(PicoApp *app, float dt)
     if (IsKeyPressed(KEY_ESCAPE))
     {
         PicoExts_Close();
+        return;
+    }
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        return;
+    }
+    int n = PicoPlugins_Count();
+    for (int i = 0; i < n; i++)
+    {
+        PicoExtInfo info;
+        if (!PicoPlugins_Get(i, &info) || !RowToggleable(&info))
+        {
+            continue;
+        }
+        if (Clay_PointerOver(CLAY_IDI("ExtModalRow", i)))
+        {
+            PicoPlugins_SetEnabled(app, i, !info.enabled);
+            return;
+        }
     }
 }
 
 static void CmdExtensions(PicoApp *app, const char *args)
 {
     (void)args;
-    PicoPrompt_Close();
-    g_open = true;
+    PicoExts_Open();
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;
 }
 
 static void ExtsInit(PicoApp *app)
 {
-    pico_add_command(app, "extensions", "Show installed extensions", CmdExtensions);
+    pico_add_command(app, "extensions", "Manage extensions", CmdExtensions);
     pico_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
 }

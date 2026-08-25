@@ -20,5 +20,6 @@ bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort);
 bool PicoSettings_SetModel(PicoApp *app, PicoAgent *agent, const char *id_or_name);
 bool PicoSettings_SetEffort(PicoApp *app, PicoAgent *agent, const char *level);
 bool PicoSettings_SaveSelection(PicoApp *app, const PicoAgent *agent, bool save_model, bool save_effort);
+bool PicoSettings_SetExtensionDisabled(PicoApp *app, const char *name, bool disabled);
 
 #endif

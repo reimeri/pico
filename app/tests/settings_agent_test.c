@@ -1,7 +1,11 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "settings.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int Fail(const char *message)
 {
@@ -109,6 +113,45 @@ static int TestPerAgentSelection(void)
     return 0;
 }
 
+static int TestDisabledExtensionsFromUserSettings(void)
+{
+    char temp[] = "/tmp/pico-disabled-ext-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create isolated settings directory");
+    }
+
+    char dir[sizeof(temp) + 8];
+    snprintf(dir, sizeof(dir), "%s/pico", temp);
+    Pico_MkdirP(dir);
+    char path[sizeof(temp) + 32];
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    FILE *f = fopen(path, "w");
+    if (!f)
+    {
+        rmdir(dir);
+        rmdir(temp);
+        return Fail("could not write isolated settings.json");
+    }
+    fputs("{\n  \"disabled_extensions\": [\"composer\"]\n}\n", f);
+    fclose(f);
+
+    PicoApp app;
+    memset(&app, 0, sizeof(app));
+    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoSettings_Load(&app);
+    int failed = app.settings.disabled_extension_count != 1 ||
+                 strcmp(app.settings.disabled_extensions[0], "composer") != 0;
+
+    free(app.models);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(path);
+    rmdir(dir);
+    rmdir(temp);
+    return failed ? Fail("user disabled_extensions did not populate the disabled set") : 0;
+}
+
 int main(void)
 {
     int rc = TestPerAgentSelection();
@@ -121,5 +164,10 @@ int main(void)
     {
         return rc;
     }
-    return TestFallbackWhenModelHasNoLimit();
+    rc = TestFallbackWhenModelHasNoLimit();
+    if (rc)
+    {
+        return rc;
+    }
+    return TestDisabledExtensionsFromUserSettings();
 }

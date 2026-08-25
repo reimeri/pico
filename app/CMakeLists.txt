@@ -344,6 +344,7 @@ if(BUILD_TESTING)
         tests/settings_agent_test.c
         settings.c
         json.c
+        theme.c
         docs_path.c)
     target_include_directories(pico_settings_agent_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

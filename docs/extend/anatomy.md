@@ -25,11 +25,13 @@ PicoExt pico_ext(void)
 `abi` must be `PICO_EXT_ABI` (currently 8). ABI 8 includes stable `PicoTraceLine` tool-call and child identity for subagent inspect, context-based concurrent worker callbacks, agent-targeted main-thread callbacks, copied persistence state/write results, and reported terminal shutdown; there is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
-- `init` — register views/tools/hooks/commands. Called on load and after every reload.
+- `init` — register views/tools/hooks/commands. Called on load and after every reload when the extension is enabled.
 - `shutdown` — release extension-owned memory/threads before `dlclose`.
 - `on_frame` — main thread, once per frame, `dt` in seconds.
 
-There is no unregister. Reload clears all registrations and calls `init` again (builtins too). It then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
+There is no unregister. Reload clears all registrations and calls `init` again for enabled extensions (builtins too). It then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
+
+`/extensions` (or F2) lists builtins and user sources. Click a row to toggle it off or on. Disabled extensions stay in the registry (compiled/`dlopen` for user sources) but skip `init` / `on_frame`. The builtin `extensions` manager cannot be turned off. Toggles persist as `disabled_extensions` in user `~/.config/pico/settings.json` (not workspace settings) and apply through the same reload path as F5.
 
 ## Directories
 
@@ -51,8 +53,8 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 ## Reload
 
-F5, `/reload`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** until every live/retired runtime, pending ask, offered catalog, event, and delegation job is quiescent. A queued reload prevents new turns and delegations. Do not cache registration pointers beyond their documented callback lifetime.
+F5, `/reload`, toggling an extension in `/extensions`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** until every live/retired runtime, pending ask, offered catalog, event, and delegation job is quiescent. A queued reload prevents new turns and delegations. Do not cache registration pointers beyond their documented callback lifetime.
 
 `/cd` queues a workspace transition behind the same barrier; `app->workspace` changes only when the old agent set can be replaced as one main-thread transition.
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `extensions`, `prompt`. `/extensions` lists them.
+Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `prompt`, `diff`. `/extensions` or F2 lists them.

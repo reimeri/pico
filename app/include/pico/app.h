@@ -28,6 +28,8 @@
 #define PICO_MAX_PROVIDERS 16
 #define PICO_MAX_AUTH 16
 #define PICO_MAX_EFFORTS 16
+#define PICO_MAX_DISABLED_EXTENSIONS 48
+#define PICO_DISABLED_EXT_NAME 64
 
 typedef enum PicoRole {
     PICO_ROLE_USER = 0,
@@ -365,6 +367,8 @@ typedef struct PicoSettings {
     bool compact_enabled;
     bool resume_last;
     double font_scale;
+    char disabled_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
+    int disabled_extension_count;
 } PicoSettings;
 
 typedef struct PicoApp {
@@ -502,7 +506,7 @@ typedef struct PicoExtInfo {
     const char *source;      /* user .c path; NULL for builtins */
     bool builtin;
     bool loaded;  /* false for compile/dlopen stubs */
-    bool enabled; /* currently same as loaded; later independently togglable */
+    bool enabled; /* independent of loaded; false when toggled off */
 } PicoExtInfo;
 
 void PicoPlugins_Load(PicoApp *app);
@@ -513,6 +517,7 @@ void PicoPlugins_UnloadUser(PicoApp *app);
 void PicoPlugins_Shutdown(PicoApp *app);
 int PicoPlugins_Count(void);
 bool PicoPlugins_Get(int index, PicoExtInfo *out);
+bool PicoPlugins_SetEnabled(PicoApp *app, int index, bool enabled);
 
 bool Pico_ShortcutPressed(char letter);
 bool Pico_ShortcutRepeat(char letter);
@@ -546,7 +551,9 @@ bool PicoDiff_IsOpen(void);
 void PicoDiff_RenderChip(PicoApp *app);
 void PicoOverlay_Render(PicoApp *app);
 void PicoOverlay_OnFrame(PicoApp *app, float dt);
+void PicoExts_Open(void);
 void PicoExts_Close(void);
+void PicoExts_Toggle(void);
 bool PicoExts_IsOpen(void);
 void PicoPrompt_Close(void);
 bool PicoPrompt_IsOpen(void);

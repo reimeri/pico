@@ -1447,6 +1447,10 @@ void PicoApp_Frame(PicoApp *app)
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
 
+    if (IsKeyPressed(KEY_F2))
+    {
+        PicoExts_Toggle();
+    }
     if (IsKeyPressed(KEY_F3))
     {
         app->debug_enabled = !app->debug_enabled;

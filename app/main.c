@@ -47,7 +47,8 @@ static void PrintUsage(const char *argv0)
             "  PICO_MODEL                        default gpt-4o\n"
             "  PICO_EFFORT                       override selected_effort of the active model\n"
             "  PICO_FONT_SCALE                   override font_scale (0.5-3.0, default 1.0)\n"
-            "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale}\n"
+            "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale,\n"
+            "                                    disabled_extensions}\n"
             "  ~/.config/pico/auth.json          per-provider credentials (api_key or oauth)\n"
             "  /login openai                     Codex device-code (ChatGPT subscription)\n"
             "  /login hyper                      Hyper device-code (Charm subscription)\n"
@@ -58,6 +59,7 @@ static void PrintUsage(const char *argv0)
             "  <workspace>/AGENTS.md             optional project instructions\n"
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n"
             "  ~/.config/pico/subagents/         named JSONC subagent profiles (see /docs subagents)\n"
+            "  F2                                 open the extension manager\n"
             "  F5 or /reload                     reload extensions and profiles after quiescence\n",
             argv0);
 }

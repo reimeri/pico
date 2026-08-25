@@ -23,7 +23,7 @@ static void TimeInit(PicoApp *app)
 }
 ```
 
-Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types `/time`. `/help` lists every registered command. Builtin `/extensions` opens a modal listing installed extensions. Builtin `/docs [topic]` prints markdown shipped next to the binary (`docs/extend/`, plus `docs/subagents.md`) into chat — not the compile-time source tree and not `~/.config`. Builtin `/show-prompt` opens a modal with the assembled system prompt for the next turn (`SYSTEM.md`, workspace `AGENTS.md`, the docs hint, and any `pico_add_llm_hook` extras under `## Additional instructions`). The docs hint is the absolute path of that shipped `docs/extend/README.md`. Example sources ship next to the binary in `examples/` (from this page: [`../../examples/`](../../examples/)).
+Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types `/time`. `/help` lists every registered command. Builtin `/extensions` (also F2) opens a modal listing installed extensions; click a card to toggle it on or off. Builtin `/docs [topic]` prints markdown shipped next to the binary (`docs/extend/`, plus `docs/subagents.md`) into chat — not the compile-time source tree and not `~/.config`. Builtin `/show-prompt` opens a modal with the assembled system prompt for the next turn (`SYSTEM.md`, workspace `AGENTS.md`, the docs hint, and any `pico_add_llm_hook` extras under `## Additional instructions`). The docs hint is the absolute path of that shipped `docs/extend/README.md`. Example sources ship next to the binary in `examples/` (from this page: [`../../examples/`](../../examples/)).
 
 ## Contract
 

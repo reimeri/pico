@@ -307,7 +307,46 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
     free(model);
 }
 
-static void LoadFile(PicoSettings *s, PicoModel **models, int *model_count, const char *path)
+static bool DisabledNameListed(const PicoSettings *s, const char *name)
+{
+    if (!s || !name || !name[0])
+    {
+        return false;
+    }
+    for (int i = 0; i < s->disabled_extension_count; i++)
+    {
+        if (strcmp(s->disabled_extensions[i], name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ApplyDisabledExtensions(PicoSettings *s, const JsonDoc *doc, int obj)
+{
+    s->disabled_extension_count = 0;
+    int arr = JsonObjGet(doc, obj, "disabled_extensions");
+    if (!JsonIsArray(doc, arr))
+    {
+        return;
+    }
+    int n = JsonArrayLen(doc, arr);
+    for (int i = 0; i < n && s->disabled_extension_count < PICO_MAX_DISABLED_EXTENSIONS; i++)
+    {
+        char *name = JsonStrDup(doc, JsonArrayAt(doc, arr, i));
+        if (name && name[0] && strcmp(name, "extensions") != 0 && !DisabledNameListed(s, name))
+        {
+            snprintf(s->disabled_extensions[s->disabled_extension_count], PICO_DISABLED_EXT_NAME, "%s",
+                     name);
+            s->disabled_extension_count++;
+        }
+        free(name);
+    }
+}
+
+static void LoadFile(PicoSettings *s, PicoModel **models, int *model_count, const char *path,
+                     bool load_disabled)
 {
     size_t len = 0;
     char *src = Pico_ReadFile(path, &len);
@@ -321,6 +360,10 @@ static void LoadFile(PicoSettings *s, PicoModel **models, int *model_count, cons
     {
         ApplyObject(s, &doc, 0);
         ReplaceModels(models, model_count, &doc, 0);
+        if (load_disabled)
+        {
+            ApplyDisabledExtensions(s, &doc, 0);
+        }
         JsonFree(&doc);
     }
     free(src);
@@ -607,12 +650,12 @@ void PicoSettings_Load(PicoApp *app)
     char path[4096];
     if (UserSettingsPath(path, sizeof(path)))
     {
-        LoadFile(s, &catalog, &catalog_n, path);
+        LoadFile(s, &catalog, &catalog_n, path, true);
     }
 
     if (WorkspaceSettingsPath(app, path, sizeof(path)) && path[0])
     {
-        LoadFile(s, &catalog, &catalog_n, path);
+        LoadFile(s, &catalog, &catalog_n, path, false);
     }
 
     CopyField(s->model, sizeof(s->model), FirstEnv("PICO_MODEL", "OPENAI_MODEL"));
@@ -868,6 +911,158 @@ static bool PatchRootString(const char *path, const char *key, const char *value
     }
     free(src);
     return ok;
+}
+
+static bool PatchTokSpan(char **src, size_t *len, const JsonDoc *doc, int tok, const char *json_value)
+{
+    int start = JsonTokStart(doc, tok);
+    int end = JsonTokEnd(doc, tok);
+    if (start < 0 || end < start || !json_value)
+    {
+        return false;
+    }
+    char *next = Splice(*src, *len, start, end - start, json_value);
+    if (!next)
+    {
+        return false;
+    }
+    free(*src);
+    *src = next;
+    *len = strlen(next);
+    return true;
+}
+
+static bool PatchRootJson(const char *path, const char *key, const char *json_value)
+{
+    if (!path || !key || !json_value)
+    {
+        return false;
+    }
+    size_t len = 0;
+    char *src = Pico_ReadFile(path, &len);
+    if (!src)
+    {
+        JsonBuf b;
+        JsonBuf_Init(&b);
+        JsonBuf_Puts(&b, "{\n  ");
+        JsonBuf_String(&b, key);
+        JsonBuf_Puts(&b, ": ");
+        JsonBuf_Puts(&b, json_value);
+        JsonBuf_Puts(&b, "\n}\n");
+        char *out = JsonBuf_Steal(&b);
+        bool ok = WriteFile(path, out, out ? strlen(out) : 0);
+        free(out);
+        return ok;
+    }
+    char *stripped = (char *)malloc(len + 1);
+    if (!stripped)
+    {
+        free(src);
+        return false;
+    }
+    memcpy(stripped, src, len + 1);
+    JsonStripComments(stripped, len);
+    JsonDoc doc;
+    if (JsonParse(&doc, stripped, len) != 0)
+    {
+        free(stripped);
+        free(src);
+        return false;
+    }
+    int tok = JsonObjGet(&doc, 0, key);
+    bool ok = false;
+    if (tok >= 0)
+    {
+        ok = PatchTokSpan(&src, &len, &doc, tok, json_value);
+    }
+    else
+    {
+        ok = InsertObjectKey(&src, &len, &doc, 0, key, json_value);
+    }
+    JsonFree(&doc);
+    free(stripped);
+    if (ok)
+    {
+        ok = WriteFile(path, src, len);
+    }
+    free(src);
+    return ok;
+}
+
+static char *DisabledExtensionsJson(const PicoSettings *s)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Putc(&b, '[');
+    for (int i = 0; i < s->disabled_extension_count; i++)
+    {
+        if (i)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_String(&b, s->disabled_extensions[i]);
+    }
+    JsonBuf_Putc(&b, ']');
+    return JsonBuf_Steal(&b);
+}
+
+static bool SaveDisabledExtensions(PicoApp *app)
+{
+    char path[4096];
+    if (!UserSettingsPath(path, sizeof(path)))
+    {
+        return false;
+    }
+    char dir[4096];
+    if (Pico_ConfigDir(dir, sizeof(dir)))
+    {
+        Pico_MkdirP(dir);
+    }
+    char *json = DisabledExtensionsJson(&app->settings);
+    bool ok = json && PatchRootJson(path, "disabled_extensions", json);
+    free(json);
+    return ok;
+}
+
+bool PicoSettings_SetExtensionDisabled(PicoApp *app, const char *name, bool disabled)
+{
+    if (!app || !name || !name[0] || strcmp(name, "extensions") == 0)
+    {
+        return false;
+    }
+    PicoSettings *s = &app->settings;
+    int found = -1;
+    for (int i = 0; i < s->disabled_extension_count; i++)
+    {
+        if (strcmp(s->disabled_extensions[i], name) == 0)
+        {
+            found = i;
+            break;
+        }
+    }
+    if (disabled)
+    {
+        if (found >= 0)
+        {
+            return SaveDisabledExtensions(app);
+        }
+        if (s->disabled_extension_count >= PICO_MAX_DISABLED_EXTENSIONS)
+        {
+            return false;
+        }
+        snprintf(s->disabled_extensions[s->disabled_extension_count], PICO_DISABLED_EXT_NAME, "%s", name);
+        s->disabled_extension_count++;
+    }
+    else if (found >= 0)
+    {
+        for (int i = found; i < s->disabled_extension_count - 1; i++)
+        {
+            memcpy(s->disabled_extensions[i], s->disabled_extensions[i + 1], PICO_DISABLED_EXT_NAME);
+        }
+        s->disabled_extension_count--;
+        s->disabled_extensions[s->disabled_extension_count][0] = '\0';
+    }
+    return SaveDisabledExtensions(app);
 }
 
 static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected_effort)

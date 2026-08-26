@@ -36,6 +36,7 @@
 #define COMPOSER_MAX_ATTACH 32
 #define ATTACH_THUMB 56
 #define ATTACH_REMOVE 18
+#define ATTACH_GAP 8.0f
 #define CLIP_IMAGE_MAX (32 * 1024 * 1024)
 #define CLIP_PROCESS_TIMEOUT_SECONDS 1.5
 #define CARET_BLINK_HZ 2.0
@@ -274,6 +275,7 @@ typedef struct ComposerView {
 } ComposerView;
 
 static float s_wrap_width = 0;
+static float s_composer_width = 0;
 static int s_seen_cursor = -1;
 static int s_seen_length = -1;
 static float s_goal_x = -1;
@@ -1839,6 +1841,126 @@ void PicoComposer_HandlePointer(PicoApp *app)
     }
 }
 
+static bool ComposerVision(PicoApp *app)
+{
+    bool vision = true;
+    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+    if (model)
+    {
+        vision = model->vision;
+    }
+    return vision;
+}
+
+static void ComposerAttachRender(PicoApp *app)
+{
+    if (g_attach_n <= 0)
+    {
+        return;
+    }
+
+    bool vision = ComposerVision(app);
+    float screen_w = (float)GetScreenWidth();
+    float max_w = s_composer_width > 0 ? s_composer_width : screen_w - 24.0f;
+    if (max_w > screen_w - 24.0f)
+    {
+        max_w = screen_w - 24.0f;
+    }
+    if (max_w < 72.0f)
+    {
+        max_w = 72.0f;
+    }
+
+    CLAY(CLAY_ID("ComposerAttachStrip"),
+         {.floating = {.offset = {.y = -ATTACH_GAP},
+                       .parentId = CLAY_ID("Composer").id,
+                       .zIndex = 10,
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_BOTTOM,
+                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP},
+                       .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
+                       .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID},
+          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .padding = {8, 8, 8, 8},
+                     .childGap = 4,
+                     .sizing = {.width = CLAY_SIZING_FIT(0, max_w), .height = CLAY_SIZING_FIT(0)}},
+          .backgroundColor = COLOR_COMPOSER_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(8)})
+    {
+        CLAY(CLAY_ID("ComposerAttachRow"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = 8,
+                         .sizing = {.width = CLAY_SIZING_FIT(0),
+                                    .height = CLAY_SIZING_FIXED((float)ATTACH_THUMB)}}})
+        {
+            for (int i = 0; i < g_attach_n; i++)
+            {
+                ComposerAttach *a = &g_attach[i];
+                float thumb_w = (float)ATTACH_THUMB;
+                float thumb_h = (float)ATTACH_THUMB;
+                if (a->loaded && a->thumb.width > 0 && a->thumb.height > 0)
+                {
+                    if (a->thumb.width >= a->thumb.height)
+                    {
+                        thumb_h = (float)ATTACH_THUMB * ((float)a->thumb.height / (float)a->thumb.width);
+                    }
+                    else
+                    {
+                        thumb_w = (float)ATTACH_THUMB * ((float)a->thumb.width / (float)a->thumb.height);
+                    }
+                }
+                CLAY(CLAY_IDI("CompAttach", i),
+                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)ATTACH_THUMB),
+                                            .height = CLAY_SIZING_FIXED((float)ATTACH_THUMB)},
+                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                      .backgroundColor = COLOR_CODE_BG,
+                      .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                {
+                    if (a->loaded)
+                    {
+                        CLAY(CLAY_IDI("CompAttachImg", i),
+                             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(thumb_w),
+                                                    .height = CLAY_SIZING_FIXED(thumb_h)}},
+                              .image = {.imageData = &a->thumb}})
+                        {
+                        }
+                    }
+                    if (Clay_Hovered() || Clay_PointerOver(CLAY_IDI("CompAttachRemove", i)))
+                    {
+                        CLAY(CLAY_IDI("CompAttachRemove", i),
+                             {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                                           .zIndex = 12,
+                                           .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                                           .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP,
+                                                            .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
+                                           .offset = {-3, 3}},
+                              .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)ATTACH_REMOVE),
+                                                    .height = CLAY_SIZING_FIXED((float)ATTACH_REMOVE)},
+                                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
+                                                            .y = CLAY_ALIGN_Y_CENTER}},
+                              .backgroundColor = Clay_Hovered() ? (Clay_Color){50, 28, 32, 240}
+                                                                : (Clay_Color){20, 20, 24, 220},
+                              .cornerRadius = CLAY_CORNER_RADIUS(9)})
+                        {
+                            CLAY_TEXT(CLAY_STRING("×"),
+                                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                        .fontSize = 12,
+                                                        .textColor = COLOR_TEXT}));
+                        }
+                    }
+                }
+            }
+        }
+        if (!vision)
+        {
+            CLAY_TEXT(CLAY_STRING("This model doesn't accept images"),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                        .fontSize = 12,
+                                        .textColor = COLOR_MUTED,
+                                        .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+        }
+    }
+}
+
 void PicoComposer_Render(PicoApp *app)
 {
     PicoComposer *c = &app->composer;
@@ -1853,29 +1975,13 @@ void PicoComposer_Render(PicoApp *app)
         line_height = ComposerPx();
     }
 
-    bool vision = true;
-    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
-    if (model)
-    {
-        vision = model->vision;
-    }
-    float attach_h = 0;
-    if (g_attach_n > 0)
-    {
-        attach_h = (float)ATTACH_THUMB + 8.0f;
-        if (!vision)
-        {
-            attach_h += 18.0f;
-        }
-    }
-
     float content_h = (float)line_count * line_height;
-    float box_h = content_h + (float)COMPOSER_PAD_Y * 2 + attach_h;
-    if (box_h < (float)COMPOSER_MIN_HEIGHT + attach_h)
+    float box_h = content_h + (float)COMPOSER_PAD_Y * 2;
+    if (box_h < (float)COMPOSER_MIN_HEIGHT)
     {
-        box_h = (float)COMPOSER_MIN_HEIGHT + attach_h;
+        box_h = (float)COMPOSER_MIN_HEIGHT;
     }
-    float max_h = (float)COMPOSER_MAX_GROW_LINES * line_height + (float)COMPOSER_PAD_Y * 2 + attach_h;
+    float max_h = (float)COMPOSER_MAX_GROW_LINES * line_height + (float)COMPOSER_PAD_Y * 2;
     if (box_h > max_h)
     {
         box_h = max_h;
@@ -1883,93 +1989,11 @@ void PicoComposer_Render(PicoApp *app)
 
     CLAY(CLAY_ID("Composer"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childGap = g_attach_n > 0 ? 8 : 0,
                      .padding = {COMPOSER_PAD_X, COMPOSER_PAD_X, COMPOSER_PAD_Y, COMPOSER_PAD_Y},
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(box_h)}},
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        if (g_attach_n > 0)
-        {
-            CLAY(CLAY_ID("ComposerAttachStrip"),
-                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .childGap = 4,
-                             .sizing = {.width = CLAY_SIZING_GROW(0),
-                                        .height = CLAY_SIZING_FIT(0)}}})
-            {
-                CLAY(CLAY_ID("ComposerAttachRow"),
-                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                 .childGap = 8,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0),
-                                            .height = CLAY_SIZING_FIXED((float)ATTACH_THUMB)}}})
-                {
-                    for (int i = 0; i < g_attach_n; i++)
-                    {
-                        ComposerAttach *a = &g_attach[i];
-                        float thumb_w = (float)ATTACH_THUMB;
-                        float thumb_h = (float)ATTACH_THUMB;
-                        if (a->loaded && a->thumb.width > 0 && a->thumb.height > 0)
-                        {
-                            if (a->thumb.width >= a->thumb.height)
-                            {
-                                thumb_h = (float)ATTACH_THUMB * ((float)a->thumb.height / (float)a->thumb.width);
-                            }
-                            else
-                            {
-                                thumb_w = (float)ATTACH_THUMB * ((float)a->thumb.width / (float)a->thumb.height);
-                            }
-                        }
-                        CLAY(CLAY_IDI("CompAttach", i),
-                             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)ATTACH_THUMB),
-                                                    .height = CLAY_SIZING_FIXED((float)ATTACH_THUMB)},
-                                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                              .backgroundColor = COLOR_CODE_BG,
-                              .cornerRadius = CLAY_CORNER_RADIUS(6)})
-                        {
-                            if (a->loaded)
-                            {
-                                CLAY(CLAY_IDI("CompAttachImg", i),
-                                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(thumb_w),
-                                                            .height = CLAY_SIZING_FIXED(thumb_h)}},
-                                      .image = {.imageData = &a->thumb}})
-                                {
-                                }
-                            }
-                            if (Clay_Hovered())
-                            {
-                                CLAY(CLAY_IDI("CompAttachRemove", i),
-                                     {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                                                   .zIndex = 4,
-                                                   .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP,
-                                                                    .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
-                                                   .offset = {-3, 3}},
-                                      .layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)ATTACH_REMOVE),
-                                                            .height = CLAY_SIZING_FIXED((float)ATTACH_REMOVE)},
-                                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
-                                                                    .y = CLAY_ALIGN_Y_CENTER}},
-                                      .backgroundColor = Clay_Hovered() ? (Clay_Color){50, 28, 32, 240}
-                                                                        : (Clay_Color){20, 20, 24, 220},
-                                      .cornerRadius = CLAY_CORNER_RADIUS(9)})
-                                {
-                                    CLAY_TEXT(CLAY_STRING("×"),
-                                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                                .fontSize = 12,
-                                                                .textColor = COLOR_TEXT}));
-                                }
-                            }
-                        }
-                    }
-                }
-                if (!vision)
-                {
-                    CLAY_TEXT(CLAY_STRING("This model doesn't accept images"),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = 12,
-                                                .textColor = COLOR_MUTED,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
-            }
-        }
         CLAY(CLAY_ID("ComposerRow"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = SCROLLBAR_GAP,
@@ -2157,6 +2181,11 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
     {
         s_wrap_width = v.wrap_width;
     }
+    Clay_ElementData composer = Clay_GetElementData(CLAY_ID("Composer"));
+    if (composer.found)
+    {
+        s_composer_width = composer.boundingBox.width;
+    }
     app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
     if (g_preview >= 0)
     {
@@ -2203,6 +2232,7 @@ static void ComposerFrame(PicoApp *app, float dt)
 static void ComposerInit(PicoApp *app)
 {
     pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
+    pico_add_view(app, PICO_SLOT_OVERLAY, 6, ComposerAttachRender);
     pico_add_view(app, PICO_SLOT_OVERLAY, 25, ComposerPreviewRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ComposerAfterLayout);
     pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoComposer_DrawOverlay);

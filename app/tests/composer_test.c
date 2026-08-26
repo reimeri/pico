@@ -189,9 +189,14 @@ static void TestWhitespaceSubmitReady(void)
     Check(pico_composer_submit_ready("   ", 3), "whitespace-only composer with attachments is ready");
     Check(pico_composer_submit_ready("", 0), "empty composer with attachments is ready");
     char *display = pico_composer_display_message("");
-    Check(display && strstr(display, "![](") && strstr(display, "shot.png"),
+    Check(display && strstr(display, "![image](") && strstr(display, "shot.png"),
           "display message for an image-only send includes a markdown image");
     free(display);
+    char *with_text = pico_composer_display_message("look");
+    Check(with_text && strstr(with_text, "look") && strstr(with_text, "![image](") &&
+              strstr(with_text, "shot.png"),
+          "typed text plus a pasted image is shown as text then a markdown image");
+    free(with_text);
     PicoComposer_DiscardAttachments();
     unlink(path);
     rmdir(temp);

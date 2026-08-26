@@ -1245,7 +1245,7 @@ void PicoComposer_DiscardAttachments(void)
 char *pico_composer_display_message(const char *text)
 {
     (void)text;
-    return g_composer_has_attachment ? JsonDup("![](/tmp/pasted.png)") : NULL;
+    return g_composer_has_attachment ? JsonDup("![image](/tmp/pasted.png)") : NULL;
 }
 
 bool PicoComposer_PreviewOpen(void)

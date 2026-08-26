@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define CHAT_IMAGE_MAX_WIDTH 360.0f
+#define CHAT_IMAGE_MAX_HEIGHT 240.0f
+
 static uint16_t HeadingSizes[7] = {0, 32, 27, 23, 20, 17, 15};
 
 static RichTextStyle BaseStyle = {
@@ -49,6 +52,47 @@ void MdView_SetImageBaseDir(const char *dir)
     snprintf(image_base_dir, sizeof(image_base_dir), "%s", dir);
 }
 
+static void ChatImageFit(int src_w, int src_h, float max_w, float max_h, int *out_w, int *out_h)
+{
+    if (src_w < 1)
+    {
+        src_w = 1;
+    }
+    if (src_h < 1)
+    {
+        src_h = 1;
+    }
+    if (max_w < 1.0f)
+    {
+        max_w = 1.0f;
+    }
+    if (max_h < 1.0f)
+    {
+        max_h = 1.0f;
+    }
+    float scale = 1.0f;
+    if ((float)src_w > max_w)
+    {
+        scale = max_w / (float)src_w;
+    }
+    if ((float)src_h * scale > max_h)
+    {
+        scale = max_h / (float)src_h;
+    }
+    int w = (int)((float)src_w * scale + 0.5f);
+    int h = (int)((float)src_h * scale + 0.5f);
+    if (w < 1)
+    {
+        w = 1;
+    }
+    if (h < 1)
+    {
+        h = 1;
+    }
+    *out_w = w;
+    *out_h = h;
+}
+
 static const char *ResolveImagePath(const char *src)
 {
     static char resolved[8192];
@@ -75,8 +119,25 @@ static CachedImage *GetCachedImage(const char *path)
     }
     CachedImage *entry = &image_cache[image_cache_count++];
     snprintf(entry->path, sizeof(entry->path), "%s", path);
-    entry->texture = LoadTexture(path);
-    entry->loaded = entry->texture.id != 0;
+    memset(&entry->texture, 0, sizeof(entry->texture));
+    entry->loaded = false;
+    Image img = LoadImage(path);
+    if (img.data && img.width > 0 && img.height > 0)
+    {
+        int w = img.width;
+        int h = img.height;
+        ChatImageFit(img.width, img.height, CHAT_IMAGE_MAX_WIDTH, CHAT_IMAGE_MAX_HEIGHT, &w, &h);
+        if (w != img.width || h != img.height)
+        {
+            ImageResize(&img, w, h);
+        }
+        entry->texture = LoadTextureFromImage(img);
+        entry->loaded = entry->texture.id != 0;
+    }
+    if (img.data)
+    {
+        UnloadImage(img);
+    }
     return entry;
 }
 
@@ -480,17 +541,17 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
             const char *path = ResolveImagePath(block->image_path);
             bool remote = strncmp(block->image_path, "http", 4) == 0;
             CachedImage *image = (!remote && FileExists(path)) ? GetCachedImage(path) : NULL;
-            if (image && image->loaded)
+            if (image && image->loaded && image->texture.width > 0 && image->texture.height > 0)
             {
-                float width = (float)image->texture.width;
-                if (width > available_width)
-                {
-                    width = available_width;
-                }
+                float max_w = available_width < CHAT_IMAGE_MAX_WIDTH ? available_width : CHAT_IMAGE_MAX_WIDTH;
+                int width = 0;
+                int height = 0;
+                ChatImageFit(image->texture.width, image->texture.height, max_w, CHAT_IMAGE_MAX_HEIGHT, &width,
+                             &height);
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
                 {
-                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(width)}},
-                                  .aspectRatio = (float)image->texture.width / (float)image->texture.height,
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED((float)width),
+                                                        .height = CLAY_SIZING_FIXED((float)height)}},
                                   .image = {.imageData = &image->texture}})
                     {
                     }

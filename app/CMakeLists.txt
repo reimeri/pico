@@ -191,6 +191,14 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_text_range_tests)
     add_test(NAME pico_text_range_tests COMMAND pico_text_range_tests)
 
+    add_executable(pico_markdown_tests
+        tests/markdown_test.c
+        markdown.c)
+    target_include_directories(pico_markdown_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_markdown_tests)
+    target_link_libraries(pico_markdown_tests PRIVATE md4c)
+    add_test(NAME pico_markdown_tests COMMAND pico_markdown_tests)
+
     add_executable(pico_diff_lines_tests
         tests/diff_lines_test.c
         diff_lines.c)

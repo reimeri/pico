@@ -1133,8 +1133,29 @@ static bool LineStartsFence(const char *src, size_t len, size_t i)
     return i + 3 <= len && src[i] == '`' && src[i + 1] == '`' && src[i + 2] == '`';
 }
 
+static bool LineStartsMarkdownImage(const char *src, size_t len, size_t i)
+{
+    while (i < len && (src[i] == ' ' || src[i] == '\t'))
+    {
+        i++;
+    }
+    if (i + 1 >= len || src[i] != '!' || src[i + 1] != '[')
+    {
+        return false;
+    }
+    i += 2;
+    while (i < len && src[i] != ']' && src[i] != '\n')
+    {
+        i++;
+    }
+    return i + 1 < len && src[i] == ']' && src[i + 1] == '(';
+}
+
 // Turns extra blank lines into paragraphs that survive CommonMark collapsing,
-// so user-typed gaps stay visible. Fenced code is left unchanged.
+// so user-typed gaps stay visible. Fenced code is left unchanged. A blank
+// run that only separates a paragraph from a following markdown image is kept
+// as a normal CommonMark break so chat display can show the image without an
+// extra empty line.
 static char *RewritePreserveBlanks(const char *src, size_t len, size_t *out_len)
 {
     char *out = (char *)malloc(len * 3 + 4);
@@ -1174,6 +1195,14 @@ static char *RewritePreserveBlanks(const char *src, size_t len, size_t *out_len)
                 }
                 n++;
                 k++;
+            }
+            if (n >= 2 && LineStartsMarkdownImage(src, len, k))
+            {
+                out[o++] = '\n';
+                out[o++] = '\n';
+                i = k;
+                at_line_start = true;
+                continue;
             }
             out[o++] = '\n';
             for (size_t b = 1; b < n; b++)

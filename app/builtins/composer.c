@@ -678,7 +678,7 @@ char *pico_composer_display_message(const char *text)
         {
             JsonBuf_Puts(&b, "\n\n");
         }
-        JsonBuf_Puts(&b, "![](");
+        JsonBuf_Puts(&b, "![image](");
         JsonBuf_Puts(&b, g_attach[i].path);
         JsonBuf_Putc(&b, ')');
     }

@@ -234,10 +234,20 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 if (tintColor.r == 0 && tintColor.g == 0 && tintColor.b == 0 && tintColor.a == 0) {
                     tintColor = (Clay_Color) { 255, 255, 255, 255 };
                 }
+                float dest_w = roundf(boundingBox.width);
+                float dest_h = roundf(boundingBox.height);
+                if (dest_w < 1.0f)
+                {
+                    dest_w = 1.0f;
+                }
+                if (dest_h < 1.0f)
+                {
+                    dest_h = 1.0f;
+                }
                 DrawTexturePro(
                     imageTexture,
                     (Rectangle) { 0, 0, imageTexture.width, imageTexture.height },
-                    (Rectangle){boundingBox.x, boundingBox.y, boundingBox.width, boundingBox.height},
+                    (Rectangle){ roundf(boundingBox.x), roundf(boundingBox.y), dest_w, dest_h },
                     (Vector2) {},
                     0,
                     CLAY_COLOR_TO_RAYLIB_COLOR(tintColor));

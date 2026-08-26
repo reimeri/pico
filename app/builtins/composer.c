@@ -292,6 +292,7 @@ static ComposerAttach g_attach[COMPOSER_MAX_ATTACH];
 static int g_attach_n;
 static int g_preview = -1;
 static Texture2D g_preview_tex;
+static Image g_preview_src;
 static bool g_preview_loaded;
 
 static void ClosePreview(void)
@@ -300,9 +301,110 @@ static void ClosePreview(void)
     {
         UnloadTexture(g_preview_tex);
     }
+    if (g_preview_src.data)
+    {
+        UnloadImage(g_preview_src);
+    }
     memset(&g_preview_tex, 0, sizeof(g_preview_tex));
+    memset(&g_preview_src, 0, sizeof(g_preview_src));
     g_preview_loaded = false;
     g_preview = -1;
+}
+
+static void PreviewFitSize(int src_w, int src_h, int screen_w, int screen_h, int *out_w, int *out_h)
+{
+    if (src_w < 1)
+    {
+        src_w = 1;
+    }
+    if (src_h < 1)
+    {
+        src_h = 1;
+    }
+    if (screen_w < 1)
+    {
+        screen_w = 1;
+    }
+    if (screen_h < 1)
+    {
+        screen_h = 1;
+    }
+    if (src_w <= screen_w && src_h <= screen_h)
+    {
+        *out_w = src_w;
+        *out_h = src_h;
+        return;
+    }
+    int max_w = screen_w - 48;
+    int max_h = screen_h - 48;
+    if (max_w < 32)
+    {
+        max_w = 32;
+    }
+    if (max_h < 32)
+    {
+        max_h = 32;
+    }
+    long long dest_w = src_w;
+    long long dest_h = src_h;
+    if (dest_w > max_w)
+    {
+        dest_w = max_w;
+        dest_h = (dest_w * src_h + src_w / 2) / src_w;
+        if (dest_h < 1)
+        {
+            dest_h = 1;
+        }
+    }
+    if (dest_h > max_h)
+    {
+        dest_h = max_h;
+        dest_w = (dest_h * src_w + src_h / 2) / src_h;
+        if (dest_w < 1)
+        {
+            dest_w = 1;
+        }
+    }
+    *out_w = (int)dest_w;
+    *out_h = (int)dest_h;
+}
+
+static void UpdatePreviewDisplay(void)
+{
+    if (g_preview < 0 || !g_preview_src.data || g_preview_src.width < 1 || g_preview_src.height < 1)
+    {
+        return;
+    }
+    int dest_w = 0;
+    int dest_h = 0;
+    PreviewFitSize(g_preview_src.width, g_preview_src.height, GetScreenWidth(), GetScreenHeight(), &dest_w,
+                   &dest_h);
+    if (g_preview_loaded && g_preview_tex.width == dest_w && g_preview_tex.height == dest_h)
+    {
+        return;
+    }
+    Image copy = ImageCopy(g_preview_src);
+    if (!copy.data)
+    {
+        return;
+    }
+    if (copy.width != dest_w || copy.height != dest_h)
+    {
+        ImageResize(&copy, dest_w, dest_h);
+    }
+    if (g_preview_loaded)
+    {
+        UnloadTexture(g_preview_tex);
+        memset(&g_preview_tex, 0, sizeof(g_preview_tex));
+        g_preview_loaded = false;
+    }
+    g_preview_tex = LoadTextureFromImage(copy);
+    UnloadImage(copy);
+    if (g_preview_tex.id != 0)
+    {
+        SetTextureFilter(g_preview_tex, TEXTURE_FILTER_POINT);
+        g_preview_loaded = true;
+    }
 }
 
 static void LoadThumb(ComposerAttach *a)
@@ -1501,8 +1603,8 @@ static void OpenPreview(int index)
     {
         return;
     }
-    g_preview_tex = LoadTexture(g_attach[index].path);
-    g_preview_loaded = g_preview_tex.id != 0;
+    g_preview_src = LoadImage(g_attach[index].path);
+    UpdatePreviewDisplay();
 }
 
 static void PasteClipboard(PicoComposer *c)
@@ -2061,27 +2163,8 @@ static void ComposerPreviewRender(PicoApp *app)
     float img_h = 0;
     if (g_preview_loaded && g_preview_tex.width > 0 && g_preview_tex.height > 0)
     {
-        float max_w = sw - 48.0f;
-        float max_h = sh - 48.0f;
-        if (max_w < 32.0f)
-        {
-            max_w = 32.0f;
-        }
-        if (max_h < 32.0f)
-        {
-            max_h = 32.0f;
-        }
-        float scale = 1.0f;
-        if ((float)g_preview_tex.width > max_w)
-        {
-            scale = max_w / (float)g_preview_tex.width;
-        }
-        if ((float)g_preview_tex.height * scale > max_h)
-        {
-            scale = max_h / (float)g_preview_tex.height;
-        }
-        img_w = (float)g_preview_tex.width * scale;
-        img_h = (float)g_preview_tex.height * scale;
+        img_w = (float)g_preview_tex.width;
+        img_h = (float)g_preview_tex.height;
     }
 
     CLAY(CLAY_ID("ComposerPreviewDim"),
@@ -2099,7 +2182,6 @@ static void ComposerPreviewRender(PicoApp *app)
             CLAY(CLAY_ID("ComposerPreviewImage"),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(img_w),
                                         .height = CLAY_SIZING_FIXED(img_h)}},
-                  .aspectRatio = (float)g_preview_tex.width / (float)g_preview_tex.height,
                   .image = {.imageData = &g_preview_tex}})
             {
             }
@@ -2223,6 +2305,7 @@ static void ComposerFrame(PicoApp *app, float dt)
     PicoComposer_PumpClipboardPaste(app);
 #endif
     PicoComposer_HandleInput(app);
+    UpdatePreviewDisplay();
     if (!PicoUi_ModalOpen(app))
     {
         UpdateComposerScrollbarDrag(app);

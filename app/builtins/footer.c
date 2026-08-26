@@ -445,7 +445,7 @@ static void RenderMenu(PicoApp *app)
                              .sizing = {.width = CLAY_SIZING_GROW(0),
                                         .height = scroll ? CLAY_SIZING_GROW(0) : CLAY_SIZING_FIT(0)}},
                   .clip = {.vertical = scroll,
-                           .horizontal = false,
+                           .horizontal = true,
                            .childOffset = scroll ? Clay_GetScrollOffset() : (Clay_Vector2){0}}})
             {
                 for (int i = 0; i < n; i++)

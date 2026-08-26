@@ -1377,7 +1377,7 @@ static void RenderTextQuestion(const AskQuestion *q)
         CLAY(CLAY_ID("AskUserTextScroll"),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-              .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+              .clip = {.vertical = true, .horizontal = true, .childOffset = Clay_GetScrollOffset()}})
         {
             CLAY(CLAY_ID("AskUserTextContent"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,

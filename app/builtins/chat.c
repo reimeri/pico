@@ -1047,6 +1047,12 @@ bool PicoChat_InspectIsOpen(void)
     return g_inspect_n > 0;
 }
 
+static bool InspectIsTopModal(PicoApp *app)
+{
+    const char *top = pico_ui_modal_top(app);
+    return g_inspect_n > 0 && top && strcmp(top, "inspect") == 0;
+}
+
 static void InspectPop(void)
 {
     if (g_inspect_n <= 0)
@@ -1804,13 +1810,16 @@ static void PicoChat_DrawChevrons(PicoApp *app)
     {
         return;
     }
-    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    if (scroll.found)
+    if (!PicoUi_ModalOpen(app))
     {
-        TranscriptView main = MainTranscriptView(app);
-        DrawTraceChevrons(&main, scroll.boundingBox);
+        Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (scroll.found)
+        {
+            TranscriptView main = MainTranscriptView(app);
+            DrawTraceChevrons(&main, scroll.boundingBox);
+        }
     }
-    if (g_inspect_n > 0)
+    if (InspectIsTopModal(app))
     {
         PicoSubagentInspect inspect;
         memset(&inspect, 0, sizeof(inspect));
@@ -1967,10 +1976,16 @@ static void PicoChat_DrawInspectSheen(PicoApp *app)
 void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    PicoChatSel_DrawOverlay(app);
+    if (!PicoUi_ModalOpen(app))
+    {
+        PicoChatSel_DrawOverlay(app);
+        PicoChat_DrawThinkSheen(app);
+    }
     PicoChat_DrawChevrons(app);
-    PicoChat_DrawThinkSheen(app);
-    PicoChat_DrawInspectSheen(app);
+    if (InspectIsTopModal(app))
+    {
+        PicoChat_DrawInspectSheen(app);
+    }
 }
 
 static void ChatOnFrame(PicoApp *app, float dt)

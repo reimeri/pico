@@ -884,7 +884,7 @@ static void DiffModalRender(PicoApp *app)
                                  .sizing = {.width = CLAY_SIZING_GROW(0),
                                             .height = CLAY_SIZING_GROW(0)}},
                       .clip = {.vertical = true,
-                               .horizontal = false,
+                               .horizontal = true,
                                .childOffset = Clay_GetScrollOffset()}})
                 {
                     if (!g_model || g_model->file_count == 0)

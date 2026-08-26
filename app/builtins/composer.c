@@ -2201,6 +2201,10 @@ static void ComposerPreviewRender(PicoApp *app)
 void PicoComposer_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
+    if (PicoUi_ModalOpen(app))
+    {
+        return;
+    }
     PicoComposer *c = &app->composer;
     ComposerView v = GetComposerView(app);
     if (!v.found)

@@ -2996,8 +2996,10 @@ void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent)
         PicoAgent_Cancel(agent);
         return;
     }
+    pthread_mutex_lock(&manager->ui_post_mu);
     agent->runtime_generation = next_generation;
     rt->context.runtime_generation = next_generation;
+    pthread_mutex_unlock(&manager->ui_post_mu);
     PicoAgentManager_CancelDelegations(manager, agent->id,
                                        old->context.runtime_generation);
 
@@ -3107,6 +3109,52 @@ static int AskCancel(char **answer_json)
         *answer_json = NULL;
     }
     return PICO_ASK_CANCEL;
+}
+
+void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
+                  const char *text, size_t n)
+{
+    PicoAgentManager *manager;
+    if (t_worker_context != PICO_WORKER_TOOL || !AgentContextActive(ctx))
+    {
+        return;
+    }
+    if (!name || !name[0] || strlen(name) >= PICO_UI_MODAL_NAME)
+    {
+        return;
+    }
+    if (kind != PICO_UI_POST_TEXT && kind != PICO_UI_POST_STATUS)
+    {
+        return;
+    }
+    manager = ctx->manager;
+    if (!manager)
+    {
+        return;
+    }
+    PicoAgentManager_UiPost(manager, name, kind, ctx->agent_id, ctx->runtime_generation, text, n);
+}
+
+bool pico_ui_latest(const PicoApp *app, const char *name, PicoUiPost *out)
+{
+    if (!app || !name || !name[0])
+    {
+        if (out)
+        {
+            memset(out, 0, sizeof(*out));
+        }
+        return false;
+    }
+    return PicoAgentManager_UiLatest(app->agents, name, out);
+}
+
+void pico_ui_clear(PicoApp *app, const char *name)
+{
+    if (!app || !app->agents)
+    {
+        return;
+    }
+    PicoAgentManager_UiClear(app->agents, name);
 }
 
 int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer_json)
@@ -3265,6 +3313,10 @@ void PicoAgent_DismissError(PicoAgent *agent)
 void PicoAgent_Pump(PicoApp *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (agent && agent->manager)
+    {
+        PicoAgentManager_PumpUiPosts(agent->manager);
+    }
     if (!rt)
     {
         return;

@@ -16,9 +16,9 @@ On process exit, every agent, delegation job, and retired runtime shares one abs
 
 ## Threads
 
-Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool-row hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout, `pico_ui_modal_push` / `pop`. Agent-scoped callbacks receive a `PicoAgentId`; keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized. View render callbacks are declarative and may run more than once per displayed frame during same-frame reflow; keep durable state changes, I/O, and input consumption in `on_frame` or hooks.
+Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool-row hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout, `pico_ui_modal_push` / `pop`, `pico_ui_latest` / `pico_ui_clear`. Agent-scoped callbacks receive a `PicoAgentId`; keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized. View render callbacks are declarative and may run more than once per displayed frame during same-frame reflow; keep durable state changes, I/O, and input consumption in `on_frame` or hooks.
 
-Worker thread: `PicoToolFn`, `PicoToolBeforeFn`, `PicoProviderStreamFn`. They receive a callback-scoped opaque `PicoAgentContext *`, never the UI `PicoApp *`. Do not retain it. Worker callbacks from different agents may overlap and must be reentrant. Use context accessors, `pico_tool_ask`, `pico_tool_set_child`, and `pico_auth_copy_ctx`; do not touch UI, transcript, session, settings, model catalog, or unsynchronized agent-scoped extension state. `pico_tool_ask` may be called only from a tool or before-tool callback. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
+Worker thread: `PicoToolFn`, `PicoToolBeforeFn`, `PicoProviderStreamFn`. They receive a callback-scoped opaque `PicoAgentContext *`, never the UI `PicoApp *`. Do not retain it. Worker callbacks from different agents may overlap and must be reentrant. Use context accessors, `pico_tool_ask`, `pico_ui_post`, `pico_tool_set_child`, and `pico_auth_copy_ctx`; do not touch UI, transcript, session, settings, model catalog, or unsynchronized agent-scoped extension state. `pico_tool_ask` and `pico_ui_post` may be called only from a tool or before-tool callback. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
 Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a `PicoToolResult` with malloc'd fields; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`. `PICO_LLM_DELTA_THINKING` appends; `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current summary (zero-length starts the next step). Pico coalesces consecutive summaries until a tool call. The widget title is the latest step; expanding shows every step.
 
@@ -32,6 +32,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PicoToolResult.output` / `details_json`: malloc if set; Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
 - `pico_tool_pending_ask` `request_json`: the oldest live ask across all agents; valid until the next manager pump. Do not retain it across frames.
+- `pico_ui_latest` `status` / `text`: borrowed published mailbox storage, invalidated by the next pump, `pico_ui_clear` of that name, or workspace replacement. Pico copies posted bytes; do not retain worker pointers.
 - `pico_subagent_profile_info`: copies the complete profile snapshot into caller storage. Profile strings and tool names in that copy are caller-owned values, not registry pointers.
 - `pico_agent_message` and nested `PicoTraceLine` strings such as `tool_call_id`: borrowed main-thread transcript storage, invalidated by pumping, transcript mutation, close, or workspace replacement.
 - `PicoAgentContext *` and all strings returned by its accessors: callback-scoped; never retain them.
@@ -58,6 +59,8 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - 16 empty-state views (`pico_add_empty_view`)
 - 64 notification hooks, tool hooks, tool-row hooks, LLM hooks, context hooks, tools, commands
 - 16 named modal claims (`PICO_MAX_UI_MODALS`); names shorter than `PICO_UI_MODAL_NAME`
+- 16 named UI mailboxes (`PICO_MAX_UI_POSTS`); names shorter than `PICO_UI_MODAL_NAME`
+- `PICO_UI_POST_TEXT_MAX` (64 KiB) and `PICO_UI_POST_STATUS_MAX` (128 bytes)
 - 16 completers, providers, auth registrations
 - 24 completion items per query
 - `PICO_TOOL_DETAILS_MAX`, `PICO_TOOL_ASK_MAX_REQUEST`, and `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)

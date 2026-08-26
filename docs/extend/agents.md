@@ -90,9 +90,9 @@ Read-only accessors provide copied worker values:
 - `pico_agent_context_safe_mode(ctx)`
 - `pico_agent_context_cancelled(ctx)`
 
-A context binds to one agent ID and runtime generation. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask or bind child processes.
+A context binds to one agent ID and runtime generation. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask, post to a UI mailbox, or bind child processes.
 
-Use `pico_tool_ask(ctx, ...)`, `pico_tool_set_child(ctx, pid)`, `pico_auth_copy_ctx(ctx, ...)`, callback results, provider cancellation, and delta callbacks. Worker callbacks must not mutate UI, transcripts, sessions, model settings, or main-thread extension state.
+Use `pico_tool_ask(ctx, ...)`, `pico_ui_post(ctx, ...)`, `pico_tool_set_child(ctx, pid)`, `pico_auth_copy_ctx(ctx, ...)`, callback results, provider cancellation, and delta callbacks. Worker callbacks must not mutate UI, transcripts, sessions, model settings, or main-thread extension state.
 
 ## Concurrency contract
 

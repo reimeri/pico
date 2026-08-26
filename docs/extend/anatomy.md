@@ -22,7 +22,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 9). ABI 9 adds the named modal stack (`pico_ui_modal_push` / `pop`) and tool-row click hooks (`pico_add_tool_row_hook`). There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 10). ABI 10 adds the named UI mailbox (`pico_ui_post` / `pico_ui_latest` / `pico_ui_clear`). ABI 9 added the named modal stack (`pico_ui_modal_push` / `pop`) and tool-row click hooks (`pico_add_tool_row_hook`). There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload when the extension is enabled.

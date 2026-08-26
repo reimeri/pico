@@ -107,3 +107,18 @@ if (pico_ui_modal_push(app, "my-modal"))
 - Draw your own dimmer and card with unique `CLAY_ID`s. Do not reuse builtin IDs such as `SubagentModalDim`. Handle Esc and dimmer clicks yourself.
 
 Full file: [`../../examples/modal.c`](../../examples/modal.c).
+
+## Named mailbox
+
+Tools cannot touch Clay. To stream into a named overlay, post from the worker and read the published snapshot on the main thread:
+
+```c
+PicoUiPost post;
+if (pico_ui_latest(app, "web_search", &post))
+{
+    /* post.status / post.text are borrowed until the next pump or clear. */
+}
+pico_ui_clear(app, "web_search");
+```
+
+`pico_ui_post` copies immediately and publishes on the next pump. TEXT appends; STATUS replaces. Force-cancelled leftovers are ignored. The snapshot survives the tool returning and extension reload; workspace replacement and `pico_ui_clear` drop it. See [tools](tools.md#streaming-into-a-modal) and [`../../examples/stream_modal.c`](../../examples/stream_modal.c).

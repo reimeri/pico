@@ -117,6 +117,21 @@ The modal preserves answers while moving Next/Back and returns them in question 
 
 Controls: Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
 
+## Streaming into a modal
+
+`pico_ui_post` is a mailbox, not a second worker. The tool already runs on Pico's worker; post copies bytes and the main thread publishes a snapshot on the next pump. Read it from `on_frame` or overlay render with `pico_ui_latest`. See [`../../examples/stream_modal.c`](../../examples/stream_modal.c).
+
+```c
+pico_ui_post(ctx, "web_search", PICO_UI_POST_STATUS, "searching", 9);
+pico_ui_post(ctx, "web_search", PICO_UI_POST_TEXT, chunk, n);
+```
+
+- Worker only (`PicoToolFn` or `PicoToolBeforeFn`). Inactive/force-cancelled generations are dropped. Do not wait on your own condvar.
+- `PICO_UI_POST_TEXT` appends up to `PICO_UI_POST_TEXT_MAX` (64 KiB) and keeps the prefix. `PICO_UI_POST_STATUS` replaces a line of at most `PICO_UI_POST_STATUS_MAX` (128 bytes).
+- Names use the same length limit as modals (`PICO_UI_MODAL_NAME`). At most `PICO_MAX_UI_POSTS` (16) names; a new name is dropped when the table is full. Last accepted writer wins if two agents share a name.
+- The snapshot outlives the tool call until `pico_ui_clear` or workspace replacement. Reload does not clear it. `pico_ui_latest` pointers are valid until the next pump, clear of that name, or workspace replacement.
+- Copy the snapshot into your own display buffer in `on_frame` if Clay will hold the string. Popping the modal is the usual time to `pico_ui_clear`.
+
 ## Tool-row click
 
 Register `pico_add_tool_row_hook` to open your own overlay when the user clicks a tool row. Set `event->handled` to skip the default expand/collapse. Builtin subagent inspect uses this path. See [hooks](hooks.md#tool-row-click) and [`../../examples/modal.c`](../../examples/modal.c).
@@ -183,7 +198,7 @@ The apply callback returns `false` to reject details. A live rejection converts 
 - Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
-- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoApp *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Worker callbacks from different agents may overlap. See [agents](agents.md).
+- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoApp *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Worker callbacks from different agents may overlap. See [agents](agents.md).
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 and workspace changes still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.

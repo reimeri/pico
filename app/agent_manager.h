@@ -13,6 +13,21 @@ typedef struct PicoSessionReservation {
     char path[4096];
 } PicoSessionReservation;
 
+typedef struct PicoUiMailbox {
+    char name[PICO_UI_MODAL_NAME];
+    PicoAgentId agent_id;
+    uint64_t generation;
+    char status[PICO_UI_POST_STATUS_MAX + 1];
+    char *text;
+    size_t text_len;
+    PicoAgentId pub_agent_id;
+    uint64_t pub_generation;
+    char pub_status[PICO_UI_POST_STATUS_MAX + 1];
+    char *pub_text;
+    bool dirty;
+    bool published;
+} PicoUiMailbox;
+
 typedef struct PicoSubagentSnapshot {
     PicoAgentId child_id;
     PicoAgentId parent_id;
@@ -45,10 +60,19 @@ struct PicoAgentManager {
     int snapshot_count;
     int snapshot_capacity;
     pthread_mutex_t lifecycle_mu;
+    pthread_mutex_t ui_post_mu;
+    PicoUiMailbox ui_mailboxes[PICO_MAX_UI_POSTS];
+    int ui_mailbox_count;
     bool accepting_work;
     bool curl_initialized;
     bool retained_shutdown;
 };
+
+void PicoAgentManager_UiPost(PicoAgentManager *manager, const char *name, PicoUiPostKind kind,
+                             PicoAgentId agent_id, uint64_t generation, const char *text, size_t n);
+void PicoAgentManager_PumpUiPosts(PicoAgentManager *manager);
+bool PicoAgentManager_UiLatest(const PicoAgentManager *manager, const char *name, PicoUiPost *out);
+void PicoAgentManager_UiClear(PicoAgentManager *manager, const char *name);
 
 PicoAgentManager *PicoAgentManager_Create(PicoApp *app);
 /* False means a detached worker retained the execution host. */

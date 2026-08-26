@@ -456,7 +456,7 @@ endforeach()
 unset(_pico_ref_builtins)
 unset(_f)
 
-foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd modal)
+foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd modal stream_modal)
     add_custom_command(
             TARGET pico POST_BUILD
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99 ${PICO_WARNINGS_AS_ERRORS_OPTION}

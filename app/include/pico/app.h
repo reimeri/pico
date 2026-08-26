@@ -22,6 +22,9 @@
 #define PICO_MAX_TOOL_ROW_HOOKS 64
 #define PICO_MAX_UI_MODALS 16
 #define PICO_UI_MODAL_NAME 64
+#define PICO_MAX_UI_POSTS 16
+#define PICO_UI_POST_TEXT_MAX (64 * 1024)
+#define PICO_UI_POST_STATUS_MAX 128
 #define PICO_TOOL_DETAILS_MAX (64 * 1024)
 #define PICO_TOOL_ASK_MAX_REQUEST (64 * 1024)
 #define PICO_TOOL_ASK_MAX_ANSWER (64 * 1024)
@@ -303,6 +306,18 @@ typedef struct PicoToolAsk {
     const char *request_json;
 } PicoToolAsk;
 
+typedef enum PicoUiPostKind {
+    PICO_UI_POST_TEXT = 0,
+    PICO_UI_POST_STATUS,
+} PicoUiPostKind;
+
+typedef struct PicoUiPost {
+    PicoAgentId agent_id;
+    uint64_t generation;
+    const char *status; /* borrowed; empty if none */
+    const char *text;   /* borrowed; empty if none */
+} PicoUiPost;
+
 /* Provider-facing request. input_json is canonical items, oldest first:
  *   {"type":"user","parts":[{"type":"text","text":"..."},{"type":"image","path":"...","mime":"..."}]}
  *   {"type":"assistant","parts":[{"type":"text","text":"..."}],"thinking":"...","thinking_signature":"..."}
@@ -477,6 +492,18 @@ const char *pico_ui_modal_top(const PicoApp *app);
 int pico_ui_modal_count(const PicoApp *app);
 bool pico_ui_modal_claimed(const PicoApp *app);
 bool pico_ui_modal_has(const PicoApp *app, const char *name);
+/* Worker thread, inside PicoToolFn or a before-tool hook. Copies bytes into a
+ * named mailbox and publishes them on the next main-thread pump. Drops the
+ * post when ctx is inactive, the name is empty/oversized, or kind is invalid.
+ * TEXT appends up to PICO_UI_POST_TEXT_MAX (prefix kept). STATUS replaces up
+ * to PICO_UI_POST_STATUS_MAX. Last accepted writer wins if names collide. */
+void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
+                  const char *text, size_t n);
+/* Main thread. Latest published snapshot for `name`. Pointers are valid until
+ * the next pump, clear of this name, or workspace replacement. */
+bool pico_ui_latest(const PicoApp *app, const char *name, PicoUiPost *out);
+/* Main thread. Drops the snapshot and any unpublished posts for `name`. */
+void pico_ui_clear(PicoApp *app, const char *name);
 /* Main thread. Runs tool-row hooks in registration order. Returns true when a
  * hook set handled. Strings are borrowed from `line` for this callback. */
 bool pico_tool_row_activate(PicoApp *app, PicoAgentId agent_id, const PicoTraceLine *line);

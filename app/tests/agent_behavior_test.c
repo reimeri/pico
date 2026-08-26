@@ -41,6 +41,10 @@ typedef enum TestMode {
     TEST_INTERLEAVED_TRACE_ITEMS,
     TEST_MALFORMED_RESULT,
     TEST_MEDIA_PERSIST_FAIL,
+    TEST_UI_POST,
+    TEST_UI_POST_BLOCK,
+    TEST_UI_POST_CAP,
+    TEST_UI_POST_LIMIT,
 } TestMode;
 
 typedef struct TestState {
@@ -604,6 +608,75 @@ static void LateDelegateTool(PicoAgentContext *ctx, const char *args_json, PicoT
     else
     {
         free(result);
+    }
+}
+
+static void UiPostTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+{
+    TestMode mode;
+    (void)args_json;
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+
+    pthread_mutex_lock(&g_test.mu);
+    mode = g_test.mode;
+    g_test.tool_invocations++;
+    pthread_mutex_unlock(&g_test.mu);
+
+    if (mode == TEST_UI_POST_CAP)
+    {
+        char *buf = (char *)malloc(PICO_UI_POST_TEXT_MAX + 8);
+        if (buf)
+        {
+            memset(buf, 'a', PICO_UI_POST_TEXT_MAX + 4);
+            pico_ui_post(ctx, "cap", PICO_UI_POST_TEXT, buf, PICO_UI_POST_TEXT_MAX + 4);
+            pico_ui_post(ctx, "cap", PICO_UI_POST_TEXT, "b", 1);
+            free(buf);
+        }
+    }
+    else if (mode == TEST_UI_POST_BLOCK)
+    {
+        pico_ui_post(ctx, "stream", PICO_UI_POST_TEXT, "live", 4);
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_entered = true;
+        pthread_cond_broadcast(&g_test.cv);
+        while (!g_test.block_release)
+        {
+            pthread_cond_wait(&g_test.cv, &g_test.mu);
+        }
+        pthread_mutex_unlock(&g_test.mu);
+        pico_ui_post(ctx, "stream", PICO_UI_POST_TEXT, "dead", 4);
+    }
+    else if (mode == TEST_UI_POST_LIMIT)
+    {
+        int i;
+        for (i = 0; i < PICO_MAX_UI_POSTS + 1; i++)
+        {
+            char name[8];
+            snprintf(name, sizeof(name), "b%d", i);
+            pico_ui_post(ctx, name, PICO_UI_POST_STATUS, "x", 1);
+        }
+    }
+    else
+    {
+        char status[PICO_UI_POST_STATUS_MAX];
+        memset(status, 's', sizeof(status));
+        pico_ui_post(ctx, "stream", PICO_UI_POST_STATUS, "searching", 9);
+        pico_ui_post(ctx, "stream", PICO_UI_POST_TEXT, "ab", 2);
+        pico_ui_post(ctx, "stream", PICO_UI_POST_TEXT, "cd", 2);
+        pico_ui_post(ctx, "stream", PICO_UI_POST_STATUS, status, sizeof(status));
+        pico_ui_post(ctx, "other", PICO_UI_POST_TEXT, "zz", 2);
+    }
+
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_done = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    if (out)
+    {
+        out->output = JsonDup("posted");
     }
 }
 
@@ -3062,6 +3135,236 @@ static int TestRestoredThinkKeepsUnknownDuration(void)
     return kept ? 0 : Fail(name, "stored thinking_ms was not kept across a following tool");
 }
 
+static bool WaitForUi(PicoApp *app, const char *box_name, PicoUiPost *out)
+{
+    int i;
+    for (i = 0; i < 3000; i++)
+    {
+        PicoAgent_Pump(app, PicoApp_ActiveAgent(app));
+        if (pico_ui_latest(app, box_name, out))
+        {
+            return true;
+        }
+        SleepOneMs();
+    }
+    return false;
+}
+
+static void UseUiPostTool(PicoApp *app)
+{
+    pico_add_tool(app, "ui_post", "test", "{}", UiPostTool, NULL);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ui_post");
+}
+
+static int TestUiPostAppendReplace(void)
+{
+    const char *name = "ui mailbox append and replace";
+    PicoApp app;
+    PicoUiPost stream;
+    PicoUiPost other;
+    PicoUiPost after_clear;
+    bool ok;
+
+    ResetTest(TEST_UI_POST, 1);
+    InitApp(&app);
+    UseUiPostTool(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    if (!pico_ui_latest(&app, "stream", &stream) || !pico_ui_latest(&app, "other", &other))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "published snapshots were missing");
+    }
+    ok = stream.status && strlen(stream.status) == PICO_UI_POST_STATUS_MAX &&
+         stream.status[0] == 's' && stream.status[PICO_UI_POST_STATUS_MAX - 1] == 's' &&
+         stream.text && strcmp(stream.text, "abcd") == 0 &&
+         other.text && strcmp(other.text, "zz") == 0 &&
+         stream.agent_id == pico_agent_active(&app) && stream.generation != 0;
+    pico_ui_post(NULL, "stream", PICO_UI_POST_TEXT, "nope", 4);
+    pico_ui_latest(&app, "stream", &stream);
+    ok = ok && stream.text && strcmp(stream.text, "abcd") == 0;
+    pico_ui_clear(&app, "stream");
+    ok = ok && !pico_ui_latest(&app, "stream", &after_clear) &&
+         pico_ui_latest(&app, "other", &other);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "status/text snapshot contract failed");
+}
+
+static int TestUiPostCap(void)
+{
+    const char *name = "ui mailbox text keeps prefix at cap";
+    PicoApp app;
+    PicoUiPost post;
+    bool ok;
+
+    ResetTest(TEST_UI_POST_CAP, 1);
+    InitApp(&app);
+    UseUiPostTool(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    if (!pico_ui_latest(&app, "cap", &post) || !post.text)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "capped snapshot was missing");
+    }
+    ok = strlen(post.text) == PICO_UI_POST_TEXT_MAX &&
+         post.text[0] == 'a' && post.text[PICO_UI_POST_TEXT_MAX - 1] == 'a';
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "overflow did not keep the prefix");
+}
+
+static int TestUiPostForceCancel(void)
+{
+    const char *name = "ui mailbox drops abandoned generation posts";
+    PicoApp app;
+    PicoUiPost post;
+    bool reaped = false;
+    int i;
+
+    ResetTest(TEST_UI_POST_BLOCK, 1);
+    InitApp(&app);
+    UseUiPostTool(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "blocking ui post tool did not start");
+    }
+    if (!WaitForUi(&app, "stream", &post) || !post.text || strcmp(post.text, "live") != 0)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "live snapshot was not published");
+    }
+    PicoAgent_ForceCancel(&app, PicoApp_ActiveAgent(&app));
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    for (i = 0; i < 3000; i++)
+    {
+        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+        if (!PicoAgent_BlocksReload(PicoApp_ActiveAgent(&app)))
+        {
+            reaped = true;
+            break;
+        }
+        SleepOneMs();
+    }
+    if (!reaped || !pico_ui_latest(&app, "stream", &post) || !post.text ||
+        strcmp(post.text, "live") != 0)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "abandoned post replaced the live snapshot");
+    }
+    PicoApp_Free(&app);
+    return 0;
+}
+
+static bool WaitForFlagNoPump(bool *flag)
+{
+    int i;
+    for (i = 0; i < 3000; i++)
+    {
+        pthread_mutex_lock(&g_test.mu);
+        bool done = *flag;
+        pthread_mutex_unlock(&g_test.mu);
+        if (done)
+        {
+            return true;
+        }
+        SleepOneMs();
+    }
+    return false;
+}
+
+static int TestUiPostUnpublishedIdentity(void)
+{
+    const char *name = "ui mailbox latest stays on last publish";
+    PicoApp app;
+    PicoUiPost post;
+    uint64_t first_gen;
+    PicoAgentId first_agent;
+    bool ok;
+
+    ResetTest(TEST_UI_POST_BLOCK, 1);
+    InitApp(&app);
+    UseUiPostTool(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForBlock(&app) || !WaitForUi(&app, "stream", &post) ||
+        !post.text || strcmp(post.text, "live") != 0)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "first snapshot was not published");
+    }
+    first_gen = post.generation;
+    first_agent = post.agent_id;
+
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    if (!WaitForFlagNoPump(&g_test.block_done))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "second post did not finish");
+    }
+    if (!pico_ui_latest(&app, "stream", &post) || !post.text || strcmp(post.text, "live") != 0 ||
+        post.generation != first_gen || post.agent_id != first_agent)
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "unpublished append leaked into latest");
+    }
+    PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+    ok = pico_ui_latest(&app, "stream", &post) && post.text && strcmp(post.text, "livedead") == 0 &&
+         post.generation == first_gen && post.agent_id == first_agent;
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "pump did not publish the staged append");
+}
+
+static int TestUiPostLimit(void)
+{
+    const char *name = "ui mailbox table rejects a new name when full";
+    PicoApp app;
+    PicoUiPost post;
+    int i;
+    bool ok = true;
+
+    ResetTest(TEST_UI_POST_LIMIT, 1);
+    InitApp(&app);
+    UseUiPostTool(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    for (i = 0; i < PICO_MAX_UI_POSTS; i++)
+    {
+        char box[8];
+        snprintf(box, sizeof(box), "b%d", i);
+        if (!pico_ui_latest(&app, box, &post))
+        {
+            ok = false;
+            break;
+        }
+    }
+    {
+        char overflow[8];
+        snprintf(overflow, sizeof(overflow), "b%d", PICO_MAX_UI_POSTS);
+        ok = ok && !pico_ui_latest(&app, overflow, &post);
+    }
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "mailbox limit was not enforced");
+}
+
 int main(void)
 {
     int failed = 0;
@@ -3138,6 +3441,11 @@ int main(void)
     failed |= TestCancelledThinkingPersistence();
     failed |= TestThinkSummaryCoalesce();
     failed |= TestRestoredThinkKeepsUnknownDuration();
+    failed |= TestUiPostAppendReplace();
+    failed |= TestUiPostCap();
+    failed |= TestUiPostForceCancel();
+    failed |= TestUiPostUnpublishedIdentity();
+    failed |= TestUiPostLimit();
     /* Retained shutdown permanently retires Pico in this process, so run last. */
     failed |= TestShutdownTimeout();
     return failed ? 1 : 0;

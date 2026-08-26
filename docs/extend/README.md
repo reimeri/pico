@@ -48,6 +48,7 @@ Copy-templates (paths from this README):
 - [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c) — request-only context
 - [`../../examples/time_cmd.c`](../../examples/time_cmd.c) — slash command
 - [`../../examples/modal.c`](../../examples/modal.c) — named overlay modal and tool-row click
+- [`../../examples/stream_modal.c`](../../examples/stream_modal.c) — tool worker posts into a named overlay mailbox
 - [`../../examples/subagents/exploration.json`](../../examples/subagents/exploration.json) — read-only exploration profile
 - [`../../examples/subagents/review.json`](../../examples/subagents/review.json) — read-only review profile
 

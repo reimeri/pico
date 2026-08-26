@@ -86,6 +86,265 @@ const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager)
     return PicoAgentManager_FindConst(manager, manager ? manager->active_id : 0);
 }
 
+static PicoUiMailbox *FindMailbox(PicoAgentManager *manager, const char *name)
+{
+    int i;
+    if (!manager || !name || !name[0])
+    {
+        return NULL;
+    }
+    for (i = 0; i < manager->ui_mailbox_count; i++)
+    {
+        if (strcmp(manager->ui_mailboxes[i].name, name) == 0)
+        {
+            return &manager->ui_mailboxes[i];
+        }
+    }
+    return NULL;
+}
+
+static const PicoUiMailbox *FindMailboxConst(const PicoAgentManager *manager, const char *name)
+{
+    return FindMailbox((PicoAgentManager *)manager, name);
+}
+
+static void FreeMailbox(PicoUiMailbox *box)
+{
+    if (!box)
+    {
+        return;
+    }
+    free(box->text);
+    free(box->pub_text);
+    memset(box, 0, sizeof(*box));
+}
+
+static void RemoveMailboxAt(PicoAgentManager *manager, int index)
+{
+    if (!manager || index < 0 || index >= manager->ui_mailbox_count)
+    {
+        return;
+    }
+    FreeMailbox(&manager->ui_mailboxes[index]);
+    manager->ui_mailbox_count--;
+    if (index < manager->ui_mailbox_count)
+    {
+        manager->ui_mailboxes[index] = manager->ui_mailboxes[manager->ui_mailbox_count];
+        memset(&manager->ui_mailboxes[manager->ui_mailbox_count], 0, sizeof(manager->ui_mailboxes[0]));
+    }
+}
+
+static bool MailboxAppend(PicoUiMailbox *box, const char *s, size_t n)
+{
+    size_t room;
+    char *next;
+    if (!box || !s || n == 0)
+    {
+        return true;
+    }
+    room = PICO_UI_POST_TEXT_MAX > box->text_len ? PICO_UI_POST_TEXT_MAX - box->text_len : 0;
+    if (room == 0)
+    {
+        return true;
+    }
+    if (n > room)
+    {
+        n = room;
+    }
+    next = (char *)realloc(box->text, box->text_len + n + 1);
+    if (!next)
+    {
+        return false;
+    }
+    memcpy(next + box->text_len, s, n);
+    box->text_len += n;
+    next[box->text_len] = '\0';
+    box->text = next;
+    return true;
+}
+
+void PicoAgentManager_UiPost(PicoAgentManager *manager, const char *name, PicoUiPostKind kind,
+                             PicoAgentId agent_id, uint64_t generation, const char *text, size_t n)
+{
+    PicoUiMailbox *box;
+    if (!manager || !name || !name[0] || !generation ||
+        (kind != PICO_UI_POST_TEXT && kind != PICO_UI_POST_STATUS))
+    {
+        return;
+    }
+    if (kind == PICO_UI_POST_TEXT && (!text || n == 0))
+    {
+        return;
+    }
+    if (!text)
+    {
+        text = "";
+        n = 0;
+    }
+    pthread_mutex_lock(&manager->ui_post_mu);
+    {
+        const PicoAgent *agent = PicoAgentManager_FindConst(manager, agent_id);
+        if (!agent || agent->runtime_generation != generation)
+        {
+            pthread_mutex_unlock(&manager->ui_post_mu);
+            return;
+        }
+    }
+    box = FindMailbox(manager, name);
+    if (!box)
+    {
+        if (manager->ui_mailbox_count >= PICO_MAX_UI_POSTS)
+        {
+            pthread_mutex_unlock(&manager->ui_post_mu);
+            return;
+        }
+        box = &manager->ui_mailboxes[manager->ui_mailbox_count];
+        memset(box, 0, sizeof(*box));
+        snprintf(box->name, sizeof(box->name), "%s", name);
+        manager->ui_mailbox_count++;
+    }
+    if (box->generation != 0 && box->agent_id == agent_id && generation < box->generation)
+    {
+        pthread_mutex_unlock(&manager->ui_post_mu);
+        return;
+    }
+    if (box->generation != 0 &&
+        (box->agent_id != agent_id || generation != box->generation))
+    {
+        free(box->text);
+        box->text = NULL;
+        box->text_len = 0;
+        box->status[0] = '\0';
+    }
+    box->agent_id = agent_id;
+    box->generation = generation;
+    if (kind == PICO_UI_POST_STATUS)
+    {
+        size_t copy = n < PICO_UI_POST_STATUS_MAX ? n : PICO_UI_POST_STATUS_MAX;
+        memcpy(box->status, text, copy);
+        box->status[copy] = '\0';
+        box->dirty = true;
+    }
+    else if (MailboxAppend(box, text, n))
+    {
+        box->dirty = true;
+    }
+    pthread_mutex_unlock(&manager->ui_post_mu);
+}
+
+void PicoAgentManager_PumpUiPosts(PicoAgentManager *manager)
+{
+    int i;
+    if (!manager)
+    {
+        return;
+    }
+    pthread_mutex_lock(&manager->ui_post_mu);
+    for (i = 0; i < manager->ui_mailbox_count;)
+    {
+        PicoUiMailbox *box = &manager->ui_mailboxes[i];
+        const PicoAgent *agent;
+        bool live;
+        if (!box->dirty)
+        {
+            i++;
+            continue;
+        }
+        agent = PicoAgentManager_FindConst(manager, box->agent_id);
+        live = agent && agent->runtime_generation == box->generation;
+        if (!live)
+        {
+            box->dirty = false;
+            if (!box->published)
+            {
+                RemoveMailboxAt(manager, i);
+                continue;
+            }
+            i++;
+            continue;
+        }
+        box->pub_agent_id = box->agent_id;
+        box->pub_generation = box->generation;
+        memcpy(box->pub_status, box->status, sizeof(box->pub_status));
+        free(box->pub_text);
+        box->pub_text = NULL;
+        if (box->text && box->text_len)
+        {
+            box->pub_text = (char *)malloc(box->text_len + 1);
+            if (box->pub_text)
+            {
+                memcpy(box->pub_text, box->text, box->text_len + 1);
+            }
+        }
+        box->published = true;
+        box->dirty = false;
+        i++;
+    }
+    pthread_mutex_unlock(&manager->ui_post_mu);
+}
+
+bool PicoAgentManager_UiLatest(const PicoAgentManager *manager, const char *name, PicoUiPost *out)
+{
+    const PicoUiMailbox *box;
+    bool found = false;
+    if (!out)
+    {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!manager)
+    {
+        return false;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&manager->ui_post_mu);
+    box = FindMailboxConst(manager, name);
+    if (box && box->published)
+    {
+        out->agent_id = box->pub_agent_id;
+        out->generation = box->pub_generation;
+        out->status = box->pub_status;
+        out->text = box->pub_text ? box->pub_text : "";
+        found = true;
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&manager->ui_post_mu);
+    return found;
+}
+
+void PicoAgentManager_UiClear(PicoAgentManager *manager, const char *name)
+{
+    int i;
+    if (!manager || !name || !name[0])
+    {
+        return;
+    }
+    pthread_mutex_lock(&manager->ui_post_mu);
+    for (i = 0; i < manager->ui_mailbox_count; i++)
+    {
+        if (strcmp(manager->ui_mailboxes[i].name, name) == 0)
+        {
+            RemoveMailboxAt(manager, i);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&manager->ui_post_mu);
+}
+
+static void FreeUiPosts(PicoAgentManager *manager)
+{
+    int i;
+    if (!manager)
+    {
+        return;
+    }
+    pthread_mutex_lock(&manager->ui_post_mu);
+    for (i = 0; i < manager->ui_mailbox_count; i++)
+    {
+        FreeMailbox(&manager->ui_mailboxes[i]);
+    }
+    manager->ui_mailbox_count = 0;
+    pthread_mutex_unlock(&manager->ui_post_mu);
+}
+
 PicoAgentManager *PicoAgentManager_Create(PicoApp *app)
 {
     PicoAgentManager *manager = (PicoAgentManager *)calloc(1, sizeof(*manager));
@@ -96,9 +355,11 @@ PicoAgentManager *PicoAgentManager_Create(PicoApp *app)
     manager->app = app;
     pthread_mutex_init(&manager->delegation_mu, NULL);
     pthread_mutex_init(&manager->lifecycle_mu, NULL);
+    pthread_mutex_init(&manager->ui_post_mu, NULL);
     manager->accepting_work = true;
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
     {
+        pthread_mutex_destroy(&manager->ui_post_mu);
         pthread_mutex_destroy(&manager->lifecycle_mu);
         pthread_mutex_destroy(&manager->delegation_mu);
         free(manager);
@@ -452,6 +713,7 @@ void PicoAgentManager_Pump(PicoAgentManager *manager)
     {
         return;
     }
+    PicoAgentManager_PumpUiPosts(manager);
     PicoAgent_ReapRetired(manager);
     ProcessDelegationRequests(manager);
     for (int i = 0; i < manager->count; i++)
@@ -618,6 +880,8 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     {
         curl_global_cleanup();
     }
+    FreeUiPosts(manager);
+    pthread_mutex_destroy(&manager->ui_post_mu);
     pthread_mutex_destroy(&manager->lifecycle_mu);
     pthread_mutex_destroy(&manager->delegation_mu);
     free(manager);

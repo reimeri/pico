@@ -320,8 +320,7 @@ void PicoOverlay_OnFrame(PicoApp *app, float dt)
             g_notify_ttl = 0.0f;
         }
     }
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-        PicoChat_InspectIsOpen() || PicoComposer_PreviewOpen() || !IsKeyPressed(KEY_ESCAPE))
+    if (pico_ui_modal_claimed(app) || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }

@@ -1,10 +1,11 @@
 # Hooks
 
-Three families:
+Four families:
 
 - **Notifications** — `pico_add_hook`. Main thread, with a `PicoHookEvent` target.
 - **Tool interceptors** — `pico_add_tool_before_hook` and `pico_add_tool_after_hook`.
 - **LLM/request context** — `pico_add_llm_hook` and `pico_add_context_hook`, with a target agent ID.
+- **Tool-row clicks** — `pico_add_tool_row_hook`. Main thread, when a chat tool row is activated.
 
 ```c
 pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
@@ -109,3 +110,31 @@ Full file: [`../../examples/extra_instructions.c`](../../examples/extra_instruct
 LLM hooks run on the serialized main thread for every request, including compaction. They see only tools permitted by the agent policy. Hooks run twice per request in registration order: first a filtering pass where `exclude[i] = true` hides a tool from this request (any `extra_instructions` set during this pass is discarded), then an instructions pass where every hook sees the final exclusion set and malloc'd `extra_instructions` is appended under a shared `## Additional instructions` section for later hooks. The heading is omitted when no hook contributes a non-empty extra.
 
 The provider receives a retained copy of the final catalog. `/show-prompt` runs the same hooks with the active target. Reload cannot unload hooks while a runtime retains a callback/catalog snapshot; it waits for full quiescence and releases idle snapshots first.
+
+## Tool-row click
+
+```c
+static void OnRow(PicoApp *app, PicoToolRowEvent *ev)
+{
+    if (!ev->name || strcmp(ev->name, "web_search") != 0)
+    {
+        return;
+    }
+    (void)pico_ui_modal_push(app, "web_search");
+    ev->handled = true;
+}
+
+pico_add_tool_row_hook(app, OnRow);
+```
+
+Chat calls `pico_tool_row_activate` when the user activates a tool row (main transcript or nested inspect). Hooks run in registration order on the main thread. The first hook that sets `handled` skips later hooks and the default expand/collapse. Builtin `subagent` inspect is one of these hooks.
+
+`PicoToolRowEvent` fields are borrowed from the trace line and valid only during the callback:
+
+- `agent_id`, `name`, `call_id`, `args_json`
+- `output` — NULL while the call is still running
+- `is_error`
+- `handled`
+
+Do not retain the pointers. Maximum 64 hooks (`PICO_MAX_TOOL_ROW_HOOKS`).
+

@@ -19,8 +19,8 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 
 - `anatomy` — entry point, lifecycle, compile
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
-- `views` — UI in a slot (sidebar, chat, footer, …) and the chat empty-state
-- `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool and LLM interceptors
+- `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
+- `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
 - `tools` — LLM-callable tools and structured replayable details
 - `commands` — slash commands (`/foo`)
@@ -47,6 +47,7 @@ Copy-templates (paths from this README):
 - [`../../examples/extra_instructions.c`](../../examples/extra_instructions.c) — `pico_add_llm_hook` extra prompt line
 - [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c) — request-only context
 - [`../../examples/time_cmd.c`](../../examples/time_cmd.c) — slash command
+- [`../../examples/modal.c`](../../examples/modal.c) — named overlay modal and tool-row click
 - [`../../examples/subagents/exploration.json`](../../examples/subagents/exploration.json) — read-only exploration profile
 - [`../../examples/subagents/review.json`](../../examples/subagents/review.json) — read-only review profile
 

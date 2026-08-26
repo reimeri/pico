@@ -7,14 +7,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+static PicoApp *g_app;
 static bool g_open;
 static char *g_text;
 static bool g_overflow;
 static PicoScrollbar g_scrollbar;
 
+static void Unclaim(void)
+{
+    if (g_open && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "prompt");
+    }
+    g_open = false;
+}
+
 void PicoPrompt_Close(void)
 {
-    g_open = false;
+    Unclaim();
     free(g_text);
     g_text = NULL;
     g_overflow = false;
@@ -165,13 +175,22 @@ static void CmdShowPrompt(PicoApp *app, const char *args)
     PicoExts_Close();
     free(g_text);
     g_text = PicoAgent_BuildInstructions(app, PicoApp_ActiveAgent(app));
-    g_open = true;
+    if (!g_open)
+    {
+        (void)pico_ui_modal_push(app, "prompt");
+        g_open = true;
+    }
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;
 }
 
 static void PromptInit(PicoApp *app)
 {
+    g_app = app;
+    if (g_open && !pico_ui_modal_has(app, "prompt"))
+    {
+        (void)pico_ui_modal_push(app, "prompt");
+    }
     pico_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
     pico_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PromptAfterLayout);
@@ -179,8 +198,9 @@ static void PromptInit(PicoApp *app)
 
 static void PromptShutdown(PicoApp *app)
 {
-    (void)app;
     PicoPrompt_Close();
+    g_app = NULL;
+    (void)app;
 }
 
 PicoExt pico_ext_prompt(void)

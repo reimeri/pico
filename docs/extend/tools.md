@@ -117,6 +117,10 @@ The modal preserves answers while moving Next/Back and returns them in question 
 
 Controls: Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button, Shift+Tab, or Left at the start of text goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
 
+## Tool-row click
+
+Register `pico_add_tool_row_hook` to open your own overlay when the user clicks a tool row. Set `event->handled` to skip the default expand/collapse. Builtin subagent inspect uses this path. See [hooks](hooks.md#tool-row-click) and [`../../examples/modal.c`](../../examples/modal.c).
+
 ## Wrapping tools
 
 You cannot replace a builtin by registering the same name. Use `pico_add_tool_before_hook` or `pico_add_tool_after_hook` to intercept offered calls, including `sh`. See `hooks.md` for the event fields.

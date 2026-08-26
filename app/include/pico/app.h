@@ -19,6 +19,9 @@
 #define PICO_MAX_TOOL_HOOKS 64
 #define PICO_MAX_LLM_HOOKS 64
 #define PICO_MAX_CONTEXT_HOOKS 64
+#define PICO_MAX_TOOL_ROW_HOOKS 64
+#define PICO_MAX_UI_MODALS 16
+#define PICO_UI_MODAL_NAME 64
 #define PICO_TOOL_DETAILS_MAX (64 * 1024)
 #define PICO_TOOL_ASK_MAX_REQUEST (64 * 1024)
 #define PICO_TOOL_ASK_MAX_ANSWER (64 * 1024)
@@ -219,6 +222,18 @@ typedef void (*PicoToolBeforeFn)(PicoAgentContext *ctx, PicoToolEvent *event);
 typedef void (*PicoToolAfterFn)(struct PicoApp *app, PicoAgentId agent_id,
                                 PicoToolEvent *event);
 
+typedef struct PicoToolRowEvent {
+    PicoAgentId agent_id;
+    const char *name;      /* tool name; core-owned, callback-scoped */
+    const char *call_id;   /* may be NULL */
+    const char *args_json; /* may be NULL */
+    const char *output;    /* NULL while the call is still running */
+    bool is_error;
+    bool handled;          /* first hook that sets this skips later hooks and expand */
+} PicoToolRowEvent;
+
+typedef void (*PicoToolRowFn)(struct PicoApp *app, PicoToolRowEvent *event);
+
 typedef struct PicoLlmEvent {
     bool compact;
     bool include_tools; /* read-only; false => catalog omitted, exclude ignored */
@@ -405,6 +420,10 @@ typedef struct PicoApp {
     int llm_hook_count;
     PicoContextHookFn context_hooks[PICO_MAX_CONTEXT_HOOKS];
     int context_hook_count;
+    PicoToolRowFn tool_row_hooks[PICO_MAX_TOOL_ROW_HOOKS];
+    int tool_row_hook_count;
+    char ui_modals[PICO_MAX_UI_MODALS][PICO_UI_MODAL_NAME];
+    int ui_modal_count;
     PicoTool tools[PICO_MAX_TOOLS];
     int tool_count;
     PicoCommand commands[PICO_MAX_COMMANDS];
@@ -448,6 +467,19 @@ void pico_add_tool_before_hook(PicoApp *app, PicoToolBeforeFn fn);
 void pico_add_tool_after_hook(PicoApp *app, PicoToolAfterFn fn);
 void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);
 void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn);
+void pico_add_tool_row_hook(PicoApp *app, PicoToolRowFn fn);
+/* Main thread. Named modal stack used by PicoUi_ModalOpen. `name` is copied.
+ * Push fails when name is empty or the stack is full. Pop succeeds only when
+ * `name` is the current top. */
+bool pico_ui_modal_push(PicoApp *app, const char *name);
+bool pico_ui_modal_pop(PicoApp *app, const char *name);
+const char *pico_ui_modal_top(const PicoApp *app);
+int pico_ui_modal_count(const PicoApp *app);
+bool pico_ui_modal_claimed(const PicoApp *app);
+bool pico_ui_modal_has(const PicoApp *app, const char *name);
+/* Main thread. Runs tool-row hooks in registration order. Returns true when a
+ * hook set handled. Strings are borrowed from `line` for this callback. */
+bool pico_tool_row_activate(PicoApp *app, PicoAgentId agent_id, const PicoTraceLine *line);
 /* Append a line to status_warn (extension-error overlay). */
 void pico_status_warn(PicoApp *app, const char *msg);
 /* False and a status_warn line on invalid args/schema, duplicate name, or limit. */
@@ -470,6 +502,7 @@ bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json);
  * the next manager pump, transcript mutation, close, or workspace change. */
 int pico_agent_message_count(const PicoApp *app, PicoAgentId id);
 const PicoMessage *pico_agent_message(const PicoApp *app, PicoAgentId id, int index);
+/* True while the named modal stack is non-empty or a tool ask is showing. */
 bool PicoUi_ModalOpen(const PicoApp *app);
 void pico_add_command(PicoApp *app, const char *name, const char *help, PicoCmdFn run);
 void pico_add_completer(PicoApp *app, char trigger, bool bol_only, PicoCompleteQueryFn query,

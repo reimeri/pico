@@ -288,6 +288,7 @@ typedef struct ComposerAttach {
     bool owned;
 } ComposerAttach;
 
+static PicoApp *g_app;
 static ComposerAttach g_attach[COMPOSER_MAX_ATTACH];
 static int g_attach_n;
 static int g_preview = -1;
@@ -297,6 +298,10 @@ static bool g_preview_loaded;
 
 static void ClosePreview(void)
 {
+    if (g_preview >= 0 && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "preview");
+    }
     if (g_preview_loaded)
     {
         UnloadTexture(g_preview_tex);
@@ -1599,6 +1604,10 @@ static void OpenPreview(int index)
     }
     ClosePreview();
     g_preview = index;
+    if (g_app)
+    {
+        (void)pico_ui_modal_push(g_app, "preview");
+    }
     if (!IsWindowReady())
     {
         return;
@@ -2314,6 +2323,11 @@ static void ComposerFrame(PicoApp *app, float dt)
 
 static void ComposerInit(PicoApp *app)
 {
+    g_app = app;
+    if (g_preview >= 0 && !pico_ui_modal_has(app, "preview"))
+    {
+        (void)pico_ui_modal_push(app, "preview");
+    }
     pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
     pico_add_view(app, PICO_SLOT_OVERLAY, 6, ComposerAttachRender);
     pico_add_view(app, PICO_SLOT_OVERLAY, 25, ComposerPreviewRender);
@@ -2328,6 +2342,7 @@ static void ComposerShutdown(PicoApp *app)
     PicoComposer_CancelClipboardPaste();
 #endif
     PicoComposer_DiscardAttachments();
+    g_app = NULL;
 }
 
 PicoExt pico_ext_composer(void)

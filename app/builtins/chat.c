@@ -58,6 +58,7 @@ typedef struct InspectFrame {
     char *fallback;
 } InspectFrame;
 
+static PicoApp *g_app;
 static InspectFrame g_inspect[PICO_MAX_DELEGATION_DEPTH + 1];
 static int g_inspect_n;
 static bool g_inspect_follow = true;
@@ -933,6 +934,10 @@ static void InspectPop(void)
     free(g_inspect[g_inspect_n].fallback);
     memset(&g_inspect[g_inspect_n], 0, sizeof(g_inspect[g_inspect_n]));
     g_inspect_follow = true;
+    if (g_inspect_n == 0 && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "inspect");
+    }
 }
 
 void PicoChat_InspectClose(void)
@@ -993,8 +998,65 @@ static void InspectPushLine(const PicoTraceLine *line, PicoAgentId parent_id)
     frame->parent_id = parent_id;
     frame->tool_call_id = line->tool_call_id ? JsonDup(line->tool_call_id) : NULL;
     InspectCaptureLine(frame, line);
+    if (g_inspect_n == 0 && g_app)
+    {
+        (void)pico_ui_modal_push(g_app, "inspect");
+    }
     g_inspect_n++;
     g_inspect_follow = true;
+}
+
+static PicoTraceLine *FindToolLine(PicoApp *app, PicoAgentId agent_id, const char *call_id)
+{
+    PicoAgent *agent;
+    int i;
+    int t;
+    if (!app || !call_id || !call_id[0])
+    {
+        return NULL;
+    }
+    agent = PicoAgentManager_Find(app->agents, agent_id);
+    if (!agent)
+    {
+        return NULL;
+    }
+    for (i = agent->message_count - 1; i >= 0; i--)
+    {
+        PicoMessage *message = &agent->messages[i];
+        for (t = message->trace_count - 1; t >= 0; t--)
+        {
+            PicoTraceLine *line = &message->trace[t];
+            if (line->is_tool && line->tool_call_id && strcmp(line->tool_call_id, call_id) == 0)
+            {
+                return line;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void SubagentToolRow(PicoApp *app, PicoToolRowEvent *ev)
+{
+    PicoTraceLine scratch;
+    PicoTraceLine *line;
+    if (!ev || !ev->name || strcmp(ev->name, "subagent") != 0)
+    {
+        return;
+    }
+    line = FindToolLine(app, ev->agent_id, ev->call_id);
+    if (!line)
+    {
+        memset(&scratch, 0, sizeof(scratch));
+        scratch.is_tool = true;
+        scratch.tool_name = (char *)(void *)ev->name;
+        scratch.tool_call_id = (char *)(void *)ev->call_id;
+        scratch.tool_args = (char *)(void *)ev->args_json;
+        scratch.tool_output = (char *)(void *)ev->output;
+        scratch.tool_error = ev->is_error;
+        line = &scratch;
+    }
+    InspectPushLine(line, ev->agent_id);
+    ev->handled = true;
 }
 
 static void InspectRefreshFrame(PicoApp *app, InspectFrame *frame)
@@ -1301,9 +1363,9 @@ static void InspectHandlePointer(PicoApp *app)
              tool_idx == g_inspect_tool_idx && found && tool_msg < inspect.message_count)
     {
         PicoTraceLine *line = (PicoTraceLine *)&inspect.messages[tool_msg].trace[tool_idx];
-        if (IsSubagentTool(line))
+        if (line->is_tool && pico_tool_row_activate(app, inspect.live_id, line))
         {
-            InspectPushLine(line, inspect.live_id);
+            /* hook handled the row */
         }
         else
         {
@@ -1326,17 +1388,27 @@ void PicoChat_HandleToolRelease(PicoApp *app)
 
     PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
     int t = app->chat_sel.tool_idx;
-    if (t < 0 || t >= msg->trace_count || IsSubagentTool(&msg->trace[t]))
+    TranscriptView main;
+    if (t < 0 || t >= msg->trace_count)
     {
         return;
     }
-
-    TranscriptView main = MainTranscriptView(app);
-    if (HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
+    main = MainTranscriptView(app);
+    if (!HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
     {
-        msg->trace[t].expanded = !msg->trace[t].expanded;
-        app->chat_sel.pressed_tool = false;
+        return;
     }
+    if (msg->trace[t].is_tool && pico_tool_row_activate(app, PicoApp_ActiveAgent(app)->id, &msg->trace[t]))
+    {
+        app->chat_sel.pressed_tool = false;
+        return;
+    }
+    if (IsSubagentTool(&msg->trace[t]))
+    {
+        return;
+    }
+    msg->trace[t].expanded = !msg->trace[t].expanded;
+    app->chat_sel.pressed_tool = false;
 }
 
 void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
@@ -1433,9 +1505,10 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
             if (t >= 0 && t < msg->trace_count &&
                 HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
             {
-                if (IsSubagentTool(&msg->trace[t]))
+                if (msg->trace[t].is_tool &&
+                    pico_tool_row_activate(app, PicoApp_ActiveAgent(app)->id, &msg->trace[t]))
                 {
-                    InspectPushLine(&msg->trace[t], PicoApp_ActiveAgent(app)->id);
+                    /* hook handled the row */
                 }
                 else
                 {
@@ -1732,8 +1805,7 @@ static void ChatOnFrame(PicoApp *app, float dt)
     {
         g_inspect_follow = false;
     }
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-        PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)))
+    if (pico_ui_modal_top(app) && strcmp(pico_ui_modal_top(app), "inspect") != 0)
     {
         return;
     }
@@ -1747,14 +1819,22 @@ static void ChatShutdown(PicoApp *app)
 {
     (void)app;
     ThinkFrameFree();
+    PicoChat_InspectClose();
+    g_app = NULL;
 }
 
 static void ChatInit(PicoApp *app)
 {
+    g_app = app;
+    if (g_inspect_n > 0 && !pico_ui_modal_has(app, "inspect"))
+    {
+        (void)pico_ui_modal_push(app, "inspect");
+    }
     pico_add_view(app, PICO_SLOT_MAIN, 0, PicoChat_Render);
     pico_add_view(app, PICO_SLOT_OVERLAY, 20, InspectRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoChat_HandlePointer);
     pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoChat_DrawOverlay);
+    pico_add_tool_row_hook(app, SubagentToolRow);
 }
 
 PicoExt pico_ext_chat(void)

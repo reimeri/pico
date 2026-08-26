@@ -22,7 +22,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 8). ABI 8 includes stable `PicoTraceLine` tool-call and child identity for subagent inspect, context-based concurrent worker callbacks, agent-targeted main-thread callbacks, copied persistence state/write results, and reported terminal shutdown; there is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 9). ABI 9 adds the named modal stack (`pico_ui_modal_push` / `pop`) and tool-row click hooks (`pico_add_tool_row_hook`). There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload when the extension is enabled.

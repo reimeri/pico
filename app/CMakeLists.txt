@@ -65,6 +65,7 @@ target_include_directories(md4c PUBLIC md4c)
 add_executable(pico
     main.c
     app.c
+    ui.c
     plugin.c
     theme.c
     md_view.c
@@ -292,6 +293,7 @@ if(BUILD_TESTING)
         tests/subagent_test.c
         tests/clay_impl.c
         app.c
+        ui.c
         scrollbar.c
         agent.c
         agent_manager.c
@@ -339,6 +341,7 @@ if(BUILD_TESTING)
         builtins/complete.c
         builtins/composer.c
         builtins/files.c
+        ui.c
         canonical.c
         json.c)
     target_include_directories(pico_files_tests PRIVATE
@@ -357,6 +360,7 @@ if(BUILD_TESTING)
         builtins/complete.c
         builtins/composer.c
         builtins/files.c
+        ui.c
         canonical.c
         json.c)
     target_include_directories(pico_composer_tests PRIVATE
@@ -402,6 +406,17 @@ if(BUILD_TESTING)
     target_link_options(pico_font_scale_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_font_scale_tests COMMAND pico_font_scale_tests)
 
+    add_executable(pico_ui_tests
+        tests/ui_test.c
+        ui.c)
+    target_include_directories(pico_ui_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_ui_tests)
+    add_test(NAME pico_ui_tests COMMAND pico_ui_tests)
+
     add_executable(pico_docs_path_tests
         tests/docs_path_test.c
         docs_path.c)
@@ -441,7 +456,7 @@ endforeach()
 unset(_pico_ref_builtins)
 unset(_f)
 
-foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd)
+foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd modal)
     add_custom_command(
             TARGET pico POST_BUILD
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99 ${PICO_WARNINGS_AS_ERRORS_OPTION}

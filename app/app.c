@@ -301,6 +301,8 @@ void pico_clear_registrations(PicoApp *app)
     app->llm_hook_count = 0;
     memset(app->context_hooks, 0, sizeof(app->context_hooks));
     app->context_hook_count = 0;
+    memset(app->tool_row_hooks, 0, sizeof(app->tool_row_hooks));
+    app->tool_row_hook_count = 0;
     memset(app->tools, 0, sizeof(app->tools));
     app->tool_count = 0;
     memset(app->commands, 0, sizeof(app->commands));
@@ -831,9 +833,7 @@ void PicoApp_Cancel(PicoApp *app)
 
 bool PicoUi_ModalOpen(const PicoApp *app)
 {
-    return PicoExts_IsOpen() || PicoPrompt_IsOpen() || PicoFooter_MenuOpen() ||
-           PicoChat_InspectIsOpen() || PicoDiff_IsOpen() || PicoComposer_PreviewOpen() ||
-           PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
+    return pico_ui_modal_claimed(app) || PicoAgent_AskUiOpen(PicoApp_ActiveAgentConst(app));
 }
 
 void PicoApp_Init(PicoApp *app, Font *fonts, const char *workspace, bool safe_mode,
@@ -1112,6 +1112,8 @@ static void ApplyWorkspaceChange(PicoApp *app)
 
     PicoAgentManager *old = app->agents;
     PicoChat_InspectClose();
+    memset(app->ui_modals, 0, sizeof(app->ui_modals));
+    app->ui_modal_count = 0;
     if (!PicoAgentManager_Destroy(old))
     {
         (void)PicoAgent_Destroy(initial);
@@ -1560,16 +1562,10 @@ void PicoApp_Frame(PicoApp *app)
 
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
-    bool had_exts = PicoExts_IsOpen();
-    bool had_prompt = PicoPrompt_IsOpen();
-    bool had_footer = PicoFooter_MenuOpen();
-    bool had_diff = PicoDiff_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
-    bool had_inspect = PicoChat_InspectIsOpen();
-    bool had_preview = PicoComposer_PreviewOpen();
+    bool had_modal = pico_ui_modal_claimed(app);
     PicoPlugins_OnFrame(app, GetFrameTime());
-    if (!had_warn && !had_complete && !had_exts && !had_prompt && !had_footer && !had_diff && !had_todo &&
-        !had_inspect && !had_preview && IsKeyPressed(KEY_ESCAPE))
+    if (!had_warn && !had_complete && !had_todo && !had_modal && IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgent *active = PicoApp_ActiveAgent(app);
         if (PicoAgent_IsBusy(active))

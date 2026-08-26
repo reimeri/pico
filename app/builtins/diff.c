@@ -143,6 +143,7 @@ static DiffModel *g_model;   /* main thread only */
 static char g_workspace[4096];
 static bool g_thread_started;
 static bool g_thread_stop;
+static PicoApp *g_app;
 static bool g_open;
 static PicoScrollbar g_scrollbar;
 static bool g_overflow;
@@ -727,8 +728,21 @@ bool PicoDiff_IsOpen(void)
 
 static void CloseModal(void)
 {
+    if (g_open && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "diff");
+    }
     g_open = false;
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+}
+
+static void OpenModal(PicoApp *app)
+{
+    if (!g_open)
+    {
+        (void)pico_ui_modal_push(app, "diff");
+        g_open = true;
+    }
 }
 
 static Clay_Color RowBg(DiffRowKind kind)
@@ -939,7 +953,7 @@ static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
         app->hovered_clickable = true;
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            g_open = true;
+            OpenModal(app);
         }
     }
 }
@@ -965,6 +979,11 @@ static void DiffOnFrame(PicoApp *app, float dt)
 
 static void DiffInit(PicoApp *app)
 {
+    g_app = app;
+    if (g_open && !pico_ui_modal_has(app, "diff"))
+    {
+        (void)pico_ui_modal_push(app, "diff");
+    }
     pico_add_view(app, PICO_SLOT_OVERLAY, 30, DiffModalRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, DiffAfterLayout);
     StartThread(app);
@@ -980,7 +999,8 @@ static void DiffShutdown(PicoApp *app)
     DiffModel_Free(g_pending);
     g_pending = NULL;
     pthread_mutex_unlock(&g_lock);
-    g_open = false;
+    CloseModal();
+    g_app = NULL;
 }
 
 PicoExt pico_ext_diff(void)

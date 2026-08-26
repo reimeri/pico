@@ -38,6 +38,7 @@ static char g_extra[64];
 static char g_model[128];
 static char g_effort[PICO_EFFORT_LEN];
 
+static PicoApp *g_app;
 static FooterMenu g_menu;
 static int g_selected;
 static bool g_want_folder;
@@ -50,8 +51,25 @@ bool PicoFooter_MenuOpen(void)
     return g_menu != FOOTER_MENU_NONE || g_esc_block || g_want_folder;
 }
 
+static void UnclaimMenu(void)
+{
+    if (g_menu != FOOTER_MENU_NONE && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "footer-menu");
+    }
+}
+
+static void UnclaimFolder(void)
+{
+    if (g_want_folder && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "folder");
+    }
+}
+
 static void ClearFolderRequest(void)
 {
+    UnclaimFolder();
     g_want_folder = false;
     g_folder_painted = false;
 }
@@ -233,6 +251,7 @@ static void SelectHovered(PicoApp *app)
 
 static void CloseMenu(void)
 {
+    UnclaimMenu();
     g_menu = FOOTER_MENU_NONE;
     g_selected = 0;
 }
@@ -257,6 +276,10 @@ static void OpenMenu(PicoApp *app, FooterMenu which)
         }
     }
 
+    if (g_menu == FOOTER_MENU_NONE && g_app)
+    {
+        (void)pico_ui_modal_push(g_app, "footer-menu");
+    }
     g_menu = which;
     g_selected = 0;
     if (which == FOOTER_MENU_MODEL)
@@ -329,6 +352,10 @@ static void RequestFolder(PicoApp *app)
     {
         PicoOverlay_Notify(app, "Folder dialog unavailable. Install zenity or kdialog.");
         return;
+    }
+    if (!g_want_folder && g_app)
+    {
+        (void)pico_ui_modal_push(g_app, "folder");
     }
     g_want_folder = true;
     g_folder_painted = false;
@@ -754,9 +781,26 @@ static void FooterOnFrame(PicoApp *app, float dt)
 
 static void FooterInit(PicoApp *app)
 {
+    g_app = app;
+    if (g_menu != FOOTER_MENU_NONE && !pico_ui_modal_has(app, "footer-menu"))
+    {
+        (void)pico_ui_modal_push(app, "footer-menu");
+    }
+    if (g_want_folder && !pico_ui_modal_has(app, "folder"))
+    {
+        (void)pico_ui_modal_push(app, "folder");
+    }
     pico_add_view(app, PICO_SLOT_FOOTER, 0, PicoFooter_Render);
     pico_add_view(app, PICO_SLOT_OVERLAY, 40, RenderFolderModal);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, FooterAfterLayout);
+}
+
+static void FooterShutdown(PicoApp *app)
+{
+    CloseMenu();
+    ClearFolderRequest();
+    g_app = NULL;
+    (void)app;
 }
 
 PicoExt pico_ext_footer(void)
@@ -766,6 +810,7 @@ PicoExt pico_ext_footer(void)
         .name = "footer",
         .description = "Status bar",
         .init = FooterInit,
+        .shutdown = FooterShutdown,
         .on_frame = FooterOnFrame,
     };
 }

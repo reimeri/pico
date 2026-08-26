@@ -187,6 +187,51 @@ void Clay_Raylib_Initialize(int width, int height, const char *title, unsigned i
 static char *temp_render_buffer = NULL;
 static int temp_render_buffer_len = 0;
 
+/* Raylib's EndScissorMode disables clipping entirely; it does not restore a parent
+ * scissor. Think-header clips (and similar) nest inside ChatScroll / inspect, so
+ * a naive End would let the remaining transcript paint outside the pane. */
+#define CLAY_RAYLIB_SCISSOR_STACK 16
+static Rectangle clay_raylib_scissors[CLAY_RAYLIB_SCISSOR_STACK];
+static int clay_raylib_scissor_depth = 0;
+
+static Rectangle Clay_Raylib_IntersectScissor(Rectangle a, Rectangle b)
+{
+    float x1 = a.x > b.x ? a.x : b.x;
+    float y1 = a.y > b.y ? a.y : b.y;
+    float x2 = (a.x + a.width) < (b.x + b.width) ? (a.x + a.width) : (b.x + b.width);
+    float y2 = (a.y + a.height) < (b.y + b.height) ? (a.y + a.height) : (b.y + b.height);
+    Rectangle out = {x1, y1, x2 > x1 ? x2 - x1 : 0.0f, y2 > y1 ? y2 - y1 : 0.0f};
+    return out;
+}
+
+static void Clay_Raylib_PushScissor(Clay_BoundingBox box)
+{
+    Rectangle r = {roundf(box.x), roundf(box.y), roundf(box.width), roundf(box.height)};
+    if (clay_raylib_scissor_depth > 0)
+    {
+        r = Clay_Raylib_IntersectScissor(r, clay_raylib_scissors[clay_raylib_scissor_depth - 1]);
+    }
+    if (clay_raylib_scissor_depth < CLAY_RAYLIB_SCISSOR_STACK)
+    {
+        clay_raylib_scissors[clay_raylib_scissor_depth++] = r;
+    }
+    BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+}
+
+static void Clay_Raylib_PopScissor(void)
+{
+    if (clay_raylib_scissor_depth > 0)
+    {
+        clay_raylib_scissor_depth--;
+    }
+    EndScissorMode();
+    if (clay_raylib_scissor_depth > 0)
+    {
+        Rectangle r = clay_raylib_scissors[clay_raylib_scissor_depth - 1];
+        BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+    }
+}
+
 // Call after closing the window to clean up the render buffer
 void Clay_Raylib_Close()
 {
@@ -199,6 +244,10 @@ void Clay_Raylib_Close()
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
 {
+    while (clay_raylib_scissor_depth > 0)
+    {
+        Clay_Raylib_PopScissor();
+    }
     for (int j = 0; j < renderCommands.length; j++)
     {
         Clay_RenderCommand *renderCommand = Clay_RenderCommandArray_Get(&renderCommands, j);
@@ -254,11 +303,11 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
-                BeginScissorMode((int)roundf(boundingBox.x), (int)roundf(boundingBox.y), (int)roundf(boundingBox.width), (int)roundf(boundingBox.height));
+                Clay_Raylib_PushScissor(boundingBox);
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
-                EndScissorMode();
+                Clay_Raylib_PopScissor();
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_OVERLAY_COLOR_START: {
@@ -333,5 +382,9 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 exit(1);
             }
         }
+    }
+    while (clay_raylib_scissor_depth > 0)
+    {
+        Clay_Raylib_PopScissor();
     }
 }

@@ -95,7 +95,8 @@ typedef struct PicoTraceLine {
     bool is_tool;
     char *tool_name;
     char *tool_call_id;
-    char *tool_args;
+    char *tool_args;      /* formatted for transcript display */
+    char *tool_args_json; /* original JSON supplied by the provider */
     char *tool_output;
     bool tool_error;
     bool expanded;
@@ -229,8 +230,10 @@ typedef struct PicoToolRowEvent {
     PicoAgentId agent_id;
     const char *name;      /* tool name; core-owned, callback-scoped */
     const char *call_id;   /* may be NULL */
-    const char *args_json; /* may be NULL */
-    const char *output;    /* NULL while the call is still running */
+    const char *args_json;        /* original tool arguments; may be NULL */
+    const char *output;           /* NULL while the call is still running */
+    PicoAgentId child_id;         /* subagent child identity; zero when absent */
+    const char *child_session_id; /* subagent session identity; may be NULL */
     bool is_error;
     bool handled;          /* first hook that sets this skips later hooks and expand */
 } PicoToolRowEvent;
@@ -484,14 +487,17 @@ void pico_add_llm_hook(PicoApp *app, PicoLlmHookFn fn);
 void pico_add_context_hook(PicoApp *app, PicoContextHookFn fn);
 void pico_add_tool_row_hook(PicoApp *app, PicoToolRowFn fn);
 /* Main thread. Named modal stack used by PicoUi_ModalOpen. `name` is copied.
- * Push fails when name is empty or the stack is full. Pop succeeds only when
- * `name` is the current top. */
+ * Push fails when name is empty, already claimed, or the stack is full. Pop
+ * succeeds only when `name` is the current top. */
 bool pico_ui_modal_push(PicoApp *app, const char *name);
 bool pico_ui_modal_pop(PicoApp *app, const char *name);
 const char *pico_ui_modal_top(const PicoApp *app);
 int pico_ui_modal_count(const PicoApp *app);
 bool pico_ui_modal_claimed(const PicoApp *app);
 bool pico_ui_modal_has(const PicoApp *app, const char *name);
+bool pico_ui_modal_is_top(const PicoApp *app, const char *name);
+/* Core lifecycle helper. Drops every named claim before registrations are rebuilt. */
+void pico_ui_modal_reset(PicoApp *app);
 /* Worker thread, inside PicoToolFn or a before-tool hook. Copies bytes into a
  * named mailbox and publishes them on the next main-thread pump. Drops the
  * post when ctx is inactive, the name is empty/oversized, or kind is invalid.

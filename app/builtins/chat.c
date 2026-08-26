@@ -1053,28 +1053,45 @@ static bool InspectIsTopModal(PicoApp *app)
     return g_inspect_n > 0 && top && strcmp(top, "inspect") == 0;
 }
 
-static void InspectPop(void)
+static bool InspectPop(void)
 {
     if (g_inspect_n <= 0)
     {
-        return;
+        return true;
+    }
+    if (g_inspect_n == 1 && g_app && !pico_ui_modal_pop(g_app, "inspect"))
+    {
+        return false;
     }
     g_inspect_n--;
     free(g_inspect[g_inspect_n].tool_call_id);
     free(g_inspect[g_inspect_n].fallback);
     memset(&g_inspect[g_inspect_n], 0, sizeof(g_inspect[g_inspect_n]));
     g_inspect_follow = true;
-    if (g_inspect_n == 0 && g_app)
-    {
-        (void)pico_ui_modal_pop(g_app, "inspect");
-    }
+    return true;
 }
 
 void PicoChat_InspectClose(void)
 {
+    while (g_inspect_n > 0 && InspectPop())
+    {
+        /* pop every nested frame */
+    }
+    g_inspect_pressed_dim = false;
+    g_inspect_pressed_back = false;
+    g_inspect_pressed_tool = false;
+    g_inspect_overflow = false;
+    memset(&g_inspect_bar, 0, sizeof(g_inspect_bar));
+}
+
+static void InspectForceReset(void)
+{
     while (g_inspect_n > 0)
     {
-        InspectPop();
+        g_inspect_n--;
+        free(g_inspect[g_inspect_n].tool_call_id);
+        free(g_inspect[g_inspect_n].fallback);
+        memset(&g_inspect[g_inspect_n], 0, sizeof(g_inspect[g_inspect_n]));
     }
     g_inspect_pressed_dim = false;
     g_inspect_pressed_back = false;
@@ -1128,9 +1145,13 @@ static void InspectPushLine(const PicoTraceLine *line, PicoAgentId parent_id)
     frame->parent_id = parent_id;
     frame->tool_call_id = line->tool_call_id ? JsonDup(line->tool_call_id) : NULL;
     InspectCaptureLine(frame, line);
-    if (g_inspect_n == 0 && g_app)
+    if (g_inspect_n == 0 &&
+        (!g_app || !pico_ui_modal_push(g_app, "inspect")))
     {
-        (void)pico_ui_modal_push(g_app, "inspect");
+        free(frame->tool_call_id);
+        free(frame->fallback);
+        memset(frame, 0, sizeof(*frame));
+        return;
     }
     g_inspect_n++;
     g_inspect_follow = true;
@@ -1181,8 +1202,15 @@ static void SubagentToolRow(PicoApp *app, PicoToolRowEvent *ev)
         scratch.tool_name = (char *)(void *)ev->name;
         scratch.tool_call_id = (char *)(void *)ev->call_id;
         scratch.tool_args = (char *)(void *)ev->args_json;
+        scratch.tool_args_json = (char *)(void *)ev->args_json;
         scratch.tool_output = (char *)(void *)ev->output;
         scratch.tool_error = ev->is_error;
+        scratch.child_id = ev->child_id;
+        if (ev->child_session_id)
+        {
+            snprintf(scratch.child_session_id, sizeof(scratch.child_session_id), "%s",
+                     ev->child_session_id);
+        }
         line = &scratch;
     }
     InspectPushLine(line, ev->agent_id);
@@ -1452,7 +1480,7 @@ static bool HitTraceRow(const TranscriptView *view, const PicoTraceLine *line, i
 
 static void InspectHandlePointer(PicoApp *app)
 {
-    if (g_inspect_n <= 0)
+    if (!InspectIsTopModal(app))
     {
         return;
     }
@@ -2001,7 +2029,7 @@ static void ChatOnFrame(PicoApp *app, float dt)
     {
         g_inspect_follow = false;
     }
-    if (pico_ui_modal_top(app) && strcmp(pico_ui_modal_top(app), "inspect") != 0)
+    if (!InspectIsTopModal(app))
     {
         return;
     }
@@ -2016,6 +2044,7 @@ static void ChatShutdown(PicoApp *app)
     (void)app;
     ThinkFrameFree();
     PicoChat_InspectClose();
+    InspectForceReset();
     g_app = NULL;
 }
 
@@ -2024,7 +2053,7 @@ static void ChatInit(PicoApp *app)
     g_app = app;
     if (g_inspect_n > 0 && !pico_ui_modal_has(app, "inspect"))
     {
-        (void)pico_ui_modal_push(app, "inspect");
+        InspectForceReset();
     }
     pico_add_view(app, PICO_SLOT_MAIN, 0, PicoChat_Render);
     pico_add_view(app, PICO_SLOT_OVERLAY, 20, InspectRender);

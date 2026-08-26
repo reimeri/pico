@@ -525,6 +525,7 @@ void PicoPlugins_Load(PicoApp *app)
     }
     g_plugin_count = 0;
     pico_clear_registrations(app);
+    pico_ui_modal_reset(app);
     WarnClear(app);
     LoadBuiltins(app);
     LoadUsers(app);
@@ -550,6 +551,7 @@ void PicoPlugins_Reload(PicoApp *app)
 
     PicoPlugins_UnloadUser(app);
     pico_clear_registrations(app);
+    pico_ui_modal_reset(app);
     WarnClear(app);
     for (int i = 0; i < g_plugin_count; i++)
     {
@@ -579,6 +581,7 @@ void PicoPlugins_Shutdown(PicoApp *app)
     ShutdownRange(app, false);
     g_plugin_count = 0;
     pico_clear_registrations(app);
+    pico_ui_modal_reset(app);
 }
 
 typedef struct CollectCtx {

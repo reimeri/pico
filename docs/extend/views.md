@@ -83,7 +83,7 @@ static void CustomEmptyInit(PicoApp *app)
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`).
 - Do not call Clay from a tool or provider callback (worker thread).
-- `PicoUi_ModalOpen` is true while the named modal stack is non-empty or a tool ask is showing. Builtin composer, chat, and footer skip input then. Core does not close your overlay on Esc; it only suppresses turn-cancel while a claim is already on the stack at the start of the frame. Close the top claim yourself in `on_frame` with `pico_ui_modal_pop`. A custom ask overlay still receives pointer hits; it may consume `GetCharPressed()` from `on_frame` after the composer has skipped.
+- `PicoUi_ModalOpen` is true while the named modal stack is non-empty or a tool ask is showing. Builtin composer, chat, and footer skip input then. Core does not close your overlay on Esc during normal frames; it only suppresses turn-cancel while a claim is already on the stack at the start of the frame. Check `pico_ui_modal_is_top(app, name)` before consuming input, then close the top claim with `pico_ui_modal_pop`. A custom ask overlay still receives pointer hits; it may consume `GetCharPressed()` from `on_frame` after the composer has skipped.
 - Answer a pending ask with `pico_tool_answer(app, ask.id, json)` from the main thread. `PicoToolAsk` also identifies `agent_id`, `profile`, and `purpose`; show these when the target may not be the visible agent. Bind buttons to the globally unique ask ID. The request string stays valid through Clay render of this frame even if you answer in `AFTER_LAYOUT`.
 - The builtin `ask_user` overlay owns custom requests with `{"type":"questionnaire","ui":"custom",…}`. Use a different `type` for an extension-defined ask UI.
 - A queued reload or workspace change keeps ask/cancel UI responsive while blocking new submits. Do not cache active-agent transcript indices or workspace-derived UI snapshots across workspace replacement; IDs and borrowed messages become stale.
@@ -99,11 +99,11 @@ if (pico_ui_modal_push(app, "my-modal"))
 }
 ```
 
-- `pico_ui_modal_push` copies `name` (non-empty, shorter than `PICO_UI_MODAL_NAME`). It fails when the stack is full (`PICO_MAX_UI_MODALS`).
-- The same name may appear twice. `pico_ui_modal_pop(app, name)` succeeds only when `name` is the current top.
-- `pico_ui_modal_top` / `pico_ui_modal_count` / `pico_ui_modal_has` / `pico_ui_modal_claimed` inspect the stack. Ask UI is not a named claim; `PicoUi_ModalOpen` ORs it in separately.
-- Reload leaves claims in place and rebuilds view/hook registrations. If your overlay is still open, `init` may re-push only when `!pico_ui_modal_has(app, name)`.
-- Workspace replacement and `PicoApp_Init` / `PicoApp_Free` clear the stack. Builtin inspect, extensions, prompt, diff, preview, footer menu, and folder picker use this same stack.
+- `pico_ui_modal_push` copies a globally unique `name` (non-empty, shorter than `PICO_UI_MODAL_NAME`). It fails when that name is already claimed or the stack is full (`PICO_MAX_UI_MODALS`). Prefix extension modal names to avoid collisions with builtins.
+- `pico_ui_modal_pop(app, name)` succeeds only when `name` is the current top.
+- `pico_ui_modal_top` / `pico_ui_modal_is_top` / `pico_ui_modal_count` / `pico_ui_modal_has` / `pico_ui_modal_claimed` inspect the stack. Ask UI is not a named claim; `PicoUi_ModalOpen` ORs it in separately.
+- Reload closes every named modal before rebuilding view/hook registrations. Do not attempt to preserve modal-local state across reload.
+- Workspace replacement and `PicoApp_Init` / `PicoApp_Free` also clear the stack and modal-local builtin state. Builtin inspect, extensions, prompt, diff, preview, footer menu, and folder picker use this same stack.
 - Draw your own dimmer and card with unique `CLAY_ID`s. Do not reuse builtin IDs such as `SubagentModalDim`. Handle Esc and dimmer clicks yourself.
 
 Full file: [`../../examples/modal.c`](../../examples/modal.c).

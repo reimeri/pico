@@ -1608,6 +1608,7 @@ void PicoTraceLine_Release(PicoTraceLine *line)
     free(line->tool_name);
     free(line->tool_call_id);
     free(line->tool_args);
+    free(line->tool_args_json);
     free(line->tool_output);
     if (line->think_parts)
     {

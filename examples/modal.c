@@ -21,7 +21,10 @@ static void CloseModal(PicoApp *app)
     {
         return;
     }
-    (void)pico_ui_modal_pop(app, kName);
+    if (!pico_ui_modal_pop(app, kName))
+    {
+        return;
+    }
     g_open = false;
 }
 
@@ -81,7 +84,7 @@ static void ModalRender(PicoApp *app)
 static void ModalAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, kName))
     {
         return;
     }
@@ -100,7 +103,7 @@ static void ModalAfterLayout(PicoApp *app, const PicoHookEvent *event)
 static void ModalOnFrame(PicoApp *app, float dt)
 {
     (void)dt;
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, kName))
     {
         return;
     }
@@ -163,6 +166,7 @@ static void ModalInit(PicoApp *app)
 static void ModalShutdown(PicoApp *app)
 {
     CloseModal(app);
+    g_open = false;
 }
 
 PicoExt pico_ext(void)

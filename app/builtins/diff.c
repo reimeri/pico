@@ -726,21 +726,25 @@ bool PicoDiff_IsOpen(void)
     return g_open;
 }
 
-static void CloseModal(void)
+static bool CloseModal(void)
 {
-    if (g_open && g_app)
+    if (!g_open)
     {
-        (void)pico_ui_modal_pop(g_app, "diff");
+        return true;
+    }
+    if (g_app && !pico_ui_modal_pop(g_app, "diff"))
+    {
+        return false;
     }
     g_open = false;
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+    return true;
 }
 
 static void OpenModal(PicoApp *app)
 {
-    if (!g_open)
+    if (!g_open && pico_ui_modal_push(app, "diff"))
     {
-        (void)pico_ui_modal_push(app, "diff");
         g_open = true;
     }
 }
@@ -927,6 +931,10 @@ static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
     (void)event;
     if (g_open)
     {
+        if (!pico_ui_modal_is_top(app, "diff"))
+        {
+            return;
+        }
         g_overflow = PicoScrollbar_Overflows(CLAY_STRING("DiffScroll"));
         app->hovered_clickable = false;
         if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
@@ -962,7 +970,7 @@ static void DiffOnFrame(PicoApp *app, float dt)
 {
     (void)dt;
     AdoptPending(app);
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, "diff"))
     {
         return;
     }
@@ -982,7 +990,8 @@ static void DiffInit(PicoApp *app)
     g_app = app;
     if (g_open && !pico_ui_modal_has(app, "diff"))
     {
-        (void)pico_ui_modal_push(app, "diff");
+        g_open = false;
+        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     }
     pico_add_view(app, PICO_SLOT_OVERLAY, 30, DiffModalRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, DiffAfterLayout);
@@ -999,7 +1008,9 @@ static void DiffShutdown(PicoApp *app)
     DiffModel_Free(g_pending);
     g_pending = NULL;
     pthread_mutex_unlock(&g_lock);
-    CloseModal();
+    (void)CloseModal();
+    g_open = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     g_app = NULL;
 }
 

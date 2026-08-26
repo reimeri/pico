@@ -131,8 +131,10 @@ Chat calls `pico_tool_row_activate` when the user activates a tool row (main tra
 
 `PicoToolRowEvent` fields are borrowed from the trace line and valid only during the callback:
 
-- `agent_id`, `name`, `call_id`, `args_json`
+- `agent_id`, `name`, `call_id`
+- `args_json` — the original provider arguments, not the formatted transcript label
 - `output` — NULL while the call is still running
+- `child_id`, `child_session_id` — linked subagent identity when available
 - `is_error`
 - `handled`
 

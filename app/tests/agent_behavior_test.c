@@ -1105,7 +1105,10 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent,
 
 void PicoPlugins_Load(PicoApp *app)
 {
-    (void)app;
+    if (app && app->reload_queued)
+    {
+        g_plugin_reloads++;
+    }
 }
 
 void PicoPlugins_Reload(PicoApp *app)
@@ -2844,9 +2847,13 @@ static int TestResumedToolCallArgs(void)
     InitApp(&app);
     PicoApp_AddToolCall(&app, "sh", "{\"command\":\"cat examples/extra_instructions.c\"}");
     PicoTraceLine *line = LastToolTrace(&app);
-    bool ok = line && line->tool_args && strcmp(line->tool_args, "command: cat examples/extra_instructions.c") == 0;
+    bool ok = line && line->tool_args &&
+              strcmp(line->tool_args, "command: cat examples/extra_instructions.c") == 0 &&
+              line->tool_args_json &&
+              strcmp(line->tool_args_json,
+                     "{\"command\":\"cat examples/extra_instructions.c\"}") == 0;
     PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "resumed tool call kept raw JSON arguments");
+    return ok ? 0 : Fail(name, "tool call did not preserve display and raw arguments");
 }
 
 static int TestToolCallListArgs(void)
@@ -2860,7 +2867,8 @@ static int TestToolCallListArgs(void)
                         "{\"id\":\"3\",\"content\":\"c\",\"status\":\"pending\"},"
                         "{\"id\":\"4\",\"content\":\"d\",\"status\":\"pending\"}]}");
     PicoTraceLine *line = LastToolTrace(&app);
-    bool ok = line && line->tool_args && strcmp(line->tool_args, "todos: [4 items]") == 0;
+    bool ok = line && line->tool_args && strcmp(line->tool_args, "todos: [4 items]") == 0 &&
+              line->tool_args_json && strstr(line->tool_args_json, "\"todos\"");
     PicoApp_Free(&app);
     return ok ? 0 : Fail(name, "list args were not summarized as an item count");
 }

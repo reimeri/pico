@@ -296,12 +296,8 @@ static Texture2D g_preview_tex;
 static Image g_preview_src;
 static bool g_preview_loaded;
 
-static void ClosePreview(void)
+static void ResetPreview(void)
 {
-    if (g_preview >= 0 && g_app)
-    {
-        (void)pico_ui_modal_pop(g_app, "preview");
-    }
     if (g_preview_loaded)
     {
         UnloadTexture(g_preview_tex);
@@ -314,6 +310,20 @@ static void ClosePreview(void)
     memset(&g_preview_src, 0, sizeof(g_preview_src));
     g_preview_loaded = false;
     g_preview = -1;
+}
+
+static bool ClosePreview(void)
+{
+    if (g_preview < 0)
+    {
+        return true;
+    }
+    if (g_app && !pico_ui_modal_pop(g_app, "preview"))
+    {
+        return false;
+    }
+    ResetPreview();
+    return true;
 }
 
 static void PreviewFitSize(int src_w, int src_h, int screen_w, int screen_h, int *out_w, int *out_h)
@@ -461,7 +471,10 @@ static void UnloadAttach(ComposerAttach *a, bool delete_owned)
 
 static void ClearAttachments(bool delete_owned)
 {
-    ClosePreview();
+    if (!ClosePreview())
+    {
+        return;
+    }
     for (int i = 0; i < g_attach_n; i++)
     {
         UnloadAttach(&g_attach[i], delete_owned);
@@ -530,7 +543,10 @@ bool pico_composer_remove_at(int index)
     }
     if (g_preview == index)
     {
-        ClosePreview();
+        if (!ClosePreview())
+        {
+            return false;
+        }
     }
     else if (g_preview > index)
     {
@@ -1602,12 +1618,11 @@ static void OpenPreview(int index)
     {
         return;
     }
-    ClosePreview();
-    g_preview = index;
-    if (g_app)
+    if (!ClosePreview() || !g_app || !pico_ui_modal_push(g_app, "preview"))
     {
-        (void)pico_ui_modal_push(g_app, "preview");
+        return;
     }
+    g_preview = index;
     if (!IsWindowReady())
     {
         return;
@@ -2284,6 +2299,11 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
     app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
     if (g_preview >= 0)
     {
+        if (!pico_ui_modal_is_top(app, "preview"))
+        {
+            EnsureCaretVisible(app);
+            return;
+        }
         if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             ClosePreview();
@@ -2330,7 +2350,7 @@ static void ComposerInit(PicoApp *app)
     g_app = app;
     if (g_preview >= 0 && !pico_ui_modal_has(app, "preview"))
     {
-        (void)pico_ui_modal_push(app, "preview");
+        ResetPreview();
     }
     pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
     pico_add_view(app, PICO_SLOT_OVERLAY, 6, ComposerAttachRender);
@@ -2345,6 +2365,11 @@ static void ComposerShutdown(PicoApp *app)
 #if defined(__linux__)
     PicoComposer_CancelClipboardPaste();
 #endif
+    if (g_preview >= 0 && g_app)
+    {
+        (void)pico_ui_modal_pop(g_app, "preview");
+    }
+    ResetPreview();
     PicoComposer_DiscardAttachments();
     g_app = NULL;
 }

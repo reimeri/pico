@@ -20,9 +20,17 @@ static bool CopyModalName(char *dst, size_t cap, const char *name)
 
 bool pico_ui_modal_push(PicoApp *app, const char *name)
 {
+    int i;
     if (!app || app->ui_modal_count >= PICO_MAX_UI_MODALS)
     {
         return false;
+    }
+    for (i = 0; name && name[0] && i < app->ui_modal_count; i++)
+    {
+        if (strcmp(app->ui_modals[i], name) == 0)
+        {
+            return false;
+        }
     }
     if (!CopyModalName(app->ui_modals[app->ui_modal_count], PICO_UI_MODAL_NAME, name))
     {
@@ -83,6 +91,22 @@ bool pico_ui_modal_has(const PicoApp *app, const char *name)
     return false;
 }
 
+bool pico_ui_modal_is_top(const PicoApp *app, const char *name)
+{
+    const char *top = pico_ui_modal_top(app);
+    return top && name && name[0] && strcmp(top, name) == 0;
+}
+
+void pico_ui_modal_reset(PicoApp *app)
+{
+    if (!app)
+    {
+        return;
+    }
+    memset(app->ui_modals, 0, sizeof(app->ui_modals));
+    app->ui_modal_count = 0;
+}
+
 void pico_add_tool_row_hook(PicoApp *app, PicoToolRowFn fn)
 {
     if (!app || !fn || app->tool_row_hook_count >= PICO_MAX_TOOL_ROW_HOOKS)
@@ -105,8 +129,10 @@ bool pico_tool_row_activate(PicoApp *app, PicoAgentId agent_id, const PicoTraceL
     ev.agent_id = agent_id;
     ev.name = line->tool_name;
     ev.call_id = line->tool_call_id;
-    ev.args_json = line->tool_args;
+    ev.args_json = line->tool_args_json;
     ev.output = line->tool_output;
+    ev.child_id = line->child_id;
+    ev.child_session_id = line->child_session_id[0] ? line->child_session_id : NULL;
     ev.is_error = line->tool_error;
     for (i = 0; i < app->tool_row_hook_count; i++)
     {

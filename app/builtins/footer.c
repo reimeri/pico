@@ -51,27 +51,26 @@ bool PicoFooter_MenuOpen(void)
     return g_menu != FOOTER_MENU_NONE || g_esc_block || g_want_folder;
 }
 
-static void UnclaimMenu(void)
+static bool UnclaimMenu(void)
 {
-    if (g_menu != FOOTER_MENU_NONE && g_app)
-    {
-        (void)pico_ui_modal_pop(g_app, "footer-menu");
-    }
+    return g_menu == FOOTER_MENU_NONE || !g_app ||
+           pico_ui_modal_pop(g_app, "footer-menu");
 }
 
-static void UnclaimFolder(void)
+static bool UnclaimFolder(void)
 {
-    if (g_want_folder && g_app)
-    {
-        (void)pico_ui_modal_pop(g_app, "folder");
-    }
+    return !g_want_folder || !g_app || pico_ui_modal_pop(g_app, "folder");
 }
 
-static void ClearFolderRequest(void)
+static bool ClearFolderRequest(void)
 {
-    UnclaimFolder();
+    if (!UnclaimFolder())
+    {
+        return false;
+    }
     g_want_folder = false;
     g_folder_painted = false;
+    return true;
 }
 
 static const char *AgentStateName(const PicoApp *app)
@@ -249,11 +248,15 @@ static void SelectHovered(PicoApp *app)
     }
 }
 
-static void CloseMenu(void)
+static bool CloseMenu(void)
 {
-    UnclaimMenu();
+    if (!UnclaimMenu())
+    {
+        return false;
+    }
     g_menu = FOOTER_MENU_NONE;
     g_selected = 0;
+    return true;
 }
 
 static void OpenMenu(PicoApp *app, FooterMenu which)
@@ -276,9 +279,10 @@ static void OpenMenu(PicoApp *app, FooterMenu which)
         }
     }
 
-    if (g_menu == FOOTER_MENU_NONE && g_app)
+    if (g_menu == FOOTER_MENU_NONE &&
+        (!g_app || !pico_ui_modal_push(g_app, "footer-menu")))
     {
-        (void)pico_ui_modal_push(g_app, "footer-menu");
+        return;
     }
     g_menu = which;
     g_selected = 0;
@@ -342,7 +346,10 @@ static bool FolderDialogGraphic(void)
 
 static void RequestFolder(PicoApp *app)
 {
-    CloseMenu();
+    if (!CloseMenu())
+    {
+        return;
+    }
     if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
@@ -353,9 +360,9 @@ static void RequestFolder(PicoApp *app)
         PicoOverlay_Notify(app, "Folder dialog unavailable. Install zenity or kdialog.");
         return;
     }
-    if (!g_want_folder && g_app)
+    if (!g_want_folder && (!g_app || !pico_ui_modal_push(g_app, "folder")))
     {
-        (void)pico_ui_modal_push(g_app, "folder");
+        return;
     }
     g_want_folder = true;
     g_folder_painted = false;
@@ -659,7 +666,10 @@ void PicoFooter_Render(PicoApp *app)
 static void FooterAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    if (PicoExts_IsOpen() || PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)) || g_want_folder)
+    bool own_menu_top = g_menu != FOOTER_MENU_NONE &&
+                        pico_ui_modal_is_top(app, "footer-menu");
+    if (PicoAgent_AskUiOpen(PicoApp_ActiveAgent(app)) ||
+        (pico_ui_modal_claimed(app) && !own_menu_top) || g_want_folder)
     {
         app->hovered_clickable = false;
         return;
@@ -730,6 +740,10 @@ static void FooterOnFrame(PicoApp *app, float dt)
     g_esc_block = false;
     if (g_menu != FOOTER_MENU_NONE)
     {
+        if (!pico_ui_modal_is_top(app, "footer-menu"))
+        {
+            return;
+        }
         PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("FooterMenuScroll"),
                                  CLAY_STRING("FooterMenuScrollHandle"));
         int n = MenuCount(app);
@@ -754,7 +768,7 @@ static void FooterOnFrame(PicoApp *app, float dt)
         }
     }
 
-    if (!g_want_folder || !g_folder_painted)
+    if (!g_want_folder || !g_folder_painted || !pico_ui_modal_is_top(app, "folder"))
     {
         return;
     }
@@ -784,11 +798,14 @@ static void FooterInit(PicoApp *app)
     g_app = app;
     if (g_menu != FOOTER_MENU_NONE && !pico_ui_modal_has(app, "footer-menu"))
     {
-        (void)pico_ui_modal_push(app, "footer-menu");
+        g_menu = FOOTER_MENU_NONE;
+        g_selected = 0;
+        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     }
     if (g_want_folder && !pico_ui_modal_has(app, "folder"))
     {
-        (void)pico_ui_modal_push(app, "folder");
+        g_want_folder = false;
+        g_folder_painted = false;
     }
     pico_add_view(app, PICO_SLOT_FOOTER, 0, PicoFooter_Render);
     pico_add_view(app, PICO_SLOT_OVERLAY, 40, RenderFolderModal);
@@ -797,8 +814,13 @@ static void FooterInit(PicoApp *app)
 
 static void FooterShutdown(PicoApp *app)
 {
-    CloseMenu();
-    ClearFolderRequest();
+    (void)CloseMenu();
+    (void)ClearFolderRequest();
+    g_menu = FOOTER_MENU_NONE;
+    g_selected = 0;
+    g_want_folder = false;
+    g_folder_painted = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     g_app = NULL;
     (void)app;
 }

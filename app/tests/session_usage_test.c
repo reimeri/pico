@@ -438,6 +438,7 @@ void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *cal
     line->tool_name = JsonDup(name && name[0] ? name : "tool");
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
     line->tool_args = JsonDup(args_json ? args_json : "");
+    line->tool_args_json = JsonDup(args_json ? args_json : "");
 }
 
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error)
@@ -513,6 +514,7 @@ void PicoTraceLine_Release(PicoTraceLine *line)
     free(line->tool_name);
     free(line->tool_call_id);
     free(line->tool_args);
+    free(line->tool_args_json);
     free(line->tool_output);
     if (line->think_parts)
     {

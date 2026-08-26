@@ -36,7 +36,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `pico_subagent_profile_info`: copies the complete profile snapshot into caller storage. Profile strings and tool names in that copy are caller-owned values, not registry pointers.
 - `pico_agent_message` and nested `PicoTraceLine` strings such as `tool_call_id`: borrowed main-thread transcript storage, invalidated by pumping, transcript mutation, close, or workspace replacement.
 - `PicoAgentContext *` and all strings returned by its accessors: callback-scoped; never retain them.
-- `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
+- `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoToolRowEvent.name` / `call_id` / `args_json` / `output` / `child_session_id`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
 - `app->agent_input`: malloc if you set it; Pico frees.
 - `app->agent_parts`: optional malloc'd JSON array of canonical user parts; Pico frees.

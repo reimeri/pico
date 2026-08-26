@@ -579,6 +579,7 @@ void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *cal
     line->tool_name = JsonDup(name && name[0] ? name : "tool");
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
     line->tool_args = FormatToolProps(args);
+    line->tool_args_json = JsonDup(args ? args : "");
 }
 
 void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args)
@@ -621,8 +622,18 @@ void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
             if (line->is_tool && line->tool_call_id &&
                 strcmp(line->tool_call_id, call_id) == 0)
             {
+                char *display = FormatToolProps(args);
+                char *raw = JsonDup(args ? args : "");
+                if (!display || !raw)
+                {
+                    free(display);
+                    free(raw);
+                    return;
+                }
                 free(line->tool_args);
-                line->tool_args = FormatToolProps(args);
+                free(line->tool_args_json);
+                line->tool_args = display;
+                line->tool_args_json = raw;
                 return;
             }
         }
@@ -1112,8 +1123,6 @@ static void ApplyWorkspaceChange(PicoApp *app)
 
     PicoAgentManager *old = app->agents;
     PicoChat_InspectClose();
-    memset(app->ui_modals, 0, sizeof(app->ui_modals));
-    app->ui_modal_count = 0;
     if (!PicoAgentManager_Destroy(old))
     {
         (void)PicoAgent_Destroy(initial);
@@ -1124,6 +1133,8 @@ static void ApplyWorkspaceChange(PicoApp *app)
         return;
     }
 
+    app->agents = NULL;
+    PicoPlugins_Shutdown(app);
     app->agents = replacement;
     snprintf(app->workspace, sizeof(app->workspace), "%s", target);
     app->pending_workspace[0] = '\0';
@@ -1143,7 +1154,13 @@ static void ApplyWorkspaceChange(PicoApp *app)
         pico_status_warn(app, "Workspace replacement could not publish its prepared agent; Pico must exit.");
         return;
     }
-    PicoPlugins_Reload(app);
+    PicoPlugins_Load(app);
+    PicoAgentManager_LoadProfiles(app->agents);
+    PicoAgentManager_RevalidateToolPolicies(app->agents);
+    PicoAgentManager_NotifySessions(app->agents);
+    PicoAgentManager_ReplayToolDetails(app->agents);
+    app->reload_queued = false;
+    PicoAgentManager_SetAcceptingWork(app->agents, true);
     PicoChatSel_Clear(app);
     memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
     app->chat_follow_bottom = true;
@@ -1272,6 +1289,7 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
                 to->tool_name = from->tool_name ? JsonDup(from->tool_name) : NULL;
                 to->tool_call_id = from->tool_call_id ? JsonDup(from->tool_call_id) : NULL;
                 to->tool_args = from->tool_args ? JsonDup(from->tool_args) : NULL;
+                to->tool_args_json = from->tool_args_json ? JsonDup(from->tool_args_json) : NULL;
                 to->tool_output = from->tool_output ? JsonDup(from->tool_output) : NULL;
                 if (from->think_part_count > 0 && from->think_parts)
                 {

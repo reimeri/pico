@@ -13,18 +13,26 @@ static char *g_text;
 static bool g_overflow;
 static PicoScrollbar g_scrollbar;
 
-static void Unclaim(void)
+static bool Unclaim(void)
 {
-    if (g_open && g_app)
+    if (!g_open)
     {
-        (void)pico_ui_modal_pop(g_app, "prompt");
+        return true;
+    }
+    if (g_app && !pico_ui_modal_pop(g_app, "prompt"))
+    {
+        return false;
     }
     g_open = false;
+    return true;
 }
 
 void PicoPrompt_Close(void)
 {
-    Unclaim();
+    if (!Unclaim())
+    {
+        return;
+    }
     free(g_text);
     g_text = NULL;
     g_overflow = false;
@@ -134,7 +142,7 @@ static void PromptAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
     (void)app;
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, "prompt"))
     {
         return;
     }
@@ -155,9 +163,8 @@ static void PromptAfterLayout(PicoApp *app, const PicoHookEvent *event)
 
 static void PromptOnFrame(PicoApp *app, float dt)
 {
-    (void)app;
     (void)dt;
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, "prompt"))
     {
         return;
     }
@@ -175,9 +182,8 @@ static void CmdShowPrompt(PicoApp *app, const char *args)
     PicoExts_Close();
     free(g_text);
     g_text = PicoAgent_BuildInstructions(app, PicoApp_ActiveAgent(app));
-    if (!g_open)
+    if (!g_open && pico_ui_modal_push(app, "prompt"))
     {
-        (void)pico_ui_modal_push(app, "prompt");
         g_open = true;
     }
     PicoComposer_SetText(app, "");
@@ -189,7 +195,11 @@ static void PromptInit(PicoApp *app)
     g_app = app;
     if (g_open && !pico_ui_modal_has(app, "prompt"))
     {
-        (void)pico_ui_modal_push(app, "prompt");
+        g_open = false;
+        free(g_text);
+        g_text = NULL;
+        g_overflow = false;
+        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     }
     pico_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
     pico_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
@@ -198,7 +208,12 @@ static void PromptInit(PicoApp *app)
 
 static void PromptShutdown(PicoApp *app)
 {
-    PicoPrompt_Close();
+    (void)Unclaim();
+    g_open = false;
+    free(g_text);
+    g_text = NULL;
+    g_overflow = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     g_app = NULL;
     (void)app;
 }

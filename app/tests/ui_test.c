@@ -25,6 +25,14 @@ static void HookA(PicoApp *app, PicoToolRowEvent *ev)
 {
     (void)app;
     g_hook_a++;
+    if (ev && ev->name && strcmp(ev->name, "plain") == 0)
+    {
+        Check(ev->args_json && strcmp(ev->args_json, "{\"query\":\"x\"}") == 0,
+              "hook receives raw args JSON");
+        Check(ev->child_id == 42, "hook receives child id");
+        Check(ev->child_session_id && strcmp(ev->child_session_id, "session-1") == 0,
+              "hook receives child session id");
+    }
     if (ev && ev->name && strcmp(ev->name, "handled") == 0)
     {
         ev->handled = true;
@@ -57,6 +65,8 @@ static int TestModalStack(void)
     Check(pico_ui_modal_push(&app, "b"), "push b");
     Check(pico_ui_modal_count(&app) == 2, "count 2");
     Check(pico_ui_modal_top(&app) && strcmp(pico_ui_modal_top(&app), "b") == 0, "top b");
+    Check(pico_ui_modal_is_top(&app, "b"), "is top b");
+    Check(!pico_ui_modal_is_top(&app, "a"), "a is not top");
     Check(pico_ui_modal_has(&app, "a") && pico_ui_modal_has(&app, "b"), "has a and b");
     Check(!pico_ui_modal_pop(&app, "a"), "pop non-top fails");
     Check(pico_ui_modal_top(&app) && strcmp(pico_ui_modal_top(&app), "b") == 0, "top still b");
@@ -66,11 +76,15 @@ static int TestModalStack(void)
     Check(pico_ui_modal_count(&app) == 0, "stack empty again");
 
     Check(pico_ui_modal_push(&app, "same"), "push same");
-    Check(pico_ui_modal_push(&app, "same"), "push same again");
-    Check(pico_ui_modal_count(&app) == 2, "duplicate names");
-    Check(pico_ui_modal_pop(&app, "same"), "pop one same");
-    Check(pico_ui_modal_count(&app) == 1, "one same remains");
-    Check(pico_ui_modal_pop(&app, "same"), "pop last same");
+    Check(!pico_ui_modal_push(&app, "same"), "duplicate name rejected");
+    Check(pico_ui_modal_count(&app) == 1, "duplicate did not grow stack");
+    Check(pico_ui_modal_pop(&app, "same"), "pop unique name");
+
+    Check(pico_ui_modal_push(&app, "reload-a"), "push reload a");
+    Check(pico_ui_modal_push(&app, "reload-b"), "push reload b");
+    pico_ui_modal_reset(&app);
+    Check(pico_ui_modal_count(&app) == 0 && !pico_ui_modal_claimed(&app),
+          "lifecycle reset clears every claim");
 
     memset(&app, 0, sizeof(app));
     for (i = 0; i < PICO_MAX_UI_MODALS; i++)
@@ -110,7 +124,10 @@ static int TestToolRowHooks(void)
     line.is_tool = true;
     line.tool_name = "plain";
     line.tool_call_id = "c1";
-    line.tool_args = "{}";
+    line.tool_args = "query: x";
+    line.tool_args_json = "{\"query\":\"x\"}";
+    line.child_id = 42;
+    snprintf(line.child_session_id, sizeof(line.child_session_id), "session-1");
     pico_add_tool_row_hook(&app, HookA);
     pico_add_tool_row_hook(&app, HookB);
     Check(!pico_tool_row_activate(&app, 7, &line), "unhandled returns false");

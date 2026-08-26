@@ -10,27 +10,40 @@ static bool g_open;
 static bool g_overflow;
 static PicoScrollbar g_scrollbar;
 
-static void Claim(void)
+static bool Claim(void)
 {
-    if (!g_open && g_app)
+    if (g_open)
     {
-        (void)pico_ui_modal_push(g_app, "extensions");
+        return true;
+    }
+    if (!g_app || !pico_ui_modal_push(g_app, "extensions"))
+    {
+        return false;
     }
     g_open = true;
+    return true;
 }
 
-static void Unclaim(void)
+static bool Unclaim(void)
 {
-    if (g_open && g_app)
+    if (!g_open)
     {
-        (void)pico_ui_modal_pop(g_app, "extensions");
+        return true;
+    }
+    if (g_app && !pico_ui_modal_pop(g_app, "extensions"))
+    {
+        return false;
     }
     g_open = false;
+    return true;
 }
 
 void PicoExts_Close(void)
 {
-    Unclaim();
+    if (!Unclaim())
+    {
+        return;
+    }
     g_overflow = false;
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
@@ -45,7 +58,10 @@ void PicoExts_Toggle(void)
 {
     if (g_open)
     {
-        PicoExts_Close();
+        if (g_app && pico_ui_modal_is_top(g_app, "extensions"))
+        {
+            PicoExts_Close();
+        }
     }
     else
     {
@@ -271,7 +287,7 @@ static void ExtsRender(PicoApp *app)
 static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
 {
     (void)event;
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
         return;
     }
@@ -309,7 +325,7 @@ static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
 static void ExtsOnFrame(PicoApp *app, float dt)
 {
     (void)dt;
-    if (!g_open)
+    if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
         return;
     }
@@ -353,7 +369,9 @@ static void ExtsInit(PicoApp *app)
     g_app = app;
     if (g_open && !pico_ui_modal_has(app, "extensions"))
     {
-        (void)pico_ui_modal_push(app, "extensions");
+        g_open = false;
+        g_overflow = false;
+        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     }
     pico_add_command(app, "extensions", "Manage extensions", CmdExtensions);
     pico_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
@@ -362,7 +380,10 @@ static void ExtsInit(PicoApp *app)
 
 static void ExtsShutdown(PicoApp *app)
 {
-    Unclaim();
+    (void)Unclaim();
+    g_open = false;
+    g_overflow = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     g_app = NULL;
     (void)app;
 }

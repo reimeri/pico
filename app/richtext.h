@@ -11,6 +11,8 @@
 // here: chunks are split into styled words, measured with the same text
 // measure function clay uses, greedily packed into lines, and emitted as one
 // LEFT_TO_RIGHT row container per line, with one CLAY_TEXT per style run.
+// Inline `code` runs are wrapped in a padded pill; that horizontal padding is
+// part of the wrap width so the line does not overflow and overlap.
 //
 // Wrapping results are cached on the MdBlock (block->wrap_cache) and only
 // rebuilt when the available width changes, so steady-state frames are cheap.

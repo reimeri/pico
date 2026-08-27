@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Horizontal padding on inline `code` pills. Wrap width must include this or
+// the line overflows, Clay compresses earlier FIT runs (chat selection
+// wrappers), and the pill paints over the text before it.
+#define RT_INLINE_CODE_PAD_X 4
+
 // ---------------------------------------------------------------------------
 // Measure function wiring
 
@@ -110,6 +115,16 @@ static Clay_TextElementConfig TextConfigFor(const RichTextStyle *style, bool bol
         config.textColor = style->link_color;
     }
     return config;
+}
+
+static uint16_t InlineCodePadX(void)
+{
+    return Pico_FontPxU16(RT_INLINE_CODE_PAD_X);
+}
+
+static float InlineCodeChromeX(void)
+{
+    return (float)InlineCodePadX() * 2.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +234,36 @@ typedef struct ScratchLine {
     int run_capacity;
 } ScratchLine;
 
+static bool ContinuesRun(const ScratchRun *run, const RtWord *word)
+{
+    return run && run->bold == word->bold && run->italic == word->italic && run->code == word->code &&
+           run->strike == word->strike && run->link_url == word->link_url;
+}
+
+static float GapBeforeWord(const RichTextStyle *style, float default_space, const ScratchRun *last_run,
+                           bool has_content, const RtWord *word)
+{
+    if (!has_content || !word->space_before)
+    {
+        return 0;
+    }
+    if (ContinuesRun(last_run, word))
+    {
+        Clay_TextElementConfig config =
+            TextConfigFor(style, last_run->bold, last_run->italic, last_run->code, last_run->link_url != NULL);
+        return Measure(" ", 1, &config).width;
+    }
+    return default_space;
+}
+
+static float WordAdvance(const RichTextStyle *style, float default_space, const ScratchRun *last_run,
+                         bool has_content, const RtWord *word)
+{
+    float gap = GapBeforeWord(style, default_space, last_run, has_content, word);
+    float chrome = (word->code && !ContinuesRun(last_run, word)) ? InlineCodeChromeX() : 0.0f;
+    return gap + word->width + chrome;
+}
+
 static void ScratchRunAppendWord(ScratchRun *run, RtWord *word, bool add_space)
 {
     int needed = run->length + word->length + (add_space ? 1 : 0) + 1;
@@ -302,8 +347,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
         }
 
         ScratchRun *last_run = current_line.run_count > 0 ? &current_line.runs[current_line.run_count - 1] : NULL;
-        bool gap = line_x > 0 && word->space_before;
-        bool fits = line_x + word->width + (gap ? space_width : 0) <= available_width;
+        float advance = WordAdvance(style, space_width, last_run, line_x > 0, word);
+        bool fits = line_x + advance <= available_width;
 
         if (line_x == 0)
         {
@@ -322,15 +367,13 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.link_url = word->link_url;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
-            line_x = word->width;
+            line_x = WordAdvance(style, space_width, NULL, false, word);
         }
-        else if (fits && last_run && last_run->bold == word->bold && last_run->italic == word->italic &&
-                 last_run->code == word->code && last_run->strike == word->strike &&
-                 last_run->link_url == word->link_url)
+        else if (fits && ContinuesRun(last_run, word))
         {
             // Extend the current run.
             ScratchRunAppendWord(last_run, word, word->space_before);
-            line_x += (word->space_before ? space_width : 0) + word->width;
+            line_x += advance;
         }
         else if (fits)
         {
@@ -350,7 +393,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.space_before = word->space_before;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
-            line_x += (word->space_before ? space_width : 0) + word->width;
+            line_x += advance;
         }
         else
         {
@@ -368,7 +411,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             current_line.run_capacity = 4;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
-            line_x = word->width;
+            line_x = WordAdvance(style, space_width, NULL, false, word);
         }
     }
     // Push the final line (possibly empty -> blank paragraph still takes
@@ -430,7 +473,8 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
 
     if (run->code)
     {
-        CLAY_AUTO_ID({.layout = {.padding = {4, 4, 0, 0}},
+        uint16_t pad = InlineCodePadX();
+        CLAY_AUTO_ID({.layout = {.padding = {pad, pad, 0, 0}},
                       .backgroundColor = style->code_bg_color,
                       .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
@@ -545,6 +589,7 @@ void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextS
     float space_width = Measure(" ", 1, &space_config).width;
 
     float line_x = 0;
+    const RtWord *last = NULL;
     for (int i = 0; i < words.count; i++)
     {
         RtWord *word = &words.items[i];
@@ -555,14 +600,31 @@ void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextS
                 preferred = line_x;
             }
             line_x = 0;
+            last = NULL;
             continue;
         }
-        if (word->width > min)
+        float chrome = word->code && !(last && SameStyle(*last, *word)) ? InlineCodeChromeX() : 0.0f;
+        float word_min = word->width + (word->code ? InlineCodeChromeX() : 0.0f);
+        if (word_min > min)
         {
-            min = word->width;
+            min = word_min;
         }
-        float gap = (line_x > 0 && word->space_before) ? space_width : 0;
-        line_x += gap + word->width;
+        float gap = 0;
+        if (line_x > 0 && word->space_before)
+        {
+            if (last && SameStyle(*last, *word))
+            {
+                Clay_TextElementConfig gap_config =
+                    TextConfigFor(style, word->bold, word->italic, word->code, word->link_url != NULL);
+                gap = Measure(" ", 1, &gap_config).width;
+            }
+            else
+            {
+                gap = space_width;
+            }
+        }
+        line_x += gap + word->width + chrome;
+        last = word;
     }
     if (line_x > preferred)
     {

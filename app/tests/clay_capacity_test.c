@@ -53,6 +53,44 @@ static int TestHashMapOverflowGrows(void)
     return failed;
 }
 
+static int TestUnbalancedOverflowGrows(void)
+{
+    uint32_t size = Clay_MinMemorySize();
+    void *memory = malloc(size);
+    if (!memory)
+    {
+        return Fail("could not allocate Clay arena");
+    }
+
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(size, memory);
+    if (!Clay_Initialize(arena, (Clay_Dimensions){100, 100}, (Clay_ErrorHandler){0}))
+    {
+        DropClay(memory);
+        return Fail("could not initialize Clay");
+    }
+
+    Pico_ClearClayReinit();
+    int32_t before = Clay_GetMaxElementCount();
+    Pico_HandleClayErrors((Clay_ErrorData){
+        .errorType = CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE,
+        .errorText = CLAY_STRING("unbalanced"),
+    });
+
+    int failed = 0;
+    if (!Pico_NeedsClayReinit())
+    {
+        failed = Fail("unbalanced open/close did not request Clay reinit");
+    }
+    else if (Clay_GetMaxElementCount() != before * 2)
+    {
+        failed = Fail("unbalanced open/close did not double max element count");
+    }
+
+    Pico_ClearClayReinit();
+    DropClay(memory);
+    return failed;
+}
+
 static void LayoutChat(float content_h)
 {
     Clay_BeginLayout();
@@ -142,5 +180,10 @@ static int TestScrollSurvivesReinit(void)
 int main(void)
 {
     int rc = TestHashMapOverflowGrows();
+    if (rc != 0)
+    {
+        return rc;
+    }
+    rc = TestUnbalancedOverflowGrows();
     return rc != 0 ? rc : TestScrollSurvivesReinit();
 }

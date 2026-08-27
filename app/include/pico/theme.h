@@ -66,6 +66,7 @@ void Pico_UnloadFonts(Font *fonts);
 void Pico_HandleClayErrors(Clay_ErrorData error_data);
 bool Pico_NeedsClayReinit(void);
 void Pico_ClearClayReinit(void);
+void Pico_ReinitClay(Font *fonts, bool debug_enabled);
 void Pico_CaptureClayScroll(void);
 void Pico_RememberClayScroll(void);
 bool Pico_RestoreClayScroll(void);

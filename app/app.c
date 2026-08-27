@@ -1534,6 +1534,59 @@ static void SyncRaylibWindowSize(void)
     }
 }
 
+static bool ClayCapacityErrorOverlay(Clay_RenderCommandArray commands)
+{
+    for (int32_t i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, i);
+        if (!cmd || cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        Clay_StringSlice text = cmd->renderData.text.stringContents;
+        if (text.chars && text.length >= 11 && memcmp(text.chars, "Clay Error:", 11) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ClayLayoutUnusable(Clay_RenderCommandArray commands)
+{
+    return Pico_NeedsClayReinit() || ClayCapacityErrorOverlay(commands);
+}
+
+static void SkipClayPresent(Clay_RenderCommandArray commands)
+{
+    fprintf(stderr, "clay-scroll: skip present cmds=%d overlay=%d needs=%d\n", commands.length,
+            ClayCapacityErrorOverlay(commands) ? 1 : 0, Pico_NeedsClayReinit() ? 1 : 0);
+    GLFWwindow *win = GetWindowHandle();
+    if (win)
+    {
+        glfwPollEvents();
+    }
+}
+
+static Clay_RenderCommandArray RecoverClayLayoutIfNeeded(PicoApp *app, Clay_RenderCommandArray commands)
+{
+    for (int attempt = 0; ClayLayoutUnusable(commands) && attempt < 4; attempt++)
+    {
+        fprintf(stderr, "clay-scroll: recover attempt=%d cmds=%d overlay=%d needs=%d\n", attempt, commands.length,
+                ClayCapacityErrorOverlay(commands) ? 1 : 0, Pico_NeedsClayReinit() ? 1 : 0);
+        if (!Pico_NeedsClayReinit())
+        {
+            int32_t before = Clay_GetMaxElementCount();
+            Clay_SetMaxElementCount(before * 2);
+            fprintf(stderr, "clay-scroll: overlay without handler, doubled %d -> %d\n", (int)before,
+                    (int)Clay_GetMaxElementCount());
+        }
+        Pico_ReinitClay(app->fonts, app->debug_enabled);
+        commands = CreateShellLayout(app, 0.0f);
+    }
+    return commands;
+}
+
 void PicoApp_Frame(PicoApp *app)
 {
     if (!app)
@@ -1632,7 +1685,8 @@ void PicoApp_Frame(PicoApp *app)
     }
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
-    Clay_RenderCommandArray render_commands = CreateShellLayout(app, GetFrameTime());
+    Clay_RenderCommandArray render_commands =
+        RecoverClayLayoutIfNeeded(app, CreateShellLayout(app, GetFrameTime()));
 
     app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
@@ -1664,9 +1718,9 @@ void PicoApp_Frame(PicoApp *app)
     }
 
     bool relayout = false;
-    if (Pico_NeedsClayReinit())
+    if (ClayLayoutUnusable(render_commands))
     {
-        fprintf(stderr, "clay-scroll: skip restore/remember (reinit pending)\n");
+        fprintf(stderr, "clay-scroll: skip restore/remember (layout unusable)\n");
     }
     else
     {
@@ -1693,7 +1747,7 @@ void PicoApp_Frame(PicoApp *app)
         fprintf(stderr, "clay-scroll: relayout follow=%d\n", app->chat_follow_bottom ? 1 : 0);
         /* Clay has already generated command bounds with the prior offset.
          * Rebuild once so the corrected offset is visible this frame. */
-        render_commands = CreateShellLayout(app, 0.0f);
+        render_commands = RecoverClayLayoutIfNeeded(app, CreateShellLayout(app, 0.0f));
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
         {
@@ -1705,6 +1759,12 @@ void PicoApp_Frame(PicoApp *app)
         !PicoChatSel_HasSelection(app))
     {
         OpenURL(app->hovered_link);
+    }
+
+    if (ClayLayoutUnusable(render_commands))
+    {
+        SkipClayPresent(render_commands);
+        return;
     }
 
     BeginDrawing();

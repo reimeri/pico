@@ -129,20 +129,7 @@ int main(int argc, char **argv)
     {
         if (Pico_NeedsClayReinit())
         {
-            fprintf(stderr, "clay-scroll: reinit begin max=%d mem=%llu snaps pending (capture next)\n",
-                    (int)Clay_GetMaxElementCount(), (unsigned long long)Clay_MinMemorySize());
-            Pico_CaptureClayScroll();
-            uint64_t size = Clay_MinMemorySize();
-            Clay_Arena memory = Clay_CreateArenaWithCapacityAndMemory(size, malloc(size));
-            Clay_Initialize(memory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()},
-                            (Clay_ErrorHandler){Pico_HandleClayErrors, 0});
-            Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
-#ifdef PICO_CLAY_DEBUG
-            Clay_SetDebugModeEnabled(app.debug_enabled);
-#endif
-            Pico_ClearClayReinit();
-            fprintf(stderr, "clay-scroll: reinit done max=%d size=%llu follow=%d\n",
-                    (int)Clay_GetMaxElementCount(), (unsigned long long)size, app.chat_follow_bottom ? 1 : 0);
+            Pico_ReinitClay(fonts, app.debug_enabled);
         }
         PicoApp_Frame(&app);
     }

@@ -233,6 +233,23 @@ static void ReportClayInternalError(Clay_String error_text)
 #endif
 }
 
+static bool clay_capacity_grown;
+
+static void RequestCapacityReinit(const char *reason)
+{
+    needs_clay_reinit = true;
+    if (clay_capacity_grown)
+    {
+        fprintf(stderr, "clay-scroll: %s reinit (cap already doubled this overflow)\n", reason);
+        return;
+    }
+    int32_t before = Clay_GetMaxElementCount();
+    Clay_SetMaxElementCount(before * 2);
+    clay_capacity_grown = true;
+    fprintf(stderr, "clay-scroll: doubled max %d -> %d (%s) snaps=%d\n", (int)before,
+            (int)Clay_GetMaxElementCount(), reason, clay_scroll_snap_count);
+}
+
 void Pico_HandleClayErrors(Clay_ErrorData error_data)
 {
     if (error_data.errorType == CLAY_ERROR_TYPE_INTERNAL_ERROR)
@@ -244,9 +261,18 @@ void Pico_HandleClayErrors(Clay_ErrorData error_data)
         printf("%.*s\n", error_data.errorText.length, error_data.errorText.chars);
     }
     if (error_data.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED ||
-        error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED)
+        error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED ||
+        error_data.errorType == CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE)
     {
-        int32_t before = Clay_GetMaxElementCount();
+        const char *reason = "elements";
+        if (error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED)
+        {
+            reason = "hashmap";
+        }
+        else if (error_data.errorType == CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE)
+        {
+            reason = "unbalanced";
+        }
         float chat_y = 0.0f;
         int has_chat = 0;
         for (int i = 0; i < clay_scroll_snap_count; i++)
@@ -258,13 +284,9 @@ void Pico_HandleClayErrors(Clay_ErrorData error_data)
                 break;
             }
         }
-        fprintf(stderr, "clay-scroll: error %s max=%d snaps=%d remembered_chat=%d y=%.1f\n",
-                error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED ? "hashmap" : "elements",
-                (int)before, clay_scroll_snap_count, has_chat, (double)chat_y);
-        needs_clay_reinit = true;
-        Clay_SetMaxElementCount(before * 2);
-        fprintf(stderr, "clay-scroll: doubled max %d -> %d snaps=%d\n", (int)before,
-                (int)Clay_GetMaxElementCount(), clay_scroll_snap_count);
+        fprintf(stderr, "clay-scroll: error %s max=%d snaps=%d remembered_chat=%d y=%.1f\n", reason,
+                (int)Clay_GetMaxElementCount(), clay_scroll_snap_count, has_chat, (double)chat_y);
+        RequestCapacityReinit(reason);
     }
     else if (error_data.errorType == CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED)
     {
@@ -283,6 +305,38 @@ bool Pico_NeedsClayReinit(void)
 void Pico_ClearClayReinit(void)
 {
     needs_clay_reinit = false;
+    clay_capacity_grown = false;
+}
+
+void Pico_ReinitClay(Font *fonts, bool debug_enabled)
+{
+    fprintf(stderr, "clay-scroll: reinit begin max=%d mem=%llu\n", (int)Clay_GetMaxElementCount(),
+            (unsigned long long)Clay_MinMemorySize());
+    Pico_CaptureClayScroll();
+    uint64_t size = Clay_MinMemorySize();
+    void *block = malloc(size);
+    if (!block)
+    {
+        fprintf(stderr, "clay-scroll: reinit malloc failed size=%llu\n", (unsigned long long)size);
+        return;
+    }
+    Clay_Arena memory = Clay_CreateArenaWithCapacityAndMemory(size, block);
+    if (!Clay_Initialize(memory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()},
+                         (Clay_ErrorHandler){Pico_HandleClayErrors, 0}))
+    {
+        fprintf(stderr, "clay-scroll: reinit initialize failed\n");
+        free(block);
+        return;
+    }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
+#ifdef PICO_CLAY_DEBUG
+    Clay_SetDebugModeEnabled(debug_enabled);
+#else
+    (void)debug_enabled;
+#endif
+    Pico_ClearClayReinit();
+    fprintf(stderr, "clay-scroll: reinit done max=%d size=%llu\n", (int)Clay_GetMaxElementCount(),
+            (unsigned long long)size);
 }
 
 static float ClampAxis(float value, float viewport, float content)

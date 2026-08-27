@@ -3,7 +3,7 @@
 An LLM provider implements one streaming turn. Builtins are `openai` ([`../../builtins/openai.c`](../../builtins/openai.c)), `hyper` ([`../../builtins/hyper.c`](../../builtins/hyper.c)), and `xai` ([`../../builtins/xai.c`](../../builtins/xai.c)). Shared request/stream helpers: [`../../builtins/responses.c`](../../builtins/responses.c) for OpenAI, and [`../../builtins/completions.c`](../../builtins/completions.c) for Hyper, xAI, and other OpenAI-compatible Chat Completions providers. Models in `settings.json` name the provider:
 
 ```json
-{ "id": "gpt-4o", "name": "GPT-4o", "provider": "openai", "context_limit": 128000 }
+{ "id": "gpt-5.6-sol", "name": "GPT-5.6-Sol", "provider": "openai", "context_limit": 128000 }
 ```
 
 Hyper models use `"provider": "hyper"` at the fixed HTTPS base `https://hyper.charm.land/v1`. The catalog is static `settings.json`; Pico does not fetch Hyper's model list at runtime. Hyper rejects non-canonical `base_url` overrides so workspace settings cannot redirect Hyper credentials.

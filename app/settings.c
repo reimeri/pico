@@ -632,7 +632,7 @@ void PicoSettings_Load(PicoApp *app)
 {
     PicoSettings *s = &app->settings;
     memset(s, 0, sizeof(*s));
-    snprintf(s->model, sizeof(s->model), "gpt-4o");
+    snprintf(s->model, sizeof(s->model), "gpt-5.6-sol");
     s->context_limit = 128000;
     s->compact_enabled = true;
     s->compact_ratio = 0.9;

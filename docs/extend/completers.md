@@ -34,7 +34,7 @@ Each item:
 
 - `label` — list row
 - `detail` — muted subtitle
-- `insert` — text that replaces the whole token, **including the trigger** (e.g. `/model gpt-4o`, `@src/foo.c`)
+- `insert` — text that replaces the whole token, **including the trigger** (e.g. `/model gpt-5.6-sol`, `@src/foo.c`)
 
 ## Contract
 

@@ -12,6 +12,7 @@
 #include "scrollbar.h"
 #include "markdown.h"
 #include "transcript_virtual.h"
+#include "wrapped_text.h"
 
 #include "clay/clay.h"
 
@@ -21,7 +22,7 @@
 #include <string.h>
 
 #define TOOL_OUTPUT_MAX_LINES 100
-#define TOOL_WRAP_MAX_LINES 48
+#define TOOL_WRAP_MAX_LINES PICO_WRAPPED_TEXT_LINE_CAPACITY
 #define THINK_SHEEN_PERIOD 1.4f
 #define THINK_SHEEN_BAND 56.0f
 #define INSPECT_CARD_PAD_X 16.0f
@@ -48,6 +49,8 @@ static MdDocument *g_think_docs;
 static int g_think_doc_count;
 static int g_think_doc_cap;
 
+typedef struct ToolWrapCacheSet ToolWrapCacheSet;
+
 typedef struct TranscriptView {
     PicoApp *app;
     const PicoMessage *messages;
@@ -56,11 +59,26 @@ typedef struct TranscriptView {
     const char *activity;
     PicoAgent *owner;
     PicoTranscriptVirtual *virtual_cache;
+    ToolWrapCacheSet *tool_wrap_cache;
     Clay_String scroll_id;
     uint64_t virtual_identity;
     int id_ns;
     bool selectable;
 } TranscriptView;
+
+typedef struct ToolWrapCacheEntry {
+    int message_index;
+    int trace_index;
+    PicoWrappedText wrapped;
+} ToolWrapCacheEntry;
+
+struct ToolWrapCacheSet {
+    ToolWrapCacheEntry *entries;
+    int count;
+    int capacity;
+    uint64_t identity;
+    bool configured;
+};
 
 typedef struct InspectFrame {
     PicoAgentId parent_id;
@@ -83,6 +101,8 @@ static int g_inspect_tool_msg;
 static int g_inspect_tool_idx;
 static PicoTranscriptVirtual g_main_virtual;
 static PicoTranscriptVirtual g_inspect_virtual;
+static ToolWrapCacheSet g_main_tool_wrap;
+static ToolWrapCacheSet g_inspect_tool_wrap;
 static int g_inspect_virtual_ns;
 static bool g_virtual_relayout;
 
@@ -126,28 +146,69 @@ static void ViewGlue(const TranscriptView *view, const char *s)
     }
 }
 
-static int Utf8Step(const char *s, int len, int pos)
+static void ToolWrapCacheSet_Free(ToolWrapCacheSet *set)
 {
-    if (pos >= len)
+    if (!set)
     {
-        return len;
+        return;
     }
-    unsigned char c = (unsigned char)s[pos];
-    int step = 1;
-    if ((c & 0xE0) == 0xC0)
+    for (int i = 0; i < set->count; i++)
     {
-        step = 2;
+        PicoWrappedText_Free(&set->entries[i].wrapped);
     }
-    else if ((c & 0xF0) == 0xE0)
+    free(set->entries);
+    memset(set, 0, sizeof(*set));
+}
+
+static void ToolWrapCacheSet_Begin(ToolWrapCacheSet *set, uint64_t identity)
+{
+    if (!set)
     {
-        step = 3;
+        return;
     }
-    else if ((c & 0xF8) == 0xF0)
+    if (set->configured && set->identity == identity)
     {
-        step = 4;
+        return;
     }
-    pos += step;
-    return pos > len ? len : pos;
+    ToolWrapCacheSet_Free(set);
+    set->identity = identity;
+    set->configured = true;
+}
+
+static PicoWrappedText *ToolWrapCacheSet_Get(ToolWrapCacheSet *set,
+                                             int message_index, int trace_index)
+{
+    if (!set)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < set->count; i++)
+    {
+        if (set->entries[i].message_index == message_index &&
+            set->entries[i].trace_index == trace_index)
+        {
+            return &set->entries[i].wrapped;
+        }
+    }
+    if (set->count >= set->capacity)
+    {
+        int capacity = set->capacity == 0 ? 32 : set->capacity * 2;
+        ToolWrapCacheEntry *entries =
+            (ToolWrapCacheEntry *)realloc(set->entries,
+                                          (size_t)capacity * sizeof(ToolWrapCacheEntry));
+        if (!entries)
+        {
+            return NULL;
+        }
+        memset(entries + set->capacity, 0,
+               (size_t)(capacity - set->capacity) * sizeof(ToolWrapCacheEntry));
+        set->entries = entries;
+        set->capacity = capacity;
+    }
+    ToolWrapCacheEntry *entry = &set->entries[set->count++];
+    entry->message_index = message_index;
+    entry->trace_index = trace_index;
+    return &entry->wrapped;
 }
 
 static float MeasureCfg(Clay_TextElementConfig *config, const char *s, int n)
@@ -156,13 +217,56 @@ static float MeasureCfg(Clay_TextElementConfig *config, const char *s, int n)
     return Pico_MeasureTextUtf8(slice, config, NULL).width;
 }
 
+static float MeasureWrappedCharacter(void *user, const char *text, int length)
+{
+    return MeasureCfg((Clay_TextElementConfig *)user, text, length);
+}
+
+static uint64_t WrappedStyleKey(const Clay_TextElementConfig *config)
+{
+    return (uint64_t)config->fontId |
+           ((uint64_t)config->fontSize << 16) |
+           ((uint64_t)config->letterSpacing << 32);
+}
+
+static uint64_t WrappedScaleKey(void)
+{
+    float scale = Pico_FontScale();
+    uint32_t scale_bits = 0;
+    memcpy(&scale_bits, &scale, sizeof(scale_bits));
+    return scale_bits;
+}
+
+static void EmitWrappedText(const TranscriptView *view, Clay_String text,
+                            Clay_TextElementConfig config,
+                            const PicoWrappedText *wrapped)
+{
+    for (int i = 0; i < wrapped->line_count; i++)
+    {
+        PicoWrappedTextLine line = wrapped->lines[i];
+        Clay_String emitted = line.length > 0
+                                  ? (Clay_String){.length = line.length,
+                                                  .chars = text.chars + line.start}
+                                  : (Clay_String){.length = 1, .chars = " "};
+        ViewText(view, emitted, config);
+        ViewBreak(view);
+    }
+    if (wrapped->truncated)
+    {
+        CLAY_TEXT(CLAY_STRING("…"), CLAY_TEXT_CONFIG({.fontId = config.fontId,
+                                                     .fontSize = config.fontSize,
+                                                     .textColor = COLOR_MUTED,
+                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        ViewBreak(view);
+    }
+}
+
 /* Pre-wrap so long unspaced tokens (JSON args, paths) stay inside `width`. Clay
  * WRAP_WORDS will not break a token, which is what overflowed the inspect card. */
-static void ViewWrappedText(const TranscriptView *view, Clay_String text, Clay_TextElementConfig config,
-                            float width)
+static void ViewWrappedTextWithCache(const TranscriptView *view, Clay_String text,
+                                     Clay_TextElementConfig config, float width,
+                                     PicoWrappedText *persistent)
 {
-    int i;
-    int lines;
     if (text.length <= 0 || !text.chars)
     {
         return;
@@ -172,67 +276,32 @@ static void ViewWrappedText(const TranscriptView *view, Clay_String text, Clay_T
         width = 20.0f;
     }
     config.wrapMode = CLAY_TEXT_WRAP_NONE;
-    i = 0;
-    lines = 0;
-    while (i < text.length && lines < TOOL_WRAP_MAX_LINES)
+    PicoWrappedText temporary = {0};
+    PicoWrappedText *wrapped = persistent ? persistent : &temporary;
+    if (PicoWrappedText_Prepare(wrapped, text.chars, text.length, width,
+                                TOOL_WRAP_MAX_LINES, WrappedStyleKey(&config),
+                                WrappedScaleKey(), MeasureWrappedCharacter, &config))
     {
-        int line_start = i;
-        float line_w = 0.0f;
-        int break_at = -1;
-        int break_resume = -1;
-        int wrapped = 0;
-        if (text.chars[i] == '\n')
-        {
-            ViewText(view, (Clay_String){.length = 1, .chars = " "}, config);
-            ViewBreak(view);
-            i++;
-            lines++;
-            continue;
-        }
-        while (i < text.length && text.chars[i] != '\n')
-        {
-            int next = Utf8Step(text.chars, text.length, i);
-            float ch_w = MeasureCfg(&config, text.chars + i, next - i);
-            if (line_w + ch_w > width && i > line_start)
-            {
-                int end = break_at > line_start ? break_at : i;
-                ViewText(view, (Clay_String){.length = end - line_start, .chars = text.chars + line_start},
-                         config);
-                ViewBreak(view);
-                i = break_at > line_start ? break_resume : i;
-                wrapped = 1;
-                lines++;
-                break;
-            }
-            line_w += ch_w;
-            if (text.chars[i] == ' ' || text.chars[i] == '\t')
-            {
-                break_at = i;
-                break_resume = next;
-            }
-            i = next;
-        }
-        if (!wrapped)
-        {
-            int len = i - line_start;
-            ViewText(view, (Clay_String){.length = len > 0 ? len : 1, .chars = len > 0 ? text.chars + line_start : " "},
-                     config);
-            ViewBreak(view);
-            lines++;
-            if (i < text.length && text.chars[i] == '\n')
-            {
-                i++;
-            }
-        }
+        EmitWrappedText(view, text, config, wrapped);
     }
-    if (i < text.length)
-    {
-        CLAY_TEXT(CLAY_STRING("…"), CLAY_TEXT_CONFIG({.fontId = config.fontId,
-                                                     .fontSize = config.fontSize,
-                                                     .textColor = COLOR_MUTED,
-                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        ViewBreak(view);
-    }
+    PicoWrappedText_Free(persistent ? NULL : &temporary);
+}
+
+static void ViewWrappedText(const TranscriptView *view, Clay_String text,
+                            Clay_TextElementConfig config, float width)
+{
+    ViewWrappedTextWithCache(view, text, config, width, NULL);
+}
+
+static void ViewWrappedToolArgs(const TranscriptView *view, Clay_String text,
+                                Clay_TextElementConfig config, float width,
+                                int message_index, int trace_index)
+{
+    PicoWrappedText *wrapped = view
+                                   ? ToolWrapCacheSet_Get(view->tool_wrap_cache,
+                                                          message_index, trace_index)
+                                   : NULL;
+    ViewWrappedTextWithCache(view, text, config, width, wrapped);
 }
 
 static float ChatWidth(PicoApp *app)
@@ -781,7 +850,8 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                          .sizing = {.width = CLAY_SIZING_GROW(0, args_w)}}})
                 {
-                    ViewWrappedText(view, args, args_cfg, args_w);
+                    ViewWrappedToolArgs(view, args, args_cfg, args_w,
+                                        message_index, trace_index);
                 }
             }
             else
@@ -1105,6 +1175,7 @@ static void RenderTranscriptSpacer(const TranscriptView *view, int begin, int en
 static void RenderTranscript(const TranscriptView *view, float available_width)
 {
     PicoTranscriptVirtual *cache = view->virtual_cache;
+    ToolWrapCacheSet_Begin(view->tool_wrap_cache, view->virtual_identity);
     PicoTranscriptVirtual_Begin(cache, view->virtual_identity, view->message_count,
                                 available_width, Pico_FontScale());
     if (!cache || cache->count != view->message_count)
@@ -1296,6 +1367,7 @@ void PicoChat_Render(PicoApp *app)
                     .activity = active->activity,
                     .owner = active,
                     .virtual_cache = &g_main_virtual,
+                    .tool_wrap_cache = &g_main_tool_wrap,
                     .scroll_id = CLAY_STRING("ChatScroll"),
                     .id_ns = 0,
                     .selectable = true,
@@ -1324,6 +1396,7 @@ static TranscriptView MainTranscriptView(PicoApp *app)
         .activity = active->activity,
         .owner = active,
         .virtual_cache = &g_main_virtual,
+        .tool_wrap_cache = &g_main_tool_wrap,
         .scroll_id = CLAY_STRING("ChatScroll"),
         .id_ns = 0,
         .selectable = true,
@@ -1357,6 +1430,7 @@ static bool InspectPop(void)
     free(g_inspect[g_inspect_n].tool_call_id);
     free(g_inspect[g_inspect_n].fallback);
     memset(&g_inspect[g_inspect_n], 0, sizeof(g_inspect[g_inspect_n]));
+    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
     g_inspect_follow = true;
     return true;
 }
@@ -1383,6 +1457,7 @@ static void InspectForceReset(void)
         free(g_inspect[g_inspect_n].fallback);
         memset(&g_inspect[g_inspect_n], 0, sizeof(g_inspect[g_inspect_n]));
     }
+    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
     g_inspect_pressed_dim = false;
     g_inspect_pressed_back = false;
     g_inspect_pressed_tool = false;
@@ -1725,6 +1800,7 @@ static void InspectRender(PicoApp *app)
                             .activity = inspect.activity,
                             .owner = owner,
                             .virtual_cache = &g_inspect_virtual,
+                            .tool_wrap_cache = &g_inspect_tool_wrap,
                             .scroll_id = CLAY_STRING("SubagentChatScroll"),
                             .id_ns = g_inspect_n,
                             .selectable = false,
@@ -2339,8 +2415,10 @@ static void ChatSessionReset(PicoApp *app, const PicoHookEvent *event)
     if (!event || !active || event->agent_id == active->id)
     {
         PicoTranscriptVirtual_Free(&g_main_virtual);
+        ToolWrapCacheSet_Free(&g_main_tool_wrap);
     }
     PicoTranscriptVirtual_Free(&g_inspect_virtual);
+    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
     g_virtual_relayout = false;
 }
 
@@ -2350,6 +2428,8 @@ static void ChatShutdown(PicoApp *app)
     ThinkFrameFree();
     PicoTranscriptVirtual_Free(&g_main_virtual);
     PicoTranscriptVirtual_Free(&g_inspect_virtual);
+    ToolWrapCacheSet_Free(&g_main_tool_wrap);
+    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
     g_virtual_relayout = false;
     PicoChat_InspectClose();
     InspectForceReset();

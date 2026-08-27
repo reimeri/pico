@@ -88,6 +88,7 @@ add_executable(pico
     diff_lines.c
     scrollbar.c
     transcript_virtual.c
+    wrapped_text.c
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
@@ -227,6 +228,13 @@ if(BUILD_TESTING)
     target_include_directories(pico_transcript_virtual_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_transcript_virtual_tests)
     add_test(NAME pico_transcript_virtual_tests COMMAND pico_transcript_virtual_tests)
+
+    add_executable(pico_wrapped_text_tests
+        tests/wrapped_text_test.c
+        wrapped_text.c)
+    target_include_directories(pico_wrapped_text_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_wrapped_text_tests)
+    add_test(NAME pico_wrapped_text_tests COMMAND pico_wrapped_text_tests)
 
     add_executable(pico_responses_tests
         tests/responses_test.c

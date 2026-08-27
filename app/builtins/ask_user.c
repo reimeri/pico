@@ -1517,7 +1517,7 @@ static void AskUserRender(PicoApp *app)
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
-                    CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                    CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                                  .fontSize = 16,
                                                                  .textColor = COLOR_TEXT,
                                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS}));

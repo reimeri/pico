@@ -299,7 +299,8 @@ static void TodoRender(PicoApp *app)
         expanded_h = 150.0f;
     }
     float width = state->expanded ? expanded_w : TODO_COLLAPSED_WIDTH;
-    float height = state->expanded ? expanded_h : TODO_COLLAPSED_HEIGHT;
+    Clay_SizingAxis height = state->expanded ? CLAY_SIZING_FIT(0, expanded_h)
+                                             : CLAY_SIZING_FIXED(TODO_COLLAPSED_HEIGHT);
 
     CLAY(CLAY_ID("TodoPanel"),
          {.floating = {.offset = {.y = -TODO_GAP},
@@ -313,7 +314,7 @@ static void TodoRender(PicoApp *app)
                      .padding = state->expanded ? (Clay_Padding){14, 14, 12, 12} : (Clay_Padding){12, 12, 8, 8},
                      .childGap = 10,
                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                     .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(height)}},
+                     .sizing = {.width = CLAY_SIZING_FIXED(width), .height = height}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = state->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
           .transition = {.handler = Clay_EaseOut,
@@ -333,12 +334,12 @@ static void TodoRender(PicoApp *app)
             CLAY(CLAY_ID("TodoListScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childGap = SCROLLBAR_GAP,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
             {
                 CLAY(CLAY_ID("TodoListScroll"),
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}},
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
                     RenderTodoRows(state);

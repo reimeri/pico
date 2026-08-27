@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "scrollbar.h"
 #include "markdown.h"
+#include "transcript_virtual.h"
 
 #include "clay/clay.h"
 
@@ -28,6 +29,8 @@
 #define INSPECT_CARD_GAP 10.0f
 #define INSPECT_MSG_PAD_X 16.0f
 #define TOOL_ROW_FIXED_CHROME 46.0f
+#define TRANSCRIPT_MESSAGE_GAP 8.0f
+#define TRANSCRIPT_OVERSCAN_VIEWPORTS 0.75f
 
 static const float kThinkBriefMaxSec = 10.0f;
 static const float kThinkDeepMaxSec = 60.0f;
@@ -52,6 +55,9 @@ typedef struct TranscriptView {
     PicoAgentState state;
     const char *activity;
     PicoAgent *owner;
+    PicoTranscriptVirtual *virtual_cache;
+    Clay_String scroll_id;
+    uint64_t virtual_identity;
     int id_ns;
     bool selectable;
 } TranscriptView;
@@ -75,6 +81,10 @@ static bool g_inspect_pressed_back;
 static bool g_inspect_pressed_tool;
 static int g_inspect_tool_msg;
 static int g_inspect_tool_idx;
+static PicoTranscriptVirtual g_main_virtual;
+static PicoTranscriptVirtual g_inspect_virtual;
+static int g_inspect_virtual_ns;
+static bool g_virtual_relayout;
 
 static bool IsSubagentTool(const PicoTraceLine *line)
 {
@@ -911,61 +921,336 @@ static void RenderEmptyState(PicoApp *app)
     }
 }
 
-static void RenderTranscript(const TranscriptView *view, float available_width)
+static uint64_t RevisionMix(uint64_t hash, uint64_t value)
 {
-    for (int i = 0; i < view->message_count; i++)
+    hash ^= value + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+static uint64_t RevisionPointer(uint64_t hash, const void *pointer)
+{
+    return RevisionMix(hash, (uint64_t)(uintptr_t)pointer);
+}
+
+static uint64_t RevisionText(uint64_t hash, const char *text)
+{
+    if (!text)
     {
-        PicoMessage *msg = (PicoMessage *)&view->messages[i];
-        bool user = msg->role == PICO_ROLE_USER;
-        Clay_Color bg = user ? COLOR_USER_BG : COLOR_ASSISTANT_BG;
-        Clay_Padding pad = user ? (Clay_Padding){16, 16, 12, 12} : (Clay_Padding){16, 16, 0, 0};
-        float msg_max = available_width + (float)(pad.left + pad.right);
-        if (msg_max < 50.0f)
+        return RevisionMix(hash, 0);
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++)
+    {
+        hash = RevisionMix(hash, *p);
+    }
+    return hash;
+}
+
+static uint64_t MessageRevision(const TranscriptView *view, int message_index)
+{
+    const PicoMessage *msg = &view->messages[message_index];
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    hash = RevisionMix(hash, (uint64_t)msg->role);
+    hash = RevisionPointer(hash, msg->source);
+    hash = RevisionPointer(hash, msg->trace);
+    hash = RevisionMix(hash, (uint64_t)msg->trace_count);
+    for (int t = 0; t < msg->trace_count; t++)
+    {
+        const PicoTraceLine *line = &msg->trace[t];
+        hash = RevisionPointer(hash, line->text);
+        hash = RevisionPointer(hash, line->tool_name);
+        hash = RevisionPointer(hash, line->tool_args);
+        hash = RevisionPointer(hash, line->tool_output);
+        hash = RevisionPointer(hash, line->think_parts);
+        hash = RevisionMix(hash, (uint64_t)line->think_part_count);
+        hash = RevisionMix(hash, (uint64_t)line->think_steps);
+        hash = RevisionMix(hash, (uint64_t)line->think_ms);
+        hash = RevisionMix(hash, (uint64_t)line->child_id);
+        hash = RevisionMix(hash, line->is_tool ? 1 : 0);
+        hash = RevisionMix(hash, line->tool_error ? 1 : 0);
+        hash = RevisionMix(hash, line->expanded ? 1 : 0);
+        for (int p = 0; p < line->think_part_count; p++)
         {
-            msg_max = 50.0f;
-        }
-        CLAY(MessageId(view, i),
-             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .padding = pad,
-                         .childGap = 8,
-                         .sizing = {.width = CLAY_SIZING_GROW(0, msg_max)}},
-              .backgroundColor = bg,
-              .cornerRadius = user ? CLAY_CORNER_RADIUS(8) : CLAY_CORNER_RADIUS(0)})
-        {
-            if (view->selectable)
-            {
-                PicoChatSel_SetMessage(i);
-            }
-            bool has_source = msg->source && msg->source[0];
-            bool live = !user && i == view->message_count - 1 && OwnerWaiting(view);
-            bool live_llm = live && view->state == PICO_AGENT_LLM_WAIT;
-            for (int t = 0; t < msg->trace_count; t++)
-            {
-                PicoTraceLine *line = &msg->trace[t];
-                if (line->is_tool)
-                {
-                    RenderToolLine(view, line, i, t, available_width);
-                    continue;
-                }
-                RenderThinkLine(view, line, i, t, available_width);
-            }
-            bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
-                                  ThinkHasBody(&msg->trace[msg->trace_count - 1]);
-            if (live_llm && !has_source && !trailing_think)
-            {
-                RenderSyntheticThink(view, i);
-            }
-            if (has_source)
-            {
-                MdView_RenderDocument(&msg->doc, (view->id_ns + 1) * 100000 + (i + 1) * 4096,
-                                      available_width);
-            }
-            if (view->selectable)
-            {
-                PicoChatSel_SetMessage(-1);
-            }
+            hash = RevisionPointer(hash, line->think_parts ? line->think_parts[p] : NULL);
         }
     }
+    if (message_index == view->message_count - 1)
+    {
+        /* Streaming buffers often grow in place, so pointer identity alone is
+         * insufficient for the one message that can still be changing. */
+        hash = RevisionText(hash, msg->source);
+        for (int t = 0; t < msg->trace_count; t++)
+        {
+            const PicoTraceLine *line = &msg->trace[t];
+            hash = RevisionText(hash, line->text);
+            if (line->think_part_count > 0 && line->think_parts)
+            {
+                hash = RevisionText(hash, line->think_parts[line->think_part_count - 1]);
+            }
+        }
+        hash = RevisionMix(hash, (uint64_t)view->state);
+        hash = RevisionText(hash, view->activity);
+    }
+    return hash;
+}
+
+static Clay_ElementId TranscriptSpacerId(const TranscriptView *view, int begin)
+{
+    switch (view ? view->id_ns : 0)
+    {
+    case 0: return CLAY_IDI("TranscriptSpacerMain", begin);
+    case 1: return CLAY_IDI("TranscriptSpacerInspect1", begin);
+    case 2: return CLAY_IDI("TranscriptSpacerInspect2", begin);
+    case 3: return CLAY_IDI("TranscriptSpacerInspect3", begin);
+    case 4: return CLAY_IDI("TranscriptSpacerInspect4", begin);
+    default: return CLAY_IDI("TranscriptSpacerInspect5", begin);
+    }
+}
+
+static Clay_ElementId TranscriptGapId(const TranscriptView *view, int message_index)
+{
+    switch (view ? view->id_ns : 0)
+    {
+    case 0: return CLAY_IDI("TranscriptGapMain", message_index);
+    case 1: return CLAY_IDI("TranscriptGapInspect1", message_index);
+    case 2: return CLAY_IDI("TranscriptGapInspect2", message_index);
+    case 3: return CLAY_IDI("TranscriptGapInspect3", message_index);
+    case 4: return CLAY_IDI("TranscriptGapInspect4", message_index);
+    default: return CLAY_IDI("TranscriptGapInspect5", message_index);
+    }
+}
+
+static void RenderTranscriptGap(const TranscriptView *view, int message_index)
+{
+    if (message_index + 1 >= view->message_count)
+    {
+        return;
+    }
+    CLAY(TranscriptGapId(view, message_index),
+         {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                .height = CLAY_SIZING_FIXED(TRANSCRIPT_MESSAGE_GAP)}}})
+    {
+    }
+}
+
+static void RenderTranscriptMessage(const TranscriptView *view, int i, float available_width)
+{
+    PicoMessage *msg = (PicoMessage *)&view->messages[i];
+    bool user = msg->role == PICO_ROLE_USER;
+    Clay_Color bg = user ? COLOR_USER_BG : COLOR_ASSISTANT_BG;
+    Clay_Padding pad = user ? (Clay_Padding){16, 16, 12, 12} : (Clay_Padding){16, 16, 0, 0};
+    float msg_max = available_width + (float)(pad.left + pad.right);
+    if (msg_max < 50.0f)
+    {
+        msg_max = 50.0f;
+    }
+    CLAY(MessageId(view, i),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .padding = pad,
+                     .childGap = 8,
+                     .sizing = {.width = CLAY_SIZING_GROW(0, msg_max)}},
+          .backgroundColor = bg,
+          .cornerRadius = user ? CLAY_CORNER_RADIUS(8) : CLAY_CORNER_RADIUS(0)})
+    {
+        if (view->selectable)
+        {
+            PicoChatSel_SetMessage(i);
+        }
+        bool has_source = msg->source && msg->source[0];
+        bool live = !user && i == view->message_count - 1 && OwnerWaiting(view);
+        bool live_llm = live && view->state == PICO_AGENT_LLM_WAIT;
+        for (int t = 0; t < msg->trace_count; t++)
+        {
+            PicoTraceLine *line = &msg->trace[t];
+            if (line->is_tool)
+            {
+                RenderToolLine(view, line, i, t, available_width);
+                continue;
+            }
+            RenderThinkLine(view, line, i, t, available_width);
+        }
+        bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+                              ThinkHasBody(&msg->trace[msg->trace_count - 1]);
+        if (live_llm && !has_source && !trailing_think)
+        {
+            RenderSyntheticThink(view, i);
+        }
+        if (has_source)
+        {
+            MdView_RenderDocument(&msg->doc, (view->id_ns + 1) * 100000 + (i + 1) * 4096,
+                                  available_width);
+        }
+        if (view->selectable)
+        {
+            PicoChatSel_SetMessage(-1);
+        }
+    }
+    RenderTranscriptGap(view, i);
+}
+
+static void RenderTranscriptSpacer(const TranscriptView *view, int begin, int end)
+{
+    float height = PicoTranscriptVirtual_SpanHeight(view->virtual_cache, begin, end,
+                                                    TRANSCRIPT_MESSAGE_GAP);
+    if (height <= 0.5f)
+    {
+        return;
+    }
+    CLAY(TranscriptSpacerId(view, begin),
+         {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                .height = CLAY_SIZING_FIXED(height)}}})
+    {
+    }
+}
+
+static void RenderTranscript(const TranscriptView *view, float available_width)
+{
+    PicoTranscriptVirtual *cache = view->virtual_cache;
+    PicoTranscriptVirtual_Begin(cache, view->virtual_identity, view->message_count,
+                                available_width, Pico_FontScale());
+    if (!cache || cache->count != view->message_count)
+    {
+        for (int i = 0; i < view->message_count; i++)
+        {
+            RenderTranscriptMessage(view, i, available_width);
+        }
+        return;
+    }
+    for (int i = 0; i < view->message_count; i++)
+    {
+        PicoTranscriptVirtual_SetRevision(cache, i, MessageRevision(view, i));
+    }
+
+    Clay_ScrollContainerData scroll =
+        Clay_GetScrollContainerData(Clay_GetElementId(view->scroll_id));
+    float scroll_top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
+    float viewport = scroll.found ? scroll.scrollContainerDimensions.height : 0.0f;
+    int force_index = -1;
+    if (view->selectable &&
+        (view->app->chat_sel.mouse_selecting || PicoChatSel_HasSelection(view->app)))
+    {
+        force_index = view->app->chat_sel.msg;
+    }
+    PicoTranscriptVirtual_Plan(cache, scroll_top, viewport,
+                               viewport * TRANSCRIPT_OVERSCAN_VIEWPORTS,
+                               force_index, TRANSCRIPT_MESSAGE_GAP);
+
+    int skipped = -1;
+    for (int i = 0; i < view->message_count; i++)
+    {
+        if (!PicoTranscriptVirtual_Mounted(cache, i))
+        {
+            if (skipped < 0)
+            {
+                skipped = i;
+            }
+            continue;
+        }
+        if (skipped >= 0)
+        {
+            RenderTranscriptSpacer(view, skipped, i);
+            skipped = -1;
+        }
+        RenderTranscriptMessage(view, i, available_width);
+    }
+    if (skipped >= 0)
+    {
+        RenderTranscriptSpacer(view, skipped, view->message_count);
+    }
+}
+
+static uint64_t TranscriptIdentity(const TranscriptView *view)
+{
+    uint64_t identity = UINT64_C(0x6a09e667f3bcc909);
+    if (view->owner)
+    {
+        identity = RevisionMix(identity, (uint64_t)view->owner->id);
+        identity = RevisionText(identity, view->owner->session_id);
+    }
+    else
+    {
+        identity = RevisionPointer(identity, view->messages);
+    }
+    identity = RevisionMix(identity, (uint64_t)view->id_ns);
+    return identity ? identity : 1;
+}
+
+static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
+                                     Clay_String scroll_id, bool preserve_anchor)
+{
+    if (!cache || cache->count <= 0)
+    {
+        return;
+    }
+    Clay_ScrollContainerData scroll =
+        Clay_GetScrollContainerData(Clay_GetElementId(scroll_id));
+    float anchor_top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
+    float anchor_delta = 0.0f;
+    TranscriptView ids = {.id_ns = id_ns};
+    for (int i = 0; i < cache->count; i++)
+    {
+        if (!PicoTranscriptVirtual_Mounted(cache, i))
+        {
+            continue;
+        }
+        Clay_ElementData element = Clay_GetElementData(MessageId(&ids, i));
+        if (!element.found)
+        {
+            continue;
+        }
+        float delta = preserve_anchor
+                          ? PicoTranscriptVirtual_AnchorDelta(
+                                cache, i, element.boundingBox.height, anchor_top,
+                                TRANSCRIPT_MESSAGE_GAP)
+                          : 0.0f;
+        PicoTranscriptVirtual_RecordHeight(cache, i, element.boundingBox.height);
+        anchor_top += delta;
+        anchor_delta += delta;
+    }
+    PicoTranscriptVirtual_FinishMeasure(cache);
+
+    if (!preserve_anchor || !scroll.found || !scroll.scrollPosition ||
+        fabsf(anchor_delta) <= 0.01f)
+    {
+        return;
+    }
+    float next = scroll.scrollPosition->y - anchor_delta;
+    float min_y = scroll.scrollContainerDimensions.height - scroll.contentDimensions.height;
+    if (min_y > 0.0f)
+    {
+        min_y = 0.0f;
+    }
+    if (next > 0.0f)
+    {
+        next = 0.0f;
+    }
+    else if (next < min_y)
+    {
+        next = min_y;
+    }
+    if (fabsf(next - scroll.scrollPosition->y) > 0.01f)
+    {
+        scroll.scrollPosition->y = next;
+        g_virtual_relayout = true;
+    }
+}
+
+void PicoChat_HarvestVirtualHeights(PicoApp *app)
+{
+    if (!app)
+    {
+        return;
+    }
+    HarvestTranscriptHeights(&g_main_virtual, 0, CLAY_STRING("ChatScroll"),
+                             !app->chat_follow_bottom);
+    HarvestTranscriptHeights(&g_inspect_virtual, g_inspect_virtual_ns,
+                             CLAY_STRING("SubagentChatScroll"), !g_inspect_follow);
+}
+
+bool PicoChat_TakeVirtualRelayout(void)
+{
+    bool relayout = g_virtual_relayout;
+    g_virtual_relayout = false;
+    return relayout;
 }
 
 void PicoChat_Render(PicoApp *app)
@@ -993,7 +1278,6 @@ void PicoChat_Render(PicoApp *app)
             }
             CLAY(CLAY_ID("ChatContent"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .childGap = 8,
                              .padding = {4, 4, 8, 8},
                              .childAlignment = align,
                              .sizing = content_size}})
@@ -1011,9 +1295,12 @@ void PicoChat_Render(PicoApp *app)
                     .state = active->state,
                     .activity = active->activity,
                     .owner = active,
+                    .virtual_cache = &g_main_virtual,
+                    .scroll_id = CLAY_STRING("ChatScroll"),
                     .id_ns = 0,
                     .selectable = true,
                 };
+                view.virtual_identity = TranscriptIdentity(&view);
                 RenderTranscript(&view, available_width);
             }
         }
@@ -1036,9 +1323,12 @@ static TranscriptView MainTranscriptView(PicoApp *app)
         .state = active->state,
         .activity = active->activity,
         .owner = active,
+        .virtual_cache = &g_main_virtual,
+        .scroll_id = CLAY_STRING("ChatScroll"),
         .id_ns = 0,
         .selectable = true,
     };
+    view.virtual_identity = TranscriptIdentity(&view);
     return view;
 }
 
@@ -1416,7 +1706,6 @@ static void InspectRender(PicoApp *app)
             {
                 CLAY(CLAY_ID("SubagentChatScroll"),
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = 8,
                                  .padding = {0, 0, 0, 12},
                                  .sizing = {.width = CLAY_SIZING_FIXED(scroll_w),
                                             .height = CLAY_SIZING_FIXED(scroll_h)}},
@@ -1435,9 +1724,14 @@ static void InspectRender(PicoApp *app)
                             .state = inspect.state,
                             .activity = inspect.activity,
                             .owner = owner,
+                            .virtual_cache = &g_inspect_virtual,
+                            .scroll_id = CLAY_STRING("SubagentChatScroll"),
                             .id_ns = g_inspect_n,
                             .selectable = false,
                         };
+                        view.virtual_identity = RevisionText(TranscriptIdentity(&view),
+                                                             inspect.session_id);
+                        g_inspect_virtual_ns = view.id_ns;
                         RenderTranscript(&view, transcript_w);
                     }
                     else if (fallback && fallback[0])
@@ -2039,10 +2333,24 @@ static void ChatOnFrame(PicoApp *app, float dt)
     }
 }
 
+static void ChatSessionReset(PicoApp *app, const PicoHookEvent *event)
+{
+    PicoAgent *active = PicoApp_ActiveAgent(app);
+    if (!event || !active || event->agent_id == active->id)
+    {
+        PicoTranscriptVirtual_Free(&g_main_virtual);
+    }
+    PicoTranscriptVirtual_Free(&g_inspect_virtual);
+    g_virtual_relayout = false;
+}
+
 static void ChatShutdown(PicoApp *app)
 {
     (void)app;
     ThinkFrameFree();
+    PicoTranscriptVirtual_Free(&g_main_virtual);
+    PicoTranscriptVirtual_Free(&g_inspect_virtual);
+    g_virtual_relayout = false;
     PicoChat_InspectClose();
     InspectForceReset();
     g_app = NULL;
@@ -2059,6 +2367,7 @@ static void ChatInit(PicoApp *app)
     pico_add_view(app, PICO_SLOT_OVERLAY, 20, InspectRender);
     pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoChat_HandlePointer);
     pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoChat_DrawOverlay);
+    pico_add_hook(app, PICO_HOOK_ON_SESSION_RESET, ChatSessionReset);
     pico_add_tool_row_hook(app, SubagentToolRow);
 }
 

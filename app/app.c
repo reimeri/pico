@@ -1720,11 +1720,17 @@ void PicoApp_Frame(PicoApp *app)
     bool relayout = false;
     if (ClayLayoutUnusable(render_commands))
     {
+        (void)PicoChat_TakeVirtualRelayout();
         fprintf(stderr, "clay-scroll: skip restore/remember (layout unusable)\n");
     }
     else
     {
-        relayout = Pico_RestoreClayScroll();
+        PicoChat_HarvestVirtualHeights(app);
+        relayout = PicoChat_TakeVirtualRelayout();
+        if (Pico_RestoreClayScroll())
+        {
+            relayout = true;
+        }
         if (app->chat_follow_bottom)
         {
             Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));

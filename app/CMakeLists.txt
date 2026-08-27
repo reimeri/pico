@@ -87,6 +87,7 @@ add_executable(pico
     text_range.c
     diff_lines.c
     scrollbar.c
+    transcript_virtual.c
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
@@ -219,6 +220,13 @@ if(BUILD_TESTING)
     target_compile_options(pico_scrollbar_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_scrollbar_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_scrollbar_tests COMMAND pico_scrollbar_tests)
+
+    add_executable(pico_transcript_virtual_tests
+        tests/transcript_virtual_test.c
+        transcript_virtual.c)
+    target_include_directories(pico_transcript_virtual_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_transcript_virtual_tests)
+    add_test(NAME pico_transcript_virtual_tests COMMAND pico_transcript_virtual_tests)
 
     add_executable(pico_responses_tests
         tests/responses_test.c

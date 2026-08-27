@@ -2,7 +2,9 @@
 
 ![Pico banner](app/resources/banner.png)
 
-A small C99 AI agent harness with a native chat UI. The core is a loader, agent loop, and session; most behavior is extensions (builtins plus your own `.c` files).
+A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader, agent loop, and session; most behavior is extensions (builtins plus your own `.c` files).
+
+> Alpha software
 
 ## Features
 

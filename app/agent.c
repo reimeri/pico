@@ -3576,18 +3576,58 @@ void PicoAgent_AppendThinkSummary(PicoApp *app, PicoAgent *agent, const char *te
     }
 }
 
-char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent)
+char *PicoAgent_BuildInstructionsSpans(PicoApp *app, PicoAgent *agent, PicoPromptSpan *spans,
+                                       int *span_count)
 {
-    (void)agent;
-    if (!app) return JsonDup("");
-    char *base = PicoSettings_LoadSystemPrompt(app);
+    if (span_count)
+    {
+        *span_count = 0;
+    }
+    if (!app)
+    {
+        return JsonDup("");
+    }
+    PicoPromptSpan base_spans[PICO_PROMPT_SPAN_MAX];
+    int base_count = 0;
+    char *base = PicoSettings_LoadSystemPromptSpans(app, base_spans, &base_count);
+    size_t base_len = base ? strlen(base) : 0;
     char *instr = NULL;
     PicoTool *tools = NULL;
     int tool_count = 0;
     RunLlmHooks(app, agent, false, true, base, &instr, &tools, &tool_count);
     free(base);
     free(tools);
-    return instr ? instr : JsonDup("");
+    if (!instr)
+    {
+        instr = JsonDup("");
+    }
+    if (spans && span_count)
+    {
+        int n = 0;
+        for (int i = 0; i < base_count && n < PICO_PROMPT_SPAN_MAX; i++)
+        {
+            spans[n++] = base_spans[i];
+        }
+        size_t instr_len = strlen(instr);
+        if (instr_len > base_len && n < PICO_PROMPT_SPAN_MAX)
+        {
+            size_t start = base_len ? base_len + 2 : 0;
+            if (start < instr_len)
+            {
+                spans[n].source = PICO_PROMPT_SOURCE_LLM_HOOK;
+                spans[n].start = start;
+                spans[n].length = instr_len - start;
+                n++;
+            }
+        }
+        *span_count = n;
+    }
+    return instr;
+}
+
+char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent)
+{
+    return PicoAgent_BuildInstructionsSpans(app, agent, NULL, NULL);
 }
 
 static bool AgentContextActive(const PicoAgentContext *ctx)

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "docs_path.h"
 #include "settings.h"
 
 #include <stdio.h>
@@ -152,6 +153,131 @@ static int TestDisabledExtensionsFromUserSettings(void)
     return failed ? Fail("user disabled_extensions did not populate the disabled set") : 0;
 }
 
+static int WriteFile(const char *path, const char *contents)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+    {
+        return 1;
+    }
+    fputs(contents, f);
+    fclose(f);
+    return 0;
+}
+
+static int ExpectSpan(const PicoPromptSpan *span, PicoPromptSource source, const char *text,
+                      const char *want)
+{
+    if (!span || span->source != source || !text)
+    {
+        return 1;
+    }
+    size_t n = strlen(want);
+    return span->length == n && strncmp(text + span->start, want, n) == 0 ? 0 : 1;
+}
+
+static int TestPromptSourceSpans(void)
+{
+    char temp[] = "/tmp/pico-prompt-spans-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create isolated prompt directory");
+    }
+
+    char config[sizeof(temp) + 8];
+    snprintf(config, sizeof(config), "%s/pico", temp);
+    Pico_MkdirP(config);
+    char workspace[sizeof(temp) + 16];
+    snprintf(workspace, sizeof(workspace), "%s/work", temp);
+    Pico_MkdirP(workspace);
+    char pico_dir[sizeof(workspace) + 8];
+    snprintf(pico_dir, sizeof(pico_dir), "%s/.pico", workspace);
+    Pico_MkdirP(pico_dir);
+
+    char user_system[sizeof(config) + 16];
+    char workspace_system[sizeof(pico_dir) + 16];
+    char agents[sizeof(workspace) + 16];
+    snprintf(user_system, sizeof(user_system), "%s/SYSTEM.md", config);
+    snprintf(workspace_system, sizeof(workspace_system), "%s/SYSTEM.md", pico_dir);
+    snprintf(agents, sizeof(agents), "%s/AGENTS.md", workspace);
+    if (WriteFile(user_system, "user-system") || WriteFile(workspace_system, "workspace-system") ||
+        WriteFile(agents, "agents-md"))
+    {
+        return Fail("could not write prompt source files");
+    }
+
+    PicoApp app;
+    memset(&app, 0, sizeof(app));
+    snprintf(app.workspace, sizeof(app.workspace), "%s", workspace);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    Pico_DocsSetAppDir(NULL);
+
+    PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
+    int n = 0;
+    char *text = PicoSettings_LoadSystemPromptSpans(&app, spans, &n);
+    int failed = !text || n != 3 || ExpectSpan(&spans[0], PICO_PROMPT_SOURCE_BASE, text, "user-system") ||
+                 ExpectSpan(&spans[1], PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM, text, "workspace-system") ||
+                 ExpectSpan(&spans[2], PICO_PROMPT_SOURCE_AGENTS, text, "agents-md") ||
+                 strcmp(text, "user-system\n\nworkspace-system\n\nagents-md") != 0;
+
+    free(text);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(user_system);
+    unlink(workspace_system);
+    unlink(agents);
+    rmdir(pico_dir);
+    rmdir(workspace);
+    rmdir(config);
+    rmdir(temp);
+    return failed ? Fail("prompt source spans did not match assembled sections") : 0;
+}
+
+static int TestDocsHintIsBaseSpan(void)
+{
+    char temp[] = "/tmp/pico-prompt-docs-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create isolated docs directory");
+    }
+
+    char config[sizeof(temp) + 8];
+    snprintf(config, sizeof(config), "%s/pico", temp);
+    Pico_MkdirP(config);
+
+    PicoApp app;
+    memset(&app, 0, sizeof(app));
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    Pico_DocsSetAppDir(temp);
+
+    PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
+    int n = 0;
+    char *text = PicoSettings_LoadSystemPromptSpans(&app, spans, &n);
+    const char *hint = text ? strstr(text, "If the user asks about Pico") : NULL;
+    bool covered = false;
+    if (hint && text)
+    {
+        size_t offset = (size_t)(hint - text);
+        for (int i = 0; i < n; i++)
+        {
+            size_t start = spans[i].start;
+            size_t end = start + spans[i].length;
+            if (offset >= start && offset < end && spans[i].source == PICO_PROMPT_SOURCE_BASE)
+            {
+                covered = true;
+                break;
+            }
+        }
+    }
+    int failed = !covered;
+
+    free(text);
+    Pico_DocsSetAppDir(NULL);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(config);
+    rmdir(temp);
+    return failed ? Fail("docs hint was not classified as the base system prompt") : 0;
+}
+
 int main(void)
 {
     int rc = TestPerAgentSelection();
@@ -169,5 +295,15 @@ int main(void)
     {
         return rc;
     }
-    return TestDisabledExtensionsFromUserSettings();
+    rc = TestDisabledExtensionsFromUserSettings();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestPromptSourceSpans();
+    if (rc)
+    {
+        return rc;
+    }
+    return TestDocsHintIsBaseSpan();
 }

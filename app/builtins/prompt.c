@@ -1,6 +1,7 @@
 #include "pico/plugin.h"
 #include "agent.h"
 #include "scrollbar.h"
+#include "settings.h"
 
 #include "clay/clay.h"
 
@@ -10,8 +11,15 @@
 static PicoApp *g_app;
 static bool g_open;
 static char *g_text;
+static PicoPromptSpan g_spans[PICO_PROMPT_SPAN_MAX];
+static int g_span_count;
 static bool g_overflow;
 static PicoScrollbar g_scrollbar;
+
+#define COLOR_PROMPT_BASE (Clay_Color){186, 164, 122, 255}
+#define COLOR_PROMPT_WORKSPACE (Clay_Color){122, 156, 148, 255}
+#define COLOR_PROMPT_AGENTS (Clay_Color){132, 154, 186, 255}
+#define COLOR_PROMPT_HOOK (Clay_Color){138, 160, 128, 255}
 
 static bool Unclaim(void)
 {
@@ -27,16 +35,23 @@ static bool Unclaim(void)
     return true;
 }
 
+static void ClearPrompt(void)
+{
+    free(g_text);
+    g_text = NULL;
+    g_span_count = 0;
+    memset(g_spans, 0, sizeof(g_spans));
+    g_overflow = false;
+    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+}
+
 void PicoPrompt_Close(void)
 {
     if (!Unclaim())
     {
         return;
     }
-    free(g_text);
-    g_text = NULL;
-    g_overflow = false;
-    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+    ClearPrompt();
 }
 
 bool PicoPrompt_IsOpen(void)
@@ -44,11 +59,79 @@ bool PicoPrompt_IsOpen(void)
     return g_open;
 }
 
+static Clay_Color PromptSourceColor(PicoPromptSource source)
+{
+    switch (source)
+    {
+    case PICO_PROMPT_SOURCE_BASE:
+        return COLOR_PROMPT_BASE;
+    case PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM:
+        return COLOR_PROMPT_WORKSPACE;
+    case PICO_PROMPT_SOURCE_AGENTS:
+        return COLOR_PROMPT_AGENTS;
+    case PICO_PROMPT_SOURCE_LLM_HOOK:
+        return COLOR_PROMPT_HOOK;
+    }
+    return COLOR_CODE_TEXT;
+}
+
+static const char *PromptSourceLabel(PicoPromptSource source)
+{
+    switch (source)
+    {
+    case PICO_PROMPT_SOURCE_BASE:
+        return "Base system prompt";
+    case PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM:
+        return ".pico/SYSTEM.md";
+    case PICO_PROMPT_SOURCE_AGENTS:
+        return "AGENTS.md";
+    case PICO_PROMPT_SOURCE_LLM_HOOK:
+        return "Extra instructions";
+    }
+    return "";
+}
+
+static bool PromptHasSource(PicoPromptSource source)
+{
+    for (int i = 0; i < g_span_count; i++)
+    {
+        if (g_spans[i].source == source && g_spans[i].length > 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static Clay_Color ColorAt(size_t offset)
+{
+    for (int i = 0; i < g_span_count; i++)
+    {
+        size_t start = g_spans[i].start;
+        size_t end = start + g_spans[i].length;
+        if (offset >= start && offset < end)
+        {
+            return PromptSourceColor(g_spans[i].source);
+        }
+    }
+    return COLOR_CODE_TEXT;
+}
+
+static Clay_String CStr(const char *s)
+{
+    if (!s)
+    {
+        s = "";
+    }
+    return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+}
+
 static void RenderPromptText(void)
 {
     const char *text = (g_text && g_text[0]) ? g_text : "(empty)";
-    Clay_Color color = (g_text && g_text[0]) ? COLOR_CODE_TEXT : COLOR_MUTED;
+    bool empty = !g_text || !g_text[0];
     const char *line = text;
+    size_t offset = 0;
     while (line)
     {
         const char *newline = strchr(line, '\n');
@@ -58,12 +141,62 @@ static void RenderPromptText(void)
             length--;
         }
         Clay_String s = {.length = length > 0 ? length : 1, .chars = length > 0 ? line : " "};
+        Clay_Color color = empty ? COLOR_MUTED : ColorAt(offset);
         CLAY_TEXT(s, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                       .fontSize = 13,
                                       .lineHeight = Pico_FontPxU16(18),
                                       .textColor = color,
                                       .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-        line = newline ? newline + 1 : NULL;
+        if (newline)
+        {
+            offset += (size_t)(newline - line) + 1;
+            line = newline + 1;
+        }
+        else
+        {
+            line = NULL;
+        }
+    }
+}
+
+static void RenderLegendItem(PicoPromptSource source)
+{
+    if (!PromptHasSource(source))
+    {
+        return;
+    }
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = 6,
+                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
+                      .backgroundColor = PromptSourceColor(source),
+                      .cornerRadius = CLAY_CORNER_RADIUS(4)})
+        {
+        }
+        CLAY_TEXT(CStr(PromptSourceLabel(source)),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                    .fontSize = 11,
+                                    .textColor = COLOR_MUTED,
+                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+    }
+}
+
+static void RenderLegend(void)
+{
+    if (g_span_count <= 0)
+    {
+        return;
+    }
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = 14,
+                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        RenderLegendItem(PICO_PROMPT_SOURCE_BASE);
+        RenderLegendItem(PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM);
+        RenderLegendItem(PICO_PROMPT_SOURCE_AGENTS);
+        RenderLegendItem(PICO_PROMPT_SOURCE_LLM_HOOK);
     }
 }
 
@@ -134,6 +267,7 @@ static void PromptRender(PicoApp *app)
                 PicoScrollbar_RenderOverlay(CLAY_STRING("PromptModalScroll"), CLAY_STRING("PromptModalScrollTrack"),
                                             CLAY_STRING("PromptModalScrollHandle"));
             }
+            RenderLegend();
         }
     }
 }
@@ -181,7 +315,9 @@ static void CmdShowPrompt(PicoApp *app, const char *args)
     (void)args;
     PicoExts_Close();
     free(g_text);
-    g_text = PicoAgent_BuildInstructions(app, PicoApp_ActiveAgent(app));
+    g_span_count = 0;
+    memset(g_spans, 0, sizeof(g_spans));
+    g_text = PicoAgent_BuildInstructionsSpans(app, PicoApp_ActiveAgent(app), g_spans, &g_span_count);
     if (!g_open && pico_ui_modal_push(app, "prompt"))
     {
         g_open = true;
@@ -196,10 +332,7 @@ static void PromptInit(PicoApp *app)
     if (g_open && !pico_ui_modal_has(app, "prompt"))
     {
         g_open = false;
-        free(g_text);
-        g_text = NULL;
-        g_overflow = false;
-        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+        ClearPrompt();
     }
     pico_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
     pico_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
@@ -210,10 +343,7 @@ static void PromptShutdown(PicoApp *app)
 {
     (void)Unclaim();
     g_open = false;
-    free(g_text);
-    g_text = NULL;
-    g_overflow = false;
-    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+    ClearPrompt();
     g_app = NULL;
     (void)app;
 }

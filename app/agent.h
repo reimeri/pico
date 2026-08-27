@@ -2,6 +2,7 @@
 #define PICO_AGENT_H
 
 #include "agent_internal.h"
+#include "settings.h"
 
 #include <time.h>
 
@@ -30,6 +31,8 @@ bool PicoAgent_RevalidateToolPolicy(const PicoApp *app, PicoAgent *agent);
 void PicoAgent_Compact(PicoApp *app, PicoAgent *agent);
 /* Malloc'd instructions for the next normal turn. Caller frees. */
 char *PicoAgent_BuildInstructions(PicoApp *app, PicoAgent *agent);
+char *PicoAgent_BuildInstructionsSpans(PicoApp *app, PicoAgent *agent, PicoPromptSpan *spans,
+                                       int *span_count);
 struct PicoAuthStore *PicoAgentContext_AuthStore(const PicoAgentContext *ctx);
 bool PicoAgentContext_LockIfLive(const PicoAgentContext *ctx);
 void PicoAgentContext_UnlockLive(const PicoAgentContext *ctx);

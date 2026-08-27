@@ -906,6 +906,23 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
     return JsonDup("");
 }
 
+char *PicoSettings_LoadSystemPromptSpans(const PicoApp *app, PicoPromptSpan *spans, int *span_count)
+{
+    char *text = PicoSettings_LoadSystemPrompt(app);
+    if (span_count)
+    {
+        *span_count = 0;
+    }
+    if (spans && span_count && text && text[0])
+    {
+        spans[0].source = PICO_PROMPT_SOURCE_BASE;
+        spans[0].start = 0;
+        spans[0].length = strlen(text);
+        *span_count = 1;
+    }
+    return text;
+}
+
 PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent)
 {
     (void)agent;
@@ -2286,6 +2303,25 @@ static int TestLlmExtraInstructions(void)
     return ok ? 0 : Fail(name, "provider did not receive extra instructions under the section header");
 }
 
+static int TestBuildInstructionsExtraSpan(void)
+{
+    const char *name = "previewed extra instructions are a distinct span";
+    ResetTest(TEST_SINGLE, 0);
+    PicoApp app;
+    InitApp(&app);
+    pico_add_llm_hook(&app, ExtraInstructions);
+    PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
+    int n = 0;
+    char *preview = PicoAgent_BuildInstructionsSpans(&app, PicoApp_ActiveAgent(&app), spans, &n);
+    bool ok = preview && n == 1 && spans[0].source == PICO_PROMPT_SOURCE_LLM_HOOK &&
+              spans[0].start == 0 && spans[0].length == strlen(preview) &&
+              strstr(preview, "## Additional instructions") == preview &&
+              strstr(preview, "injected-line") != NULL;
+    free(preview);
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "extra instructions were not a single LLM-hook span");
+}
+
 static int TestBuildInstructionsMatchTurn(void)
 {
     const char *name = "previewed instructions match the next turn";
@@ -3401,6 +3437,7 @@ int main(void)
     failed |= TestRequestOnlyContext();
     failed |= TestUnmappedContextFails();
     failed |= TestLlmExtraInstructions();
+    failed |= TestBuildInstructionsExtraSpan();
     failed |= TestBuildInstructionsMatchTurn();
     failed |= TestAgentPolicyPrecedesLlmHooks();
     failed |= TestLlmExcludeTool();

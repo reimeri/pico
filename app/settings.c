@@ -1246,6 +1246,72 @@ static void AppendFile(JsonBuf *b, const char *path)
     free(src);
 }
 
+static bool AppendFileSpan(JsonBuf *b, const char *path, PicoPromptSpan *spans, int *span_count,
+                           int max_spans, PicoPromptSource source)
+{
+    size_t before = b->len;
+    AppendFile(b, path);
+    if (b->len <= before || !spans || !span_count || *span_count >= max_spans)
+    {
+        return b->len > before;
+    }
+    size_t start = before ? before + 2 : 0;
+    if (start >= b->len)
+    {
+        return true;
+    }
+    spans[*span_count].source = source;
+    spans[*span_count].start = start;
+    spans[*span_count].length = b->len - start;
+    (*span_count)++;
+    return true;
+}
+
+static void PushSpan(PicoPromptSpan *spans, int *span_count, int max_spans, PicoPromptSource source,
+                     size_t start, size_t length)
+{
+    if (!spans || !span_count || *span_count >= max_spans || length == 0)
+    {
+        return;
+    }
+    spans[*span_count].source = source;
+    spans[*span_count].start = start;
+    spans[*span_count].length = length;
+    (*span_count)++;
+}
+
+static void AppendDocsHint(JsonBuf *b)
+{
+    char docs[4096];
+    if (!Pico_DocsFile("README", docs, sizeof(docs)))
+    {
+        return;
+    }
+    if (b->len)
+    {
+        JsonBuf_Puts(b, "\n\n");
+    }
+    JsonBuf_Puts(b, "If the user asks about Pico or wants to extend it, read ");
+    JsonBuf_Puts(b, docs);
+    JsonBuf_Puts(b, ". That file is shipped with Pico, not in the workspace. ");
+    JsonBuf_Puts(b, "Topic pages are in the same directory as that README. ");
+    char examples[4096];
+    if (Pico_DocsJoin(Pico_DocsAppDir(), "examples", examples, sizeof(examples)))
+    {
+        JsonBuf_Puts(b, "Example sources and subagent profiles are in ");
+        JsonBuf_Puts(b, examples);
+        JsonBuf_Puts(b, ". ");
+    }
+    char builtins[4096];
+    if (Pico_DocsJoin(Pico_DocsAppDir(), "builtins", builtins, sizeof(builtins)))
+    {
+        JsonBuf_Puts(b, "Reference builtin sources (sh, openai, hyper; compiled into Pico) are in ");
+        JsonBuf_Puts(b, builtins);
+        JsonBuf_Puts(b, ". ");
+    }
+    JsonBuf_Puts(b, "Resolve relative paths in those pages from the file that contains them.");
+}
+
 static bool FileHasContent(const char *path)
 {
     struct stat st;
@@ -1291,21 +1357,30 @@ int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max)
     return n;
 }
 
-char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
+char *PicoSettings_LoadSystemPromptSpans(const PicoApp *app, PicoPromptSpan *spans, int *span_count)
 {
+    if (span_count)
+    {
+        *span_count = 0;
+    }
     JsonBuf b;
     JsonBuf_Init(&b);
+    if (!app)
+    {
+        return JsonBuf_Steal(&b);
+    }
     char path[4096];
     char config[4096];
     if (Pico_ConfigDir(config, sizeof(config)) &&
         PicoPath_Format(path, sizeof(path), "%s/SYSTEM.md", config))
     {
-        AppendFile(&b, path);
+        AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE);
     }
     if (app->workspace[0] &&
         PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", app->workspace))
     {
-        AppendFile(&b, path);
+        AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX,
+                       PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM);
     }
     if (!b.len)
     {
@@ -1313,37 +1388,23 @@ char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
                      "You are coding assistant, working inside Pico agent harness. The user's workspace is the current "
                      "working directory. Use the sh tool to run shell commands when that helps. "
                      "Prefer concise answers.");
+        PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE, 0, b.len);
     }
     if (app->workspace[0] && PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", app->workspace))
     {
-        AppendFile(&b, path);
+        AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_AGENTS);
     }
-    char docs[4096];
-    if (Pico_DocsFile("README", docs, sizeof(docs)))
+    size_t before_docs = b.len;
+    AppendDocsHint(&b);
+    if (b.len > before_docs)
     {
-        if (b.len)
-        {
-            JsonBuf_Puts(&b, "\n\n");
-        }
-        JsonBuf_Puts(&b, "If the user asks about Pico or wants to extend it, read ");
-        JsonBuf_Puts(&b, docs);
-        JsonBuf_Puts(&b, ". That file is shipped with Pico, not in the workspace. ");
-        JsonBuf_Puts(&b, "Topic pages are in the same directory as that README. ");
-        char examples[4096];
-        if (Pico_DocsJoin(Pico_DocsAppDir(), "examples", examples, sizeof(examples)))
-        {
-            JsonBuf_Puts(&b, "Example sources and subagent profiles are in ");
-            JsonBuf_Puts(&b, examples);
-            JsonBuf_Puts(&b, ". ");
-        }
-        char builtins[4096];
-        if (Pico_DocsJoin(Pico_DocsAppDir(), "builtins", builtins, sizeof(builtins)))
-        {
-            JsonBuf_Puts(&b, "Reference builtin sources (sh, openai, hyper; compiled into Pico) are in ");
-            JsonBuf_Puts(&b, builtins);
-            JsonBuf_Puts(&b, ". ");
-        }
-        JsonBuf_Puts(&b, "Resolve relative paths in those pages from the file that contains them.");
+        size_t start = before_docs ? before_docs + 2 : 0;
+        PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE, start, b.len - start);
     }
     return JsonBuf_Steal(&b);
+}
+
+char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
+{
+    return PicoSettings_LoadSystemPromptSpans(app, NULL, NULL);
 }

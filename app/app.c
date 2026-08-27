@@ -1663,17 +1663,41 @@ void PicoApp_Frame(PicoApp *app)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
 
-    if (app->chat_follow_bottom)
+    bool relayout = false;
+    if (Pico_NeedsClayReinit())
     {
-        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-        if (data.found &&
-            PicoScrollbar_PinToBottom(data.scrollContainerDimensions.height, data.contentDimensions.height,
-                                      data.scrollPosition ? &data.scrollPosition->y : NULL))
+        fprintf(stderr, "clay-scroll: skip restore/remember (reinit pending)\n");
+    }
+    else
+    {
+        relayout = Pico_RestoreClayScroll();
+        if (app->chat_follow_bottom)
         {
-            /* Clay has already generated command bounds with the prior offset.
-             * Rebuild once so the corrected bottom offset is visible this frame. */
-            render_commands = CreateShellLayout(app, 0.0f);
-            app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
+            Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+            float chat_y = (data.found && data.scrollPosition) ? data.scrollPosition->y : 0.0f;
+            bool pinned = data.found &&
+                          PicoScrollbar_PinToBottom(data.scrollContainerDimensions.height, data.contentDimensions.height,
+                                                    data.scrollPosition ? &data.scrollPosition->y : NULL);
+            if (pinned)
+            {
+                fprintf(stderr, "clay-scroll: pin-bottom chat_y %.1f -> %.1f view_h=%.1f content_h=%.1f\n",
+                        (double)chat_y, (double)(data.scrollPosition ? data.scrollPosition->y : 0.0f),
+                        (double)data.scrollContainerDimensions.height, (double)data.contentDimensions.height);
+                relayout = true;
+            }
+        }
+        Pico_RememberClayScroll();
+    }
+    if (relayout)
+    {
+        fprintf(stderr, "clay-scroll: relayout follow=%d\n", app->chat_follow_bottom ? 1 : 0);
+        /* Clay has already generated command bounds with the prior offset.
+         * Rebuild once so the corrected offset is visible this frame. */
+        render_commands = CreateShellLayout(app, 0.0f);
+        app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
+        if (!Pico_NeedsClayReinit())
+        {
+            Pico_RememberClayScroll();
         }
     }
 

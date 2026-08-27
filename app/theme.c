@@ -200,6 +200,18 @@ void Pico_UnloadFonts(Font *fonts)
 
 static bool needs_clay_reinit = false;
 
+#define PICO_CLAY_SCROLL_MAX 16
+
+typedef struct PicoClayScrollSnap {
+    uint32_t id;
+    Clay_Vector2 pos;
+    const char *name;
+} PicoClayScrollSnap;
+
+static PicoClayScrollSnap clay_scroll_snaps[PICO_CLAY_SCROLL_MAX];
+static int clay_scroll_snap_count;
+static bool clay_scroll_restore_pending;
+
 static void ReportClayInternalError(Clay_String error_text)
 {
     if (error_text.chars)
@@ -231,13 +243,33 @@ void Pico_HandleClayErrors(Clay_ErrorData error_data)
     {
         printf("%.*s\n", error_data.errorText.length, error_data.errorText.chars);
     }
-    if (error_data.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED)
+    if (error_data.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED ||
+        error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED)
     {
+        int32_t before = Clay_GetMaxElementCount();
+        float chat_y = 0.0f;
+        int has_chat = 0;
+        for (int i = 0; i < clay_scroll_snap_count; i++)
+        {
+            if (clay_scroll_snaps[i].name && strcmp(clay_scroll_snaps[i].name, "ChatScroll") == 0)
+            {
+                chat_y = clay_scroll_snaps[i].pos.y;
+                has_chat = 1;
+                break;
+            }
+        }
+        fprintf(stderr, "clay-scroll: error %s max=%d snaps=%d remembered_chat=%d y=%.1f\n",
+                error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED ? "hashmap" : "elements",
+                (int)before, clay_scroll_snap_count, has_chat, (double)chat_y);
         needs_clay_reinit = true;
-        Clay_SetMaxElementCount(Clay_GetMaxElementCount() * 2);
+        Clay_SetMaxElementCount(before * 2);
+        fprintf(stderr, "clay-scroll: doubled max %d -> %d snaps=%d\n", (int)before,
+                (int)Clay_GetMaxElementCount(), clay_scroll_snap_count);
     }
     else if (error_data.errorType == CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED)
     {
+        fprintf(stderr, "clay-scroll: error text-cache max=%d snaps=%d\n", (int)Clay_GetMaxElementCount(),
+                clay_scroll_snap_count);
         needs_clay_reinit = true;
         Clay_SetMaxMeasureTextCacheWordCount(Clay_GetMaxMeasureTextCacheWordCount() * 2);
     }
@@ -251,4 +283,207 @@ bool Pico_NeedsClayReinit(void)
 void Pico_ClearClayReinit(void)
 {
     needs_clay_reinit = false;
+}
+
+static float ClampAxis(float value, float viewport, float content)
+{
+    float overflow = content - viewport;
+    float min_v = overflow > 0.0f ? -overflow : 0.0f;
+    if (value > 0.0f)
+    {
+        return 0.0f;
+    }
+    if (value < min_v)
+    {
+        return min_v;
+    }
+    return value;
+}
+
+static bool NearZero(float value)
+{
+    return value > -0.01f && value < 0.01f;
+}
+
+static void CaptureScrollId(const char *name, bool verbose)
+{
+    Clay_String label = {.length = (int32_t)strlen(name), .chars = name};
+    Clay_ElementId id = Clay_GetElementId(label);
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(id);
+    if (!data.found || !data.scrollPosition)
+    {
+        if (verbose)
+        {
+            fprintf(stderr, "clay-scroll: snapshot miss %s found=%d pos=%p\n", name, data.found ? 1 : 0,
+                    (void *)data.scrollPosition);
+        }
+        return;
+    }
+    if (data.scrollContainerDimensions.width <= 0.0f && data.scrollContainerDimensions.height <= 0.0f &&
+        data.contentDimensions.width <= 0.0f && data.contentDimensions.height <= 0.0f)
+    {
+        if (verbose)
+        {
+            fprintf(stderr, "clay-scroll: snapshot skip unmeasured %s\n", name);
+        }
+        return;
+    }
+    if (clay_scroll_snap_count >= PICO_CLAY_SCROLL_MAX)
+    {
+        if (verbose)
+        {
+            fprintf(stderr, "clay-scroll: snapshot drop %s (full)\n", name);
+        }
+        return;
+    }
+    clay_scroll_snaps[clay_scroll_snap_count].id = id.id;
+    clay_scroll_snaps[clay_scroll_snap_count].pos = *data.scrollPosition;
+    clay_scroll_snaps[clay_scroll_snap_count].name = name;
+    clay_scroll_snap_count++;
+    if (verbose)
+    {
+        fprintf(stderr,
+                "clay-scroll: snapshot %s id=%u y=%.1f x=%.1f view=%.1fx%.1f content=%.1fx%.1f\n", name,
+                (unsigned)id.id, (double)data.scrollPosition->y, (double)data.scrollPosition->x,
+                (double)data.scrollContainerDimensions.width, (double)data.scrollContainerDimensions.height,
+                (double)data.contentDimensions.width, (double)data.contentDimensions.height);
+    }
+}
+
+static void SnapshotScrollers(bool verbose, const char *reason)
+{
+    if (!Clay_GetCurrentContext())
+    {
+        if (verbose)
+        {
+            fprintf(stderr, "clay-scroll: %s skip (no clay context)\n", reason);
+        }
+        return;
+    }
+    clay_scroll_snap_count = 0;
+    if (verbose)
+    {
+        fprintf(stderr, "clay-scroll: %s begin\n", reason);
+    }
+    CaptureScrollId("ChatScroll", verbose);
+    CaptureScrollId("SubagentChatScroll", verbose);
+    CaptureScrollId("ComposerScroll", verbose);
+    CaptureScrollId("AskUserTextScroll", verbose);
+    CaptureScrollId("PromptModalScroll", verbose);
+    CaptureScrollId("TodoListScroll", verbose);
+    CaptureScrollId("ExtModalScroll", verbose);
+    CaptureScrollId("DiffScroll", verbose);
+    CaptureScrollId("FooterMenuScroll", verbose);
+    CaptureScrollId("AskModalScroll", verbose);
+    if (verbose)
+    {
+        fprintf(stderr, "clay-scroll: %s done count=%d\n", reason, clay_scroll_snap_count);
+    }
+}
+
+void Pico_RememberClayScroll(void)
+{
+    SnapshotScrollers(false, "remember");
+}
+
+void Pico_CaptureClayScroll(void)
+{
+    clay_scroll_restore_pending = true;
+    if (clay_scroll_snap_count > 0)
+    {
+        fprintf(stderr, "clay-scroll: capture skip (already %d snaps) restore_pending=1\n",
+                clay_scroll_snap_count);
+        return;
+    }
+    SnapshotScrollers(true, "capture");
+}
+
+bool Pico_RestoreClayScroll(void)
+{
+    if (!clay_scroll_restore_pending)
+    {
+        return false;
+    }
+    if (clay_scroll_snap_count <= 0)
+    {
+        clay_scroll_restore_pending = false;
+        return false;
+    }
+    if (needs_clay_reinit)
+    {
+        fprintf(stderr, "clay-scroll: restore defer (reinit pending) count=%d\n", clay_scroll_snap_count);
+        return false;
+    }
+    fprintf(stderr, "clay-scroll: restore begin count=%d\n", clay_scroll_snap_count);
+    int applied = 0;
+    int skipped = 0;
+    bool changed = false;
+    for (int i = 0; i < clay_scroll_snap_count; i++)
+    {
+        const char *name = clay_scroll_snaps[i].name ? clay_scroll_snaps[i].name : "?";
+        Clay_ScrollContainerData data =
+            Clay_GetScrollContainerData((Clay_ElementId){.id = clay_scroll_snaps[i].id});
+        if (!data.found || !data.scrollPosition)
+        {
+            fprintf(stderr, "clay-scroll: restore miss %s found=%d pos=%p saved_y=%.1f\n", name,
+                    data.found ? 1 : 0, (void *)data.scrollPosition, (double)clay_scroll_snaps[i].pos.y);
+            skipped++;
+            continue;
+        }
+        if (data.contentDimensions.width <= 0.0f && data.contentDimensions.height <= 0.0f)
+        {
+            fprintf(stderr, "clay-scroll: restore unmeasured %s y=%.1f saved_y=%.1f\n", name,
+                    (double)data.scrollPosition->y, (double)clay_scroll_snaps[i].pos.y);
+            skipped++;
+            continue;
+        }
+        Clay_Vector2 want = clay_scroll_snaps[i].pos;
+        want.x = ClampAxis(want.x, data.scrollContainerDimensions.width, data.contentDimensions.width);
+        want.y = ClampAxis(want.y, data.scrollContainerDimensions.height, data.contentDimensions.height);
+        if (NearZero(want.y) && NearZero(want.x) &&
+            (!NearZero(data.scrollPosition->x) || !NearZero(data.scrollPosition->y)))
+        {
+            fprintf(stderr, "clay-scroll: restore keep %s current_y=%.1f (saved was 0)\n", name,
+                    (double)data.scrollPosition->y);
+            skipped++;
+            continue;
+        }
+        applied++;
+        float before_y = data.scrollPosition->y;
+        float dx = want.x - data.scrollPosition->x;
+        float dy = want.y - data.scrollPosition->y;
+        if (dx < 0.0f)
+        {
+            dx = -dx;
+        }
+        if (dy < 0.0f)
+        {
+            dy = -dy;
+        }
+        bool wrote = false;
+        if (dx > 0.01f || dy > 0.01f)
+        {
+            *data.scrollPosition = want;
+            changed = true;
+            wrote = true;
+        }
+        fprintf(stderr,
+                "clay-scroll: restore %s y %.1f -> %.1f (saved=%.1f clamped=%.1f) view_h=%.1f "
+                "content_h=%.1f wrote=%d\n",
+                name, (double)before_y, (double)data.scrollPosition->y, (double)clay_scroll_snaps[i].pos.y,
+                (double)want.y, (double)data.scrollContainerDimensions.height,
+                (double)data.contentDimensions.height, wrote ? 1 : 0);
+    }
+    if (applied > 0)
+    {
+        fprintf(stderr, "clay-scroll: restore consumed snaps applied=%d skipped=%d changed=%d\n", applied,
+                skipped, changed ? 1 : 0);
+        clay_scroll_snap_count = 0;
+        clay_scroll_restore_pending = false;
+    }
+    else
+    {
+        fprintf(stderr, "clay-scroll: restore keep snaps applied=0 skipped=%d\n", skipped);
+    }
+    return changed;
 }

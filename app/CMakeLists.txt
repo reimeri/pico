@@ -390,6 +390,20 @@ if(BUILD_TESTING)
     target_link_options(pico_settings_agent_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_settings_agent_tests COMMAND pico_settings_agent_tests)
 
+    add_executable(pico_clay_capacity_tests
+        tests/clay_capacity_test.c
+        tests/clay_impl.c
+        theme.c)
+    target_include_directories(pico_clay_capacity_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_clay_capacity_tests)
+    target_compile_options(pico_clay_capacity_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_clay_capacity_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_clay_capacity_tests COMMAND pico_clay_capacity_tests)
+
     add_executable(pico_font_scale_tests
         tests/font_scale_test.c
         settings.c

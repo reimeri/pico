@@ -99,6 +99,10 @@ static bool IsPathByte(unsigned char c)
 
 static const PicoCompleter *FindCompleter(const PicoHost *app, char trigger, bool bol)
 {
+    if (!app)
+    {
+        return NULL;
+    }
     for (int i = 0; i < app->completer_count; i++)
     {
         if (app->completers[i].trigger == trigger && app->completers[i].bol_only == bol)
@@ -106,11 +110,32 @@ static const PicoCompleter *FindCompleter(const PicoHost *app, char trigger, boo
             return &app->completers[i];
         }
     }
+    const PicoWorkspace *ws = PicoHost_SelectedWorkspaceConst(app);
+    if (ws)
+    {
+        for (int i = 0; i < ws->completer_count; i++)
+        {
+            if (ws->completers[i].trigger == trigger && ws->completers[i].bol_only == bol)
+            {
+                return &ws->completers[i];
+            }
+        }
+    }
     for (int i = 0; i < app->completer_count; i++)
     {
         if (app->completers[i].trigger == trigger)
         {
             return &app->completers[i];
+        }
+    }
+    if (ws)
+    {
+        for (int i = 0; i < ws->completer_count; i++)
+        {
+            if (ws->completers[i].trigger == trigger)
+            {
+                return &ws->completers[i];
+            }
         }
     }
     return NULL;
@@ -316,6 +341,11 @@ static void Accept(PicoHost *app)
     int end = g_complete.token_end;
     ScanToken(app, &start, &end, &comp);
     if (comp && comp->host_accept && comp->host_accept(app, item, comp->state))
+    {
+        PicoComplete_Refresh(app);
+        return;
+    }
+    if (comp && comp->workspace_accept && comp->workspace && comp->workspace_accept(comp->workspace, item, comp->state))
     {
         PicoComplete_Refresh(app);
         return;

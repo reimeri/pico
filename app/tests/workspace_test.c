@@ -66,7 +66,9 @@ static int TestManagerProfileRegistry(void)
     PicoAgentId close_id = 0;
     close_contract = close_contract &&
                      pico_agent_create(&app, &close_options, &close_id) == PICO_AGENT_RESULT_OK;
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, PicoHost_PrimaryWorkspace(&app));
     pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_ON_AGENT_DESTROY, InspectClosedAgent);
+    PicoHost_PublishRegistration(&app, NULL);
     g_close_hook_saw_removed = false;
     close_contract = close_contract && pico_agent_close(&app, close_id) == PICO_AGENT_RESULT_OK &&
                      g_close_hook_saw_removed;
@@ -381,7 +383,9 @@ static int TestLoginRoutesToSnapshottedAgent(void)
     g_login_seen = 0;
     app.auths[0] = (PicoAuth){.provider = "testauth", .login = FakeLogin};
     app.auth_count = 1;
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, PicoHost_PrimaryWorkspace(&app));
     pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_BEFORE_SUBMIT, LoginOnSubmit);
+    PicoHost_PublishRegistration(&app, NULL);
     app.composer.text = JsonDup("/login testauth");
     app.composer.length = (int)strlen(app.composer.text);
     app.composer.capacity = app.composer.length + 1;

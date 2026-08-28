@@ -430,19 +430,21 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
     }
 }
 
-static void TodoAfterLayout(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+static void TodoHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    TodoState *s = (TodoState *)state;
-    if (!s)
+    (void)state;
+    if (!app)
     {
-        s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
+        return;
     }
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
+    TodoState *s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
     if (!s)
     {
         return;
     }
-    PicoHost *app = workspace ? workspace->host : NULL;
-    TodoAgentState *todos = FindState(s, event ? event->agent_id : 0, false);
+    PicoAgentId agent_id = event && event->agent_id ? event->agent_id : pico_agent_active(app);
+    TodoAgentState *todos = FindState(s, agent_id, false);
     Clay_ElementData composer = Clay_GetElementData(CLAY_ID("Composer"));
     if (composer.found)
     {
@@ -522,6 +524,13 @@ static void TodoWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
     }
 }
 
+static int TodoHostInit(PicoHost *app, void **state_out)
+{
+    (void)state_out;
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, TodoHostAfterLayout);
+    return 0;
+}
+
 static int TodoWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     TodoState *s = (TodoState *)calloc(1, sizeof(TodoState));
@@ -544,7 +553,6 @@ static int TodoWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     pico_add_context_hook(workspace, TodoContext);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_SESSION_RESET, TodoReset);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_AGENT_DESTROY, TodoReset);
-    pico_workspace_add_hook(workspace, PICO_HOOK_AFTER_LAYOUT, TodoAfterLayout);
     pico_workspace_add_view(workspace, PICO_SLOT_OVERLAY, 5, TodoRender);
     return 0;
 }
@@ -573,6 +581,7 @@ PicoExt pico_ext_todo(void)
         .abi = PICO_EXT_ABI,
         .name = "todos",
         .description = "Agent TODO tracking",
+        .host_init = TodoHostInit,
         .workspace_init = TodoWorkspaceInit,
         .workspace_shutdown = TodoWorkspaceShutdown,
         .workspace_on_frame = TodoWorkspaceOnFrame,

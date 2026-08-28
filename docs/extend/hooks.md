@@ -2,13 +2,14 @@
 
 Four families:
 
-- **Notifications** — `pico_host_add_hook` / `pico_workspace_add_hook`. Main thread, with a `PicoHookEvent` target.
-- **Tool interceptors** — `pico_add_tool_before_hook` and `pico_add_tool_after_hook`.
-- **LLM/request context** — `pico_add_llm_hook` and `pico_add_context_hook`, with a target agent ID.
-- **Tool-row clicks** — `pico_add_tool_row_hook`. Main thread, when a chat tool row is activated.
+- **Notifications** — `pico_host_add_hook` (host scope) and `pico_workspace_add_hook` (workspace scope). Main thread, with a `PicoHookEvent` target.
+- **Tool interceptors** — `pico_add_tool_before_hook` and `pico_add_tool_after_hook` (workspace scope).
+- **LLM/request context** — `pico_add_llm_hook` and `pico_add_context_hook` (workspace scope), with a target agent ID.
+- **Tool-row clicks** — `pico_add_tool_row_hook` (workspace scope). Main thread, when a chat tool row is activated.
 
 ```c
-pico_host_add_hook(host, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
+pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, MyAfterLayout);
+pico_workspace_add_hook(workspace, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
 pico_add_tool_before_hook(workspace, MyBeforeTool);
 pico_add_tool_after_hook(workspace, MyAfterTool);
 pico_add_llm_hook(workspace, MyBeforeLlm);
@@ -19,19 +20,31 @@ Callbacks run in registration order. Each family has its corresponding `PICO_MAX
 ## Notifications
 
 ```c
-static void MyHook(PicoHost *host, const PicoHookEvent *event, void *state)
+static void MyHostHook(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)host;
+    (void)event;
+    (void)state;
+}
+
+static void MyWorkspaceHook(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
     PicoAgentId target = event->agent_id;
-    (void)host;
+    (void)workspace;
     (void)state;
 }
 ```
 
-All notifications run on the main thread. Agent-scoped notifications carry the affected ID; layout/render and submit hooks carry the active ID.
+All notifications run on the main thread.
 
+### Host Notification Hooks (`pico_host_add_hook`)
+Registered during `host_init`. Only valid for app-global UI hooks:
 - `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. App-global UI work; target is active agent.
 - `PICO_HOOK_AFTER_RENDER` — after `Clay_Raylib_Render`. App-global UI work; target is active agent.
-- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the global composer submit for the active agent.
+
+### Workspace Notification Hooks (`pico_workspace_add_hook`)
+Registered during `workspace_init`. Valid for agent lifecycle hooks:
+- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the composer submit for the active agent.
 - `PICO_HOOK_ON_SUBMIT` — the target user message was logged and its turn started.
 - `PICO_HOOK_ON_MESSAGE` — a message was added to the target transcript.
 - `PICO_HOOK_ON_COMPACT` — target compaction is starting.

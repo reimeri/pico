@@ -1844,7 +1844,7 @@ static void AskUserLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEv
     }
 }
 
-static int AskUserInit(PicoHost *app, void **state_out)
+static int AskUserHostInit(PicoHost *app, void **state_out)
 {
     AskUiState *s = (AskUiState *)calloc(1, sizeof(AskUiState));
     if (!s)
@@ -1859,20 +1859,13 @@ static int AskUserInit(PicoHost *app, void **state_out)
         *state_out = s;
     }
     s_active_ask_state = s;
-    pico_add_tool(PicoHost_PrimaryWorkspace(app), "ask_user",
-                  "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
-                  "in one call. Use kind 'select' with options for a single choice; select questions always include a "
-                  "required free-form Other choice. Use kind 'text' for a free-form answer. "
-                  "Results are returned as an ordered answers array keyed by question id.",
-                  kAskUserParams, AskUserRun, NULL);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(app), AskUserLlm);
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
     pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, AskUserDrawOverlay);
     return 0;
 }
 
-static void AskUserShutdown(PicoHost *app, void *state)
+static void AskUserHostShutdown(PicoHost *app, void *state)
 {
     (void)app;
     AskUiState *s = (AskUiState *)state;
@@ -1887,14 +1880,28 @@ static void AskUserShutdown(PicoHost *app, void *state)
     s_active_ask_state = NULL;
 }
 
+static int AskUserWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)state_out;
+    pico_add_tool(workspace, "ask_user",
+                  "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
+                  "in one call. Use kind 'select' with options for a single choice; select questions always include a "
+                  "required free-form Other choice. Use kind 'text' for a free-form answer. "
+                  "Results are returned as an ordered answers array keyed by question id.",
+                  kAskUserParams, AskUserRun, NULL);
+    pico_add_llm_hook(workspace, AskUserLlm);
+    return 0;
+}
+
 PicoExt pico_ext_ask_user(void)
 {
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "ask-user",
         .description = "Multi-step required select and free-form clarifying questions",
-        .host_init = AskUserInit,
-        .host_shutdown = AskUserShutdown,
+        .host_init = AskUserHostInit,
+        .host_shutdown = AskUserHostShutdown,
         .host_on_frame = AskUserOnFrame,
+        .workspace_init = AskUserWorkspaceInit,
     };
 }

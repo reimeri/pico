@@ -95,8 +95,9 @@ static bool FoldContains(const char *s, const char *needle)
     return false;
 }
 
-static void CmdModel(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdModel(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
     (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
@@ -104,18 +105,25 @@ static void CmdModel(PicoHost *app, PicoAgentId agent_id, const char *args, void
     }
     if (!args || !args[0])
     {
-        PicoComposer_SetText(app, "/model ");
-        app->submit_cancel = true;
-        PicoComplete_Refresh(app);
+        if (app)
+        {
+            PicoComposer_SetText(app, "/model ");
+            app->submit_cancel = true;
+            PicoComplete_Refresh(app);
+        }
         return;
     }
-    PicoSettings_SetModel(PicoHost_FindAgent(app, agent_id), args);
+    PicoSettings_SetModel(PicoWorkspace_FindAgent(workspace, agent_id), args);
     ClearComposer(app);
-    app->submit_cancel = true;
+    if (app)
+    {
+        app->submit_cancel = true;
+    }
 }
 
-static void CmdEffort(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdEffort(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
     (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
@@ -123,23 +131,33 @@ static void CmdEffort(PicoHost *app, PicoAgentId agent_id, const char *args, voi
     }
     if (!args || !args[0])
     {
-        PicoComposer_SetText(app, "/effort ");
-        app->submit_cancel = true;
-        PicoComplete_Refresh(app);
+        if (app)
+        {
+            PicoComposer_SetText(app, "/effort ");
+            app->submit_cancel = true;
+            PicoComplete_Refresh(app);
+        }
         return;
     }
-    PicoSettings_SetEffort(PicoHost_FindAgent(app, agent_id), args);
+    PicoSettings_SetEffort(PicoWorkspace_FindAgent(workspace, agent_id), args);
     ClearComposer(app);
-    app->submit_cancel = true;
+    if (app)
+    {
+        app->submit_cancel = true;
+    }
 }
 
-static void CmdCompact(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdCompact(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
     (void)state;
     (void)args;
-    PicoAgent_Compact(app, PicoHost_FindAgent(app, agent_id));
+    PicoAgent_Compact(app, PicoWorkspace_FindAgent(workspace, agent_id));
     ClearComposer(app);
-    app->submit_cancel = true;
+    if (app)
+    {
+        app->submit_cancel = true;
+    }
 }
 
 static void RelAge(char *out, size_t cap, time_t mtime)
@@ -168,25 +186,35 @@ static void RelAge(char *out, size_t cap, time_t mtime)
     }
 }
 
-static void CmdNew(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdNew(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    PicoAgent *agent = PicoWorkspace_FindAgent(workspace, agent_id);
     (void)state;
     (void)args;
-    if (PicoAgent_IsBusy(PicoHost_FindAgent(app, agent_id)))
+    if (PicoAgent_IsBusy(agent))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before starting a new session.");
         ClearComposer(app);
-        app->submit_cancel = true;
+        if (app)
+        {
+            app->submit_cancel = true;
+        }
         return;
     }
-    PicoSession_Reset(app, PicoHost_FindAgent(app, agent_id));
+    PicoSession_Reset(app, agent);
     PicoOverlay_Notify(app, "New session.");
     ClearComposer(app);
-    app->submit_cancel = true;
+    if (app)
+    {
+        app->submit_cancel = true;
+    }
 }
 
-static void CmdResume(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdResume(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    PicoAgent *agent = PicoWorkspace_FindAgent(workspace, agent_id);
     (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
@@ -194,16 +222,22 @@ static void CmdResume(PicoHost *app, PicoAgentId agent_id, const char *args, voi
     }
     if (!args || !args[0])
     {
-        PicoComposer_SetText(app, "/resume ");
-        app->submit_cancel = true;
-        PicoComplete_Refresh(app);
+        if (app)
+        {
+            PicoComposer_SetText(app, "/resume ");
+            app->submit_cancel = true;
+            PicoComplete_Refresh(app);
+        }
         return;
     }
-    if (PicoAgent_IsBusy(PicoHost_FindAgent(app, agent_id)))
+    if (PicoAgent_IsBusy(agent))
     {
         Note(app, agent_id, "Wait until the agent is idle before resuming a session.");
         ClearComposer(app);
-        app->submit_cancel = true;
+        if (app)
+        {
+            app->submit_cancel = true;
+        }
         return;
     }
     PicoAgentResult result = PicoWorkspace_Resume(app, agent_id, args, true);
@@ -216,11 +250,17 @@ static void CmdResume(PicoHost *app, PicoAgentId agent_id, const char *args, voi
                      : "Unknown session `%s`. Try `/resume`.", args);
         Note(app, agent_id, line);
         ClearComposer(app);
-        app->submit_cancel = true;
+        if (app)
+        {
+            app->submit_cancel = true;
+        }
         return;
     }
     ClearComposer(app);
-    app->submit_cancel = true;
+    if (app)
+    {
+        app->submit_cancel = true;
+    }
 }
 
 static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
@@ -289,6 +329,12 @@ static void CmdHelp(PicoHost *app, PicoAgentId agent_id, const char *args, void 
     {
         n += (size_t)snprintf(buf + n, sizeof(buf) - n, "`/%s` — %s\n", app->commands[i].name,
                               app->commands[i].help ? app->commands[i].help : "");
+    }
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    for (int i = 0; ws && i < ws->command_count && n + 8 < sizeof(buf); i++)
+    {
+        n += (size_t)snprintf(buf + n, sizeof(buf) - n, "`/%s` — %s\n", ws->commands[i].name,
+                              ws->commands[i].help ? ws->commands[i].help : "");
     }
     Note(app, agent_id, buf);
     ClearComposer(app);
@@ -498,8 +544,9 @@ static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out
     return 0;
 }
 
-static void CmdCd(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdCd(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
     (void)state;
     (void)agent_id;
     while (args && *args && isspace((unsigned char)*args))
@@ -508,15 +555,21 @@ static void CmdCd(PicoHost *app, PicoAgentId agent_id, const char *args, void *s
     }
     if (!args || !args[0])
     {
-        PicoComposer_SetText(app, "/cd ");
-        app->submit_cancel = true;
-        PicoComplete_Refresh(app);
+        if (app)
+        {
+            PicoComposer_SetText(app, "/cd ");
+            app->submit_cancel = true;
+            PicoComplete_Refresh(app);
+        }
         return;
     }
 
-    PicoHost_ChangeWorkspace(app, args);
-    ClearComposer(app);
-    app->submit_cancel = true;
+    if (app)
+    {
+        PicoHost_ChangeWorkspace(app, args);
+        ClearComposer(app);
+        app->submit_cancel = true;
+    }
 }
 
 static int CdQuery(PicoHost *app, const char *rest, PicoCompleteItem *out, int max, void *state)
@@ -632,6 +685,17 @@ static const PicoCommand *FindCommand(PicoHost *app, const char *name)
         if (FoldEq(app->commands[i].name, name))
         {
             return &app->commands[i];
+        }
+    }
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (ws)
+    {
+        for (int i = 0; i < ws->command_count; i++)
+        {
+            if (FoldEq(ws->commands[i].name, name))
+            {
+                return &ws->commands[i];
+            }
         }
     }
     return NULL;
@@ -801,6 +865,26 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
             }
             n++;
         }
+        PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+        for (int i = 0; ws && i < ws->command_count && n < max; i++)
+        {
+            if (!FoldPrefix(ws->commands[i].name, cmd) && !FoldContains(ws->commands[i].name, cmd))
+            {
+                continue;
+            }
+            snprintf(out[n].label, sizeof(out[n].label), "/%s", ws->commands[i].name);
+            snprintf(out[n].detail, sizeof(out[n].detail), "%s",
+                     ws->commands[i].help ? ws->commands[i].help : "");
+            if (NeedsArgs(ws->commands[i].name))
+            {
+                snprintf(out[n].insert, sizeof(out[n].insert), "/%s ", ws->commands[i].name);
+            }
+            else
+            {
+                snprintf(out[n].insert, sizeof(out[n].insert), "/%s", ws->commands[i].name);
+            }
+            n++;
+        }
         return n;
     }
     if (FoldEq(cmd, "model"))
@@ -933,23 +1017,29 @@ static void CommandsBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *
     }
 }
 
-static int CommandsInit(PicoHost *app, void **state_out)
+static int CommandsHostInit(PicoHost *app, void **state_out)
 {
     (void)state_out;
-    pico_host_add_command(app, "model", "Switch model", CmdModel);
-    pico_host_add_command(app, "effort", "Set reasoning effort for this model", CmdEffort);
     pico_host_add_command(app, "login", "Sign in a provider", CmdLogin);
     pico_host_add_command(app, "logout", "Sign out a provider", CmdLogout);
-    pico_host_add_command(app, "new", "Start a new session", CmdNew);
-    pico_host_add_command(app, "resume", "Resume a previous session", CmdResume);
-    pico_host_add_command(app, "cd", "Change workspace directory", CmdCd);
-    pico_host_add_command(app, "compact", "Compact the current session", CmdCompact);
     pico_host_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_host_add_command(app, "help", "List commands", CmdHelp);
     pico_host_add_command(app, "docs", "Show extension docs", CmdDocs);
     pico_host_add_command(app, "reload", "Reload extensions", CmdReload);
     pico_host_add_completer(app, '/', true, CommandQuery, NULL);
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_BEFORE_SUBMIT, CommandsBeforeSubmit);
+    return 0;
+}
+
+static int CommandsWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)state_out;
+    pico_workspace_add_command(workspace, "model", "Switch model", CmdModel);
+    pico_workspace_add_command(workspace, "effort", "Set reasoning effort for this model", CmdEffort);
+    pico_workspace_add_command(workspace, "new", "Start a new session", CmdNew);
+    pico_workspace_add_command(workspace, "resume", "Resume a previous session", CmdResume);
+    pico_workspace_add_command(workspace, "cd", "Change workspace directory", CmdCd);
+    pico_workspace_add_command(workspace, "compact", "Compact the current session", CmdCompact);
+    pico_workspace_add_hook(workspace, PICO_HOOK_BEFORE_SUBMIT, CommandsBeforeSubmit);
     return 0;
 }
 
@@ -959,6 +1049,7 @@ PicoExt pico_ext_commands(void)
         .abi = PICO_EXT_ABI,
         .name = "commands",
         .description = "Slash commands",
-        .host_init = CommandsInit,
+        .host_init = CommandsHostInit,
+        .workspace_init = CommandsWorkspaceInit,
     };
 }

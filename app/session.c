@@ -801,14 +801,19 @@ static void ApplyToolDetails(PicoHost *app, PicoAgent *agent, const char *name,
     {
         return;
     }
-    for (int i = 0; i < app->tool_count; i++)
+    PicoWorkspace *ws = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
+    if (!ws)
     {
-        PicoTool *tool = &app->tools[i];
+        return;
+    }
+    for (int i = 0; i < ws->tool_count; i++)
+    {
+        PicoTool *tool = &ws->tools[i];
         if (tool->name && strcmp(tool->name, name) == 0)
         {
             if (tool->apply)
             {
-                (void)tool->apply(PicoHost_PrimaryWorkspace(app), agent->id, details, true, tool->state);
+                (void)tool->apply(ws, agent->id, details, true, tool->state);
             }
             return;
         }

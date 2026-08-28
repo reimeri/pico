@@ -223,18 +223,29 @@ static int TestWorkspaceBuiltinsRegisterThroughWorkspaceInit(void)
         Fail("shell and subagent must initialize as workspace instances");
         return 1;
     }
-    if (shell.workspace_init(workspace, NULL) != 0 || subagent.workspace_init(workspace, NULL) != 0)
+    PicoHost_BeginRegistration(&host, PICO_REG_WORKSPACE, workspace);
+    if (shell.workspace_init(workspace, NULL) != 0)
     {
-        Fail("workspace builtin init");
+        Fail("shell workspace builtin init");
         return 1;
     }
-    for (i = 0; i < host.tool_count; i++)
+    PicoHost_PublishRegistration(&host, NULL);
+
+    PicoHost_BeginRegistration(&host, PICO_REG_WORKSPACE, workspace);
+    if (subagent.workspace_init(workspace, NULL) != 0)
     {
-        if (host.tools[i].name && strcmp(host.tools[i].name, "sh") == 0)
+        Fail("subagent workspace builtin init");
+        return 1;
+    }
+    PicoHost_PublishRegistration(&host, NULL);
+
+    for (i = 0; i < workspace->tool_count; i++)
+    {
+        if (workspace->tools[i].name && strcmp(workspace->tools[i].name, "sh") == 0)
         {
             has_sh = true;
         }
-        if (host.tools[i].name && strcmp(host.tools[i].name, "subagent") == 0)
+        if (workspace->tools[i].name && strcmp(workspace->tools[i].name, "subagent") == 0)
         {
             has_subagent = true;
         }
@@ -838,6 +849,257 @@ static int TestHostPreferencesPersistence(void)
     return 0;
 }
 
+static void DummyHostView(PicoHost *h, void *s) { (void)h; (void)s; }
+static void DummyWsView(PicoWorkspace *w, PicoAgentId a, void *s) { (void)w; (void)a; (void)s; }
+static void DummyHostHook(PicoHost *h, const PicoHookEvent *e, void *s) { (void)h; (void)e; (void)s; }
+static void DummyWsHook(PicoWorkspace *w, const PicoHookEvent *e, void *s) { (void)w; (void)e; (void)s; }
+static void DummyTool(PicoAgentContext *c, const char *a, PicoToolResult *o, void *s) { (void)c; (void)a; (void)o; (void)s; }
+static void DummyHostCmd(PicoHost *h, PicoAgentId a, const char *args, void *s) { (void)h; (void)a; (void)args; (void)s; }
+static void DummyWsCmd(PicoWorkspace *w, PicoAgentId a, const char *args, void *s) { (void)w; (void)a; (void)args; (void)s; }
+static int DummyHostQuery(PicoHost *h, const char *p, PicoCompleteItem *o, int m, void *s) { (void)h; (void)p; (void)o; (void)m; (void)s; return 0; }
+static int DummyWsQuery(PicoWorkspace *w, const char *p, PicoCompleteItem *o, int m, void *s) { (void)w; (void)p; (void)o; (void)m; (void)s; return 0; }
+static void DummyAuthLogin(PicoHost *h, PicoAgentId a, const char *args, void *s) { (void)h; (void)a; (void)args; (void)s; }
+
+static int TestScopeEnforcement(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+
+    /* 1. In Host Init scope */
+    PicoHost_BeginRegistration(&host, PICO_REG_HOST, NULL);
+
+    /* Workspace registrations must be rejected during host init */
+    if (pico_add_tool(ws, "invalid_tool", "desc", "{}", DummyTool, NULL))
+    {
+        Fail("pico_add_tool must be rejected during host init");
+        free(host.workspaces[0]);
+        return 1;
+    }
+    pico_workspace_add_view(ws, PICO_SLOT_SIDEBAR, 0, DummyWsView);
+    pico_workspace_add_empty_view(ws, PICO_EMPTY_ABOVE, 0, DummyWsView);
+    pico_workspace_add_command(ws, "invalid_cmd", "help", DummyWsCmd);
+    pico_workspace_add_completer(ws, '#', false, DummyWsQuery, NULL);
+    pico_workspace_add_hook(ws, PICO_HOOK_BEFORE_SUBMIT, DummyWsHook);
+    pico_add_tool_before_hook(ws, NULL);
+    pico_add_tool_after_hook(ws, NULL);
+    pico_add_llm_hook(ws, NULL);
+    pico_add_context_hook(ws, NULL);
+    pico_add_tool_row_hook(ws, NULL);
+
+    if (ws->tool_count > 0 || ws->view_count[PICO_SLOT_SIDEBAR] > 0 || ws->empty_view_count > 0 ||
+        ws->command_count > 0 || ws->completer_count > 0 || ws->hook_count > 0 ||
+        ws->tool_before_hook_count > 0 || ws->tool_after_hook_count > 0 || ws->llm_hook_count > 0 ||
+        ws->context_hook_count > 0 || ws->tool_row_hook_count > 0 ||
+        host.staging.ws_tool_count > 0)
+    {
+        Fail("workspace registrations during host init must not mutate workspace or staging state");
+        free(host.workspaces[0]);
+        return 1;
+    }
+    if (!host.status_warn)
+    {
+        Fail("workspace registrations during host init must generate warnings");
+        free(host.workspaces[0]);
+        return 1;
+    }
+    PicoHost_DiscardRegistration(&host);
+    free(host.status_warn);
+    host.status_warn = NULL;
+
+    /* 2. In Workspace Init scope */
+    PicoHost_BeginRegistration(&host, PICO_REG_WORKSPACE, ws);
+
+    /* Host registrations must be rejected during workspace init */
+    pico_host_add_view(&host, PICO_SLOT_SIDEBAR, 0, DummyHostView);
+    pico_host_add_command(&host, "invalid_hcmd", "help", DummyHostCmd);
+    pico_host_add_completer(&host, '#', false, DummyHostQuery, NULL);
+    pico_add_auth(&host, &(PicoAuth){.provider = "test", .login = DummyAuthLogin});
+    pico_host_add_hook(&host, PICO_HOOK_AFTER_LAYOUT, DummyHostHook);
+
+    /* Workspace cannot register AFTER_LAYOUT or AFTER_RENDER */
+    pico_workspace_add_hook(ws, PICO_HOOK_AFTER_LAYOUT, DummyWsHook);
+    pico_workspace_add_hook(ws, PICO_HOOK_AFTER_RENDER, DummyWsHook);
+
+    if (host.view_count[PICO_SLOT_SIDEBAR] > 0 || host.command_count > 0 || host.completer_count > 0 ||
+        host.auth_count > 0 || host.hook_count > 0 || host.staging.host_view_count[PICO_SLOT_SIDEBAR] > 0)
+    {
+        Fail("host registrations during workspace init must not mutate host state");
+        free(host.workspaces[0]);
+        return 1;
+    }
+    if (!host.status_warn)
+    {
+        Fail("host registrations during workspace init must generate warnings");
+        free(host.workspaces[0]);
+        return 1;
+    }
+    PicoHost_DiscardRegistration(&host);
+    free(host.status_warn);
+    host.status_warn = NULL;
+
+    /* 3. Outside of any init (PICO_REG_NONE) */
+    pico_host_add_command(&host, "unscoped_hcmd", "help", DummyHostCmd);
+    pico_workspace_add_command(ws, "unscoped_wcmd", "help", DummyWsCmd);
+    if (host.command_count > 0 || ws->command_count > 0)
+    {
+        Fail("registrations outside init must not mutate host or workspace");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    free(host.workspaces[0]);
+    return 0;
+}
+
+typedef struct RollbackState {
+    bool freed;
+} RollbackState;
+
+static int FailingWorkspaceInit(PicoWorkspace *ws, void **state_out)
+{
+    RollbackState *s = (RollbackState *)calloc(1, sizeof(RollbackState));
+    *state_out = s;
+    pico_add_tool(ws, "rollback_tool", "desc", "{}", DummyTool, NULL);
+    pico_workspace_add_command(ws, "rollback_cmd", "help", DummyWsCmd);
+    return -1;
+}
+
+static void RollbackWorkspaceShutdown(PicoWorkspace *ws, void *state)
+{
+    (void)ws;
+    RollbackState *s = (RollbackState *)state;
+    if (s)
+    {
+        s->freed = true;
+        free(s);
+    }
+}
+
+static int TestStagingRollbackOnFailedInit(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+
+    int init_tools = ws->tool_count;
+    int init_cmds = ws->command_count;
+
+    PicoExt ext = {
+        .abi = PICO_EXT_ABI,
+        .name = "failing_ext",
+        .workspace_init = FailingWorkspaceInit,
+        .workspace_shutdown = RollbackWorkspaceShutdown,
+    };
+
+    void *state = NULL;
+    PicoHost_BeginRegistration(&host, PICO_REG_WORKSPACE, ws);
+    int rc = ext.workspace_init(ws, &state);
+    if (rc != 0)
+    {
+        PicoHost_DiscardRegistration(&host);
+        if (state && ext.workspace_shutdown)
+        {
+            ext.workspace_shutdown(ws, state);
+        }
+    }
+    else
+    {
+        PicoHost_PublishRegistration(&host, state);
+    }
+
+    if (ws->tool_count != init_tools || ws->command_count != init_cmds)
+    {
+        Fail("staged registrations must be rolled back on init failure");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    free(host.workspaces[0]);
+    return 0;
+}
+
+static const char *kWorkspaceLocalWithHostExt =
+    "#include \"pico/plugin.h\"\n"
+    "#include <stdlib.h>\n"
+    "static int HostInit(PicoHost *host, void **state_out)\n"
+    "{\n"
+    "    (void)host;\n"
+    "    (void)state_out;\n"
+    "    return 0;\n"
+    "}\n"
+    "PicoExt pico_ext(void)\n"
+    "{\n"
+    "    return (PicoExt){\n"
+    "        .abi = PICO_EXT_ABI,\n"
+    "        .name = \"ws_local_bad\",\n"
+    "        .host_init = HostInit,\n"
+    "    };\n"
+    "}\n";
+
+static int TestWorkspaceLocalExtensionWithHostCallbacksRejected(void)
+{
+    char cfg[256];
+    char cache[256];
+    char ws[256];
+    char ws_ext_dir[1024];
+    char src[2048];
+    PicoHost *host = NULL;
+    PicoWorkspaceId id = 0;
+
+    snprintf(cfg, sizeof(cfg), "/tmp/pico-cfg-XXXXXX");
+    snprintf(cache, sizeof(cache), "/tmp/pico-cache-XXXXXX");
+    snprintf(ws, sizeof(ws), "/tmp/pico-ws-XXXXXX");
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(ws))
+    {
+        Fail("mkdtemp ws_local");
+        return 1;
+    }
+    snprintf(ws_ext_dir, sizeof(ws_ext_dir), "%s/.pico/extensions", ws);
+    snprintf(src, sizeof(src), "%s/bad.c", ws_ext_dir);
+    if (MkdirParents(ws_ext_dir) != 0 || WriteFile(src, kWorkspaceLocalWithHostExt) != 0)
+    {
+        Fail("write ws_local extension");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, false) != PICO_OK || !host)
+    {
+        Fail("pico_host_init ws_local");
+        return 1;
+    }
+    if (pico_workspace_open(host, ws, &id) != PICO_OK)
+    {
+        Fail("open ws_local workspace");
+        pico_host_free(host);
+        return 1;
+    }
+    PicoPlugins_Load(host);
+
+    if (!host->status_warn || !strstr(host->status_warn, "workspace-local extension cannot have host callbacks"))
+    {
+        Fail("workspace-local extension with host callbacks must be rejected with warning");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        RmRf(ws);
+        return 1;
+    }
+
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(ws);
+    return 0;
+}
+
 int main(void)
 {
     if (TestCanonicalOpenAndDuplicate() != 0)
@@ -881,6 +1143,18 @@ int main(void)
         return 1;
     }
     if (TestHostPreferencesPersistence() != 0)
+    {
+        return 1;
+    }
+    if (TestScopeEnforcement() != 0)
+    {
+        return 1;
+    }
+    if (TestStagingRollbackOnFailedInit() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspaceLocalExtensionWithHostCallbacksRejected() != 0)
     {
         return 1;
     }

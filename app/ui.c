@@ -108,24 +108,12 @@ void pico_ui_modal_reset(PicoHost *app)
     app->ui_modal_count = 0;
 }
 
-void pico_add_tool_row_hook(PicoWorkspace *workspace, PicoToolRowFn fn)
-{
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !fn || host->tool_row_hook_count >= PICO_MAX_TOOL_ROW_HOOKS)
-    {
-        return;
-    }
-    host->tool_row_hooks[host->tool_row_hook_count].fn = fn;
-    host->tool_row_hook_count++;
-}
-
-bool pico_tool_row_activate(PicoHost *host, PicoAgentId agent_id, const PicoTraceLine *line)
+bool pico_tool_row_activate(PicoWorkspace *workspace, PicoAgentId agent_id, const PicoTraceLine *line)
 {
     PicoToolRowEvent ev;
     int i;
-    PicoWorkspace *workspace;
 
-    if (!host || !line || !line->is_tool)
+    if (!workspace || !line || !line->is_tool)
     {
         return false;
     }
@@ -138,14 +126,13 @@ bool pico_tool_row_activate(PicoHost *host, PicoAgentId agent_id, const PicoTrac
     ev.child_id = line->child_id;
     ev.child_session_id = line->child_session_id[0] ? line->child_session_id : NULL;
     ev.is_error = line->tool_error;
-    workspace = PicoHost_PrimaryWorkspace(host);
-    for (i = 0; i < host->tool_row_hook_count; i++)
+    for (i = 0; i < workspace->tool_row_hook_count; i++)
     {
-        if (!host->tool_row_hooks[i].fn)
+        if (!workspace->tool_row_hooks[i].fn)
         {
             continue;
         }
-        host->tool_row_hooks[i].fn(workspace, &ev, host->tool_row_hooks[i].state);
+        workspace->tool_row_hooks[i].fn(workspace, &ev, workspace->tool_row_hooks[i].state);
         if (ev.handled)
         {
             return true;

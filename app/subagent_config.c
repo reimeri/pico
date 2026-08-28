@@ -31,11 +31,11 @@ static bool ValidProfileName(const char *name)
     return strlen(name) <= 64;
 }
 
-static bool ToolRegistered(const PicoHost *app, const char *name)
+static bool ToolRegistered(const PicoWorkspace *workspace, const char *name)
 {
-    for (int i = 0; app && i < app->tool_count; i++)
+    for (int i = 0; workspace && i < workspace->tool_count; i++)
     {
-        if (app->tools[i].name && strcmp(app->tools[i].name, name) == 0)
+        if (workspace->tools[i].name && strcmp(workspace->tools[i].name, name) == 0)
         {
             return true;
         }
@@ -138,7 +138,7 @@ static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char 
                 {
                     error = "tool names must be non-empty strings shorter than 128 bytes";
                 }
-                else if (!ToolRegistered(app, tool))
+                else if (!ToolRegistered(workspace, tool))
                 {
                     error = "tools contains an unknown tool name";
                 }

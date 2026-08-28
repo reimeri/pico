@@ -17,6 +17,46 @@ enum {
     PICO_REG_WORKSPACE,
 };
 
+typedef struct PicoHostStaging {
+    /* Host staged registrations */
+    PicoSlotView host_views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int host_view_count[PICO_SLOT_COUNT];
+    PicoHookEntry host_hooks[PICO_MAX_HOOKS];
+    int host_hook_count;
+    PicoCommand host_commands[PICO_MAX_COMMANDS];
+    int host_command_count;
+    PicoCompleter host_completers[PICO_MAX_COMPLETERS];
+    int host_completer_count;
+    PicoAuth host_auths[PICO_MAX_AUTH];
+    int host_auth_count;
+
+    /* Workspace staged registrations */
+    PicoSlotView ws_views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int ws_view_count[PICO_SLOT_COUNT];
+    PicoEmptyView ws_empty_views[PICO_MAX_EMPTY_VIEWS];
+    int ws_empty_view_count;
+    PicoHookEntry ws_hooks[PICO_MAX_HOOKS];
+    int ws_hook_count;
+    PicoToolBeforeEntry ws_tool_before_hooks[PICO_MAX_TOOL_HOOKS];
+    int ws_tool_before_hook_count;
+    PicoToolAfterEntry ws_tool_after_hooks[PICO_MAX_TOOL_HOOKS];
+    int ws_tool_after_hook_count;
+    PicoLlmHookEntry ws_llm_hooks[PICO_MAX_LLM_HOOKS];
+    int ws_llm_hook_count;
+    PicoContextHookEntry ws_context_hooks[PICO_MAX_CONTEXT_HOOKS];
+    int ws_context_hook_count;
+    PicoToolRowEntry ws_tool_row_hooks[PICO_MAX_TOOL_ROW_HOOKS];
+    int ws_tool_row_hook_count;
+    PicoTool ws_tools[PICO_MAX_TOOLS];
+    int ws_tool_count;
+    PicoCommand ws_commands[PICO_MAX_COMMANDS];
+    int ws_command_count;
+    PicoCompleter ws_completers[PICO_MAX_COMPLETERS];
+    int ws_completer_count;
+    PicoProvider ws_providers[PICO_MAX_PROVIDERS];
+    int ws_provider_count;
+} PicoHostStaging;
+
 struct PicoHost {
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;
@@ -27,30 +67,14 @@ struct PicoHost {
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
-    PicoEmptyView empty_views[PICO_MAX_EMPTY_VIEWS];
-    int empty_view_count;
     PicoHookEntry hooks[PICO_MAX_HOOKS];
     int hook_count;
-    PicoToolBeforeEntry tool_before_hooks[PICO_MAX_TOOL_HOOKS];
-    int tool_before_hook_count;
-    PicoToolAfterEntry tool_after_hooks[PICO_MAX_TOOL_HOOKS];
-    int tool_after_hook_count;
-    PicoLlmHookEntry llm_hooks[PICO_MAX_LLM_HOOKS];
-    int llm_hook_count;
-    PicoContextHookEntry context_hooks[PICO_MAX_CONTEXT_HOOKS];
-    int context_hook_count;
-    PicoToolRowEntry tool_row_hooks[PICO_MAX_TOOL_ROW_HOOKS];
-    int tool_row_hook_count;
     char ui_modals[PICO_MAX_UI_MODALS][PICO_UI_MODAL_NAME];
     int ui_modal_count;
-    PicoTool tools[PICO_MAX_TOOLS];
-    int tool_count;
     PicoCommand commands[PICO_MAX_COMMANDS];
     int command_count;
     PicoCompleter completers[PICO_MAX_COMPLETERS];
     int completer_count;
-    PicoProvider providers[PICO_MAX_PROVIDERS];
-    int provider_count;
     PicoAuth auths[PICO_MAX_AUTH];
     int auth_count;
     struct PicoAuthStore *auth_store;
@@ -88,19 +112,7 @@ struct PicoHost {
     int reg_scope;
     PicoWorkspace *reg_workspace;
     void *reg_state;
-    int staged_view_count[PICO_SLOT_COUNT];
-    int staged_empty_view_count;
-    int staged_hook_count;
-    int staged_tool_before_hook_count;
-    int staged_tool_after_hook_count;
-    int staged_llm_hook_count;
-    int staged_context_hook_count;
-    int staged_tool_row_hook_count;
-    int staged_tool_count;
-    int staged_command_count;
-    int staged_completer_count;
-    int staged_provider_count;
-    int staged_auth_count;
+    PicoHostStaging staging;
 };
 
 static inline PicoWorkspace *PicoHost_PrimaryWorkspace(PicoHost *host)

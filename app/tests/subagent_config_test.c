@@ -127,7 +127,7 @@ static int TestSubagentProfileDiscovery(void)
     snprintf(ws->models[1].effort[1], sizeof(ws->models[1].effort[1]), "high");
     ws->models[1].effort_count = 2;
     snprintf(ws->models[1].default_effort, sizeof(ws->models[1].default_effort), "low");
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "sh", "shell fixture", "{}", EchoTool, NULL);
+    TestAddTool(&app, "sh", "shell fixture", "{}", EchoTool, NULL);
 
     size_t exploration_len = 0;
     size_t review_len = 0;

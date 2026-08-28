@@ -34,6 +34,18 @@ bool pico_auth_set_oauth_ctx(PicoAgentContext *ctx, const char *provider, const 
 bool pico_auth_set_active(PicoHost *app, const char *provider, const char *active);
 bool pico_auth_clear_oauth(PicoHost *app, const char *provider);
 
+enum {
+    PICO_AUTH_REFRESH_FAILED = 0,
+    PICO_AUTH_REFRESH_ALREADY_VALID = 1,
+    PICO_AUTH_REFRESH_OWNER = 2,
+};
+
+/* Coordinates worker OAuth token refresh without mutable static variables. */
+int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
+                                PicoLlmCancelFn cancel, void *user,
+                                PicoAuthEntry *auth_out);
+void pico_auth_end_refresh_ctx(PicoAgentContext *ctx, const char *provider);
+
 void PicoAuth_Load(PicoHost *app);
 void PicoAuth_Free(PicoHost *app);
 

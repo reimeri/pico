@@ -938,6 +938,13 @@ void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *nam
     return NULL;
 }
 
+void PicoChat_SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
+{
+    (void)workspace;
+    (void)event;
+    (void)state;
+}
+
 void PicoHostPreferences_Load(PicoHost *app)
 {
     (void)app;
@@ -1203,10 +1210,12 @@ void PicoPlugins_Load(PicoHost *app)
     if (app)
     {
         PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
-        if (app->provider_count == 0)
+        if (ws && ws->provider_count == 0)
         {
+            PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
             pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
             pico_add_tool(ws, "ask_test", "test", "{}", AskTool, NULL);
+            PicoHost_PublishRegistration(app, NULL);
         }
     }
     if (app && app->reload_queued)
@@ -1494,8 +1503,10 @@ static void InitApp(PicoHost *app)
     }
     app->workspaces[0] = workspace;
     app->workspace_count = 1;
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, workspace);
     pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
     pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL);
+    PicoHost_PublishRegistration(app, NULL);
     PicoAgentCreateOptions options = {
         .kind = PICO_AGENT_MAIN,
         .session_start = PICO_SESSION_NONE,
@@ -1503,6 +1514,79 @@ static void InitApp(PicoHost *app)
     };
     PicoAgentId id = 0;
     (void)pico_agent_create(app, &options, &id);
+}
+
+static void InitExt(PicoHost *app, PicoWorkspace *ws, PicoExt ext, void **host_state, void **ws_state)
+{
+    if (ext.host_init)
+    {
+        PicoHost_BeginRegistration(app, PICO_REG_HOST, NULL);
+        ext.host_init(app, host_state);
+        PicoHost_PublishRegistration(app, host_state ? *host_state : NULL);
+    }
+    if (ext.workspace_init && ws)
+    {
+        PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+        ext.workspace_init(ws, ws_state);
+        PicoHost_PublishRegistration(app, ws_state ? *ws_state : NULL);
+    }
+}
+
+static void TestAddToolBeforeHook(PicoHost *app, PicoToolBeforeFn fn)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    pico_add_tool_before_hook(ws, fn);
+    PicoHost_PublishRegistration(app, NULL);
+}
+
+static void TestAddToolAfterHook(PicoHost *app, PicoToolAfterFn fn)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    pico_add_tool_after_hook(ws, fn);
+    PicoHost_PublishRegistration(app, NULL);
+}
+
+static void TestAddLlmHook(PicoHost *app, PicoLlmHookFn fn)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    pico_add_llm_hook(ws, fn);
+    PicoHost_PublishRegistration(app, NULL);
+}
+
+static void TestAddContextHook(PicoHost *app, PicoContextHookFn fn)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    pico_add_context_hook(ws, fn);
+    PicoHost_PublishRegistration(app, NULL);
+}
+
+static void TestAddHook(PicoHost *app, PicoHook hook, PicoWorkspaceHookFn fn)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    pico_workspace_add_hook(ws, hook, fn);
+    PicoHost_PublishRegistration(app, NULL);
+}
+
+static bool TestAddTool(PicoHost *app, const char *name, const char *description, const char *params_json, PicoToolFn run, PicoToolApplyFn apply)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    bool ok = pico_add_tool(ws, name, description, params_json, run, apply);
+    PicoHost_PublishRegistration(app, NULL);
+    return ok;
+}
+
+static void TestAddProvider(PicoHost *app, const PicoProvider *provider)
+{
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
+    pico_add_provider(ws, provider);
+    PicoHost_PublishRegistration(app, NULL);
 }
 
 static bool WaitForPending(PicoHost *app, uint64_t different_from, PicoToolAsk *out)
@@ -1722,27 +1806,30 @@ static int TestToolSchemaValidation(void)
     PicoHost app;
     memset(&app, 0, sizeof(app));
     (void)TestWs(&app);
-    bool null_schema = pico_add_tool(PicoHost_PrimaryWorkspace(&app), "null_schema", "null", NULL, EchoTool, NULL);
-    bool empty_schema = pico_add_tool(PicoHost_PrimaryWorkspace(&app), "empty_schema", "empty", "", EchoTool, NULL);
-    bool valid = pico_add_tool(PicoHost_PrimaryWorkspace(&app), "valid", "valid", "{\"type\":\"object\"}", EchoTool, NULL);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    bool null_schema = pico_add_tool(ws, "null_schema", "null", NULL, EchoTool, NULL);
+    bool empty_schema = pico_add_tool(ws, "empty_schema", "empty", "", EchoTool, NULL);
+    bool valid = pico_add_tool(ws, "valid", "valid", "{\"type\":\"object\"}", EchoTool, NULL);
     bool rejected =
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "extra", "invalid", "{\"type\":\"object\"}}", EchoTool, NULL) &&
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "literal", "invalid", "{\"type\":falsee}", EchoTool, NULL) &&
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "number", "invalid", "{\"minimum\":01}", EchoTool, NULL) &&
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "comma", "invalid", "{\"type\":\"object\",}", EchoTool, NULL) &&
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "array", "invalid", "[]", EchoTool, NULL) &&
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "multiple", "invalid", "{} {}", EchoTool, NULL) &&
-        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL);
+        !pico_add_tool(ws, "extra", "invalid", "{\"type\":\"object\"}}", EchoTool, NULL) &&
+        !pico_add_tool(ws, "literal", "invalid", "{\"type\":falsee}", EchoTool, NULL) &&
+        !pico_add_tool(ws, "number", "invalid", "{\"minimum\":01}", EchoTool, NULL) &&
+        !pico_add_tool(ws, "comma", "invalid", "{\"type\":\"object\",}", EchoTool, NULL) &&
+        !pico_add_tool(ws, "array", "invalid", "[]", EchoTool, NULL) &&
+        !pico_add_tool(ws, "multiple", "invalid", "{} {}", EchoTool, NULL) &&
+        !pico_add_tool(ws, "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL);
+    PicoHost_PublishRegistration(&app, NULL);
 
     PicoHost todo_app;
     memset(&todo_app, 0, sizeof(todo_app));
     (void)TestWs(&todo_app);
     PicoExt todo = pico_ext_todo();
     PicoWorkspace *todo_ws = PicoHost_PrimaryWorkspace(&todo_app);
-    if (todo.workspace_init) (void)todo.workspace_init(todo_ws, NULL);
-    bool todo_registered = todo_app.tool_count == 1 && todo_app.tools[0].params_json;
+    InitExt(&todo_app, todo_ws, todo, NULL, NULL);
+    bool todo_registered = todo_ws->tool_count == 1 && todo_ws->tools[0].params_json;
     if (todo.workspace_shutdown) todo.workspace_shutdown(todo_ws, NULL);
-    bool ok = null_schema && empty_schema && valid && rejected && app.tool_count == 3 && todo_registered;
+    bool ok = null_schema && empty_schema && valid && rejected && ws->tool_count == 3 && todo_registered;
     free(app.status_warn);
     free(todo_app.status_warn);
     return ok ? 0 : Fail(name, "invalid JSON Schema was accepted or builtin todo_update was unavailable");
@@ -1759,12 +1846,14 @@ static int TestToolRegistrationFailureWarns(void)
     PicoHost app;
     memset(&app, 0, sizeof(app));
     (void)TestWs(&app);
-    if (!pico_add_tool(PicoHost_PrimaryWorkspace(&app), "ok", "ok", "{}", EchoTool, NULL) || app.status_warn)
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    if (!pico_add_tool(ws, "ok", "ok", "{}", EchoTool, NULL) || app.status_warn)
     {
         free(app.status_warn);
         return Fail(name, "successful registration warned or failed");
     }
-    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "ok", "dup", "{}", EchoTool, NULL) ||
+    if (pico_add_tool(ws, "ok", "dup", "{}", EchoTool, NULL) ||
         !WarnMentions(&app, "\"ok\"", "already registered"))
     {
         free(app.status_warn);
@@ -1772,7 +1861,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "bad_schema", "invalid", "[]", EchoTool, NULL) ||
+    if (pico_add_tool(ws, "bad_schema", "invalid", "[]", EchoTool, NULL) ||
         !WarnMentions(&app, "\"bad_schema\"", "JSON object"))
     {
         free(app.status_warn);
@@ -1780,7 +1869,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "no_run", "missing", "{}", NULL, NULL) ||
+    if (pico_add_tool(ws, "no_run", "missing", "{}", NULL, NULL) ||
         !WarnMentions(&app, "\"no_run\"", "missing run function"))
     {
         free(app.status_warn);
@@ -1789,17 +1878,17 @@ static int TestToolRegistrationFailureWarns(void)
     free(app.status_warn);
     app.status_warn = NULL;
     char extra[PICO_MAX_TOOLS][16];
-    while (app.tool_count < PICO_MAX_TOOLS)
+    while (ws->tool_count + app.staging.ws_tool_count < PICO_MAX_TOOLS)
     {
-        int i = app.tool_count;
+        int i = ws->tool_count + app.staging.ws_tool_count;
         snprintf(extra[i], sizeof(extra[i]), "x%d", i);
-        if (!pico_add_tool(PicoHost_PrimaryWorkspace(&app), extra[i], "pad", "{}", EchoTool, NULL))
+        if (!pico_add_tool(ws, extra[i], "pad", "{}", EchoTool, NULL))
         {
             free(app.status_warn);
             return Fail(name, "padding tools to the limit failed");
         }
     }
-    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "overflow", "full", "{}", EchoTool, NULL) ||
+    if (pico_add_tool(ws, "overflow", "full", "{}", EchoTool, NULL) ||
         !WarnMentions(&app, "\"overflow\"", "tool limit reached"))
     {
         free(app.status_warn);
@@ -1948,7 +2037,7 @@ static int TestSubmitHookCannotRetarget(void)
         return Fail(name, "could not create a second main agent");
     }
     g_submit_retarget_id = second_id;
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_BEFORE_SUBMIT, SelectOtherOnSubmit);
+    TestAddHook(&app, PICO_HOOK_BEFORE_SUBMIT, SelectOtherOnSubmit);
     app.composer.text = JsonDup("keep this on the first agent");
     app.composer.length = (int)strlen(app.composer.text);
     app.composer.capacity = app.composer.length + 1;
@@ -1994,7 +2083,8 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create restricted agent");
     }
-    app.tool_count = 0; /* simulate the allowed tool disappearing on reload */
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    if (ws) ws->tool_count = 0; /* simulate the allowed tool disappearing on reload */
     app.composer.text = JsonDup("keep this draft");
     app.composer.length = (int)strlen(app.composer.text);
     app.composer.capacity = app.composer.length + 1;
@@ -2112,7 +2202,7 @@ static int TestShutdownTimeout(void)
     PicoHostShutdownResult shutdown = PicoHost_Shutdown(app);
     if (shutdown != PICO_HOST_SHUTDOWN_RETAINED || !PicoHost_ProcessRetired() ||
         g_plugin_shutdowns != 0 || g_auth_frees != 0 || (ws && ws->models != models) ||
-        app->tool_count != 1 || !app->tools[0].run)
+        !ws || ws->tool_count != 1 || !ws->tools[0].run)
     {
         return Fail(name, "PicoHost_Shutdown tore down worker-visible state");
     }
@@ -2186,8 +2276,8 @@ static int TestBeforeForceCancel(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), BlockingBefore);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), CountBefore);
+    TestAddToolBeforeHook(&app, BlockingBefore);
+    TestAddToolBeforeHook(&app, CountBefore);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
@@ -2234,7 +2324,7 @@ static int TestBeforeDeny(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), DenyBefore);
+    TestAddToolBeforeHook(&app, DenyBefore);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2253,7 +2343,7 @@ static int TestBeforeAskCancel(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), AskBefore);
+    TestAddToolBeforeHook(&app, AskBefore);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask))
@@ -2278,9 +2368,9 @@ static int TestBeforeRewriteArgs(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), RewriteArgsBefore);
+    TestAddToolBeforeHook(&app, RewriteArgsBefore);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2301,10 +2391,10 @@ static int TestAfterRewriteOutput(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), RewriteOutAfter);
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    TestAddToolAfterHook(&app, RewriteOutAfter);
+    TestAddToolAfterHook(&app, CaptureAfter);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2324,9 +2414,9 @@ static int TestRewriteThenDenyArgs(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), RewriteArgsBefore);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), DenyBefore);
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    TestAddToolBeforeHook(&app, RewriteArgsBefore);
+    TestAddToolBeforeHook(&app, DenyBefore);
+    TestAddToolAfterHook(&app, CaptureAfter);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2347,14 +2437,14 @@ static int TestStructuredToolDetails(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    if (!pico_add_tool(PicoHost_PrimaryWorkspace(&app), "details_test", "details", "{}", DetailsTool, ApplyDetails) ||
-        pico_add_tool(PicoHost_PrimaryWorkspace(&app), "details_test", "duplicate", "{}", DetailsTool, ApplyDetails))
+    if (!TestAddTool(&app, "details_test", "details", "{}", DetailsTool, ApplyDetails) ||
+        TestAddTool(&app, "details_test", "duplicate", "{}", DetailsTool, ApplyDetails))
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "tool name uniqueness contract failed");
     }
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "details_test");
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    TestAddToolAfterHook(&app, CaptureAfter);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2379,9 +2469,9 @@ static int TestInvalidDetailsFailClosed(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "invalid_details", "details", "{}", InvalidDetailsTool, ApplyDetails);
+    TestAddTool(&app, "invalid_details", "details", "{}", InvalidDetailsTool, ApplyDetails);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "invalid_details");
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    TestAddToolAfterHook(&app, CaptureAfter);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2402,10 +2492,10 @@ static int TestDeniedDetailsDoNotApply(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "details_test", "details", "{}", DetailsTool, ApplyDetails);
+    TestAddTool(&app, "details_test", "details", "{}", DetailsTool, ApplyDetails);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "details_test");
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), DenyBefore);
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    TestAddToolBeforeHook(&app, DenyBefore);
+    TestAddToolAfterHook(&app, CaptureAfter);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2436,8 +2526,8 @@ static int TestRequestOnlyContext(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), AddEphemeralContext);
-    pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), InspectBaseContext);
+    TestAddContextHook(&app, AddEphemeralContext);
+    TestAddContextHook(&app, InspectBaseContext);
     PicoAgent_StartTurn(&app, TestAgent(&app), "first");
     if (!WaitForIdle(&app))
     {
@@ -2483,10 +2573,10 @@ static int TestUnmappedContextFails(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    pico_add_provider(PicoHost_PrimaryWorkspace(&app), &(PicoProvider){.name = "legacy", .stream = SilentProvider});
+    TestAddProvider(&app, &(PicoProvider){.name = "legacy", .stream = SilentProvider});
     snprintf(PicoHost_PrimaryWorkspace(&app)->models[0].provider,
              sizeof(PicoHost_PrimaryWorkspace(&app)->models[0].provider), "legacy");
-    pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), AddEphemeralContext);
+    TestAddContextHook(&app, AddEphemeralContext);
     PicoAgent_StartTurn(&app, TestAgent(&app), "hello");
     if (!WaitForIdle(&app))
     {
@@ -2505,7 +2595,7 @@ static int TestLlmExtraInstructions(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraInstructions);
+    TestAddLlmHook(&app, ExtraInstructions);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2529,7 +2619,7 @@ static int TestBuildInstructionsExtraSpan(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraInstructions);
+    TestAddLlmHook(&app, ExtraInstructions);
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
     char *preview = PicoAgent_BuildInstructionsSpans(&app, TestAgent(&app), spans, &n);
@@ -2548,7 +2638,7 @@ static int TestBuildInstructionsMatchTurn(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraWhenTools);
+    TestAddLlmHook(&app, ExtraWhenTools);
     char *preview = PicoAgent_BuildInstructions(&app, TestAgent(&app));
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
@@ -2574,7 +2664,7 @@ static int TestAgentPolicyPrecedesLlmHooks(void)
     InitApp(&app);
     TestAgent(&app)->allowed_tools = (char **)calloc(1, sizeof(char *));
     TestAgent(&app)->allowed_tool_count = 0;
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraWhenTools);
+    TestAddLlmHook(&app, ExtraWhenTools);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2596,7 +2686,7 @@ static int TestLlmExcludeTool(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskTest);
+    TestAddLlmHook(&app, ExcludeAskTest);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2615,9 +2705,9 @@ static int TestHiddenToolCallIsControlled(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskTest);
-    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), CountBefore);
-    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    TestAddLlmHook(&app, ExcludeAskTest);
+    TestAddToolBeforeHook(&app, CountBefore);
+    TestAddToolAfterHook(&app, CaptureAfter);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
@@ -2639,7 +2729,10 @@ static int TestOfferedCatalogSnapshot(void)
     ResetTest(TEST_CATALOG_BLOCK, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    pico_add_tool(ws, "echo_test", "echo", "{}", EchoTool, NULL);
+    PicoHost_PublishRegistration(&app, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForBlock(&app))
@@ -2647,11 +2740,11 @@ static int TestOfferedCatalogSnapshot(void)
         PicoHost_Shutdown(&app);
         return Fail(name, "provider gate did not open");
     }
-    for (int i = 0; i < app.tool_count; i++)
+    for (int i = 0; ws && i < ws->tool_count; i++)
     {
-        if (app.tools[i].name && strcmp(app.tools[i].name, "echo_test") == 0)
+        if (ws->tools[i].name && strcmp(ws->tools[i].name, "echo_test") == 0)
         {
-            app.tools[i].run = NULL;
+            ws->tools[i].run = NULL;
         }
     }
     pthread_mutex_lock(&g_test.mu);
@@ -2704,10 +2797,10 @@ static int TestMalformedToolCalls(void)
 
 static void AddLifeHooks(PicoHost *app)
 {
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_TURN_END, LifeTurnEnd);
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_CANCEL, LifeCancel);
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_ERROR, LifeError);
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_AFTER_COMPACT, LifeAfterCompact);
+    TestAddHook(app, PICO_HOOK_ON_TURN_END, LifeTurnEnd);
+    TestAddHook(app, PICO_HOOK_ON_CANCEL, LifeCancel);
+    TestAddHook(app, PICO_HOOK_ON_ERROR, LifeError);
+    TestAddHook(app, PICO_HOOK_AFTER_COMPACT, LifeAfterCompact);
 }
 
 static int TestTurnEnd(void)
@@ -2803,7 +2896,7 @@ static int TestSessionUsageAccumulation(void)
     g_test.provider_cached_tokens = 25;
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, TestAgent(&app), "first");
     if (!WaitForIdle(&app))
@@ -2882,7 +2975,7 @@ static int TestToolTraceError(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
@@ -2957,21 +3050,21 @@ static int TestTodoAgentIsolation(void)
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoExt ext = pico_ext_todo();
     void *todo_state = NULL;
-    ext.workspace_init(ws, &todo_state);
+    InitExt(&app, ws, ext, NULL, &todo_state);
     const char *first =
         "{\"version\":1,\"task\":\"First\",\"todos\":[{\"id\":\"a\",\"text\":\"first-agent\",\"status\":\"pending\"}]}";
     const char *second =
         "{\"version\":1,\"task\":\"Second\",\"todos\":[{\"id\":\"b\",\"text\":\"second-agent\",\"status\":\"in_progress\"}]}";
-    bool ok = app.tool_count == 1 && app.tools[0].apply &&
-              app.tools[0].apply(ws, 11, first, true, todo_state) &&
-              app.tools[0].apply(ws, 22, second, true, todo_state);
+    bool ok = ws->tool_count == 1 && ws->tools[0].apply &&
+              ws->tools[0].apply(ws, 11, first, true, todo_state) &&
+              ws->tools[0].apply(ws, 22, second, true, todo_state);
 
-    PicoContextEvent one = {.tools = app.tools, .tool_count = app.tool_count};
-    PicoContextEvent two = {.tools = app.tools, .tool_count = app.tool_count};
-    app.context_hooks[0].fn(ws, 11, &one, todo_state);
-    app.context_hooks[0].fn(ws, 22, &two, todo_state);
+    PicoContextEvent one = {.tools = ws->tools, .tool_count = ws->tool_count};
+    PicoContextEvent two = {.tools = ws->tools, .tool_count = ws->tool_count};
+    ws->context_hooks[0].fn(ws, 11, &one, todo_state);
+    ws->context_hooks[0].fn(ws, 22, &two, todo_state);
     PicoContextEvent hidden = {0};
-    app.context_hooks[0].fn(ws, 22, &hidden, todo_state);
+    ws->context_hooks[0].fn(ws, 22, &hidden, todo_state);
     ok = ok && !hidden.extra_context && one.extra_context && strstr(one.extra_context, "first-agent") &&
          !strstr(one.extra_context, "second-agent") && two.extra_context &&
          strstr(two.extra_context, "second-agent") && !strstr(two.extra_context, "first-agent");
@@ -2979,17 +3072,17 @@ static int TestTodoAgentIsolation(void)
     free(two.extra_context);
 
     PicoHookEvent reset = {.hook = PICO_HOOK_ON_SESSION_RESET, .agent_id = 11};
-    for (int i = 0; i < app.hook_count; i++)
+    for (int i = 0; i < ws->hook_count; i++)
     {
-        if (app.hooks[i].hook == reset.hook)
+        if (ws->hooks[i].hook == reset.hook)
         {
-            app.hooks[i].workspace_fn(PicoHost_PrimaryWorkspace(&app), &reset, todo_state);
+            ws->hooks[i].workspace_fn(ws, &reset, todo_state);
         }
     }
-    one = (PicoContextEvent){.tools = app.tools, .tool_count = app.tool_count};
-    two = (PicoContextEvent){.tools = app.tools, .tool_count = app.tool_count};
-    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 11, &one, todo_state);
-    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 22, &two, todo_state);
+    one = (PicoContextEvent){.tools = ws->tools, .tool_count = ws->tool_count};
+    two = (PicoContextEvent){.tools = ws->tools, .tool_count = ws->tool_count};
+    ws->context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 11, &one, todo_state);
+    ws->context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 22, &two, todo_state);
     ok = ok && !one.extra_context && two.extra_context && strstr(two.extra_context, "second-agent");
     free(one.extra_context);
     free(two.extra_context);
@@ -2998,13 +3091,13 @@ static int TestTodoAgentIsolation(void)
     return ok ? 0 : Fail(name, "apply, context, or reset crossed agent boundaries");
 }
 
-static PicoTool *FindTodoTool(PicoHost *app)
+static PicoTool *FindTodoTool(PicoWorkspace *ws)
 {
-    for (int i = 0; app && i < app->tool_count; i++)
+    for (int i = 0; ws && i < ws->tool_count; i++)
     {
-        if (app->tools[i].name && strcmp(app->tools[i].name, "todo_update") == 0)
+        if (ws->tools[i].name && strcmp(ws->tools[i].name, "todo_update") == 0)
         {
-            return &app->tools[i];
+            return &ws->tools[i];
         }
     }
     return NULL;
@@ -3018,8 +3111,8 @@ static int TestTodoApplyRenamesSession(void)
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoExt ext = pico_ext_todo();
     void *todo_state = NULL;
-    ext.workspace_init(ws, &todo_state);
-    PicoTool *tool = FindTodoTool(&app);
+    InitExt(&app, ws, ext, NULL, &todo_state);
+    PicoTool *tool = FindTodoTool(ws);
     PicoAgent *agent = TestAgent(&app);
     const char *first =
         "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
@@ -3062,9 +3155,10 @@ static int TestTodoApplyRenamesSession(void)
 
 static bool AskUserRegistered(const PicoHost *app)
 {
-    return app && app->tool_count == 1 && app->tools[0].name &&
-           strcmp(app->tools[0].name, "ask_user") == 0 && app->tools[0].run &&
-           app->llm_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
+    const PicoWorkspace *ws = PicoHost_PrimaryWorkspaceConst(app);
+    return app && ws && ws->tool_count == 1 && ws->tools[0].name &&
+           strcmp(ws->tools[0].name, "ask_user") == 0 && ws->tools[0].run &&
+           ws->llm_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
            app->hook_count == 2;
 }
 
@@ -3075,11 +3169,14 @@ static int TestAskUserHiddenOmitsGuidance(void)
     PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.host_init(&app, NULL);
+    InitExt(&app, TestWs(&app), ext, NULL, NULL);
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, PicoHost_PrimaryWorkspace(&app));
     pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskUser);
+    PicoHost_PublishRegistration(&app, NULL);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
+        if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
         ext.host_shutdown(&app, NULL);
         PicoHost_Shutdown(&app);
         return Fail(name, "agent did not finish");
@@ -3088,6 +3185,7 @@ static int TestAskUserHiddenOmitsGuidance(void)
     bool ok = g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user") == NULL &&
               (!g_test.last_input || strstr(g_test.last_input, "always use ask_user") == NULL);
     pthread_mutex_unlock(&g_test.mu);
+    if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
     ext.host_shutdown(&app, NULL);
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "guidance remained after ask_user was excluded");
@@ -3098,17 +3196,19 @@ static int TestAskUserRegistrationReload(void)
     const char *name = "ask_user registration reload";
     PicoHost app;
     memset(&app, 0, sizeof(app));
-    (void)TestWs(&app);
+    PicoWorkspace *ws = TestWs(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.host_init(&app, NULL);
+    InitExt(&app, ws, ext, NULL, NULL);
     if (!AskUserRegistered(&app))
     {
+        if (ext.workspace_shutdown) ext.workspace_shutdown(ws, NULL);
         ext.host_shutdown(&app, NULL);
         return Fail(name, "builtin did not register its tool, instruction hook, and overlay");
     }
     pico_clear_registrations(&app);
-    ext.host_init(&app, NULL);
+    InitExt(&app, ws, ext, NULL, NULL);
     bool ok = AskUserRegistered(&app);
+    if (ext.workspace_shutdown) ext.workspace_shutdown(ws, NULL);
     ext.host_shutdown(&app, NULL);
     pico_clear_registrations(&app);
     return ok ? 0 : Fail(name, "builtin did not re-register cleanly after registrations were cleared");
@@ -3140,7 +3240,7 @@ static int TestAskUserToolSuccess(void)
     PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.host_init(&app, NULL);
+    InitExt(&app, TestWs(&app), ext, NULL, NULL);
     ConfigureAskUserCall();
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
 
@@ -3149,12 +3249,14 @@ static int TestAskUserToolSuccess(void)
     {
         PicoAgent_Cancel(TestAgent(&app));
         WaitForIdle(&app);
+        if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
         ext.host_shutdown(&app, NULL);
         PicoHost_Shutdown(&app);
         return Fail(name, "questionnaire request was not published unchanged");
     }
     if (!pico_tool_answer(&app, ask.id, answer) || !WaitForIdle(&app))
     {
+        if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
         ext.host_shutdown(&app, NULL);
         PicoHost_Shutdown(&app);
         return Fail(name, "answer was not delivered to the tool");
@@ -3163,6 +3265,7 @@ static int TestAskUserToolSuccess(void)
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_output && strcmp(line->tool_output, answer) == 0 && !line->tool_error &&
               g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user");
+    if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
     ext.host_shutdown(&app, NULL);
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool result or clarification guidance was not preserved");
@@ -3175,13 +3278,14 @@ static int TestAskUserToolCancellation(void)
     PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.host_init(&app, NULL);
+    InitExt(&app, TestWs(&app), ext, NULL, NULL);
     ConfigureAskUserCall();
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
 
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask))
     {
+        if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
         ext.host_shutdown(&app, NULL);
         PicoHost_Shutdown(&app);
         return Fail(name, "questionnaire request was not published");
@@ -3189,6 +3293,7 @@ static int TestAskUserToolCancellation(void)
     PicoAgent_Cancel(TestAgent(&app));
     if (!WaitForIdle(&app))
     {
+        if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
         ext.host_shutdown(&app, NULL);
         PicoHost_Shutdown(&app);
         return Fail(name, "cancelled questionnaire did not return idle");
@@ -3196,6 +3301,7 @@ static int TestAskUserToolCancellation(void)
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_error && line->tool_output &&
               strcmp(line->tool_output, "{\"error\":\"questionnaire cancelled\"}") == 0;
+    if (ext.workspace_shutdown) ext.workspace_shutdown(TestWs(&app), NULL);
     ext.host_shutdown(&app, NULL);
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "cancellation did not produce the expected tool error");
@@ -3475,7 +3581,7 @@ static int TestThinkSummaryCoalesce(void)
     g_test.emit_think_summaries = true;
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
@@ -3548,7 +3654,7 @@ static bool WaitForUi(PicoHost *app, const char *box_name, PicoUiPost *out)
 
 static void UseUiPostTool(PicoHost *app)
 {
-    pico_add_tool(PicoHost_PrimaryWorkspace(app), "ui_post", "test", "{}", UiPostTool, NULL);
+    TestAddTool(app, "ui_post", "test", "{}", UiPostTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ui_post");
 }
 

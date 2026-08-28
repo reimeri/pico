@@ -654,9 +654,15 @@ static char *RunToolAfterHooks(PicoHost *app, PicoAgentId agent_id, const char *
                                const char *details_json, bool executed, bool is_error)
 {
     char *cur = Dup(output ? output : "");
-    for (int i = 0; i < app->tool_after_hook_count; i++)
+    PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
+    PicoWorkspace *workspace = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
+    if (!workspace)
     {
-        if (!app->tool_after_hooks[i].fn)
+        return cur;
+    }
+    for (int i = 0; i < workspace->tool_after_hook_count; i++)
+    {
+        if (!workspace->tool_after_hooks[i].fn)
         {
             continue;
         }
@@ -669,7 +675,7 @@ static char *RunToolAfterHooks(PicoHost *app, PicoAgentId agent_id, const char *
         ev.details_json = details_json;
         ev.executed = executed;
         ev.is_error = is_error;
-        app->tool_after_hooks[i].fn(PicoHost_PrimaryWorkspace(app), agent_id, &ev, app->tool_after_hooks[i].state);
+        workspace->tool_after_hooks[i].fn(workspace, agent_id, &ev, workspace->tool_after_hooks[i].state);
         free(ev.args_json_out);
         if (ev.result)
         {
@@ -734,20 +740,20 @@ static void RunLlmHooks(PicoHost *app, PicoAgent *agent, bool compact, bool incl
     char *instr = Dup(base);
     PicoTool eligible[PICO_MAX_TOOLS];
     int ntools = 0;
-    for (int i = 0; i < app->tool_count && ntools < PICO_MAX_TOOLS; i++)
+    PicoWorkspace *workspace = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
+    for (int i = 0; workspace && i < workspace->tool_count && ntools < PICO_MAX_TOOLS; i++)
     {
-        if (AgentAllowsTool(agent, app->tools[i].name))
+        if (AgentAllowsTool(agent, workspace->tools[i].name))
         {
-            eligible[ntools++] = app->tools[i];
+            eligible[ntools++] = workspace->tools[i];
         }
     }
     bool exclude[PICO_MAX_TOOLS];
     memset(exclude, 0, sizeof(exclude));
     /* Filtering pass: collect exclusions so every hook sees the final catalog. */
-    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(app);
-    for (int i = 0; i < app->llm_hook_count; i++)
+    for (int i = 0; workspace && i < workspace->llm_hook_count; i++)
     {
-        if (!app->llm_hooks[i].fn)
+        if (!workspace->llm_hooks[i].fn)
         {
             continue;
         }
@@ -759,14 +765,14 @@ static void RunLlmHooks(PicoHost *app, PicoAgent *agent, bool compact, bool incl
         ev.tool_count = ntools;
         ev.exclude = include_tools ? exclude : NULL;
         ev.instructions = instr ? instr : "";
-        app->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev, app->llm_hooks[i].state);
+        workspace->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev, workspace->llm_hooks[i].state);
         free(ev.extra_instructions);
     }
     /* Instructions pass: extras go under one heading; later hooks see the section. */
     bool extras = false;
-    for (int i = 0; i < app->llm_hook_count; i++)
+    for (int i = 0; workspace && i < workspace->llm_hook_count; i++)
     {
-        if (!app->llm_hooks[i].fn)
+        if (!workspace->llm_hooks[i].fn)
         {
             continue;
         }
@@ -778,7 +784,7 @@ static void RunLlmHooks(PicoHost *app, PicoAgent *agent, bool compact, bool incl
         ev.tool_count = ntools;
         ev.exclude = include_tools ? exclude : NULL;
         ev.instructions = instr ? instr : "";
-        app->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev, app->llm_hooks[i].state);
+        workspace->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev, workspace->llm_hooks[i].state);
         if (ev.extra_instructions)
         {
             if (ev.extra_instructions[0] && !extras)
@@ -1154,10 +1160,15 @@ static void RunContextHooks(PicoHost *app, PicoAgent *agent, bool compact,
     char *extras[PICO_MAX_CONTEXT_HOOKS];
     int extra_count = 0;
     memset(extras, 0, sizeof(extras));
-
-    for (int i = 0; i < app->context_hook_count; i++)
+    PicoWorkspace *workspace = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
+    if (!workspace)
     {
-        if (!app->context_hooks[i].fn)
+        return;
+    }
+
+    for (int i = 0; i < workspace->context_hook_count; i++)
+    {
+        if (!workspace->context_hooks[i].fn)
         {
             continue;
         }
@@ -1168,8 +1179,8 @@ static void RunContextHooks(PicoHost *app, PicoAgent *agent, bool compact,
         ev.history_count = base_count;
         ev.tools = tools;
         ev.tool_count = tool_count;
-        app->context_hooks[i].fn(PicoHost_PrimaryWorkspace(app), agent ? agent->id : 0, &ev,
-                                 app->context_hooks[i].state);
+        workspace->context_hooks[i].fn(workspace, agent ? agent->id : 0, &ev,
+                                       workspace->context_hooks[i].state);
         if (ev.extra_context && ev.extra_context[0])
         {
             extras[extra_count++] = ev.extra_context;
@@ -2634,14 +2645,19 @@ bool PicoAgent_RevalidateToolPolicy(const PicoHost *app, PicoAgent *agent)
     {
         return false;
     }
+    const PicoWorkspace *ws = PicoAgent_Workspace(agent);
+    if (!ws)
+    {
+        ws = PicoHost_SelectedWorkspaceConst(app);
+    }
     bool valid = true;
-    for (int i = 0; app && agent->allowed_tools && i < agent->allowed_tool_count; i++)
+    for (int i = 0; ws && agent->allowed_tools && i < agent->allowed_tool_count; i++)
     {
         bool found = false;
-        for (int t = 0; t < app->tool_count; t++)
+        for (int t = 0; t < ws->tool_count; t++)
         {
-            if (app->tools[t].name && agent->allowed_tools[i] &&
-                strcmp(app->tools[t].name, agent->allowed_tools[i]) == 0)
+            if (ws->tools[t].name && agent->allowed_tools[i] &&
+                strcmp(ws->tools[t].name, agent->allowed_tools[i]) == 0)
             {
                 found = true;
                 break;
@@ -2737,8 +2753,15 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
     snprintf(ctx->purpose, sizeof(ctx->purpose), "%s", agent->purpose);
     ctx->safe_mode = app->safe_mode;
     ctx->auth_store = app->auth_store;
-    memcpy(rt->tool_before_hooks, app->tool_before_hooks, sizeof(rt->tool_before_hooks));
-    rt->tool_before_hook_count = app->tool_before_hook_count;
+    if (workspace)
+    {
+        memcpy(rt->tool_before_hooks, workspace->tool_before_hooks, sizeof(rt->tool_before_hooks));
+        rt->tool_before_hook_count = workspace->tool_before_hook_count;
+    }
+    else
+    {
+        rt->tool_before_hook_count = 0;
+    }
 }
 
 static PicoAgentRt *CreateRt(PicoHost *app, PicoAgent *agent)

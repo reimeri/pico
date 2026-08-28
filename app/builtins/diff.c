@@ -993,19 +993,20 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
 /* Input                                                               */
 /* ------------------------------------------------------------------ */
 
-static void DiffAfterLayout(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+static void DiffHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    DiffState *s = (DiffState *)state;
+    (void)state;
     (void)event;
-    if (!s)
+    if (!app)
     {
-        s = (DiffState *)PicoPlugins_WorkspaceState(workspace, "diff");
+        return;
     }
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
+    DiffState *s = (DiffState *)PicoPlugins_WorkspaceState(workspace, "diff");
     if (!s)
     {
         return;
     }
-    PicoHost *app = workspace ? workspace->host : NULL;
     if (s->open)
     {
         if (!pico_ui_modal_is_top(app, "diff"))
@@ -1068,6 +1069,13 @@ static void DiffWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
 /* Extension                                                           */
 /* ------------------------------------------------------------------ */
 
+static int DiffHostInit(PicoHost *host, void **state_out)
+{
+    (void)state_out;
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, DiffHostAfterLayout);
+    return 0;
+}
+
 static int DiffWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     DiffState *s = (DiffState *)calloc(1, sizeof(DiffState));
@@ -1081,7 +1089,6 @@ static int DiffWorkspaceInit(PicoWorkspace *workspace, void **state_out)
         *state_out = s;
     }
     pico_workspace_add_view(workspace, PICO_SLOT_OVERLAY, 30, DiffModalRender);
-    pico_workspace_add_hook(workspace, PICO_HOOK_AFTER_LAYOUT, DiffAfterLayout);
     StartThread(s, workspace ? workspace->path : ".");
     return 0;
 }
@@ -1107,6 +1114,7 @@ PicoExt pico_ext_diff(void)
         .abi = PICO_EXT_ABI,
         .name = "diff",
         .description = "Git working-tree changes in the footer",
+        .host_init = DiffHostInit,
         .workspace_init = DiffWorkspaceInit,
         .workspace_shutdown = DiffWorkspaceShutdown,
         .workspace_on_frame = DiffWorkspaceOnFrame,

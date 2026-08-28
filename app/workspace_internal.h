@@ -58,6 +58,9 @@ typedef struct PicoSubagentInspect {
     int message_count;
 } PicoSubagentInspect;
 
+#include "pico/app.h"
+#include "pico/plugin.h"
+
 typedef struct PicoPluginSlot {
     char name[64];
     void *state;
@@ -69,6 +72,31 @@ struct PicoWorkspace {
     char path[4096];
     PicoWorkspaceState state;
     uint64_t registration_generation;
+
+    PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int view_count[PICO_SLOT_COUNT];
+    PicoEmptyView empty_views[PICO_MAX_EMPTY_VIEWS];
+    int empty_view_count;
+    PicoHookEntry hooks[PICO_MAX_HOOKS];
+    int hook_count;
+    PicoToolBeforeEntry tool_before_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_before_hook_count;
+    PicoToolAfterEntry tool_after_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_after_hook_count;
+    PicoLlmHookEntry llm_hooks[PICO_MAX_LLM_HOOKS];
+    int llm_hook_count;
+    PicoContextHookEntry context_hooks[PICO_MAX_CONTEXT_HOOKS];
+    int context_hook_count;
+    PicoToolRowEntry tool_row_hooks[PICO_MAX_TOOL_ROW_HOOKS];
+    int tool_row_hook_count;
+    PicoTool tools[PICO_MAX_TOOLS];
+    int tool_count;
+    PicoCommand commands[PICO_MAX_COMMANDS];
+    int command_count;
+    PicoCompleter completers[PICO_MAX_COMPLETERS];
+    int completer_count;
+    PicoProvider providers[PICO_MAX_PROVIDERS];
+    int provider_count;
 
     PicoAgent *agents[PICO_MAX_AGENTS];
     int count;

@@ -372,9 +372,10 @@ static bool CopyToolPolicy(PicoHost *app, PicoAgent *agent,
             return false;
         }
         bool registered = false;
-        for (int t = 0; t < app->tool_count; t++)
+        PicoWorkspace *ws = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
+        for (int t = 0; ws && t < ws->tool_count; t++)
         {
-            if (app->tools[t].name && strcmp(app->tools[t].name, tools[i]) == 0)
+            if (ws->tools[t].name && strcmp(ws->tools[t].name, tools[i]) == 0)
             {
                 registered = true;
                 break;

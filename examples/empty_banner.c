@@ -11,10 +11,11 @@
 
 #include "clay/clay.h"
 
-static void BannerRender(PicoHost *app, void *state)
+static void BannerRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
 {
     (void)state;
-    (void)app;
+    (void)selected_agent_id;
+    (void)workspace;
     CLAY(CLAY_ID("EmptyBanner"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4}})
     {
@@ -25,10 +26,10 @@ static void BannerRender(PicoHost *app, void *state)
     }
 }
 
-static int BannerInit(PicoHost *app, void **state_out)
+static int BannerInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_host_add_empty_view(app, PICO_EMPTY_ABOVE, 0, BannerRender);
+    pico_workspace_add_empty_view(workspace, PICO_EMPTY_ABOVE, 0, BannerRender);
     return 0;
 }
 
@@ -38,6 +39,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "empty_banner",
         .description = "Banner above the empty-state cards",
-        .host_init = BannerInit,
+        .workspace_init = BannerInit,
     };
 }

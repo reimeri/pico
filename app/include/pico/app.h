@@ -482,7 +482,6 @@ void pico_host_set_agent_input(PicoHost *host, char *text);
 void pico_host_set_agent_parts(PicoHost *host, char *parts_json);
 void pico_host_add_view(PicoHost *host, PicoUiSlot slot, int z, PicoHostViewFn render);
 void pico_workspace_add_view(PicoWorkspace *workspace, PicoUiSlot slot, int z, PicoWorkspaceViewFn render);
-void pico_host_add_empty_view(PicoHost *host, PicoEmptyKind kind, int z, PicoHostViewFn render);
 void pico_workspace_add_empty_view(PicoWorkspace *workspace, PicoEmptyKind kind, int z,
                                    PicoWorkspaceViewFn render);
 void pico_host_add_hook(PicoHost *host, PicoHook hook, PicoHostHookFn fn);
@@ -518,7 +517,7 @@ bool pico_ui_latest(const PicoHost *host, const char *name, PicoUiPost *out);
 void pico_ui_clear(PicoHost *host, const char *name);
 /* Main thread. Runs tool-row hooks in registration order. Returns true when a
  * hook set handled. Strings are borrowed from `line` for this callback. */
-bool pico_tool_row_activate(PicoHost *host, PicoAgentId agent_id, const PicoTraceLine *line);
+bool pico_tool_row_activate(PicoWorkspace *workspace, PicoAgentId agent_id, const PicoTraceLine *line);
 /* Append a line to status_warn (extension-error overlay). */
 void pico_status_warn(PicoHost *host, const char *msg);
 void pico_workspace_status_warn(PicoWorkspace *workspace, const char *msg);

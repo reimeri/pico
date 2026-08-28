@@ -108,6 +108,8 @@ static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, Pic
     event->extra_instructions = JsonBuf_Steal(&b);
 }
 
+#include "builtins/chat.h"
+
 static int SubagentInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
@@ -115,6 +117,7 @@ static int SubagentInit(PicoWorkspace *workspace, void **state_out)
                   "Delegate a task synchronously to a discovered named subagent profile",
                   kSubagentParams, SubagentRun, NULL);
     pico_add_llm_hook(workspace, SubagentGuidance);
+    pico_add_tool_row_hook(workspace, PicoChat_SubagentToolRow);
     return 0;
 }
 

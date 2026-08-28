@@ -998,11 +998,12 @@ static void RenderEmptyCards(PicoHost *app)
 {
     const char *tools[PICO_MAX_TOOLS];
     int tool_n = 0;
-    for (int i = 0; i < app->tool_count && tool_n < PICO_MAX_TOOLS; i++)
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    for (int i = 0; ws && i < ws->tool_count && tool_n < PICO_MAX_TOOLS; i++)
     {
-        if (app->tools[i].name && app->tools[i].name[0])
+        if (ws->tools[i].name && ws->tools[i].name[0])
         {
-            tools[tool_n++] = app->tools[i].name;
+            tools[tool_n++] = ws->tools[i].name;
         }
     }
     const char *ctx[8];
@@ -1021,9 +1022,14 @@ static void RenderEmptyCards(PicoHost *app)
 
 static bool EmptyReplaced(PicoHost *app)
 {
-    for (int i = 0; i < app->empty_view_count; i++)
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (!ws)
     {
-        if (app->empty_views[i].kind == PICO_EMPTY_REPLACE)
+        return false;
+    }
+    for (int i = 0; i < ws->empty_view_count; i++)
+    {
+        if (ws->empty_views[i].kind == PICO_EMPTY_REPLACE)
         {
             return true;
         }
@@ -1033,22 +1039,23 @@ static bool EmptyReplaced(PicoHost *app)
 
 static void RunEmpty(PicoHost *app, PicoEmptyKind kind)
 {
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (!ws)
+    {
+        return;
+    }
     const PicoAgent *selected = PicoHost_SelectedAgentConst(app);
     PicoAgentId selected_id = selected ? selected->id : 0;
-    for (int i = 0; i < app->empty_view_count; i++)
+    for (int i = 0; i < ws->empty_view_count; i++)
     {
-        PicoEmptyView *view = &app->empty_views[i];
+        PicoEmptyView *view = &ws->empty_views[i];
         if (view->kind != kind)
         {
             continue;
         }
-        if (view->host_render)
+        if (view->workspace_render)
         {
-            view->host_render(app, view->state);
-        }
-        if (view->workspace_render && view->workspace)
-        {
-            view->workspace_render(view->workspace, selected_id, view->state);
+            view->workspace_render(ws, selected_id, view->state);
         }
     }
 }
@@ -1643,7 +1650,7 @@ static PicoTraceLine *FindToolLine(PicoHost *app, PicoAgentId agent_id, const ch
     return NULL;
 }
 
-static void SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
+void PicoChat_SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
     PicoHost *app = workspace ? workspace->host : NULL;
     s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
@@ -2025,7 +2032,8 @@ static void InspectHandlePointer(PicoHost *app)
              tool_idx == g_inspect_tool_idx && found && tool_msg < inspect.message_count)
     {
         PicoTraceLine *line = (PicoTraceLine *)&inspect.messages[tool_msg].trace[tool_idx];
-        if (line->is_tool && pico_tool_row_activate(app, inspect.live_id, line))
+        PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+        if (line->is_tool && pico_tool_row_activate(ws, inspect.live_id, line))
         {
             /* hook handled the row */
         }
@@ -2060,7 +2068,8 @@ void PicoChat_HandleToolRelease(PicoHost *app)
     {
         return;
     }
-    if (msg->trace[t].is_tool && pico_tool_row_activate(app, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (msg->trace[t].is_tool && pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
     {
         app->chat_sel.pressed_tool = false;
         return;
@@ -2172,8 +2181,9 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
             if (t >= 0 && t < msg->trace_count &&
                 HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
             {
+                PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
                 if (msg->trace[t].is_tool &&
-                    pico_tool_row_activate(app, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
+                    pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
                 {
                     /* hook handled the row */
                 }
@@ -2583,25 +2593,6 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
     }
 }
 
-static void ChatSessionReset(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
-{
-    PicoHost *app = workspace ? workspace->host : NULL;
-    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
-    if (!s_active_chat_state)
-    {
-        return;
-    }
-    PicoAgent *active = PicoHost_SelectedAgent(app);
-    if (!event || !active || event->agent_id == active->id)
-    {
-        PicoTranscriptVirtual_Free(&g_main_virtual);
-        ToolWrapCacheSet_Free(&g_main_tool_wrap);
-    }
-    PicoTranscriptVirtual_Free(&g_inspect_virtual);
-    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
-    g_virtual_relayout = false;
-}
-
 static void ChatShutdown(PicoHost *app, void *state)
 {
     (void)app;
@@ -2645,8 +2636,6 @@ static int ChatInit(PicoHost *app, void **state_out)
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 20, InspectRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoChat_HandlePointer);
     pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoChat_DrawOverlay);
-    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_SESSION_RESET, ChatSessionReset);
-    pico_add_tool_row_hook(PicoHost_PrimaryWorkspace(app), SubagentToolRow);
     return 0;
 }
 

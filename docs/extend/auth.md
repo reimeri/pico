@@ -47,6 +47,7 @@ static int MyInit(PicoHost *host, void **state_out)
 - `pico_auth_set_env_key(app, name, key)` — process-only key; not written. NULL clears.
 - `pico_auth_set_oauth(app, ...)` — main-thread access/refresh/account/expiry.
 - `pico_auth_set_oauth_ctx(ctx, ...)` — synchronized worker variant for provider token refresh.
+- `pico_auth_begin_refresh_ctx(ctx, name, &out_entry)` / `pico_auth_end_refresh_ctx(ctx, name)` — coordinate single-flight token refresh across concurrent worker threads; callers refresh only when `begin` returns true, or recheck `out_entry` when false.
 - `pico_auth_set_active(app, name, PICO_AUTH_API_KEY or PICO_AUTH_OAUTH)` — which credential to use.
 - `pico_auth_clear_oauth(app, name)` — drop stored tokens.
 

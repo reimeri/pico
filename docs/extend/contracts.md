@@ -56,7 +56,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 
 - 32 user `.c` files
 - 16 views per slot
-- 16 empty-state views (`pico_host_add_empty_view` / `pico_workspace_add_empty_view`)
+- 16 empty-state views (`pico_workspace_add_empty_view`)
 - 64 notification hooks, tool hooks, tool-row hooks, LLM hooks, context hooks, tools, commands
 - 16 named modal claims (`PICO_MAX_UI_MODALS`); names shorter than `PICO_UI_MODAL_NAME`
 - 16 named UI mailboxes (`PICO_MAX_UI_POSTS`); names shorter than `PICO_UI_MODAL_NAME`
@@ -66,7 +66,7 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PICO_TOOL_DETAILS_MAX`, `PICO_TOOL_ASK_MAX_REQUEST`, and `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB)
 - Builtin `ask_user`: 24 questions, 20 options per select question, 16 KiB per free-form answer
 
-Registrations are ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for these cases, duplicate names, and malformed/non-object `params_json` schemas, and appends a `status_warn` line naming the tool and the reason.
+Registration APIs (`pico_host_add_*`, `pico_workspace_add_*`, `pico_add_tool`, `pico_add_provider`, `pico_add_auth`, etc.) may only be called during their respective `host_init` or `workspace_init` phase; calls outside the active init scope fail and emit warnings. Registrations stage in an isolated staging area and are atomically published to the active registry only if `init` succeeds (returns 0). If `init` fails or returns non-zero, staged registrations are discarded without modifying the active registry. Registrations are also ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` additionally returns `false` for duplicate names and malformed/non-object `params_json` schemas, and appends a `status_warn` line naming the tool and the reason.
 
 ## Directories
 

@@ -1,6 +1,11 @@
 # Views
 
-Add Clay UI into a fixed slot. You cannot remove or replace builtins; you add alongside them. The empty-state (no messages yet) is the exception: `pico_host_add_empty_view` can replace it or stack panels around the builtin cards. See [Empty state](#empty-state).
+Add Clay UI into a fixed slot. You cannot remove or replace builtins; you add alongside them. The empty-state (no messages yet) is the exception: `pico_workspace_add_empty_view` can replace it or stack panels around the builtin cards. See [Empty state](#empty-state).
+
+Views are scoped:
+- **Host views** (`pico_host_add_view`) — registered in `host_init`. Callback signature: `void (*PicoHostViewFn)(PicoHost *host, void *state)`.
+- **Workspace views** (`pico_workspace_add_view`) — registered in `workspace_init`. Callback signature: `void (*PicoWorkspaceViewFn)(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)`.
+- **Empty-state views** (`pico_workspace_add_empty_view`) — registered in `workspace_init`. Callback signature: `PicoWorkspaceViewFn`.
 
 ```c
 #include "pico/plugin.h"
@@ -40,10 +45,10 @@ Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
 ## Empty state
 
-When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. Extensions register extra Clay with `pico_host_add_empty_view`, not a shell slot — the empty state is inside the chat column.
+When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. Extensions register extra Clay with `pico_workspace_add_empty_view` during `workspace_init`, not a shell slot — the empty state is inside the chat column.
 
 ```c
-pico_host_add_empty_view(host, PICO_EMPTY_ABOVE, 0, BannerRender);
+pico_workspace_add_empty_view(workspace, PICO_EMPTY_ABOVE, 0, BannerRender);
 ```
 
 Kinds:
@@ -61,9 +66,10 @@ Full file for a banner: [`../../examples/empty_banner.c`](../../examples/empty_b
 Replace the whole empty state:
 
 ```c
-static void CustomEmpty(PicoHost *host, void *state)
+static void CustomEmpty(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
 {
-    (void)host;
+    (void)workspace;
+    (void)selected_agent_id;
     (void)state;
     CLAY(CLAY_ID("MyEmpty"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -75,10 +81,10 @@ static void CustomEmpty(PicoHost *host, void *state)
     }
 }
 
-static int CustomEmptyInit(PicoHost *host, void **state_out)
+static int CustomEmptyInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_host_add_empty_view(host, PICO_EMPTY_REPLACE, 0, CustomEmpty);
+    pico_workspace_add_empty_view(workspace, PICO_EMPTY_REPLACE, 0, CustomEmpty);
     return 0;
 }
 ```

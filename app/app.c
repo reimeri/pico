@@ -133,167 +133,230 @@ uint64_t PicoHost_AllocAskId(PicoHost *host)
     return id;
 }
 
-static void SnapshotRegistrationCounts(PicoHost *host)
-{
-    if (!host)
-    {
-        return;
-    }
-    memcpy(host->staged_view_count, host->view_count, sizeof(host->view_count));
-    host->staged_empty_view_count = host->empty_view_count;
-    host->staged_hook_count = host->hook_count;
-    host->staged_tool_before_hook_count = host->tool_before_hook_count;
-    host->staged_tool_after_hook_count = host->tool_after_hook_count;
-    host->staged_llm_hook_count = host->llm_hook_count;
-    host->staged_context_hook_count = host->context_hook_count;
-    host->staged_tool_row_hook_count = host->tool_row_hook_count;
-    host->staged_tool_count = host->tool_count;
-    host->staged_command_count = host->command_count;
-    host->staged_completer_count = host->completer_count;
-    host->staged_provider_count = host->provider_count;
-    host->staged_auth_count = host->auth_count;
-}
-
 void PicoHost_BeginRegistration(PicoHost *host, int scope, PicoWorkspace *workspace)
 {
     if (!host)
     {
         return;
     }
+    memset(&host->staging, 0, sizeof(host->staging));
     host->reg_scope = scope;
     host->reg_workspace = workspace;
     host->reg_state = NULL;
-    SnapshotRegistrationCounts(host);
 }
 
-static void ApplyStateToNewRegistrations(PicoHost *host, void *state)
+static void SortSlotViewsArray(PicoSlotView *views, int count)
 {
-    int slot;
-    int i;
-    if (!host)
+    for (int i = 1; i < count; i++)
     {
-        return;
-    }
-    for (slot = 0; slot < PICO_SLOT_COUNT; slot++)
-    {
-        for (i = host->staged_view_count[slot]; i < host->view_count[slot]; i++)
+        PicoSlotView cur = views[i];
+        int j = i;
+        while (j > 0 && views[j - 1].z > cur.z)
         {
-            host->views[slot][i].state = state;
-        }
-    }
-    for (i = host->staged_empty_view_count; i < host->empty_view_count; i++)
-    {
-        host->empty_views[i].state = state;
-    }
-    for (i = host->staged_hook_count; i < host->hook_count; i++)
-    {
-        host->hooks[i].state = state;
-    }
-    for (i = host->staged_tool_before_hook_count; i < host->tool_before_hook_count; i++)
-    {
-        host->tool_before_hooks[i].state = state;
-    }
-    for (i = host->staged_tool_after_hook_count; i < host->tool_after_hook_count; i++)
-    {
-        host->tool_after_hooks[i].state = state;
-    }
-    for (i = host->staged_llm_hook_count; i < host->llm_hook_count; i++)
-    {
-        host->llm_hooks[i].state = state;
-    }
-    for (i = host->staged_context_hook_count; i < host->context_hook_count; i++)
-    {
-        host->context_hooks[i].state = state;
-    }
-    for (i = host->staged_tool_row_hook_count; i < host->tool_row_hook_count; i++)
-    {
-        host->tool_row_hooks[i].state = state;
-    }
-    for (i = host->staged_tool_count; i < host->tool_count; i++)
-    {
-        host->tools[i].state = state;
-    }
-    for (i = host->staged_command_count; i < host->command_count; i++)
-    {
-        host->commands[i].state = state;
-    }
-    for (i = host->staged_completer_count; i < host->completer_count; i++)
-    {
-        host->completers[i].state = state;
-    }
-    for (i = host->staged_provider_count; i < host->provider_count; i++)
-    {
-        host->providers[i].state = state;
-    }
-    for (i = host->staged_auth_count; i < host->auth_count; i++)
-    {
-        host->auths[i].state = state;
-    }
-}
-
-static void SortSlotViews(PicoHost *host, PicoUiSlot slot)
-{
-    int n;
-    int i;
-    int j;
-    PicoSlotView cur;
-    if (!host || slot < 0 || slot >= PICO_SLOT_COUNT)
-    {
-        return;
-    }
-    n = host->view_count[slot];
-    for (i = 1; i < n; i++)
-    {
-        cur = host->views[slot][i];
-        j = i;
-        while (j > 0 && host->views[slot][j - 1].z > cur.z)
-        {
-            host->views[slot][j] = host->views[slot][j - 1];
+            views[j] = views[j - 1];
             j--;
         }
-        host->views[slot][j] = cur;
+        views[j] = cur;
     }
 }
 
-static void SortEmptyViews(PicoHost *host)
+static void SortEmptyViewsArray(PicoEmptyView *views, int count)
 {
-    int i;
-    int j;
-    PicoEmptyView cur;
-    if (!host)
+    for (int i = 1; i < count; i++)
     {
-        return;
-    }
-    for (i = 1; i < host->empty_view_count; i++)
-    {
-        cur = host->empty_views[i];
-        j = i;
-        while (j > 0 && host->empty_views[j - 1].z > cur.z)
+        PicoEmptyView cur = views[i];
+        int j = i;
+        while (j > 0 && views[j - 1].z > cur.z)
         {
-            host->empty_views[j] = host->empty_views[j - 1];
+            views[j] = views[j - 1];
             j--;
         }
-        host->empty_views[j] = cur;
+        views[j] = cur;
     }
 }
 
 void PicoHost_PublishRegistration(PicoHost *host, void *state)
 {
-    int slot;
     if (!host)
     {
         return;
     }
-    ApplyStateToNewRegistrations(host, state);
-    for (slot = 0; slot < PICO_SLOT_COUNT; slot++)
+    if (host->reg_scope == PICO_REG_HOST)
     {
-        SortSlotViews(host, slot);
+        for (int slot = 0; slot < PICO_SLOT_COUNT; slot++)
+        {
+            for (int i = 0; i < host->staging.host_view_count[slot]; i++)
+            {
+                PicoSlotView v = host->staging.host_views[slot][i];
+                v.state = state;
+                if (host->view_count[slot] < PICO_MAX_SLOT_VIEWS)
+                {
+                    host->views[slot][host->view_count[slot]++] = v;
+                }
+            }
+            SortSlotViewsArray(host->views[slot], host->view_count[slot]);
+        }
+        for (int i = 0; i < host->staging.host_hook_count; i++)
+        {
+            PicoHookEntry h = host->staging.host_hooks[i];
+            h.state = state;
+            if (host->hook_count < PICO_MAX_HOOKS)
+            {
+                host->hooks[host->hook_count++] = h;
+            }
+        }
+        for (int i = 0; i < host->staging.host_command_count; i++)
+        {
+            PicoCommand c = host->staging.host_commands[i];
+            c.state = state;
+            if (host->command_count < PICO_MAX_COMMANDS)
+            {
+                host->commands[host->command_count++] = c;
+            }
+        }
+        for (int i = 0; i < host->staging.host_completer_count; i++)
+        {
+            PicoCompleter cmp = host->staging.host_completers[i];
+            cmp.state = state;
+            if (host->completer_count < PICO_MAX_COMPLETERS)
+            {
+                host->completers[host->completer_count++] = cmp;
+            }
+        }
+        for (int i = 0; i < host->staging.host_auth_count; i++)
+        {
+            PicoAuth a = host->staging.host_auths[i];
+            a.state = state;
+            if (host->auth_count < PICO_MAX_AUTH)
+            {
+                host->auths[host->auth_count++] = a;
+            }
+        }
     }
-    SortEmptyViews(host);
-    if (host->reg_scope == PICO_REG_WORKSPACE && host->reg_workspace)
+    else if (host->reg_scope == PICO_REG_WORKSPACE && host->reg_workspace)
     {
-        host->reg_workspace->registration_generation++;
+        PicoWorkspace *ws = host->reg_workspace;
+        for (int slot = 0; slot < PICO_SLOT_COUNT; slot++)
+        {
+            for (int i = 0; i < host->staging.ws_view_count[slot]; i++)
+            {
+                PicoSlotView v = host->staging.ws_views[slot][i];
+                v.state = state;
+                v.workspace = ws;
+                if (ws->view_count[slot] < PICO_MAX_SLOT_VIEWS)
+                {
+                    ws->views[slot][ws->view_count[slot]++] = v;
+                }
+            }
+            SortSlotViewsArray(ws->views[slot], ws->view_count[slot]);
+        }
+        for (int i = 0; i < host->staging.ws_empty_view_count; i++)
+        {
+            PicoEmptyView ev = host->staging.ws_empty_views[i];
+            ev.state = state;
+            ev.workspace = ws;
+            if (ws->empty_view_count < PICO_MAX_EMPTY_VIEWS)
+            {
+                ws->empty_views[ws->empty_view_count++] = ev;
+            }
+        }
+        SortEmptyViewsArray(ws->empty_views, ws->empty_view_count);
+        for (int i = 0; i < host->staging.ws_hook_count; i++)
+        {
+            PicoHookEntry h = host->staging.ws_hooks[i];
+            h.state = state;
+            h.workspace = ws;
+            if (ws->hook_count < PICO_MAX_HOOKS)
+            {
+                ws->hooks[ws->hook_count++] = h;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_tool_before_hook_count; i++)
+        {
+            PicoToolBeforeEntry tbh = host->staging.ws_tool_before_hooks[i];
+            tbh.state = state;
+            if (ws->tool_before_hook_count < PICO_MAX_TOOL_HOOKS)
+            {
+                ws->tool_before_hooks[ws->tool_before_hook_count++] = tbh;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_tool_after_hook_count; i++)
+        {
+            PicoToolAfterEntry tah = host->staging.ws_tool_after_hooks[i];
+            tah.state = state;
+            if (ws->tool_after_hook_count < PICO_MAX_TOOL_HOOKS)
+            {
+                ws->tool_after_hooks[ws->tool_after_hook_count++] = tah;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_llm_hook_count; i++)
+        {
+            PicoLlmHookEntry lh = host->staging.ws_llm_hooks[i];
+            lh.state = state;
+            if (ws->llm_hook_count < PICO_MAX_LLM_HOOKS)
+            {
+                ws->llm_hooks[ws->llm_hook_count++] = lh;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_context_hook_count; i++)
+        {
+            PicoContextHookEntry ch = host->staging.ws_context_hooks[i];
+            ch.state = state;
+            if (ws->context_hook_count < PICO_MAX_CONTEXT_HOOKS)
+            {
+                ws->context_hooks[ws->context_hook_count++] = ch;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_tool_row_hook_count; i++)
+        {
+            PicoToolRowEntry trh = host->staging.ws_tool_row_hooks[i];
+            trh.state = state;
+            if (ws->tool_row_hook_count < PICO_MAX_TOOL_ROW_HOOKS)
+            {
+                ws->tool_row_hooks[ws->tool_row_hook_count++] = trh;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_tool_count; i++)
+        {
+            PicoTool t = host->staging.ws_tools[i];
+            t.state = state;
+            if (ws->tool_count < PICO_MAX_TOOLS)
+            {
+                ws->tools[ws->tool_count++] = t;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_command_count; i++)
+        {
+            PicoCommand c = host->staging.ws_commands[i];
+            c.state = state;
+            c.workspace = ws;
+            if (ws->command_count < PICO_MAX_COMMANDS)
+            {
+                ws->commands[ws->command_count++] = c;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_completer_count; i++)
+        {
+            PicoCompleter cmp = host->staging.ws_completers[i];
+            cmp.state = state;
+            cmp.workspace = ws;
+            if (ws->completer_count < PICO_MAX_COMPLETERS)
+            {
+                ws->completers[ws->completer_count++] = cmp;
+            }
+        }
+        for (int i = 0; i < host->staging.ws_provider_count; i++)
+        {
+            PicoProvider p = host->staging.ws_providers[i];
+            p.state = state;
+            if (ws->provider_count < PICO_MAX_PROVIDERS)
+            {
+                ws->providers[ws->provider_count++] = p;
+            }
+        }
+        ws->registration_generation++;
     }
+    memset(&host->staging, 0, sizeof(host->staging));
     host->reg_scope = PICO_REG_NONE;
     host->reg_workspace = NULL;
     host->reg_state = NULL;
@@ -301,70 +364,14 @@ void PicoHost_PublishRegistration(PicoHost *host, void *state)
 
 void PicoHost_DiscardRegistration(PicoHost *host)
 {
-    int slot;
     if (!host)
     {
         return;
     }
-    for (slot = 0; slot < PICO_SLOT_COUNT; slot++)
-    {
-        if (host->view_count[slot] > host->staged_view_count[slot])
-        {
-            memset(&host->views[slot][host->staged_view_count[slot]], 0,
-                   sizeof(PicoSlotView) * (size_t)(host->view_count[slot] - host->staged_view_count[slot]));
-            host->view_count[slot] = host->staged_view_count[slot];
-        }
-    }
-    if (host->empty_view_count > host->staged_empty_view_count)
-    {
-        memset(&host->empty_views[host->staged_empty_view_count], 0,
-               sizeof(PicoEmptyView) * (size_t)(host->empty_view_count - host->staged_empty_view_count));
-        host->empty_view_count = host->staged_empty_view_count;
-    }
-    host->hook_count = host->staged_hook_count;
-    host->tool_before_hook_count = host->staged_tool_before_hook_count;
-    host->tool_after_hook_count = host->staged_tool_after_hook_count;
-    host->llm_hook_count = host->staged_llm_hook_count;
-    host->context_hook_count = host->staged_context_hook_count;
-    host->tool_row_hook_count = host->staged_tool_row_hook_count;
-    host->tool_count = host->staged_tool_count;
-    host->command_count = host->staged_command_count;
-    host->completer_count = host->staged_completer_count;
-    host->provider_count = host->staged_provider_count;
-    host->auth_count = host->staged_auth_count;
+    memset(&host->staging, 0, sizeof(host->staging));
     host->reg_scope = PICO_REG_NONE;
     host->reg_workspace = NULL;
     host->reg_state = NULL;
-}
-
-static void InsertSlotView(PicoHost *host, PicoUiSlot slot, int z, PicoSlotView view)
-{
-    int n;
-    int i;
-    if (!host || slot < 0 || slot >= PICO_SLOT_COUNT)
-    {
-        return;
-    }
-    n = host->view_count[slot];
-    if (n >= PICO_MAX_SLOT_VIEWS)
-    {
-        return;
-    }
-    view.z = z;
-    if (host->reg_scope != PICO_REG_NONE)
-    {
-        host->views[slot][n] = view;
-        host->view_count[slot]++;
-        return;
-    }
-    i = n;
-    while (i > 0 && host->views[slot][i - 1].z > z)
-    {
-        host->views[slot][i] = host->views[slot][i - 1];
-        i--;
-    }
-    host->views[slot][i] = view;
-    host->view_count[slot]++;
 }
 
 void pico_host_set_hovered_clickable(PicoHost *host)
@@ -408,158 +415,329 @@ void pico_host_set_agent_parts(PicoHost *host, char *parts_json)
 void pico_host_add_view(PicoHost *host, PicoUiSlot slot, int z, PicoHostViewFn render)
 {
     PicoSlotView view;
-    if (!host || !render)
+    if (!host)
     {
+        return;
+    }
+    if (host->reg_scope != PICO_REG_HOST)
+    {
+        pico_status_warn(host, "pico_host_add_view is only valid during host extension init");
+        return;
+    }
+    if (!render)
+    {
+        pico_status_warn(host, "pico_host_add_view: missing render function");
+        return;
+    }
+    if (slot < 0 || slot >= PICO_SLOT_COUNT)
+    {
+        pico_status_warn(host, "pico_host_add_view: invalid UI slot");
+        return;
+    }
+    if (host->view_count[slot] + host->staging.host_view_count[slot] >= PICO_MAX_SLOT_VIEWS)
+    {
+        pico_status_warn(host, "pico_host_add_view: slot view limit reached");
         return;
     }
     memset(&view, 0, sizeof(view));
     view.host_render = render;
-    InsertSlotView(host, slot, z, view);
+    view.z = z;
+    host->staging.host_views[slot][host->staging.host_view_count[slot]++] = view;
 }
 
 void pico_workspace_add_view(PicoWorkspace *workspace, PicoUiSlot slot, int z, PicoWorkspaceViewFn render)
 {
     PicoSlotView view;
-    if (!workspace || !workspace->host || !render)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
+        return;
+    }
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_view is only valid during workspace extension init");
+        return;
+    }
+    if (!render)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_view: missing render function");
+        return;
+    }
+    if (slot < 0 || slot >= PICO_SLOT_COUNT)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_view: invalid UI slot");
+        return;
+    }
+    if (workspace->view_count[slot] + host->staging.ws_view_count[slot] >= PICO_MAX_SLOT_VIEWS)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_view: slot view limit reached");
         return;
     }
     memset(&view, 0, sizeof(view));
     view.workspace_render = render;
     view.workspace = workspace;
-    InsertSlotView(workspace->host, slot, z, view);
-}
-
-static void InsertEmptyView(PicoHost *host, PicoEmptyKind kind, int z, PicoEmptyView view)
-{
-    int n;
-    int i;
-    if (!host)
-    {
-        return;
-    }
-    if (kind != PICO_EMPTY_ABOVE && kind != PICO_EMPTY_BELOW && kind != PICO_EMPTY_REPLACE)
-    {
-        return;
-    }
-    n = host->empty_view_count;
-    if (n >= PICO_MAX_EMPTY_VIEWS)
-    {
-        return;
-    }
-    view.kind = kind;
     view.z = z;
-    if (host->reg_scope != PICO_REG_NONE)
-    {
-        host->empty_views[n] = view;
-        host->empty_view_count++;
-        return;
-    }
-    i = n;
-    while (i > 0 && host->empty_views[i - 1].z > z)
-    {
-        host->empty_views[i] = host->empty_views[i - 1];
-        i--;
-    }
-    host->empty_views[i] = view;
-    host->empty_view_count++;
-}
-
-void pico_host_add_empty_view(PicoHost *host, PicoEmptyKind kind, int z, PicoHostViewFn render)
-{
-    PicoEmptyView view;
-    if (!host || !render)
-    {
-        return;
-    }
-    memset(&view, 0, sizeof(view));
-    view.host_render = render;
-    InsertEmptyView(host, kind, z, view);
+    host->staging.ws_views[slot][host->staging.ws_view_count[slot]++] = view;
 }
 
 void pico_workspace_add_empty_view(PicoWorkspace *workspace, PicoEmptyKind kind, int z,
                                    PicoWorkspaceViewFn render)
 {
     PicoEmptyView view;
-    if (!workspace || !workspace->host || !render)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace,
+                                   "pico_workspace_add_empty_view is only valid during workspace extension init");
+        return;
+    }
+    if (!render)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_empty_view: missing render function");
+        return;
+    }
+    if (kind != PICO_EMPTY_ABOVE && kind != PICO_EMPTY_BELOW && kind != PICO_EMPTY_REPLACE)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_empty_view: invalid empty view kind");
+        return;
+    }
+    if (workspace->empty_view_count + host->staging.ws_empty_view_count >= PICO_MAX_EMPTY_VIEWS)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_empty_view: empty view limit reached");
+        return;
+    }
     memset(&view, 0, sizeof(view));
+    view.kind = kind;
+    view.z = z;
     view.workspace_render = render;
     view.workspace = workspace;
-    InsertEmptyView(workspace->host, kind, z, view);
+    host->staging.ws_empty_views[host->staging.ws_empty_view_count++] = view;
 }
 
 void pico_host_add_hook(PicoHost *host, PicoHook hook, PicoHostHookFn fn)
 {
-    if (!host || !fn || host->hook_count >= PICO_MAX_HOOKS)
+    if (!host)
     {
         return;
     }
-    host->hooks[host->hook_count].hook = hook;
-    host->hooks[host->hook_count].host_fn = fn;
-    host->hooks[host->hook_count].workspace_fn = NULL;
-    host->hooks[host->hook_count].workspace = NULL;
-    host->hook_count++;
+    if (host->reg_scope != PICO_REG_HOST)
+    {
+        pico_status_warn(host, "pico_host_add_hook is only valid during host extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_status_warn(host, "pico_host_add_hook: missing hook function");
+        return;
+    }
+    if (hook != PICO_HOOK_AFTER_LAYOUT && hook != PICO_HOOK_AFTER_RENDER)
+    {
+        pico_status_warn(host, "pico_host_add_hook only accepts PICO_HOOK_AFTER_LAYOUT and PICO_HOOK_AFTER_RENDER");
+        return;
+    }
+    if (host->hook_count + host->staging.host_hook_count >= PICO_MAX_HOOKS)
+    {
+        pico_status_warn(host, "pico_host_add_hook: hook limit reached");
+        return;
+    }
+    PicoHookEntry h;
+    memset(&h, 0, sizeof(h));
+    h.hook = hook;
+    h.host_fn = fn;
+    host->staging.host_hooks[host->staging.host_hook_count++] = h;
 }
 
 void pico_workspace_add_hook(PicoWorkspace *workspace, PicoHook hook, PicoWorkspaceHookFn fn)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !fn || host->hook_count >= PICO_MAX_HOOKS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->hooks[host->hook_count].hook = hook;
-    host->hooks[host->hook_count].host_fn = NULL;
-    host->hooks[host->hook_count].workspace_fn = fn;
-    host->hooks[host->hook_count].workspace = workspace;
-    host->hook_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_hook is only valid during workspace extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_hook: missing hook function");
+        return;
+    }
+    if (hook == PICO_HOOK_AFTER_LAYOUT || hook == PICO_HOOK_AFTER_RENDER)
+    {
+        pico_workspace_status_warn(workspace, "workspace extensions cannot register AFTER_LAYOUT or AFTER_RENDER hooks");
+        return;
+    }
+    if (hook < 0 || hook >= PICO_HOOK_COUNT)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_hook: invalid hook enum");
+        return;
+    }
+    if (workspace->hook_count + host->staging.ws_hook_count >= PICO_MAX_HOOKS)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_hook: hook limit reached");
+        return;
+    }
+    PicoHookEntry h;
+    memset(&h, 0, sizeof(h));
+    h.hook = hook;
+    h.workspace_fn = fn;
+    h.workspace = workspace;
+    host->staging.ws_hooks[host->staging.ws_hook_count++] = h;
 }
 
 void pico_add_tool_before_hook(PicoWorkspace *workspace, PicoToolBeforeFn fn)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !fn || host->tool_before_hook_count >= PICO_MAX_TOOL_HOOKS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->tool_before_hooks[host->tool_before_hook_count].fn = fn;
-    host->tool_before_hook_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace,
+                                   "pico_add_tool_before_hook is only valid during workspace extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_before_hook: missing hook function");
+        return;
+    }
+    if (workspace->tool_before_hook_count + host->staging.ws_tool_before_hook_count >= PICO_MAX_TOOL_HOOKS)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_before_hook: hook limit reached");
+        return;
+    }
+    PicoToolBeforeEntry tbh;
+    memset(&tbh, 0, sizeof(tbh));
+    tbh.fn = fn;
+    host->staging.ws_tool_before_hooks[host->staging.ws_tool_before_hook_count++] = tbh;
 }
 
 void pico_add_tool_after_hook(PicoWorkspace *workspace, PicoToolAfterFn fn)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !fn || host->tool_after_hook_count >= PICO_MAX_TOOL_HOOKS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->tool_after_hooks[host->tool_after_hook_count].fn = fn;
-    host->tool_after_hook_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_after_hook is only valid during workspace extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_after_hook: missing hook function");
+        return;
+    }
+    if (workspace->tool_after_hook_count + host->staging.ws_tool_after_hook_count >= PICO_MAX_TOOL_HOOKS)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_after_hook: hook limit reached");
+        return;
+    }
+    PicoToolAfterEntry tah;
+    memset(&tah, 0, sizeof(tah));
+    tah.fn = fn;
+    host->staging.ws_tool_after_hooks[host->staging.ws_tool_after_hook_count++] = tah;
 }
 
 void pico_add_llm_hook(PicoWorkspace *workspace, PicoLlmHookFn fn)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !fn || host->llm_hook_count >= PICO_MAX_LLM_HOOKS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->llm_hooks[host->llm_hook_count].fn = fn;
-    host->llm_hook_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_llm_hook is only valid during workspace extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_llm_hook: missing hook function");
+        return;
+    }
+    if (workspace->llm_hook_count + host->staging.ws_llm_hook_count >= PICO_MAX_LLM_HOOKS)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_llm_hook: hook limit reached");
+        return;
+    }
+    PicoLlmHookEntry lh;
+    memset(&lh, 0, sizeof(lh));
+    lh.fn = fn;
+    host->staging.ws_llm_hooks[host->staging.ws_llm_hook_count++] = lh;
 }
 
 void pico_add_context_hook(PicoWorkspace *workspace, PicoContextHookFn fn)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !fn || host->context_hook_count >= PICO_MAX_CONTEXT_HOOKS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->context_hooks[host->context_hook_count].fn = fn;
-    host->context_hook_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_context_hook is only valid during workspace extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_context_hook: missing hook function");
+        return;
+    }
+    if (workspace->context_hook_count + host->staging.ws_context_hook_count >= PICO_MAX_CONTEXT_HOOKS)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_context_hook: hook limit reached");
+        return;
+    }
+    PicoContextHookEntry ch;
+    memset(&ch, 0, sizeof(ch));
+    ch.fn = fn;
+    host->staging.ws_context_hooks[host->staging.ws_context_hook_count++] = ch;
+}
+
+void pico_add_tool_row_hook(PicoWorkspace *workspace, PicoToolRowFn fn)
+{
+    PicoHost *host;
+    if (!workspace || !workspace->host)
+    {
+        return;
+    }
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_row_hook is only valid during workspace extension init");
+        return;
+    }
+    if (!fn)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_row_hook: missing hook function");
+        return;
+    }
+    if (workspace->tool_row_hook_count + host->staging.ws_tool_row_hook_count >= PICO_MAX_TOOL_ROW_HOOKS)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_tool_row_hook: hook limit reached");
+        return;
+    }
+    PicoToolRowEntry trh;
+    memset(&trh, 0, sizeof(trh));
+    trh.fn = fn;
+    host->staging.ws_tool_row_hooks[host->staging.ws_tool_row_hook_count++] = trh;
 }
 
 void pico_status_warn(PicoHost *host, const char *msg)
@@ -624,9 +802,15 @@ static void ToolAddFail(PicoHost *host, const char *name, const char *reason)
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
                    const char *params_json, PicoToolFn run, PicoToolApplyFn apply)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
+        return false;
+    }
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        ToolAddFail(host, name, "pico_add_tool is only valid during workspace extension init");
         return false;
     }
     if (!name || !name[0])
@@ -645,148 +829,317 @@ bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *descr
         ToolAddFail(host, name, params_err);
         return false;
     }
-    if (host->tool_count >= PICO_MAX_TOOLS)
+    if (workspace->tool_count + host->staging.ws_tool_count >= PICO_MAX_TOOLS)
     {
         char reason[64];
         snprintf(reason, sizeof(reason), "tool limit reached (%d)", PICO_MAX_TOOLS);
         ToolAddFail(host, name, reason);
         return false;
     }
-    for (int i = 0; i < host->tool_count; i++)
+    for (int i = 0; i < workspace->tool_count; i++)
     {
-        if (host->tools[i].name && strcmp(host->tools[i].name, name) == 0)
+        if (workspace->tools[i].name && strcmp(workspace->tools[i].name, name) == 0)
         {
             ToolAddFail(host, name, "already registered");
             return false;
         }
     }
-    host->tools[host->tool_count].name = name;
-    host->tools[host->tool_count].description = description;
-    host->tools[host->tool_count].params_json = params_json;
-    host->tools[host->tool_count].run = run;
-    host->tools[host->tool_count].apply = apply;
-    host->tools[host->tool_count].state = NULL;
-    host->tool_count++;
+    for (int i = 0; i < host->staging.ws_tool_count; i++)
+    {
+        if (host->staging.ws_tools[i].name && strcmp(host->staging.ws_tools[i].name, name) == 0)
+        {
+            ToolAddFail(host, name, "already registered");
+            return false;
+        }
+    }
+    PicoTool t;
+    memset(&t, 0, sizeof(t));
+    t.name = name;
+    t.description = description;
+    t.params_json = params_json;
+    t.run = run;
+    t.apply = apply;
+    host->staging.ws_tools[host->staging.ws_tool_count++] = t;
     return true;
 }
 
 void pico_host_add_command(PicoHost *host, const char *name, const char *help, PicoHostCmdFn run)
 {
-    if (!host || !name || !run || host->command_count >= PICO_MAX_COMMANDS)
+    if (!host)
     {
         return;
     }
-    host->commands[host->command_count].name = name;
-    host->commands[host->command_count].help = help;
-    host->commands[host->command_count].host_run = run;
-    host->commands[host->command_count].workspace_run = NULL;
-    host->commands[host->command_count].workspace = NULL;
-    host->command_count++;
+    if (host->reg_scope != PICO_REG_HOST)
+    {
+        pico_status_warn(host, "pico_host_add_command is only valid during host extension init");
+        return;
+    }
+    if (!name || !name[0] || !run)
+    {
+        pico_status_warn(host, "pico_host_add_command: invalid command name or run function");
+        return;
+    }
+    if (host->command_count + host->staging.host_command_count >= PICO_MAX_COMMANDS)
+    {
+        pico_status_warn(host, "pico_host_add_command: command limit reached");
+        return;
+    }
+    for (int i = 0; i < host->command_count; i++)
+    {
+        if (host->commands[i].name && strcmp(host->commands[i].name, name) == 0)
+        {
+            pico_status_warn(host, "pico_host_add_command: duplicate command name");
+            return;
+        }
+    }
+    for (int i = 0; i < host->staging.host_command_count; i++)
+    {
+        if (host->staging.host_commands[i].name && strcmp(host->staging.host_commands[i].name, name) == 0)
+        {
+            pico_status_warn(host, "pico_host_add_command: duplicate command name");
+            return;
+        }
+    }
+    PicoCommand c;
+    memset(&c, 0, sizeof(c));
+    c.name = name;
+    c.help = help;
+    c.host_run = run;
+    host->staging.host_commands[host->staging.host_command_count++] = c;
 }
 
 void pico_workspace_add_command(PicoWorkspace *workspace, const char *name, const char *help,
                                 PicoWorkspaceCmdFn run)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !name || !run || host->command_count >= PICO_MAX_COMMANDS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->commands[host->command_count].name = name;
-    host->commands[host->command_count].help = help;
-    host->commands[host->command_count].host_run = NULL;
-    host->commands[host->command_count].workspace_run = run;
-    host->commands[host->command_count].workspace = workspace;
-    host->command_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_command is only valid during workspace extension init");
+        return;
+    }
+    if (!name || !name[0] || !run)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_command: invalid command name or run function");
+        return;
+    }
+    if (workspace->command_count + host->staging.ws_command_count >= PICO_MAX_COMMANDS)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_command: command limit reached");
+        return;
+    }
+    for (int i = 0; i < workspace->command_count; i++)
+    {
+        if (workspace->commands[i].name && strcmp(workspace->commands[i].name, name) == 0)
+        {
+            pico_workspace_status_warn(workspace, "pico_workspace_add_command: duplicate command name");
+            return;
+        }
+    }
+    for (int i = 0; i < host->staging.ws_command_count; i++)
+    {
+        if (host->staging.ws_commands[i].name && strcmp(host->staging.ws_commands[i].name, name) == 0)
+        {
+            pico_workspace_status_warn(workspace, "pico_workspace_add_command: duplicate command name");
+            return;
+        }
+    }
+    PicoCommand c;
+    memset(&c, 0, sizeof(c));
+    c.name = name;
+    c.help = help;
+    c.workspace_run = run;
+    c.workspace = workspace;
+    host->staging.ws_commands[host->staging.ws_command_count++] = c;
 }
 
 void pico_host_add_completer(PicoHost *host, char trigger, bool bol_only, PicoHostCompleteQueryFn query,
                              PicoHostCompleteAcceptFn accept)
 {
-    if (!host || !query || host->completer_count >= PICO_MAX_COMPLETERS)
+    if (!host)
     {
         return;
     }
-    memset(&host->completers[host->completer_count], 0, sizeof(PicoCompleter));
-    host->completers[host->completer_count].trigger = trigger;
-    host->completers[host->completer_count].bol_only = bol_only;
-    host->completers[host->completer_count].host_query = query;
-    host->completers[host->completer_count].host_accept = accept;
-    host->completer_count++;
+    if (host->reg_scope != PICO_REG_HOST)
+    {
+        pico_status_warn(host, "pico_host_add_completer is only valid during host extension init");
+        return;
+    }
+    if (!query)
+    {
+        pico_status_warn(host, "pico_host_add_completer: missing query function");
+        return;
+    }
+    if (host->completer_count + host->staging.host_completer_count >= PICO_MAX_COMPLETERS)
+    {
+        pico_status_warn(host, "pico_host_add_completer: completer limit reached");
+        return;
+    }
+    PicoCompleter cmp;
+    memset(&cmp, 0, sizeof(cmp));
+    cmp.trigger = trigger;
+    cmp.bol_only = bol_only;
+    cmp.host_query = query;
+    cmp.host_accept = accept;
+    host->staging.host_completers[host->staging.host_completer_count++] = cmp;
 }
 
 void pico_workspace_add_completer(PicoWorkspace *workspace, char trigger, bool bol_only,
                                   PicoWorkspaceCompleteQueryFn query, PicoWorkspaceCompleteAcceptFn accept)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !query || host->completer_count >= PICO_MAX_COMPLETERS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    memset(&host->completers[host->completer_count], 0, sizeof(PicoCompleter));
-    host->completers[host->completer_count].trigger = trigger;
-    host->completers[host->completer_count].bol_only = bol_only;
-    host->completers[host->completer_count].workspace_query = query;
-    host->completers[host->completer_count].workspace_accept = accept;
-    host->completers[host->completer_count].workspace = workspace;
-    host->completer_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_completer is only valid during workspace extension init");
+        return;
+    }
+    if (!query)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_completer: missing query function");
+        return;
+    }
+    if (workspace->completer_count + host->staging.ws_completer_count >= PICO_MAX_COMPLETERS)
+    {
+        pico_workspace_status_warn(workspace, "pico_workspace_add_completer: completer limit reached");
+        return;
+    }
+    PicoCompleter cmp;
+    memset(&cmp, 0, sizeof(cmp));
+    cmp.trigger = trigger;
+    cmp.bol_only = bol_only;
+    cmp.workspace_query = query;
+    cmp.workspace_accept = accept;
+    cmp.workspace = workspace;
+    host->staging.ws_completers[host->staging.ws_completer_count++] = cmp;
 }
 
 void pico_add_provider(PicoWorkspace *workspace, const PicoProvider *p)
 {
-    PicoHost *host = workspace ? workspace->host : NULL;
-    if (!host || !p || !p->name || !p->name[0] || !p->stream || host->provider_count >= PICO_MAX_PROVIDERS)
+    PicoHost *host;
+    if (!workspace || !workspace->host)
     {
         return;
     }
-    host->providers[host->provider_count] = *p;
-    host->provider_count++;
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_provider is only valid during workspace extension init");
+        return;
+    }
+    if (!p || !p->name || !p->name[0] || !p->stream)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_provider: invalid provider descriptor");
+        return;
+    }
+    if (workspace->provider_count + host->staging.ws_provider_count >= PICO_MAX_PROVIDERS)
+    {
+        pico_workspace_status_warn(workspace, "pico_add_provider: provider limit reached");
+        return;
+    }
+    for (int i = 0; i < workspace->provider_count; i++)
+    {
+        if (workspace->providers[i].name && strcmp(workspace->providers[i].name, p->name) == 0)
+        {
+            pico_workspace_status_warn(workspace, "pico_add_provider: duplicate provider name");
+            return;
+        }
+    }
+    for (int i = 0; i < host->staging.ws_provider_count; i++)
+    {
+        if (host->staging.ws_providers[i].name && strcmp(host->staging.ws_providers[i].name, p->name) == 0)
+        {
+            pico_workspace_status_warn(workspace, "pico_add_provider: duplicate provider name");
+            return;
+        }
+    }
+    host->staging.ws_providers[host->staging.ws_provider_count++] = *p;
 }
 
-const PicoProvider *pico_find_provider(const PicoHost *host, const char *name)
+const PicoProvider *pico_workspace_find_provider(const PicoWorkspace *workspace, const char *name)
 {
-    if (!host || !name || !name[0])
+    if (!workspace || !name || !name[0])
     {
         return NULL;
     }
-    for (int i = 0; i < host->provider_count; i++)
+    for (int i = 0; i < workspace->provider_count; i++)
     {
-        if (host->providers[i].name && strcmp(host->providers[i].name, name) == 0)
+        if (workspace->providers[i].name && strcmp(workspace->providers[i].name, name) == 0)
         {
-            return &host->providers[i];
+            return &workspace->providers[i];
         }
     }
     return NULL;
 }
 
+const PicoProvider *pico_find_provider(const PicoHost *host, const char *name)
+{
+    return pico_workspace_find_provider(PicoHost_SelectedWorkspaceConst(host), name);
+}
+
 void pico_clear_registrations(PicoHost *app)
 {
+    if (!app)
+    {
+        return;
+    }
     memset(app->views, 0, sizeof(app->views));
     memset(app->view_count, 0, sizeof(app->view_count));
-    memset(app->empty_views, 0, sizeof(app->empty_views));
-    app->empty_view_count = 0;
     memset(app->hooks, 0, sizeof(app->hooks));
     app->hook_count = 0;
-    memset(app->tool_before_hooks, 0, sizeof(app->tool_before_hooks));
-    app->tool_before_hook_count = 0;
-    memset(app->tool_after_hooks, 0, sizeof(app->tool_after_hooks));
-    app->tool_after_hook_count = 0;
-    memset(app->llm_hooks, 0, sizeof(app->llm_hooks));
-    app->llm_hook_count = 0;
-    memset(app->context_hooks, 0, sizeof(app->context_hooks));
-    app->context_hook_count = 0;
-    memset(app->tool_row_hooks, 0, sizeof(app->tool_row_hooks));
-    app->tool_row_hook_count = 0;
-    memset(app->tools, 0, sizeof(app->tools));
-    app->tool_count = 0;
     memset(app->commands, 0, sizeof(app->commands));
     app->command_count = 0;
     memset(app->completers, 0, sizeof(app->completers));
     app->completer_count = 0;
-    memset(app->providers, 0, sizeof(app->providers));
-    app->provider_count = 0;
     memset(app->auths, 0, sizeof(app->auths));
     app->auth_count = 0;
+    memset(app->host_plugins, 0, sizeof(app->host_plugins));
+    app->host_plugin_count = 0;
+    memset(&app->staging, 0, sizeof(app->staging));
+
+    for (int w = 0; w < app->workspace_count; w++)
+    {
+        PicoWorkspace *ws = app->workspaces[w];
+        if (!ws)
+        {
+            continue;
+        }
+        memset(ws->views, 0, sizeof(ws->views));
+        memset(ws->view_count, 0, sizeof(ws->view_count));
+        memset(ws->empty_views, 0, sizeof(ws->empty_views));
+        ws->empty_view_count = 0;
+        memset(ws->hooks, 0, sizeof(ws->hooks));
+        ws->hook_count = 0;
+        memset(ws->tool_before_hooks, 0, sizeof(ws->tool_before_hooks));
+        ws->tool_before_hook_count = 0;
+        memset(ws->tool_after_hooks, 0, sizeof(ws->tool_after_hooks));
+        ws->tool_after_hook_count = 0;
+        memset(ws->llm_hooks, 0, sizeof(ws->llm_hooks));
+        ws->llm_hook_count = 0;
+        memset(ws->context_hooks, 0, sizeof(ws->context_hooks));
+        ws->context_hook_count = 0;
+        memset(ws->tool_row_hooks, 0, sizeof(ws->tool_row_hooks));
+        ws->tool_row_hook_count = 0;
+        memset(ws->tools, 0, sizeof(ws->tools));
+        ws->tool_count = 0;
+        memset(ws->commands, 0, sizeof(ws->commands));
+        ws->command_count = 0;
+        memset(ws->completers, 0, sizeof(ws->completers));
+        ws->completer_count = 0;
+        memset(ws->providers, 0, sizeof(ws->providers));
+        ws->provider_count = 0;
+        memset(ws->workspace_plugins, 0, sizeof(ws->workspace_plugins));
+        ws->workspace_plugin_count = 0;
+        ws->registration_generation++;
+    }
 }
 
 void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
@@ -798,19 +1151,29 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
     }
     event.hook = hook;
     event.agent_id = agent_id;
-    for (int i = 0; i < host->hook_count; i++)
+    if (hook == PICO_HOOK_AFTER_LAYOUT || hook == PICO_HOOK_AFTER_RENDER)
     {
-        if (host->hooks[i].hook != hook)
+        for (int i = 0; i < host->hook_count; i++)
         {
-            continue;
+            if (host->hooks[i].hook == hook && host->hooks[i].host_fn)
+            {
+                host->hooks[i].host_fn(host, &event, host->hooks[i].state);
+            }
         }
-        if (host->hooks[i].host_fn)
+    }
+    else
+    {
+        PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+        PicoWorkspace *ws = agent ? agent->workspace : PicoHost_SelectedWorkspace(host);
+        if (ws)
         {
-            host->hooks[i].host_fn(host, &event, host->hooks[i].state);
-        }
-        if (host->hooks[i].workspace_fn && host->hooks[i].workspace)
-        {
-            host->hooks[i].workspace_fn(host->hooks[i].workspace, &event, host->hooks[i].state);
+            for (int i = 0; i < ws->hook_count; i++)
+            {
+                if (ws->hooks[i].hook == hook && ws->hooks[i].workspace_fn)
+                {
+                    ws->hooks[i].workspace_fn(ws, &event, ws->hooks[i].state);
+                }
+            }
         }
     }
 }
@@ -873,8 +1236,10 @@ bool Pico_ShortcutRepeat(char letter)
 
 static void RunSlot(PicoHost *host, PicoUiSlot slot)
 {
-    const PicoAgent *selected = PicoHost_SelectedAgentConst(host);
-    PicoAgentId selected_id = selected ? selected->id : 0;
+    if (!host || slot < 0 || slot >= PICO_SLOT_COUNT)
+    {
+        return;
+    }
     for (int i = 0; i < host->view_count[slot]; i++)
     {
         PicoSlotView *view = &host->views[slot][i];
@@ -882,9 +1247,19 @@ static void RunSlot(PicoHost *host, PicoUiSlot slot)
         {
             view->host_render(host, view->state);
         }
-        if (view->workspace_render && view->workspace)
+    }
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(host);
+    if (ws)
+    {
+        const PicoAgent *selected = PicoHost_SelectedAgentConst(host);
+        PicoAgentId selected_id = selected ? selected->id : 0;
+        for (int i = 0; i < ws->view_count[slot]; i++)
         {
-            view->workspace_render(view->workspace, selected_id, view->state);
+            PicoSlotView *view = &ws->views[slot][i];
+            if (view->workspace_render)
+            {
+                view->workspace_render(ws, selected_id, view->state);
+            }
         }
     }
 }

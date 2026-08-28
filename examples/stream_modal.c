@@ -12,33 +12,22 @@
 #include <string.h>
 
 static const char *kName = "stream-modal";
-static bool g_open;
-static char g_status[PICO_UI_POST_STATUS_MAX];
-static char g_text[PICO_UI_POST_TEXT_MAX + 1];
+
+typedef struct StreamState {
+    char status[PICO_UI_POST_STATUS_MAX];
+    char text[PICO_UI_POST_TEXT_MAX + 1];
+} StreamState;
 
 static const char *kParams = "{\"type\":\"object\",\"properties\":{}}";
 
 static void CloseModal(PicoHost *app)
 {
-    if (!g_open)
-    {
-        return;
-    }
     (void)pico_ui_modal_pop(app, kName);
-    g_open = false;
 }
 
 static void OpenModal(PicoHost *app)
 {
-    if (g_open)
-    {
-        return;
-    }
-    if (!pico_ui_modal_push(app, kName))
-    {
-        return;
-    }
-    g_open = true;
+    (void)pico_ui_modal_push(app, kName);
 }
 
 static Clay_String CStr(const char *s)
@@ -52,15 +41,13 @@ static Clay_String CStr(const char *s)
 
 static void StreamRender(PicoHost *app, void *state)
 {
-    (void)state;
-    float sw;
-    float sh;
-    if (!g_open)
+    StreamState *s = (StreamState *)state;
+    if (!s || !pico_ui_modal_has(app, kName))
     {
         return;
     }
-    sw = (float)GetScreenWidth();
-    sh = (float)GetScreenHeight();
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
     CLAY(CLAY_ID("StreamModalDim"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
                        .zIndex = 50,
@@ -81,15 +68,15 @@ static void StreamRender(PicoHost *app, void *state)
         {
             CLAY_TEXT(CLAY_STRING("Stream mailbox"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 16, .textColor = COLOR_TEXT}));
-            if (g_status[0])
+            if (s->status[0])
             {
-                CLAY_TEXT(CStr(g_status),
+                CLAY_TEXT(CStr(s->status),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
                                             .fontSize = 14,
                                             .textColor = COLOR_MUTED,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
-            CLAY_TEXT(g_text[0] ? CStr(g_text) : CLAY_STRING("Waiting for worker posts…"),
+            CLAY_TEXT(s->text[0] ? CStr(s->text) : CLAY_STRING("Waiting for worker posts…"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = 14,
                                         .textColor = COLOR_TEXT,
@@ -101,9 +88,9 @@ static void StreamRender(PicoHost *app, void *state)
 
 static void StreamAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
+    StreamState *s = (StreamState *)state;
     (void)event;
-    if (!g_open)
+    if (!s || !pico_ui_modal_is_top(app, kName))
     {
         return;
     }
@@ -117,22 +104,27 @@ static void StreamAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     {
         CloseModal(app);
         pico_ui_clear(app, kName);
-        g_status[0] = '\0';
-        g_text[0] = '\0';
+        s->status[0] = '\0';
+        s->text[0] = '\0';
     }
 }
 
 static void StreamOnFrame(PicoHost *app, void *state, float dt)
 {
+    StreamState *s = (StreamState *)state;
     PicoUiPost post;
     (void)dt;
+    if (!s)
+    {
+        return;
+    }
     if (pico_ui_latest(app, kName, &post))
     {
-        snprintf(g_status, sizeof(g_status), "%s", post.status ? post.status : "");
-        snprintf(g_text, sizeof(g_text), "%s", post.text ? post.text : "");
+        snprintf(s->status, sizeof(s->status), "%s", post.status ? post.status : "");
+        snprintf(s->text, sizeof(s->text), "%s", post.text ? post.text : "");
         OpenModal(app);
     }
-    if (!g_open)
+    if (!pico_ui_modal_is_top(app, kName))
     {
         return;
     }
@@ -140,22 +132,26 @@ static void StreamOnFrame(PicoHost *app, void *state, float dt)
     {
         CloseModal(app);
         pico_ui_clear(app, kName);
-        g_status[0] = '\0';
-        g_text[0] = '\0';
+        s->status[0] = '\0';
+        s->text[0] = '\0';
     }
 }
 
 static void CmdStream(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
-    (void)state;
+    StreamState *s = (StreamState *)state;
     (void)args;
     (void)agent_id;
-    if (g_open)
+    if (!s)
+    {
+        return;
+    }
+    if (pico_ui_modal_has(app, kName))
     {
         CloseModal(app);
         pico_ui_clear(app, kName);
-        g_status[0] = '\0';
-        g_text[0] = '\0';
+        s->status[0] = '\0';
+        s->text[0] = '\0';
     }
     else
     {
@@ -194,17 +190,20 @@ static void StreamToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, voi
 
 static int StreamHostInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
+    StreamState *s = (StreamState *)calloc(1, sizeof(StreamState));
+    if (!s)
+    {
+        return 1;
+    }
+    if (state_out)
+    {
+        *state_out = s;
+    }
     PicoUiPost post;
     if (pico_ui_latest(app, kName, &post) && !pico_ui_modal_has(app, kName))
     {
-        snprintf(g_status, sizeof(g_status), "%s", post.status ? post.status : "");
-        snprintf(g_text, sizeof(g_text), "%s", post.text ? post.text : "");
-        (void)pico_ui_modal_push(app, kName);
-        g_open = true;
-    }
-    else if (g_open && !pico_ui_modal_has(app, kName))
-    {
+        snprintf(s->status, sizeof(s->status), "%s", post.status ? post.status : "");
+        snprintf(s->text, sizeof(s->text), "%s", post.text ? post.text : "");
         (void)pico_ui_modal_push(app, kName);
     }
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 50, StreamRender);
@@ -224,8 +223,9 @@ static int StreamWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 
 static void StreamShutdown(PicoHost *app, void *state)
 {
-    (void)state;
+    StreamState *s = (StreamState *)state;
     CloseModal(app);
+    free(s);
 }
 
 PicoExt pico_ext(void)

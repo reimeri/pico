@@ -53,7 +53,7 @@ static int TestNamedSubagentDelegation(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
@@ -108,7 +108,7 @@ static int TestSubagentParentCancellation(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
@@ -158,8 +158,8 @@ static int TestSubagentCancellationBeforeEnqueue(void)
     ResetTest(TEST_SINGLE, 1);
     PicoHost app;
     InitApp(&app);
-    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "late_delegate", "delegate after a barrier", "{}",
-                  LateDelegateTool, NULL);
+    TestAddTool(&app, "late_delegate", "delegate after a barrier", "{}",
+                LateDelegateTool, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "late_delegate");
     PicoAgent *parent = TestAgent(&app);
@@ -224,7 +224,7 @@ static int TestSubagentSessionContinuation(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     ConfigureFakeSession("exploration");
     int random_before = g_random_hex_calls;
@@ -290,7 +290,7 @@ static int TestSubagentContinuationEmptyAnswer(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     ConfigureFakeSession("exploration");
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
@@ -336,7 +336,7 @@ static int TestSubagentResumeFailures(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
 
     ConfigureFakeSession("review");
@@ -411,7 +411,7 @@ static int TestSubagentChildAsk(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
@@ -486,7 +486,7 @@ static int TestSubagentDelegationCaps(void)
     }
     char dir[4096];
     char path[4096];
-    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Nested work\",\"tools\":[]}",
+    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Caps\",\"tools\":[]}",
                               dir, sizeof(dir), path, sizeof(path)))
     {
         rmdir(temp);
@@ -498,7 +498,7 @@ static int TestSubagentDelegationCaps(void)
     PicoHost depth_app;
     InitApp(&depth_app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&depth_app), NULL);
+    InitExt(&depth_app, PicoHost_PrimaryWorkspace(&depth_app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&depth_app));
     PicoAgentId parent_id = pico_agent_active(&depth_app);
     PicoAgentId deepest_id = 0;
@@ -537,7 +537,7 @@ static int TestSubagentDelegationCaps(void)
     PicoHost count_app;
     InitApp(&count_app);
     extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&count_app), NULL);
+    InitExt(&count_app, PicoHost_PrimaryWorkspace(&count_app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&count_app));
     PicoAgentId root_id = pico_agent_active(&count_app);
     for (int i = 1; i < PICO_MAX_AGENTS; i++)
@@ -595,7 +595,7 @@ static int TestSubagentDirectChildCancellation(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
@@ -661,7 +661,7 @@ static int TestSubagentLiveInspect(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
@@ -744,7 +744,7 @@ static int TestSubagentInspectRetention(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
@@ -811,7 +811,7 @@ static int TestSubagentInspectThenContinue(void)
     PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.workspace_init(PicoHost_PrimaryWorkspace(&app), NULL);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     ConfigureFakeSession("exploration");
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");

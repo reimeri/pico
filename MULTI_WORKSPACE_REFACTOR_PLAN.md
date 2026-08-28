@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 4 complete; implementation continues at Phase 5  
+Status: Phase 5 complete; implementation continues at Phase 6  
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -718,6 +718,8 @@ nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/buil
 
 ### Phase 5 — Enforce scoped registrations and complete instance isolation
 
+Status: complete (2026-08-28)
+
 Owner files:
 
 - Public callback headers and registration implementations
@@ -742,6 +744,15 @@ Acceptance:
 - Host registrations cannot add tools/providers; workspace registrations cannot add global UI/auth.
 - Disabling one scope/instance does not disable another scope/instance.
 - All examples compile with ABI 13.
+
+#### Phase 5 recorded result
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/build/release && ctest --test-dir app/build/release --output-on-failure'
+```
+
+25/25 tests passed in Debug and Release presets. Scoped registrations are strictly enforced with isolated staging (`PicoHostStaging`) and rollback on failed init. Workspace-scoped registries (`views`, `empty_views`, `hooks`, `tool_before_hooks`, `tool_after_hooks`, `llm_hooks`, `context_hooks`, `tool_row_hooks`, `tools`, `commands`, `completers`, `providers`, `workspace_plugins`) live directly on `PicoWorkspace`. Dual-scope builtins (`ask_user`, `commands`, `diff`, `todo`, `openai`, `hyper`, `xai`) are cleanly split into isolated host and workspace instances with no mutable file-static state. Provider auth token refresh uses `pico_auth_begin_refresh_ctx` / `pico_auth_end_refresh_ctx` with condvar coordination. Workspace-local extensions declaring host callbacks are rejected. Decoupled host and workspace disable settings. All 12 example extensions compile as ABI 13 smoke tests including the new thread-safe stateful `counter_tool.c`. `docs/extend/` synchronized with public API and contracts.
 
 ### Phase 6 — Implement module and registration generations
 

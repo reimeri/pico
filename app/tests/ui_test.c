@@ -49,6 +49,14 @@ static void HookB(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state
     g_hook_b++;
 }
 
+void pico_add_tool_row_hook(PicoWorkspace *workspace, PicoToolRowFn fn)
+{
+    if (workspace && fn && workspace->tool_row_hook_count < PICO_MAX_TOOL_ROW_HOOKS)
+    {
+        workspace->tool_row_hooks[workspace->tool_row_hook_count++] = (PicoToolRowEntry){.fn = fn, .state = NULL};
+    }
+}
+
 static int TestModalStack(void)
 {
     PicoHost app;
@@ -126,10 +134,10 @@ static int TestToolRowHooks(void)
     memset(&line, 0, sizeof(line));
     g_hook_a = 0;
     g_hook_b = 0;
-    Check(!pico_tool_row_activate(&app, 1, NULL), "null line");
+    Check(!pico_tool_row_activate(&workspace, 1, NULL), "null line");
     line.is_tool = false;
     line.tool_name = "handled";
-    Check(!pico_tool_row_activate(&app, 1, &line), "non-tool line");
+    Check(!pico_tool_row_activate(&workspace, 1, &line), "non-tool line");
 
     line.is_tool = true;
     line.tool_name = "plain";
@@ -138,15 +146,15 @@ static int TestToolRowHooks(void)
     line.tool_args_json = "{\"query\":\"x\"}";
     line.child_id = 42;
     snprintf(line.child_session_id, sizeof(line.child_session_id), "session-1");
-    pico_add_tool_row_hook(PicoHost_PrimaryWorkspace(&app), HookA);
-    pico_add_tool_row_hook(PicoHost_PrimaryWorkspace(&app), HookB);
-    Check(!pico_tool_row_activate(&app, 7, &line), "unhandled returns false");
+    pico_add_tool_row_hook(&workspace, HookA);
+    pico_add_tool_row_hook(&workspace, HookB);
+    Check(!pico_tool_row_activate(&workspace, 7, &line), "unhandled returns false");
     Check(g_hook_a == 1 && g_hook_b == 1, "both hooks run when unhandled");
 
     line.tool_name = "handled";
     g_hook_a = 0;
     g_hook_b = 0;
-    Check(pico_tool_row_activate(&app, 7, &line), "handled returns true");
+    Check(pico_tool_row_activate(&workspace, 7, &line), "handled returns true");
     Check(g_hook_a == 1 && g_hook_b == 0, "later hook skipped");
     return g_failed;
 }

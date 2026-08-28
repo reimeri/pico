@@ -688,8 +688,12 @@ static bool ReplayApply(PicoWorkspace *workspace, PicoAgentId agent_id, const ch
 
 static void RegisterReplayTool(PicoHost *app)
 {
-    app->tools[0] = (PicoTool){.name = "state_test", .run = ReplayTool, .apply = ReplayApply};
-    app->tool_count = 1;
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    if (ws)
+    {
+        ws->tools[0] = (PicoTool){.name = "state_test", .run = ReplayTool, .apply = ReplayApply};
+        ws->tool_count = 1;
+    }
 }
 
 static bool AppendRaw(const char *path, const char *line)

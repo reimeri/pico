@@ -639,8 +639,7 @@ void PicoFooter_Render(PicoApp *app)
                      .padding = {14, 14, 8, 8},
                      .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}},
-          .backgroundColor = COLOR_FOOTER_BG,
-          .cornerRadius = CLAY_CORNER_RADIUS(8)})
+          .backgroundColor = {0, 0, 0, 0}})
     {
         RenderStatus(app);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(10), .height = CLAY_SIZING_FIXED(1)}}}) {}

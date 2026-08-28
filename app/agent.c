@@ -1230,7 +1230,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
 {
     PicoAgentRt *rt = agent->runtime;
     RefreshWorkerContext(rt, app, agent);
-    PicoModel *m = PicoSettings_ActiveModel(app, agent);
+    PicoModel *m = PicoSettings_ActiveModel(agent);
     if (!m || !m->provider[0])
     {
         SetErrorState(app, agent, "Active model has no provider. Set `provider` on the model in settings.json.");
@@ -2892,7 +2892,7 @@ PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace)
     agent->state = PICO_AGENT_IDLE;
     agent->persistence = PICO_SESSION_EPHEMERAL;
     agent->tool_policy_valid = true;
-    PicoSettings_InitAgent(app, agent);
+    PicoSettings_InitAgent(agent);
     agent->runtime = CreateRt(app, agent);
     if (!agent->runtime)
     {

@@ -1268,7 +1268,7 @@ void PicoHost_Submit(PicoHost *app)
 
     PicoComposer *c = &app->composer;
     bool has_attach = PicoComposer_HasAttachments(app);
-    PicoModel *model = PicoSettings_ActiveModel(app, active);
+    PicoModel *model = PicoSettings_ActiveModel(active);
     if (has_attach && model && !model->vision)
     {
         free(app->agent_input);
@@ -1413,11 +1413,11 @@ bool PicoUi_ModalOpen(const PicoHost *app)
 
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
 {
-    PicoChat_InspectClose();
     memset(host, 0, sizeof(*host));
     host->next_workspace_id = 1;
     host->next_agent_id = 1;
     host->next_ask_id = 0;
+    pthread_mutex_init(&host->settings_mu, NULL);
     pthread_mutex_init(&host->ask_id_mu, NULL);
     host->ask_id_mu_ready = true;
     host->fonts = fonts;
@@ -1528,7 +1528,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
         return PICO_NO_MEMORY;
     }
     host->curl_initialized = true;
-    PicoSettings_Load(host);
+    PicoHostPreferences_Load(host);
     PicoAuth_Load(host);
     *out = host;
     return PICO_OK;
@@ -1605,12 +1605,13 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     workspace->id = host->next_workspace_id++;
     snprintf(workspace->path, sizeof(workspace->path), "%s", canonical);
     workspace->state = PICO_WORKSPACE_OPEN;
+    pthread_mutex_init(&workspace->settings_mu, NULL);
     pthread_mutex_init(&workspace->delegation_mu, NULL);
     pthread_mutex_init(&workspace->lifecycle_mu, NULL);
     pthread_mutex_init(&workspace->ui_post_mu, NULL);
     workspace->accepting_work = true;
     host->workspaces[host->workspace_count++] = workspace;
-    PicoSettings_Load(host);
+    PicoWorkspaceSettings_Load(workspace);
     if (out)
     {
         *out = workspace->id;
@@ -1752,7 +1753,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
             return;
         }
         host->curl_initialized = true;
-        PicoSettings_Load(host);
+        PicoHostPreferences_Load(host);
         PicoAuth_Load(host);
     }
     else
@@ -1789,7 +1790,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
         PicoSession_Reset(host, initial);
         PicoSession_Start(host, initial, session_start, session_file);
     }
-    else if (session_start == PICO_SESSION_RESUME || host->settings.resume_last)
+    else if (session_start == PICO_SESSION_RESUME || host->workspaces[0]->settings.resume_last)
     {
         PicoSession_Start(host, initial, session_start, NULL);
     }
@@ -2014,6 +2015,7 @@ static void ApplyWorkspaceChange(PicoHost *host)
     replacement->id = host->next_workspace_id++;
     snprintf(replacement->path, sizeof(replacement->path), "%s", target);
     replacement->state = PICO_WORKSPACE_OPEN;
+    pthread_mutex_init(&replacement->settings_mu, NULL);
     pthread_mutex_init(&replacement->delegation_mu, NULL);
     pthread_mutex_init(&replacement->lifecycle_mu, NULL);
     pthread_mutex_init(&replacement->ui_post_mu, NULL);
@@ -2048,12 +2050,13 @@ static void ApplyWorkspaceChange(PicoHost *host)
     host->workspace_change_queued = false;
     host->reload_queued = true;
     prev_font_scale = Pico_FontScale();
-    PicoSettings_Load(host);
+    PicoHostPreferences_Load(host);
+    PicoWorkspaceSettings_Load(replacement);
     if (Pico_FontScale() != prev_font_scale)
     {
         Clay_ResetMeasureTextCache();
     }
-    PicoSettings_InitAgent(host, initial);
+    PicoSettings_InitAgent(initial);
     if (!PicoWorkspace_AdoptInitial(replacement, initial))
     {
         (void)PicoAgent_Destroy(initial);
@@ -2310,7 +2313,6 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     PicoHost_ClearMessages(host, host->selected_agent_id);
     free(host->composer.text);
     free(host->status_warn);
-    free(host->models);
     free(host->agent_input);
     free(host->agent_parts);
     if (host->curl_initialized)
@@ -2323,6 +2325,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         pthread_mutex_destroy(&host->ask_id_mu);
         host->ask_id_mu_ready = false;
     }
+    pthread_mutex_destroy(&host->settings_mu);
     memset(host, 0, sizeof(*host));
     return PICO_HOST_SHUTDOWN_CLEAN;
 }

@@ -24,7 +24,17 @@ typedef struct CompleteState {
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
 } CompleteState;
 
-static CompleteState g_complete;
+static CompleteState *GetCompleteState(void)
+{
+    static CompleteState *complete_instance;
+    if (!complete_instance)
+    {
+        complete_instance = (CompleteState *)calloc(1, sizeof(CompleteState));
+    }
+    return complete_instance;
+}
+
+#define g_complete (*GetCompleteState())
 
 void PicoComplete_Close(void)
 {

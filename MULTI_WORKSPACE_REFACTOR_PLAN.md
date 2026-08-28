@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 2 complete; implementation continues at Phase 3  
+Status: Phase 4 complete; implementation continues at Phase 5  
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -652,6 +652,8 @@ No `PicoApp_ActiveAgent` or `PicoAgentManager_Active` matches. Remaining `app->w
 
 ### Phase 3 — Fold `PicoAgentManager` into `PicoWorkspace`
 
+Status: complete (2026-08-28)
+
 Owner files:
 
 - Rename `app/agent_manager.c` to `app/workspace.c`
@@ -673,7 +675,17 @@ Acceptance:
 - Existing concurrency and subagent tests pass.
 - A workspace may contain multiple main agents and their independent child trees.
 
+#### Phase 3 recorded result
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+```
+
+25/25 tests passed. `PicoAgentManager` and `agent_manager.*` are gone. `PicoWorkspace` directly owns agent arrays, child trees, delegation queues, session reservations, profiles, and lifecycle locks.
+
 ### Phase 4 — Split settings and workspace-owned caches
+
+Status: complete (2026-08-28)
 
 Owner files:
 
@@ -694,6 +706,15 @@ Acceptance:
 - Two state structs instantiated in tests do not share file lists, diff results, TODOs, prompt buffers, asks, or composer attachments.
 - Model changes on one agent do not mutate another agent or workspace defaults.
 - `rg '^static .*g_|^static .*s_' app/builtins --glob '*.[ch]'` is manually reviewed; every writable result is documented as immutable/process service or removed.
+
+#### Phase 4 recorded result
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/build/release && ctest --test-dir app/build/release --output-on-failure'
+```
+
+25/25 tests passed in Debug and Release presets. `PicoHostPreferences` and `PicoWorkspaceSettings` are independent and written atomically with parent directory sync. Model catalogs and selections are per-workspace. Background diff worker is refcounted with generation cancellation (`DiffWorkerCtx`). `diff`, `files`, and `todos` are workspace-scoped extensions. Host and workspace plugin slot tables provide instance-specific state lookup. Isolation tests in `app/tests/host_workspace_test.c` verify per-workspace model isolation, instance plugin isolation, and preferences persistence.
 
 ### Phase 5 — Enforce scoped registrations and complete instance isolation
 

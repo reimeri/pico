@@ -9,13 +9,30 @@
 #include <stdlib.h>
 #include <string.h>
 
-static PicoHost *g_app;
-static bool g_open;
-static char *g_text;
-static PicoPromptSpan g_spans[PICO_PROMPT_SPAN_MAX];
-static int g_span_count;
-static bool g_overflow;
-static PicoScrollbar g_scrollbar;
+typedef struct PromptState {
+    PicoHost *app;
+    bool open;
+    char *text;
+    PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
+    int span_count;
+    bool overflow;
+    PicoScrollbar scrollbar;
+} PromptState;
+
+static __thread PromptState *s_active_prompt_state = NULL;
+
+static PromptState *ActivePromptState(void)
+{
+    return s_active_prompt_state;
+}
+
+#define g_app (ActivePromptState()->app)
+#define g_open (ActivePromptState()->open)
+#define g_text (ActivePromptState()->text)
+#define g_spans (ActivePromptState()->spans)
+#define g_span_count (ActivePromptState()->span_count)
+#define g_overflow (ActivePromptState()->overflow)
+#define g_scrollbar (ActivePromptState()->scrollbar)
 
 #define COLOR_PROMPT_BASE (Clay_Color){186, 164, 122, 255}
 #define COLOR_PROMPT_WORKSPACE (Clay_Color){122, 156, 148, 255}
@@ -203,9 +220,8 @@ static void RenderLegend(void)
 
 static void PromptRender(PicoHost *app, void *state)
 {
-    (void)state;
-    (void)app;
-    if (!g_open)
+    s_active_prompt_state = state ? (PromptState *)state : (PromptState *)PicoPlugins_HostState(app, "prompt");
+    if (!s_active_prompt_state || !g_open)
     {
         return;
     }
@@ -276,10 +292,9 @@ static void PromptRender(PicoHost *app, void *state)
 
 static void PromptAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
     (void)event;
-    (void)app;
-    if (!g_open || !pico_ui_modal_is_top(app, "prompt"))
+    s_active_prompt_state = state ? (PromptState *)state : (PromptState *)PicoPlugins_HostState(app, "prompt");
+    if (!s_active_prompt_state || !g_open || !pico_ui_modal_is_top(app, "prompt"))
     {
         return;
     }
@@ -301,7 +316,8 @@ static void PromptAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
 static void PromptOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
-    if (!g_open || !pico_ui_modal_is_top(app, "prompt"))
+    s_active_prompt_state = state ? (PromptState *)state : (PromptState *)PicoPlugins_HostState(app, "prompt");
+    if (!s_active_prompt_state || !g_open || !pico_ui_modal_is_top(app, "prompt"))
     {
         return;
     }
@@ -315,8 +331,12 @@ static void PromptOnFrame(PicoHost *app, void *state, float dt)
 
 static void CmdShowPrompt(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
-    (void)state;
     (void)args;
+    s_active_prompt_state = state ? (PromptState *)state : (PromptState *)PicoPlugins_HostState(app, "prompt");
+    if (!s_active_prompt_state)
+    {
+        return;
+    }
     PicoExts_Close();
     free(g_text);
     g_span_count = 0;
@@ -332,13 +352,17 @@ static void CmdShowPrompt(PicoHost *app, PicoAgentId agent_id, const char *args,
 
 static int PromptInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
-    g_app = app;
-    if (g_open && !pico_ui_modal_has(app, "prompt"))
+    PromptState *s = (PromptState *)calloc(1, sizeof(PromptState));
+    if (!s)
     {
-        g_open = false;
-        ClearPrompt();
+        return 1;
     }
+    s->app = app;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_prompt_state = s;
     pico_host_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PromptAfterLayout);
@@ -347,12 +371,18 @@ static int PromptInit(PicoHost *app, void **state_out)
 
 static void PromptShutdown(PicoHost *app, void *state)
 {
-    (void)state;
-    (void)Unclaim();
-    g_open = false;
-    ClearPrompt();
-    g_app = NULL;
     (void)app;
+    PromptState *s = (PromptState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_prompt_state = s;
+    (void)Unclaim();
+    s->open = false;
+    ClearPrompt();
+    free(s);
+    s_active_prompt_state = NULL;
 }
 
 PicoExt pico_ext_prompt(void)

@@ -109,7 +109,7 @@ static void CmdModel(PicoHost *app, PicoAgentId agent_id, const char *args, void
         PicoComplete_Refresh(app);
         return;
     }
-    PicoSettings_SetModel(app, PicoHost_FindAgent(app, agent_id), args);
+    PicoSettings_SetModel(PicoHost_FindAgent(app, agent_id), args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -128,7 +128,7 @@ static void CmdEffort(PicoHost *app, PicoAgentId agent_id, const char *args, voi
         PicoComplete_Refresh(app);
         return;
     }
-    PicoSettings_SetEffort(app, PicoHost_FindAgent(app, agent_id), args);
+    PicoSettings_SetEffort(PicoHost_FindAgent(app, agent_id), args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -805,9 +805,10 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
     }
     if (FoldEq(cmd, "model"))
     {
-        for (int i = 0; i < app->model_count && n < max; i++)
+        PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+        for (int i = 0; ws && i < ws->model_count && n < max; i++)
         {
-            PicoModel *m = &app->models[i];
+            PicoModel *m = &ws->models[i];
             if (!FoldPrefix(m->id, rest) && !FoldContains(m->id, rest) && !FoldContains(m->name, rest))
             {
                 continue;
@@ -821,7 +822,7 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
     }
     if (FoldEq(cmd, "effort"))
     {
-        PicoModel *m = PicoSettings_ActiveModel(app, PicoHost_SelectedAgent(app));
+        PicoModel *m = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
         if (!m)
         {
             return 0;

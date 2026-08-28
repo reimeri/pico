@@ -355,12 +355,27 @@ if(BUILD_TESTING)
 
     add_executable(pico_files_tests
         tests/files_test.c
+        tests/clay_impl.c
         builtins/complete.c
         builtins/composer.c
         builtins/files.c
+        app.c
         ui.c
+        scrollbar.c
+        agent.c
+        workspace.c
+        subagent_config.c
+        json.c
         canonical.c
-        json.c)
+        usage.c
+        theme.c
+        docs_path.c
+        settings.c
+        auth.c
+        session.c
+        chat_sel.c
+        text_range.c
+        markdown.c)
     target_include_directories(pico_files_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -369,17 +384,32 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_files_tests)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_files_tests PRIVATE raylib)
+    target_link_libraries(pico_files_tests PRIVATE raylib Threads::Threads md4c)
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
     add_executable(pico_composer_tests
         tests/composer_test.c
+        tests/clay_impl.c
         builtins/complete.c
         builtins/composer.c
         builtins/files.c
+        app.c
         ui.c
+        scrollbar.c
+        agent.c
+        workspace.c
+        subagent_config.c
+        json.c
         canonical.c
-        json.c)
+        usage.c
+        theme.c
+        docs_path.c
+        settings.c
+        auth.c
+        session.c
+        chat_sel.c
+        text_range.c
+        markdown.c)
     target_include_directories(pico_composer_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -388,7 +418,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_composer_tests)
     target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_composer_tests PRIVATE raylib)
+    target_link_libraries(pico_composer_tests PRIVATE raylib Threads::Threads md4c)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
 
     add_executable(pico_settings_agent_tests

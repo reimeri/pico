@@ -6,10 +6,24 @@
 
 #include <string.h>
 
-static PicoHost *g_app;
-static bool g_open;
-static bool g_overflow;
-static PicoScrollbar g_scrollbar;
+typedef struct ExtensionsState {
+    PicoHost *app;
+    bool open;
+    bool overflow;
+    PicoScrollbar scrollbar;
+} ExtensionsState;
+
+static __thread ExtensionsState *s_active_exts_state = NULL;
+
+static ExtensionsState *ActiveExtensionsState(void)
+{
+    return s_active_exts_state;
+}
+
+#define g_app (ActiveExtensionsState()->app)
+#define g_open (ActiveExtensionsState()->open)
+#define g_overflow (ActiveExtensionsState()->overflow)
+#define g_scrollbar (ActiveExtensionsState()->scrollbar)
 
 static bool Claim(void)
 {
@@ -217,9 +231,8 @@ static void RenderSection(bool builtin, Clay_String title)
 
 static void ExtsRender(PicoHost *app, void *state)
 {
-    (void)state;
-    (void)app;
-    if (!g_open)
+    s_active_exts_state = state ? (ExtensionsState *)state : (ExtensionsState *)PicoPlugins_HostState(app, "extensions");
+    if (!s_active_exts_state || !g_open)
     {
         return;
     }
@@ -288,9 +301,9 @@ static void ExtsRender(PicoHost *app, void *state)
 
 static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
     (void)event;
-    if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
+    s_active_exts_state = state ? (ExtensionsState *)state : (ExtensionsState *)PicoPlugins_HostState(app, "extensions");
+    if (!s_active_exts_state || !g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
         return;
     }
@@ -328,7 +341,8 @@ static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *sta
 static void ExtsOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
-    if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
+    s_active_exts_state = state ? (ExtensionsState *)state : (ExtensionsState *)PicoPlugins_HostState(app, "extensions");
+    if (!s_active_exts_state || !g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
         return;
     }
@@ -371,14 +385,17 @@ static void CmdExtensions(PicoHost *app, PicoAgentId agent_id, const char *args,
 
 static int ExtsInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
-    g_app = app;
-    if (g_open && !pico_ui_modal_has(app, "extensions"))
+    ExtensionsState *s = (ExtensionsState *)calloc(1, sizeof(ExtensionsState));
+    if (!s)
     {
-        g_open = false;
-        g_overflow = false;
-        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+        return 1;
     }
+    s->app = app;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_exts_state = s;
     pico_host_add_command(app, "extensions", "Manage extensions", CmdExtensions);
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
@@ -387,13 +404,19 @@ static int ExtsInit(PicoHost *app, void **state_out)
 
 static void ExtsShutdown(PicoHost *app, void *state)
 {
-    (void)state;
-    (void)Unclaim();
-    g_open = false;
-    g_overflow = false;
-    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
-    g_app = NULL;
     (void)app;
+    ExtensionsState *s = (ExtensionsState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_exts_state = s;
+    (void)Unclaim();
+    s->open = false;
+    s->overflow = false;
+    memset(&s->scrollbar, 0, sizeof(s->scrollbar));
+    free(s);
+    s_active_exts_state = NULL;
 }
 
 PicoExt pico_ext_extensions(void)

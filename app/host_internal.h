@@ -23,7 +23,7 @@ struct PicoHost {
     PicoAgentId selected_agent_id;
 
     PicoComposer composer;
-    PicoSettings settings;
+    PicoHostPreferences preferences;
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
@@ -74,15 +74,16 @@ struct PicoHost {
     bool hovered_clickable;
     char pending_workspace[4096];
     char *status_warn;
-    PicoModel *models;
-    int model_count;
 
     uint64_t next_workspace_id;
     uint64_t next_agent_id;
     uint64_t next_ask_id;
     pthread_mutex_t ask_id_mu;
+    pthread_mutex_t settings_mu;
     bool curl_initialized;
     bool ask_id_mu_ready;
+    PicoPluginSlot host_plugins[64];
+    int host_plugin_count;
 
     int reg_scope;
     PicoWorkspace *reg_workspace;
@@ -143,6 +144,7 @@ static inline void PicoHost_SetPath(PicoHost *host, const char *path)
             pthread_mutex_init(&workspace->delegation_mu, NULL);
             pthread_mutex_init(&workspace->lifecycle_mu, NULL);
             pthread_mutex_init(&workspace->ui_post_mu, NULL);
+            pthread_mutex_init(&workspace->settings_mu, NULL);
             workspace->accepting_work = true;
         }
         host->workspaces[0] = workspace;

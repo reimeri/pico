@@ -58,6 +58,11 @@ typedef struct PicoSubagentInspect {
     int message_count;
 } PicoSubagentInspect;
 
+typedef struct PicoPluginSlot {
+    char name[64];
+    void *state;
+} PicoPluginSlot;
+
 struct PicoWorkspace {
     PicoHost *host;
     PicoWorkspaceId id;
@@ -85,6 +90,12 @@ struct PicoWorkspace {
     pthread_mutex_t ui_post_mu;
     PicoUiMailbox ui_mailboxes[PICO_MAX_UI_POSTS];
     int ui_mailbox_count;
+    PicoWorkspaceSettings settings;
+    pthread_mutex_t settings_mu;
+    PicoModel *models;
+    int model_count;
+    PicoPluginSlot workspace_plugins[64];
+    int workspace_plugin_count;
     bool accepting_work;
     bool retained_shutdown;
 };

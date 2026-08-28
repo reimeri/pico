@@ -90,7 +90,14 @@ typedef struct AskUiState {
     PicoScrollbar body_scrollbar;
 } AskUiState;
 
-static AskUiState g_ui;
+static __thread AskUiState *s_active_ask_state = NULL;
+
+static AskUiState *ActiveAskState(void)
+{
+    return s_active_ask_state;
+}
+
+#define g_ui (*ActiveAskState())
 
 static void MarkTextViewDirty(void);
 
@@ -1247,6 +1254,11 @@ static void UpdateAskScrollbarDrag(void)
 static void AskUserOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state)
+    {
+        return;
+    }
     SyncPendingAsk(app);
     if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
@@ -1428,9 +1440,8 @@ static void RenderTextQuestion(const AskQuestion *q)
 
 static void AskUserRender(PicoHost *app, void *state)
 {
-    (void)state;
-    (void)app;
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
@@ -1651,9 +1662,9 @@ static void EnsureAskCaretVisible(const AskQuestion *q)
 
 static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
     (void)event;
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
@@ -1733,10 +1744,9 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
 
 static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
-    (void)app;
     (void)event;
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
@@ -1836,7 +1846,19 @@ static void AskUserLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEv
 
 static int AskUserInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
+    AskUiState *s = (AskUiState *)calloc(1, sizeof(AskUiState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->seen_cursor = -1;
+    s->seen_length = -1;
+    s->text_box_max = 120.0f;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_ask_state = s;
     pico_add_tool(PicoHost_PrimaryWorkspace(app), "ask_user",
                   "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
                   "in one call. Use kind 'select' with options for a single choice; select questions always include a "
@@ -1852,10 +1874,17 @@ static int AskUserInit(PicoHost *app, void **state_out)
 
 static void AskUserShutdown(PicoHost *app, void *state)
 {
-    (void)state;
     (void)app;
+    AskUiState *s = (AskUiState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_ask_state = s;
     ClearQuestions();
-    g_ui.answered_id = 0;
+    s->answered_id = 0;
+    free(s);
+    s_active_ask_state = NULL;
 }
 
 PicoExt pico_ext_ask_user(void)

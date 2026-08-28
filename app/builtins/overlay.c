@@ -19,18 +19,38 @@
 #define NOTIFY_TIMER_H 3.0f
 #define INVALID_ASK_ANSWER "{\"error\":\"invalid ask payload; fix it and try again\"}"
 
-static char *g_notify;
-static float g_notify_ttl;
+typedef struct OverlayState {
+    char *notify;
+    float notify_ttl;
+    uint64_t ask_id;
+    bool ask_show;
+    char *ask_msg;
+    bool ask_overflow;
+    PicoScrollbar ask_bar;
+} OverlayState;
 
-static uint64_t g_ask_id;
-static bool g_ask_show;
-static char *g_ask_msg;
-static bool g_ask_overflow;
-static PicoScrollbar g_ask_bar;
+static __thread OverlayState *s_active_overlay_state = NULL;
+
+static OverlayState *ActiveOverlayState(void)
+{
+    return s_active_overlay_state;
+}
+
+#define g_notify (ActiveOverlayState()->notify)
+#define g_notify_ttl (ActiveOverlayState()->notify_ttl)
+#define g_ask_id (ActiveOverlayState()->ask_id)
+#define g_ask_show (ActiveOverlayState()->ask_show)
+#define g_ask_msg (ActiveOverlayState()->ask_msg)
+#define g_ask_overflow (ActiveOverlayState()->ask_overflow)
+#define g_ask_bar (ActiveOverlayState()->ask_bar)
 
 void PicoOverlay_Notify(PicoHost *app, const char *text)
 {
-    (void)app;
+    s_active_overlay_state = (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     free(g_notify);
     g_notify = NULL;
     g_notify_ttl = 0.0f;
@@ -299,7 +319,11 @@ static void RenderToast(PicoHost *app)
 
 void PicoOverlay_Render(PicoHost *app, void *state)
 {
-    (void)state;
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     RenderError(app);
     RenderToast(app);
     RenderAsk(app);
@@ -307,7 +331,11 @@ void PicoOverlay_Render(PicoHost *app, void *state)
 
 void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
 {
-    (void)state;
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     if (g_ask_show)
     {
         PicoScrollbar_UpdateDrag(&g_ask_bar, CLAY_STRING("AskModalScroll"),
@@ -342,8 +370,12 @@ static bool OverAsk(Clay_String id)
 
 static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
     (void)event;
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     if (g_ask_show)
     {
         g_ask_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskModalScroll"));
@@ -390,10 +422,9 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
 
 static void OverlayAfterRender(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
-    (void)app;
     (void)event;
-    if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state || !g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
     {
         return;
     }
@@ -434,11 +465,32 @@ static void OverlayAfterRender(PicoHost *app, const PicoHookEvent *event, void *
 
 static int OverlayInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
+    OverlayState *s = (OverlayState *)calloc(1, sizeof(OverlayState));
+    if (!s)
+    {
+        return 1;
+    }
+    if (state_out)
+    {
+        *state_out = s;
+    }
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 0, PicoOverlay_Render);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, OverlayAfterLayout);
     pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, OverlayAfterRender);
     return 0;
+}
+
+static void OverlayShutdown(PicoHost *app, void *state)
+{
+    (void)app;
+    OverlayState *s = (OverlayState *)state;
+    if (!s)
+    {
+        return;
+    }
+    free(s->notify);
+    free(s->ask_msg);
+    free(s);
 }
 
 PicoExt pico_ext_overlay(void)
@@ -448,6 +500,7 @@ PicoExt pico_ext_overlay(void)
         .name = "overlay",
         .description = "Errors and notifications",
         .host_init = OverlayInit,
+        .host_shutdown = OverlayShutdown,
         .host_on_frame = PicoOverlay_OnFrame,
     };
 }

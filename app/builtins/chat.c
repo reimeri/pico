@@ -44,12 +44,6 @@ typedef struct ThinkLabelBlock {
     char data[];
 } ThinkLabelBlock;
 
-static ThinkLabelBlock *g_think_label_blocks;
-static ThinkLabelBlock *g_think_label_block;
-static MdDocument *g_think_docs;
-static int g_think_doc_count;
-static int g_think_doc_cap;
-
 typedef struct ToolWrapCacheSet ToolWrapCacheSet;
 
 typedef struct TranscriptView {
@@ -89,23 +83,60 @@ typedef struct InspectFrame {
     char *fallback;
 } InspectFrame;
 
-static PicoHost *g_app;
-static InspectFrame g_inspect[PICO_MAX_DELEGATION_DEPTH + 1];
-static int g_inspect_n;
-static bool g_inspect_follow = true;
-static bool g_inspect_overflow;
-static PicoScrollbar g_inspect_bar;
-static bool g_inspect_pressed_dim;
-static bool g_inspect_pressed_back;
-static bool g_inspect_pressed_tool;
-static int g_inspect_tool_msg;
-static int g_inspect_tool_idx;
-static PicoTranscriptVirtual g_main_virtual;
-static PicoTranscriptVirtual g_inspect_virtual;
-static ToolWrapCacheSet g_main_tool_wrap;
-static ToolWrapCacheSet g_inspect_tool_wrap;
-static int g_inspect_virtual_ns;
-static bool g_virtual_relayout;
+typedef struct ChatState {
+    ThinkLabelBlock *think_label_blocks;
+    ThinkLabelBlock *think_label_block;
+    MdDocument *think_docs;
+    int think_doc_count;
+    int think_doc_cap;
+    PicoHost *app;
+    InspectFrame inspect[PICO_MAX_DELEGATION_DEPTH + 1];
+    int inspect_n;
+    bool inspect_follow;
+    bool inspect_overflow;
+    PicoScrollbar inspect_bar;
+    bool inspect_pressed_dim;
+    bool inspect_pressed_back;
+    bool inspect_pressed_tool;
+    int inspect_tool_msg;
+    int inspect_tool_idx;
+    PicoTranscriptVirtual main_virtual;
+    PicoTranscriptVirtual inspect_virtual;
+    ToolWrapCacheSet main_tool_wrap;
+    ToolWrapCacheSet inspect_tool_wrap;
+    int inspect_virtual_ns;
+    bool virtual_relayout;
+} ChatState;
+
+static __thread ChatState *s_active_chat_state = NULL;
+
+static ChatState *ActiveChatState(void)
+{
+    return s_active_chat_state;
+}
+
+#define g_think_label_blocks (ActiveChatState()->think_label_blocks)
+#define g_think_label_block (ActiveChatState()->think_label_block)
+#define g_think_docs (ActiveChatState()->think_docs)
+#define g_think_doc_count (ActiveChatState()->think_doc_count)
+#define g_think_doc_cap (ActiveChatState()->think_doc_cap)
+#define g_app (ActiveChatState()->app)
+#define g_inspect (ActiveChatState()->inspect)
+#define g_inspect_n (ActiveChatState()->inspect_n)
+#define g_inspect_follow (ActiveChatState()->inspect_follow)
+#define g_inspect_overflow (ActiveChatState()->inspect_overflow)
+#define g_inspect_bar (ActiveChatState()->inspect_bar)
+#define g_inspect_pressed_dim (ActiveChatState()->inspect_pressed_dim)
+#define g_inspect_pressed_back (ActiveChatState()->inspect_pressed_back)
+#define g_inspect_pressed_tool (ActiveChatState()->inspect_pressed_tool)
+#define g_inspect_tool_msg (ActiveChatState()->inspect_tool_msg)
+#define g_inspect_tool_idx (ActiveChatState()->inspect_tool_idx)
+#define g_main_virtual (ActiveChatState()->main_virtual)
+#define g_inspect_virtual (ActiveChatState()->inspect_virtual)
+#define g_main_tool_wrap (ActiveChatState()->main_tool_wrap)
+#define g_inspect_tool_wrap (ActiveChatState()->inspect_tool_wrap)
+#define g_inspect_virtual_ns (ActiveChatState()->inspect_virtual_ns)
+#define g_virtual_relayout (ActiveChatState()->virtual_relayout)
 
 static bool IsSubagentTool(const PicoTraceLine *line)
 {
@@ -1376,7 +1407,11 @@ bool PicoChat_TakeVirtualRelayout(void)
 
 void PicoChat_Render(PicoHost *app, void *state)
 {
-    (void)state;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     app->hovered_tool = false;
     ThinkFrameReset();
     PicoChatSel_BeginFrame(PicoHost_SelectedAgent(app)->message_count);
@@ -1489,6 +1524,11 @@ static bool InspectPop(void)
 
 void PicoChat_InspectClose(void)
 {
+    ChatState *s = ActiveChatState();
+    if (!s)
+    {
+        return;
+    }
     while (g_inspect_n > 0 && InspectPop())
     {
         /* pop every nested frame */
@@ -1606,8 +1646,12 @@ static PicoTraceLine *FindToolLine(PicoHost *app, PicoAgentId agent_id, const ch
 static void SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
     PicoHost *app = workspace ? workspace->host : NULL;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     PicoToolRowEvent *ev = event;
-    (void)state;
     PicoTraceLine scratch;
     PicoTraceLine *line;
     if (!ev || !ev->name || strcmp(ev->name, "subagent") != 0)
@@ -1693,8 +1737,8 @@ static void InspectFollowScroll(void)
 
 static void InspectRender(PicoHost *app, void *state)
 {
-    (void)state;
-    if (g_inspect_n <= 0)
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state || g_inspect_n <= 0)
     {
         return;
     }
@@ -2031,8 +2075,12 @@ void PicoChat_HandleToolRelease(PicoHost *app)
 
 void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
     (void)event;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     InspectHandlePointer(app);
     InspectFollowScroll();
     PicoChatSel_Clamp(app);
@@ -2493,8 +2541,12 @@ static void PicoChat_DrawInspectSheen(PicoHost *app)
 
 void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)state;
     (void)event;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     if (!PicoUi_ModalOpen(app))
     {
         PicoChatSel_DrawOverlay(app);
@@ -2510,7 +2562,8 @@ void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state
 static void ChatOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
-    if (g_inspect_n <= 0)
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state || g_inspect_n <= 0)
     {
         return;
     }
@@ -2533,7 +2586,11 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
 static void ChatSessionReset(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
     PicoHost *app = workspace ? workspace->host : NULL;
-    (void)state;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     PicoAgent *active = PicoHost_SelectedAgent(app);
     if (!event || !active || event->agent_id == active->id)
     {
@@ -2548,23 +2605,39 @@ static void ChatSessionReset(PicoWorkspace *workspace, const PicoHookEvent *even
 static void ChatShutdown(PicoHost *app, void *state)
 {
     (void)app;
-    (void)state;
+    ChatState *s = (ChatState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_chat_state = s;
     ThinkFrameFree();
-    PicoTranscriptVirtual_Free(&g_main_virtual);
-    PicoTranscriptVirtual_Free(&g_inspect_virtual);
-    ToolWrapCacheSet_Free(&g_main_tool_wrap);
-    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
-    g_virtual_relayout = false;
+    PicoTranscriptVirtual_Free(&s->main_virtual);
+    PicoTranscriptVirtual_Free(&s->inspect_virtual);
+    ToolWrapCacheSet_Free(&s->main_tool_wrap);
+    ToolWrapCacheSet_Free(&s->inspect_tool_wrap);
+    s->virtual_relayout = false;
     PicoChat_InspectClose();
     InspectForceReset();
-    g_app = NULL;
+    free(s);
+    s_active_chat_state = NULL;
 }
 
 static int ChatInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
-    g_app = app;
-    if (g_inspect_n > 0 && !pico_ui_modal_has(app, "inspect"))
+    ChatState *s = (ChatState *)calloc(1, sizeof(ChatState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->app = app;
+    s->inspect_follow = true;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_chat_state = s;
+    if (s->inspect_n > 0 && !pico_ui_modal_has(app, "inspect"))
     {
         InspectForceReset();
     }

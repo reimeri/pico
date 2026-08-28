@@ -1,6 +1,9 @@
 #include "pico/host.h"
 #include "pico/plugin.h"
 #include "host_internal.h"
+#include "workspace_internal.h"
+#include "settings.h"
+#include "agent_internal.h"
 #include "clay/clay.h"
 
 #include <dirent.h>
@@ -589,6 +592,252 @@ static int TestWorkspaceChangeSeesOwningWorkspace(void)
     return 0;
 }
 
+static int TestModelChangeDoesNotMutateWorkspaceDefault(void)
+{
+    PicoWorkspace ws;
+    PicoAgent agent;
+    PicoModel models[2];
+    memset(&ws, 0, sizeof(ws));
+    memset(&agent, 0, sizeof(agent));
+    memset(models, 0, sizeof(models));
+
+    snprintf(models[0].id, sizeof(models[0].id), "original-default-model");
+    snprintf(models[1].id, sizeof(models[1].id), "custom-agent-model");
+    ws.models = models;
+    ws.model_count = 2;
+    snprintf(ws.settings.default_model, sizeof(ws.settings.default_model), "original-default-model");
+    agent.workspace = &ws;
+
+    PicoSettings_InitAgent(&agent);
+    if (strcmp(agent.model_name, "original-default-model") != 0)
+    {
+        Fail("agent should initialize with workspace default model");
+        return 1;
+    }
+
+    PicoSettings_SetModel(&agent, "custom-agent-model");
+    if (strcmp(agent.model_name, "custom-agent-model") != 0)
+    {
+        Fail("agent model should update to custom model");
+        return 1;
+    }
+    if (strcmp(ws.settings.default_model, "original-default-model") != 0)
+    {
+        Fail("PicoSettings_SetModel must not mutate workspace default_model");
+        return 1;
+    }
+    return 0;
+}
+
+static int TestWorkspacePluginIsolation(void)
+{
+    char ws1_dir[] = "/tmp/pico-ws-iso1-XXXXXX";
+    char ws2_dir[] = "/tmp/pico-ws-iso2-XXXXXX";
+    if (!mkdtemp(ws1_dir) || !mkdtemp(ws2_dir))
+    {
+        Fail("mkdtemp ws iso");
+        return 1;
+    }
+    PicoHost *host1 = NULL;
+    PicoHost *host2 = NULL;
+    PicoWorkspaceId id1 = 0;
+    PicoWorkspaceId id2 = 0;
+    if (pico_host_init(&host1, NULL, true) != PICO_OK || !host1 ||
+        pico_host_init(&host2, NULL, true) != PICO_OK || !host2)
+    {
+        Fail("host_init iso");
+        if (host1) pico_host_free(host1);
+        if (host2) pico_host_free(host2);
+        rmdir(ws1_dir);
+        rmdir(ws2_dir);
+        return 1;
+    }
+    if (pico_workspace_open(host1, ws1_dir, &id1) != PICO_OK ||
+        pico_workspace_open(host2, ws2_dir, &id2) != PICO_OK)
+    {
+        Fail("workspace_open iso");
+        pico_host_free(host1);
+        pico_host_free(host2);
+        rmdir(ws1_dir);
+        rmdir(ws2_dir);
+        return 1;
+    }
+    PicoPlugins_Load(host1);
+    PicoPlugins_Load(host2);
+    PicoWorkspace *ws1 = PicoHost_PrimaryWorkspace(host1);
+    PicoWorkspace *ws2 = PicoHost_PrimaryWorkspace(host2);
+    void *files1 = PicoPlugins_WorkspaceState(ws1, "files");
+    void *diff1 = PicoPlugins_WorkspaceState(ws1, "diff");
+    void *todo1 = PicoPlugins_WorkspaceState(ws1, "todos");
+    void *files2 = PicoPlugins_WorkspaceState(ws2, "files");
+    void *diff2 = PicoPlugins_WorkspaceState(ws2, "diff");
+    void *todo2 = PicoPlugins_WorkspaceState(ws2, "todos");
+    if (!files1 || !diff1 || !todo1 || !files2 || !diff2 || !todo2)
+    {
+        Fail("workspace plugins must be initialized on both workspaces");
+        pico_host_free(host1);
+        pico_host_free(host2);
+        rmdir(ws1_dir);
+        rmdir(ws2_dir);
+        return 1;
+    }
+    if (files1 == files2 || diff1 == diff2 || todo1 == todo2)
+    {
+        Fail("workspace plugin states must be isolated per-workspace instance");
+        pico_host_free(host1);
+        pico_host_free(host2);
+        rmdir(ws1_dir);
+        rmdir(ws2_dir);
+        return 1;
+    }
+
+    pico_host_free(host1);
+    pico_host_free(host2);
+    rmdir(ws1_dir);
+    rmdir(ws2_dir);
+    return 0;
+}
+
+static int TestHostPluginIsolation(void)
+{
+    char cfg1[] = "/tmp/pico-cfg1-XXXXXX";
+    char cfg2[] = "/tmp/pico-cfg2-XXXXXX";
+    char cache1[] = "/tmp/pico-cache1-XXXXXX";
+    char cache2[] = "/tmp/pico-cache2-XXXXXX";
+    if (!mkdtemp(cfg1) || !mkdtemp(cfg2) || !mkdtemp(cache1) || !mkdtemp(cache2))
+    {
+        Fail("mkdtemp host iso");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg1, 1);
+    setenv("XDG_CACHE_HOME", cache1, 1);
+    PicoHost *host1 = NULL;
+    if (pico_host_init(&host1, NULL, true) != PICO_OK || !host1)
+    {
+        Fail("host1 init");
+        return 1;
+    }
+    PicoPlugins_Load(host1);
+
+    setenv("XDG_CONFIG_HOME", cfg2, 1);
+    setenv("XDG_CACHE_HOME", cache2, 1);
+    PicoHost *host2 = NULL;
+    if (pico_host_init(&host2, NULL, true) != PICO_OK || !host2)
+    {
+        Fail("host2 init");
+        pico_host_free(host1);
+        return 1;
+    }
+    PicoPlugins_Load(host2);
+
+    void *comp1 = PicoPlugins_HostState(host1, "composer");
+    void *comp2 = PicoPlugins_HostState(host2, "composer");
+    void *chat1 = PicoPlugins_HostState(host1, "chat");
+    void *chat2 = PicoPlugins_HostState(host2, "chat");
+    if (!comp1 || !comp2 || !chat1 || !chat2 || comp1 == comp2 || chat1 == chat2)
+    {
+        Fail("host plugins must have distinct per-host instances without global fallback");
+        pico_host_free(host1);
+        pico_host_free(host2);
+        return 1;
+    }
+
+    pico_host_free(host1);
+    pico_host_free(host2);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg1);
+    RmRf(cfg2);
+    RmRf(cache1);
+    RmRf(cache2);
+    return 0;
+}
+
+static int TestHostPreferencesPersistence(void)
+{
+    char cfg[] = "/tmp/pico-pref-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-pref-cache-XXXXXX";
+    char ws_dir[] = "/tmp/pico-pref-ws-XXXXXX";
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(ws_dir))
+    {
+        Fail("mkdtemp pref");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+
+    PicoHost *host = NULL;
+    PicoWorkspaceId id = 0;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("pref host init");
+        return 1;
+    }
+    if (pico_workspace_open(host, ws_dir, &id) != PICO_OK)
+    {
+        Fail("pref ws open");
+        pico_host_free(host);
+        return 1;
+    }
+    PicoPlugins_Load(host);
+
+    int ext_count = PicoPlugins_Count();
+    int target_idx = -1;
+    for (int i = 0; i < ext_count; i++)
+    {
+        PicoExtInfo info;
+        if (PicoPlugins_Get(i, &info) && info.name && strcmp(info.name, "footer") == 0)
+        {
+            target_idx = i;
+            break;
+        }
+    }
+    if (target_idx < 0)
+    {
+        Fail("find footer extension");
+        pico_host_free(host);
+        return 1;
+    }
+
+    if (!PicoPlugins_SetEnabled(host, target_idx, false))
+    {
+        Fail("PicoPlugins_SetEnabled to false");
+        pico_host_free(host);
+        return 1;
+    }
+
+    char pref_path[512];
+    snprintf(pref_path, sizeof(pref_path), "%s/pico/host_preferences.json", cfg);
+    if (access(pref_path, F_OK) != 0)
+    {
+        Fail("disabling host plugin must write to host_preferences.json");
+        pico_host_free(host);
+        return 1;
+    }
+
+    char ws_settings_path[512];
+    snprintf(ws_settings_path, sizeof(ws_settings_path), "%s/.pico/settings.json", ws_dir);
+    if (access(ws_settings_path, F_OK) == 0)
+    {
+        char content[1024];
+        ReadFileStr(ws_settings_path, content, sizeof(content));
+        if (strstr(content, "disabled_extensions") || strstr(content, "footer"))
+        {
+            Fail("disabling host plugin must NOT write disabled_extensions to workspace settings.json");
+            pico_host_free(host);
+            return 1;
+        }
+    }
+
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(ws_dir);
+    return 0;
+}
+
 int main(void)
 {
     if (TestCanonicalOpenAndDuplicate() != 0)
@@ -616,6 +865,22 @@ int main(void)
         return 1;
     }
     if (TestWorkspaceChangeSeesOwningWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestModelChangeDoesNotMutateWorkspaceDefault() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspacePluginIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestHostPluginIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestHostPreferencesPersistence() != 0)
     {
         return 1;
     }

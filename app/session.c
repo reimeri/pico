@@ -728,7 +728,7 @@ static void ApplyHeader(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int
     {
         snprintf(agent->model, sizeof(agent->model), "%s", model);
         agent->effort[0] = '\0';
-        PicoSettings_SyncAgent(app, agent);
+        PicoSettings_SyncAgent(agent);
     }
     free(model);
     char *key = JsonObjStr(doc, obj, "prompt_cache_key");
@@ -996,7 +996,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         {
             snprintf(agent->effort, sizeof(agent->effort), "%s", effort);
         }
-        PicoSettings_SyncAgent(app, agent);
+        PicoSettings_SyncAgent(agent);
         free(model);
         free(effort);
     }
@@ -1296,7 +1296,7 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
         }
         return;
     }
-    if (start == PICO_SESSION_RESUME || app->settings.resume_last)
+    if (start == PICO_SESSION_RESUME || (ws && ws->settings.resume_last))
     {
         char dir[4096];
         char latest[4096];

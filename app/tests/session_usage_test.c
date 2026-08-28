@@ -622,20 +622,20 @@ void PicoMessages_PrepareDocs(PicoMessage *messages, int count)
     (void)count;
 }
 
-PicoModel *PicoSettings_ActiveModel(PicoHost *app, const PicoAgent *agent)
+PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent)
 {
-    if (!app || !agent) return NULL;
-    for (int i = 0; i < app->model_count; i++)
+    if (!agent || !agent->workspace) return NULL;
+    for (int i = 0; i < agent->workspace->model_count; i++)
     {
-        if (strcmp(app->models[i].id, agent->model) == 0) return &app->models[i];
+        if (strcmp(agent->workspace->models[i].id, agent->model) == 0) return &agent->workspace->models[i];
     }
     return NULL;
 }
 
-void PicoSettings_SyncAgent(const PicoHost *app, PicoAgent *agent)
+void PicoSettings_SyncAgent(PicoAgent *agent)
 {
-    PicoModel *model = PicoSettings_ActiveModel((PicoHost *)app, agent);
     if (!agent) return;
+    PicoModel *model = PicoSettings_ActiveModel(agent);
     snprintf(agent->model_name, sizeof(agent->model_name), "%s",
              model && model->name[0] ? model->name : agent->model);
     agent->context_limit = model ? model->context_limit : 0;
@@ -1270,13 +1270,19 @@ int main(void)
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
 
     PicoHost writer;
+    PicoWorkspace writer_ws;
     PicoAgent writer_agent;
     memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
     memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
-    PicoHost_SetPath(&writer, "/workspace");
-    snprintf(writer.settings.model, sizeof(writer.settings.model), "default-model");
+    snprintf(writer_ws.settings.default_model, sizeof(writer_ws.settings.default_model), "default-model");
     PicoSession_LogUsage(&writer, &writer_agent, 100, 20);
     PicoSession_LogUsage(&writer, &writer_agent, 200, 150);
     PicoSession_LogAssistant(&writer, &writer_agent, 0, "assistant response", NULL, NULL, NULL, NULL, 0);
@@ -1301,6 +1307,7 @@ int main(void)
 
     PicoAgent child_agent;
     memset(&child_agent, 0, sizeof(child_agent));
+    child_agent.workspace = &writer_ws;
     child_agent.persistence = PICO_SESSION_DURABLE;
     child_agent.kind = PICO_AGENT_SUBAGENT;
     snprintf(child_agent.model, sizeof(child_agent.model), "saved-model");
@@ -1361,9 +1368,16 @@ int main(void)
     }
 
     PicoHost compacted;
+    PicoWorkspace compacted_ws;
     PicoAgent compacted_agent;
     memset(&compacted, 0, sizeof(compacted));
+    memset(&compacted_ws, 0, sizeof(compacted_ws));
     memset(&compacted_agent, 0, sizeof(compacted_agent));
+    compacted_ws.host = &compacted;
+    snprintf(compacted_ws.path, sizeof(compacted_ws.path), "/workspace");
+    compacted.workspaces[0] = &compacted_ws;
+    compacted.workspace_count = 1;
+    compacted_agent.workspace = &compacted_ws;
     PicoModel replay_models[2];
     memset(replay_models, 0, sizeof(replay_models));
     snprintf(replay_models[0].id, sizeof(replay_models[0].id), "default-model");
@@ -1374,8 +1388,8 @@ int main(void)
     snprintf(replay_models[1].name, sizeof(replay_models[1].name), "Saved");
     replay_models[1].context_limit = 222;
     snprintf(replay_models[1].default_effort, sizeof(replay_models[1].default_effort), "low");
-    compacted.models = replay_models;
-    compacted.model_count = 2;
+    compacted_ws.models = replay_models;
+    compacted_ws.model_count = 2;
     snprintf(compacted_agent.model, sizeof(compacted_agent.model), "default-model");
     snprintf(compacted_agent.effort, sizeof(compacted_agent.effort), "high");
     compacted_agent.context_limit = 111;

@@ -431,17 +431,22 @@ typedef struct PicoAuth {
     void *state;
 } PicoAuth;
 
-typedef struct PicoSettings {
-    char model[128];
-    int context_limit;
+typedef struct PicoHostPreferences {
+    double font_scale;
+    int chat_width;
+    char disabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
+    int disabled_host_extension_count;
+} PicoHostPreferences;
+
+typedef struct PicoWorkspaceSettings {
+    char default_model[128];
+    int context_limit_fallback;
     double compact_ratio;
     bool compact_enabled;
     bool resume_last;
-    double font_scale;
-    int chat_width;
     char disabled_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
     int disabled_extension_count;
-} PicoSettings;
+} PicoWorkspaceSettings;
 
 typedef struct PicoToolBeforeEntry {
     PicoToolBeforeFn fn;
@@ -600,6 +605,8 @@ void PicoPlugins_Shutdown(PicoHost *host);
 int PicoPlugins_Count(void);
 bool PicoPlugins_Get(int index, PicoExtInfo *out);
 bool PicoPlugins_SetEnabled(PicoHost *host, int index, bool enabled);
+void *PicoPlugins_HostState(const PicoHost *host, const char *name);
+void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name);
 
 bool Pico_ShortcutPressed(char letter);
 bool Pico_ShortcutRepeat(char letter);
@@ -629,7 +636,7 @@ void PicoComplete_Close(void);
 bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoHost *app, void *state);
 bool PicoFooter_MenuOpen(void);
-bool PicoDiff_IsOpen(void);
+bool PicoDiff_IsOpen(const PicoHost *app);
 void PicoDiff_RenderChip(PicoHost *app);
 void PicoOverlay_Render(PicoHost *app, void *state);
 void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt);

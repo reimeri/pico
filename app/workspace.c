@@ -408,6 +408,7 @@ static PicoAgentResult ConfigureAgent(PicoHost *app, PicoAgent *agent,
     {
         return PICO_AGENT_RESULT_INVALID;
     }
+    PicoWorkspace *workspace = agent->workspace;
     if (options->kind != PICO_AGENT_MAIN && options->kind != PICO_AGENT_SUBAGENT)
     {
         return PICO_AGENT_RESULT_INVALID;
@@ -440,18 +441,18 @@ static PicoAgentResult ConfigureAgent(PicoHost *app, PicoAgent *agent,
     snprintf(agent->purpose, sizeof(agent->purpose), "%s", options->purpose ? options->purpose : "");
     if (options->model && options->model[0])
     {
-        const PicoModel *model = PicoSettings_FindModelConst(app, options->model);
+        const PicoModel *model = PicoSettings_FindModelConst(workspace, options->model);
         if (!model)
         {
             return PICO_AGENT_RESULT_INVALID;
         }
         snprintf(agent->model, sizeof(agent->model), "%s", model->id);
         agent->effort[0] = '\0';
-        PicoSettings_SyncAgent(app, agent);
+        PicoSettings_SyncAgent(agent);
     }
     if (options->effort && options->effort[0])
     {
-        const PicoModel *model = PicoSettings_ActiveModelConst(app, agent);
+        const PicoModel *model = PicoSettings_ActiveModelConst(agent);
         if (!PicoSettings_EffortAllowed(model, options->effort) &&
             !(model && model->effort_count == 0 && strcmp(options->effort, "none") == 0))
         {
@@ -885,6 +886,10 @@ void PicoWorkspace_Free(PicoWorkspace *workspace)
     workspace->snapshot_count = 0;
     workspace->snapshot_capacity = 0;
     FreeUiPosts(workspace);
+    free(workspace->models);
+    workspace->models = NULL;
+    workspace->model_count = 0;
+    pthread_mutex_destroy(&workspace->settings_mu);
     pthread_mutex_destroy(&workspace->ui_post_mu);
     pthread_mutex_destroy(&workspace->lifecycle_mu);
     pthread_mutex_destroy(&workspace->delegation_mu);
@@ -1733,7 +1738,7 @@ static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
         snprintf(child->parent_session_id, sizeof(child->parent_session_id), "%s",
                  parent->persistence == PICO_SESSION_DURABLE ? parent->session_id : "");
     }
-    PicoSettings_SyncAgent(app, child);
+    PicoSettings_SyncAgent(child);
     if (job->session_id[0] && replayed_model[0] && strcmp(replayed_model, model) != 0)
     {
         PicoAgent_RotateCacheKey(child);

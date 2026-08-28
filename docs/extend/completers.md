@@ -26,11 +26,13 @@ static int HashInit(PicoHost *host, void **state_out)
 }
 ```
 
+Workspace-scoped completers (e.g. `@` files) register via `pico_workspace_add_completer(workspace, '@', false, WorkspaceQuery, NULL)` in `workspace_init`.
+
 ## Fields
 
 - `trigger` — character that starts the token (`/` and `@` are taken by builtins).
 - `bol_only` — if true, only when the trigger is at the start of the composer (commands). If false, the trigger must be at a token start (preceded by start-of-text or whitespace).
-- `query(app, prefix, out, max)` — fill up to `max` items (`PICO_MAX_COMPLETE_ITEMS` is 24). `prefix` is the text after the trigger. Return the count.
+- `query(host/workspace, prefix, out, max, state)` — fill up to `max` items (`PICO_MAX_COMPLETE_ITEMS` is 24). `prefix` is the text after the trigger. Return the count.
 - `accept` — optional. Return true if you handled insertion yourself; otherwise Pico replaces the token with `item->insert` (or `label` if `insert` is empty).
 
 Each item:

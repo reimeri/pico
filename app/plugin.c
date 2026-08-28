@@ -81,15 +81,31 @@ static bool ExtPinned(const char *name)
     return name && name[0] && strcmp(name, "extensions") == 0;
 }
 
-static bool ExtDisabled(const PicoHost *app, const char *name)
+static bool HostExtDisabled(const PicoHost *host, const char *name)
 {
-    if (!app || !name || !name[0] || ExtPinned(name))
+    if (!host || !name || !name[0] || ExtPinned(name))
     {
         return false;
     }
-    for (int i = 0; i < app->settings.disabled_extension_count; i++)
+    for (int i = 0; i < host->preferences.disabled_host_extension_count; i++)
     {
-        if (strcmp(app->settings.disabled_extensions[i], name) == 0)
+        if (strcmp(host->preferences.disabled_host_extensions[i], name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool WorkspaceExtDisabled(const PicoWorkspace *workspace, const char *name)
+{
+    if (!workspace || !name || !name[0] || ExtPinned(name))
+    {
+        return false;
+    }
+    for (int i = 0; i < workspace->settings.disabled_extension_count; i++)
+    {
+        if (strcmp(workspace->settings.disabled_extensions[i], name) == 0)
         {
             return true;
         }
@@ -100,15 +116,31 @@ static bool ExtDisabled(const PicoHost *app, const char *name)
 static void ShutdownPlugin(PicoHost *host, LoadedPlugin *p)
 {
     PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(host);
-    if (p->workspace_inited && p->ext.workspace_shutdown)
+    if (workspace && p->workspace_inited && p->ext.workspace_shutdown)
     {
         p->ext.workspace_shutdown(workspace, p->workspace_state);
+        for (int i = 0; i < workspace->workspace_plugin_count; i++)
+        {
+            if (strcmp(workspace->workspace_plugins[i].name, p->ext.name) == 0)
+            {
+                workspace->workspace_plugins[i].state = NULL;
+                break;
+            }
+        }
     }
     p->workspace_inited = false;
     p->workspace_state = NULL;
-    if (p->host_inited && p->ext.host_shutdown)
+    if (host && p->host_inited && p->ext.host_shutdown)
     {
         p->ext.host_shutdown(host, p->host_state);
+        for (int i = 0; i < host->host_plugin_count; i++)
+        {
+            if (strcmp(host->host_plugins[i].name, p->ext.name) == 0)
+            {
+                host->host_plugins[i].state = NULL;
+                break;
+            }
+        }
     }
     p->host_inited = false;
     p->host_state = NULL;
@@ -136,6 +168,24 @@ static int RunHostInit(PicoHost *host, LoadedPlugin *p)
     PicoHost_PublishRegistration(host, state);
     p->host_state = state;
     p->host_inited = true;
+    if (host && p->ext.name && host->host_plugin_count < (int)(sizeof(host->host_plugins)/sizeof(host->host_plugins[0])))
+    {
+        int slot = -1;
+        for (int i = 0; i < host->host_plugin_count; i++)
+        {
+            if (strcmp(host->host_plugins[i].name, p->ext.name) == 0)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+        {
+            slot = host->host_plugin_count++;
+            snprintf(host->host_plugins[slot].name, sizeof(host->host_plugins[slot].name), "%s", p->ext.name);
+        }
+        host->host_plugins[slot].state = state;
+    }
     return 0;
 }
 
@@ -166,30 +216,53 @@ static int RunWorkspaceInit(PicoHost *host, LoadedPlugin *p)
     PicoHost_PublishRegistration(host, state);
     p->workspace_state = state;
     p->workspace_inited = true;
+    if (workspace->workspace_plugin_count < (int)(sizeof(workspace->workspace_plugins)/sizeof(workspace->workspace_plugins[0])))
+    {
+        int slot = -1;
+        for (int i = 0; i < workspace->workspace_plugin_count; i++)
+        {
+            if (strcmp(workspace->workspace_plugins[i].name, p->ext.name) == 0)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+        {
+            slot = workspace->workspace_plugin_count++;
+            snprintf(workspace->workspace_plugins[slot].name, sizeof(workspace->workspace_plugins[slot].name), "%s", p->ext.name);
+        }
+        workspace->workspace_plugins[slot].state = state;
+    }
     return 0;
 }
 
 static void ActivatePlugin(PicoHost *host, LoadedPlugin *p)
 {
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(host);
     bool loaded = p->builtin || p->handle != NULL;
-    p->enabled = loaded && !ExtDisabled(host, p->ext.name);
+    bool host_dis = HostExtDisabled(host, p->ext.name);
+    bool ws_dis = WorkspaceExtDisabled(workspace, p->ext.name);
+    p->enabled = loaded && (!host_dis || !ws_dis);
     if (ExtPinned(p->ext.name))
     {
         p->enabled = loaded;
+        host_dis = false;
+        ws_dis = false;
     }
     if (p->host_inited || p->workspace_inited)
     {
         ShutdownPlugin(host, p);
     }
-    if (!p->enabled)
+    if (!loaded)
     {
         return;
     }
-    if (RunHostInit(host, p) != 0)
+    if (!host_dis && RunHostInit(host, p) != 0)
     {
         pico_status_warn(host, "host extension init failed");
     }
-    if (RunWorkspaceInit(host, p) != 0)
+    if (!ws_dis && RunWorkspaceInit(host, p) != 0)
     {
         pico_status_warn(host, "workspace extension init failed");
     }
@@ -857,7 +930,21 @@ bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
     {
         return true;
     }
-    if (!PicoSettings_SetExtensionDisabled(app, info.name, !enabled))
+    LoadedPlugin *p = &g_plugins[index];
+    bool ok = true;
+    if (p->ext.host_init)
+    {
+        ok = PicoHost_SetExtensionDisabled(app, info.name, !enabled) && ok;
+    }
+    if (p->ext.workspace_init)
+    {
+        PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(app);
+        if (workspace)
+        {
+            ok = PicoWorkspace_SetExtensionDisabled(workspace, info.name, !enabled) && ok;
+        }
+    }
+    if (!ok)
     {
         return false;
     }
@@ -871,4 +958,36 @@ bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
         }
     }
     return true;
+}
+
+void *PicoPlugins_HostState(const PicoHost *host, const char *name)
+{
+    if (!host || !name || !name[0])
+    {
+        return NULL;
+    }
+    for (int i = 0; i < host->host_plugin_count; i++)
+    {
+        if (strcmp(host->host_plugins[i].name, name) == 0)
+        {
+            return host->host_plugins[i].state;
+        }
+    }
+    return NULL;
+}
+
+void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name)
+{
+    if (!workspace || !name || !name[0])
+    {
+        return NULL;
+    }
+    for (int i = 0; i < workspace->workspace_plugin_count; i++)
+    {
+        if (strcmp(workspace->workspace_plugins[i].name, name) == 0)
+        {
+            return workspace->workspace_plugins[i].state;
+        }
+    }
+    return NULL;
 }

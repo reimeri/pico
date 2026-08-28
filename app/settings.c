@@ -8,15 +8,19 @@
 #include "session.h"
 #include "theme_internal.h"
 #include "host_internal.h"
+#include "workspace_internal.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <errno.h>
+#include <unistd.h>
 
 static const char *HomeDir(void)
 {
@@ -217,11 +221,11 @@ static float ChatChWidth(void)
 
 float Pico_ChatTextMaxPx(const PicoHost *app)
 {
-    if (!app || app->settings.chat_width <= 0)
+    if (!app || app->preferences.chat_width <= 0)
     {
         return 0.0f;
     }
-    return (float)app->settings.chat_width * ChatChWidth();
+    return (float)app->preferences.chat_width * ChatChWidth();
 }
 
 float Pico_ChatColumnMaxPx(const PicoHost *app)
@@ -240,7 +244,7 @@ static bool IsOffWord(const char *s)
                  strcmp(s, "none") == 0);
 }
 
-static void ApplyCompactAt(PicoSettings *s, const JsonDoc *doc, int obj)
+static void ApplyCompactAtWorkspace(PicoWorkspaceSettings *s, const JsonDoc *doc, int obj)
 {
     int tok = JsonObjGet(doc, obj, "compact_at");
     if (tok < 0)
@@ -356,24 +360,33 @@ static void ReplaceModels(PicoModel **models, int *count, const JsonDoc *doc, in
     *count = got;
 }
 
-static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
+static void ApplyWorkspaceObject(PicoWorkspaceSettings *s, const JsonDoc *doc, int obj)
 {
     if (!JsonIsObject(doc, obj))
     {
         return;
     }
     char *model = JsonObjStr(doc, obj, "model");
-    CopyField(s->model, sizeof(s->model), model);
+    CopyField(s->default_model, sizeof(s->default_model), model);
     int limit = JsonObjInt(doc, obj, "context_limit", 0);
     if (limit > 0)
     {
-        s->context_limit = limit;
+        s->context_limit_fallback = limit;
     }
-    ApplyCompactAt(s, doc, obj);
+    ApplyCompactAtWorkspace(s, doc, obj);
     int resume = JsonObjGet(doc, obj, "resume_last");
     if (resume >= 0)
     {
         s->resume_last = JsonEq(doc, resume, "true") || JsonEq(doc, resume, "1");
+    }
+    free(model);
+}
+
+static void ApplyPreferencesObject(PicoHostPreferences *p, const JsonDoc *doc, int obj)
+{
+    if (!JsonIsObject(doc, obj))
+    {
+        return;
     }
     char *font_scale = JsonObjRaw(doc, obj, "font_scale");
     if (font_scale)
@@ -381,7 +394,7 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
         double scale;
         if (ParseFontScale(font_scale, &scale))
         {
-            s->font_scale = scale;
+            p->font_scale = scale;
         }
         free(font_scale);
     }
@@ -391,22 +404,22 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
         int width;
         if (ParseChatWidth(chat_width, &width))
         {
-            s->chat_width = width;
+            p->chat_width = width;
         }
         free(chat_width);
     }
-    free(model);
 }
 
-static bool DisabledNameListed(const PicoSettings *s, const char *name)
+static bool DisabledNameListed(const char list[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME], int count,
+                               const char *name)
 {
-    if (!s || !name || !name[0])
+    if (!name || !name[0])
     {
         return false;
     }
-    for (int i = 0; i < s->disabled_extension_count; i++)
+    for (int i = 0; i < count; i++)
     {
-        if (strcmp(s->disabled_extensions[i], name) == 0)
+        if (strcmp(list[i], name) == 0)
         {
             return true;
         }
@@ -414,7 +427,30 @@ static bool DisabledNameListed(const PicoSettings *s, const char *name)
     return false;
 }
 
-static void ApplyDisabledExtensions(PicoSettings *s, const JsonDoc *doc, int obj)
+static void ApplyDisabledHostExtensions(PicoHostPreferences *p, const JsonDoc *doc, int obj)
+{
+    p->disabled_host_extension_count = 0;
+    int arr = JsonObjGet(doc, obj, "disabled_host_extensions");
+    if (!JsonIsArray(doc, arr))
+    {
+        return;
+    }
+    int n = JsonArrayLen(doc, arr);
+    for (int i = 0; i < n && p->disabled_host_extension_count < PICO_MAX_DISABLED_EXTENSIONS; i++)
+    {
+        char *name = JsonStrDup(doc, JsonArrayAt(doc, arr, i));
+        if (name && name[0] && strcmp(name, "extensions") != 0 &&
+            !DisabledNameListed(p->disabled_host_extensions, p->disabled_host_extension_count, name))
+        {
+            snprintf(p->disabled_host_extensions[p->disabled_host_extension_count], PICO_DISABLED_EXT_NAME, "%s",
+                     name);
+            p->disabled_host_extension_count++;
+        }
+        free(name);
+    }
+}
+
+static void ApplyDisabledExtensions(PicoWorkspaceSettings *s, const JsonDoc *doc, int obj)
 {
     s->disabled_extension_count = 0;
     int arr = JsonObjGet(doc, obj, "disabled_extensions");
@@ -426,7 +462,8 @@ static void ApplyDisabledExtensions(PicoSettings *s, const JsonDoc *doc, int obj
     for (int i = 0; i < n && s->disabled_extension_count < PICO_MAX_DISABLED_EXTENSIONS; i++)
     {
         char *name = JsonStrDup(doc, JsonArrayAt(doc, arr, i));
-        if (name && name[0] && strcmp(name, "extensions") != 0 && !DisabledNameListed(s, name))
+        if (name && name[0] && strcmp(name, "extensions") != 0 &&
+            !DisabledNameListed(s->disabled_extensions, s->disabled_extension_count, name))
         {
             snprintf(s->disabled_extensions[s->disabled_extension_count], PICO_DISABLED_EXT_NAME, "%s",
                      name);
@@ -434,30 +471,6 @@ static void ApplyDisabledExtensions(PicoSettings *s, const JsonDoc *doc, int obj
         }
         free(name);
     }
-}
-
-static void LoadFile(PicoSettings *s, PicoModel **models, int *model_count, const char *path,
-                     bool load_disabled)
-{
-    size_t len = 0;
-    char *src = Pico_ReadFile(path, &len);
-    if (!src)
-    {
-        return;
-    }
-    JsonStripComments(src, len);
-    JsonDoc doc;
-    if (JsonParse(&doc, src, len) == 0)
-    {
-        ApplyObject(s, &doc, 0);
-        ReplaceModels(models, model_count, &doc, 0);
-        if (load_disabled)
-        {
-            ApplyDisabledExtensions(s, &doc, 0);
-        }
-        JsonFree(&doc);
-    }
-    free(src);
 }
 
 static const char *FirstEnv(const char *a, const char *b)
@@ -473,6 +486,19 @@ static const char *FirstEnv(const char *a, const char *b)
         return v;
     }
     return NULL;
+}
+
+static bool SettingsFileExists(const char *path)
+{
+    struct stat st;
+    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool UserPreferencesPath(char *out, size_t cap)
+{
+    char dir[4096];
+    return Pico_ConfigDir(dir, sizeof(dir)) &&
+           PicoPath_Format(out, cap, "%s/host_preferences.json", dir);
 }
 
 static bool UserSettingsPath(char *out, size_t cap)
@@ -495,12 +521,6 @@ static bool WorkspaceSettingsPath(const PicoWorkspace *workspace, char *out, siz
     return true;
 }
 
-static bool SettingsFileExists(const char *path)
-{
-    struct stat st;
-    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
-}
-
 static bool FileHasModels(const char *path)
 {
     size_t len = 0;
@@ -521,187 +541,67 @@ static bool FileHasModels(const char *path)
     return has;
 }
 
-PicoModel *PicoSettings_FindModel(PicoHost *app, const char *id)
+void PicoHostPreferences_Load(PicoHost *host)
 {
-    if (!app || !id || !id[0])
-    {
-        return NULL;
-    }
-    for (int i = 0; i < app->model_count; i++)
-    {
-        if (strcmp(app->models[i].id, id) == 0)
-        {
-            return &app->models[i];
-        }
-    }
-    return NULL;
-}
-
-bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
-{
-    if (!model || !effort || !effort[0])
-    {
-        return false;
-    }
-    for (int i = 0; i < model->effort_count; i++)
-    {
-        if (strcmp(model->effort[i], effort) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-const PicoModel *PicoSettings_FindModelConst(const PicoHost *app, const char *id)
-{
-    if (!app || !id || !id[0])
-    {
-        return NULL;
-    }
-    for (int i = 0; i < app->model_count; i++)
-    {
-        if (strcmp(app->models[i].id, id) == 0)
-        {
-            return &app->models[i];
-        }
-    }
-    return NULL;
-}
-
-PicoModel *PicoSettings_ActiveModel(PicoHost *app, const PicoAgent *agent)
-{
-    return agent ? PicoSettings_FindModel(app, agent->model) : NULL;
-}
-
-const PicoModel *PicoSettings_ActiveModelConst(const PicoHost *app, const PicoAgent *agent)
-{
-    return agent ? PicoSettings_FindModelConst(app, agent->model) : NULL;
-}
-
-const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
-{
-    return agent && agent->effort[0] ? agent->effort : "none";
-}
-
-void PicoSettings_SyncAgent(const PicoHost *app, PicoAgent *agent)
-{
-    if (!app || !agent)
+    if (!host)
     {
         return;
     }
-    const PicoModel *m = PicoSettings_ActiveModelConst(app, agent);
-    snprintf(agent->model_name, sizeof(agent->model_name), "%s",
-             m && m->name[0] ? m->name : agent->model);
-    if (m && m->context_limit > 0)
-    {
-        agent->context_limit = m->context_limit;
-    }
-    else
-    {
-        agent->context_limit = app->settings.context_limit;
-    }
-    if (!m || !PicoSettings_EffortAllowed(m, agent->effort))
-    {
-        const char *effort = m && PicoSettings_EffortAllowed(m, m->default_effort)
-                                 ? m->default_effort
-                                 : (m && m->effort_count > 0 ? m->effort[0] : "none");
-        snprintf(agent->effort, sizeof(agent->effort), "%s", effort);
-    }
-}
+    PicoHostPreferences *p = &host->preferences;
+    memset(p, 0, sizeof(*p));
+    p->font_scale = 1.0;
+    p->chat_width = PICO_CHAT_WIDTH_DEFAULT;
 
-void PicoSettings_InitAgent(const PicoHost *app, PicoAgent *agent)
-{
-    if (!app || !agent)
+    char dir[4096];
+    if (Pico_ConfigDir(dir, sizeof(dir)))
     {
-        return;
+        Pico_MkdirP(dir);
     }
-    snprintf(agent->model, sizeof(agent->model), "%s", app->settings.model);
-    agent->compact_enabled = app->settings.compact_enabled;
-    agent->compact_ratio = app->settings.compact_ratio;
-    agent->effort[0] = '\0';
-    PicoSettings_SyncAgent(app, agent);
-}
 
-static PicoModel *FindCatalog(PicoHost *app, const char *q)
-{
-    if (!app || !q || !q[0])
+    char path[4096];
+    if (UserPreferencesPath(path, sizeof(path)))
     {
-        return NULL;
-    }
-    for (int i = 0; i < app->model_count; i++)
-    {
-        if (strcasecmp(app->models[i].id, q) == 0 || strcasecmp(app->models[i].name, q) == 0)
+        size_t len = 0;
+        char *src = Pico_ReadFile(path, &len);
+        if (src)
         {
-            return &app->models[i];
+            JsonStripComments(src, len);
+            JsonDoc doc;
+            if (JsonParse(&doc, src, len) == 0)
+            {
+                ApplyPreferencesObject(p, &doc, 0);
+                ApplyDisabledHostExtensions(p, &doc, 0);
+                JsonFree(&doc);
+            }
+            free(src);
         }
     }
-    return NULL;
+
+    const char *font_scale = getenv("PICO_FONT_SCALE");
+    if (font_scale && font_scale[0])
+    {
+        double scale;
+        if (ParseFontScale(font_scale, &scale))
+        {
+            p->font_scale = scale;
+        }
+    }
+    const char *chat_width = getenv("PICO_CHAT_WIDTH");
+    if (chat_width && chat_width[0])
+    {
+        int width;
+        if (ParseChatWidth(chat_width, &width))
+        {
+            p->chat_width = width;
+        }
+    }
+
+    Pico_SetFontScale((float)p->font_scale);
 }
 
-bool PicoSettings_SetModel(PicoHost *app, PicoAgent *agent, const char *id_or_name)
+static void EnsureDefaultCatalog(PicoWorkspace *workspace)
 {
-    if (!app || !agent)
-    {
-        return false;
-    }
-    PicoModel *m = FindCatalog(app, id_or_name);
-    if (!m)
-    {
-        char line[256];
-        snprintf(line, sizeof(line), "Unknown model `%s`. Try `/model` for the catalog.",
-                 id_or_name ? id_or_name : "");
-        PicoOverlay_Notify(app, line);
-        return false;
-    }
-    snprintf(agent->model, sizeof(agent->model), "%s", m->id);
-    snprintf(app->settings.model, sizeof(app->settings.model), "%s", m->id);
-    agent->effort[0] = '\0';
-    PicoSettings_SyncAgent(app, agent);
-    PicoSettings_SaveSelection(app, agent, true, false);
-    PicoSession_LogModelChange(app, agent, agent->model, PicoSettings_ActiveEffort(agent));
-    char line[256];
-    snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
-             PicoSettings_ActiveEffort(agent));
-    PicoOverlay_Notify(app, line);
-    return true;
-}
-
-bool PicoSettings_SetEffort(PicoHost *app, PicoAgent *agent, const char *level)
-{
-    if (!app || !agent)
-    {
-        return false;
-    }
-    PicoModel *m = PicoSettings_ActiveModel(app, agent);
-    if (!m)
-    {
-        PicoOverlay_Notify(app, "No model in the catalog. Add one in settings.json.");
-        return false;
-    }
-    if (!level || !level[0])
-    {
-        return false;
-    }
-    if (m->effort_count > 0 && !PicoSettings_EffortAllowed(m, level))
-    {
-        char line[256];
-        snprintf(line, sizeof(line), "`%s` is not in this model's effort list.", level);
-        PicoOverlay_Notify(app, line);
-        return false;
-    }
-    snprintf(agent->effort, sizeof(agent->effort), "%s", level);
-    PicoSettings_SaveSelection(app, agent, false, true);
-    PicoSession_LogModelChange(app, agent, agent->model, PicoSettings_ActiveEffort(agent));
-    char line[256];
-    snprintf(line, sizeof(line), "Effort `%s` for `%s`", agent->effort, m->name[0] ? m->name : m->id);
-    PicoOverlay_Notify(app, line);
-    return true;
-}
-
-static void EnsureDefaultCatalog(PicoHost *app)
-{
-    if (app->model_count > 0)
+    if (!workspace || workspace->model_count > 0)
     {
         return;
     }
@@ -710,31 +610,27 @@ static void EnsureDefaultCatalog(PicoHost *app)
     {
         return;
     }
-    snprintf(list[0].id, sizeof(list[0].id), "%s", app->settings.model);
-    snprintf(list[0].name, sizeof(list[0].name), "%s", app->settings.model);
+    snprintf(list[0].id, sizeof(list[0].id), "%s", workspace->settings.default_model);
+    snprintf(list[0].name, sizeof(list[0].name), "%s", workspace->settings.default_model);
     snprintf(list[0].provider, sizeof(list[0].provider), "%s", "openai");
-    list[0].context_limit = app->settings.context_limit;
+    list[0].context_limit = workspace->settings.context_limit_fallback;
     snprintf(list[0].default_effort, sizeof(list[0].default_effort), "%s", "none");
-    app->models = list;
-    app->model_count = 1;
+    workspace->models = list;
+    workspace->model_count = 1;
 }
 
-void PicoSettings_Load(PicoHost *app)
+void PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
 {
-    PicoSettings *s = &app->settings;
+    if (!workspace)
+    {
+        return;
+    }
+    PicoWorkspaceSettings *s = &workspace->settings;
     memset(s, 0, sizeof(*s));
-    snprintf(s->model, sizeof(s->model), "gpt-5.6-sol");
-    s->context_limit = 128000;
+    snprintf(s->default_model, sizeof(s->default_model), "gpt-5.6-sol");
+    s->context_limit_fallback = 128000;
     s->compact_enabled = true;
     s->compact_ratio = 0.9;
-    s->font_scale = 1.0;
-    s->chat_width = PICO_CHAT_WIDTH_DEFAULT;
-
-    char dir[4096];
-    if (Pico_ConfigDir(dir, sizeof(dir)))
-    {
-        Pico_MkdirP(dir);
-    }
 
     PicoModel *catalog = NULL;
     int catalog_n = 0;
@@ -742,22 +638,50 @@ void PicoSettings_Load(PicoHost *app)
     char path[4096];
     if (UserSettingsPath(path, sizeof(path)))
     {
-        LoadFile(s, &catalog, &catalog_n, path, true);
+        size_t len = 0;
+        char *src = Pico_ReadFile(path, &len);
+        if (src)
+        {
+            JsonStripComments(src, len);
+            JsonDoc doc;
+            if (JsonParse(&doc, src, len) == 0)
+            {
+                ApplyWorkspaceObject(s, &doc, 0);
+                ReplaceModels(&catalog, &catalog_n, &doc, 0);
+                ApplyDisabledExtensions(s, &doc, 0);
+                JsonFree(&doc);
+            }
+            free(src);
+        }
     }
 
-    if (WorkspaceSettingsPath(PicoHost_PrimaryWorkspaceConst(app), path, sizeof(path)) && path[0])
+    if (WorkspaceSettingsPath(workspace, path, sizeof(path)) && path[0])
     {
-        LoadFile(s, &catalog, &catalog_n, path, false);
+        size_t len = 0;
+        char *src = Pico_ReadFile(path, &len);
+        if (src)
+        {
+            JsonStripComments(src, len);
+            JsonDoc doc;
+            if (JsonParse(&doc, src, len) == 0)
+            {
+                ApplyWorkspaceObject(s, &doc, 0);
+                ReplaceModels(&catalog, &catalog_n, &doc, 0);
+                ApplyDisabledExtensions(s, &doc, 0);
+                JsonFree(&doc);
+            }
+            free(src);
+        }
     }
 
-    CopyField(s->model, sizeof(s->model), FirstEnv("PICO_MODEL", "OPENAI_MODEL"));
+    CopyField(s->default_model, sizeof(s->default_model), FirstEnv("PICO_MODEL", "OPENAI_MODEL"));
     const char *limit = getenv("PICO_CONTEXT_LIMIT");
     if (limit && limit[0])
     {
         int n = atoi(limit);
         if (n > 0)
         {
-            s->context_limit = n;
+            s->context_limit_fallback = n;
         }
     }
     const char *resume = getenv("PICO_RESUME_LAST");
@@ -783,47 +707,270 @@ void PicoSettings_Load(PicoHost *app)
             }
         }
     }
-    const char *font_scale = getenv("PICO_FONT_SCALE");
-    if (font_scale && font_scale[0])
-    {
-        double scale;
-        if (ParseFontScale(font_scale, &scale))
-        {
-            s->font_scale = scale;
-        }
-    }
 
-    free(app->models);
-    app->models = catalog;
-    app->model_count = catalog_n;
-    EnsureDefaultCatalog(app);
+    free(workspace->models);
+    workspace->models = catalog;
+    workspace->model_count = catalog_n;
+    EnsureDefaultCatalog(workspace);
 
     const char *effort = getenv("PICO_EFFORT");
     if (effort && effort[0])
     {
-        PicoModel *m = PicoSettings_FindModel(app, app->settings.model);
+        PicoModel *m = PicoSettings_FindModel(workspace, workspace->settings.default_model);
         if (m)
         {
             snprintf(m->default_effort, sizeof(m->default_effort), "%s", effort);
         }
     }
-    Pico_SetFontScale((float)s->font_scale);
 }
 
-static bool WriteFile(const char *path, const char *data, size_t len)
+PicoModel *PicoSettings_FindModel(PicoWorkspace *workspace, const char *id)
+{
+    if (!workspace || !id || !id[0])
+    {
+        return NULL;
+    }
+    for (int i = 0; i < workspace->model_count; i++)
+    {
+        if (strcmp(workspace->models[i].id, id) == 0)
+        {
+            return &workspace->models[i];
+        }
+    }
+    return NULL;
+}
+
+bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
+{
+    if (!model || !effort || !effort[0])
+    {
+        return false;
+    }
+    for (int i = 0; i < model->effort_count; i++)
+    {
+        if (strcmp(model->effort[i], effort) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+const PicoModel *PicoSettings_FindModelConst(const PicoWorkspace *workspace, const char *id)
+{
+    return PicoSettings_FindModel((PicoWorkspace *)workspace, id);
+}
+
+PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent)
+{
+    return (agent && agent->workspace) ? PicoSettings_FindModel(agent->workspace, agent->model) : NULL;
+}
+
+const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent)
+{
+    return (agent && agent->workspace) ? PicoSettings_FindModelConst(agent->workspace, agent->model) : NULL;
+}
+
+const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
+{
+    return agent && agent->effort[0] ? agent->effort : "none";
+}
+
+void PicoSettings_SyncAgent(PicoAgent *agent)
+{
+    if (!agent)
+    {
+        return;
+    }
+    const PicoModel *m = PicoSettings_ActiveModelConst(agent);
+    snprintf(agent->model_name, sizeof(agent->model_name), "%s",
+             m && m->name[0] ? m->name : agent->model);
+    if (m && m->context_limit > 0)
+    {
+        agent->context_limit = m->context_limit;
+    }
+    else if (agent->workspace)
+    {
+        agent->context_limit = agent->workspace->settings.context_limit_fallback;
+    }
+    else
+    {
+        agent->context_limit = 128000;
+    }
+    if (!m || !PicoSettings_EffortAllowed(m, agent->effort))
+    {
+        const char *effort = m && PicoSettings_EffortAllowed(m, m->default_effort)
+                                 ? m->default_effort
+                                 : (m && m->effort_count > 0 ? m->effort[0] : "none");
+        snprintf(agent->effort, sizeof(agent->effort), "%s", effort);
+    }
+}
+
+void PicoSettings_InitAgent(PicoAgent *agent)
+{
+    if (!agent || !agent->workspace)
+    {
+        return;
+    }
+    snprintf(agent->model, sizeof(agent->model), "%s", agent->workspace->settings.default_model);
+    agent->compact_enabled = agent->workspace->settings.compact_enabled;
+    agent->compact_ratio = agent->workspace->settings.compact_ratio;
+    agent->effort[0] = '\0';
+    PicoSettings_SyncAgent(agent);
+}
+
+static PicoModel *FindCatalog(PicoWorkspace *workspace, const char *q)
+{
+    if (!workspace || !q || !q[0])
+    {
+        return NULL;
+    }
+    for (int i = 0; i < workspace->model_count; i++)
+    {
+        if (strcasecmp(workspace->models[i].id, q) == 0 || strcasecmp(workspace->models[i].name, q) == 0)
+        {
+            return &workspace->models[i];
+        }
+    }
+    return NULL;
+}
+
+bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name)
+{
+    if (!agent || !agent->workspace)
+    {
+        return false;
+    }
+    PicoWorkspace *workspace = agent->workspace;
+    PicoHost *host = workspace->host;
+    PicoModel *m = FindCatalog(workspace, id_or_name);
+    if (!m)
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "Unknown model `%s`. Try `/model` for the catalog.",
+                 id_or_name ? id_or_name : "");
+        PicoOverlay_Notify(host, line);
+        return false;
+    }
+    snprintf(agent->model, sizeof(agent->model), "%s", m->id);
+    agent->effort[0] = '\0';
+    PicoSettings_SyncAgent(agent);
+    PicoSession_LogModelChange(host, agent, agent->model, PicoSettings_ActiveEffort(agent));
+    char line[256];
+    snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
+             PicoSettings_ActiveEffort(agent));
+    PicoOverlay_Notify(host, line);
+    return true;
+}
+
+bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
+{
+    if (!agent || !agent->workspace)
+    {
+        return false;
+    }
+    PicoWorkspace *workspace = agent->workspace;
+    PicoHost *host = workspace->host;
+    PicoModel *m = PicoSettings_ActiveModel(agent);
+    if (!m)
+    {
+        PicoOverlay_Notify(host, "No model in the catalog. Add one in settings.json.");
+        return false;
+    }
+    if (!level || !level[0])
+    {
+        return false;
+    }
+    if (m->effort_count > 0 && !PicoSettings_EffortAllowed(m, level))
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "`%s` is not in this model's effort list.", level);
+        PicoOverlay_Notify(host, line);
+        return false;
+    }
+    snprintf(agent->effort, sizeof(agent->effort), "%s", level);
+    PicoSession_LogModelChange(host, agent, agent->model, PicoSettings_ActiveEffort(agent));
+    char line[256];
+    snprintf(line, sizeof(line), "Effort `%s` for `%s`", agent->effort, m->name[0] ? m->name : m->id);
+    PicoOverlay_Notify(host, line);
+    return true;
+}
+
+static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode_t mode)
 {
     if (!path || !path[0] || !data)
     {
         return false;
     }
-    FILE *f = fopen(path, "wb");
-    if (!f)
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash)
+    {
+        *slash = '\0';
+    }
+    else
+    {
+        snprintf(dir, sizeof(dir), ".");
+    }
+    char tmp[4096];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp))
     {
         return false;
     }
-    size_t n = fwrite(data, 1, len, f);
-    fclose(f);
-    return n == len;
+    int fd = mkstemp(tmp);
+    if (fd < 0)
+    {
+        return false;
+    }
+    if (mode != 0600)
+    {
+        (void)fchmod(fd, mode);
+    }
+    bool ok = true;
+    for (size_t off = 0; ok && off < len;)
+    {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n <= 0)
+        {
+            ok = false;
+            break;
+        }
+        off += (size_t)n;
+    }
+    if (ok && fsync(fd) != 0)
+    {
+        ok = false;
+    }
+    if (close(fd) != 0)
+    {
+        ok = false;
+    }
+    if (!ok || rename(tmp, path) != 0)
+    {
+        unlink(tmp);
+        return false;
+    }
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0)
+    {
+        return false;
+    }
+    if (fsync(dfd) != 0)
+    {
+        close(dfd);
+        return false;
+    }
+    if (close(dfd) != 0)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool WriteFile(const char *path, const char *data, size_t len)
+{
+    return AtomicWriteFile(path, data, len, 0666);
 }
 
 static char *JsonQuoted(const char *s)
@@ -1081,7 +1228,90 @@ static bool PatchRootJson(const char *path, const char *key, const char *json_va
     return ok;
 }
 
-static char *DisabledExtensionsJson(const PicoSettings *s)
+static char *DisabledHostExtensionsJson(const PicoHostPreferences *p)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Putc(&b, '[');
+    for (int i = 0; i < p->disabled_host_extension_count; i++)
+    {
+        if (i)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_String(&b, p->disabled_host_extension_count ? p->disabled_host_extensions[i] : "");
+    }
+    JsonBuf_Putc(&b, ']');
+    return JsonBuf_Steal(&b);
+}
+
+static bool SaveDisabledHostExtensions(PicoHost *host)
+{
+    char path[4096];
+    if (!UserPreferencesPath(path, sizeof(path)))
+    {
+        return false;
+    }
+    char dir[4096];
+    if (Pico_ConfigDir(dir, sizeof(dir)))
+    {
+        Pico_MkdirP(dir);
+    }
+    char *json = DisabledHostExtensionsJson(&host->preferences);
+    bool ok = json && PatchRootJson(path, "disabled_host_extensions", json);
+    free(json);
+    return ok;
+}
+
+bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled)
+{
+    if (!host || !name || !name[0] || strcmp(name, "extensions") == 0)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&host->settings_mu);
+    PicoHostPreferences *p = &host->preferences;
+    int found = -1;
+    for (int i = 0; i < p->disabled_host_extension_count; i++)
+    {
+        if (strcmp(p->disabled_host_extensions[i], name) == 0)
+        {
+            found = i;
+            break;
+        }
+    }
+    bool ok = false;
+    if (disabled)
+    {
+        if (found >= 0)
+        {
+            ok = SaveDisabledHostExtensions(host);
+            pthread_mutex_unlock(&host->settings_mu);
+            return ok;
+        }
+        if (p->disabled_host_extension_count >= PICO_MAX_DISABLED_EXTENSIONS)
+        {
+            pthread_mutex_unlock(&host->settings_mu);
+            return false;
+        }
+        snprintf(p->disabled_host_extensions[p->disabled_host_extension_count], PICO_DISABLED_EXT_NAME, "%s", name);
+        p->disabled_host_extension_count++;
+    }
+    else if (found >= 0)
+    {
+        for (int i = found; i < p->disabled_host_extension_count - 1; i++)
+        {
+            memcpy(p->disabled_host_extensions[i], p->disabled_host_extensions[i + 1], PICO_DISABLED_EXT_NAME);
+        }
+        p->disabled_host_extension_count--;
+        p->disabled_host_extensions[p->disabled_host_extension_count][0] = '\0';
+    }
+    ok = SaveDisabledHostExtensions(host);
+    pthread_mutex_unlock(&host->settings_mu);
+    return ok;
+}
+
+static char *DisabledExtensionsJson(const PicoWorkspaceSettings *s)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -1098,31 +1328,32 @@ static char *DisabledExtensionsJson(const PicoSettings *s)
     return JsonBuf_Steal(&b);
 }
 
-static bool SaveDisabledExtensions(PicoHost *app)
+static bool SaveDisabledExtensions(PicoWorkspace *workspace)
 {
     char path[4096];
-    if (!UserSettingsPath(path, sizeof(path)))
+    if (!WorkspaceSettingsPath(workspace, path, sizeof(path)) || !path[0])
     {
         return false;
     }
     char dir[4096];
-    if (Pico_ConfigDir(dir, sizeof(dir)))
+    if (PicoPath_Format(dir, sizeof(dir), "%s/.pico", workspace->path))
     {
         Pico_MkdirP(dir);
     }
-    char *json = DisabledExtensionsJson(&app->settings);
+    char *json = DisabledExtensionsJson(&workspace->settings);
     bool ok = json && PatchRootJson(path, "disabled_extensions", json);
     free(json);
     return ok;
 }
 
-bool PicoSettings_SetExtensionDisabled(PicoHost *app, const char *name, bool disabled)
+bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled)
 {
-    if (!app || !name || !name[0] || strcmp(name, "extensions") == 0)
+    if (!workspace || !name || !name[0] || strcmp(name, "extensions") == 0)
     {
         return false;
     }
-    PicoSettings *s = &app->settings;
+    pthread_mutex_lock(&workspace->settings_mu);
+    PicoWorkspaceSettings *s = &workspace->settings;
     int found = -1;
     for (int i = 0; i < s->disabled_extension_count; i++)
     {
@@ -1132,14 +1363,18 @@ bool PicoSettings_SetExtensionDisabled(PicoHost *app, const char *name, bool dis
             break;
         }
     }
+    bool ok = false;
     if (disabled)
     {
         if (found >= 0)
         {
-            return SaveDisabledExtensions(app);
+            ok = SaveDisabledExtensions(workspace);
+            pthread_mutex_unlock(&workspace->settings_mu);
+            return ok;
         }
         if (s->disabled_extension_count >= PICO_MAX_DISABLED_EXTENSIONS)
         {
+            pthread_mutex_unlock(&workspace->settings_mu);
             return false;
         }
         snprintf(s->disabled_extensions[s->disabled_extension_count], PICO_DISABLED_EXT_NAME, "%s", name);
@@ -1154,7 +1389,9 @@ bool PicoSettings_SetExtensionDisabled(PicoHost *app, const char *name, bool dis
         s->disabled_extension_count--;
         s->disabled_extensions[s->disabled_extension_count][0] = '\0';
     }
-    return SaveDisabledExtensions(app);
+    ok = SaveDisabledExtensions(workspace);
+    pthread_mutex_unlock(&workspace->settings_mu);
+    return ok;
 }
 
 static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected_effort)
@@ -1190,9 +1427,9 @@ static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected
     JsonBuf_Putc(b, '}');
 }
 
-static bool PatchSelectedEffort(const char *path, PicoHost *app, const PicoAgent *agent)
+static bool PatchSelectedEffort(const char *path, PicoWorkspace *workspace, const PicoAgent *agent)
 {
-    PicoModel *active = PicoSettings_ActiveModel(app, agent);
+    PicoModel *active = PicoSettings_ActiveModel(agent);
     if (!active)
     {
         return false;
@@ -1235,14 +1472,14 @@ static bool PatchSelectedEffort(const char *path, PicoHost *app, const PicoAgent
         JsonBuf b;
         JsonBuf_Init(&b);
         JsonBuf_Putc(&b, '[');
-        for (int i = 0; i < app->model_count; i++)
+        for (int i = 0; i < workspace->model_count; i++)
         {
             if (i)
             {
                 JsonBuf_Putc(&b, ',');
             }
-            WriteModelValue(&b, &app->models[i],
-                            strcmp(app->models[i].id, agent->model) == 0 ? agent->effort : NULL);
+            WriteModelValue(&b, &workspace->models[i],
+                            strcmp(workspace->models[i].id, agent->model) == 0 ? agent->effort : NULL);
         }
         JsonBuf_Putc(&b, ']');
         char *val = JsonBuf_Steal(&b);
@@ -1290,33 +1527,41 @@ static bool PatchSelectedEffort(const char *path, PicoHost *app, const PicoAgent
     return ok;
 }
 
-bool PicoSettings_SaveSelection(PicoHost *app, const PicoAgent *agent, bool save_model, bool save_effort)
+bool PicoSettings_SaveSelection(const PicoAgent *agent, bool save_model, bool save_effort)
 {
-    if (!app || !agent)
+    if (!agent || !agent->workspace)
     {
         return false;
     }
+    PicoWorkspace *workspace = agent->workspace;
+    PicoHost *host = workspace->host;
     char user[4096];
-    char workspace[4096];
+    char ws_path[4096];
     if (!UserSettingsPath(user, sizeof(user)) ||
-        !WorkspaceSettingsPath(PicoAgent_Workspace(agent), workspace, sizeof(workspace)))
+        !WorkspaceSettingsPath(workspace, ws_path, sizeof(ws_path)))
     {
         return false;
     }
     bool ok = true;
     if (save_model)
     {
-        const char *path = SettingsFileExists(workspace) ? workspace : user;
+        const char *path = SettingsFileExists(ws_path) ? ws_path : user;
+        pthread_mutex_t *mu = (path == ws_path) ? &workspace->settings_mu : (host ? &host->settings_mu : NULL);
+        if (mu) pthread_mutex_lock(mu);
         ok = PatchRootString(path, "model", agent->model) && ok;
+        if (mu) pthread_mutex_unlock(mu);
     }
     if (save_effort)
     {
-        const char *path = FileHasModels(workspace) ? workspace : (FileHasModels(user) ? user : NULL);
+        const char *path = FileHasModels(ws_path) ? ws_path : (FileHasModels(user) ? user : NULL);
         if (!path)
         {
-            path = SettingsFileExists(workspace) ? workspace : user;
+            path = SettingsFileExists(ws_path) ? ws_path : user;
         }
-        ok = PatchSelectedEffort(path, app, agent) && ok;
+        pthread_mutex_t *mu = (path == ws_path) ? &workspace->settings_mu : (host ? &host->settings_mu : NULL);
+        if (mu) pthread_mutex_lock(mu);
+        ok = PatchSelectedEffort(path, workspace, agent) && ok;
+        if (mu) pthread_mutex_unlock(mu);
     }
     return ok;
 }
@@ -1497,3 +1742,4 @@ char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace)
 {
     return PicoSettings_LoadSystemPromptSpans(workspace, NULL, NULL);
 }
+

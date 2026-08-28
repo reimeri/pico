@@ -50,9 +50,10 @@ static void ProfileWarning(PicoHost *app, const char *path, const char *reason)
     pico_status_warn(app, line);
 }
 
-static bool ParseProfile(PicoHost *app, const char *path, const char *name,
+static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char *name,
                          PicoSubagentProfileInfo *out)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
     size_t len = 0;
     char *source = Pico_ReadFile(path, &len);
     if (!source)
@@ -105,7 +106,7 @@ static bool ParseProfile(PicoHost *app, const char *path, const char *name,
     {
         error = "model must be a string";
     }
-    else if (model && (!model[0] || !PicoSettings_FindModelConst(app, model)))
+    else if (model && (!model[0] || !PicoSettings_FindModelConst(workspace, model)))
     {
         error = "model is not in the model catalog";
     }
@@ -114,7 +115,7 @@ static bool ParseProfile(PicoHost *app, const char *path, const char *name,
         error = "effort must be a string";
     }
     else if (effort && model &&
-             !PicoSettings_EffortAllowed(PicoSettings_FindModelConst(app, model), effort))
+             !PicoSettings_EffortAllowed(PicoSettings_FindModelConst(workspace, model), effort))
     {
         error = "effort is not supported by the configured model";
     }
@@ -257,7 +258,7 @@ void PicoSubagentConfig_Load(PicoWorkspace *workspace)
                 ProfileWarning(workspace->host, path, "invalid profile filename");
                 continue;
             }
-            if (ParseProfile(workspace->host, path, profile_name, &loaded[count]))
+            if (ParseProfile(workspace, path, profile_name, &loaded[count]))
             {
                 count++;
             }
@@ -293,7 +294,7 @@ bool PicoSubagentConfig_Resolve(const PicoHost *app, const PicoAgent *parent,
         return false;
     }
     const char *resolved_model = profile->has_model ? profile->model : parent->model;
-    const PicoModel *catalog = PicoSettings_FindModelConst(app, resolved_model);
+    const PicoModel *catalog = PicoSettings_FindModelConst(parent->workspace, resolved_model);
     if (!catalog)
     {
         return false;

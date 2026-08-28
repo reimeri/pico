@@ -6,21 +6,22 @@ static int TestSubagentProfileResolution(void)
     const char *name = "subagent profile model and effort resolution";
     PicoHost app;
     InitApp(&app);
-    PicoModel *models = (PicoModel *)realloc(app.models, 2 * sizeof(PicoModel));
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    PicoModel *models = (PicoModel *)realloc(ws->models, 2 * sizeof(PicoModel));
     if (!models)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "could not extend the model catalog");
     }
-    app.models = models;
-    memset(&app.models[1], 0, sizeof(app.models[1]));
-    app.model_count = 2;
-    snprintf(app.models[1].id, sizeof(app.models[1].id), "review-model");
-    snprintf(app.models[1].provider, sizeof(app.models[1].provider), "test");
-    snprintf(app.models[1].effort[0], sizeof(app.models[1].effort[0]), "low");
-    snprintf(app.models[1].effort[1], sizeof(app.models[1].effort[1]), "high");
-    app.models[1].effort_count = 2;
-    snprintf(app.models[1].default_effort, sizeof(app.models[1].default_effort), "low");
+    ws->models = models;
+    memset(&ws->models[1], 0, sizeof(ws->models[1]));
+    ws->model_count = 2;
+    snprintf(ws->models[1].id, sizeof(ws->models[1].id), "review-model");
+    snprintf(ws->models[1].provider, sizeof(ws->models[1].provider), "test");
+    snprintf(ws->models[1].effort[0], sizeof(ws->models[1].effort[0]), "low");
+    snprintf(ws->models[1].effort[1], sizeof(ws->models[1].effort[1]), "high");
+    ws->models[1].effort_count = 2;
+    snprintf(ws->models[1].default_effort, sizeof(ws->models[1].default_effort), "low");
 
     PicoAgent *parent = TestAgent(&app);
     PicoSubagentProfileInfo profile;
@@ -107,7 +108,8 @@ static int TestSubagentProfileDiscovery(void)
     bool created_empty = directory_path_ok && stat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
                          pico_subagent_profile_count(&app) == 0;
 
-    PicoModel *models = (PicoModel *)realloc(app.models, 2 * sizeof(PicoModel));
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    PicoModel *models = (PicoModel *)realloc(ws->models, 2 * sizeof(PicoModel));
     if (!models)
     {
         PicoHost_Shutdown(&app);
@@ -116,15 +118,15 @@ static int TestSubagentProfileDiscovery(void)
         snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
         return Fail(name, "could not extend model catalog");
     }
-    app.models = models;
-    memset(&app.models[1], 0, sizeof(app.models[1]));
-    app.model_count = 2;
-    snprintf(app.models[1].id, sizeof(app.models[1].id), "gpt-5.6-sol");
-    snprintf(app.models[1].provider, sizeof(app.models[1].provider), "test");
-    snprintf(app.models[1].effort[0], sizeof(app.models[1].effort[0]), "low");
-    snprintf(app.models[1].effort[1], sizeof(app.models[1].effort[1]), "high");
-    app.models[1].effort_count = 2;
-    snprintf(app.models[1].default_effort, sizeof(app.models[1].default_effort), "low");
+    ws->models = models;
+    memset(&ws->models[1], 0, sizeof(ws->models[1]));
+    ws->model_count = 2;
+    snprintf(ws->models[1].id, sizeof(ws->models[1].id), "gpt-5.6-sol");
+    snprintf(ws->models[1].provider, sizeof(ws->models[1].provider), "test");
+    snprintf(ws->models[1].effort[0], sizeof(ws->models[1].effort[0]), "low");
+    snprintf(ws->models[1].effort[1], sizeof(ws->models[1].effort[1]), "high");
+    ws->models[1].effort_count = 2;
+    snprintf(ws->models[1].default_effort, sizeof(ws->models[1].default_effort), "low");
     pico_add_tool(PicoHost_PrimaryWorkspace(&app), "sh", "shell fixture", "{}", EchoTool, NULL);
 
     size_t exploration_len = 0;

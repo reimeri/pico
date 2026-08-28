@@ -35,6 +35,8 @@ static int TestClamp(void)
 static void CleanupDir(const char *dir)
 {
     char path[4096];
+    snprintf(path, sizeof(path), "%s/pico/host_preferences.json", dir);
+    unlink(path);
     snprintf(path, sizeof(path), "%s/pico/settings.json", dir);
     unlink(path);
     snprintf(path, sizeof(path), "%s/pico", dir);
@@ -72,11 +74,11 @@ static int LoadChatWidth(const char *json_body, int *out)
         char path[4096];
         snprintf(dir, sizeof(dir), "%s/pico", temp);
         if (mkdir(dir, 0755) != 0 ||
-            snprintf(path, sizeof(path), "%s/settings.json", dir) < 0 ||
+            snprintf(path, sizeof(path), "%s/host_preferences.json", dir) < 0 ||
             !WriteFile(path, json_body))
         {
             CleanupDir(temp);
-            return Fail("could not write settings.json");
+            return Fail("could not write host_preferences.json");
         }
     }
 
@@ -84,9 +86,8 @@ static int LoadChatWidth(const char *json_body, int *out)
     memset(&app, 0, sizeof(app));
     PicoHost_SetPath(&app, temp);
     setenv("XDG_CONFIG_HOME", temp, 1);
-    PicoSettings_Load(&app);
-    *out = app.settings.chat_width;
-    free(app.models);
+    PicoHostPreferences_Load(&app);
+    *out = app.preferences.chat_width;
     unsetenv("XDG_CONFIG_HOME");
     CleanupDir(temp);
     return 0;

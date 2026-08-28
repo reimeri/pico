@@ -924,9 +924,41 @@ static void InspectBaseContext(PicoWorkspace *workspace, PicoAgentId agent_id, P
 }
 
 /* Minimal host implementations used by the real agent worker. */
-void PicoSettings_Load(PicoHost *app)
+void *PicoPlugins_HostState(const PicoHost *host, const char *name)
+{
+    (void)host;
+    (void)name;
+    return NULL;
+}
+
+void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name)
+{
+    (void)workspace;
+    (void)name;
+    return NULL;
+}
+
+void PicoHostPreferences_Load(PicoHost *app)
 {
     (void)app;
+}
+
+void PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
+{
+    if (!workspace)
+    {
+        return;
+    }
+    if (workspace->model_count == 0)
+    {
+        workspace->models = (PicoModel *)calloc(1, sizeof(PicoModel));
+        workspace->model_count = workspace->models ? 1 : 0;
+        if (workspace->models)
+        {
+            snprintf(workspace->models[0].id, sizeof(workspace->models[0].id), "test-model");
+            snprintf(workspace->models[0].provider, sizeof(workspace->models[0].provider), "test");
+        }
+    }
 }
 
 char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace)
@@ -952,26 +984,29 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPro
     return text;
 }
 
-PicoModel *PicoSettings_ActiveModel(PicoHost *app, const PicoAgent *agent)
+PicoModel *PicoSettings_FindModel(PicoWorkspace *workspace, const char *id)
 {
-    (void)agent;
-    return app && app->model_count > 0 ? &app->models[0] : NULL;
-}
-
-const PicoModel *PicoSettings_ActiveModelConst(const PicoHost *app, const PicoAgent *agent)
-{
-    (void)agent;
-    return app && app->model_count > 0 ? &app->models[0] : NULL;
-}
-
-const PicoModel *PicoSettings_FindModelConst(const PicoHost *app, const char *id)
-{
-    if (!app || !id) return NULL;
-    for (int i = 0; i < app->model_count; i++)
+    if (!workspace || !id) return NULL;
+    for (int i = 0; i < workspace->model_count; i++)
     {
-        if (strcmp(app->models[i].id, id) == 0) return &app->models[i];
+        if (strcmp(workspace->models[i].id, id) == 0) return &workspace->models[i];
     }
     return NULL;
+}
+
+const PicoModel *PicoSettings_FindModelConst(const PicoWorkspace *workspace, const char *id)
+{
+    return PicoSettings_FindModel((PicoWorkspace *)workspace, id);
+}
+
+PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent)
+{
+    return (agent && agent->workspace && agent->workspace->model_count > 0) ? &agent->workspace->models[0] : NULL;
+}
+
+const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent)
+{
+    return (agent && agent->workspace && agent->workspace->model_count > 0) ? &agent->workspace->models[0] : NULL;
 }
 
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
@@ -985,9 +1020,8 @@ bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
     return false;
 }
 
-void PicoSettings_SyncAgent(const PicoHost *app, PicoAgent *agent)
+void PicoSettings_SyncAgent(PicoAgent *agent)
 {
-    (void)app;
     (void)agent;
 }
 
@@ -997,15 +1031,14 @@ const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
     return "none";
 }
 
-
-void PicoSettings_InitAgent(const PicoHost *app, PicoAgent *agent)
+void PicoSettings_InitAgent(PicoAgent *agent)
 {
     if (!agent) return;
     snprintf(agent->model, sizeof(agent->model), "test-model");
     snprintf(agent->effort, sizeof(agent->effort), "none");
     agent->context_limit = 1000;
-    agent->compact_enabled = app ? app->settings.compact_enabled : false;
-    agent->compact_ratio = app ? app->settings.compact_ratio : 0.9;
+    agent->compact_enabled = (agent->workspace) ? agent->workspace->settings.compact_enabled : false;
+    agent->compact_ratio = (agent->workspace) ? agent->workspace->settings.compact_ratio : 0.9;
 }
 bool Pico_ConfigDir(char *out, size_t cap)
 {
@@ -1167,6 +1200,15 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
 
 void PicoPlugins_Load(PicoHost *app)
 {
+    if (app)
+    {
+        PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+        if (app->provider_count == 0)
+        {
+            pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
+            pico_add_tool(ws, "ask_test", "test", "{}", AskTool, NULL);
+        }
+    }
     if (app && app->reload_queued)
     {
         g_plugin_reloads++;
@@ -1429,25 +1471,27 @@ static void InitApp(PicoHost *app)
     memset(app, 0, sizeof(*app));
     app->next_workspace_id = 1;
     app->next_agent_id = 1;
+    pthread_mutex_init(&app->settings_mu, NULL);
     pthread_mutex_init(&app->ask_id_mu, NULL);
     app->ask_id_mu_ready = true;
-    app->settings.compact_enabled = false;
-    app->models = (PicoModel *)calloc(1, sizeof(PicoModel));
-    app->model_count = app->models ? 1 : 0;
-    if (app->models)
-    {
-        snprintf(app->models[0].id, sizeof(app->models[0].id), "test-model");
-        snprintf(app->models[0].provider, sizeof(app->models[0].provider), "test");
-    }
     workspace = (PicoWorkspace *)calloc(1, sizeof(PicoWorkspace));
     workspace->host = app;
     workspace->id = app->next_workspace_id++;
     snprintf(workspace->path, sizeof(workspace->path), ".");
     workspace->state = PICO_WORKSPACE_OPEN;
+    pthread_mutex_init(&workspace->settings_mu, NULL);
     pthread_mutex_init(&workspace->delegation_mu, NULL);
     pthread_mutex_init(&workspace->lifecycle_mu, NULL);
     pthread_mutex_init(&workspace->ui_post_mu, NULL);
     workspace->accepting_work = true;
+    workspace->settings.compact_enabled = false;
+    workspace->models = (PicoModel *)calloc(1, sizeof(PicoModel));
+    workspace->model_count = workspace->models ? 1 : 0;
+    if (workspace->models)
+    {
+        snprintf(workspace->models[0].id, sizeof(workspace->models[0].id), "test-model");
+        snprintf(workspace->models[0].provider, sizeof(workspace->models[0].provider), "test");
+    }
     app->workspaces[0] = workspace;
     app->workspace_count = 1;
     pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
@@ -1694,9 +1738,10 @@ static int TestToolSchemaValidation(void)
     memset(&todo_app, 0, sizeof(todo_app));
     (void)TestWs(&todo_app);
     PicoExt todo = pico_ext_todo();
-    (void)todo.host_init(&todo_app, NULL);
+    PicoWorkspace *todo_ws = PicoHost_PrimaryWorkspace(&todo_app);
+    if (todo.workspace_init) (void)todo.workspace_init(todo_ws, NULL);
     bool todo_registered = todo_app.tool_count == 1 && todo_app.tools[0].params_json;
-    if (todo.host_shutdown) todo.host_shutdown(&todo_app, NULL);
+    if (todo.workspace_shutdown) todo.workspace_shutdown(todo_ws, NULL);
     bool ok = null_schema && empty_schema && valid && rejected && app.tool_count == 3 && todo_registered;
     free(app.status_warn);
     free(todo_app.status_warn);
@@ -1973,7 +2018,7 @@ static int TestImageOnlySubmitStartsTurn(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    app.models[0].vision = true;
+    PicoHost_PrimaryWorkspace(&app)->models[0].vision = true;
     app.composer.text = JsonDup("");
     app.composer.capacity = 1;
     g_composer_has_attachment = true;
@@ -1999,7 +2044,7 @@ static int TestNonVisionSubmitPreservesDraft(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    app.models[0].vision = false;
+    PicoHost_PrimaryWorkspace(&app)->models[0].vision = false;
     app.composer.text = JsonDup("  keep this draft  ");
     app.composer.length = (int)strlen(app.composer.text);
     app.composer.capacity = app.composer.length + 1;
@@ -2062,10 +2107,11 @@ static int TestShutdownTimeout(void)
         return Fail(name, "blocking tool did not start");
     }
 
-    PicoModel *models = app->models;
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
+    PicoModel *models = ws ? ws->models : NULL;
     PicoHostShutdownResult shutdown = PicoHost_Shutdown(app);
     if (shutdown != PICO_HOST_SHUTDOWN_RETAINED || !PicoHost_ProcessRetired() ||
-        g_plugin_shutdowns != 0 || g_auth_frees != 0 || app->models != models ||
+        g_plugin_shutdowns != 0 || g_auth_frees != 0 || (ws && ws->models != models) ||
         app->tool_count != 1 || !app->tools[0].run)
     {
         return Fail(name, "PicoHost_Shutdown tore down worker-visible state");
@@ -2438,7 +2484,8 @@ static int TestUnmappedContextFails(void)
     PicoHost app;
     InitApp(&app);
     pico_add_provider(PicoHost_PrimaryWorkspace(&app), &(PicoProvider){.name = "legacy", .stream = SilentProvider});
-    snprintf(app.models[0].provider, sizeof(app.models[0].provider), "legacy");
+    snprintf(PicoHost_PrimaryWorkspace(&app)->models[0].provider,
+             sizeof(PicoHost_PrimaryWorkspace(&app)->models[0].provider), "legacy");
     pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), AddEphemeralContext);
     PicoAgent_StartTurn(&app, TestAgent(&app), "hello");
     if (!WaitForIdle(&app))
@@ -2810,8 +2857,8 @@ static int TestAfterCompact(void)
     g_test.provider_cached_tokens = 40;
     PicoHost app;
     InitApp(&app);
-    app.settings.compact_enabled = true;
-    app.settings.compact_ratio = 0.5;
+    PicoHost_PrimaryWorkspace(&app)->settings.compact_enabled = true;
+    PicoHost_PrimaryWorkspace(&app)->settings.compact_ratio = 0.5;
     TestAgent(&app)->compact_enabled = true;
     TestAgent(&app)->compact_ratio = 0.5;
     TestAgent(&app)->context_limit = 100;
@@ -2907,23 +2954,24 @@ static int TestTodoAgentIsolation(void)
     PicoHost app;
     memset(&app, 0, sizeof(app));
     (void)TestWs(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoExt ext = pico_ext_todo();
-    ext.host_init(&app, NULL);
+    void *todo_state = NULL;
+    ext.workspace_init(ws, &todo_state);
     const char *first =
         "{\"version\":1,\"task\":\"First\",\"todos\":[{\"id\":\"a\",\"text\":\"first-agent\",\"status\":\"pending\"}]}";
     const char *second =
         "{\"version\":1,\"task\":\"Second\",\"todos\":[{\"id\":\"b\",\"text\":\"second-agent\",\"status\":\"in_progress\"}]}";
-    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     bool ok = app.tool_count == 1 && app.tools[0].apply &&
-              app.tools[0].apply(ws, 11, first, true, app.tools[0].state) &&
-              app.tools[0].apply(ws, 22, second, true, app.tools[0].state);
+              app.tools[0].apply(ws, 11, first, true, todo_state) &&
+              app.tools[0].apply(ws, 22, second, true, todo_state);
 
     PicoContextEvent one = {.tools = app.tools, .tool_count = app.tool_count};
     PicoContextEvent two = {.tools = app.tools, .tool_count = app.tool_count};
-    app.context_hooks[0].fn(ws, 11, &one, app.context_hooks[0].state);
-    app.context_hooks[0].fn(ws, 22, &two, app.context_hooks[0].state);
+    app.context_hooks[0].fn(ws, 11, &one, todo_state);
+    app.context_hooks[0].fn(ws, 22, &two, todo_state);
     PicoContextEvent hidden = {0};
-    app.context_hooks[0].fn(ws, 22, &hidden, app.context_hooks[0].state);
+    app.context_hooks[0].fn(ws, 22, &hidden, todo_state);
     ok = ok && !hidden.extra_context && one.extra_context && strstr(one.extra_context, "first-agent") &&
          !strstr(one.extra_context, "second-agent") && two.extra_context &&
          strstr(two.extra_context, "second-agent") && !strstr(two.extra_context, "first-agent");
@@ -2935,17 +2983,17 @@ static int TestTodoAgentIsolation(void)
     {
         if (app.hooks[i].hook == reset.hook)
         {
-            app.hooks[i].workspace_fn(PicoHost_PrimaryWorkspace(&app), &reset, app.hooks[i].state);
+            app.hooks[i].workspace_fn(PicoHost_PrimaryWorkspace(&app), &reset, todo_state);
         }
     }
     one = (PicoContextEvent){.tools = app.tools, .tool_count = app.tool_count};
     two = (PicoContextEvent){.tools = app.tools, .tool_count = app.tool_count};
-    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 11, &one, app.context_hooks[0].state);
-    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 22, &two, app.context_hooks[0].state);
+    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 11, &one, todo_state);
+    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 22, &two, todo_state);
     ok = ok && !one.extra_context && two.extra_context && strstr(two.extra_context, "second-agent");
     free(one.extra_context);
     free(two.extra_context);
-    ext.host_shutdown(&app, NULL);
+    ext.workspace_shutdown(ws, todo_state);
     pico_clear_registrations(&app);
     return ok ? 0 : Fail(name, "apply, context, or reset crossed agent boundaries");
 }
@@ -2967,8 +3015,10 @@ static int TestTodoApplyRenamesSession(void)
     const char *name = "todo apply renames the session when task changes";
     PicoHost app;
     InitApp(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoExt ext = pico_ext_todo();
-    ext.host_init(&app, NULL);
+    void *todo_state = NULL;
+    ext.workspace_init(ws, &todo_state);
     PicoTool *tool = FindTodoTool(&app);
     PicoAgent *agent = TestAgent(&app);
     const char *first =
@@ -2988,23 +3038,23 @@ static int TestTodoApplyRenamesSession(void)
         "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"completed\"}]}";
     g_log_title_calls = 0;
     g_logged_title[0] = '\0';
-    bool ok = tool && tool->apply && agent && ext.host_on_frame &&
-              tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, first, false, tool->state) && g_log_title_calls == 0;
-    ext.host_on_frame(&app, NULL, 0.0f);
+    bool ok = tool && tool->apply && agent && ext.workspace_on_frame &&
+              tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, first, false, todo_state) && g_log_title_calls == 0;
+    ext.workspace_on_frame(ws, todo_state, 0.0f);
     ok = ok && g_log_title_calls == 1 && strcmp(g_logged_title, "Name the session") == 0 &&
-         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, same, false, tool->state);
-    ext.host_on_frame(&app, NULL, 0.0f);
-    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_same, true, tool->state);
-    ext.host_on_frame(&app, NULL, 0.0f);
-    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_stale, true, tool->state);
-    ext.host_on_frame(&app, NULL, 0.0f);
+         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, same, false, todo_state);
+    ext.workspace_on_frame(ws, todo_state, 0.0f);
+    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_same, true, todo_state);
+    ext.workspace_on_frame(ws, todo_state, 0.0f);
+    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_stale, true, todo_state);
+    ext.workspace_on_frame(ws, todo_state, 0.0f);
     ok = ok && g_log_title_calls == 2 && strcmp(g_logged_title, "Heal replayed title") == 0 &&
-         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, renamed, false, tool->state) && g_log_title_calls == 2;
-    ext.host_on_frame(&app, NULL, 0.0f);
+         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, renamed, false, todo_state) && g_log_title_calls == 2;
+    ext.workspace_on_frame(ws, todo_state, 0.0f);
     ok = ok && g_log_title_calls == 3 && strcmp(g_logged_title, "Rename again") == 0;
-    if (ext.host_shutdown)
+    if (ext.workspace_shutdown)
     {
-        ext.host_shutdown(&app, NULL);
+        ext.workspace_shutdown(ws, todo_state);
     }
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "live apply did not rename on task change, or replay/unchanged task wrote a title");

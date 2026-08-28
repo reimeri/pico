@@ -147,13 +147,23 @@ static bool WriteSecret(const char *path, const char *data, size_t len)
     {
         return false;
     }
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash)
+    {
+        *slash = '\0';
+    }
+    else
+    {
+        snprintf(dir, sizeof(dir), ".");
+    }
     char tmp[4096];
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp))
     {
         return false;
     }
-    unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    int fd = mkstemp(tmp);
     if (fd < 0)
     {
         return false;
@@ -180,6 +190,20 @@ static bool WriteSecret(const char *path, const char *data, size_t len)
     if (!ok || rename(tmp, path) != 0)
     {
         unlink(tmp);
+        return false;
+    }
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0)
+    {
+        return false;
+    }
+    if (fsync(dfd) != 0)
+    {
+        close(dfd);
+        return false;
+    }
+    if (close(dfd) != 0)
+    {
         return false;
     }
     return true;

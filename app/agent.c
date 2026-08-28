@@ -2522,6 +2522,25 @@ bool PicoAgent_IsBusy(const PicoAgent *agent)
     return agent && LiveBusyState(agent->state);
 }
 
+PicoToolCallProgress PicoAgent_ToolCallProgress(const PicoAgent *agent, const char *call_id)
+{
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!rt || !call_id || !call_id[0] || agent->state != PICO_AGENT_TOOL_WAIT)
+    {
+        return PICO_TOOL_CALL_IDLE;
+    }
+    for (int i = rt->pending_next; i < rt->pending_count; i++)
+    {
+        const char *id = rt->pending[i].call_id;
+        if (!id || strcmp(id, call_id) != 0)
+        {
+            continue;
+        }
+        return i == rt->pending_next ? PICO_TOOL_CALL_RUNNING : PICO_TOOL_CALL_QUEUED;
+    }
+    return PICO_TOOL_CALL_IDLE;
+}
+
 bool PicoAgent_CancelRequested(const PicoAgent *agent)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;

@@ -768,19 +768,6 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
     ViewBreak(view);
 }
 
-static Clay_Color ToolStatusColor(const PicoTraceLine *line)
-{
-    if (!line->tool_output)
-    {
-        return COLOR_STATUS_RUN;
-    }
-    if (line->tool_error)
-    {
-        return COLOR_STATUS_ERR;
-    }
-    return COLOR_STATUS_ON;
-}
-
 static const char *SubagentActivity(PicoApp *app, const PicoTraceLine *line)
 {
     PicoAgent *child = line->child_id ? PicoAgentManager_Find(app->agents, line->child_id) : NULL;
@@ -808,6 +795,43 @@ static bool OwnerHasAsk(const TranscriptView *view)
         return PicoAgent_PendingAsk(view->owner, &ask);
     }
     return pico_tool_pending_ask(view->app, &ask);
+}
+
+static PicoToolCallProgress ToolProgress(const TranscriptView *view, const PicoTraceLine *line)
+{
+    return PicoAgent_ToolCallProgress(view ? view->owner : NULL, line ? line->tool_call_id : NULL);
+}
+
+static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLine *line)
+{
+    if (line->tool_output)
+    {
+        return line->tool_error ? COLOR_STATUS_ERR : COLOR_STATUS_ON;
+    }
+    PicoToolCallProgress progress = ToolProgress(view, line);
+    if (progress == PICO_TOOL_CALL_QUEUED)
+    {
+        return COLOR_STATUS_OFF;
+    }
+    if (progress == PICO_TOOL_CALL_RUNNING || OwnerWaiting(view))
+    {
+        return COLOR_STATUS_RUN;
+    }
+    return COLOR_STATUS_OFF;
+}
+
+static const char *ToolPendingLabel(const TranscriptView *view, const PicoTraceLine *line)
+{
+    PicoToolCallProgress progress = ToolProgress(view, line);
+    if (progress == PICO_TOOL_CALL_QUEUED)
+    {
+        return "Queued…";
+    }
+    if (progress == PICO_TOOL_CALL_RUNNING || OwnerWaiting(view))
+    {
+        return OwnerHasAsk(view) ? "Waiting for you…" : "Running…";
+    }
+    return NULL;
 }
 
 static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int message_index,
@@ -850,7 +874,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
         {
             CLAY(ToolStatusId(view, message_index, trace_index),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
-                  .backgroundColor = ToolStatusColor(line),
+                  .backgroundColor = ToolStatusColor(view, line),
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
             }
@@ -876,7 +900,9 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
         }
         if (subagent && !line->tool_output)
         {
-            const char *activity = SubagentActivity(view->app, line);
+            const char *activity = ToolProgress(view, line) == PICO_TOOL_CALL_QUEUED
+                                       ? "Queued…"
+                                       : SubagentActivity(view->app, line);
             ViewWrappedText(view, ViewCStr(activity),
                             (Clay_TextElementConfig){.fontId = FONT_ITALIC,
                                                      .fontSize = 14,
@@ -886,9 +912,9 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
         else if (!subagent && line->expanded)
         {
             const char *output = line->tool_output;
-            if (!output && OwnerWaiting(view))
+            if (!output)
             {
-                output = OwnerHasAsk(view) ? "Waiting for you…" : "Running…";
+                output = ToolPendingLabel(view, line);
             }
             RenderToolOutput(view, output, available_width);
         }
@@ -1049,6 +1075,7 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         hash = RevisionMix(hash, line->is_tool ? 1 : 0);
         hash = RevisionMix(hash, line->tool_error ? 1 : 0);
         hash = RevisionMix(hash, line->expanded ? 1 : 0);
+        hash = RevisionMix(hash, (uint64_t)ToolProgress(view, line));
         for (int p = 0; p < line->think_part_count; p++)
         {
             hash = RevisionPointer(hash, line->think_parts ? line->think_parts[p] : NULL);

@@ -23,6 +23,7 @@ typedef enum TestMode {
     TEST_SEQUENTIAL,
     TEST_INVALID,
     TEST_BLOCK,
+    TEST_BATCH_TOOLS,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
     TEST_SIGNATURE_CONTINUATION,
@@ -472,7 +473,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     }
 
     int emitted = mode == TEST_TOO_MANY_CALLS ? 17 :
-                  (mode == TEST_DUPLICATE_CALLS ? 2 : 1);
+                  (mode == TEST_DUPLICATE_CALLS || mode == TEST_BATCH_TOOLS ? 2 : 1);
     for (int i = 0; i < emitted; i++)
     {
         char call_id[32];
@@ -510,7 +511,7 @@ static void AskTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult
     pthread_mutex_lock(&g_test.mu);
     int invocation = g_test.tool_invocations++;
     TestMode mode = g_test.mode;
-    if (mode == TEST_BLOCK)
+    if (mode == TEST_BLOCK || mode == TEST_BATCH_TOOLS)
     {
         g_test.block_entered = true;
         g_test.block_entered_count++;
@@ -1428,6 +1429,28 @@ static PicoTraceLine *LastToolTrace(PicoApp *app)
         if (m->trace[t].is_tool)
         {
             return &m->trace[t];
+        }
+    }
+    return NULL;
+}
+
+static PicoTraceLine *ToolTraceByCallId(PicoApp *app, const char *call_id)
+{
+    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    if (!agent || !call_id)
+    {
+        return NULL;
+    }
+    for (int m = 0; m < agent->message_count; m++)
+    {
+        PicoMessage *msg = &agent->messages[m];
+        for (int t = 0; t < msg->trace_count; t++)
+        {
+            PicoTraceLine *line = &msg->trace[t];
+            if (line->is_tool && line->tool_call_id && strcmp(line->tool_call_id, call_id) == 0)
+            {
+                return line;
+            }
         }
     }
     return NULL;
@@ -2707,6 +2730,43 @@ static int TestToolTraceError(void)
     return ok ? 0 : Fail(name, "unknown tool was not marked as error");
 }
 
+static int TestQueuedToolCallProgress(void)
+{
+    const char *name = "later tool call stays queued";
+    ResetTest(TEST_BATCH_TOOLS, 1);
+    PicoApp app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    if (!WaitForBlock(&app))
+    {
+        return Fail(name, "first tool did not start");
+    }
+
+    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoTraceLine *first = ToolTraceByCallId(&app, "call-1-0");
+    PicoTraceLine *second = ToolTraceByCallId(&app, "call-1-1");
+    pthread_mutex_lock(&g_test.mu);
+    int invocations = g_test.tool_invocations;
+    pthread_mutex_unlock(&g_test.mu);
+    bool queued = first && !first->tool_output &&
+                  PicoAgent_ToolCallProgress(agent, "call-1-0") == PICO_TOOL_CALL_RUNNING &&
+                  second && !second->tool_output &&
+                  PicoAgent_ToolCallProgress(agent, "call-1-1") == PICO_TOOL_CALL_QUEUED &&
+                  invocations == 1;
+
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    if (!WaitForIdle(&app))
+    {
+        PicoApp_Free(&app);
+        return Fail(name, "batched tools did not finish");
+    }
+    PicoApp_Free(&app);
+    return queued ? 0 : Fail(name, "the later call was running before the first finished");
+}
+
 static int TestTodoAgentIsolation(void)
 {
     const char *name = "todo state is keyed by agent id";
@@ -3530,6 +3590,7 @@ int main(void)
     failed |= TestUsageNormalizationAndSaturation();
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();
+    failed |= TestQueuedToolCallProgress();
     failed |= TestTodoAgentIsolation();
     failed |= TestTodoApplyRenamesSession();
     failed |= TestAskUserHiddenOmitsGuidance();

@@ -6,6 +6,12 @@
 
 #include <time.h>
 
+typedef enum PicoToolCallProgress {
+    PICO_TOOL_CALL_IDLE = 0,
+    PICO_TOOL_CALL_RUNNING,
+    PICO_TOOL_CALL_QUEUED,
+} PicoToolCallProgress;
+
 PicoAgent *PicoAgent_Create(PicoApp *app);
 /* Rebind an unpublished idle agent after a staged workspace replacement. */
 void PicoAgent_RebindHost(PicoApp *app, PicoAgent *agent, PicoAgentManager *manager);
@@ -19,6 +25,8 @@ void PicoAgent_StartTurn(PicoApp *app, PicoAgent *agent, const char *user_text);
 void PicoAgent_Cancel(PicoAgent *agent);
 void PicoAgent_ForceCancel(PicoApp *app, PicoAgent *agent);
 bool PicoAgent_IsBusy(const PicoAgent *agent);
+/* Main-thread: which pending call this id is. IDLE if it is not in the live queue. */
+PicoToolCallProgress PicoAgent_ToolCallProgress(const PicoAgent *agent, const char *call_id);
 bool PicoAgent_CancelRequested(const PicoAgent *agent);
 bool PicoAgent_AskUiOpen(const PicoAgent *agent);
 void PicoAgent_DismissError(PicoAgent *agent);

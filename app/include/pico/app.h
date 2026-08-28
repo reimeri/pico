@@ -176,8 +176,10 @@ typedef bool (*PicoToolApplyFn)(struct PicoApp *app, PicoAgentId agent_id,
                                 const char *details_json, bool replay);
 typedef void (*PicoCmdFn)(struct PicoApp *app, const char *args);
 
+#define PICO_COMPLETE_LABEL_MAX 288
+
 typedef struct PicoCompleteItem {
-    char label[256];
+    char label[PICO_COMPLETE_LABEL_MAX + 1];
     char detail[128];
     char insert[512];
 } PicoCompleteItem;

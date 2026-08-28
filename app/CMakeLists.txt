@@ -347,6 +347,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src)
+    target_compile_definitions(pico_session_usage_tests PRIVATE PICO_SESSION_TEST_HOOKS=1)
     pico_warnings_are_errors(pico_session_usage_tests)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)

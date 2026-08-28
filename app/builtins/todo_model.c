@@ -34,6 +34,7 @@ void PicoTodoList_Free(PicoTodoList *list)
     {
         free(list->items[i].text);
     }
+    free(list->task);
     free(list->explanation);
     memset(list, 0, sizeof(*list));
 }
@@ -360,6 +361,35 @@ static bool ParseList(const JsonDoc *doc, int obj, PicoTodoList *out, char **err
         return Fail(error, "At most one TODO may be in_progress");
     }
 
+    int task_tok = JsonObjGet(doc, obj, "task");
+    if (!IsStringToken(doc, task_tok))
+    {
+        return Fail(error, "TODO update task must be a string");
+    }
+    if (TokenHasEscapedControl(doc, task_tok))
+    {
+        return Fail(error, "TODO task contains control characters");
+    }
+    char *task = JsonStrDup(doc, task_tok);
+    TrimAscii(task);
+    if (!task || !task[0])
+    {
+        free(task);
+        return Fail(error, "TODO task cannot be blank");
+    }
+    int task_count = 0;
+    if (!Utf8Count(task, &task_count))
+    {
+        free(task);
+        return Fail(error, "TODO task contains invalid UTF-8 or control characters");
+    }
+    if (task_count > PICO_TODO_TASK_MAX)
+    {
+        free(task);
+        return Fail(error, "TODO task exceeds 72 characters");
+    }
+    out->task = task;
+
     int explanation_tok = JsonObjGet(doc, obj, "explanation");
     if (explanation_tok >= 0)
     {
@@ -459,6 +489,8 @@ char *PicoTodoList_DetailsJson(const PicoTodoList *list)
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "{\"version\":");
     JsonBuf_Int(&b, PICO_TODO_STATE_VERSION);
+    JsonBuf_Puts(&b, ",\"task\":");
+    JsonBuf_String(&b, list && list->task ? list->task : "");
     JsonBuf_Puts(&b, ",\"todos\":[");
     int count = list ? list->count : 0;
     for (int i = 0; i < count; i++)
@@ -501,13 +533,24 @@ static char StatusSymbol(PicoTodoStatus status)
 
 char *PicoTodoList_FormatAgent(const PicoTodoList *list)
 {
-    if (!list || list->count == 0)
+    if (!list || (list->count == 0 && (!list->task || !list->task[0])))
     {
         return JsonDup("No TODOs are currently tracked.");
     }
-    int completed = PicoTodoList_Completed(list);
     JsonBuf b;
     JsonBuf_Init(&b);
+    if (list->task && list->task[0])
+    {
+        JsonBuf_Puts(&b, "Task: ");
+        JsonBuf_Puts(&b, list->task);
+        JsonBuf_Putc(&b, '\n');
+    }
+    if (list->count == 0)
+    {
+        JsonBuf_Puts(&b, "No TODOs are currently tracked.");
+        return JsonBuf_Steal(&b);
+    }
+    int completed = PicoTodoList_Completed(list);
     char header[96];
     snprintf(header, sizeof(header), "TODOs: %d/%d completed, %d remaining\n", completed, list->count,
              list->count - completed);

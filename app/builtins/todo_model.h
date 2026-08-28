@@ -6,6 +6,7 @@
 #define PICO_TODO_MAX 30
 #define PICO_TODO_ID_MAX 64
 #define PICO_TODO_TEXT_MAX 300
+#define PICO_TODO_TASK_MAX 72
 #define PICO_TODO_EXPLANATION_MAX 300
 #define PICO_TODO_STATE_VERSION 1
 
@@ -24,6 +25,7 @@ typedef struct PicoTodoItem {
 typedef struct PicoTodoList {
     PicoTodoItem items[PICO_TODO_MAX];
     int count;
+    char *task;
     char *explanation;
 } PicoTodoList;
 

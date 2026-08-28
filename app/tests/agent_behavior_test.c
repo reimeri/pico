@@ -1120,6 +1120,22 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
+static int g_log_title_calls;
+static char g_logged_title[PICO_COMPLETE_LABEL_MAX + 1];
+
+PicoSessionWriteResult PicoSession_LogTitle(PicoApp *app, PicoAgent *agent, const char *title)
+{
+    (void)app;
+    (void)agent;
+    const char *next = title ? title : "";
+    if (strcmp(g_logged_title, next) != 0)
+    {
+        g_log_title_calls++;
+        snprintf(g_logged_title, sizeof(g_logged_title), "%s", next);
+    }
+    return PICO_SESSION_WRITE_OK;
+}
+
 void PicoPlugins_Load(PicoApp *app)
 {
     if (app && app->reload_queued)
@@ -2698,8 +2714,10 @@ static int TestTodoAgentIsolation(void)
     memset(&app, 0, sizeof(app));
     PicoExt ext = pico_ext_todo();
     ext.init(&app);
-    const char *first = "{\"version\":1,\"todos\":[{\"id\":\"a\",\"text\":\"first-agent\",\"status\":\"pending\"}]}";
-    const char *second = "{\"version\":1,\"todos\":[{\"id\":\"b\",\"text\":\"second-agent\",\"status\":\"in_progress\"}]}";
+    const char *first =
+        "{\"version\":1,\"task\":\"First\",\"todos\":[{\"id\":\"a\",\"text\":\"first-agent\",\"status\":\"pending\"}]}";
+    const char *second =
+        "{\"version\":1,\"task\":\"Second\",\"todos\":[{\"id\":\"b\",\"text\":\"second-agent\",\"status\":\"in_progress\"}]}";
     bool ok = app.tool_count == 1 && app.tools[0].apply &&
               app.tools[0].apply(&app, 11, first, true) &&
               app.tools[0].apply(&app, 22, second, true);
@@ -2734,6 +2752,66 @@ static int TestTodoAgentIsolation(void)
     ext.shutdown(&app);
     pico_clear_registrations(&app);
     return ok ? 0 : Fail(name, "apply, context, or reset crossed agent boundaries");
+}
+
+static PicoTool *FindTodoTool(PicoApp *app)
+{
+    for (int i = 0; app && i < app->tool_count; i++)
+    {
+        if (app->tools[i].name && strcmp(app->tools[i].name, "todo_update") == 0)
+        {
+            return &app->tools[i];
+        }
+    }
+    return NULL;
+}
+
+static int TestTodoApplyRenamesSession(void)
+{
+    const char *name = "todo apply renames the session when task changes";
+    PicoApp app;
+    InitApp(&app);
+    PicoExt ext = pico_ext_todo();
+    ext.init(&app);
+    PicoTool *tool = FindTodoTool(&app);
+    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    const char *first =
+        "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
+        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
+    const char *same =
+        "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
+        "[{\"id\":\"a\",\"text\":\"later\",\"status\":\"in_progress\"}]}";
+    const char *replayed_same =
+        "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
+        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
+    const char *replayed_stale =
+        "{\"version\":1,\"task\":\"Heal replayed title\",\"todos\":"
+        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
+    const char *renamed =
+        "{\"version\":1,\"task\":\"Rename again\",\"todos\":"
+        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"completed\"}]}";
+    g_log_title_calls = 0;
+    g_logged_title[0] = '\0';
+    bool ok = tool && tool->apply && agent && ext.on_frame &&
+              tool->apply(&app, agent->id, first, false) && g_log_title_calls == 0;
+    ext.on_frame(&app, 0.0f);
+    ok = ok && g_log_title_calls == 1 && strcmp(g_logged_title, "Name the session") == 0 &&
+         tool->apply(&app, agent->id, same, false);
+    ext.on_frame(&app, 0.0f);
+    ok = ok && g_log_title_calls == 1 && tool->apply(&app, agent->id, replayed_same, true);
+    ext.on_frame(&app, 0.0f);
+    ok = ok && g_log_title_calls == 1 && tool->apply(&app, agent->id, replayed_stale, true);
+    ext.on_frame(&app, 0.0f);
+    ok = ok && g_log_title_calls == 2 && strcmp(g_logged_title, "Heal replayed title") == 0 &&
+         tool->apply(&app, agent->id, renamed, false) && g_log_title_calls == 2;
+    ext.on_frame(&app, 0.0f);
+    ok = ok && g_log_title_calls == 3 && strcmp(g_logged_title, "Rename again") == 0;
+    if (ext.shutdown)
+    {
+        ext.shutdown(&app);
+    }
+    PicoApp_Free(&app);
+    return ok ? 0 : Fail(name, "live apply did not rename on task change, or replay/unchanged task wrote a title");
 }
 
 static bool AskUserRegistered(const PicoApp *app)
@@ -3453,6 +3531,7 @@ int main(void)
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();
     failed |= TestTodoAgentIsolation();
+    failed |= TestTodoApplyRenamesSession();
     failed |= TestAskUserHiddenOmitsGuidance();
     failed |= TestAskUserRegistrationReload();
     failed |= TestAskUserToolSuccess();

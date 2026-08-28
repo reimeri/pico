@@ -1,6 +1,8 @@
 #include "pico/plugin.h"
 #include "todo.h"
 #include "todo_model.h"
+#include "agent_manager.h"
+#include "session.h"
 #include "json.h"
 #include "scrollbar.h"
 
@@ -21,6 +23,7 @@ typedef struct TodoAgentState {
     PicoAgentId agent_id;
     PicoTodoList todos;
     bool expanded;
+    bool title_pending;
 } TodoAgentState;
 
 static TodoAgentState g_states[PICO_MAX_AGENTS];
@@ -31,7 +34,10 @@ static bool g_overflow;
 static PicoScrollbar g_scrollbar;
 
 static const char *kTodoParams =
-    "{\"type\":\"object\",\"properties\":{\"todos\":{\"type\":\"array\",\"maxItems\":30,"
+    "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":72,"
+    "\"description\":\"Succinct session name for the current work (a few words, not a paragraph). "
+    "Keep it stable unless the goal changes.\"},"
+    "\"todos\":{\"type\":\"array\",\"maxItems\":30,"
     "\"description\":\"The complete canonical TODO list. This replaces the previous list atomically.\","
     "\"items\":{\"type\":\"object\",\"properties\":{"
     "\"id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64,"
@@ -39,7 +45,7 @@ static const char *kTodoParams =
     "\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300},"
     "\"status\":{\"type\":\"string\",\"enum\":[\"pending\",\"in_progress\",\"completed\"]}},"
     "\"required\":[\"id\",\"text\",\"status\"]}},"
-    "\"explanation\":{\"type\":\"string\",\"maxLength\":300}},\"required\":[\"todos\"]}";
+    "\"explanation\":{\"type\":\"string\",\"maxLength\":300}},\"required\":[\"todos\",\"task\"]}";
 
 static Clay_String CStr(const char *s)
 {
@@ -138,8 +144,6 @@ static void TodoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult
 
 static bool TodoApply(PicoApp *app, PicoAgentId agent_id, const char *details_json, bool replay)
 {
-    (void)app;
-    (void)replay;
     PicoTodoList parsed;
     char *error = NULL;
     if (!PicoTodoList_ParseDetails(details_json, &parsed, &error))
@@ -153,11 +157,22 @@ static bool TodoApply(PicoApp *app, PicoAgentId agent_id, const char *details_js
         PicoTodoList_Free(&parsed);
         return false;
     }
+    const char *old_task = state->todos.task;
+    const char *new_task = parsed.task;
+    bool changed = !old_task || !new_task || strcmp(old_task, new_task) != 0;
     PicoTodoList_Swap(&state->todos, &parsed);
     PicoTodoList_Free(&parsed);
     if (state->todos.count == 0)
     {
         state->expanded = false;
+    }
+    if (replay)
+    {
+        state->title_pending = state->todos.task && state->todos.task[0];
+    }
+    else if (changed && state->todos.task && state->todos.task[0])
+    {
+        state->title_pending = true;
     }
     return true;
 }
@@ -323,11 +338,26 @@ static void TodoRender(PicoApp *app)
                                        CLAY_TRANSITION_PROPERTY_CORNER_RADIUS}})
     {
         CLAY(CLAY_ID("TodoPanelHeader"),
-             {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+             {.layout = {.layoutDirection = state->expanded ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
+                         .childGap = state->expanded ? 4 : 0,
+                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                          .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY_TEXT(CStr(g_header),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
+            if (state->expanded && state->todos.task && state->todos.task[0])
+            {
+                CLAY_TEXT(CStr(state->todos.task),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                            .fontSize = 14,
+                                            .textColor = COLOR_TEXT,
+                                            .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                CLAY_TEXT(CStr(g_header),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED}));
+            }
+            else
+            {
+                CLAY_TEXT(CStr(g_header),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
+            }
         }
         if (state->expanded)
         {
@@ -403,6 +433,21 @@ static void TodoAfterLayout(PicoApp *app, const PicoHookEvent *event)
 static void TodoFrame(PicoApp *app, float dt)
 {
     (void)dt;
+    for (int i = 0; app && i < PICO_MAX_AGENTS; i++)
+    {
+        TodoAgentState *pending = &g_states[i];
+        if (!pending->agent_id || !pending->title_pending)
+        {
+            continue;
+        }
+        PicoAgent *agent = app->agents ? PicoAgentManager_Find(app->agents, pending->agent_id) : NULL;
+        if (agent && pending->todos.task && pending->todos.task[0])
+        {
+            (void)PicoSession_LogTitle(app, agent, pending->todos.task);
+        }
+        pending->title_pending = false;
+    }
+
     TodoAgentState *state = ActiveState(app);
     if (state && state->expanded)
     {
@@ -418,8 +463,9 @@ static void TodoFrame(PicoApp *app, float dt)
 static void TodoInit(PicoApp *app)
 {
     pico_add_tool(app, "todo_update",
-                  "Replace the complete canonical TODO list. Include every current item, use stable IDs and statuses "
-                  "pending, in_progress, or completed, and keep at most one item in_progress.",
+                  "Replace the complete canonical TODO list. Set task to a succinct session title for the current "
+                  "work and keep it stable unless the goal changes. Include every current item, use stable IDs and "
+                  "statuses pending, in_progress, or completed, and keep at most one item in_progress.",
                   kTodoParams, TodoRun, TodoApply);
     pico_add_context_hook(app, TodoContext);
     pico_add_hook(app, PICO_HOOK_ON_SESSION_RESET, TodoReset);

@@ -5,10 +5,12 @@
 
 #include <time.h>
 
+#define PICO_SESSION_TITLE_MAX_BYTES (72 * 4)
+
 typedef struct PicoSessionInfo {
     char path[4096];
     char id[40];
-    char title[256];
+    char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
     PicoAgentKind kind;
     time_t mtime;
 } PicoSessionInfo;
@@ -17,6 +19,7 @@ typedef struct PicoSessionHeader {
     int version;
     PicoAgentKind kind;
     char id[40];
+    char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
     char profile[65];
     char initial_purpose[1025];
     char parent_session_id[40];
@@ -68,5 +71,6 @@ PicoSessionWriteResult PicoSession_LogModelChange(PicoApp *app, PicoAgent *agent
                                                   const char *model, const char *effort);
 PicoSessionWriteResult PicoSession_LogCustom(PicoApp *app, PicoAgent *agent,
                                              const char *ext, const char *data_json);
+PicoSessionWriteResult PicoSession_LogTitle(PicoApp *app, PicoAgent *agent, const char *title);
 
 #endif

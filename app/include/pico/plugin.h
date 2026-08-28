@@ -3,7 +3,7 @@
 
 #include "pico/app.h"
 
-#define PICO_EXT_ABI 11
+#define PICO_EXT_ABI 12
 
 // User/agent extensions export a function named pico_ext with this signature.
 typedef struct PicoExt {

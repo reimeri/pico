@@ -22,7 +22,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 11). ABI 11 preserves raw tool-row arguments and subagent child identity, and adds `pico_ui_modal_is_top`. ABI 10 added the named UI mailbox (`pico_ui_post` / `pico_ui_latest` / `pico_ui_clear`). ABI 9 added the named modal stack (`pico_ui_modal_push` / `pop`) and tool-row click hooks (`pico_add_tool_row_hook`). There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 12). ABI 12 expands completion-item labels to 288 UTF-8 bytes. ABI 11 preserves raw tool-row arguments and subagent child identity, and adds `pico_ui_modal_is_top`. ABI 10 added the named UI mailbox (`pico_ui_post` / `pico_ui_latest` / `pico_ui_clear`). ABI 9 added the named modal stack (`pico_ui_modal_push` / `pop`) and tool-row click hooks (`pico_add_tool_row_hook`). There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `init` — register views/tools/hooks/commands. Called on load and after every reload when the extension is enabled.

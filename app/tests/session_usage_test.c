@@ -8,10 +8,12 @@
 #include "usage.h"
 
 #include <stdbool.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char g_config_dir[4096];
@@ -24,6 +26,43 @@ static char g_last_sig[4096];
 static char g_last_item_id[128];
 static char g_last_user_parts[4096];
 static char g_last_assistant_parts[4096];
+static const char *g_session_fail_stage;
+static int g_title_ready_fd = -1;
+static int g_title_continue_fd = -1;
+static int g_lock_attempt_fd = -1;
+
+static bool TransferByte(int fd, bool write_byte)
+{
+    char byte = 'x';
+    ssize_t result;
+    do
+    {
+        result = write_byte ? write(fd, &byte, 1) : read(fd, &byte, 1);
+    } while (result < 0 && errno == EINTR);
+    return result == 1;
+}
+
+bool PicoSession_TestHook(const char *stage)
+{
+    if (stage && strcmp(stage, "title_after_copy") == 0 &&
+        g_title_ready_fd >= 0 && g_title_continue_fd >= 0)
+    {
+        if (!TransferByte(g_title_ready_fd, true) || !TransferByte(g_title_continue_fd, false))
+        {
+            return true;
+        }
+    }
+    if (stage && strcmp(stage, "lock_before_wait") == 0 && g_lock_attempt_fd >= 0)
+    {
+        int fd = g_lock_attempt_fd;
+        g_lock_attempt_fd = -1;
+        if (!TransferByte(fd, true))
+        {
+            return true;
+        }
+    }
+    return stage && g_session_fail_stage && strcmp(stage, g_session_fail_stage) == 0;
+}
 
 static int Fail(const char *message)
 {
@@ -648,6 +687,276 @@ static bool AppendRaw(const char *path, const char *line)
     return true;
 }
 
+static int CountSubstr(const char *hay, const char *needle)
+{
+    int n = 0;
+    size_t needle_len = needle ? strlen(needle) : 0;
+    if (!hay || !needle || needle_len == 0)
+    {
+        return 0;
+    }
+    for (const char *p = hay; (p = strstr(p, needle)); p += needle_len)
+    {
+        n++;
+    }
+    return n;
+}
+
+static bool ListedTitleIs(PicoApp *app, const char *session_id, const char *title)
+{
+    PicoSessionInfo *listed = NULL;
+    int listed_n = PicoSession_List(app, &listed, true);
+    bool match = false;
+    for (int i = 0; i < listed_n; i++)
+    {
+        if (strcmp(listed[i].id, session_id) == 0)
+        {
+            match = title && strcmp(listed[i].title, title) == 0;
+            break;
+        }
+    }
+    free(listed);
+    return match;
+}
+
+static int TestSessionTitle(void)
+{
+    PicoApp app;
+    PicoAgent agent;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoSession_LogUser(&app, &agent, "first user message should not win",
+                        "first user message should not win", NULL);
+    if (!agent.session_path[0])
+    {
+        return Fail("title test did not create a session file");
+    }
+    if (!ListedTitleIs(&app, agent.session_id, "first user message should not win"))
+    {
+        unlink(agent.session_path);
+        return Fail("listing did not use the first user message before a title exists");
+    }
+
+    PicoAgent ephemeral;
+    memset(&ephemeral, 0, sizeof(ephemeral));
+    ephemeral.persistence = PICO_SESSION_EPHEMERAL;
+    if (PicoSession_LogTitle(&app, &ephemeral, "Nope") != PICO_SESSION_WRITE_SKIPPED)
+    {
+        unlink(agent.session_path);
+        return Fail("ephemeral title write was not skipped");
+    }
+
+    if (PicoSession_LogTitle(&app, &agent, "Add todo task field") != PICO_SESSION_WRITE_OK)
+    {
+        unlink(agent.session_path);
+        return Fail("first title write failed");
+    }
+    PicoSessionHeader header;
+    if (PicoSession_ReadHeader(agent.session_path, &header) != 0 ||
+        strcmp(header.title, "Add todo task field") != 0)
+    {
+        unlink(agent.session_path);
+        return Fail("header title was not stored");
+    }
+    size_t file_len = 0;
+    char *file = Pico_ReadFile(agent.session_path, &file_len);
+    bool first_ok = file && CountSubstr(file, "\"type\":\"title\"") == 1 &&
+                    strstr(file, "\"title\":\"Add todo task field\"");
+    free(file);
+    if (!first_ok || !ListedTitleIs(&app, agent.session_id, "Add todo task field"))
+    {
+        unlink(agent.session_path);
+        return Fail("listing did not use the header title after the first rename");
+    }
+    if (PicoSession_LogTitle(&app, &agent, "Add todo task field") != PICO_SESSION_WRITE_OK)
+    {
+        unlink(agent.session_path);
+        return Fail("unchanged title was not accepted");
+    }
+    file = Pico_ReadFile(agent.session_path, &file_len);
+    bool unchanged_ok = file && CountSubstr(file, "\"type\":\"title\"") == 1;
+    free(file);
+    if (!unchanged_ok)
+    {
+        unlink(agent.session_path);
+        return Fail("unchanged title appended a duplicate event");
+    }
+
+    if (PicoSession_LogTitle(&app, &agent, "Rename again") != PICO_SESSION_WRITE_OK)
+    {
+        unlink(agent.session_path);
+        return Fail("second title write failed");
+    }
+    if (PicoSession_ReadHeader(agent.session_path, &header) != 0 ||
+        strcmp(header.title, "Rename again") != 0)
+    {
+        unlink(agent.session_path);
+        return Fail("header title was not updated");
+    }
+    file = Pico_ReadFile(agent.session_path, &file_len);
+    bool second_ok = file && CountSubstr(file, "\"type\":\"title\"") == 2 &&
+                     strstr(file, "\"title\":\"Rename again\"");
+    free(file);
+    if (!second_ok || !ListedTitleIs(&app, agent.session_id, "Rename again"))
+    {
+        unlink(agent.session_path);
+        return Fail("second rename did not update the header and append a title event");
+    }
+
+    PicoApp reader;
+    PicoAgent reader_agent;
+    memset(&reader, 0, sizeof(reader));
+    memset(&reader_agent, 0, sizeof(reader_agent));
+    reader_agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, agent.session_path);
+    PicoAgent_ClearMessages(&reader_agent);
+
+    char *before = Pico_ReadFile(agent.session_path, &file_len);
+    g_status_warning[0] = '\0';
+    g_session_fail_stage = "title_before_rename";
+    PicoSessionWriteResult failed = PicoSession_LogTitle(&app, &agent, "Should fail");
+    g_session_fail_stage = NULL;
+    char *after = Pico_ReadFile(agent.session_path, &file_len);
+    bool intact = before && after && strcmp(before, after) == 0;
+    free(before);
+    free(after);
+    bool failed_ok = failed == PICO_SESSION_WRITE_FAILED &&
+                     agent.persistence == PICO_SESSION_FAILED &&
+                     strstr(g_status_warning, "no longer resumable") && intact;
+    unlink(agent.session_path);
+    return failed_ok ? 0 : Fail("title rewrite failure did not preserve the original file");
+}
+
+static int TestTitleFailureStage(const char *stage, bool expect_original)
+{
+    PicoApp app;
+    PicoAgent agent;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoSession_LogUser(&app, &agent, "seed", "seed", NULL);
+    size_t file_len = 0;
+    char *before = Pico_ReadFile(agent.session_path, &file_len);
+    g_session_fail_stage = stage;
+    PicoSessionWriteResult result = PicoSession_LogTitle(&app, &agent, "Injected failure");
+    g_session_fail_stage = NULL;
+    char *after = Pico_ReadFile(agent.session_path, &file_len);
+    bool content_ok = expect_original ? before && after && strcmp(before, after) == 0
+                                      : after && strstr(after, "\"title\":\"Injected failure\"");
+    bool ok = result == PICO_SESSION_WRITE_FAILED &&
+              agent.persistence == PICO_SESSION_FAILED && content_ok;
+    free(before);
+    free(after);
+    unlink(agent.session_path);
+    return ok ? 0 : Fail("injected title failure had the wrong persistence or preservation result");
+}
+
+static int TestSessionTitleFailureStages(void)
+{
+    return TestTitleFailureStage("title_after_copy", true) |
+           TestTitleFailureStage("title_fsync", true) |
+           TestTitleFailureStage("title_dir_fsync", false);
+}
+
+static int TestSessionTitleUtf8(void)
+{
+    PicoApp app;
+    PicoAgent agent;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+
+    char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
+    for (int i = 0; i < 72; i++)
+    {
+        memcpy(title + i * 4, "\xF0\x9F\x98\x80", 4);
+    }
+    title[PICO_SESSION_TITLE_MAX_BYTES] = '\0';
+    if (PicoSession_LogTitle(&app, &agent, title) != PICO_SESSION_WRITE_OK)
+    {
+        unlink(agent.session_path);
+        return Fail("72 four-byte title code points were rejected");
+    }
+    PicoSessionHeader header;
+    bool ok = sizeof(((PicoCompleteItem *)0)->label) >= sizeof(title) &&
+              PicoSession_ReadHeader(agent.session_path, &header) == 0 &&
+              strcmp(header.title, title) == 0 &&
+              ListedTitleIs(&app, agent.session_id, title);
+    unlink(agent.session_path);
+    return ok ? 0 : Fail("72 four-byte title code points were truncated");
+}
+
+static int TestConcurrentAppendDuringTitle(void)
+{
+    PicoApp app;
+    PicoAgent agent;
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoSession_LogUser(&app, &agent, "seed", "seed", NULL);
+
+    int ready[2];
+    int attempted[2];
+    if (pipe(ready) != 0 || pipe(attempted) != 0)
+    {
+        unlink(agent.session_path);
+        return Fail("could not create concurrency test pipes");
+    }
+    pid_t child = fork();
+    if (child < 0)
+    {
+        close(ready[0]); close(ready[1]); close(attempted[0]); close(attempted[1]);
+        unlink(agent.session_path);
+        return Fail("could not fork concurrent session writer");
+    }
+    if (child == 0)
+    {
+        close(ready[1]);
+        close(attempted[0]);
+        if (!TransferByte(ready[0], false))
+        {
+            _exit(2);
+        }
+        close(ready[0]);
+        g_lock_attempt_fd = attempted[1];
+        PicoSessionWriteResult result = PicoSession_LogAssistant(
+            &app, &agent, 1, "concurrent append", NULL, NULL, NULL, NULL, 0);
+        close(attempted[1]);
+        _exit(result == PICO_SESSION_WRITE_OK ? 0 : 3);
+    }
+
+    close(ready[0]);
+    close(attempted[1]);
+    g_title_ready_fd = ready[1];
+    g_title_continue_fd = attempted[0];
+    PicoSessionWriteResult title_result = PicoSession_LogTitle(&app, &agent, "Locked rewrite");
+    g_title_ready_fd = -1;
+    g_title_continue_fd = -1;
+    close(ready[1]);
+    close(attempted[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+
+    size_t file_len = 0;
+    char *file = Pico_ReadFile(agent.session_path, &file_len);
+    bool ok = title_result == PICO_SESSION_WRITE_OK && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+              file && strstr(file, "\"title\":\"Locked rewrite\"") &&
+              strstr(file, "concurrent append");
+    free(file);
+    unlink(agent.session_path);
+    return ok ? 0 : Fail("title rewrite lost or corrupted a concurrent append");
+}
+
 static bool HasRestoredThinkSummary(const PicoMessage *messages, int count, int think_ms)
 {
     for (int i = 0; i < count; i++)
@@ -1255,7 +1564,9 @@ int main(void)
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
     if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
-        TestTranscriptMessageGroups() != 0)
+        TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
+        TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
+        TestConcurrentAppendDuringTitle() != 0)
     {
         return 1;
     }

@@ -236,6 +236,13 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info)
                 info->kind = PICO_AGENT_SUBAGENT;
             }
             free(kind);
+            char *title = JsonObjStr(&doc, 0, "title");
+            if (title && title[0])
+            {
+                snprintf(info->title, sizeof(info->title), "%s", title);
+                got_title = true;
+            }
+            free(title);
         }
         else if (type && strcmp(type, "message") == 0)
         {
@@ -368,9 +375,134 @@ static bool WriteAll(int fd, const char *data, size_t len)
     return true;
 }
 
+#ifdef PICO_SESSION_TEST_HOOKS
+extern bool PicoSession_TestHook(const char *stage);
+
+static bool SessionTestFail(const char *stage)
+{
+    if (PicoSession_TestHook(stage))
+    {
+        errno = EIO;
+        return true;
+    }
+    return false;
+}
+#else
+static bool SessionTestFail(const char *stage)
+{
+    (void)stage;
+    return false;
+}
+#endif
+
+static int SessionLockAcquire(const char *session_path, char *error, size_t error_cap)
+{
+    char lock_path[4102];
+    if (!session_path ||
+        (size_t)snprintf(lock_path, sizeof(lock_path), "%s.lock", session_path) >= sizeof(lock_path))
+    {
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "session lock path is too long");
+        }
+        return -1;
+    }
+    int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+    {
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
+        }
+        return -1;
+    }
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    if (SessionTestFail("lock_before_wait"))
+    {
+        int failure = errno ? errno : EIO;
+        close(fd);
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "%s", strerror(failure));
+        }
+        return -1;
+    }
+    while (fcntl(fd, F_SETLKW, &lock) != 0)
+    {
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        int failure = errno ? errno : EIO;
+        close(fd);
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "%s", strerror(failure));
+        }
+        return -1;
+    }
+    return fd;
+}
+
+static void SessionLockRelease(int fd)
+{
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+}
+
+static bool SyncParentDir(const char *path)
+{
+    char dir[4096];
+    if (!path || (size_t)snprintf(dir, sizeof(dir), "%s", path) >= sizeof(dir))
+    {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    char *slash = strrchr(dir, '/');
+    if (!slash)
+    {
+        snprintf(dir, sizeof(dir), ".");
+    }
+    else if (slash == dir)
+    {
+        slash[1] = '\0';
+    }
+    else
+    {
+        *slash = '\0';
+    }
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        return false;
+    }
+    bool ok = fsync(fd) == 0;
+    int failure = ok ? 0 : (errno ? errno : EIO);
+    if (close(fd) != 0 && ok)
+    {
+        ok = false;
+        failure = errno ? errno : EIO;
+    }
+    if (!ok)
+    {
+        errno = failure;
+    }
+    return ok;
+}
+
 static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t error_cap)
 {
     int failure = 0;
+    int lock_fd = SessionLockAcquire(agent->session_path, error, error_cap);
+    if (lock_fd < 0)
+    {
+        return false;
+    }
     int fd = open(agent->session_path, O_WRONLY | O_APPEND | O_CREAT, 0600);
     off_t original_size = -1;
     if (fd < 0)
@@ -381,7 +513,8 @@ static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t er
     {
         original_size = lseek(fd, 0, SEEK_END);
         size_t len = strlen(json);
-        if (!WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) || fsync(fd) != 0)
+        if (SessionTestFail("append_write") || !WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) ||
+            fsync(fd) != 0)
         {
             failure = errno ? errno : EIO;
             if (original_size >= 0)
@@ -395,6 +528,7 @@ static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t er
             failure = errno ? errno : EIO;
         }
     }
+    SessionLockRelease(lock_fd);
     if (failure != 0 && error && error_cap > 0)
     {
         snprintf(error, error_cap, "%s", strerror(failure));
@@ -1205,6 +1339,7 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     char *purpose = JsonObjStr(&doc, 0, "initial_purpose");
     char *parent = JsonObjStr(&doc, 0, "parent_session_id");
     char *model = JsonObjStr(&doc, 0, "model");
+    char *title = JsonObjStr(&doc, 0, "title");
     if (id) snprintf(out->id, sizeof(out->id), "%s", id);
     bool kind_valid = kind && (strcmp(kind, "normal") == 0 || strcmp(kind, "subagent") == 0);
     out->kind = kind && strcmp(kind, "subagent") == 0 ? PICO_AGENT_SUBAGENT : PICO_AGENT_NORMAL;
@@ -1212,6 +1347,7 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     if (purpose) snprintf(out->initial_purpose, sizeof(out->initial_purpose), "%s", purpose);
     if (parent) snprintf(out->parent_session_id, sizeof(out->parent_session_id), "%s", parent);
     if (model) snprintf(out->model, sizeof(out->model), "%s", model);
+    if (title) snprintf(out->title, sizeof(out->title), "%s", title);
     bool valid = out->version == 4 && out->id[0] && kind_valid &&
                  (out->kind == PICO_AGENT_NORMAL || (out->profile[0] && out->initial_purpose[0]));
     free(id);
@@ -1220,6 +1356,7 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     free(purpose);
     free(parent);
     free(model);
+    free(title);
     JsonFree(&doc);
     free(line);
     return valid ? 0 : -1;
@@ -1965,4 +2102,292 @@ PicoSessionWriteResult PicoSession_LogCustom(PicoApp *app, PicoAgent *agent,
     free(line);
     free(pre);
     return result;
+}
+
+static bool AppendTokRaw(JsonBuf *b, const JsonDoc *doc, int tok)
+{
+    int start = JsonTokStart(doc, tok);
+    int end = JsonTokEnd(doc, tok);
+    if (!b || !doc || start < 0 || end < start || (size_t)end > doc->len)
+    {
+        return false;
+    }
+    if (start > 0 && doc->src[start - 1] == '"')
+    {
+        start--;
+        if ((size_t)end < doc->len && doc->src[end] == '"')
+        {
+            end++;
+        }
+    }
+    JsonBuf_Append(b, doc->src + start, (size_t)(end - start));
+    return true;
+}
+
+static bool HeaderTitleEquals(const char *header_line, const char *title)
+{
+    if (!header_line || !title)
+    {
+        return false;
+    }
+    JsonDoc doc;
+    memset(&doc, 0, sizeof(doc));
+    if (JsonParse(&doc, header_line, strlen(header_line)) != 0 || !JsonIsObject(&doc, 0))
+    {
+        if (doc.toks)
+        {
+            JsonFree(&doc);
+        }
+        return false;
+    }
+    char *current = JsonObjStr(&doc, 0, "title");
+    bool equal = JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "session") &&
+                 current && strcmp(current, title) == 0;
+    free(current);
+    JsonFree(&doc);
+    return equal;
+}
+
+static char *HeaderWithTitle(const char *header_line, const char *title)
+{
+    if (!header_line || !title)
+    {
+        return NULL;
+    }
+    JsonDoc doc;
+    memset(&doc, 0, sizeof(doc));
+    if (JsonParse(&doc, header_line, strlen(header_line)) != 0 || !JsonIsObject(&doc, 0) ||
+        !JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "session"))
+    {
+        if (doc.toks)
+        {
+            JsonFree(&doc);
+        }
+        return NULL;
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Putc(&b, '{');
+    int n = JsonObjLen(&doc, 0);
+    bool first = true;
+    bool wrote_title = false;
+    for (int i = 0; i < n; i++)
+    {
+        int key_tok = -1;
+        int val_tok = -1;
+        if (!JsonObjPair(&doc, 0, i, &key_tok, &val_tok))
+        {
+            JsonBuf_Free(&b);
+            JsonFree(&doc);
+            return NULL;
+        }
+        char *key = JsonStrDup(&doc, key_tok);
+        if (!key)
+        {
+            JsonBuf_Free(&b);
+            JsonFree(&doc);
+            return NULL;
+        }
+        if (!first)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        first = false;
+        if (strcmp(key, "title") == 0)
+        {
+            JsonBuf_Puts(&b, "\"title\":");
+            JsonBuf_String(&b, title);
+            wrote_title = true;
+            free(key);
+            continue;
+        }
+        JsonBuf_String(&b, key);
+        JsonBuf_Putc(&b, ':');
+        bool ok = AppendTokRaw(&b, &doc, val_tok);
+        free(key);
+        if (!ok)
+        {
+            JsonBuf_Free(&b);
+            JsonFree(&doc);
+            return NULL;
+        }
+    }
+    if (!wrote_title)
+    {
+        if (!first)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_Puts(&b, "\"title\":");
+        JsonBuf_String(&b, title);
+    }
+    JsonBuf_Putc(&b, '}');
+    JsonFree(&doc);
+    return JsonBuf_Steal(&b);
+}
+
+static bool CopyRemainder(FILE *src, int fd)
+{
+    char buf[8192];
+    for (;;)
+    {
+        size_t n = fread(buf, 1, sizeof(buf), src);
+        if (n > 0 && !WriteAll(fd, buf, n))
+        {
+            return false;
+        }
+        if (n < sizeof(buf))
+        {
+            return ferror(src) == 0;
+        }
+    }
+}
+
+PicoSessionWriteResult PicoSession_LogTitle(PicoApp *app, PicoAgent *agent, const char *title)
+{
+    if (!app || !agent || !title || !title[0])
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (agent->persistence == PICO_SESSION_EPHEMERAL)
+    {
+        return PICO_SESSION_WRITE_SKIPPED;
+    }
+    if (agent->persistence == PICO_SESSION_FAILED)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!agent->session_path[0] && CreateNew(app, agent) != 0)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!agent->session_path[0])
+    {
+        PersistenceFailed(app, agent, "session path was not created");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+
+    char error[256] = {0};
+    int lock_fd = SessionLockAcquire(agent->session_path, error, sizeof(error));
+    if (lock_fd < 0)
+    {
+        PersistenceFailed(app, agent, error);
+        return PICO_SESSION_WRITE_FAILED;
+    }
+
+    int failure = 0;
+    bool renamed = false;
+    FILE *src = NULL;
+    char *header = NULL;
+    char *event_line = NULL;
+    int fd = -1;
+    char tmp_path[sizeof(agent->session_path) + 16];
+    tmp_path[0] = '\0';
+
+    src = fopen(agent->session_path, "rb");
+    if (!src)
+    {
+        failure = errno ? errno : EIO;
+        goto done;
+    }
+    char *header_line = NULL;
+    size_t header_cap = 0;
+    ssize_t got = getline(&header_line, &header_cap, src);
+    if (got <= 0)
+    {
+        free(header_line);
+        failure = EINVAL;
+        goto done;
+    }
+    while (got > 0 && (header_line[got - 1] == '\n' || header_line[got - 1] == '\r'))
+    {
+        header_line[--got] = '\0';
+    }
+    if (HeaderTitleEquals(header_line, title))
+    {
+        free(header_line);
+        goto done;
+    }
+    header = HeaderWithTitle(header_line, title);
+    free(header_line);
+    if (!header)
+    {
+        failure = ENOMEM;
+        goto done;
+    }
+
+    char *pre = EventPrefix("title");
+    JsonBuf event;
+    JsonBuf_Init(&event);
+    JsonBuf_Puts(&event, pre);
+    JsonBuf_Puts(&event, ",\"title\":");
+    JsonBuf_String(&event, title);
+    JsonBuf_Putc(&event, '}');
+    event_line = JsonBuf_Steal(&event);
+    free(pre);
+    if (!event_line)
+    {
+        failure = ENOMEM;
+        goto done;
+    }
+
+    if ((size_t)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", agent->session_path) >= sizeof(tmp_path))
+    {
+        failure = ENAMETOOLONG;
+        goto done;
+    }
+    if (SessionTestFail("title_temp_open") || (fd = mkstemp(tmp_path)) < 0)
+    {
+        failure = errno ? errno : EIO;
+        goto done;
+    }
+    if (!WriteAll(fd, header, strlen(header)) || !WriteAll(fd, "\n", 1) ||
+        !CopyRemainder(src, fd) || SessionTestFail("title_after_copy") ||
+        !WriteAll(fd, event_line, strlen(event_line)) || !WriteAll(fd, "\n", 1) ||
+        SessionTestFail("title_fsync") || fsync(fd) != 0)
+    {
+        failure = errno ? errno : EIO;
+        goto done;
+    }
+    if (close(fd) != 0)
+    {
+        failure = errno ? errno : EIO;
+        fd = -1;
+        goto done;
+    }
+    fd = -1;
+    if (SessionTestFail("title_before_rename") || rename(tmp_path, agent->session_path) != 0)
+    {
+        failure = errno ? errno : EIO;
+        goto done;
+    }
+    renamed = true;
+    if (SessionTestFail("title_dir_fsync") || !SyncParentDir(agent->session_path))
+    {
+        failure = errno ? errno : EIO;
+        goto done;
+    }
+
+done:
+    if (fd >= 0 && close(fd) != 0 && failure == 0)
+    {
+        failure = errno ? errno : EIO;
+    }
+    if (src)
+    {
+        fclose(src);
+    }
+    free(header);
+    free(event_line);
+    if (!renamed && tmp_path[0])
+    {
+        unlink(tmp_path);
+    }
+    SessionLockRelease(lock_fd);
+    if (failure != 0)
+    {
+        PersistenceFailed(app, agent, strerror(failure));
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    return PICO_SESSION_WRITE_OK;
 }

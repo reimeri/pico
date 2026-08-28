@@ -436,16 +436,21 @@ void PicoComplete_Render(PicoApp *app)
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childGap = 8,
                              .padding = {8, 8, 4, 4},
+                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .sizing = {.width = CLAY_SIZING_GROW(0)}},
                   .backgroundColor = bg,
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
                 Clay_String label = {.length = (int32_t)strlen(g_complete.items[i].label),
                                      .chars = g_complete.items[i].label};
-                CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                   .fontSize = 14,
-                                                   .textColor = COLOR_TEXT,
-                                                   .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .clip = {.horizontal = true}})
+                {
+                    CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                       .fontSize = 14,
+                                                       .textColor = COLOR_TEXT,
+                                                       .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
                 if (g_complete.items[i].detail[0])
                 {
                     Clay_String detail = {.length = (int32_t)strlen(g_complete.items[i].detail),

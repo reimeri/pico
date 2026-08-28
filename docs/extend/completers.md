@@ -33,7 +33,7 @@ static void HashInit(PicoApp *app)
 Each item:
 
 - `label` — list row, up to `PICO_COMPLETE_LABEL_MAX` (288) UTF-8 bytes
-- `detail` — muted subtitle
+- `detail` — muted secondary text, right-aligned in the row
 - `insert` — text that replaces the whole token, **including the trigger** (e.g. `/model gpt-5.6-sol`, `@src/foo.c`)
 
 ## Contract

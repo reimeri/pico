@@ -144,7 +144,7 @@ int main(int argc, char **argv)
 
     char session_path[4096];
     session_path[0] = '\0';
-    const PicoAgent *active = PicoHost_ActiveAgentConst(app);
+    const PicoAgent *active = PicoHost_SelectedAgentConst(app);
     if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0] &&
         access(active->session_path, F_OK) == 0)
     {

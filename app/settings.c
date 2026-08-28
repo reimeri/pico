@@ -482,11 +482,11 @@ static bool UserSettingsPath(char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/settings.json", dir);
 }
 
-static bool WorkspaceSettingsPath(const PicoHost *app, char *out, size_t cap)
+static bool WorkspaceSettingsPath(const PicoWorkspace *workspace, char *out, size_t cap)
 {
-    if (app && PicoHost_Path(app)[0])
+    if (workspace && workspace->path[0])
     {
-        return PicoPath_Format(out, cap, "%s/.pico/settings.json", PicoHost_Path(app));
+        return PicoPath_Format(out, cap, "%s/.pico/settings.json", workspace->path);
     }
     if (out && cap > 0)
     {
@@ -745,7 +745,7 @@ void PicoSettings_Load(PicoHost *app)
         LoadFile(s, &catalog, &catalog_n, path, true);
     }
 
-    if (WorkspaceSettingsPath(app, path, sizeof(path)) && path[0])
+    if (WorkspaceSettingsPath(PicoHost_PrimaryWorkspaceConst(app), path, sizeof(path)) && path[0])
     {
         LoadFile(s, &catalog, &catalog_n, path, false);
     }
@@ -1299,7 +1299,7 @@ bool PicoSettings_SaveSelection(PicoHost *app, const PicoAgent *agent, bool save
     char user[4096];
     char workspace[4096];
     if (!UserSettingsPath(user, sizeof(user)) ||
-        !WorkspaceSettingsPath(app, workspace, sizeof(workspace)))
+        !WorkspaceSettingsPath(PicoAgent_Workspace(agent), workspace, sizeof(workspace)))
     {
         return false;
     }
@@ -1421,7 +1421,7 @@ static bool PushContext(const char **labels, int max, int *n, const char *path, 
     return true;
 }
 
-int PicoSettings_LoadedContext(const PicoHost *app, const char **labels, int max)
+int PicoSettings_LoadedContext(const PicoWorkspace *workspace, const char **labels, int max)
 {
     if (!labels || max <= 0)
     {
@@ -1430,18 +1430,19 @@ int PicoSettings_LoadedContext(const PicoHost *app, const char **labels, int max
     int n = 0;
     char path[4096];
     char config[4096];
+    const char *root = PicoWorkspace_Path(workspace);
     if (Pico_ConfigDir(config, sizeof(config)) &&
         PicoPath_Format(path, sizeof(path), "%s/SYSTEM.md", config))
     {
         PushContext(labels, max, &n, path, "SYSTEM.md");
     }
-    if (app && PicoHost_Path(app)[0])
+    if (root[0])
     {
-        if (PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", PicoHost_Path(app)))
+        if (PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", root))
         {
             PushContext(labels, max, &n, path, ".pico/SYSTEM.md");
         }
-        if (PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", PicoHost_Path(app)))
+        if (PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", root))
         {
             PushContext(labels, max, &n, path, "AGENTS.md");
         }
@@ -1449,7 +1450,7 @@ int PicoSettings_LoadedContext(const PicoHost *app, const char **labels, int max
     return n;
 }
 
-char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *spans, int *span_count)
+char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPromptSpan *spans, int *span_count)
 {
     if (span_count)
     {
@@ -1457,10 +1458,7 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *sp
     }
     JsonBuf b;
     JsonBuf_Init(&b);
-    if (!app)
-    {
-        return JsonBuf_Steal(&b);
-    }
+    const char *root = PicoWorkspace_Path(workspace);
     char path[4096];
     char config[4096];
     if (Pico_ConfigDir(config, sizeof(config)) &&
@@ -1468,8 +1466,7 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *sp
     {
         AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE);
     }
-    if (PicoHost_Path(app)[0] &&
-        PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", PicoHost_Path(app)))
+    if (root[0] && PicoPath_Format(path, sizeof(path), "%s/.pico/SYSTEM.md", root))
     {
         AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX,
                        PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM);
@@ -1482,7 +1479,7 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *sp
                      "Prefer concise answers.");
         PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE, 0, b.len);
     }
-    if (PicoHost_Path(app)[0] && PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", PicoHost_Path(app)))
+    if (root[0] && PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", root))
     {
         AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_AGENTS);
     }
@@ -1496,7 +1493,7 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *sp
     return JsonBuf_Steal(&b);
 }
 
-char *PicoSettings_LoadSystemPrompt(const PicoHost *app)
+char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace)
 {
-    return PicoSettings_LoadSystemPromptSpans(app, NULL, NULL);
+    return PicoSettings_LoadSystemPromptSpans(workspace, NULL, NULL);
 }

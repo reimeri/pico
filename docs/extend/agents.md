@@ -19,7 +19,9 @@ PicoAgentId active = pico_agent_active(app);
 pico_agent_select(app, active);
 ```
 
-`pico_agent_find` returns a copied snapshot by ID. `PicoAgentInfo.persistence` is `PICO_SESSION_EPHEMERAL`, `PICO_SESSION_DURABLE`, or `PICO_SESSION_FAILED`; `resumable` is true only for a durable identity. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
+`pico_agent_find` returns a copied snapshot by ID. `PicoAgentInfo.persistence` is `PICO_SESSION_EPHEMERAL`, `PICO_SESSION_DURABLE`, or `PICO_SESSION_FAILED`; `resumable` is true only for a durable identity. `pico_agent_create`, `pico_agent_close`, `pico_agent_cancel`, and `pico_agent_force_cancel` return a controlled `PicoAgentResult`. Close rejects busy agents, retained-runtime references, and the final live agent. IDs become stale after close or workspace replacement. `pico_agent_active` / `pico_agent_select` are UI selection only; they do not retarget an in-progress submit, cancel, model, effort, session, or compaction action. Composer submit and slash commands snapshot the selected ID once and pass it into those APIs. Selection clears transcript selection/scroll snapshots but leaves the global composer draft unchanged.
+
+`pico_agent_submit(host, id, text, parts_json)` is a complete explicit submission: it locates the agent by ID, records the user transcript and session event, and starts the turn from `text` plus optional canonical `parts_json`. It does not read UI selection, the composer, or host `agent_parts`. Empty input (no text and no parts) returns `PICO_INVALID`; a stale ID returns `PICO_NOT_FOUND`; a busy or non-accepting agent returns `PICO_BUSY`. Composer send still snapshots the selected ID, prepares display text and attachments, then calls this API.
 
 `pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. Tool trace rows include their provider `tool_call_id`, formatted `tool_args` for display, and original `tool_args_json`; builtin subagent rows also expose the linked runtime `child_id` and durable `child_session_id` when available. Non-tool think rows may include `think_parts` (OpenAI-style summary steps; the last part is the widget title) and `think_ms` (frozen burst duration). Durable sessions restore both from `thinking_parts` and `thinking_ms`. The message and all nested string pointers are invalidated by pumping, transcript mutation, close, or workspace replacement.
 
@@ -83,6 +85,8 @@ Read-only accessors provide copied worker values:
 
 - `pico_agent_context_id(ctx)`
 - `pico_agent_context_generation(ctx)`
+- `pico_agent_context_registration_generation(ctx)`
+- `pico_agent_context_workspace_id(ctx)`
 - `pico_agent_context_workspace(ctx)`
 - `pico_agent_context_session_id(ctx)`
 - `pico_agent_context_profile(ctx)`
@@ -90,7 +94,7 @@ Read-only accessors provide copied worker values:
 - `pico_agent_context_safe_mode(ctx)`
 - `pico_agent_context_cancelled(ctx)`
 
-A context binds to one agent ID and runtime generation. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask, post to a UI mailbox, or bind child processes.
+A context binds to one agent ID and runtime generation. `pico_agent_context_registration_generation` is the workspace registration generation copied when that turn was accepted. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask, post to a UI mailbox, or bind child processes.
 
 Use `pico_tool_ask(ctx, ...)`, `pico_ui_post(ctx, ...)`, `pico_tool_set_child(ctx, pid)`, `pico_auth_copy_ctx(ctx, ...)`, callback results, provider cancellation, and delta callbacks. Worker callbacks must not mutate UI, transcripts, sessions, model settings, or main-thread extension state.
 

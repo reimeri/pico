@@ -171,8 +171,9 @@ typedef struct PicoToolResult {
 typedef void (*PicoToolFn)(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state);
 typedef bool (*PicoToolApplyFn)(PicoWorkspace *workspace, PicoAgentId agent_id, const char *details_json,
                                 bool replay, void *state);
-typedef void (*PicoHostCmdFn)(PicoHost *host, const char *args, void *state);
-typedef void (*PicoWorkspaceCmdFn)(PicoWorkspace *workspace, const char *args, void *state);
+typedef void (*PicoHostCmdFn)(PicoHost *host, PicoAgentId agent_id, const char *args, void *state);
+typedef void (*PicoWorkspaceCmdFn)(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args,
+                                   void *state);
 
 #define PICO_COMPLETE_LABEL_MAX 288
 
@@ -416,8 +417,8 @@ typedef struct PicoProvider {
     void *state;
 } PicoProvider;
 
-typedef void (*PicoAuthLoginFn)(PicoHost *host, const char *args, void *state);
-typedef void (*PicoAuthLogoutFn)(PicoHost *host, void *state);
+typedef void (*PicoAuthLoginFn)(PicoHost *host, PicoAgentId agent_id, const char *args, void *state);
+typedef void (*PicoAuthLogoutFn)(PicoHost *host, PicoAgentId agent_id, void *state);
 
 typedef struct PicoAuth {
     const char *provider;
@@ -569,11 +570,11 @@ void pico_agent_set_compact_summary(PicoHost *host, PicoAgentId agent_id, char *
 void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool safe_mode,
                     PicoSessionStart session_start, const char *session_file);
 PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host);
-void PicoHost_ClearMessages(PicoHost *host);
-void PicoHost_AddMessage(PicoHost *host, PicoRole role, const char *markdown);
-void PicoHost_AddToolCall(PicoHost *host, const char *name, const char *args);
-void PicoHost_SetLastToolOutput(PicoHost *host, const char *output, bool is_error);
-void PicoHost_AppendAssistant(PicoHost *host, const char *text);
+void PicoHost_ClearMessages(PicoHost *host, PicoAgentId agent_id);
+void PicoHost_AddMessage(PicoHost *host, PicoAgentId agent_id, PicoRole role, const char *markdown);
+void PicoHost_AddToolCall(PicoHost *host, PicoAgentId agent_id, const char *name, const char *args);
+void PicoHost_SetLastToolOutput(PicoHost *host, PicoAgentId agent_id, const char *output, bool is_error);
+void PicoHost_AppendAssistant(PicoHost *host, PicoAgentId agent_id, const char *text);
 void PicoHost_Submit(PicoHost *host);
 void PicoHost_Cancel(PicoHost *host);
 void PicoHost_RequestSubmitCancel(PicoHost *host);

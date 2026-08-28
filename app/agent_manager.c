@@ -76,14 +76,17 @@ const PicoAgent *PicoAgentManager_FindConst(const PicoAgentManager *manager, Pic
     return index >= 0 ? manager->agents[index] : NULL;
 }
 
-PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager)
+static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
 {
-    return PicoAgentManager_Find(manager, manager ? manager->active_id : 0);
-}
-
-const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager)
-{
-    return PicoAgentManager_FindConst(manager, manager ? manager->active_id : 0);
+    if (!host)
+    {
+        return;
+    }
+    host->selected_agent_id = id;
+    if (host->agents)
+    {
+        host->agents->active_id = id;
+    }
 }
 
 static PicoUiMailbox *FindMailbox(PicoAgentManager *manager, const char *name)
@@ -489,10 +492,11 @@ static PicoAgentResult ConfigureAgent(PicoHost *app, PicoAgent *agent,
 
 static void PublishAgent(PicoAgentManager *manager, PicoAgent *agent, bool select)
 {
+    PicoHost *host = MgrHost(manager);
     manager->agents[manager->count++] = agent;
     if (!manager->active_id || select)
     {
-        manager->active_id = agent->id;
+        SyncSelectedAgent(host, agent->id);
     }
 }
 
@@ -536,7 +540,7 @@ PicoAgentResult pico_agent_create(PicoHost *app, const PicoAgentCreateOptions *o
     {
         return PICO_AGENT_RESULT_LIMIT;
     }
-    PicoAgent *agent = PicoAgent_Create(app);
+    PicoAgent *agent = PicoAgent_Create(app, manager);
     if (!agent)
     {
         return PICO_AGENT_RESULT_NO_MEMORY;
@@ -555,7 +559,7 @@ PicoAgentResult pico_agent_create(PicoHost *app, const PicoAgentCreateOptions *o
     else if (options->session_start == PICO_SESSION_RESUME)
     {
         char path[4096];
-        if (!options->session_id || PicoSession_Resolve(app, options->session_id, false,
+        if (!options->session_id || PicoSession_Resolve(manager->workspace, options->session_id, false,
                                                        path, sizeof(path)) != 0)
         {
             FreeAgentFieldsOnCreateFailure(agent);
@@ -609,7 +613,7 @@ bool pico_agent_info(const PicoHost *app, int index, PicoAgentInfo *out)
 
 bool pico_agent_find(const PicoHost *app, PicoAgentId id, PicoAgentInfo *out)
 {
-    const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
+    const PicoAgent *agent = PicoHost_FindAgentConst(app, id);
     if (!agent || !out)
     {
         return false;
@@ -620,20 +624,20 @@ bool pico_agent_find(const PicoHost *app, PicoAgentId id, PicoAgentInfo *out)
 
 PicoAgentId pico_agent_active(const PicoHost *app)
 {
-    return app && app->agents ? app->agents->active_id : 0;
+    return app ? app->selected_agent_id : 0;
 }
 
 bool pico_agent_select(PicoHost *app, PicoAgentId id)
 {
-    if (!app || !app->agents || !PicoAgentManager_Find(app->agents, id))
+    if (!app || !PicoHost_FindAgent(app, id))
     {
         return false;
     }
-    if (app->agents->active_id == id)
+    if (app->selected_agent_id == id)
     {
         return true;
     }
-    app->agents->active_id = id;
+    SyncSelectedAgent(app, id);
     PicoChatSel_Clear(app);
     memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
     app->chat_follow_bottom = true;
@@ -670,9 +674,10 @@ PicoAgentResult pico_agent_close(PicoHost *app, PicoAgentId id)
         manager->agents[i - 1] = manager->agents[i];
     }
     manager->agents[--manager->count] = NULL;
-    if (manager->active_id == id)
+    if (app->selected_agent_id == id)
     {
-        manager->active_id = manager->agents[index < manager->count ? index : manager->count - 1]->id;
+        PicoAgentId next = manager->agents[index < manager->count ? index : manager->count - 1]->id;
+        SyncSelectedAgent(app, next);
         PicoChatSel_Clear(app);
         app->chat_follow_bottom = true;
     }
@@ -683,7 +688,7 @@ PicoAgentResult pico_agent_close(PicoHost *app, PicoAgentId id)
 
 PicoAgentResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
 {
-    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
         return PICO_AGENT_RESULT_NOT_FOUND;
@@ -694,7 +699,7 @@ PicoAgentResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
 
 PicoAgentResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
 {
-    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
         return PICO_AGENT_RESULT_NOT_FOUND;
@@ -974,13 +979,13 @@ bool pico_tool_answer(PicoHost *app, uint64_t id, const char *answer_json)
 
 int pico_agent_message_count(const PicoHost *app, PicoAgentId id)
 {
-    const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
+    const PicoAgent *agent = PicoHost_FindAgentConst(app, id);
     return agent ? agent->message_count : 0;
 }
 
 const PicoMessage *pico_agent_message(const PicoHost *app, PicoAgentId id, int index)
 {
-    const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
+    const PicoAgent *agent = PicoHost_FindAgentConst(app, id);
     return agent && index >= 0 && index < agent->message_count ? &agent->messages[index] : NULL;
 }
 
@@ -1013,15 +1018,31 @@ bool pico_subagent_profile_info(const PicoHost *app, int index,
     return true;
 }
 
-PicoAgentResult PicoAgentManager_ResumeActive(PicoHost *app, const char *id, bool allow_prefix)
+PicoAgentResult PicoAgentManager_Resume(PicoHost *app, PicoAgentId agent_id, const char *id,
+                                        bool allow_prefix)
 {
-    PicoAgent *old = PicoHost_ActiveAgent(app);
-    if (!old || PicoAgent_IsBusy(old))
+    PicoAgent *old = PicoHost_FindAgent(app, agent_id);
+    PicoAgentManager *manager;
+    PicoAgentId old_id;
+    bool was_selected;
+    char path[4096];
+    PicoAgent *replacement;
+    int index;
+
+    if (!old)
+    {
+        return PICO_AGENT_RESULT_NOT_FOUND;
+    }
+    if (PicoAgent_IsBusy(old))
     {
         return PICO_AGENT_RESULT_BUSY;
     }
-    char path[4096];
-    if (PicoSession_Resolve(app, id, allow_prefix, path, sizeof(path)) != 0)
+    manager = old->manager;
+    if (!manager)
+    {
+        return PICO_AGENT_RESULT_INVALID;
+    }
+    if (PicoSession_Resolve(PicoAgent_Workspace(old), id, allow_prefix, path, sizeof(path)) != 0)
     {
         return PICO_AGENT_RESULT_SESSION_INVALID;
     }
@@ -1029,43 +1050,58 @@ PicoAgentResult PicoAgentManager_ResumeActive(PicoHost *app, const char *id, boo
     {
         return PICO_AGENT_RESULT_OK;
     }
-    if (PicoAgentManager_SessionReserved(app->agents, path, old->id))
+    if (PicoAgentManager_SessionReserved(manager, path, old->id))
     {
         return PICO_AGENT_RESULT_SESSION_IN_USE;
     }
-    PicoAgent *replacement = PicoAgent_Create(app);
+    replacement = PicoAgent_Create(app, manager);
     if (!replacement)
     {
         return PICO_AGENT_RESULT_NO_MEMORY;
     }
     replacement->persistence = PICO_SESSION_DURABLE;
-    if (!PicoAgentManager_ReserveSession(app->agents, replacement->id, path))
+    if (!PicoAgentManager_ReserveSession(manager, replacement->id, path))
     {
         PicoAgent_Destroy(replacement);
         return PICO_AGENT_RESULT_SESSION_IN_USE;
     }
     if (PicoSession_Replay(app, replacement, path, false) != 0)
     {
-        PicoAgentManager_ReleaseSessions(app->agents, replacement->id);
+        PicoAgentManager_ReleaseSessions(manager, replacement->id);
         PicoAgent_Destroy(replacement);
         return PICO_AGENT_RESULT_SESSION_INVALID;
     }
-    int index = FindIndex(app->agents, old->id);
-    PicoAgentId old_id = old->id;
+    index = FindIndex(manager, old->id);
+    if (index < 0)
+    {
+        PicoAgentManager_ReleaseSessions(manager, replacement->id);
+        PicoAgent_Destroy(replacement);
+        return PICO_AGENT_RESULT_NOT_FOUND;
+    }
+    old_id = old->id;
+    was_selected = app && app->selected_agent_id == old_id;
     if (!PicoAgent_Destroy(old))
     {
-        PicoAgentManager_ReleaseSessions(app->agents, replacement->id);
+        PicoAgentManager_ReleaseSessions(manager, replacement->id);
         PicoAgent_Destroy(replacement);
         return PICO_AGENT_RESULT_BUSY;
     }
-    app->agents->agents[index] = replacement;
-    app->agents->active_id = replacement->id;
-    PicoAgentManager_ReleaseSessions(app->agents, old_id);
+    manager->agents[index] = replacement;
+    PicoAgentManager_ReleaseSessions(manager, old_id);
+    if (was_selected)
+    {
+        SyncSelectedAgent(app, replacement->id);
+        manager->active_id = replacement->id;
+        PicoChatSel_Clear(app);
+        app->chat_follow_bottom = true;
+    }
+    else if (manager->active_id == old_id)
+    {
+        manager->active_id = replacement->id;
+    }
     pico_run_hooks(app, PICO_HOOK_ON_AGENT_DESTROY, old_id);
     PicoSession_AppendInterrupted(app, replacement);
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, replacement->id);
-    PicoChatSel_Clear(app);
-    app->chat_follow_bottom = true;
     return PICO_AGENT_RESULT_OK;
 }
 
@@ -1433,7 +1469,7 @@ static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *sessi
     }
     PicoMessage *messages = NULL;
     int count = 0;
-    if (PicoSession_LoadTranscript(MgrHost(manager), session_id, &messages, &count) != 0)
+    if (PicoSession_LoadTranscript(manager->workspace, session_id, &messages, &count) != 0)
     {
         return false;
     }
@@ -1449,7 +1485,7 @@ static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *sessi
     snprintf(slot->session_id, sizeof(slot->session_id), "%s", session_id);
     PicoSessionHeader header;
     char path[4096];
-    if (PicoSession_Resolve(MgrHost(manager), session_id, false, path, sizeof(path)) == 0 &&
+    if (PicoSession_Resolve(manager->workspace, session_id, false, path, sizeof(path)) == 0 &&
         PicoSession_ReadHeader(path, &header) == 0)
     {
         snprintf(slot->profile, sizeof(slot->profile), "%s", header.profile);
@@ -1595,7 +1631,7 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
     if (job->session_id[0])
     {
         char path[4096];
-        if (PicoSession_Resolve(app, job->session_id, false, path, sizeof(path)) != 0 ||
+        if (PicoSession_Resolve(PicoAgent_Workspace(parent), job->session_id, false, path, sizeof(path)) != 0 ||
             PicoSession_ReadHeader(path, &header) != 0)
         {
             PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,

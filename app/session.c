@@ -53,12 +53,23 @@ static int EncodeCwd(const char *cwd, char *out, size_t cap)
     return 0;
 }
 
-static bool SessionDir(const PicoHost *app, char *out, size_t cap)
+static const PicoWorkspace *SessionWorkspace(const PicoHost *host, const PicoAgent *agent)
+{
+    PicoWorkspace *from_agent = PicoAgent_Workspace(agent);
+    if (from_agent)
+    {
+        return from_agent;
+    }
+    return PicoHost_PrimaryWorkspaceConst(host);
+}
+
+static bool SessionDir(const PicoWorkspace *workspace, char *out, size_t cap)
 {
     char cfg[4096];
     char enc[4096];
+    const char *root = PicoWorkspace_Path(workspace);
     return Pico_ConfigDir(cfg, sizeof(cfg)) &&
-           EncodeCwd(PicoHost_Path(app), enc, sizeof(enc)) == 0 &&
+           EncodeCwd(root[0] ? root : ".", enc, sizeof(enc)) == 0 &&
            PicoPath_Format(out, cap, "%s/sessions/%s", cfg, enc);
 }
 
@@ -286,18 +297,18 @@ static int CmpMtimeDesc(const void *a, const void *b)
     return strcmp(y->path, x->path);
 }
 
-int PicoSession_List(const PicoHost *app, PicoSessionInfo **out, bool parents_only)
+int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only)
 {
     if (out)
     {
         *out = NULL;
     }
-    if (!app || !out)
+    if (!workspace || !out)
     {
         return 0;
     }
     char dir[4096];
-    if (!SessionDir(app, dir, sizeof(dir)))
+    if (!SessionDir(workspace, dir, sizeof(dir)))
     {
         return 0;
     }
@@ -573,7 +584,7 @@ static char *EventPrefix(const char *type)
 static int CreateNew(PicoHost *app, PicoAgent *agent)
 {
     char dir[4096];
-    if (!SessionDir(app, dir, sizeof(dir)))
+    if (!SessionDir(SessionWorkspace(app, agent), dir, sizeof(dir)))
     {
         PersistenceFailed(app, agent, "session directory path is too long");
         return -1;
@@ -609,7 +620,7 @@ static int CreateNew(PicoHost *app, PicoAgent *agent)
     JsonBuf_Puts(&b, ",\"timestamp\":");
     JsonBuf_String(&b, ts);
     JsonBuf_Puts(&b, ",\"cwd\":");
-    JsonBuf_String(&b, PicoHost_Path(app));
+    JsonBuf_String(&b, PicoWorkspace_Path(SessionWorkspace(app, agent)));
     JsonBuf_Puts(&b, ",\"model\":");
     JsonBuf_String(&b, agent->model);
     JsonBuf_Puts(&b, ",\"kind\":");
@@ -1287,7 +1298,7 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
     {
         char dir[4096];
         char latest[4096];
-        if (SessionDir(app, dir, sizeof(dir)) &&
+        if (SessionDir(SessionWorkspace(app, agent), dir, sizeof(dir)) &&
             FindLatest(dir, latest, sizeof(latest)) == 0)
         {
             char canonical[4096];
@@ -1635,7 +1646,7 @@ static void LoadedSetOutput(PicoMessage *messages, int count, const char *call_i
     }
 }
 
-int PicoSession_LoadTranscript(const PicoHost *app, const char *id,
+int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
                                PicoMessage **out, int *out_count)
 {
     if (out)
@@ -1646,12 +1657,12 @@ int PicoSession_LoadTranscript(const PicoHost *app, const char *id,
     {
         *out_count = 0;
     }
-    if (!app || !id || !id[0] || !out || !out_count)
+    if (!workspace || !id || !id[0] || !out || !out_count)
     {
         return -1;
     }
     char path[4096];
-    if (PicoSession_Resolve(app, id, false, path, sizeof(path)) != 0)
+    if (PicoSession_Resolve(workspace, id, false, path, sizeof(path)) != 0)
     {
         return -1;
     }
@@ -1770,15 +1781,15 @@ int PicoSession_LoadTranscript(const PicoHost *app, const char *id,
     return 0;
 }
 
-int PicoSession_Resolve(const PicoHost *app, const char *id, bool allow_prefix,
+int PicoSession_Resolve(const PicoWorkspace *workspace, const char *id, bool allow_prefix,
                         char *path, size_t path_cap)
 {
-    if (!app || !id || !id[0] || !path || path_cap == 0)
+    if (!workspace || !id || !id[0] || !path || path_cap == 0)
     {
         return -1;
     }
     PicoSessionInfo *list = NULL;
-    int n = PicoSession_List(app, &list, false);
+    int n = PicoSession_List(workspace, &list, false);
     const PicoSessionInfo *found = NULL;
     const PicoSessionInfo *prefix = NULL;
     int prefix_hits = 0;
@@ -1818,7 +1829,7 @@ int PicoSession_Open(PicoHost *app, PicoAgent *agent, const char *id)
     }
 
     char path[4096];
-    if (PicoSession_Resolve(app, id, true, path, sizeof(path)) != 0)
+    if (PicoSession_Resolve(SessionWorkspace(app, agent), id, true, path, sizeof(path)) != 0)
     {
         return -1;
     }

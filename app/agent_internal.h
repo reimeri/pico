@@ -7,9 +7,6 @@
 struct PicoAgentRt;
 typedef struct PicoAgentRt PicoAgentRt;
 
-PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
-const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
-
 struct PicoAgent {
     PicoAgentManager *manager;
     PicoAgentId id;

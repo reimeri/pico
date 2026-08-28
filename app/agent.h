@@ -12,7 +12,7 @@ typedef enum PicoToolCallProgress {
     PICO_TOOL_CALL_QUEUED,
 } PicoToolCallProgress;
 
-PicoAgent *PicoAgent_Create(PicoHost *app);
+PicoAgent *PicoAgent_Create(PicoHost *app, PicoAgentManager *manager);
 /* Rebind an unpublished idle agent after a staged workspace replacement. */
 void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoAgentManager *manager);
 /* False when a worker was still running and had to be detached. */
@@ -22,6 +22,8 @@ void PicoAgent_ReapRetired(PicoAgentManager *manager);
 bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec *deadline);
 bool PicoAgent_RetiredReferences(const PicoAgentManager *manager, PicoAgentId id);
 void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text);
+void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_text,
+                              const char *parts_json);
 void PicoAgent_Cancel(PicoAgent *agent);
 void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent);
 bool PicoAgent_IsBusy(const PicoAgent *agent);

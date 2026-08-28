@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 1 complete; implementation continues at Phase 2  
+Status: Phase 2 complete; implementation continues at Phase 3  
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -613,6 +613,8 @@ nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/
 
 ### Phase 2 — Remove ambient active/workspace backend access
 
+Status: complete (2026-08-28)
+
 Owner files:
 
 - `app/app.c`, `app/agent.c`, `app/session.c`, `app/settings.c`
@@ -633,6 +635,20 @@ Acceptance:
 - Backend tests can submit to two main agents in the single workspace without changing UI selection.
 - Selection changes cannot retarget an in-progress submit hook or cancel action.
 - The forbidden-pattern search has no backend matches.
+
+#### Phase 2 recorded result
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+```
+
+25/25 tests passed. `PicoHost_SelectedAgent` is UI-only. `pico_agent_submit` to a non-selected main agent leaves selection unchanged. A `BEFORE_SUBMIT` hook that selects another agent cannot retarget the snapshotted submit.
+
+```bash
+rg "app->workspace|PicoApp_ActiveAgent|PicoAgentManager_Active" app --glob '*.[ch]'
+```
+
+No `PicoApp_ActiveAgent` or `PicoAgentManager_Active` matches. Remaining `app->workspace*` hits are the host `workspaces` array and `workspace_change_queued` (Phase 8), not the old ambient workspace path field.
 
 ### Phase 3 — Fold `PicoAgentManager` into `PicoWorkspace`
 

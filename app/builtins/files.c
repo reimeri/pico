@@ -26,6 +26,7 @@ static char **g_files;
 static int g_file_count;
 static bool g_scanned;
 static uint64_t g_token_id;
+static char g_root[4096];
 
 static bool SkipDirName(const char *name)
 {
@@ -123,12 +124,20 @@ static void Walk(const char *root, const char *rel, int depth)
     closedir(d);
 }
 
+static const char *FilesRoot(const PicoHost *app)
+{
+    return PicoWorkspace_Path(PicoHost_SelectedWorkspaceConst(app));
+}
+
 static void FilesRebuild(PicoHost *app)
 {
+    const char *root;
     FilesClear();
-    if (app && PicoHost_Path(app)[0])
+    root = FilesRoot(app);
+    snprintf(g_root, sizeof(g_root), "%s", root);
+    if (root[0])
     {
-        Walk(PicoHost_Path(app), "", 0);
+        Walk(root, "", 0);
     }
     g_scanned = true;
 }
@@ -171,7 +180,8 @@ int pico_files_complete(PicoHost *app, const char *prefix, PicoCompleteItem *out
 {
     (void)state;
     uint64_t token_id = PicoComplete_TokenId();
-    if (!g_scanned || token_id != g_token_id)
+    const char *root = FilesRoot(app);
+    if (!g_scanned || token_id != g_token_id || strcmp(g_root, root) != 0)
     {
         FilesRebuild(app);
         g_token_id = token_id;
@@ -384,20 +394,26 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
 static void FilesBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
     PicoHost *app = workspace ? workspace->host : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, event ? event->agent_id : 0);
+    const char *root;
     (void)state;
-    (void)event;
     if (!app || app->submit_cancel || !app->composer.text)
     {
         return;
     }
     bool vision = false;
-    PicoModel *model = PicoSettings_ActiveModel(app, PicoHost_ActiveAgent(app));
+    PicoModel *model = PicoSettings_ActiveModel(app, agent);
     if (model)
     {
         vision = model->vision;
     }
+    root = PicoAgent_WorkspacePath(agent);
+    if (!root[0])
+    {
+        root = PicoWorkspace_Path(workspace);
+    }
     char *parts = NULL;
-    char *expanded = pico_files_expand_mentions(PicoHost_Path(app), app->composer.text, vision, &parts);
+    char *expanded = pico_files_expand_mentions(root[0] ? root : ".", app->composer.text, vision, &parts);
     if (!expanded)
     {
         return;
@@ -418,6 +434,7 @@ void pico_files_reset(void)
 {
     FilesClear();
     g_token_id = 0;
+    g_root[0] = '\0';
 }
 
 static void FilesShutdown(PicoHost *app, void *state)

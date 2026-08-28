@@ -8,13 +8,13 @@
 
 #include <time.h>
 
-static void TimeCmd(PicoHost *app, const char *args, void *state)
+static void TimeCmd(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
     (void)state;
     (void)args;
     time_t now = time(NULL);
     char *line = ctime(&now);
-    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
+    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
     PicoComposer_SetText(app, "");
     PicoHost_RequestSubmitCancel(app);
 }

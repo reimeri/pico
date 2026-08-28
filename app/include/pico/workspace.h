@@ -9,7 +9,6 @@ extern "C" {
 
 typedef struct PicoHost PicoHost;
 typedef struct PicoWorkspace PicoWorkspace;
-typedef uint64_t PicoWorkspaceId;
 
 typedef enum PicoWorkspaceState {
     PICO_WORKSPACE_OPEN = 0,

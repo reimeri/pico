@@ -313,7 +313,7 @@ static void PromptOnFrame(PicoHost *app, void *state, float dt)
     }
 }
 
-static void CmdShowPrompt(PicoHost *app, const char *args, void *state)
+static void CmdShowPrompt(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
     (void)state;
     (void)args;
@@ -321,7 +321,7 @@ static void CmdShowPrompt(PicoHost *app, const char *args, void *state)
     free(g_text);
     g_span_count = 0;
     memset(g_spans, 0, sizeof(g_spans));
-    g_text = PicoAgent_BuildInstructionsSpans(app, PicoHost_ActiveAgent(app), g_spans, &g_span_count);
+    g_text = PicoAgent_BuildInstructionsSpans(app, PicoHost_FindAgent(app, agent_id), g_spans, &g_span_count);
     if (!g_open && pico_ui_modal_push(app, "prompt"))
     {
         g_open = true;

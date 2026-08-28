@@ -215,7 +215,7 @@ static int TestPromptSourceSpans(void)
 
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
-    char *text = PicoSettings_LoadSystemPromptSpans(&app, spans, &n);
+    char *text = PicoSettings_LoadSystemPromptSpans(PicoHost_PrimaryWorkspace(&app), spans, &n);
     int failed = !text || n != 3 || ExpectSpan(&spans[0], PICO_PROMPT_SOURCE_BASE, text, "user-system") ||
                  ExpectSpan(&spans[1], PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM, text, "workspace-system") ||
                  ExpectSpan(&spans[2], PICO_PROMPT_SOURCE_AGENTS, text, "agents-md") ||
@@ -252,7 +252,7 @@ static int TestDocsHintIsBaseSpan(void)
 
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
-    char *text = PicoSettings_LoadSystemPromptSpans(&app, spans, &n);
+    char *text = PicoSettings_LoadSystemPromptSpans(PicoHost_PrimaryWorkspace(&app), spans, &n);
     const char *hint = text ? strstr(text, "If the user asks about Pico") : NULL;
     bool covered = false;
     if (hint && text)

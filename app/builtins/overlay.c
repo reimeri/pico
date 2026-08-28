@@ -47,7 +47,7 @@ void PicoOverlay_Notify(PicoHost *app, const char *text)
 
 static bool HasError(const PicoHost *app)
 {
-    const PicoAgent *agent = PicoHost_ActiveAgentConst(app);
+    const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
     return (app->status_warn && app->status_warn[0]) || (agent->error && agent->error[0]);
 }
 
@@ -210,7 +210,7 @@ static void RenderAsk(PicoHost *app)
 static void RenderError(PicoHost *app)
 {
     const char *warn = app->status_warn;
-    const char *agent = (!warn || !warn[0]) ? PicoHost_ActiveAgent(app)->error : NULL;
+    const char *agent = (!warn || !warn[0]) ? PicoHost_SelectedAgent(app)->error : NULL;
     if ((!warn || !warn[0]) && (!agent || !agent[0]))
     {
         return;
@@ -366,7 +366,8 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
         }
     }
 
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !PicoHost_ActiveAgent(app)->error))
+    PicoAgent *agent = PicoHost_SelectedAgent(app);
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !(agent && agent->error)))
     {
         return;
     }
@@ -378,11 +379,11 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
             free(app->status_warn);
             app->status_warn = NULL;
         }
-        else if (PicoHost_ActiveAgent(app)->error && PicoHost_ActiveAgent(app)->state == PICO_AGENT_ERROR)
+        else if (agent && agent->error && agent->state == PICO_AGENT_ERROR)
         {
-            free(PicoHost_ActiveAgent(app)->error);
-            PicoHost_ActiveAgent(app)->error = NULL;
-            PicoHost_ActiveAgent(app)->state = PICO_AGENT_IDLE;
+            free(agent->error);
+            agent->error = NULL;
+            agent->state = PICO_AGENT_IDLE;
         }
     }
 }

@@ -197,3 +197,247 @@ static int TestManagerConcurrencyAndIsolation(void)
                : Fail(name, "events, usage, transcript, or cancellation crossed agent boundaries");
 }
 
+static int TestSubmitTargetsExplicitAgentWithoutChangingSelection(void)
+{
+    const char *name = "submit targets explicit agent without changing selection";
+    ResetTest(TEST_PROVIDER_BLOCK, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentId first_id = pico_agent_active(&app);
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE,
+        .select = false,
+    };
+    PicoAgentId second_id = 0;
+    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK ||
+        pico_agent_active(&app) != first_id)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "creating a second main agent changed UI selection");
+    }
+    if (pico_agent_submit(&app, second_id, "second", NULL) != PICO_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "explicit submit failed");
+    }
+    PicoAgent *first = PicoHost_FindAgent(&app, first_id);
+    PicoAgent *second = PicoHost_FindAgent(&app, second_id);
+    bool targeted = false;
+    for (int i = 0; i < 3000; i++)
+    {
+        PicoAgentManager_Pump(app.agents);
+        if (PicoAgent_IsBusy(second) && !PicoAgent_IsBusy(first) && pico_agent_active(&app) == first_id)
+        {
+            targeted = true;
+            break;
+        }
+        SleepOneMs();
+    }
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    for (int i = 0; i < 3000 && PicoAgent_IsBusy(second); i++)
+    {
+        PicoAgentManager_Pump(app.agents);
+        SleepOneMs();
+    }
+    PicoHost_Shutdown(&app);
+    return targeted ? 0 : Fail(name, "submit retargeted UI selection or ran on the selected agent");
+}
+
+static int TestSubmitIsCompleteExplicitTurn(void)
+{
+    const char *name = "explicit submit records the user turn from provided parts";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentId first_id = pico_agent_active(&app);
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE,
+        .select = false,
+    };
+    PicoAgentId second_id = 0;
+    const char *parts = "[{\"type\":\"text\",\"text\":\"second\"}]";
+    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "could not create a second main agent");
+    }
+    app.agent_parts = JsonDup("[{\"type\":\"text\",\"text\":\"ambient\"}]");
+    if (pico_agent_submit(&app, second_id, "second", parts) != PICO_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "explicit submit failed");
+    }
+    PicoAgent *second = PicoHost_FindAgent(&app, second_id);
+    for (int i = 0; i < 3000 && second && PicoAgent_IsBusy(second); i++)
+    {
+        PicoAgentManager_Pump(app.agents);
+        SleepOneMs();
+    }
+    const PicoMessage *user = pico_agent_message(&app, second_id, 0);
+    pthread_mutex_lock(&g_test.mu);
+    bool used_parts = g_test.last_input && strstr(g_test.last_input, "second") &&
+                      !strstr(g_test.last_input, "ambient");
+    pthread_mutex_unlock(&g_test.mu);
+    bool ok = pico_agent_active(&app) == first_id &&
+              pico_agent_message_count(&app, first_id) == 0 &&
+              user && user->role == PICO_ROLE_USER && user->source &&
+              strcmp(user->source, "second") == 0 &&
+              app.agent_parts && strstr(app.agent_parts, "ambient") && used_parts;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "submit consumed ambient parts or skipped the user transcript");
+}
+
+static int TestSubmitReportsResultCodes(void)
+{
+    const char *name = "explicit submit reports missing, empty, and busy results";
+    ResetTest(TEST_PROVIDER_BLOCK, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentId first_id = pico_agent_active(&app);
+    bool codes = pico_agent_submit(&app, 0, "x", NULL) == PICO_NOT_FOUND &&
+                 pico_agent_submit(&app, 999, "x", NULL) == PICO_NOT_FOUND &&
+                 pico_agent_submit(&app, first_id, "", NULL) == PICO_INVALID;
+    if (!codes || pico_agent_submit(&app, first_id, "go", NULL) != PICO_OK)
+    {
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_release = true;
+        pthread_cond_broadcast(&g_test.cv);
+        pthread_mutex_unlock(&g_test.mu);
+        PicoHost_Shutdown(&app);
+        return Fail(name, "submit did not report missing/empty results or start the turn");
+    }
+    PicoAgent *first = PicoHost_FindAgent(&app, first_id);
+    for (int i = 0; i < 3000 && first && !PicoAgent_IsBusy(first); i++)
+    {
+        PicoAgentManager_Pump(app.agents);
+        SleepOneMs();
+    }
+    bool busy = pico_agent_submit(&app, first_id, "again", NULL) == PICO_BUSY;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    for (int i = 0; i < 3000 && first && PicoAgent_IsBusy(first); i++)
+    {
+        PicoAgentManager_Pump(app.agents);
+        SleepOneMs();
+    }
+    PicoHost_Shutdown(&app);
+    return busy ? 0 : Fail(name, "busy submit did not return PICO_BUSY");
+}
+
+static PicoAgentId g_login_other;
+static PicoAgentId g_login_seen;
+
+static void FakeLogin(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
+{
+    (void)args;
+    (void)state;
+    g_login_seen = agent_id;
+    pico_agent_select(host, g_login_other);
+    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, "logged in");
+}
+
+static void LoginOnSubmit(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    PicoHost *app = workspace ? workspace->host : NULL;
+    (void)state;
+    if (!app || app->submit_cancel || !app->composer.text || strncmp(app->composer.text, "/login", 6) != 0)
+    {
+        return;
+    }
+    if (app->auth_count > 0 && app->auths[0].login)
+    {
+        app->auths[0].login(app, event->agent_id, "", app->auths[0].state);
+    }
+    app->submit_cancel = true;
+}
+
+static int TestLoginRoutesToSnapshottedAgent(void)
+{
+    const char *name = "login routes notes to the snapshotted agent";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentId first_id = pico_agent_active(&app);
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE,
+        .select = false,
+    };
+    PicoAgentId second_id = 0;
+    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "could not create a second main agent");
+    }
+    g_login_other = second_id;
+    g_login_seen = 0;
+    app.auths[0] = (PicoAuth){.provider = "testauth", .login = FakeLogin};
+    app.auth_count = 1;
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_BEFORE_SUBMIT, LoginOnSubmit);
+    app.composer.text = JsonDup("/login testauth");
+    app.composer.length = (int)strlen(app.composer.text);
+    app.composer.capacity = app.composer.length + 1;
+    PicoHost_Submit(&app);
+    const PicoMessage *note = pico_agent_message(&app, first_id, 0);
+    bool ok = g_login_seen == first_id && pico_agent_active(&app) == second_id &&
+              note && note->source && strstr(note->source, "logged in") &&
+              pico_agent_message_count(&app, second_id) == 0;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "login notes followed UI selection instead of the command snapshot");
+}
+
+static int TestResumeMissingAgentReturnsNotFound(void)
+{
+    const char *name = "resume of a stale agent id returns not found";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentResult result = PicoAgentManager_Resume(&app, 999, "missing", false);
+    PicoHost_Shutdown(&app);
+    return result == PICO_AGENT_RESULT_NOT_FOUND
+               ? 0
+               : Fail(name, "stale resume id was not PICO_AGENT_RESULT_NOT_FOUND");
+}
+
+static int TestResumeLeavesUnselectedAgentSelection(void)
+{
+    const char *name = "resume of an unselected agent leaves UI selection";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentId first_id = pico_agent_active(&app);
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE,
+        .select = false,
+    };
+    PicoAgentId second_id = 0;
+    PicoAgentInfo info;
+    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "could not create a second main agent");
+    }
+    g_fake_session.enabled = true;
+    g_fake_session.resolve_ok = true;
+    snprintf(g_fake_session.id, sizeof(g_fake_session.id), "resume-target");
+    snprintf(g_fake_session.path, sizeof(g_fake_session.path), "/tmp/resume-target.jsonl");
+    snprintf(g_fake_session.replayed_model, sizeof(g_fake_session.replayed_model), "test-model");
+    if (PicoAgentManager_Resume(&app, second_id, "resume-target", false) != PICO_AGENT_RESULT_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "explicit resume failed");
+    }
+    bool ok = pico_agent_active(&app) == first_id && !pico_agent_find(&app, second_id, &info) &&
+              pico_agent_count(&app) == 2;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "resume changed UI selection or failed to replace the target");
+}
+

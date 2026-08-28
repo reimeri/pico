@@ -752,7 +752,11 @@ bool PicoComposer_ApplyAttachments(PicoHost *app)
 
 static bool ComposerMediaDir(const PicoHost *app, char *out, size_t cap)
 {
-    const char *ws = (app && PicoHost_Path(app)[0]) ? PicoHost_Path(app) : "/tmp";
+    const char *ws = PicoWorkspace_Path(PicoHost_SelectedWorkspaceConst(app));
+    if (!ws[0])
+    {
+        ws = "/tmp";
+    }
     return PicoPath_Format(out, cap, "%s/.pico/media/composer", ws);
 }
 
@@ -1996,7 +2000,7 @@ void PicoComposer_HandlePointer(PicoHost *app)
 static bool ComposerVision(PicoHost *app)
 {
     bool vision = true;
-    PicoModel *model = PicoSettings_ActiveModel(app, PicoHost_ActiveAgent(app));
+    PicoModel *model = PicoSettings_ActiveModel(app, PicoHost_SelectedAgent(app));
     if (model)
     {
         vision = model->vision;

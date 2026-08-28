@@ -86,8 +86,6 @@ void PicoAgentManager_PrepareReload(PicoAgentManager *manager);
 /* Recheck copied restricted policies after the registration set changes. */
 void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager);
 void PicoAgentManager_NotifySessions(PicoAgentManager *manager);
-PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
-const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
 PicoAgent *PicoAgentManager_Find(PicoAgentManager *manager, PicoAgentId id);
 const PicoAgent *PicoAgentManager_FindConst(const PicoAgentManager *manager, PicoAgentId id);
 /* Adopt one unpublished, idle agent during an atomic workspace replacement. */
@@ -101,7 +99,8 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
 
 void PicoAgentManager_LoadProfiles(PicoAgentManager *manager);
 void PicoAgentManager_ReplayToolDetails(PicoAgentManager *manager);
-PicoAgentResult PicoAgentManager_ResumeActive(PicoHost *host, const char *id, bool allow_prefix);
+PicoAgentResult PicoAgentManager_Resume(PicoHost *host, PicoAgentId agent_id, const char *id,
+                                        bool allow_prefix);
 char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
                                 const char *task, const char *session_id,
                                 bool *is_error);

@@ -371,36 +371,41 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
     (void)is_error;
 }
 
-void PicoHost_AddMessage(PicoHost *app, PicoRole role, const char *text)
+void PicoHost_AddMessage(PicoHost *app, PicoAgentId agent_id, PicoRole role, const char *text)
 {
     (void)app;
+    (void)agent_id;
     (void)role;
     (void)text;
 }
 
-void PicoHost_AppendAssistant(PicoHost *app, const char *text)
+void PicoHost_AppendAssistant(PicoHost *app, PicoAgentId agent_id, const char *text)
 {
     (void)app;
+    (void)agent_id;
     (void)text;
 }
 
-void PicoHost_AddToolCall(PicoHost *app, const char *name, const char *args_json)
+void PicoHost_AddToolCall(PicoHost *app, PicoAgentId agent_id, const char *name, const char *args_json)
 {
     (void)app;
+    (void)agent_id;
     (void)name;
     (void)args_json;
 }
 
-void PicoHost_SetLastToolOutput(PicoHost *app, const char *output, bool is_error)
+void PicoHost_SetLastToolOutput(PicoHost *app, PicoAgentId agent_id, const char *output, bool is_error)
 {
     (void)app;
+    (void)agent_id;
     (void)output;
     (void)is_error;
 }
 
-void PicoHost_ClearMessages(PicoHost *app)
+void PicoHost_ClearMessages(PicoHost *app, PicoAgentId agent_id)
 {
     (void)app;
+    (void)agent_id;
 }
 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *text)
@@ -717,7 +722,7 @@ static int CountSubstr(const char *hay, const char *needle)
 static bool ListedTitleIs(PicoHost *app, const char *session_id, const char *title)
 {
     PicoSessionInfo *listed = NULL;
-    int listed_n = PicoSession_List(app, &listed, true);
+    int listed_n = PicoSession_List(PicoHost_PrimaryWorkspace(app), &listed, true);
     bool match = false;
     for (int i = 0; i < listed_n; i++)
     {
@@ -1057,7 +1062,7 @@ static int TestThinkingRoundTrip(void)
         PicoHost loader;
         memset(&loader, 0, sizeof(loader));
         PicoHost_SetPath(&loader, "/workspace");
-        if (PicoSession_LoadTranscript(&app, agent.session_id, &loaded, &loaded_n) != 0)
+        if (PicoSession_LoadTranscript(PicoHost_PrimaryWorkspace(&app), agent.session_id, &loaded, &loaded_n) != 0)
         {
             unlink(agent.session_path);
             return Fail("LoadTranscript failed after thinking log");
@@ -1199,7 +1204,8 @@ static int TestTranscriptMessageGroups(void)
         return Fail("message-group log did not create a session file");
     }
 
-    if (PicoSession_LoadTranscript(&writer, writer_agent.session_id, &loaded, &loaded_n) != 0 ||
+    if (PicoSession_LoadTranscript(PicoHost_PrimaryWorkspace(&writer), writer_agent.session_id, &loaded,
+                                  &loaded_n) != 0 ||
         !TranscriptMatchesLiveGroups(loaded, loaded_n))
     {
         PicoMessages_Free(loaded, loaded_n);
@@ -1322,7 +1328,8 @@ int main(void)
     int reserves_before_load = g_reserve_calls;
     PicoMessage *loaded = NULL;
     int loaded_n = 0;
-    if (PicoSession_LoadTranscript(&writer, child_agent.session_id, &loaded, &loaded_n) != 0 ||
+    if (PicoSession_LoadTranscript(PicoHost_PrimaryWorkspace(&writer), child_agent.session_id, &loaded,
+                                  &loaded_n) != 0 ||
         loaded_n < 2 || !loaded || !loaded[0].source || strcmp(loaded[0].source, "delegated task") != 0 ||
         !loaded[1].source || strcmp(loaded[1].source, "child findings") != 0 ||
         loaded[1].trace_count != 2 || !loaded[1].trace[0].tool_call_id ||
@@ -1340,12 +1347,12 @@ int main(void)
     PicoMessages_Free(loaded, loaded_n);
 
     PicoSessionInfo *listed = NULL;
-    int listed_n = PicoSession_List(&writer, &listed, true);
+    int listed_n = PicoSession_List(PicoHost_PrimaryWorkspace(&writer), &listed, true);
     bool parent_offered = listed_n == 1 && listed &&
                           strcmp(listed[0].id, writer_agent.session_id) == 0 &&
                           listed[0].kind == PICO_AGENT_MAIN;
     char child_resolved[4096];
-    bool child_by_id = PicoSession_Resolve(&writer, child_agent.session_id, false,
+    bool child_by_id = PicoSession_Resolve(PicoHost_PrimaryWorkspace(&writer), child_agent.session_id, false,
                                            child_resolved, sizeof(child_resolved)) == 0;
     free(listed);
     if (!parent_offered || !child_by_id)

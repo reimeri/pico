@@ -28,16 +28,16 @@ typedef struct PicoSessionHeader {
 
 void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, const char *session_file);
 /* `/resume` passes parents_only to hide subagents; resolve still lists all. */
-int PicoSession_List(const PicoHost *app, PicoSessionInfo **out, bool parents_only);
+int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only);
 int PicoSession_Open(PicoHost *app, PicoAgent *agent, const char *id);
 /* Resolve a durable session to a canonical path. Manager callers use exact IDs. */
-int PicoSession_Resolve(const PicoHost *app, const char *id, bool allow_prefix,
+int PicoSession_Resolve(const PicoWorkspace *workspace, const char *id, bool allow_prefix,
                         char *path, size_t path_cap);
 int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out);
 /* Read a durable session's visible transcript without reserving the file.
  * Messages have source, reasoning, and tool strings; markdown documents are
  * empty until PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */
-int PicoSession_LoadTranscript(const PicoHost *app, const char *id,
+int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
                                PicoMessage **out, int *out_count);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,

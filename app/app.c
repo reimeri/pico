@@ -93,26 +93,14 @@ const PicoAgent *PicoHost_FindAgentConst(const PicoHost *host, PicoAgentId id)
     return PicoHost_FindAgent((PicoHost *)host, id);
 }
 
-PicoAgent *PicoHost_ActiveAgent(PicoHost *host)
+PicoAgent *PicoHost_SelectedAgent(PicoHost *host)
 {
-    if (!host)
-    {
-        return NULL;
-    }
-    if (host->selected_agent_id)
-    {
-        PicoAgent *selected = PicoHost_FindAgent(host, host->selected_agent_id);
-        if (selected)
-        {
-            return selected;
-        }
-    }
-    return host->agents ? PicoAgentManager_Active(host->agents) : NULL;
+    return host ? PicoHost_FindAgent(host, host->selected_agent_id) : NULL;
 }
 
-const PicoAgent *PicoHost_ActiveAgentConst(const PicoHost *host)
+const PicoAgent *PicoHost_SelectedAgentConst(const PicoHost *host)
 {
-    return PicoHost_ActiveAgent((PicoHost *)host);
+    return PicoHost_SelectedAgent((PicoHost *)host);
 }
 
 int PicoHost_TotalAgentCount(const PicoHost *host)
@@ -302,6 +290,10 @@ void PicoHost_PublishRegistration(PicoHost *host, void *state)
         SortSlotViews(host, slot);
     }
     SortEmptyViews(host);
+    if (host->reg_scope == PICO_REG_WORKSPACE && host->reg_workspace)
+    {
+        host->reg_workspace->registration_generation++;
+    }
     host->reg_scope = PICO_REG_NONE;
     host->reg_workspace = NULL;
     host->reg_state = NULL;
@@ -881,7 +873,7 @@ bool Pico_ShortcutRepeat(char letter)
 
 static void RunSlot(PicoHost *host, PicoUiSlot slot)
 {
-    const PicoAgent *selected = PicoHost_ActiveAgentConst(host);
+    const PicoAgent *selected = PicoHost_SelectedAgentConst(host);
     PicoAgentId selected_id = selected ? selected->id : 0;
     for (int i = 0; i < host->view_count[slot]; i++)
     {
@@ -1164,30 +1156,30 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
     }
 }
 
-void PicoHost_AddMessage(PicoHost *app, PicoRole role, const char *markdown)
+void PicoHost_AddMessage(PicoHost *app, PicoAgentId agent_id, PicoRole role, const char *markdown)
 {
-    PicoAgent_AddMessage(app, PicoHost_ActiveAgent(app), role, markdown);
+    PicoAgent_AddMessage(app, PicoHost_FindAgent(app, agent_id), role, markdown);
 }
 
-void PicoHost_AppendAssistant(PicoHost *app, const char *text)
+void PicoHost_AppendAssistant(PicoHost *app, PicoAgentId agent_id, const char *text)
 {
-    PicoAgent_AppendAssistant(app, PicoHost_ActiveAgent(app), text);
+    PicoAgent_AppendAssistant(app, PicoHost_FindAgent(app, agent_id), text);
 }
 
-void PicoHost_AddToolCall(PicoHost *app, const char *name, const char *args)
+void PicoHost_AddToolCall(PicoHost *app, PicoAgentId agent_id, const char *name, const char *args)
 {
-    PicoAgent_AddToolCall(app, PicoHost_ActiveAgent(app), name, args);
+    PicoAgent_AddToolCall(app, PicoHost_FindAgent(app, agent_id), name, args);
 }
 
-void PicoHost_SetLastToolOutput(PicoHost *app, const char *output, bool is_error)
+void PicoHost_SetLastToolOutput(PicoHost *app, PicoAgentId agent_id, const char *output, bool is_error)
 {
-    PicoAgent_SetLastToolOutput(PicoHost_ActiveAgent(app), output, is_error);
+    PicoAgent_SetLastToolOutput(PicoHost_FindAgent(app, agent_id), output, is_error);
 }
 
 PicoSessionWriteResult pico_session_log_custom(PicoHost *app, PicoAgentId agent_id,
                                                 const char *ext, const char *data_json)
 {
-    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, agent_id) : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
     if (!agent)
     {
         return PICO_SESSION_WRITE_FAILED;
@@ -1197,7 +1189,7 @@ PicoSessionWriteResult pico_session_log_custom(PicoHost *app, PicoAgentId agent_
 
 void pico_agent_set_compact_summary(PicoHost *app, PicoAgentId agent_id, char *summary)
 {
-    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, agent_id) : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
     if (!agent)
     {
         free(summary);
@@ -1207,9 +1199,61 @@ void pico_agent_set_compact_summary(PicoHost *app, PicoAgentId agent_id, char *s
     agent->compact_summary = summary;
 }
 
+static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const char *text,
+                                     const char *display, const char *parts_json)
+{
+    char *normalized = NULL;
+    const char *parts = NULL;
+    bool has_text = text && text[0];
+    bool has_parts;
+    const char *shown;
+
+    if (!host || !agent)
+    {
+        return PICO_NOT_FOUND;
+    }
+    if (parts_json && parts_json[0])
+    {
+        if (!pico_canonical_normalize_user_parts(parts_json, &normalized))
+        {
+            return PICO_INVALID;
+        }
+        parts = normalized;
+    }
+    has_parts = parts && parts[0] == '[';
+    if (!has_text && !has_parts)
+    {
+        free(normalized);
+        return PICO_INVALID;
+    }
+    if (!agent->runtime)
+    {
+        free(normalized);
+        return PICO_INVALID;
+    }
+    if (PicoAgent_IsBusy(agent) || !PicoAgentManager_AcceptsNewWork(agent->manager))
+    {
+        free(normalized);
+        return PICO_BUSY;
+    }
+    if (!PicoAgent_RevalidateToolPolicy(host, agent))
+    {
+        pico_status_warn(host, "This agent's restricted tool policy references a tool that is not currently registered.");
+        free(normalized);
+        return PICO_INVALID;
+    }
+    shown = display && display[0] ? display : (text ? text : "");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, shown);
+    PicoSession_LogUser(host, agent, text ? text : "", shown, parts);
+    PicoAgent_StartTurnParts(host, agent, text, parts);
+    free(normalized);
+    return PICO_OK;
+}
+
 void PicoHost_Submit(PicoHost *app)
 {
-    PicoAgent *active = PicoHost_ActiveAgent(app);
+    PicoAgentId id = app ? app->selected_agent_id : 0;
+    PicoAgent *active = PicoHost_FindAgent(app, id);
     if (!app || !PicoAgentManager_AcceptsNewWork(app->agents) ||
         !active || active->state == PICO_AGENT_LLM_WAIT || active->state == PICO_AGENT_TOOL_WAIT ||
         active->state == PICO_AGENT_COMPACT_WAIT)
@@ -1277,8 +1321,17 @@ void PicoHost_Submit(PicoHost *app)
     free(app->agent_parts);
     app->agent_parts = NULL;
     app->submit_cancel = false;
-    pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT, active->id);
+    pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT, id);
     if (app->submit_cancel)
+    {
+        free(app->agent_input);
+        app->agent_input = NULL;
+        free(app->agent_parts);
+        app->agent_parts = NULL;
+        return;
+    }
+    active = PicoHost_FindAgent(app, id);
+    if (!active)
     {
         free(app->agent_input);
         app->agent_input = NULL;
@@ -1312,13 +1365,19 @@ void PicoHost_Submit(PicoHost *app)
     }
 
     const char *typed = c->text ? c->text : "";
-    const char *agent = app->agent_input && app->agent_input[0] ? app->agent_input : typed;
+    const char *text = app->agent_input && app->agent_input[0] ? app->agent_input : typed;
     char *display_owned = has_attach ? pico_composer_display_message(typed) : NULL;
     const char *display = display_owned ? display_owned : typed;
-    PicoHost_AddMessage(app, PICO_ROLE_USER, display);
     app->chat_follow_bottom = true;
-    PicoSession_LogUser(app, active, agent, display, app->agent_parts);
-    PicoAgent_StartTurn(app, active, agent);
+    if (SubmitPreparedTurn(app, active, text, display, app->agent_parts) != PICO_OK)
+    {
+        free(display_owned);
+        free(app->agent_input);
+        app->agent_input = NULL;
+        free(app->agent_parts);
+        app->agent_parts = NULL;
+        return;
+    }
 
     c->length = 0;
     c->cursor = 0;
@@ -1333,7 +1392,7 @@ void PicoHost_Submit(PicoHost *app)
     app->agent_input = NULL;
     free(app->agent_parts);
     app->agent_parts = NULL;
-    pico_run_hooks(app, PICO_HOOK_ON_SUBMIT, active->id);
+    pico_run_hooks(app, PICO_HOOK_ON_SUBMIT, id);
 }
 
 void PicoHost_RequestSubmitCancel(PicoHost *host)
@@ -1343,12 +1402,13 @@ void PicoHost_RequestSubmitCancel(PicoHost *host)
 
 void PicoHost_Cancel(PicoHost *app)
 {
-    PicoAgent_Cancel(PicoHost_ActiveAgent(app));
+    PicoAgentId id = app ? app->selected_agent_id : 0;
+    pico_agent_cancel(app, id);
 }
 
 bool PicoUi_ModalOpen(const PicoHost *app)
 {
-    return pico_ui_modal_claimed(app) || PicoAgent_AskUiOpen(PicoHost_ActiveAgentConst(app));
+    return pico_ui_modal_claimed(app) || PicoAgent_AskUiOpen(PicoHost_SelectedAgentConst(app));
 }
 
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
@@ -1642,14 +1702,17 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
 
 PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json)
 {
-    PicoAgent *agent = PicoHost_FindAgent(host, id);
-    if (!host || !agent)
+    PicoAgent *agent;
+    if (!host)
+    {
+        return PICO_INVALID;
+    }
+    agent = PicoHost_FindAgent(host, id);
+    if (!agent)
     {
         return PICO_NOT_FOUND;
     }
-    (void)parts_json;
-    PicoAgent_StartTurn(host, agent, text);
-    return PICO_OK;
+    return SubmitPreparedTurn(host, agent, text, text, parts_json);
 }
 
 static void PicoHost_PumpLifecycle(PicoHost *host);
@@ -1728,7 +1791,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
     }
     PicoPlugins_Load(host);
     PicoAgentManager_LoadProfiles(host->agents);
-    initial = PicoHost_ActiveAgent(host);
+    initial = PicoHost_FindAgent(host, initial_id);
     pico_run_hooks(host, PICO_HOOK_ON_SESSION_RESET, initial_id);
     if (session_file && session_file[0])
     {
@@ -1867,7 +1930,8 @@ bool PicoHost_ChangeWorkspace(PicoHost *app, const char *path)
     }
 
     char resolved[4096];
-    if (ResolveWorkspaceDir(PicoHost_Path(app), trimmed, resolved, sizeof(resolved)) != 0)
+    const char *ws = PicoWorkspace_Path(PicoHost_PrimaryWorkspaceConst(app));
+    if (ResolveWorkspaceDir(ws[0] ? ws : ".", trimmed, resolved, sizeof(resolved)) != 0)
     {
         char shown[400];
         snprintf(shown, sizeof(shown), "%s", trimmed);
@@ -1878,7 +1942,6 @@ bool PicoHost_ChangeWorkspace(PicoHost *app, const char *path)
     }
 
     char current[4096];
-    const char *ws = PicoHost_Path(app);
     if (realpath(ws, current) && strcmp(current, resolved) == 0)
     {
         char pretty[400];
@@ -1955,7 +2018,7 @@ static void ApplyWorkspaceChange(PicoHost *host)
         WorkspacePreflightFailed(host, "Could not prepare an agent manager for the new workspace.");
         return;
     }
-    initial = PicoAgent_Create(host);
+    initial = PicoAgent_Create(host, replacement->agents);
     if (!initial)
     {
         (void)PicoAgentManager_Destroy(replacement->agents);
@@ -2209,9 +2272,9 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
     agent->message_count = 0;
 }
 
-void PicoHost_ClearMessages(PicoHost *app)
+void PicoHost_ClearMessages(PicoHost *app, PicoAgentId agent_id)
 {
-    PicoAgent_ClearMessages(PicoHost_ActiveAgent(app));
+    PicoAgent_ClearMessages(PicoHost_FindAgent(app, agent_id));
     if (app)
     {
         PicoChatSel_Clear(app);
@@ -2252,7 +2315,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     }
     host->workspace_count = 0;
     PicoAuth_Free(host);
-    PicoHost_ClearMessages(host);
+    PicoHost_ClearMessages(host, host->selected_agent_id);
     free(host->composer.text);
     free(host->status_warn);
     free(host->models);
@@ -2505,7 +2568,7 @@ void PicoHost_Frame(PicoHost *app)
         CloseWindow();
         return;
     }
-    if (!PicoHost_ActiveAgent(app))
+    if (!PicoHost_SelectedAgent(app))
     {
         return;
     }
@@ -2544,19 +2607,20 @@ void PicoHost_Frame(PicoHost *app)
     PicoPlugins_OnFrame(app, GetFrameTime());
     if (!had_warn && !had_complete && !had_todo && !had_modal && IsKeyPressed(KEY_ESCAPE))
     {
-        PicoAgent *active = PicoHost_ActiveAgent(app);
+        PicoAgentId id = app->selected_agent_id;
+        PicoAgent *active = PicoHost_FindAgent(app, id);
         if (PicoAgent_IsBusy(active))
         {
             if (PicoAgent_CancelRequested(active))
             {
-                PicoAgent_ForceCancel(app, active);
+                pico_agent_force_cancel(app, id);
             }
             else
             {
-                PicoHost_Cancel(app);
+                pico_agent_cancel(app, id);
             }
         }
-        else if (active->state == PICO_AGENT_ERROR)
+        else if (active && active->state == PICO_AGENT_ERROR)
         {
             PicoAgent_DismissError(active);
         }

@@ -22,7 +22,7 @@ static int TestSubagentProfileResolution(void)
     app.models[1].effort_count = 2;
     snprintf(app.models[1].default_effort, sizeof(app.models[1].default_effort), "low");
 
-    PicoAgent *parent = PicoHost_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoSubagentProfileInfo profile;
     memset(&profile, 0, sizeof(profile));
     snprintf(profile.name, sizeof(profile.name), "review");

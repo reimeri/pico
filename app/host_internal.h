@@ -115,10 +115,19 @@ static inline const PicoWorkspace *PicoHost_PrimaryWorkspaceConst(const PicoHost
     return (host && host->workspace_count > 0) ? host->workspaces[0] : NULL;
 }
 
-static inline const char *PicoHost_Path(const PicoHost *host)
+static inline const char *PicoWorkspace_Path(const PicoWorkspace *workspace)
 {
-    const PicoWorkspace *workspace = PicoHost_PrimaryWorkspaceConst(host);
-    return (workspace && workspace->path[0]) ? workspace->path : ".";
+    return (workspace && workspace->path[0]) ? workspace->path : "";
+}
+
+static inline PicoWorkspace *PicoAgent_Workspace(const PicoAgent *agent)
+{
+    return (agent && agent->manager) ? agent->manager->workspace : NULL;
+}
+
+static inline const char *PicoAgent_WorkspacePath(const PicoAgent *agent)
+{
+    return PicoWorkspace_Path(PicoAgent_Workspace(agent));
 }
 
 static inline void PicoHost_SetPath(PicoHost *host, const char *path)
@@ -158,8 +167,44 @@ PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id);
 const PicoWorkspace *PicoHost_FindWorkspaceConst(const PicoHost *host, PicoWorkspaceId id);
 PicoAgent *PicoHost_FindAgent(PicoHost *host, PicoAgentId id);
 const PicoAgent *PicoHost_FindAgentConst(const PicoHost *host, PicoAgentId id);
-PicoAgent *PicoHost_ActiveAgent(PicoHost *host);
-const PicoAgent *PicoHost_ActiveAgentConst(const PicoHost *host);
+/* UI-only. Backend code must take an explicit agent ID or pointer. */
+PicoAgent *PicoHost_SelectedAgent(PicoHost *host);
+const PicoAgent *PicoHost_SelectedAgentConst(const PicoHost *host);
+
+/* UI adapters: selected agent's workspace, else the host's primary workspace. */
+static inline PicoWorkspace *PicoHost_SelectedWorkspace(PicoHost *host)
+{
+    PicoAgentId id = host ? host->selected_agent_id : 0;
+    int i;
+    int j;
+    if (!host || id == 0)
+    {
+        return PicoHost_PrimaryWorkspace(host);
+    }
+    for (i = 0; i < host->workspace_count; i++)
+    {
+        PicoWorkspace *workspace = host->workspaces[i];
+        PicoAgentManager *manager = workspace ? workspace->agents : NULL;
+        if (!manager)
+        {
+            continue;
+        }
+        for (j = 0; j < manager->count; j++)
+        {
+            if (manager->agents[j] && manager->agents[j]->id == id)
+            {
+                return workspace;
+            }
+        }
+    }
+    return PicoHost_PrimaryWorkspace(host);
+}
+
+static inline const PicoWorkspace *PicoHost_SelectedWorkspaceConst(const PicoHost *host)
+{
+    return PicoHost_SelectedWorkspace((PicoHost *)host);
+}
+
 uint64_t PicoHost_AllocAskId(PicoHost *host);
 int PicoHost_TotalAgentCount(const PicoHost *host);
 void PicoHost_BeginRegistration(PicoHost *host, int scope, PicoWorkspace *workspace);

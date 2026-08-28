@@ -12,6 +12,7 @@ struct PicoWorkspace {
     char path[4096];
     PicoWorkspaceState state;
     PicoAgentManager *agents;
+    uint64_t registration_generation;
 };
 
 #endif

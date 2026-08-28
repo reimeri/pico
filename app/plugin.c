@@ -251,9 +251,14 @@ static bool CacheDir(char *out, size_t cap)
     return PicoPath_Format(out, cap, "%s/.cache/pico/ext", HomeDir());
 }
 
-static bool WorkspaceExtDir(const PicoHost *app, char *out, size_t cap)
+static bool WorkspaceExtDir(const PicoWorkspace *workspace, char *out, size_t cap)
 {
-    return PicoPath_Format(out, cap, "%s/.pico/extensions", PicoHost_Path(app));
+    const char *root = PicoWorkspace_Path(workspace);
+    if (!root[0])
+    {
+        return false;
+    }
+    return PicoPath_Format(out, cap, "%s/.pico/extensions", root);
 }
 
 static unsigned PathHash(const char *s)
@@ -592,7 +597,7 @@ static void LoadUsers(PicoHost *app)
         MkdirP(dir);
         WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
     }
-    if (WorkspaceExtDir(app, dir, sizeof(dir)))
+    if (WorkspaceExtDir(PicoHost_PrimaryWorkspaceConst(app), dir, sizeof(dir)))
     {
         WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
     }
@@ -685,7 +690,7 @@ static int CollectSources(const PicoHost *app, char paths[][4096], time_t *mtime
     char dirs[2][4096];
     bool valid[2] = {
         ConfigExtDir(dirs[0], sizeof(dirs[0])),
-        WorkspaceExtDir(app, dirs[1], sizeof(dirs[1])),
+        WorkspaceExtDir(PicoHost_PrimaryWorkspaceConst(app), dirs[1], sizeof(dirs[1])),
     };
     for (int d = 0; d < 2; d++)
     {

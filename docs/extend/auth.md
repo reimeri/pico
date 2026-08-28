@@ -6,19 +6,20 @@ Register a provider so `/login` and `/logout` have something to call. Credential
 #include "pico/plugin.h"
 #include "pico/auth.h"
 
-static void MyLogin(PicoHost *host, const char *args, void *state)
+static void MyLogin(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
 {
     /* parse args: empty, "key", "cancel", … */
     (void)args;
     (void)state;
     pico_auth_set_active(host, "myllm", PICO_AUTH_API_KEY);
-    PicoHost_AddMessage(host, PICO_ROLE_ASSISTANT, "Logged in.");
+    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, "Logged in.");
 }
 
-static void MyLogout(PicoHost *host, void *state)
+static void MyLogout(PicoHost *host, PicoAgentId agent_id, void *state)
 {
     (void)state;
     pico_auth_clear_oauth(host, "myllm");
+    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, "Logged out.");
 }
 
 static int MyInit(PicoHost *host, void **state_out)
@@ -54,7 +55,7 @@ static int MyInit(PicoHost *host, void **state_out)
 ## Contract
 
 - `.provider`, `.help`, `.verbs` must outlive the extension.
-- `login` runs on the main thread from builtin `/login` (submit is already cancelled). `logout` is `void (*)(PicoHost *, void *)`; `/logout` already cancels submit.
+- `login` runs on the main thread from builtin `/login` (submit is already cancelled) and receives the snapshotted `PicoAgentId` from that submit. Route user-visible notes to that ID; do not call `pico_agent_active`. Asynchronous device-login text must keep the same ID, so a later selection change cannot append results to another agent. `logout` is `void (*)(PicoHost *, PicoAgentId, void *)` and uses the same snapshotted ID; `/logout` already cancels submit.
 - Auth storage is process-global and mutex-protected. Worker callbacks for different agents may overlap safely when using context variants. Builtin OpenAI, Hyper, and xAI OAuth refresh are each single-flight; waiters recheck the latest token, and a replacement fails promptly instead of racing an abandoned rotating-token exchange.
 - If shutdown detaches a callback, Pico retains the auth store and skips auth destruction so callback-scoped access cannot observe freed credentials. Pico then rejects reinitialization and must exit.
 - Max 16 auth providers (`PICO_MAX_AUTH`).

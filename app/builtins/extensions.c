@@ -359,10 +359,11 @@ static void ExtsOnFrame(PicoHost *app, void *state, float dt)
     }
 }
 
-static void CmdExtensions(PicoHost *app, const char *args, void *state)
+static void CmdExtensions(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
     (void)state;
     (void)args;
+    (void)agent_id;
     PicoExts_Open();
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;

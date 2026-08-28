@@ -28,9 +28,10 @@ void PicoSettings_Load(PicoHost *app);
 float Pico_ClampChatWidth(float available, float text_max);
 float Pico_ChatTextMaxPx(const PicoHost *app);
 float Pico_ChatColumnMaxPx(const PicoHost *app);
-char *PicoSettings_LoadSystemPrompt(const PicoHost *app);
-char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *spans, int *span_count);
-int PicoSettings_LoadedContext(const PicoHost *app, const char **labels, int max);
+char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace);
+char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPromptSpan *spans,
+                                         int *span_count);
+int PicoSettings_LoadedContext(const PicoWorkspace *workspace, const char **labels, int max);
 PicoModel *PicoSettings_FindModel(PicoHost *app, const char *id);
 const PicoModel *PicoSettings_FindModelConst(const PicoHost *app, const char *id);
 PicoModel *PicoSettings_ActiveModel(PicoHost *app, const PicoAgent *agent);

@@ -67,6 +67,8 @@ struct PicoAgentContext {
     PicoAgentManager *manager;
     PicoAgentId agent_id;
     uint64_t runtime_generation;
+    PicoWorkspaceId workspace_id;
+    uint64_t registration_generation;
     char workspace[4096];
     char session_id[40];
     char profile[65];
@@ -2169,7 +2171,7 @@ static bool PersistMediaParts(PicoHost *app, PicoAgent *agent, PicoLlmPart *part
 {
     char dir[4096];
     const char *sid = agent->session_id[0] ? agent->session_id : "tmp";
-    if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico/media/%s", PicoHost_Path(app), sid))
+    if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico/media/%s", PicoAgent_WorkspacePath(agent), sid))
     {
         return false;
     }
@@ -2722,11 +2724,14 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
         return;
     }
     PicoAgentContext *ctx = &rt->context;
+    PicoWorkspace *workspace = PicoAgent_Workspace(agent);
     ctx->runtime = rt;
-    ctx->manager = app->agents;
+    ctx->manager = agent->manager;
     ctx->agent_id = agent->id;
     ctx->runtime_generation = agent->runtime_generation;
-    snprintf(ctx->workspace, sizeof(ctx->workspace), "%s", PicoHost_Path(app));
+    ctx->workspace_id = workspace ? workspace->id : 0;
+    ctx->registration_generation = workspace ? workspace->registration_generation : 0;
+    snprintf(ctx->workspace, sizeof(ctx->workspace), "%s", PicoWorkspace_Path(workspace));
     snprintf(ctx->session_id, sizeof(ctx->session_id), "%s", agent->session_id);
     snprintf(ctx->profile, sizeof(ctx->profile), "%s", agent->profile);
     snprintf(ctx->purpose, sizeof(ctx->purpose), "%s", agent->purpose);
@@ -2873,14 +2878,14 @@ void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoAgentManager *man
     RefreshWorkerContext(agent->runtime, app, agent);
 }
 
-PicoAgent *PicoAgent_Create(PicoHost *app)
+PicoAgent *PicoAgent_Create(PicoHost *app, PicoAgentManager *manager)
 {
     PicoAgent *agent = (PicoAgent *)calloc(1, sizeof(PicoAgent));
     if (!agent)
     {
         return NULL;
     }
-    agent->manager = app ? app->agents : NULL;
+    agent->manager = manager;
     agent->id = app ? app->next_agent_id++ : 1;
     agent->runtime_generation = 1;
     agent->kind = PICO_AGENT_MAIN;
@@ -2946,14 +2951,15 @@ bool PicoAgent_Destroy(PicoAgent *agent)
     return PicoAgent_DestroyBefore(agent, &deadline);
 }
 
-void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text)
+void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_text,
+                              const char *parts_json)
 {
-    bool has_parts = app && app->agent_parts && app->agent_parts[0] == '[';
+    bool has_parts = parts_json && parts_json[0] == '[';
     if (!app || !agent || !agent->runtime || ((!user_text || !user_text[0]) && !has_parts))
     {
         return;
     }
-    if (PicoAgent_IsBusy(agent) || !PicoAgentManager_AcceptsNewWork(app->agents))
+    if (PicoAgent_IsBusy(agent) || !PicoAgentManager_AcceptsNewWork(agent->manager))
     {
         return;
     }
@@ -2964,7 +2970,7 @@ void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text)
     }
     PicoAgent_DismissError(agent);
     free(agent->runtime->instructions);
-    agent->runtime->instructions = PicoSettings_LoadSystemPrompt(app);
+    agent->runtime->instructions = PicoSettings_LoadSystemPrompt(PicoAgent_Workspace(agent));
     if (agent->kind == PICO_AGENT_SUBAGENT)
     {
         JsonBuf instructions;
@@ -2978,8 +2984,13 @@ void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text)
         free(agent->runtime->instructions);
         agent->runtime->instructions = JsonBuf_Steal(&instructions);
     }
-    PushInput(agent->runtime, BuildUserItem(user_text, app->agent_parts));
+    PushInput(agent->runtime, BuildUserItem(user_text, parts_json));
     StartLlm(app, agent);
+}
+
+void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text)
+{
+    PicoAgent_StartTurnParts(app, agent, user_text, NULL);
 }
 
 void PicoAgent_Cancel(PicoAgent *agent)
@@ -3612,7 +3623,7 @@ char *PicoAgent_BuildInstructionsSpans(PicoHost *app, PicoAgent *agent, PicoProm
     }
     PicoPromptSpan base_spans[PICO_PROMPT_SPAN_MAX];
     int base_count = 0;
-    char *base = PicoSettings_LoadSystemPromptSpans(app, base_spans, &base_count);
+    char *base = PicoSettings_LoadSystemPromptSpans(PicoAgent_Workspace(agent), base_spans, &base_count);
     size_t base_len = base ? strlen(base) : 0;
     char *instr = NULL;
     PicoTool *tools = NULL;
@@ -3673,6 +3684,16 @@ PicoAgentId pico_agent_context_id(const PicoAgentContext *ctx)
 uint64_t pico_agent_context_generation(const PicoAgentContext *ctx)
 {
     return AgentContextActive(ctx) ? ctx->runtime_generation : 0;
+}
+
+uint64_t pico_agent_context_registration_generation(const PicoAgentContext *ctx)
+{
+    return AgentContextActive(ctx) ? ctx->registration_generation : 0;
+}
+
+PicoWorkspaceId pico_agent_context_workspace_id(const PicoAgentContext *ctx)
+{
+    return AgentContextActive(ctx) ? ctx->workspace_id : 0;
 }
 
 const char *pico_agent_context_workspace(const PicoAgentContext *ctx)

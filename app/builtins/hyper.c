@@ -55,6 +55,7 @@ typedef struct DeviceLogin {
     bool joinable;
     bool running;
     bool cancel;
+    PicoAgentId agent_id;
     char *notes[PICO_DEVICE_MAX_NOTES];
     int note_count;
 } DeviceLogin;
@@ -128,9 +129,9 @@ static void StopDeviceLogin(void)
     }
 }
 
-static void Note(PicoHost *app, const char *text)
+static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
 {
-    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, text);
 }
 
 typedef struct TurnCancel {
@@ -725,7 +726,7 @@ static void *DeviceLoginMain(void *arg)
     return NULL;
 }
 
-static void StartDeviceLogin(PicoHost *app)
+static void StartDeviceLogin(PicoHost *app, PicoAgentId agent_id)
 {
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -737,16 +738,18 @@ static void StartDeviceLogin(PicoHost *app)
     g_login.note_count = 0;
     g_login.cancel = false;
     g_login.running = true;
+    g_login.agent_id = agent_id;
     bool spawned = pthread_create(&g_login.thread, NULL, DeviceLoginMain, app) == 0;
     g_login.joinable = spawned;
     if (!spawned)
     {
         g_login.running = false;
+        g_login.agent_id = 0;
     }
     pthread_mutex_unlock(&g_login.mu);
     if (!spawned)
     {
-        Note(app, "Could not start Hyper login: thread creation failed.");
+        Note(app, agent_id, "Could not start Hyper login: thread creation failed.");
     }
 }
 
@@ -756,6 +759,7 @@ static void DrainLoginNotes(PicoHost *app)
     {
         pthread_mutex_lock(&g_login.mu);
         char *text = NULL;
+        PicoAgentId agent_id = g_login.agent_id;
         if (g_login.note_count > 0)
         {
             text = g_login.notes[0];
@@ -769,7 +773,7 @@ static void DrainLoginNotes(PicoHost *app)
         pthread_mutex_unlock(&g_login.mu);
         if (text)
         {
-            Note(app, text);
+            Note(app, agent_id, text);
             free(text);
             continue;
         }
@@ -814,7 +818,7 @@ static bool IsCancelArg(const char *s)
     return FoldEq(s, "cancel");
 }
 
-static void HyperLogin(PicoHost *app, const char *args, void *state)
+static void HyperLogin(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
     (void)state;
     const char *p = args ? args : "";
@@ -837,7 +841,7 @@ static void HyperLogin(PicoHost *app, const char *args, void *state)
     }
     if (tail[0] || (verb[0] && !IsCancelArg(verb) && !IsKeyArg(verb)))
     {
-        Note(app, "Usage: `/login hyper`, `/login hyper key`, or `/login hyper cancel`.");
+        Note(app, agent_id, "Usage: `/login hyper`, `/login hyper key`, or `/login hyper cancel`.");
         return;
     }
     if (IsCancelArg(verb))
@@ -845,11 +849,11 @@ static void HyperLogin(PicoHost *app, const char *args, void *state)
         if (LoginActive())
         {
             StopDeviceLogin();
-            Note(app, "Login cancelled.");
+            Note(app, agent_id, "Login cancelled.");
         }
         else
         {
-            Note(app, "No login in progress.");
+            Note(app, agent_id, "No login in progress.");
         }
         return;
     }
@@ -860,26 +864,26 @@ static void HyperLogin(PicoHost *app, const char *args, void *state)
         pico_auth_copy(app, "hyper", &e);
         if (!e.api_key || !e.api_key[0])
         {
-            Note(app, "No API key. Set `HYPER_API_KEY`.");
+            Note(app, agent_id, "No API key. Set `HYPER_API_KEY`.");
             pico_auth_entry_free(&e);
             return;
         }
         if (pico_auth_set_active(app, "hyper", PICO_AUTH_API_KEY))
         {
-            Note(app, "Using Hyper API key.");
+            Note(app, agent_id, "Using Hyper API key.");
         }
         else
         {
-            Note(app, "Using Hyper API key, but `~/.config/pico/auth.json` could not be written, so "
-                      "this choice will not survive a restart.");
+            Note(app, agent_id, "Using Hyper API key, but `~/.config/pico/auth.json` could not be written, so "
+                                "this choice will not survive a restart.");
         }
         pico_auth_entry_free(&e);
         return;
     }
-    StartDeviceLogin(app);
+    StartDeviceLogin(app, agent_id);
 }
 
-static void HyperLogout(PicoHost *app, void *state)
+static void HyperLogout(PicoHost *app, PicoAgentId agent_id, void *state)
 {
     (void)state;
     StopDeviceLogin();
@@ -888,16 +892,16 @@ static void HyperLogout(PicoHost *app, void *state)
     pico_auth_copy(app, "hyper", &e);
     if (!saved)
     {
-        Note(app, "Logged out of Hyper, but `~/.config/pico/auth.json` could not be written, so the "
-                  "stored tokens may still be on disk.");
+        Note(app, agent_id, "Logged out of Hyper, but `~/.config/pico/auth.json` could not be written, so the "
+                            "stored tokens may still be on disk.");
     }
     else if (e.api_key && e.api_key[0])
     {
-        Note(app, "Logged out of Hyper. Using API key.");
+        Note(app, agent_id, "Logged out of Hyper. Using API key.");
     }
     else
     {
-        Note(app, "Logged out of Hyper.");
+        Note(app, agent_id, "Logged out of Hyper.");
     }
     pico_auth_entry_free(&e);
 }

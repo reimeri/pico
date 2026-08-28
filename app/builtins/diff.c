@@ -588,7 +588,7 @@ static void StartThread(PicoHost *app)
     {
         return;
     }
-    snprintf(g_workspace, sizeof(g_workspace), "%s", PicoHost_Path(app));
+    snprintf(g_workspace, sizeof(g_workspace), "%s", PicoWorkspace_Path(PicoHost_SelectedWorkspaceConst(app)));
     g_thread_started = true;
     if (pthread_create(&g_thread, NULL, DiffThreadMain, NULL) != 0)
     {
@@ -635,15 +635,16 @@ static void AdoptPending(PicoHost *app)
     pthread_mutex_lock(&g_lock);
     DiffModel *fresh = g_pending;
     g_pending = NULL;
-    if (strncmp(g_workspace, PicoHost_Path(app), sizeof(g_workspace)) != 0)
+    const char *root = PicoWorkspace_Path(PicoHost_SelectedWorkspaceConst(app));
+    if (strncmp(g_workspace, root, sizeof(g_workspace)) != 0)
     {
-        snprintf(g_workspace, sizeof(g_workspace), "%s", PicoHost_Path(app));
+        snprintf(g_workspace, sizeof(g_workspace), "%s", root);
     }
     pthread_mutex_unlock(&g_lock);
 
     /* A capture that started under a previous workspace is never displayed,
      * even if it was published after the workspace switched back. */
-    if (fresh && strncmp(fresh->workspace, PicoHost_Path(app), sizeof(fresh->workspace)) != 0)
+    if (fresh && strncmp(fresh->workspace, root, sizeof(fresh->workspace)) != 0)
     {
         DiffModel_Free(fresh);
         return;

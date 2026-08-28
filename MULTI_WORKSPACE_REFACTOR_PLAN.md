@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: approved architecture; implementation not started  
+Status: Phase 0 complete; implementation starts at Phase 1  
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -446,6 +446,8 @@ Do not enable multiple workspaces early. The executable and full test suite must
 
 ### Phase 0 — Record the baseline
 
+Status: complete (2026-08-28)
+
 Owner files: none.
 
 Tasks:
@@ -458,6 +460,113 @@ Acceptance:
 
 - No production or test code changes in this phase.
 - The existing debug build and test result are recorded before refactoring begins.
+
+#### Phase 0 recorded baseline
+
+This machine has no `cmake` on the default PATH. The flake toolchain was used:
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+```
+
+Inside an already-entered `nix develop` shell, the Section 15 commands are:
+
+```bash
+cmake -S app --preset debug
+cmake --build app/build/debug
+ctest --test-dir app/build/debug --output-on-failure
+```
+
+Results (2026-08-28, debug preset, `app/build/debug`):
+
+- Configure: success.
+- Build: success (`ninja: no work to do`; the existing debug tree was current). Example plugin smoke objects (`*_ext.so`) are `pico` POST_BUILD custom commands and were already present.
+- Tests: 24/24 passed, 0 failed, 1.61s real.
+- Pre-existing failures: none.
+
+Registered debug tests: `pico_json_tests`, `pico_http_capture_tests`, `pico_http_capture_release_tests`, `pico_text_range_tests`, `pico_markdown_tests`, `pico_diff_lines_tests`, `pico_scrollbar_tests`, `pico_transcript_virtual_tests`, `pico_wrapped_text_tests`, `pico_responses_tests`, `pico_completions_tests`, `pico_xai_auth_tests`, `pico_todo_tests`, `pico_ask_user_tests`, `pico_agent_behavior_tests` (includes `agent_manager_test.c`, `subagent_config_test.c`, `subagent_test.c`), `pico_session_usage_tests`, `pico_files_tests`, `pico_composer_tests`, `pico_settings_agent_tests`, `pico_clay_capacity_tests`, `pico_font_scale_tests`, `pico_chat_width_tests`, `pico_ui_tests`, `pico_docs_path_tests`.
+
+Architecture snapshot before Phase 1:
+
+- Public owner is `PicoApp`. `PICO_EXT_ABI` is 12. Extension callbacks take `PicoApp *` and have no instance `state`.
+- `PicoApp_Init` stores one mutable workspace path, creates `PicoAgentManager`, creates one `PICO_AGENT_NORMAL` agent, then loads plugins.
+- `curl_global_init` runs in `PicoAgentManager_Create`. Agent IDs come from `static PicoAgentId next_id` in `PicoAgent_Create`.
+- Workspace replacement uses `app->pending_workspace` / `app->workspace_change_queued`.
+
+#### Inventory: `app->workspace` call sites
+
+Production reads/writes of `app->workspace` (and the queued-change flags that gate them):
+
+| File | Lines | Role |
+|---|---|---|
+| `app/app.c` | 873, 877, 928, 1046, 1057, 1069, 1090, 1101, 1139, 1141, 1183 | Init path, `/cd` resolve/queue/apply, reload barrier |
+| `app/plugin.c` | 174, 569, 622 | Workspace extension dir; reload vs workspace-change barrier |
+| `app/agent.c` | 2164, 2721 | Session path under workspace; copy into worker context |
+| `app/session.c` | 60, 611 | Session lock encoding; persist cwd |
+| `app/settings.c` | 486, 488, 1437, 1439, 1443, 1470, 1471, 1484 | `.pico/settings.json`, `.pico/SYSTEM.md`, `AGENTS.md` |
+| `app/builtins/files.c` | 128, 130, 396 | File index walk; mention expansion |
+| `app/builtins/diff.c` | 590, 637, 639, 645 | Diff worker workspace capture/compare |
+| `app/builtins/footer.c` | 601, 786 | CWD chip; folder picker start |
+| `app/builtins/commands.c` | 542, 553 | `/cd` listing relative to current workspace |
+| `app/builtins/composer.c` | 754 | Paste-temp directory |
+
+Tests: `app/tests/files_test.c:138` writes `app->workspace`.
+
+Related mutable fields on `PicoApp`: `workspace[4096]`, `pending_workspace[4096]`, `workspace_change_queued`.
+
+#### Inventory: active-agent call sites
+
+Helpers: `PicoApp_ActiveAgent` / `PicoApp_ActiveAgentConst` in `app/agent_internal.h` forward to `PicoAgentManager_Active` / `PicoAgentManager_ActiveConst` (`app/agent_manager.c:79,84`). No other production callers of `PicoAgentManager_Active*` besides those inlines.
+
+Production `PicoApp_ActiveAgent*` uses (backend and UI mixed):
+
+| File | Approx. call sites | Typical use |
+|---|---|---|
+| `app/app.c` | 11 | Submit/cancel/modal, init session, debug transcript APIs, frame pump |
+| `app/main.c` | 1 | Window title |
+| `app/agent_manager.c` | 1 | Selection handoff when creating/selecting an agent |
+| `app/builtins/footer.c` | 22 | Model/effort menus, busy/error/usage chips, Esc/cancel |
+| `app/builtins/chat.c` | 14 | Transcript, tool-row, inspect, empty state |
+| `app/builtins/commands.c` | 8 | `/model`, `/effort`, `/compact`, `/new`, `/resume` |
+| `app/builtins/overlay.c` | 8 | Error overlay, dismiss agent error |
+| `app/builtins/prompt.c` | 1 | Instruction preview |
+| `app/builtins/composer.c` | 1 | Vision/model for attachments |
+| `app/builtins/files.c` | 1 | Vision/model for mention expansion |
+
+Tests: heavy use in `app/tests/agent_behavior_test.c`; also `subagent_test.c`, `subagent_config_test.c`. These tests treat the manager's selected agent as the subject.
+
+#### Inventory: mutable process/file-static state
+
+Core / loader (must leave process-global ID/plugin ownership):
+
+- `app/agent.c`: `g_ask_id_mu`, `g_ask_next_id`; `static PicoAgentId next_id` in `PicoAgent_Create`
+- `app/plugin.c`: `g_plugins[]`, `g_plugin_count`, `g_last_poll`
+- `app/app.c`: `g_pico_process_retired`
+- `app/docs_path.c`: `g_app_dir`
+- `app/http_capture.c`: `g_capture_mu`, `g_capture_sequence`
+- `app/theme.c`: font tables/scale, Clay reinit/scroll/capacity flags
+- `app/chat_sel.c`: `s_msgs`, `s_hits`, selection cursors
+- `app/scrollbar.c`: `s_dragging`
+- `app/richtext.c`: measure callback and `s_link_serial`
+
+Builtin mutable globals (Phase 4/5 extract into host or workspace instance state):
+
+- `chat.c`: `g_app`, inspect stack, transcript virtual caches, think-label arena
+- `composer.c`: `g_app`, attachments, preview texture, clipboard child process
+- `complete.c`: `g_complete`
+- `footer.c`: `g_app`, menus, CWD/status chip buffers
+- `overlay.c`: notify toast, ask UI
+- `prompt.c`: `g_app`, prompt text/spans
+- `extensions.c`: `g_app`, manager-UI open state
+- `files.c`: `g_files`, `g_file_count`, `g_scanned`, `g_token_id`
+- `diff.c`: worker thread/lock/cond, `g_pending`/`g_model`, `g_workspace`, `g_app`
+- `todo.c`: `g_states[PICO_MAX_AGENTS]`, layout cache
+- `ask_user.c`: `g_ui`
+- `openai.c` / `hyper.c` / `xai.c`: refresh mutex/cond, in-flight refresh owner, `g_login`
+
+`shell.c` and `subagent.c` have no writable file-static state. `auth.c` / `settings.c` keep mutable data on `PicoApp` / `PicoAuthStore`, not file-static tables.
+
+`rg "app->workspace|PicoApp_ActiveAgent|PicoAgentManager_Active|g_plugins|static PicoAgentId next_id" app --glob '*.[ch]'` currently matches all of the production sites above. That command must have no production matches after Phase 6.
 
 ### Phase 1 — Atomic host/workspace and ABI 13 foundation with one workspace
 

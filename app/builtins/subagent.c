@@ -1,6 +1,6 @@
 #include "pico/plugin.h"
 
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "json.h"
 
 #include <stdlib.h>
@@ -48,7 +48,7 @@ static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolRe
         return;
     }
     bool is_error = false;
-    char *result = PicoAgentManager_Delegate(ctx, profile, task, session_id, &is_error);
+    char *result = PicoWorkspace_Delegate(ctx, profile, task, session_id, &is_error);
     if (out)
     {
         out->output = result ? result : JsonDup("subagent: delegation failed");

@@ -3,7 +3,7 @@
 
 #include "session.h"
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -605,7 +605,8 @@ static int CreateNew(PicoHost *app, PicoAgent *agent)
         PersistenceFailed(app, agent, "session path is too long");
         return -1;
     }
-    if (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, agent->session_path))
+    PicoWorkspace *ws = agent->workspace;
+    if (ws && !PicoWorkspace_ReserveSession(ws, agent->id, agent->session_path))
     {
         PersistenceFailed(app, agent, "session path is already reserved");
         return -1;
@@ -1282,11 +1283,12 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
         return;
     }
     agent->persistence = PICO_SESSION_DURABLE;
+    PicoWorkspace *ws = agent->workspace;
     if (session_file && session_file[0])
     {
         char canonical[4096];
         if (!realpath(session_file, canonical) ||
-            (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, canonical)) ||
+            (ws && !PicoWorkspace_ReserveSession(ws, agent->id, canonical)) ||
             PicoSession_Replay(app, agent, canonical, true) != 0)
         {
             agent->persistence = PICO_SESSION_FAILED;
@@ -1303,7 +1305,7 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
         {
             char canonical[4096];
             if (realpath(latest, canonical) &&
-                (!app->agents || PicoAgentManager_ReserveSession(app->agents, agent->id, canonical)))
+                (!ws || PicoWorkspace_ReserveSession(ws, agent->id, canonical)))
             {
                 (void)PicoSession_Replay(app, agent, canonical, true);
             }
@@ -1837,13 +1839,14 @@ int PicoSession_Open(PicoHost *app, PicoAgent *agent, const char *id)
     {
         return 0;
     }
-    if (app->agents && PicoAgentManager_SessionReserved(app->agents, path, agent->id))
+    PicoWorkspace *ws = agent->workspace;
+    if (ws && PicoWorkspace_SessionReserved(ws, path, agent->id))
     {
         return -1;
     }
 
     PicoSession_Reset(app, agent);
-    if (app->agents && !PicoAgentManager_ReserveSession(app->agents, agent->id, path))
+    if (ws && !PicoWorkspace_ReserveSession(ws, agent->id, path))
     {
         return -1;
     }
@@ -1857,9 +1860,9 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     {
         return;
     }
-    if (app->agents)
+    if (agent->workspace)
     {
-        PicoAgentManager_ReleaseSessions(app->agents, agent->id);
+        PicoWorkspace_ReleaseSessions(agent->workspace, agent->id);
     }
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, agent->id);
     PicoAgent_DismissError(agent);

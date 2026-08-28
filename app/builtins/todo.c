@@ -1,7 +1,7 @@
 #include "pico/plugin.h"
 #include "todo.h"
 #include "todo_model.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "session.h"
 #include "json.h"
 #include "scrollbar.h"
@@ -451,7 +451,7 @@ static void TodoFrame(PicoHost *app, void *state, float dt)
         {
             continue;
         }
-        PicoAgent *agent = app->agents ? PicoAgentManager_Find(app->agents, pending->agent_id) : NULL;
+        PicoAgent *agent = PicoHost_FindAgent(app, pending->agent_id);
         if (agent && pending->todos.task && pending->todos.task[0])
         {
             (void)PicoSession_LogTitle(app, agent, pending->todos.task);

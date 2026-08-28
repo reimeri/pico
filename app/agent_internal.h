@@ -8,7 +8,7 @@ struct PicoAgentRt;
 typedef struct PicoAgentRt PicoAgentRt;
 
 struct PicoAgent {
-    PicoAgentManager *manager;
+    PicoWorkspace *workspace;
     PicoAgentId id;
     PicoAgentId parent_id;
     uint64_t runtime_generation;

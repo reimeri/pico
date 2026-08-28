@@ -12,15 +12,15 @@ typedef enum PicoToolCallProgress {
     PICO_TOOL_CALL_QUEUED,
 } PicoToolCallProgress;
 
-PicoAgent *PicoAgent_Create(PicoHost *app, PicoAgentManager *manager);
+PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace);
 /* Rebind an unpublished idle agent after a staged workspace replacement. */
-void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoAgentManager *manager);
+void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoWorkspace *workspace);
 /* False when a worker was still running and had to be detached. */
 bool PicoAgent_Destroy(PicoAgent *agent);
 bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline);
-void PicoAgent_ReapRetired(PicoAgentManager *manager);
-bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec *deadline);
-bool PicoAgent_RetiredReferences(const PicoAgentManager *manager, PicoAgentId id);
+void PicoAgent_ReapRetired(PicoWorkspace *workspace);
+bool PicoAgent_ShutdownRetired(PicoWorkspace *workspace, const struct timespec *deadline);
+bool PicoAgent_RetiredReferences(const PicoWorkspace *workspace, PicoAgentId id);
 void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text);
 void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_text,
                               const char *parts_json);
@@ -82,7 +82,7 @@ void PicoMessages_Free(PicoMessage *messages, int count);
 bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int *dst_count);
 void PicoMessages_PrepareDocs(PicoMessage *messages, int count);
 void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out);
-PicoAgentManager *PicoAgentContext_Manager(const PicoAgentContext *ctx);
+PicoWorkspace *PicoAgentContext_Workspace(const PicoAgentContext *ctx);
 const char *PicoAgentContext_ToolCallId(const PicoAgentContext *ctx);
 
 #endif

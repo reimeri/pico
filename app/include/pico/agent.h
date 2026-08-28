@@ -24,7 +24,6 @@ typedef struct PicoHost PicoHost;
 typedef struct PicoWorkspace PicoWorkspace;
 typedef struct PicoAgent PicoAgent;
 typedef struct PicoAgentContext PicoAgentContext;
-typedef struct PicoAgentManager PicoAgentManager;
 
 typedef enum PicoAgentKind {
     PICO_AGENT_MAIN = 0,

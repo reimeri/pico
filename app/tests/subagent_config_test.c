@@ -99,7 +99,7 @@ static int TestSubagentProfileDiscovery(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
 
     char dir[4096];
     bool directory_path_ok = PicoPath_Format(dir, sizeof(dir), "%s/subagents", temp);
@@ -159,7 +159,7 @@ static int TestSubagentProfileDiscovery(void)
     }
     wrote = wrote && nested_path_ok &&
             WriteConfigProfile(nested, "ignored.json", "{\"purpose\":\"nested\"}");
-    PicoAgentManager_LoadProfiles(app.agents);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     PicoSubagentProfileInfo exploration_info;
     PicoSubagentProfileInfo review_info;
     bool examples = wrote && pico_subagent_profile_count(&app) == 2 &&
@@ -184,7 +184,7 @@ static int TestSubagentProfileDiscovery(void)
         dir, "replacement.json",
         "{/* jsonc */\"description\":\"Replacement\",\"purpose\":\"New snapshot\","
         "\"future_key\":true}");
-    PicoAgentManager_LoadProfiles(app.agents);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     PicoSubagentProfileInfo replacement;
     bool swapped = replacement_written && pico_subagent_profile_count(&app) == 1 &&
                    FindLoadedProfile(&app, "replacement", &replacement) &&

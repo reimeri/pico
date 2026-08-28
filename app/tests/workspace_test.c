@@ -1,5 +1,5 @@
 #include "host_internal.h"
-/* Included by agent_behavior_test.c so manager concurrency uses the same deterministic fake provider host. */
+/* Included by agent_behavior_test.c so workspace concurrency uses the same deterministic fake provider host. */
 
 static bool g_close_hook_saw_removed;
 
@@ -16,7 +16,7 @@ static void InspectClosedAgent(PicoWorkspace *workspace, const PicoHookEvent *ev
 
 static int TestManagerProfileRegistry(void)
 {
-    const char *name = "manager profile registry";
+    const char *name = "workspace profile registry";
     char temp[] = "/tmp/pico-agent-profiles-XXXXXX";
     if (!mkdtemp(temp))
     {
@@ -49,7 +49,7 @@ static int TestManagerProfileRegistry(void)
 
     PicoHost app;
     InitApp(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     PicoSubagentProfileInfo info;
     bool loaded = pico_subagent_profile_count(&app) == 1 &&
                   pico_subagent_profile_info(&app, 0, &info) &&
@@ -71,11 +71,12 @@ static int TestManagerProfileRegistry(void)
     close_contract = close_contract && pico_agent_close(&app, close_id) == PICO_AGENT_RESULT_OK &&
                      g_close_hook_saw_removed;
 
-    bool reservations = PicoAgentManager_ReserveSession(app.agents, 111, "/tmp/one.jsonl") &&
-                        PicoAgentManager_ReserveSession(app.agents, 111, "/tmp/one.jsonl") &&
-                        !PicoAgentManager_ReserveSession(app.agents, 222, "/tmp/one.jsonl");
-    PicoAgentManager_ReleaseSessions(app.agents, 111);
-    reservations = reservations && !PicoAgentManager_SessionReserved(app.agents, "/tmp/one.jsonl", 0);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    bool reservations = PicoWorkspace_ReserveSession(ws, 111, "/tmp/one.jsonl") &&
+                        PicoWorkspace_ReserveSession(ws, 111, "/tmp/one.jsonl") &&
+                        !PicoWorkspace_ReserveSession(ws, 222, "/tmp/one.jsonl");
+    PicoWorkspace_ReleaseSessions(ws, 111);
+    reservations = reservations && !PicoWorkspace_SessionReserved(ws, "/tmp/one.jsonl", 0);
     PicoHost_Shutdown(&app);
     unlink(valid_path);
     unlink(invalid_path);
@@ -89,7 +90,7 @@ static int TestManagerProfileRegistry(void)
 
 static int TestManagerConcurrencyAndIsolation(void)
 {
-    const char *name = "manager concurrency and isolation";
+    const char *name = "workspace concurrency and isolation";
     ResetTest(TEST_CONCURRENT_REVERSE, 0);
     g_test.provider_tokens = 10;
     g_test.provider_cached_tokens = 3;
@@ -108,22 +109,22 @@ static int TestManagerConcurrencyAndIsolation(void)
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create two independent agents");
     }
-    PicoAgent *first = PicoAgentManager_Find(app.agents, first_id);
-    PicoAgent *second = PicoAgentManager_Find(app.agents, second_id);
+    PicoAgent *first = PicoHost_FindAgent(&app, first_id);
+    PicoAgent *second = PicoHost_FindAgent(&app, second_id);
     PicoAgent_StartTurn(&app, first, "first");
     PicoAgent_StartTurn(&app, second, "second");
 
     bool reverse_observed = false;
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         pthread_mutex_lock(&g_test.mu);
         int entered = g_test.provider_entered_count;
         PicoAgentId blocked_id = g_test.first_provider_id;
         pthread_mutex_unlock(&g_test.mu);
         if (entered >= 2)
         {
-            PicoAgent *blocked = PicoAgentManager_Find(app.agents, blocked_id);
+            PicoAgent *blocked = PicoHost_FindAgent(&app, blocked_id);
             PicoAgent *completed = blocked_id == first_id ? second : first;
             if (PicoAgent_IsBusy(blocked) && !PicoAgent_IsBusy(completed))
             {
@@ -160,7 +161,7 @@ static int TestManagerConcurrencyAndIsolation(void)
     pthread_mutex_unlock(&g_test.mu);
     for (int i = 0; i < 3000 && (PicoAgent_IsBusy(first) || PicoAgent_IsBusy(second)); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     bool isolated = !PicoAgent_IsBusy(first) && !PicoAgent_IsBusy(second) &&
@@ -181,14 +182,14 @@ static int TestManagerConcurrencyAndIsolation(void)
     PicoAgent_Cancel(first);
     for (int i = 0; i < 3000 && PicoAgent_IsBusy(first); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     bool cancel_isolated = !PicoAgent_IsBusy(first) && PicoAgent_IsBusy(second);
     PicoAgent_Cancel(second);
     for (int i = 0; i < 3000 && PicoAgent_IsBusy(second); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     PicoHost_Shutdown(&app);
@@ -226,7 +227,7 @@ static int TestSubmitTargetsExplicitAgentWithoutChangingSelection(void)
     bool targeted = false;
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         if (PicoAgent_IsBusy(second) && !PicoAgent_IsBusy(first) && pico_agent_active(&app) == first_id)
         {
             targeted = true;
@@ -240,7 +241,7 @@ static int TestSubmitTargetsExplicitAgentWithoutChangingSelection(void)
     pthread_mutex_unlock(&g_test.mu);
     for (int i = 0; i < 3000 && PicoAgent_IsBusy(second); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     PicoHost_Shutdown(&app);
@@ -275,7 +276,7 @@ static int TestSubmitIsCompleteExplicitTurn(void)
     PicoAgent *second = PicoHost_FindAgent(&app, second_id);
     for (int i = 0; i < 3000 && second && PicoAgent_IsBusy(second); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     const PicoMessage *user = pico_agent_message(&app, second_id, 0);
@@ -314,7 +315,7 @@ static int TestSubmitReportsResultCodes(void)
     PicoAgent *first = PicoHost_FindAgent(&app, first_id);
     for (int i = 0; i < 3000 && first && !PicoAgent_IsBusy(first); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     bool busy = pico_agent_submit(&app, first_id, "again", NULL) == PICO_BUSY;
@@ -324,7 +325,7 @@ static int TestSubmitReportsResultCodes(void)
     pthread_mutex_unlock(&g_test.mu);
     for (int i = 0; i < 3000 && first && PicoAgent_IsBusy(first); i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         SleepOneMs();
     }
     PicoHost_Shutdown(&app);
@@ -399,7 +400,7 @@ static int TestResumeMissingAgentReturnsNotFound(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    PicoAgentResult result = PicoAgentManager_Resume(&app, 999, "missing", false);
+    PicoAgentResult result = PicoWorkspace_Resume(&app, 999, "missing", false);
     PicoHost_Shutdown(&app);
     return result == PICO_AGENT_RESULT_NOT_FOUND
                ? 0
@@ -430,7 +431,7 @@ static int TestResumeLeavesUnselectedAgentSelection(void)
     snprintf(g_fake_session.id, sizeof(g_fake_session.id), "resume-target");
     snprintf(g_fake_session.path, sizeof(g_fake_session.path), "/tmp/resume-target.jsonl");
     snprintf(g_fake_session.replayed_model, sizeof(g_fake_session.replayed_model), "test-model");
-    if (PicoAgentManager_Resume(&app, second_id, "resume-target", false) != PICO_AGENT_RESULT_OK)
+    if (PicoWorkspace_Resume(&app, second_id, "resume-target", false) != PICO_AGENT_RESULT_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "explicit resume failed");
@@ -440,4 +441,3 @@ static int TestResumeLeavesUnselectedAgentSelection(void)
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "resume changed UI selection or failed to replace the target");
 }
-

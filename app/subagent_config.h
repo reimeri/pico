@@ -3,8 +3,8 @@
 
 #include "agent_internal.h"
 
-void PicoSubagentConfig_Load(PicoAgentManager *manager);
-const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoAgentManager *manager,
+void PicoSubagentConfig_Load(PicoWorkspace *workspace);
+const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoWorkspace *workspace,
                                                        const char *name);
 bool PicoSubagentConfig_Resolve(const PicoHost *app, const PicoAgent *parent,
                                 const PicoSubagentProfileInfo *profile,

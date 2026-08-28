@@ -22,9 +22,6 @@ struct PicoHost {
     int workspace_count;
     PicoAgentId selected_agent_id;
 
-    /* Cached pointer to the single live workspace manager in Phase 1. */
-    PicoAgentManager *agents;
-
     PicoComposer composer;
     PicoSettings settings;
     Font *fonts;
@@ -122,7 +119,7 @@ static inline const char *PicoWorkspace_Path(const PicoWorkspace *workspace)
 
 static inline PicoWorkspace *PicoAgent_Workspace(const PicoAgent *agent)
 {
-    return (agent && agent->manager) ? agent->manager->workspace : NULL;
+    return agent ? agent->workspace : NULL;
 }
 
 static inline const char *PicoAgent_WorkspacePath(const PicoAgent *agent)
@@ -141,6 +138,13 @@ static inline void PicoHost_SetPath(PicoHost *host, const char *path)
     if (!workspace)
     {
         workspace = (PicoWorkspace *)calloc(1, sizeof(*workspace));
+        if (workspace)
+        {
+            pthread_mutex_init(&workspace->delegation_mu, NULL);
+            pthread_mutex_init(&workspace->lifecycle_mu, NULL);
+            pthread_mutex_init(&workspace->ui_post_mu, NULL);
+            workspace->accepting_work = true;
+        }
         host->workspaces[0] = workspace;
         host->workspace_count = workspace ? 1 : 0;
     }
@@ -184,14 +188,13 @@ static inline PicoWorkspace *PicoHost_SelectedWorkspace(PicoHost *host)
     for (i = 0; i < host->workspace_count; i++)
     {
         PicoWorkspace *workspace = host->workspaces[i];
-        PicoAgentManager *manager = workspace ? workspace->agents : NULL;
-        if (!manager)
+        if (!workspace)
         {
             continue;
         }
-        for (j = 0; j < manager->count; j++)
+        for (j = 0; j < workspace->count; j++)
         {
-            if (manager->agents[j] && manager->agents[j]->id == id)
+            if (workspace->agents[j] && workspace->agents[j]->id == id)
             {
                 return workspace;
             }

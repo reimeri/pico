@@ -6,7 +6,7 @@
 
 #include "pico/plugin.h"
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "session.h"
 #include "settings.h"
 #include "overlay.h"
@@ -206,7 +206,7 @@ static void CmdResume(PicoHost *app, PicoAgentId agent_id, const char *args, voi
         app->submit_cancel = true;
         return;
     }
-    PicoAgentResult result = PicoAgentManager_Resume(app, agent_id, args, true);
+    PicoAgentResult result = PicoWorkspace_Resume(app, agent_id, args, true);
     if (result != PICO_AGENT_RESULT_OK)
     {
         char line[256];

@@ -3,7 +3,7 @@
 #include "subagent_config.h"
 #include "host_internal.h"
 
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -205,9 +205,9 @@ static bool ParseProfile(PicoHost *app, const char *path, const char *name,
     return error == NULL;
 }
 
-void PicoSubagentConfig_Load(PicoAgentManager *manager)
+void PicoSubagentConfig_Load(PicoWorkspace *workspace)
 {
-    if (!manager || !manager->workspace || !manager->workspace->host)
+    if (!workspace || !workspace->host)
     {
         return;
     }
@@ -254,10 +254,10 @@ void PicoSubagentConfig_Load(PicoAgentManager *manager)
             }
             if (!ValidProfileName(profile_name))
             {
-                ProfileWarning(manager->workspace->host, path, "invalid profile filename");
+                ProfileWarning(workspace->host, path, "invalid profile filename");
                 continue;
             }
-            if (ParseProfile(manager->workspace->host, path, profile_name, &loaded[count]))
+            if (ParseProfile(workspace->host, path, profile_name, &loaded[count]))
             {
                 count++;
             }
@@ -265,19 +265,19 @@ void PicoSubagentConfig_Load(PicoAgentManager *manager)
         closedir(directory);
     }
 
-    memset(manager->profiles, 0, sizeof(manager->profiles));
-    memcpy(manager->profiles, loaded, (size_t)count * sizeof(loaded[0]));
-    manager->profile_count = count;
+    memset(workspace->profiles, 0, sizeof(workspace->profiles));
+    memcpy(workspace->profiles, loaded, (size_t)count * sizeof(loaded[0]));
+    workspace->profile_count = count;
 }
 
-const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoAgentManager *manager,
+const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoWorkspace *workspace,
                                                        const char *name)
 {
-    for (int i = 0; manager && name && i < manager->profile_count; i++)
+    for (int i = 0; workspace && name && i < workspace->profile_count; i++)
     {
-        if (strcmp(manager->profiles[i].name, name) == 0)
+        if (strcmp(workspace->profiles[i].name, name) == 0)
         {
-            return &manager->profiles[i];
+            return &workspace->profiles[i];
         }
     }
     return NULL;

@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "canonical.h"
 #include "json.h"
 #include "path.h"
@@ -64,7 +64,7 @@ typedef enum PicoWorkKind {
 
 struct PicoAgentContext {
     PicoAgentRt *runtime;
-    PicoAgentManager *manager;
+    PicoWorkspace *workspace_owner;
     PicoAgentId agent_id;
     uint64_t runtime_generation;
     PicoWorkspaceId workspace_id;
@@ -2726,7 +2726,7 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
     PicoAgentContext *ctx = &rt->context;
     PicoWorkspace *workspace = PicoAgent_Workspace(agent);
     ctx->runtime = rt;
-    ctx->manager = agent->manager;
+    ctx->workspace_owner = workspace;
     ctx->agent_id = agent->id;
     ctx->runtime_generation = agent->runtime_generation;
     ctx->workspace_id = workspace ? workspace->id : 0;
@@ -2783,13 +2783,13 @@ static bool StopRt(PicoAgentRt *rt, const struct timespec *deadline)
     return done;
 }
 
-void PicoAgent_ReapRetired(PicoAgentManager *manager)
+void PicoAgent_ReapRetired(PicoWorkspace *workspace)
 {
-    if (!manager)
+    if (!workspace)
     {
         return;
     }
-    PicoAgentRt **pp = &manager->retired_runtimes;
+    PicoAgentRt **pp = &workspace->retired_runtimes;
     while (*pp)
     {
         PicoAgentRt *z = *pp;
@@ -2802,7 +2802,7 @@ void PicoAgent_ReapRetired(PicoAgentManager *manager)
             continue;
         }
         *pp = z->zombie_next;
-        manager->retired_count--;
+        workspace->retired_count--;
         if (z->started)
         {
             pthread_join(z->thread, NULL);
@@ -2811,9 +2811,9 @@ void PicoAgent_ReapRetired(PicoAgentManager *manager)
     }
 }
 
-bool PicoAgent_RetiredReferences(const PicoAgentManager *manager, PicoAgentId id)
+bool PicoAgent_RetiredReferences(const PicoWorkspace *workspace, PicoAgentId id)
 {
-    for (const PicoAgentRt *z = manager ? manager->retired_runtimes : NULL; z; z = z->zombie_next)
+    for (const PicoAgentRt *z = workspace ? workspace->retired_runtimes : NULL; z; z = z->zombie_next)
     {
         if (z->context.agent_id == id)
         {
@@ -2824,14 +2824,14 @@ bool PicoAgent_RetiredReferences(const PicoAgentManager *manager, PicoAgentId id
 }
 
 /* Share one shutdown deadline across every retired runtime. */
-bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec *deadline)
+bool PicoAgent_ShutdownRetired(PicoWorkspace *workspace, const struct timespec *deadline)
 {
     bool all_done = true;
-    PicoAgentRt *z = manager ? manager->retired_runtimes : NULL;
-    if (manager)
+    PicoAgentRt *z = workspace ? workspace->retired_runtimes : NULL;
+    if (workspace)
     {
-        manager->retired_runtimes = NULL;
-        manager->retired_count = 0;
+        workspace->retired_runtimes = NULL;
+        workspace->retired_count = 0;
     }
     while (z)
     {
@@ -2861,31 +2861,31 @@ bool PicoAgent_ShutdownRetired(PicoAgentManager *manager, const struct timespec 
 void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
 {
     if (!app || !agent || !agent->runtime || PicoAgent_IsBusy(agent) ||
-        !PicoAgentManager_AcceptsNewWork(app->agents) || !agent->tool_policy_valid)
+        !PicoWorkspace_AcceptsNewWork(PicoAgent_Workspace(agent)) || !agent->tool_policy_valid)
     {
         return;
     }
     StartCompact(app, agent);
 }
 
-void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoAgentManager *manager)
+void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoWorkspace *workspace)
 {
     if (!app || !agent || !agent->runtime || PicoAgent_BlocksReload(agent))
     {
         return;
     }
-    agent->manager = manager;
+    agent->workspace = workspace;
     RefreshWorkerContext(agent->runtime, app, agent);
 }
 
-PicoAgent *PicoAgent_Create(PicoHost *app, PicoAgentManager *manager)
+PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace)
 {
     PicoAgent *agent = (PicoAgent *)calloc(1, sizeof(PicoAgent));
     if (!agent)
     {
         return NULL;
     }
-    agent->manager = manager;
+    agent->workspace = workspace;
     agent->id = app ? app->next_agent_id++ : 1;
     agent->runtime_generation = 1;
     agent->kind = PICO_AGENT_MAIN;
@@ -2959,7 +2959,7 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
     {
         return;
     }
-    if (PicoAgent_IsBusy(agent) || !PicoAgentManager_AcceptsNewWork(agent->manager))
+    if (PicoAgent_IsBusy(agent) || !PicoWorkspace_AcceptsNewWork(agent->workspace))
     {
         return;
     }
@@ -3000,13 +3000,13 @@ void PicoAgent_Cancel(PicoAgent *agent)
     {
         return;
     }
-    PicoAgentManager_CancelChildDelegation(agent->manager, agent->id);
+    PicoWorkspace_CancelChildDelegation(agent->workspace, agent->id);
     pthread_mutex_lock(&rt->mu);
     rt->cancel = true;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
-    PicoAgentManager_CancelDelegations(agent->manager, agent->id,
-                                       agent->runtime_generation);
+    PicoWorkspace_CancelDelegations(agent->workspace, agent->id,
+                                    agent->runtime_generation);
     rt->snap_retired = true;
 }
 
@@ -3018,15 +3018,15 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
         return;
     }
 
-    PicoAgentManager *manager = agent->manager;
-    PicoAgent_ReapRetired(manager);
-    if (!manager || manager->retired_count >= PICO_MAX_RETIRED_RUNTIMES)
+    PicoWorkspace *workspace = agent->workspace;
+    PicoAgent_ReapRetired(workspace);
+    if (!workspace || workspace->retired_count >= PICO_MAX_RETIRED_RUNTIMES)
     {
         PicoAgent_Cancel(agent);
         return;
     }
 
-    PicoAgentManager_CancelChildDelegation(manager, agent->id);
+    PicoWorkspace_CancelChildDelegation(workspace, agent->id);
     uint64_t next_generation = agent->runtime_generation + 1;
     PicoAgentRt *rt = CreateRt(app, agent);
     if (!rt)
@@ -3034,12 +3034,12 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
         PicoAgent_Cancel(agent);
         return;
     }
-    pthread_mutex_lock(&manager->ui_post_mu);
+    pthread_mutex_lock(&workspace->ui_post_mu);
     agent->runtime_generation = next_generation;
     rt->context.runtime_generation = next_generation;
-    pthread_mutex_unlock(&manager->ui_post_mu);
-    PicoAgentManager_CancelDelegations(manager, agent->id,
-                                       old->context.runtime_generation);
+    pthread_mutex_unlock(&workspace->ui_post_mu);
+    PicoWorkspace_CancelDelegations(workspace, agent->id,
+                                    old->context.runtime_generation);
 
     pthread_mutex_lock(&old->mu);
     old->cancel = true;
@@ -3063,9 +3063,9 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
     rt->instructions = old->instructions;
     old->instructions = NULL;
 
-    old->zombie_next = manager->retired_runtimes;
-    manager->retired_runtimes = old;
-    manager->retired_count++;
+    old->zombie_next = workspace->retired_runtimes;
+    workspace->retired_runtimes = old;
+    workspace->retired_count++;
     agent->runtime = rt;
 }
 
@@ -3087,9 +3087,9 @@ void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid)
 static uint64_t NextAskId(PicoAgentRt *rt)
 {
     PicoHost *host = NULL;
-    if (rt && rt->context.manager && rt->context.manager->workspace)
+    if (rt && rt->context.workspace_owner)
     {
-        host = rt->context.manager->workspace->host;
+        host = rt->context.workspace_owner->host;
     }
     return PicoHost_AllocAskId(host);
 }
@@ -3149,7 +3149,7 @@ static int AskCancel(char **answer_json)
 void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
                   const char *text, size_t n)
 {
-    PicoAgentManager *manager;
+    PicoWorkspace *workspace;
     if (t_worker_context != PICO_WORKER_TOOL || !AgentContextActive(ctx))
     {
         return;
@@ -3162,16 +3162,17 @@ void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
     {
         return;
     }
-    manager = ctx->manager;
-    if (!manager)
+    workspace = ctx->workspace_owner;
+    if (!workspace)
     {
         return;
     }
-    PicoAgentManager_UiPost(manager, name, kind, ctx->agent_id, ctx->runtime_generation, text, n);
+    PicoWorkspace_UiPost(workspace, name, kind, ctx->agent_id, ctx->runtime_generation, text, n);
 }
 
 bool pico_ui_latest(const PicoHost *app, const char *name, PicoUiPost *out)
 {
+    const PicoWorkspace *workspace;
     if (!app || !name || !name[0])
     {
         if (out)
@@ -3180,16 +3181,17 @@ bool pico_ui_latest(const PicoHost *app, const char *name, PicoUiPost *out)
         }
         return false;
     }
-    return PicoAgentManager_UiLatest(app->agents, name, out);
+    workspace = PicoHost_SelectedWorkspaceConst(app);
+    return PicoWorkspace_UiLatest(workspace, name, out);
 }
 
 void pico_ui_clear(PicoHost *app, const char *name)
 {
-    if (!app || !app->agents)
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
+    if (workspace)
     {
-        return;
+        PicoWorkspace_UiClear(workspace, name);
     }
-    PicoAgentManager_UiClear(app->agents, name);
 }
 
 int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer_json)
@@ -3348,9 +3350,9 @@ void PicoAgent_DismissError(PicoAgent *agent)
 void PicoAgent_Pump(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
-    if (agent && agent->manager)
+    if (agent && agent->workspace)
     {
-        PicoAgentManager_PumpUiPosts(agent->manager);
+        PicoWorkspace_PumpUiPosts(agent->workspace);
     }
     if (!rt)
     {
@@ -3730,9 +3732,9 @@ bool pico_agent_context_cancelled(const PicoAgentContext *ctx)
     return WorkerIsCancelled(ctx->runtime);
 }
 
-PicoAgentManager *PicoAgentContext_Manager(const PicoAgentContext *ctx)
+PicoWorkspace *PicoAgentContext_Workspace(const PicoAgentContext *ctx)
 {
-    return AgentContextActive(ctx) ? ctx->manager : NULL;
+    return AgentContextActive(ctx) ? ctx->workspace_owner : NULL;
 }
 
 const char *PicoAgentContext_ToolCallId(const PicoAgentContext *ctx)

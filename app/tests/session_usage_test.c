@@ -78,22 +78,22 @@ bool Pico_ConfigDir(char *out, size_t cap)
     return PicoPath_Format(out, cap, "%s", g_config_dir);
 }
 
-bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner, const char *path)
+bool PicoWorkspace_ReserveSession(PicoWorkspace *workspace, PicoAgentId owner, const char *path)
 {
-    (void)manager; (void)owner; (void)path;
+    (void)workspace; (void)owner; (void)path;
     g_reserve_calls++;
     return true;
 }
 
-void PicoAgentManager_ReleaseSessions(PicoAgentManager *manager, PicoAgentId owner)
+void PicoWorkspace_ReleaseSessions(PicoWorkspace *workspace, PicoAgentId owner)
 {
-    (void)manager; (void)owner;
+    (void)workspace; (void)owner;
 }
 
-bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const char *path,
-                                      PicoAgentId except_owner)
+bool PicoWorkspace_SessionReserved(const PicoWorkspace *workspace, const char *path,
+                                   PicoAgentId except_owner)
 {
-    (void)manager; (void)path; (void)except_owner;
+    (void)workspace; (void)path; (void)except_owner;
     return false;
 }
 

@@ -79,7 +79,7 @@ add_executable(pico
     http.c
     http_capture.c
     agent.c
-    agent_manager.c
+    workspace.c
     subagent_config.c
     session.c
     usage.c
@@ -299,12 +299,12 @@ if(BUILD_TESTING)
     target_link_options(pico_ask_user_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_ask_user_tests COMMAND pico_ask_user_tests)
 
-    set_source_files_properties(tests/agent_manager_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(tests/workspace_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     set_source_files_properties(tests/subagent_config_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     set_source_files_properties(tests/subagent_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
-        tests/agent_manager_test.c
+        tests/workspace_test.c
         tests/subagent_config_test.c
         tests/subagent_test.c
         tests/clay_impl.c
@@ -312,7 +312,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
-        agent_manager.c
+        workspace.c
         subagent_config.c
         builtins/ask_user.c
         builtins/subagent.c
@@ -478,7 +478,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
-        agent_manager.c
+        workspace.c
         plugin.c
         subagent_config.c
         json.c

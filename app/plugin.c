@@ -1,6 +1,6 @@
 #include "pico/plugin.h"
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "path.h"
 #include "session.h"
 #include "settings.h"
@@ -619,27 +619,46 @@ void PicoPlugins_Load(PicoHost *app)
 
 void PicoPlugins_Reload(PicoHost *app)
 {
+    int i;
     if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return;
     }
     app->reload_queued = true;
-    PicoAgentManager_SetAcceptingWork(app->agents, false);
-    if (PicoAgentManager_BlocksReload(app->agents))
+    for (i = 0; i < app->workspace_count; i++)
     {
-        return;
+        if (app->workspaces[i])
+        {
+            PicoWorkspace_SetAcceptingWork(app->workspaces[i], false);
+        }
     }
-    PicoAgentManager_PrepareReload(app->agents);
-    if (PicoAgentManager_BlocksReload(app->agents))
+    for (i = 0; i < app->workspace_count; i++)
     {
-        return;
+        if (app->workspaces[i] && PicoWorkspace_BlocksReload(app->workspaces[i]))
+        {
+            return;
+        }
+    }
+    for (i = 0; i < app->workspace_count; i++)
+    {
+        if (app->workspaces[i])
+        {
+            PicoWorkspace_PrepareReload(app->workspaces[i]);
+        }
+    }
+    for (i = 0; i < app->workspace_count; i++)
+    {
+        if (app->workspaces[i] && PicoWorkspace_BlocksReload(app->workspaces[i]))
+        {
+            return;
+        }
     }
 
     PicoPlugins_UnloadUser(app);
     pico_clear_registrations(app);
     pico_ui_modal_reset(app);
     WarnClear(app);
-    for (int i = 0; i < g_plugin_count; i++)
+    for (i = 0; i < g_plugin_count; i++)
     {
         if (g_plugins[i].builtin)
         {
@@ -647,14 +666,26 @@ void PicoPlugins_Reload(PicoHost *app)
         }
     }
     LoadUsers(app);
-    PicoAgentManager_LoadProfiles(app->agents);
-    PicoAgentManager_RevalidateToolPolicies(app->agents);
-    PicoAgentManager_NotifySessions(app->agents);
-    PicoAgentManager_ReplayToolDetails(app->agents);
+    for (i = 0; i < app->workspace_count; i++)
+    {
+        if (app->workspaces[i])
+        {
+            PicoWorkspace_LoadProfiles(app->workspaces[i]);
+            PicoWorkspace_RevalidateToolPolicies(app->workspaces[i]);
+            PicoWorkspace_NotifySessions(app->workspaces[i]);
+            PicoWorkspace_ReplayToolDetails(app->workspaces[i]);
+        }
+    }
     app->reload_queued = false;
     if (!app->workspace_change_queued)
     {
-        PicoAgentManager_SetAcceptingWork(app->agents, true);
+        for (i = 0; i < app->workspace_count; i++)
+        {
+            if (app->workspaces[i])
+            {
+                PicoWorkspace_SetAcceptingWork(app->workspaces[i], true);
+            }
+        }
     }
 }
 
@@ -832,9 +863,12 @@ bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
     }
     g_plugins[index].enabled = enabled;
     app->reload_queued = true;
-    if (app->agents)
+    for (int i = 0; i < app->workspace_count; i++)
     {
-        PicoAgentManager_SetAcceptingWork(app->agents, false);
+        if (app->workspaces[i])
+        {
+            PicoWorkspace_SetAcceptingWork(app->workspaces[i], false);
+        }
     }
     return true;
 }

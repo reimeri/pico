@@ -3,7 +3,7 @@
 
 #include "../agent_internal.h"
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "pico/md_view.h"
 #include "chat_sel.h"
 #include "chat.h"
@@ -771,7 +771,7 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
 
 static const char *SubagentActivity(PicoHost *app, const PicoTraceLine *line)
 {
-    PicoAgent *child = line->child_id ? PicoAgentManager_Find(app->agents, line->child_id) : NULL;
+    PicoAgent *child = line->child_id ? PicoHost_FindAgent(app, line->child_id) : NULL;
     if (child)
     {
         return child->activity[0] ? child->activity : "Thinking…";
@@ -1583,7 +1583,7 @@ static PicoTraceLine *FindToolLine(PicoHost *app, PicoAgentId agent_id, const ch
     {
         return NULL;
     }
-    agent = PicoAgentManager_Find(app->agents, agent_id);
+    agent = PicoHost_FindAgent(app, agent_id);
     if (!agent)
     {
         return NULL;
@@ -1639,12 +1639,12 @@ static void SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, v
 
 static void InspectRefreshFrame(PicoHost *app, InspectFrame *frame)
 {
-    if (!app || !app->agents || !frame || frame->child_id || frame->session_id[0] ||
+    if (!app || !frame || frame->child_id || frame->session_id[0] ||
         frame->fallback || !frame->parent_id || !frame->tool_call_id)
     {
         return;
     }
-    PicoAgent *parent = PicoAgentManager_Find(app->agents, frame->parent_id);
+    PicoAgent *parent = PicoHost_FindAgent(app, frame->parent_id);
     for (int i = parent ? parent->message_count - 1 : -1; i >= 0; i--)
     {
         PicoMessage *message = &parent->messages[i];
@@ -1673,7 +1673,7 @@ static bool InspectCurrent(PicoHost *app, PicoSubagentInspect *out, const char *
     {
         *fallback = frame->fallback;
     }
-    return PicoAgentManager_InspectSubagent(app, &line, out);
+    return PicoWorkspace_InspectSubagent(app, &line, out);
 }
 
 static void InspectFollowScroll(void)
@@ -1847,7 +1847,7 @@ static void InspectRender(PicoHost *app, void *state)
                     if (found && inspect.message_count > 0)
                     {
                         PicoAgent *owner =
-                            inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+                            inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
                         TranscriptView view = {
                             .app = app,
                             .messages = inspect.messages,
@@ -2324,7 +2324,7 @@ static void PicoChat_DrawChevrons(PicoHost *app)
             if (InspectScrollClip(&clip))
             {
                 PicoAgent *owner =
-                    inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+                    inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
                 TranscriptView view = {
                     .app = app,
                     .messages = inspect.messages,
@@ -2463,7 +2463,7 @@ static void PicoChat_DrawInspectSheen(PicoHost *app)
     {
         return;
     }
-    PicoAgent *owner = inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+    PicoAgent *owner = inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
     TranscriptView view = {
         .app = app,
         .messages = inspect.messages,

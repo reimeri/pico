@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
 #include "pico/plugin.h"
@@ -106,7 +106,7 @@ typedef struct TestState {
     PicoAgentId llm_agent_id;
     PicoAgentId context_agent_id;
     PicoAgentId hook_agent_id;
-    bool context_manager_matches;
+    bool context_workspace_matches;
     char context_workspace[4096];
 } TestState;
 
@@ -135,7 +135,7 @@ static int g_auth_frees;
 static int g_random_hex_calls;
 static FakeSessionState g_fake_session;
 static char g_config_dir[4096] = "/tmp/pico-agent-behavior";
-static PicoAgentManager *g_expected_context_manager;
+static PicoWorkspace *g_expected_context_workspace;
 
 static void ResetTest(TestMode mode, int tool_limit)
 {
@@ -208,9 +208,9 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.llm_agent_id = 0;
     g_test.context_agent_id = 0;
     g_test.hook_agent_id = 0;
-    g_test.context_manager_matches = false;
+    g_test.context_workspace_matches = false;
     g_test.context_workspace[0] = '\0';
-    g_expected_context_manager = NULL;
+    g_expected_context_workspace = NULL;
     pthread_mutex_unlock(&g_test.mu);
     g_plugin_shutdowns = 0;
     g_auth_frees = 0;
@@ -272,8 +272,8 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     SnapshotTurn(turn);
     snprintf(g_test.context_workspace, sizeof(g_test.context_workspace), "%s",
              pico_agent_context_workspace(ctx));
-    g_test.context_manager_matches = !g_expected_context_manager ||
-                                     PicoAgentContext_Manager(ctx) == g_expected_context_manager;
+    g_test.context_workspace_matches = !g_expected_context_workspace ||
+                                     PicoAgentContext_Workspace(ctx) == g_expected_context_workspace;
     bool child_turn = pico_agent_context_profile(ctx)[0] != '\0';
     if (child_turn)
     {
@@ -607,8 +607,8 @@ static void LateDelegateTool(PicoAgentContext *ctx, const char *args_json, PicoT
     pthread_mutex_unlock(&g_test.mu);
 
     bool is_error = false;
-    char *result = PicoAgentManager_Delegate(ctx, "exploration", "late task", NULL,
-                                             &is_error);
+    char *result = PicoWorkspace_Delegate(ctx, "exploration", "late task", NULL,
+                                           &is_error);
     if (out)
     {
         out->output = result;
@@ -1179,7 +1179,7 @@ void PicoPlugins_Reload(PicoHost *app)
     if (app)
     {
         app->reload_queued = false;
-        PicoAgentManager_SetAcceptingWork(app->agents, true);
+        PicoWorkspace_SetAcceptingWork(PicoHost_PrimaryWorkspace(app), true);
     }
 }
 
@@ -1444,10 +1444,12 @@ static void InitApp(PicoHost *app)
     workspace->id = app->next_workspace_id++;
     snprintf(workspace->path, sizeof(workspace->path), ".");
     workspace->state = PICO_WORKSPACE_OPEN;
-    workspace->agents = PicoAgentManager_Create(workspace);
+    pthread_mutex_init(&workspace->delegation_mu, NULL);
+    pthread_mutex_init(&workspace->lifecycle_mu, NULL);
+    pthread_mutex_init(&workspace->ui_post_mu, NULL);
+    workspace->accepting_work = true;
     app->workspaces[0] = workspace;
     app->workspace_count = 1;
-    app->agents = workspace->agents;
     pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
     pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL);
     PicoAgentCreateOptions options = {
@@ -1787,7 +1789,7 @@ static int TestReloadQuiescence(void)
     }
 
     PicoHost_RequestReload(&app);
-    if (!app.reload_queued || PicoAgentManager_AcceptsNewWork(app.agents) || g_plugin_reloads != 0)
+    if (!app.reload_queued || PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)) || g_plugin_reloads != 0)
     {
         return Fail(name, "reload did not queue behind live extension work");
     }
@@ -1807,7 +1809,7 @@ static int TestReloadQuiescence(void)
         return Fail(name, "a new turn started while reload was queued");
     }
     pico_host_pump(&app);
-    bool ok = !app.reload_queued && PicoAgentManager_AcceptsNewWork(app.agents) &&
+    bool ok = !app.reload_queued && PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)) &&
               g_plugin_reloads == 1;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "reload did not run exactly once after quiescence");
@@ -1837,7 +1839,7 @@ static int TestDeferredWorkspaceChange(void)
         return Fail(name, "workspace request was not accepted while busy");
     }
     if (!app.workspace_change_queued || strcmp(PicoHost_PrimaryWorkspace(&app)->path, old_dir) != 0 ||
-        PicoAgentManager_AcceptsNewWork(app.agents))
+        PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)))
     {
         return Fail(name, "workspace mutated before the quiescence barrier");
     }
@@ -1851,21 +1853,21 @@ static int TestDeferredWorkspaceChange(void)
         return Fail(name, "old workspace did not drain");
     }
     pico_host_pump(&app);
-    g_expected_context_manager = app.agents;
+    g_expected_context_workspace = PicoHost_PrimaryWorkspace(&app);
     PicoAgent_StartTurn(&app, TestAgent(&app), "verify rebound workspace");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "replacement agent did not run");
     }
     pthread_mutex_lock(&g_test.mu);
-    bool rebound = g_test.context_manager_matches && strcmp(g_test.context_workspace, new_dir) == 0;
+    bool rebound = g_test.context_workspace_matches && strcmp(g_test.context_workspace, new_dir) == 0;
     pthread_mutex_unlock(&g_test.mu);
-    g_expected_context_manager = NULL;
+    g_expected_context_workspace = NULL;
     PicoAgentInfo ignored;
     bool ok = !app.workspace_change_queued && strcmp(PicoHost_PrimaryWorkspace(&app)->path, new_dir) == 0 &&
               pico_agent_count(&app) == 1 && pico_agent_active(&app) != old_id &&
               !pico_agent_find(&app, old_id, &ignored) && rebound &&
-              PicoAgentManager_AcceptsNewWork(app.agents) && g_plugin_reloads == 1;
+              PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)) && g_plugin_reloads == 1;
     PicoHost_Shutdown(&app);
     rmdir(old_dir);
     rmdir(new_dir);
@@ -2082,7 +2084,7 @@ static int TestShutdownTimeout(void)
     PicoHost rejected;
     memset(&rejected, 0, sizeof(rejected));
     PicoHost_Start(&rejected, NULL, ".", false, PICO_SESSION_NONE, NULL);
-    bool rejected_init = rejected.terminal_shutdown && rejected.agents == NULL;
+    bool rejected_init = rejected.terminal_shutdown && rejected.workspace_count == 0;
     return saw_live_state && rejected_init ? 0 :
            Fail(name, "detached worker saw torn-down state or Pico reinitialized after retained shutdown");
 }
@@ -3210,7 +3212,7 @@ static int TestWorkerContextCapturesRegistrationGeneration(void)
     return captured == 7 ? 0 : Fail(name, "turn worker did not retain the workspace registration generation");
 }
 
-#include "agent_manager_test.c"
+#include "workspace_test.c"
 #include "subagent_config_test.c"
 #include "subagent_test.c"
 

@@ -373,7 +373,7 @@ static const char *kLifecycleExt =
     "    FILE *f = Life();\n"
     "    if (f)\n"
     "    {\n"
-    "        fputc(workspace ? 'Y' : 'N', f);\n"
+    "        fputc(workspace && pico_workspace_host(workspace) ? 'Y' : 'N', f);\n"
     "        fclose(f);\n"
     "    }\n"
     "    free(state);\n"
@@ -536,6 +536,59 @@ static int TestWorkspaceShutdownSeesOwningWorkspace(void)
     return 0;
 }
 
+static int TestWorkspaceChangeSeesOwningWorkspace(void)
+{
+    char cfg[256];
+    char cache[256];
+    char ws[256];
+    char ws2[256];
+    char life[512];
+    char log[16];
+    PicoHost *host = NULL;
+
+    cfg[0] = cache[0] = ws[0] = ws2[0] = '\0';
+    if (StartLifecycleHost(&host, cfg, cache, ws, life, 0) != 0)
+    {
+        FinishLifecycleHost(host, cfg, cache, ws);
+        return 1;
+    }
+    snprintf(ws2, sizeof(ws2), "/tmp/pico-ws2-XXXXXX");
+    if (!mkdtemp(ws2))
+    {
+        Fail("mkdtemp ws2");
+        FinishLifecycleHost(host, cfg, cache, ws);
+        return 1;
+    }
+    if (!PicoHost_ChangeWorkspace(host, ws2))
+    {
+        Fail("request change workspace");
+        FinishLifecycleHost(host, cfg, cache, ws);
+        RmRf(ws2);
+        return 1;
+    }
+    pico_host_pump(host);
+    ReadFileStr(life, log, sizeof(log));
+    if (log[0] != 'Y')
+    {
+        Fail("workspace change must call workspace_shutdown on the old valid workspace");
+        FinishLifecycleHost(host, cfg, cache, ws);
+        RmRf(ws2);
+        return 1;
+    }
+    pico_host_free(host);
+    host = NULL;
+    ReadFileStr(life, log, sizeof(log));
+    FinishLifecycleHost(NULL, cfg, cache, ws);
+    RmRf(ws2);
+    if (strcmp(log, "YHYH") != 0)
+    {
+        fprintf(stderr, "actual log: %s\n", log);
+        Fail("workspace shutdown must run cleanly for both workspaces without use-after-free");
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (TestCanonicalOpenAndDuplicate() != 0)
@@ -559,6 +612,10 @@ int main(void)
         return 1;
     }
     if (TestWorkspaceShutdownSeesOwningWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspaceChangeSeesOwningWorkspace() != 0)
     {
         return 1;
     }

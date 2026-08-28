@@ -124,26 +124,33 @@ int main(int argc, char **argv)
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
     RichText_SetMeasureFunction(Pico_MeasureTextUtf8, fonts);
 
-    PicoHost app = {0};
-    PicoHost_Start(&app, fonts, workspace, safe_mode, session_start, session_file);
+    PicoHost *app = NULL;
+    if (pico_host_init(&app, fonts, safe_mode) != PICO_OK || !app)
+    {
+        fprintf(stderr, "Pico could not initialize.\n");
+        Pico_UnloadFonts(fonts);
+        Clay_Raylib_Close();
+        return 1;
+    }
+    PicoHost_Start(app, fonts, workspace, safe_mode, session_start, session_file);
     while (!WindowShouldClose())
     {
         if (Pico_NeedsClayReinit())
         {
-            Pico_ReinitClay(fonts, app.debug_enabled);
+            Pico_ReinitClay(fonts, app->debug_enabled);
         }
-        PicoHost_Frame(&app);
+        PicoHost_Frame(app);
     }
 
     char session_path[4096];
     session_path[0] = '\0';
-    const PicoAgent *active = PicoHost_ActiveAgentConst(&app);
+    const PicoAgent *active = PicoHost_ActiveAgentConst(app);
     if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0] &&
         access(active->session_path, F_OK) == 0)
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
-    PicoHostShutdownResult shutdown = PicoHost_Shutdown(&app);
+    PicoHostShutdownResult shutdown = pico_host_free(app);
 
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();

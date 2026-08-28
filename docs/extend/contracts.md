@@ -38,8 +38,8 @@ Named delegation is a worker/main-thread handshake: the parent tool waits on a c
 - `PicoAgentContext *` and all strings returned by its accessors: callback-scoped; never retain them.
 - `PicoToolEvent.name` / `call_id` / `args_json` / `output` / `details_json`, `PicoToolRowEvent.name` / `call_id` / `args_json` / `output` / `child_session_id`, `PicoLlmEvent.tools` / `instructions`, and `PicoContextEvent.history_json` / `tools`: core-owned and valid only during the callback.
 - `PicoToolEvent.args_json_out` / `result`, `PicoLlmEvent.extra_instructions`, and `PicoContextEvent.extra_context`: malloc if you set them; Pico frees.
-- Host `agent_input`: malloc if you set it; Pico frees.
-- Host `agent_parts`: optional malloc'd JSON array of canonical user parts; Pico frees.
+- `pico_host_set_agent_input(host, text)`: `text` is malloc'd and ownership transfers to Pico.
+- `pico_host_set_agent_parts(host, parts_json)`: optional malloc'd JSON array of canonical user parts; Pico frees.
 - `pico_agent_set_compact_summary(host, agent_id, summary)`: `summary` is malloc'd and ownership transfers to Pico.
 - `PicoLlmResult` strings/arrays: malloc; Pico calls `pico_llm_result_free`. This includes every nested item/part string (`thinking` / `thinking_signature` on assistant items, `item_id` on tool-call items, `path` / `url` / `mime` on media parts). Providers must project replay-critical state into canonical result items; unknown provider-native output types fail the turn instead of being dropped. Do not store file bytes in history or result JSON.
 - `shutdown` must join threads you started. `dlclose` follows `shutdown`.
@@ -79,7 +79,7 @@ Registrations are ignored when a limit is full, arguments are NULL, or the kind/
 
 ## `PicoHost` and `PicoWorkspace`
 
-`PicoHost` and `PicoWorkspace` are opaque. Prefer `pico_add_*` / `pico_host_add_*` / `pico_workspace_add_*` and the host fields listed in the topic pages (`submit_cancel`, `agent_input`). Conversation/runtime/session/model/usage fields live in opaque manager-owned `PicoAgent` instances. Use the copied `pico_agent_*` snapshots. See [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `agent_manager.h`, `host_internal.h`, `workspace_internal.h`, `session.h`, and `settings.h` are not extension API.
+`PicoHost` and `PicoWorkspace` are opaque. Prefer `pico_add_*` / `pico_host_add_*` / `pico_workspace_add_*` and the host setters listed in the topic pages (`pico_host_request_submit_cancel`, `pico_host_set_agent_input`, `pico_host_set_agent_parts`). Conversation/runtime/session/model/usage fields live in opaque manager-owned `PicoAgent` instances. Use the copied `pico_agent_*` snapshots. See [agents](agents.md). The private app-level `agent.h`, `agent_internal.h`, `agent_manager.h`, `host_internal.h`, `workspace_internal.h`, `session.h`, and `settings.h` are not extension API.
 
 The model catalog on the host is immutable while agents run. Each agent owns copied model/effort/context/compaction selection, so changing defaults or replaying a session does not mutate another live agent. `context_limit` comes from the selected catalog model when that model has one; root `settings.json` / `PICO_CONTEXT_LIMIT` is only a fallback.
 

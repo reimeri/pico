@@ -529,8 +529,9 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyfiledialogs
         ${raylib_SOURCE_DIR}/src)
     pico_warnings_are_errors(pico_host_workspace_tests)
+    set_target_properties(pico_host_workspace_tests PROPERTIES ENABLE_EXPORTS ON)
     target_compile_options(pico_host_workspace_tests PRIVATE -ffunction-sections -fdata-sections)
-    target_link_options(pico_host_workspace_tests PRIVATE -Wl,--gc-sections)
+    target_link_options(pico_host_workspace_tests PRIVATE -Wl,--gc-sections -rdynamic)
     target_compile_definitions(pico_host_workspace_tests PRIVATE
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"${CMAKE_C_COMPILER}\""

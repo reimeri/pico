@@ -402,8 +402,8 @@ static void FilesBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *eve
     {
         return;
     }
-    app->agent_input = expanded;
-    app->agent_parts = parts;
+    pico_host_set_agent_input(app, expanded);
+    pico_host_set_agent_parts(app, parts);
 }
 
 static int FilesInit(PicoHost *app, void **state_out)

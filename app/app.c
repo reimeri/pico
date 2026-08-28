@@ -243,13 +243,65 @@ static void ApplyStateToNewRegistrations(PicoHost *host, void *state)
     }
 }
 
+static void SortSlotViews(PicoHost *host, PicoUiSlot slot)
+{
+    int n;
+    int i;
+    int j;
+    PicoSlotView cur;
+    if (!host || slot < 0 || slot >= PICO_SLOT_COUNT)
+    {
+        return;
+    }
+    n = host->view_count[slot];
+    for (i = 1; i < n; i++)
+    {
+        cur = host->views[slot][i];
+        j = i;
+        while (j > 0 && host->views[slot][j - 1].z > cur.z)
+        {
+            host->views[slot][j] = host->views[slot][j - 1];
+            j--;
+        }
+        host->views[slot][j] = cur;
+    }
+}
+
+static void SortEmptyViews(PicoHost *host)
+{
+    int i;
+    int j;
+    PicoEmptyView cur;
+    if (!host)
+    {
+        return;
+    }
+    for (i = 1; i < host->empty_view_count; i++)
+    {
+        cur = host->empty_views[i];
+        j = i;
+        while (j > 0 && host->empty_views[j - 1].z > cur.z)
+        {
+            host->empty_views[j] = host->empty_views[j - 1];
+            j--;
+        }
+        host->empty_views[j] = cur;
+    }
+}
+
 void PicoHost_PublishRegistration(PicoHost *host, void *state)
 {
+    int slot;
     if (!host)
     {
         return;
     }
     ApplyStateToNewRegistrations(host, state);
+    for (slot = 0; slot < PICO_SLOT_COUNT; slot++)
+    {
+        SortSlotViews(host, slot);
+    }
+    SortEmptyViews(host);
     host->reg_scope = PICO_REG_NONE;
     host->reg_workspace = NULL;
     host->reg_state = NULL;
@@ -306,13 +358,19 @@ static void InsertSlotView(PicoHost *host, PicoUiSlot slot, int z, PicoSlotView 
     {
         return;
     }
+    view.z = z;
+    if (host->reg_scope != PICO_REG_NONE)
+    {
+        host->views[slot][n] = view;
+        host->view_count[slot]++;
+        return;
+    }
     i = n;
     while (i > 0 && host->views[slot][i - 1].z > z)
     {
         host->views[slot][i] = host->views[slot][i - 1];
         i--;
     }
-    view.z = z;
     host->views[slot][i] = view;
     host->view_count[slot]++;
 }
@@ -323,6 +381,36 @@ void pico_host_set_hovered_clickable(PicoHost *host)
     {
         host->hovered_clickable = true;
     }
+}
+
+void pico_host_request_submit_cancel(PicoHost *host)
+{
+    if (host)
+    {
+        host->submit_cancel = true;
+    }
+}
+
+void pico_host_set_agent_input(PicoHost *host, char *text)
+{
+    if (!host)
+    {
+        free(text);
+        return;
+    }
+    free(host->agent_input);
+    host->agent_input = text;
+}
+
+void pico_host_set_agent_parts(PicoHost *host, char *parts_json)
+{
+    if (!host)
+    {
+        free(parts_json);
+        return;
+    }
+    free(host->agent_parts);
+    host->agent_parts = parts_json;
 }
 
 void pico_host_add_view(PicoHost *host, PicoUiSlot slot, int z, PicoHostViewFn render)
@@ -367,14 +455,20 @@ static void InsertEmptyView(PicoHost *host, PicoEmptyKind kind, int z, PicoEmpty
     {
         return;
     }
+    view.kind = kind;
+    view.z = z;
+    if (host->reg_scope != PICO_REG_NONE)
+    {
+        host->empty_views[n] = view;
+        host->empty_view_count++;
+        return;
+    }
     i = n;
     while (i > 0 && host->empty_views[i - 1].z > z)
     {
         host->empty_views[i] = host->empty_views[i - 1];
         i--;
     }
-    view.kind = kind;
-    view.z = z;
     host->empty_views[i] = view;
     host->empty_view_count++;
 }
@@ -1244,10 +1338,7 @@ void PicoHost_Submit(PicoHost *app)
 
 void PicoHost_RequestSubmitCancel(PicoHost *host)
 {
-    if (host)
-    {
-        host->submit_cancel = true;
-    }
+    pico_host_request_submit_cancel(host);
 }
 
 void PicoHost_Cancel(PicoHost *app)
@@ -1601,10 +1692,12 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
     {
         Pico_DocsSetAppDir(GetApplicationDirectory());
         PicoHost_InitFields(host, fonts, safe_mode);
-        if (curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK)
+        if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
         {
-            host->curl_initialized = true;
+            pico_status_warn(host, "Could not initialize HTTP.");
+            return;
         }
+        host->curl_initialized = true;
         PicoSettings_Load(host);
         PicoAuth_Load(host);
     }
@@ -1889,11 +1982,15 @@ static void ApplyWorkspaceChange(PicoHost *host)
     host->agents = NULL;
     if (old_ws)
     {
+        old_ws->agents = NULL;
+    }
+    PicoPlugins_Shutdown(host);
+    if (old_ws)
+    {
         free(old_ws);
         host->workspaces[0] = NULL;
         host->workspace_count = 0;
     }
-    PicoPlugins_Shutdown(host);
     host->workspaces[0] = replacement;
     host->workspace_count = 1;
     host->agents = replacement->agents;
@@ -2142,11 +2239,18 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     host->agents = NULL;
     for (i = 0; i < host->workspace_count; i++)
     {
+        if (host->workspaces[i])
+        {
+            host->workspaces[i]->agents = NULL;
+        }
+    }
+    PicoPlugins_Shutdown(host);
+    for (i = 0; i < host->workspace_count; i++)
+    {
         free(host->workspaces[i]);
         host->workspaces[i] = NULL;
     }
     host->workspace_count = 0;
-    PicoPlugins_Shutdown(host);
     PicoAuth_Free(host);
     PicoHost_ClearMessages(host);
     free(host->composer.text);

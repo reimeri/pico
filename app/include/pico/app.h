@@ -62,7 +62,7 @@ typedef enum PicoEmptyKind {
 typedef enum PicoHook {
     PICO_HOOK_AFTER_LAYOUT = 0,
     PICO_HOOK_AFTER_RENDER,
-    PICO_HOOK_BEFORE_SUBMIT, /* set submit_cancel and/or agent_input */
+    PICO_HOOK_BEFORE_SUBMIT, /* pico_host_request_submit_cancel / pico_host_set_agent_input */
     PICO_HOOK_ON_SUBMIT,
     PICO_HOOK_ON_MESSAGE,
     PICO_HOOK_ON_COMPACT, /* pico_agent_set_compact_summary can replace the default briefing */
@@ -468,6 +468,12 @@ typedef struct PicoToolRowEntry {
 } PicoToolRowEntry;
 
 void pico_host_set_hovered_clickable(PicoHost *host);
+/* BEFORE_SUBMIT. Swallows the send. */
+void pico_host_request_submit_cancel(PicoHost *host);
+/* BEFORE_SUBMIT. Takes ownership of malloc'd replacement text; Pico frees it. */
+void pico_host_set_agent_input(PicoHost *host, char *text);
+/* BEFORE_SUBMIT. Takes ownership of malloc'd canonical parts JSON; Pico frees it. */
+void pico_host_set_agent_parts(PicoHost *host, char *parts_json);
 void pico_host_add_view(PicoHost *host, PicoUiSlot slot, int z, PicoHostViewFn render);
 void pico_workspace_add_view(PicoWorkspace *workspace, PicoUiSlot slot, int z, PicoWorkspaceViewFn render);
 void pico_host_add_empty_view(PicoHost *host, PicoEmptyKind kind, int z, PicoHostViewFn render);

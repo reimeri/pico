@@ -2,7 +2,6 @@
 
 #include "pico/plugin.h"
 #include "json.h"
-#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,10 +153,10 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
     }
 }
 
-static int ShellInit(PicoHost *app, void **state_out)
+static int ShellInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(PicoHost_PrimaryWorkspace(app), "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL);
+    pico_add_tool(workspace, "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL);
     return 0;
 }
 
@@ -167,6 +166,6 @@ PicoExt pico_ext_shell(void)
         .abi = PICO_EXT_ABI,
         .name = "sh",
         .description = "Shell tool",
-        .host_init = ShellInit,
+        .workspace_init = ShellInit,
     };
 }

@@ -177,10 +177,10 @@ static void ActivatePlugin(PicoHost *host, LoadedPlugin *p)
     {
         p->enabled = loaded;
     }
-    p->host_inited = false;
-    p->workspace_inited = false;
-    p->host_state = NULL;
-    p->workspace_state = NULL;
+    if (p->host_inited || p->workspace_inited)
+    {
+        ShutdownPlugin(host, p);
+    }
     if (!p->enabled)
     {
         return;
@@ -188,13 +188,10 @@ static void ActivatePlugin(PicoHost *host, LoadedPlugin *p)
     if (RunHostInit(host, p) != 0)
     {
         pico_status_warn(host, "host extension init failed");
-        ShutdownPlugin(host, p);
-        return;
     }
     if (RunWorkspaceInit(host, p) != 0)
     {
         pico_status_warn(host, "workspace extension init failed");
-        ShutdownPlugin(host, p);
     }
 }
 

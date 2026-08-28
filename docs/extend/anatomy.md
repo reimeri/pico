@@ -38,7 +38,7 @@ PicoExt pico_ext(void)
 - `host_shutdown` / `workspace_shutdown` — release instance state after the instance is quiescent.
 - `host_on_frame` / `workspace_on_frame` — main thread, once per frame, `dt` in seconds. Workspace `on_frame` must not draw.
 
-There is no unregister. Reload clears all registrations and calls `init` again for enabled extensions (builtins too). It then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
+There is no unregister. Reload shuts down every initialized instance once, clears all registrations, and calls `init` again for enabled extensions (builtins too). It then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
 
 `/extensions` (or F2) lists builtins and user sources. Click a row to toggle it off or on. Disabled extensions stay in the registry (compiled/`dlopen` for user sources) but skip `init` / `on_frame`. The builtin `extensions` manager cannot be turned off. Toggles persist as `disabled_extensions` in user `~/.config/pico/settings.json` (not workspace settings) and apply through the same reload path as F5.
 

@@ -1,5 +1,4 @@
 #include "pico/plugin.h"
-#include "host_internal.h"
 
 #include "agent_manager.h"
 #include "json.h"
@@ -66,7 +65,7 @@ static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolRe
 
 static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    PicoHost *app = workspace ? workspace->host : NULL;
+    PicoHost *app = pico_workspace_host(workspace);
     (void)state;
     (void)agent_id;
     bool offered = false;
@@ -109,13 +108,13 @@ static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, Pic
     event->extra_instructions = JsonBuf_Steal(&b);
 }
 
-static int SubagentInit(PicoHost *app, void **state_out)
+static int SubagentInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(PicoHost_PrimaryWorkspace(app), "subagent",
+    pico_add_tool(workspace, "subagent",
                   "Delegate a task synchronously to a discovered named subagent profile",
                   kSubagentParams, SubagentRun, NULL);
-    pico_add_llm_hook(PicoHost_PrimaryWorkspace(app), SubagentGuidance);
+    pico_add_llm_hook(workspace, SubagentGuidance);
     return 0;
 }
 
@@ -125,6 +124,6 @@ PicoExt pico_ext_subagent(void)
         .abi = PICO_EXT_ABI,
         .name = "subagent",
         .description = "Named synchronous subagent delegation",
-        .host_init = SubagentInit,
+        .workspace_init = SubagentInit,
     };
 }

@@ -275,6 +275,31 @@ typedef struct ComposerView {
 } ComposerView;
 
 static float s_wrap_width = 0;
+
+static float ComposerFallbackWrap(PicoApp *app)
+{
+    float width = (float)GetScreenWidth() - 80.0f;
+    float column = Pico_ChatColumnMaxPx(app);
+    if (column > 0.0f)
+    {
+        float inner = column - (float)(COMPOSER_PAD_X * 2);
+        if (inner > 10.0f && inner < width)
+        {
+            width = inner;
+        }
+    }
+    if (width < 10.0f)
+    {
+        width = 10.0f;
+    }
+    return width;
+}
+
+static float ComposerWrapWidth(PicoApp *app)
+{
+    return s_wrap_width > 10 ? s_wrap_width : ComposerFallbackWrap(app);
+}
+
 static float s_composer_width = 0;
 static int s_seen_cursor = -1;
 static int s_seen_length = -1;
@@ -1220,7 +1245,7 @@ static ComposerView GetComposerView(PicoApp *app)
     }
     if (v.wrap_width < 10)
     {
-        v.wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
+        v.wrap_width = ComposerWrapWidth(app);
     }
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ComposerScroll")));
     if (scroll.found && scroll.scrollPosition)
@@ -1272,7 +1297,7 @@ static void MoveVertical(PicoApp *app, int dir, bool extend)
     PicoComposer *c = &app->composer;
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = ComposerPx();
-    float wrap = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
+    float wrap = ComposerWrapWidth(app);
     int line_count = WrapComposer(c, ComposerFont(), wrap, lines, COMPOSER_MAX_LINES, &line_height);
     int line_i = 0;
     for (int i = 0; i < line_count; i++)
@@ -2092,7 +2117,7 @@ void PicoComposer_Render(PicoApp *app)
     PicoComposer *c = &app->composer;
     const char *placeholder = "Message Pico…  (Enter to send, Shift+Enter for newline)";
     bool empty = c->length == 0;
-    float wrap_width = s_wrap_width > 10 ? s_wrap_width : (float)GetScreenWidth() - 80;
+    float wrap_width = ComposerWrapWidth(app);
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = ComposerPx();
     int line_count = empty ? 1 : WrapComposer(c, ComposerFont(), wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
@@ -2113,13 +2138,27 @@ void PicoComposer_Render(PicoApp *app)
         box_h = max_h;
     }
 
-    CLAY(CLAY_ID("Composer"),
-         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .padding = {COMPOSER_PAD_X, COMPOSER_PAD_X, COMPOSER_PAD_Y, COMPOSER_PAD_Y},
-                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(box_h)}},
-          .backgroundColor = COLOR_COMPOSER_BG,
-          .cornerRadius = CLAY_CORNER_RADIUS(8)})
+    Clay_SizingAxis composer_width = CLAY_SIZING_GROW(0);
+    float column_max = Pico_ChatColumnMaxPx(app);
+    if (column_max > 0.0f)
     {
+        composer_width = CLAY_SIZING_GROW(0, column_max);
+    }
+
+    /* Match the fixed child height. FIT participates in Clay's vertical
+     * compression and can accumulate residue while chat follows the bottom. */
+    CLAY(CLAY_ID("ComposerAlign"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER},
+                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(box_h)}}})
+    {
+        CLAY(CLAY_ID("Composer"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .padding = {COMPOSER_PAD_X, COMPOSER_PAD_X, COMPOSER_PAD_Y, COMPOSER_PAD_Y},
+                         .sizing = {.width = composer_width, .height = CLAY_SIZING_FIXED(box_h)}},
+              .backgroundColor = COLOR_COMPOSER_BG,
+              .cornerRadius = CLAY_CORNER_RADIUS(8)})
+        {
         CLAY(CLAY_ID("ComposerRow"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = SCROLLBAR_GAP,
@@ -2171,6 +2210,7 @@ void PicoComposer_Render(PicoApp *app)
             }
         }
         PicoComplete_Render(app);
+        }
     }
 }
 

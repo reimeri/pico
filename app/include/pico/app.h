@@ -415,6 +415,7 @@ typedef struct PicoSettings {
     bool compact_enabled;
     bool resume_last;
     double font_scale;
+    int chat_width;
     char disabled_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
     int disabled_extension_count;
 } PicoSettings;

@@ -51,7 +51,7 @@ Kinds:
 
 `z` sorts within a kind the same way as slots. Max 16 empty views total (`PICO_MAX_EMPTY_VIEWS`). Invalid kind is a silent no-op.
 
-ABOVE/BELOW sit in the same max-900 column as the cards. REPLACE callbacks are children of `ChatContent` (full width); you own the layout.
+ABOVE/BELOW sit in the same `chat_width` column as the cards (`settings.json`, default 75 characters). REPLACE callbacks are children of `ChatContent` (that same column); you own the layout.
 
 Full file for a banner: [`../../examples/empty_banner.c`](../../examples/empty_banner.c).
 
@@ -64,7 +64,7 @@ static void CustomEmpty(PicoApp *app)
     CLAY(CLAY_ID("MyEmpty"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 8,
-                     .sizing = {.width = CLAY_SIZING_GROW(0, 900)}}})
+                     .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
         CLAY_TEXT(CLAY_STRING("Ready when you are"),
                   CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));

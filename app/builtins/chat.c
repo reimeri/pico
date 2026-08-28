@@ -311,12 +311,23 @@ static float ChatWidth(PicoApp *app)
     {
         width -= (float)(SCROLLBAR_WIDTH + SCROLLBAR_GAP);
     }
-    width -= 36; // message bubble padding
+    width -= CHAT_WRAP_CHROME;
+    width = Pico_ClampChatWidth(width, Pico_ChatTextMaxPx(app));
     if (width < 50)
     {
         width = 50;
     }
     return width;
+}
+
+static Clay_SizingAxis ChatColumnWidth(PicoApp *app)
+{
+    float column_max = Pico_ChatColumnMaxPx(app);
+    if (column_max > 0.0f)
+    {
+        return CLAY_SIZING_GROW(0, column_max);
+    }
+    return CLAY_SIZING_GROW(0);
 }
 
 static Clay_ElementId MessageId(const TranscriptView *view, int message_index)
@@ -983,7 +994,7 @@ static void RenderEmptyState(PicoApp *app)
     CLAY(CLAY_ID("EmptyStack"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 12,
-                     .sizing = {.width = CLAY_SIZING_GROW(0, 900)}}})
+                     .sizing = {.width = ChatColumnWidth(app)}}})
     {
         RunEmpty(app, PICO_EMPTY_ABOVE);
         RenderEmptyCards(app);
@@ -1336,13 +1347,14 @@ void PicoChat_Render(PicoApp *app)
     {
         CLAY(CLAY_ID("ChatScroll"),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER},
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
             bool empty = PicoApp_ActiveAgent(app)->message_count == 0;
             Clay_ChildAlignment align = empty ? (Clay_ChildAlignment){.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}
                                               : (Clay_ChildAlignment){0};
-            Clay_Sizing content_size = {.width = CLAY_SIZING_GROW(0)};
+            Clay_Sizing content_size = {.width = ChatColumnWidth(app)};
             if (empty)
             {
                 content_size.height = CLAY_SIZING_GROW(0);

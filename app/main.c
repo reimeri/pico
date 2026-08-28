@@ -48,7 +48,7 @@ static void PrintUsage(const char *argv0)
             "  PICO_EFFORT                       override selected_effort of the active model\n"
             "  PICO_FONT_SCALE                   override font_scale (0.5-3.0, default 1.0)\n"
             "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale,\n"
-            "                                    disabled_extensions}\n"
+            "                                    chat_width, disabled_extensions}\n"
             "  ~/.config/pico/auth.json          per-provider credentials (api_key or oauth)\n"
             "  /login openai                     Codex device-code (ChatGPT subscription)\n"
             "  /login hyper                      Hyper device-code (Charm subscription)\n"

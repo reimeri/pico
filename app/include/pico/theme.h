@@ -55,6 +55,8 @@ enum {
 #define SCROLLBAR_WIDTH 6
 #define SCROLLBAR_GAP 8
 #define BLOCK_SPACING 14
+#define CHAT_BODY_FONT_SIZE 18
+#define CHAT_WRAP_CHROME 36.0f
 
 Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 Font Pico_FontAt(uint16_t fontId, uint16_t fontSize);

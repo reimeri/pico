@@ -153,6 +153,86 @@ static bool ParseFontScale(const char *s, double *out)
     return true;
 }
 
+#define PICO_CHAT_WIDTH_DEFAULT 75
+#define PICO_CHAT_WIDTH_MIN 40
+#define PICO_CHAT_WIDTH_MAX 200
+
+static bool ParseChatWidth(const char *s, int *out)
+{
+    if (!s || !s[0] || !out)
+    {
+        return false;
+    }
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s)
+    {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t')
+    {
+        end++;
+    }
+    if (*end != '\0')
+    {
+        return false;
+    }
+    if (v == 0)
+    {
+        *out = 0;
+        return true;
+    }
+    if (v < PICO_CHAT_WIDTH_MIN || v > PICO_CHAT_WIDTH_MAX)
+    {
+        return false;
+    }
+    *out = (int)v;
+    return true;
+}
+
+float Pico_ClampChatWidth(float available, float text_max)
+{
+    if (!(text_max > 0.0f))
+    {
+        return available;
+    }
+    return available < text_max ? available : text_max;
+}
+
+static float ChatChWidth(void)
+{
+    Clay_TextElementConfig config = {
+        .fontId = FONT_REGULAR,
+        .fontSize = CHAT_BODY_FONT_SIZE,
+    };
+    Clay_StringSlice slice = {.length = 1, .chars = "0", .baseChars = "0"};
+    float width = Pico_MeasureTextUtf8(slice, &config, NULL).width;
+    if (width > 0.0f)
+    {
+        return width;
+    }
+    return Pico_FontPx(CHAT_BODY_FONT_SIZE) * 0.5f;
+}
+
+float Pico_ChatTextMaxPx(const PicoApp *app)
+{
+    if (!app || app->settings.chat_width <= 0)
+    {
+        return 0.0f;
+    }
+    return (float)app->settings.chat_width * ChatChWidth();
+}
+
+float Pico_ChatColumnMaxPx(const PicoApp *app)
+{
+    float text_max = Pico_ChatTextMaxPx(app);
+    if (!(text_max > 0.0f))
+    {
+        return 0.0f;
+    }
+    return text_max + CHAT_WRAP_CHROME;
+}
+
 static bool IsOffWord(const char *s)
 {
     return s && (strcmp(s, "null") == 0 || strcmp(s, "off") == 0 || strcmp(s, "false") == 0 ||
@@ -303,6 +383,16 @@ static void ApplyObject(PicoSettings *s, const JsonDoc *doc, int obj)
             s->font_scale = scale;
         }
         free(font_scale);
+    }
+    char *chat_width = JsonObjRaw(doc, obj, "chat_width");
+    if (chat_width)
+    {
+        int width;
+        if (ParseChatWidth(chat_width, &width))
+        {
+            s->chat_width = width;
+        }
+        free(chat_width);
     }
     free(model);
 }
@@ -637,6 +727,7 @@ void PicoSettings_Load(PicoApp *app)
     s->compact_enabled = true;
     s->compact_ratio = 0.9;
     s->font_scale = 1.0;
+    s->chat_width = PICO_CHAT_WIDTH_DEFAULT;
 
     char dir[4096];
     if (Pico_ConfigDir(dir, sizeof(dir)))

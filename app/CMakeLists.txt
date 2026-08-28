@@ -436,6 +436,22 @@ if(BUILD_TESTING)
     target_link_options(pico_font_scale_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_font_scale_tests COMMAND pico_font_scale_tests)
 
+    add_executable(pico_chat_width_tests
+        tests/chat_width_test.c
+        settings.c
+        json.c
+        theme.c
+        docs_path.c)
+    target_include_directories(pico_chat_width_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_chat_width_tests)
+    target_compile_options(pico_chat_width_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_chat_width_tests PRIVATE -Wl,--gc-sections)
+    add_test(NAME pico_chat_width_tests COMMAND pico_chat_width_tests)
+
     add_executable(pico_ui_tests
         tests/ui_test.c
         ui.c)

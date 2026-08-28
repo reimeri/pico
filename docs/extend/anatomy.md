@@ -5,10 +5,18 @@ Every user extension is one `.c` file that exports `pico_ext`:
 ```c
 #include "pico/plugin.h"
 
-static void MyInit(PicoApp *app)
+static int MyHostInit(PicoHost *host, void **state_out)
 {
-    /* pico_add_view / pico_add_tool / pico_add_tool_before_hook / pico_add_command / … */
-    (void)app;
+    (void)state_out;
+    pico_host_add_view(host, PICO_SLOT_SIDEBAR, 0, MyRender);
+    return 0;
+}
+
+static int MyWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)state_out;
+    pico_add_tool(workspace, "mytool", "Example tool", "{}", MyRun, NULL);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -17,17 +25,18 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "myext",
         .description = "Short summary shown in /extensions",
-        .init = MyInit,
+        .host_init = MyHostInit,
+        .workspace_init = MyWorkspaceInit,
     };
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 12). ABI 12 expands completion-item labels to 288 UTF-8 bytes. ABI 11 preserves raw tool-row arguments and subagent child identity, and adds `pico_ui_modal_is_top`. ABI 10 added the named UI mailbox (`pico_ui_post` / `pico_ui_latest` / `pico_ui_clear`). ABI 9 added the named modal stack (`pico_ui_modal_push` / `pop`) and tool-row click hooks (`pico_add_tool_row_hook`). There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 13). ABI 13 splits host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer. `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
-- `init` — register views/tools/hooks/commands. Called on load and after every reload when the extension is enabled.
-- `shutdown` — release extension-owned memory/threads before `dlclose`.
-- `on_frame` — main thread, once per frame, `dt` in seconds.
+- `host_init` / `workspace_init` — register through the matching context. Return 0 on success.
+- `host_shutdown` / `workspace_shutdown` — release instance state after the instance is quiescent.
+- `host_on_frame` / `workspace_on_frame` — main thread, once per frame, `dt` in seconds. Workspace `on_frame` must not draw.
 
 There is no unregister. Reload clears all registrations and calls `init` again for enabled extensions (builtins too). It then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
 
@@ -55,6 +64,6 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 F5, `/reload`, toggling an extension in `/extensions`, or a `.c` mtime change (polled ~0.5s). Reload is **deferred** until every live/retired runtime, pending ask, offered catalog, event, and delegation job is quiescent. A queued reload prevents new turns and delegations. Do not cache registration pointers beyond their documented callback lifetime.
 
-`/cd` queues a workspace transition behind the same barrier; `app->workspace` changes only when the old agent set can be replaced as one main-thread transition.
+`/cd` queues a workspace transition behind the same barrier; the live workspace path is immutable and changes only when the old agent set can be replaced as one main-thread transition.
 
 Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `prompt`, `diff`. `/extensions` or F2 lists them.

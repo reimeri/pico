@@ -470,6 +470,76 @@ if(BUILD_TESTING)
     target_include_directories(pico_docs_path_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_docs_path_tests)
     add_test(NAME pico_docs_path_tests COMMAND pico_docs_path_tests)
+
+    add_executable(pico_host_workspace_tests
+        tests/host_workspace_test.c
+        tests/clay_impl.c
+        app.c
+        ui.c
+        scrollbar.c
+        agent.c
+        agent_manager.c
+        plugin.c
+        subagent_config.c
+        json.c
+        canonical.c
+        usage.c
+        theme.c
+        docs_path.c
+        settings.c
+        auth.c
+        session.c
+        chat_sel.c
+        builtins/ask_user.c
+        builtins/subagent.c
+        builtins/todo.c
+        builtins/todo_model.c
+        builtins/chat.c
+        builtins/composer.c
+        builtins/footer.c
+        builtins/overlay.c
+        builtins/shell.c
+        builtins/commands.c
+        builtins/complete.c
+        builtins/files.c
+        builtins/openai.c
+        builtins/hyper.c
+        builtins/hyper_auth.c
+        builtins/xai.c
+        builtins/xai_auth.c
+        builtins/responses.c
+        builtins/completions.c
+        builtins/extensions.c
+        builtins/prompt.c
+        builtins/diff.c
+        markdown.c
+        md_view.c
+        richtext.c
+        text_range.c
+        wrapped_text.c
+        transcript_virtual.c
+        diff_lines.c
+        http.c
+        http_capture.c
+        third_party/tinyfiledialogs/tinyfiledialogs.c)
+    target_include_directories(pico_host_workspace_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyfiledialogs
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_host_workspace_tests)
+    target_compile_options(pico_host_workspace_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_host_workspace_tests PRIVATE -Wl,--gc-sections)
+    target_compile_definitions(pico_host_workspace_tests PRIVATE
+        "PICO_VERSION=\"${PROJECT_VERSION}\""
+        "PICO_CC=\"${CMAKE_C_COMPILER}\""
+        "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
+        "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
+        "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
+        "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
+    target_link_libraries(pico_host_workspace_tests PRIVATE raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()
 
 add_custom_command(

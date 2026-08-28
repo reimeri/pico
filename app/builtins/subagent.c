@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "host_internal.h"
 
 #include "agent_manager.h"
 #include "json.h"
@@ -13,8 +14,9 @@ static const char *kSubagentParams =
     "\"session_id\":{\"type\":\"string\",\"description\":\"Optional exact previous child session ID\"}},"
     "\"required\":[\"profile\",\"task\"]}";
 
-static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -62,8 +64,10 @@ static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolRe
     free(session_id);
 }
 
-static void SubagentGuidance(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *event)
+static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    (void)state;
     (void)agent_id;
     bool offered = false;
     for (int i = 0; event && event->include_tools && i < event->tool_count; i++)
@@ -105,12 +109,14 @@ static void SubagentGuidance(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *e
     event->extra_instructions = JsonBuf_Steal(&b);
 }
 
-static void SubagentInit(PicoApp *app)
+static int SubagentInit(PicoHost *app, void **state_out)
 {
-    pico_add_tool(app, "subagent",
+    (void)state_out;
+    pico_add_tool(PicoHost_PrimaryWorkspace(app), "subagent",
                   "Delegate a task synchronously to a discovered named subagent profile",
                   kSubagentParams, SubagentRun, NULL);
-    pico_add_llm_hook(app, SubagentGuidance);
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(app), SubagentGuidance);
+    return 0;
 }
 
 PicoExt pico_ext_subagent(void)
@@ -119,6 +125,6 @@ PicoExt pico_ext_subagent(void)
         .abi = PICO_EXT_ABI,
         .name = "subagent",
         .description = "Named synchronous subagent delegation",
-        .init = SubagentInit,
+        .host_init = SubagentInit,
     };
 }

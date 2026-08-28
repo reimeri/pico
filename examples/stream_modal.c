@@ -18,7 +18,7 @@ static char g_text[PICO_UI_POST_TEXT_MAX + 1];
 
 static const char *kParams = "{\"type\":\"object\",\"properties\":{}}";
 
-static void CloseModal(PicoApp *app)
+static void CloseModal(PicoHost *app)
 {
     if (!g_open)
     {
@@ -28,7 +28,7 @@ static void CloseModal(PicoApp *app)
     g_open = false;
 }
 
-static void OpenModal(PicoApp *app)
+static void OpenModal(PicoHost *app)
 {
     if (g_open)
     {
@@ -50,8 +50,9 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
-static void StreamRender(PicoApp *app)
+static void StreamRender(PicoHost *app, void *state)
 {
+    (void)state;
     float sw;
     float sh;
     if (!g_open)
@@ -98,8 +99,9 @@ static void StreamRender(PicoApp *app)
     }
 }
 
-static void StreamAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void StreamAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (!g_open)
     {
@@ -107,7 +109,7 @@ static void StreamAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("StreamModalCard"))))
     {
-        app->hovered_clickable = true;
+        pico_host_set_hovered_clickable(app);
         return;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
@@ -120,7 +122,7 @@ static void StreamAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void StreamOnFrame(PicoApp *app, float dt)
+static void StreamOnFrame(PicoHost *app, void *state, float dt)
 {
     PicoUiPost post;
     (void)dt;
@@ -143,8 +145,9 @@ static void StreamOnFrame(PicoApp *app, float dt)
     }
 }
 
-static void CmdStream(PicoApp *app, const char *args)
+static void CmdStream(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     if (g_open)
     {
@@ -158,11 +161,12 @@ static void CmdStream(PicoApp *app, const char *args)
         OpenModal(app);
     }
     PicoComposer_SetText(app, "");
-    app->submit_cancel = true;
+    PicoHost_RequestSubmitCancel(app);
 }
 
-static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)args_json;
     pico_ui_post(ctx, kName, PICO_UI_POST_STATUS, "searching", 9);
     pico_ui_post(ctx, kName, PICO_UI_POST_TEXT, "Query: example\n", 15);
@@ -176,18 +180,20 @@ static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoTool
     }
 }
 
-static void StreamToolRow(PicoApp *app, PicoToolRowEvent *ev)
+static void StreamToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
-    if (!ev || !ev->name || strcmp(ev->name, "stream_demo") != 0)
+    (void)state;
+    if (!event || !event->name || strcmp(event->name, "stream_demo") != 0)
     {
         return;
     }
-    OpenModal(app);
-    ev->handled = true;
+    OpenModal(pico_workspace_host(workspace));
+    event->handled = true;
 }
 
-static void StreamInit(PicoApp *app)
+static int StreamHostInit(PicoHost *app, void **state_out)
 {
+    (void)state_out;
     PicoUiPost post;
     if (pico_ui_latest(app, kName, &post) && !pico_ui_modal_has(app, kName))
     {
@@ -200,16 +206,24 @@ static void StreamInit(PicoApp *app)
     {
         (void)pico_ui_modal_push(app, kName);
     }
-    pico_add_view(app, PICO_SLOT_OVERLAY, 50, StreamRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
-    pico_add_command(app, "stream", "Toggle the streaming overlay modal", CmdStream);
-    pico_add_tool(app, "stream_demo", "Post fake search progress into the overlay mailbox", kParams,
-                  StreamDemoRun, NULL);
-    pico_add_tool_row_hook(app, StreamToolRow);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 50, StreamRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
+    pico_host_add_command(app, "stream", "Toggle the streaming overlay modal", CmdStream);
+    return 0;
 }
 
-static void StreamShutdown(PicoApp *app)
+static int StreamWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
+    (void)state_out;
+    pico_add_tool(workspace, "stream_demo", "Post fake search progress into the overlay mailbox", kParams,
+                  StreamDemoRun, NULL);
+    pico_add_tool_row_hook(workspace, StreamToolRow);
+    return 0;
+}
+
+static void StreamShutdown(PicoHost *app, void *state)
+{
+    (void)state;
     CloseModal(app);
 }
 
@@ -219,8 +233,9 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "stream-modal",
         .description = "Named mailbox streaming into an overlay modal",
-        .init = StreamInit,
-        .shutdown = StreamShutdown,
-        .on_frame = StreamOnFrame,
+        .host_init = StreamHostInit,
+        .workspace_init = StreamWorkspaceInit,
+        .host_shutdown = StreamShutdown,
+        .host_on_frame = StreamOnFrame,
     };
 }

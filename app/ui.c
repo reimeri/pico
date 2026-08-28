@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "host_internal.h"
 
 #include <string.h>
 
@@ -18,7 +19,7 @@ static bool CopyModalName(char *dst, size_t cap, const char *name)
     return true;
 }
 
-bool pico_ui_modal_push(PicoApp *app, const char *name)
+bool pico_ui_modal_push(PicoHost *app, const char *name)
 {
     int i;
     if (!app || app->ui_modal_count >= PICO_MAX_UI_MODALS)
@@ -40,7 +41,7 @@ bool pico_ui_modal_push(PicoApp *app, const char *name)
     return true;
 }
 
-bool pico_ui_modal_pop(PicoApp *app, const char *name)
+bool pico_ui_modal_pop(PicoHost *app, const char *name)
 {
     if (!app || app->ui_modal_count <= 0 || !name || !name[0])
     {
@@ -55,7 +56,7 @@ bool pico_ui_modal_pop(PicoApp *app, const char *name)
     return true;
 }
 
-const char *pico_ui_modal_top(const PicoApp *app)
+const char *pico_ui_modal_top(const PicoHost *app)
 {
     if (!app || app->ui_modal_count <= 0)
     {
@@ -64,17 +65,17 @@ const char *pico_ui_modal_top(const PicoApp *app)
     return app->ui_modals[app->ui_modal_count - 1];
 }
 
-int pico_ui_modal_count(const PicoApp *app)
+int pico_ui_modal_count(const PicoHost *app)
 {
     return app ? app->ui_modal_count : 0;
 }
 
-bool pico_ui_modal_claimed(const PicoApp *app)
+bool pico_ui_modal_claimed(const PicoHost *app)
 {
     return pico_ui_modal_count(app) > 0;
 }
 
-bool pico_ui_modal_has(const PicoApp *app, const char *name)
+bool pico_ui_modal_has(const PicoHost *app, const char *name)
 {
     int i;
     if (!app || !name || !name[0])
@@ -91,13 +92,13 @@ bool pico_ui_modal_has(const PicoApp *app, const char *name)
     return false;
 }
 
-bool pico_ui_modal_is_top(const PicoApp *app, const char *name)
+bool pico_ui_modal_is_top(const PicoHost *app, const char *name)
 {
     const char *top = pico_ui_modal_top(app);
     return top && name && name[0] && strcmp(top, name) == 0;
 }
 
-void pico_ui_modal_reset(PicoApp *app)
+void pico_ui_modal_reset(PicoHost *app)
 {
     if (!app)
     {
@@ -107,21 +108,24 @@ void pico_ui_modal_reset(PicoApp *app)
     app->ui_modal_count = 0;
 }
 
-void pico_add_tool_row_hook(PicoApp *app, PicoToolRowFn fn)
+void pico_add_tool_row_hook(PicoWorkspace *workspace, PicoToolRowFn fn)
 {
-    if (!app || !fn || app->tool_row_hook_count >= PICO_MAX_TOOL_ROW_HOOKS)
+    PicoHost *host = workspace ? workspace->host : NULL;
+    if (!host || !fn || host->tool_row_hook_count >= PICO_MAX_TOOL_ROW_HOOKS)
     {
         return;
     }
-    app->tool_row_hooks[app->tool_row_hook_count++] = fn;
+    host->tool_row_hooks[host->tool_row_hook_count].fn = fn;
+    host->tool_row_hook_count++;
 }
 
-bool pico_tool_row_activate(PicoApp *app, PicoAgentId agent_id, const PicoTraceLine *line)
+bool pico_tool_row_activate(PicoHost *host, PicoAgentId agent_id, const PicoTraceLine *line)
 {
     PicoToolRowEvent ev;
     int i;
+    PicoWorkspace *workspace;
 
-    if (!app || !line || !line->is_tool)
+    if (!host || !line || !line->is_tool)
     {
         return false;
     }
@@ -134,13 +138,14 @@ bool pico_tool_row_activate(PicoApp *app, PicoAgentId agent_id, const PicoTraceL
     ev.child_id = line->child_id;
     ev.child_session_id = line->child_session_id[0] ? line->child_session_id : NULL;
     ev.is_error = line->tool_error;
-    for (i = 0; i < app->tool_row_hook_count; i++)
+    workspace = PicoHost_PrimaryWorkspace(host);
+    for (i = 0; i < host->tool_row_hook_count; i++)
     {
-        if (!app->tool_row_hooks[i])
+        if (!host->tool_row_hooks[i].fn)
         {
             continue;
         }
-        app->tool_row_hooks[i](app, &ev);
+        host->tool_row_hooks[i].fn(workspace, &ev, host->tool_row_hooks[i].state);
         if (ev.handled)
         {
             return true;

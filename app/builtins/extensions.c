@@ -1,11 +1,12 @@
 #include "pico/plugin.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
 #include <string.h>
 
-static PicoApp *g_app;
+static PicoHost *g_app;
 static bool g_open;
 static bool g_overflow;
 static PicoScrollbar g_scrollbar;
@@ -214,8 +215,9 @@ static void RenderSection(bool builtin, Clay_String title)
     }
 }
 
-static void ExtsRender(PicoApp *app)
+static void ExtsRender(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     if (!g_open)
     {
@@ -284,8 +286,9 @@ static void ExtsRender(PicoApp *app)
     }
 }
 
-static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
@@ -322,7 +325,7 @@ static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void ExtsOnFrame(PicoApp *app, float dt)
+static void ExtsOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
@@ -356,16 +359,18 @@ static void ExtsOnFrame(PicoApp *app, float dt)
     }
 }
 
-static void CmdExtensions(PicoApp *app, const char *args)
+static void CmdExtensions(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     PicoExts_Open();
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;
 }
 
-static void ExtsInit(PicoApp *app)
+static int ExtsInit(PicoHost *app, void **state_out)
 {
+    (void)state_out;
     g_app = app;
     if (g_open && !pico_ui_modal_has(app, "extensions"))
     {
@@ -373,13 +378,15 @@ static void ExtsInit(PicoApp *app)
         g_overflow = false;
         memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     }
-    pico_add_command(app, "extensions", "Manage extensions", CmdExtensions);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
+    pico_host_add_command(app, "extensions", "Manage extensions", CmdExtensions);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
+    return 0;
 }
 
-static void ExtsShutdown(PicoApp *app)
+static void ExtsShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)Unclaim();
     g_open = false;
     g_overflow = false;
@@ -394,8 +401,8 @@ PicoExt pico_ext_extensions(void)
         .abi = PICO_EXT_ABI,
         .name = "extensions",
         .description = "Extension manager",
-        .init = ExtsInit,
-        .shutdown = ExtsShutdown,
-        .on_frame = ExtsOnFrame,
+        .host_init = ExtsInit,
+        .host_shutdown = ExtsShutdown,
+        .host_on_frame = ExtsOnFrame,
     };
 }

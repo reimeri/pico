@@ -15,7 +15,7 @@ static bool g_open;
 
 static const char *kParams = "{\"type\":\"object\",\"properties\":{}}";
 
-static void CloseModal(PicoApp *app)
+static void CloseModal(PicoHost *app)
 {
     if (!g_open)
     {
@@ -28,7 +28,7 @@ static void CloseModal(PicoApp *app)
     g_open = false;
 }
 
-static void OpenModal(PicoApp *app)
+static void OpenModal(PicoHost *app)
 {
     if (g_open)
     {
@@ -41,8 +41,9 @@ static void OpenModal(PicoApp *app)
     g_open = true;
 }
 
-static void ModalRender(PicoApp *app)
+static void ModalRender(PicoHost *app, void *state)
 {
+    (void)state;
     float sw;
     float sh;
     if (!g_open)
@@ -81,8 +82,9 @@ static void ModalRender(PicoApp *app)
     }
 }
 
-static void ModalAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void ModalAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (!g_open || !pico_ui_modal_is_top(app, kName))
     {
@@ -90,7 +92,7 @@ static void ModalAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ExampleModalCard"))))
     {
-        app->hovered_clickable = true;
+        pico_host_set_hovered_clickable(app);
         return;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
@@ -100,7 +102,7 @@ static void ModalAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void ModalOnFrame(PicoApp *app, float dt)
+static void ModalOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     if (!g_open || !pico_ui_modal_is_top(app, kName))
@@ -113,8 +115,9 @@ static void ModalOnFrame(PicoApp *app, float dt)
     }
 }
 
-static void CmdModal(PicoApp *app, const char *args)
+static void CmdModal(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     if (g_open)
     {
@@ -125,11 +128,12 @@ static void CmdModal(PicoApp *app, const char *args)
         OpenModal(app);
     }
     PicoComposer_SetText(app, "");
-    app->submit_cancel = true;
+    PicoHost_RequestSubmitCancel(app);
 }
 
-static void ModalDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void ModalDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)args_json;
     if (out)
@@ -139,32 +143,42 @@ static void ModalDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolR
     }
 }
 
-static void ModalToolRow(PicoApp *app, PicoToolRowEvent *ev)
+static void ModalToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
-    if (!ev || !ev->name || strcmp(ev->name, "modal_demo") != 0)
+    (void)state;
+    if (!event || !event->name || strcmp(event->name, "modal_demo") != 0)
     {
         return;
     }
-    OpenModal(app);
-    ev->handled = true;
+    OpenModal(pico_workspace_host(workspace));
+    event->handled = true;
 }
 
-static void ModalInit(PicoApp *app)
+static int ModalHostInit(PicoHost *app, void **state_out)
 {
+    (void)state_out;
     if (g_open && !pico_ui_modal_has(app, kName))
     {
         (void)pico_ui_modal_push(app, kName);
     }
-    pico_add_view(app, PICO_SLOT_OVERLAY, 50, ModalRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ModalAfterLayout);
-    pico_add_command(app, "modal", "Toggle the example overlay modal", CmdModal);
-    pico_add_tool(app, "modal_demo", "Open the example overlay from its tool row", kParams, ModalDemoRun,
-                  NULL);
-    pico_add_tool_row_hook(app, ModalToolRow);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 50, ModalRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ModalAfterLayout);
+    pico_host_add_command(app, "modal", "Toggle the example overlay modal", CmdModal);
+    return 0;
 }
 
-static void ModalShutdown(PicoApp *app)
+static int ModalWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
+    (void)state_out;
+    pico_add_tool(workspace, "modal_demo", "Open the example overlay from its tool row", kParams, ModalDemoRun,
+                  NULL);
+    pico_add_tool_row_hook(workspace, ModalToolRow);
+    return 0;
+}
+
+static void ModalShutdown(PicoHost *app, void *state)
+{
+    (void)state;
     CloseModal(app);
     g_open = false;
 }
@@ -175,8 +189,9 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "modal",
         .description = "Named overlay modal and tool-row click example",
-        .init = ModalInit,
-        .shutdown = ModalShutdown,
-        .on_frame = ModalOnFrame,
+        .host_init = ModalHostInit,
+        .workspace_init = ModalWorkspaceInit,
+        .host_shutdown = ModalShutdown,
+        .host_on_frame = ModalOnFrame,
     };
 }

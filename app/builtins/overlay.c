@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "host_internal.h"
 
 #include "../agent_internal.h"
 #include "../composer_internal.h"
@@ -27,7 +28,7 @@ static char *g_ask_msg;
 static bool g_ask_overflow;
 static PicoScrollbar g_ask_bar;
 
-void PicoOverlay_Notify(PicoApp *app, const char *text)
+void PicoOverlay_Notify(PicoHost *app, const char *text)
 {
     (void)app;
     free(g_notify);
@@ -44,9 +45,9 @@ void PicoOverlay_Notify(PicoApp *app, const char *text)
     }
 }
 
-static bool HasError(const PicoApp *app)
+static bool HasError(const PicoHost *app)
 {
-    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    const PicoAgent *agent = PicoHost_ActiveAgentConst(app);
     return (app->status_warn && app->status_warn[0]) || (agent->error && agent->error[0]);
 }
 
@@ -69,13 +70,13 @@ static void ClearAskUi(void)
     memset(&g_ask_bar, 0, sizeof(g_ask_bar));
 }
 
-static void RejectInvalidAsk(PicoApp *app, uint64_t id)
+static void RejectInvalidAsk(PicoHost *app, uint64_t id)
 {
     ClearAskUi();
     pico_tool_answer(app, id, INVALID_ASK_ANSWER);
 }
 
-static void PrepareAsk(PicoApp *app)
+static void PrepareAsk(PicoHost *app)
 {
     PicoToolAsk ask;
     if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
@@ -126,7 +127,7 @@ static void AskButton(Clay_String id, const char *label)
     }
 }
 
-static void RenderAsk(PicoApp *app)
+static void RenderAsk(PicoHost *app)
 {
     PrepareAsk(app);
     if (!g_ask_show)
@@ -206,10 +207,10 @@ static void RenderAsk(PicoApp *app)
     }
 }
 
-static void RenderError(PicoApp *app)
+static void RenderError(PicoHost *app)
 {
     const char *warn = app->status_warn;
-    const char *agent = (!warn || !warn[0]) ? PicoApp_ActiveAgent(app)->error : NULL;
+    const char *agent = (!warn || !warn[0]) ? PicoHost_ActiveAgent(app)->error : NULL;
     if ((!warn || !warn[0]) && (!agent || !agent[0]))
     {
         return;
@@ -260,7 +261,7 @@ static float NotifyRemaining(void)
     return remaining;
 }
 
-static void RenderToast(PicoApp *app)
+static void RenderToast(PicoHost *app)
 {
     if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
     {
@@ -296,15 +297,17 @@ static void RenderToast(PicoApp *app)
     }
 }
 
-void PicoOverlay_Render(PicoApp *app)
+void PicoOverlay_Render(PicoHost *app, void *state)
 {
+    (void)state;
     RenderError(app);
     RenderToast(app);
     RenderAsk(app);
 }
 
-void PicoOverlay_OnFrame(PicoApp *app, float dt)
+void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
 {
+    (void)state;
     if (g_ask_show)
     {
         PicoScrollbar_UpdateDrag(&g_ask_bar, CLAY_STRING("AskModalScroll"),
@@ -337,8 +340,9 @@ static bool OverAsk(Clay_String id)
     return Clay_PointerOver(CLAY_SID(id));
 }
 
-static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (g_ask_show)
     {
@@ -362,7 +366,7 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
         }
     }
 
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !PicoApp_ActiveAgent(app)->error))
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !PicoHost_ActiveAgent(app)->error))
     {
         return;
     }
@@ -374,17 +378,18 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
             free(app->status_warn);
             app->status_warn = NULL;
         }
-        else if (PicoApp_ActiveAgent(app)->error && PicoApp_ActiveAgent(app)->state == PICO_AGENT_ERROR)
+        else if (PicoHost_ActiveAgent(app)->error && PicoHost_ActiveAgent(app)->state == PICO_AGENT_ERROR)
         {
-            free(PicoApp_ActiveAgent(app)->error);
-            PicoApp_ActiveAgent(app)->error = NULL;
-            PicoApp_ActiveAgent(app)->state = PICO_AGENT_IDLE;
+            free(PicoHost_ActiveAgent(app)->error);
+            PicoHost_ActiveAgent(app)->error = NULL;
+            PicoHost_ActiveAgent(app)->state = PICO_AGENT_IDLE;
         }
     }
 }
 
-static void OverlayAfterRender(PicoApp *app, const PicoHookEvent *event)
+static void OverlayAfterRender(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)app;
     (void)event;
     if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
@@ -426,11 +431,13 @@ static void OverlayAfterRender(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void OverlayInit(PicoApp *app)
+static int OverlayInit(PicoHost *app, void **state_out)
 {
-    pico_add_view(app, PICO_SLOT_OVERLAY, 0, PicoOverlay_Render);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, OverlayAfterLayout);
-    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, OverlayAfterRender);
+    (void)state_out;
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 0, PicoOverlay_Render);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, OverlayAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, OverlayAfterRender);
+    return 0;
 }
 
 PicoExt pico_ext_overlay(void)
@@ -439,7 +446,7 @@ PicoExt pico_ext_overlay(void)
         .abi = PICO_EXT_ABI,
         .name = "overlay",
         .description = "Errors and notifications",
-        .init = OverlayInit,
-        .on_frame = PicoOverlay_OnFrame,
+        .host_init = OverlayInit,
+        .host_on_frame = PicoOverlay_OnFrame,
     };
 }

@@ -2,6 +2,7 @@
 
 #include "../agent_internal.h"
 #define _POSIX_C_SOURCE 200809L
+#include "host_internal.h"
 
 #include "pico/plugin.h"
 #include "agent.h"
@@ -25,12 +26,12 @@
 
 #include "raylib.h"
 
-static void Note(PicoApp *app, const char *text)
+static void Note(PicoHost *app, const char *text)
 {
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, text);
 }
 
-static void ClearComposer(PicoApp *app)
+static void ClearComposer(PicoHost *app)
 {
     PicoComposer_SetText(app, "");
 }
@@ -94,8 +95,9 @@ static bool FoldContains(const char *s, const char *needle)
     return false;
 }
 
-static void CmdModel(PicoApp *app, const char *args)
+static void CmdModel(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
         args++;
@@ -107,13 +109,14 @@ static void CmdModel(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    PicoSettings_SetModel(app, PicoApp_ActiveAgent(app), args);
+    PicoSettings_SetModel(app, PicoHost_ActiveAgent(app), args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
 
-static void CmdEffort(PicoApp *app, const char *args)
+static void CmdEffort(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
         args++;
@@ -125,15 +128,16 @@ static void CmdEffort(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    PicoSettings_SetEffort(app, PicoApp_ActiveAgent(app), args);
+    PicoSettings_SetEffort(app, PicoHost_ActiveAgent(app), args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
 
-static void CmdCompact(PicoApp *app, const char *args)
+static void CmdCompact(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
-    PicoAgent_Compact(app, PicoApp_ActiveAgent(app));
+    PicoAgent_Compact(app, PicoHost_ActiveAgent(app));
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -164,24 +168,26 @@ static void RelAge(char *out, size_t cap, time_t mtime)
     }
 }
 
-static void CmdNew(PicoApp *app, const char *args)
+static void CmdNew(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
+    if (PicoAgent_IsBusy(PicoHost_ActiveAgent(app)))
     {
         PicoOverlay_Notify(app, "Wait until the agent is idle before starting a new session.");
         ClearComposer(app);
         app->submit_cancel = true;
         return;
     }
-    PicoSession_Reset(app, PicoApp_ActiveAgent(app));
+    PicoSession_Reset(app, PicoHost_ActiveAgent(app));
     PicoOverlay_Notify(app, "New session.");
     ClearComposer(app);
     app->submit_cancel = true;
 }
 
-static void CmdResume(PicoApp *app, const char *args)
+static void CmdResume(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
         args++;
@@ -193,7 +199,7 @@ static void CmdResume(PicoApp *app, const char *args)
         PicoComplete_Refresh(app);
         return;
     }
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
+    if (PicoAgent_IsBusy(PicoHost_ActiveAgent(app)))
     {
         Note(app, "Wait until the agent is idle before resuming a session.");
         ClearComposer(app);
@@ -217,8 +223,9 @@ static void CmdResume(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
-static void CmdQuit(PicoApp *app, const char *args)
+static void CmdQuit(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     ClearComposer(app);
     app->submit_cancel = true;
@@ -231,8 +238,9 @@ static const char *const kDocTopics[] = {
 
 static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);
 
-static void CmdDocs(PicoApp *app, const char *args)
+static void CmdDocs(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     ClearComposer(app);
     app->submit_cancel = true;
     char rel[256];
@@ -269,8 +277,9 @@ static void CmdDocs(PicoApp *app, const char *args)
     free(src);
 }
 
-static void CmdHelp(PicoApp *app, const char *args)
+static void CmdHelp(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     char buf[1024];
     size_t n = 0;
@@ -285,7 +294,7 @@ static void CmdHelp(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
-static const PicoAuth *OnlyAuth(PicoApp *app)
+static const PicoAuth *OnlyAuth(PicoHost *app)
 {
     return app->auth_count == 1 ? &app->auths[0] : NULL;
 }
@@ -310,7 +319,7 @@ static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...)
     return n < cap ? n : cap - 1;
 }
 
-static void ListAuthProviders(PicoApp *app, const char *prefix)
+static void ListAuthProviders(PicoHost *app, const char *prefix)
 {
     char buf[1024];
     size_t n = Append(buf, sizeof(buf), 0, "%s", prefix);
@@ -328,14 +337,14 @@ static void ListAuthProviders(PicoApp *app, const char *prefix)
     Note(app, buf);
 }
 
-static void RunLogin(PicoApp *app, const PicoAuth *a, const char *args)
+static void RunLogin(PicoHost *app, const PicoAuth *a, const char *args)
 {
     if (!a || !a->login)
     {
         Note(app, "That provider has no login.");
         return;
     }
-    a->login(app, args ? args : "");
+    a->login(app, args ? args : "", a->state);
 }
 
 static const char *Trim(const char *s)
@@ -349,8 +358,9 @@ static const char *Trim(const char *s)
 
 /* Sub-verbs like `key` or `cancel` belong to the provider, so an argument that is
  * not a provider name is forwarded verbatim for the provider to interpret. */
-static void CmdLogin(PicoApp *app, const char *args)
+static void CmdLogin(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     const char *all = Trim(args);
     char first[64];
     const char *rest = "";
@@ -372,8 +382,9 @@ static void CmdLogin(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
-static void CmdLogout(PicoApp *app, const char *args)
+static void CmdLogout(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     char first[64];
     const char *rest = "";
     SplitPrefix(Trim(args), first, sizeof(first), &rest);
@@ -384,7 +395,7 @@ static void CmdLogout(PicoApp *app, const char *args)
     }
     else if (a->logout)
     {
-        a->logout(app);
+        a->logout(app, a->state);
     }
     else
     {
@@ -397,10 +408,11 @@ static void CmdLogout(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
-static void CmdReload(PicoApp *app, const char *args)
+static void CmdReload(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
-    PicoApp_RequestReload(app);
+    PicoHost_RequestReload(app);
     Note(app, "Reloading extensions…");
     ClearComposer(app);
     app->submit_cancel = true;
@@ -483,8 +495,9 @@ static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out
     return 0;
 }
 
-static void CmdCd(PicoApp *app, const char *args)
+static void CmdCd(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     while (args && *args && isspace((unsigned char)*args))
     {
         args++;
@@ -497,13 +510,14 @@ static void CmdCd(PicoApp *app, const char *args)
         return;
     }
 
-    PicoApp_ChangeWorkspace(app, args);
+    PicoHost_ChangeWorkspace(app, args);
     ClearComposer(app);
     app->submit_cancel = true;
 }
 
-static int CdQuery(PicoApp *app, const char *rest, PicoCompleteItem *out, int max)
+static int CdQuery(PicoHost *app, const char *rest, PicoCompleteItem *out, int max, void *state)
 {
+    (void)state;
     if (!rest)
     {
         rest = "";
@@ -539,7 +553,7 @@ static int CdQuery(PicoApp *app, const char *rest, PicoCompleteItem *out, int ma
     char list_dir[4096];
     if (!parent_typed[0])
     {
-        const char *ws = app->workspace[0] ? app->workspace : ".";
+        const char *ws = PicoHost_Path(app);
         if (!realpath(ws, list_dir))
         {
             return 0;
@@ -550,7 +564,7 @@ static int CdQuery(PicoApp *app, const char *rest, PicoCompleteItem *out, int ma
         char parent_arg[4096];
         snprintf(parent_arg, sizeof(parent_arg), "%s", parent_typed);
         StripTrailingSlashes(parent_arg);
-        if (ResolveWorkspaceDir(app->workspace, parent_arg, list_dir, sizeof(list_dir)) != 0)
+        if (ResolveWorkspaceDir(PicoHost_Path(app), parent_arg, list_dir, sizeof(list_dir)) != 0)
         {
             return 0;
         }
@@ -598,7 +612,7 @@ static int CdQuery(PicoApp *app, const char *rest, PicoCompleteItem *out, int ma
     return n;
 }
 
-static const PicoCommand *FindCommand(PicoApp *app, const char *name)
+static const PicoCommand *FindCommand(PicoHost *app, const char *name)
 {
     for (int i = 0; i < app->command_count; i++)
     {
@@ -695,7 +709,7 @@ static int AuthVerbs(const PicoAuth *a, const char *insert_prefix, const char *p
     return n;
 }
 
-static int AuthQuery(PicoApp *app, bool is_login, const char *rest, PicoCompleteItem *out, int max)
+static int AuthQuery(PicoHost *app, bool is_login, const char *rest, PicoCompleteItem *out, int max)
 {
     char first[64];
     const char *tail = "";
@@ -734,8 +748,9 @@ static int AuthQuery(PicoApp *app, bool is_login, const char *rest, PicoComplete
     return n;
 }
 
-static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
+static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
+    (void)state;
     char cmd[64];
     const char *rest = "";
     SplitPrefix(prefix, cmd, sizeof(cmd), &rest);
@@ -793,7 +808,7 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     }
     if (FoldEq(cmd, "effort"))
     {
-        PicoModel *m = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+        PicoModel *m = PicoSettings_ActiveModel(app, PicoHost_ActiveAgent(app));
         if (!m)
         {
             return 0;
@@ -850,7 +865,7 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
             snprintf(out[n].label, sizeof(out[n].label), "%s", s->title);
             char age[32];
             RelAge(age, sizeof(age), s->mtime);
-            if (s->id[0] && FoldEq(s->id, PicoApp_ActiveAgent(app)->session_id))
+            if (s->id[0] && FoldEq(s->id, PicoHost_ActiveAgent(app)->session_id))
             {
                 snprintf(out[n].detail, sizeof(out[n].detail), "current · %s", age);
             }
@@ -866,15 +881,17 @@ static int CommandQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out,
     }
     if (FoldEq(cmd, "cd"))
     {
-        return CdQuery(app, rest, out, max);
+        return CdQuery(app, rest, out, max, state);
     }
     return 0;
 }
 
-static void CommandsBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
+static void CommandsBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    (void)state;
     (void)event;
-    if (app->submit_cancel || !app->composer.text)
+    if (!app || app->submit_cancel || !app->composer.text)
     {
         return;
     }
@@ -891,25 +908,34 @@ static void CommandsBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
     {
         return;
     }
-    found->run(app, rest);
+    if (found->host_run)
+    {
+        found->host_run(app, rest, found->state);
+    }
+    else if (found->workspace_run && found->workspace)
+    {
+        found->workspace_run(found->workspace, rest, found->state);
+    }
 }
 
-static void CommandsInit(PicoApp *app)
+static int CommandsInit(PicoHost *app, void **state_out)
 {
-    pico_add_command(app, "model", "Switch model", CmdModel);
-    pico_add_command(app, "effort", "Set reasoning effort for this model", CmdEffort);
-    pico_add_command(app, "login", "Sign in a provider", CmdLogin);
-    pico_add_command(app, "logout", "Sign out a provider", CmdLogout);
-    pico_add_command(app, "new", "Start a new session", CmdNew);
-    pico_add_command(app, "resume", "Resume a previous session", CmdResume);
-    pico_add_command(app, "cd", "Change workspace directory", CmdCd);
-    pico_add_command(app, "compact", "Compact the current session", CmdCompact);
-    pico_add_command(app, "quit", "Quit Pico", CmdQuit);
-    pico_add_command(app, "help", "List commands", CmdHelp);
-    pico_add_command(app, "docs", "Show extension docs", CmdDocs);
-    pico_add_command(app, "reload", "Reload extensions", CmdReload);
-    pico_add_completer(app, '/', true, CommandQuery, NULL);
-    pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, CommandsBeforeSubmit);
+    (void)state_out;
+    pico_host_add_command(app, "model", "Switch model", CmdModel);
+    pico_host_add_command(app, "effort", "Set reasoning effort for this model", CmdEffort);
+    pico_host_add_command(app, "login", "Sign in a provider", CmdLogin);
+    pico_host_add_command(app, "logout", "Sign out a provider", CmdLogout);
+    pico_host_add_command(app, "new", "Start a new session", CmdNew);
+    pico_host_add_command(app, "resume", "Resume a previous session", CmdResume);
+    pico_host_add_command(app, "cd", "Change workspace directory", CmdCd);
+    pico_host_add_command(app, "compact", "Compact the current session", CmdCompact);
+    pico_host_add_command(app, "quit", "Quit Pico", CmdQuit);
+    pico_host_add_command(app, "help", "List commands", CmdHelp);
+    pico_host_add_command(app, "docs", "Show extension docs", CmdDocs);
+    pico_host_add_command(app, "reload", "Reload extensions", CmdReload);
+    pico_host_add_completer(app, '/', true, CommandQuery, NULL);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_BEFORE_SUBMIT, CommandsBeforeSubmit);
+    return 0;
 }
 
 PicoExt pico_ext_commands(void)
@@ -918,6 +944,6 @@ PicoExt pico_ext_commands(void)
         .abi = PICO_EXT_ABI,
         .name = "commands",
         .description = "Slash commands",
-        .init = CommandsInit,
+        .host_init = CommandsInit,
     };
 }

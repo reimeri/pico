@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "settings.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,9 +80,9 @@ static int LoadChatWidth(const char *json_body, int *out)
         }
     }
 
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    PicoHost_SetPath(&app, temp);
     setenv("XDG_CONFIG_HOME", temp, 1);
     PicoSettings_Load(&app);
     *out = app.settings.chat_width;

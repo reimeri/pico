@@ -2,16 +2,16 @@
 
 Four families:
 
-- **Notifications** — `pico_add_hook`. Main thread, with a `PicoHookEvent` target.
+- **Notifications** — `pico_host_add_hook` / `pico_workspace_add_hook`. Main thread, with a `PicoHookEvent` target.
 - **Tool interceptors** — `pico_add_tool_before_hook` and `pico_add_tool_after_hook`.
 - **LLM/request context** — `pico_add_llm_hook` and `pico_add_context_hook`, with a target agent ID.
 - **Tool-row clicks** — `pico_add_tool_row_hook`. Main thread, when a chat tool row is activated.
 
 ```c
-pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
-pico_add_tool_before_hook(app, MyBeforeTool);
-pico_add_tool_after_hook(app, MyAfterTool);
-pico_add_llm_hook(app, MyBeforeLlm);
+pico_host_add_hook(host, PICO_HOOK_BEFORE_SUBMIT, MyBeforeSubmit);
+pico_add_tool_before_hook(workspace, MyBeforeTool);
+pico_add_tool_after_hook(workspace, MyAfterTool);
+pico_add_llm_hook(workspace, MyBeforeLlm);
 ```
 
 Callbacks run in registration order. Each family has its corresponding `PICO_MAX_*_HOOKS` limit.
@@ -19,9 +19,11 @@ Callbacks run in registration order. Each family has its corresponding `PICO_MAX
 ## Notifications
 
 ```c
-static void MyHook(PicoApp *app, const PicoHookEvent *event)
+static void MyHook(PicoHost *host, const PicoHookEvent *event, void *state)
 {
     PicoAgentId target = event->agent_id;
+    (void)host;
+    (void)state;
 }
 ```
 
@@ -42,17 +44,18 @@ All notifications run on the main thread. Agent-scoped notifications carry the a
 
 ## BEFORE_SUBMIT
 
-`PicoApp_Submit` clears `submit_cancel`, `agent_input`, and `agent_parts`, then runs the hook. Set `app->submit_cancel = true` to swallow the send. Set `app->agent_input` to a malloc'd replacement sent to the model; the composer text remains the display text and Pico frees the replacement. Whitespace-only composer text is skipped unless pasted image attachments are present.
+`PicoHost_Submit` clears `submit_cancel`, `agent_input`, and `agent_parts`, then runs the hook. Set `host->submit_cancel = true` to swallow the send. Set `host->agent_input` to a malloc'd replacement sent to the model; the composer text remains the display text and Pico frees the replacement. Whitespace-only composer text is skipped unless pasted image attachments are present.
 
-For structured input, set `app->agent_parts` to a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When `agent_parts` is set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. After the hook, Pico validates `agent_parts`, then appends any pasted composer images (or builds `[text, image…]` when hooks left parts unset). Invalid hook parts reject the submission without discarding the composer draft. Pasted images also block submission, preserving the draft, when the active model does not support vision. Chat display may include markdown images for those files; `agent_input` and the text part stay as typed/hook text. Pico frees `agent_parts` after submit or cancellation.
+For structured input, set `host->agent_parts` to a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When `agent_parts` is set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. After the hook, Pico validates `agent_parts`, then appends any pasted composer images (or builds `[text, image…]` when hooks left parts unset). Invalid hook parts reject the submission without discarding the composer draft. Pasted images also block submission, preserving the draft, when the active model does not support vision. Chat display may include markdown images for those files; `agent_input` and the text part stay as typed/hook text. Pico frees `agent_parts` after submit or cancellation.
 
 ## ON_COMPACT
 
 ```c
-static void OnCompact(PicoApp *app, const PicoHookEvent *event)
+static void OnCompact(PicoHost *host, const PicoHookEvent *event, void *state)
 {
     char *briefing = /* malloc */;
-    pico_agent_set_compact_summary(app, event->agent_id, briefing);
+    (void)state;
+    pico_agent_set_compact_summary(host, event->agent_id, briefing);
 }
 ```
 
@@ -61,12 +64,13 @@ Call only during `PICO_HOOK_ON_COMPACT`. Pico takes ownership. A stale/mismatche
 ## Before-tool interceptor
 
 ```c
-static void Before(PicoAgentContext *ctx, PicoToolEvent *event)
+static void Before(PicoAgentContext *ctx, PicoToolEvent *event, void *state)
 {
+    (void)state;
     /* worker thread; callback-scoped ctx */
 }
 
-pico_add_tool_before_hook(app, Before);
+pico_add_tool_before_hook(workspace, Before);
 ```
 
 Before hooks run on the worker immediately before the offered tool. They may rewrite `args_json_out`, set `deny`, set a malloc'd denial `result`, or call `pico_tool_ask(ctx, ...)`. First deny stops later before hooks. Cancellation wins over denial.
@@ -76,12 +80,14 @@ The callback may overlap worker callbacks for other agents. Do not use Clay/UI o
 ## After-tool interceptor
 
 ```c
-static void After(PicoApp *app, PicoAgentId agent_id, PicoToolEvent *event)
+static void After(PicoWorkspace *workspace, PicoAgentId agent_id, PicoToolEvent *event, void *state)
 {
+    (void)workspace;
+    (void)state;
     /* serialized main thread */
 }
 
-pico_add_tool_after_hook(app, After);
+pico_add_tool_after_hook(workspace, After);
 ```
 
 After hooks run on the main thread after structured details have been applied. A malloc'd `event->result` rewrites model-visible output; later hooks see the rewrite. They are skipped on turn cancellation.
@@ -99,8 +105,10 @@ Hidden or unoffered calls invoke neither before nor after hooks.
 ## LLM interceptor
 
 ```c
-static void Llm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *event)
+static void Llm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
+    (void)workspace;
+    (void)state;
     event->extra_instructions = JsonDup("Prefer short answers.");
 }
 ```
@@ -114,17 +122,18 @@ The provider receives a retained copy of the final catalog. `/show-prompt` runs 
 ## Tool-row click
 
 ```c
-static void OnRow(PicoApp *app, PicoToolRowEvent *ev)
+static void OnRow(PicoWorkspace *workspace, PicoToolRowEvent *ev, void *state)
 {
+    (void)state;
     if (!ev->name || strcmp(ev->name, "web_search") != 0)
     {
         return;
     }
-    (void)pico_ui_modal_push(app, "web_search");
+    (void)pico_ui_modal_push(pico_workspace_host(workspace), "web_search");
     ev->handled = true;
 }
 
-pico_add_tool_row_hook(app, OnRow);
+pico_add_tool_row_hook(workspace, OnRow);
 ```
 
 Chat calls `pico_tool_row_activate` when the user activates a tool row (main transcript or nested inspect). Hooks run in registration order on the main thread. The first hook that sets `handled` skips later hooks and the default expand/collapse. Builtin `subagent` inspect is one of these hooks.

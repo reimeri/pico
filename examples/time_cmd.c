@@ -8,19 +8,22 @@
 
 #include <time.h>
 
-static void TimeCmd(PicoApp *app, const char *args)
+static void TimeCmd(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     time_t now = time(NULL);
     char *line = ctime(&now);
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
+    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
     PicoComposer_SetText(app, "");
-    app->submit_cancel = true;
+    PicoHost_RequestSubmitCancel(app);
 }
 
-static void TimeInit(PicoApp *app)
+static int TimeInit(PicoHost *app, void **state_out)
 {
-    pico_add_command(app, "time", "Show the local time", TimeCmd);
+    (void)state_out;
+    pico_host_add_command(app, "time", "Show the local time", TimeCmd);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -29,6 +32,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "time",
         .description = "Show the local time",
-        .init = TimeInit,
+        .host_init = TimeInit,
     };
 }

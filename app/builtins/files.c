@@ -7,6 +7,7 @@
 #include "json.h"
 #include "path.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -122,12 +123,12 @@ static void Walk(const char *root, const char *rel, int depth)
     closedir(d);
 }
 
-static void FilesRebuild(PicoApp *app)
+static void FilesRebuild(PicoHost *app)
 {
     FilesClear();
-    if (app && app->workspace[0])
+    if (app && PicoHost_Path(app)[0])
     {
-        Walk(app->workspace, "", 0);
+        Walk(PicoHost_Path(app), "", 0);
     }
     g_scanned = true;
 }
@@ -166,8 +167,9 @@ static const char *BaseName(const char *path)
     return slash ? slash + 1 : path;
 }
 
-int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
+int pico_files_complete(PicoHost *app, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
+    (void)state;
     uint64_t token_id = PicoComplete_TokenId();
     if (!g_scanned || token_id != g_token_id)
     {
@@ -379,21 +381,23 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
     return inline_text;
 }
 
-static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
+static void FilesBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    (void)state;
     (void)event;
-    if (app->submit_cancel || !app->composer.text)
+    if (!app || app->submit_cancel || !app->composer.text)
     {
         return;
     }
     bool vision = false;
-    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+    PicoModel *model = PicoSettings_ActiveModel(app, PicoHost_ActiveAgent(app));
     if (model)
     {
         vision = model->vision;
     }
     char *parts = NULL;
-    char *expanded = pico_files_expand_mentions(app->workspace, app->composer.text, vision, &parts);
+    char *expanded = pico_files_expand_mentions(PicoHost_Path(app), app->composer.text, vision, &parts);
     if (!expanded)
     {
         return;
@@ -402,10 +406,12 @@ static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
     app->agent_parts = parts;
 }
 
-static void FilesInit(PicoApp *app)
+static int FilesInit(PicoHost *app, void **state_out)
 {
-    pico_add_completer(app, '@', false, pico_files_complete, NULL);
-    pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
+    (void)state_out;
+    pico_host_add_completer(app, '@', false, pico_files_complete, NULL);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
+    return 0;
 }
 
 void pico_files_reset(void)
@@ -414,8 +420,9 @@ void pico_files_reset(void)
     g_token_id = 0;
 }
 
-static void FilesShutdown(PicoApp *app)
+static void FilesShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     pico_files_reset();
 }
@@ -426,7 +433,7 @@ PicoExt pico_ext_files(void)
         .abi = PICO_EXT_ABI,
         .name = "files",
         .description = "Workspace file completion",
-        .init = FilesInit,
-        .shutdown = FilesShutdown,
+        .host_init = FilesInit,
+        .host_shutdown = FilesShutdown,
     };
 }

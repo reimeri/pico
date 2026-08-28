@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "subagent_config.h"
 #include "usage.h"
+#include "host_internal.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -262,8 +263,9 @@ static void SnapshotTurn(const PicoLlmTurn *turn)
 }
 
 static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
+    (void)state;
     pthread_mutex_lock(&g_test.mu);
     SnapshotTurn(turn);
     snprintf(g_test.context_workspace, sizeof(g_test.context_workspace), "%s",
@@ -500,8 +502,9 @@ static void StoreAskResult(int invocation, int step, int rc, char *answer)
     pthread_mutex_unlock(&g_test.mu);
 }
 
-static void AskTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void AskTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)args_json;
     if (out)
     {
@@ -567,8 +570,9 @@ static void AskTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult
     }
 }
 
-static void EchoTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void EchoTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     pthread_mutex_lock(&g_test.mu);
     g_test.tool_invocations++;
@@ -582,8 +586,9 @@ static void EchoTool(PicoAgentContext *ctx, const char *args_json, PicoToolResul
     }
 }
 
-static void LateDelegateTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void LateDelegateTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)args_json;
     if (out)
     {
@@ -612,8 +617,9 @@ static void LateDelegateTool(PicoAgentContext *ctx, const char *args_json, PicoT
     }
 }
 
-static void UiPostTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void UiPostTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     TestMode mode;
     (void)args_json;
     if (out)
@@ -681,8 +687,9 @@ static void UiPostTool(PicoAgentContext *ctx, const char *args_json, PicoToolRes
     }
 }
 
-static void DetailsTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void DetailsTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)args_json;
     if (!out)
@@ -693,8 +700,9 @@ static void DetailsTool(PicoAgentContext *ctx, const char *args_json, PicoToolRe
     out->details_json = JsonDup("{\"value\":7}");
 }
 
-static void InvalidDetailsTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void InvalidDetailsTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)args_json;
     if (!out)
@@ -705,9 +713,10 @@ static void InvalidDetailsTool(PicoAgentContext *ctx, const char *args_json, Pic
     out->details_json = JsonDup("{\"value\":\"\xC3(\"}");
 }
 
-static bool ApplyDetails(PicoApp *app, PicoAgentId agent_id, const char *details_json, bool replay)
+static bool ApplyDetails(PicoWorkspace *workspace, PicoAgentId agent_id, const char *details_json, bool replay, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
     (void)replay;
     if (!details_json || !strstr(details_json, "\"value\":7"))
@@ -721,14 +730,16 @@ static bool ApplyDetails(PicoApp *app, PicoAgentId agent_id, const char *details
     return true;
 }
 
-static void DenyBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void DenyBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     (void)ctx;
     ev->deny = true;
 }
 
-static void AskBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void AskBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     (void)ev;
     char *answer = NULL;
     int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"gate\"}", &answer);
@@ -739,14 +750,16 @@ static void AskBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
     pthread_mutex_unlock(&g_test.mu);
 }
 
-static void RewriteArgsBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void RewriteArgsBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     (void)ctx;
     ev->args_json_out = JsonDup("{\"rewritten\":true}");
 }
 
-static void BlockingBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void BlockingBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)ev;
     pthread_mutex_lock(&g_test.mu);
@@ -762,8 +775,9 @@ static void BlockingBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
     pthread_mutex_unlock(&g_test.mu);
 }
 
-static void CountBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void CountBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)ev;
     pthread_mutex_lock(&g_test.mu);
@@ -771,122 +785,133 @@ static void CountBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
     pthread_mutex_unlock(&g_test.mu);
 }
 
-static void RewriteOutAfter(PicoApp *app, PicoAgentId agent_id, PicoToolEvent *ev)
+static void RewriteOutAfter(PicoWorkspace *workspace, PicoAgentId agent_id, PicoToolEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
-    ev->result = JsonDup("rewritten-output");
+    event->result = JsonDup("rewritten-output");
 }
 
-static void CaptureAfter(PicoApp *app, PicoAgentId agent_id, PicoToolEvent *ev)
+static void CaptureAfter(PicoWorkspace *workspace, PicoAgentId agent_id, PicoToolEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
     pthread_mutex_lock(&g_test.mu);
     free(g_test.after_seen_args);
-    g_test.after_seen_args = JsonDup(ev->args_json ? ev->args_json : "");
+    g_test.after_seen_args = JsonDup(event->args_json ? event->args_json : "");
     free(g_test.after_seen_output);
-    g_test.after_seen_output = JsonDup(ev->output ? ev->output : "");
+    g_test.after_seen_output = JsonDup(event->output ? event->output : "");
     free(g_test.after_seen_details);
-    g_test.after_seen_details = JsonDup(ev->details_json ? ev->details_json : "");
-    g_test.after_executed = ev->executed;
-    g_test.after_is_error = ev->is_error;
+    g_test.after_seen_details = JsonDup(event->details_json ? event->details_json : "");
+    g_test.after_executed = event->executed;
+    g_test.after_is_error = event->is_error;
     g_test.after_agent_id = agent_id;
     pthread_mutex_unlock(&g_test.mu);
 }
 
-static void LifeTurnEnd(PicoApp *app, const PicoHookEvent *event)
+static void LifeTurnEnd(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
-    (void)app;
-    (void)event;
+    (void)workspace;
+    (void)state;
     g_test.life_turn_end++;
     g_test.hook_agent_id = event ? event->agent_id : 0;
 }
 
-static void LifeCancel(PicoApp *app, const PicoHookEvent *event)
+static void LifeCancel(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)event;
     g_test.life_cancel++;
 }
 
-static void LifeError(PicoApp *app, const PicoHookEvent *event)
+static void LifeError(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)event;
     g_test.life_error++;
 }
 
-static void LifeAfterCompact(PicoApp *app, const PicoHookEvent *event)
+static void LifeAfterCompact(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)event;
     g_test.life_after_compact++;
 }
 
-static void ExtraInstructions(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void ExtraInstructions(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     g_test.llm_agent_id = agent_id;
-    ev->extra_instructions = JsonDup("injected-line");
+    event->extra_instructions = JsonDup("injected-line");
 }
 
-static void ExtraWhenTools(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void ExtraWhenTools(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
-    if (!ev->include_tools || ev->tool_count == 0)
+    if (!event->include_tools || event->tool_count == 0)
     {
         return;
     }
-    ev->extra_instructions = JsonDup("tool-notes");
+    event->extra_instructions = JsonDup("tool-notes");
 }
 
-static void ExcludeAskTest(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void ExcludeAskTest(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
-    if (!ev->exclude)
+    if (!event->exclude)
     {
         return;
     }
-    for (int i = 0; i < ev->tool_count; i++)
+    for (int i = 0; i < event->tool_count; i++)
     {
-        if (ev->tools[i].name && strcmp(ev->tools[i].name, "ask_test") == 0)
+        if (event->tools[i].name && strcmp(event->tools[i].name, "ask_test") == 0)
         {
-            ev->exclude[i] = true;
+            event->exclude[i] = true;
         }
     }
 }
 
-static void ExcludeAskUser(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void ExcludeAskUser(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
-    for (int i = 0; ev && ev->exclude && i < ev->tool_count; i++)
+    for (int i = 0; event && event->exclude && i < event->tool_count; i++)
     {
-        if (ev->tools[i].name && strcmp(ev->tools[i].name, "ask_user") == 0)
+        if (event->tools[i].name && strcmp(event->tools[i].name, "ask_user") == 0)
         {
-            ev->exclude[i] = true;
+            event->exclude[i] = true;
         }
     }
 }
 
-static void AddEphemeralContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
+static void AddEphemeralContext(PicoWorkspace *workspace, PicoAgentId agent_id, PicoContextEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     g_test.context_agent_id = agent_id;
-    ev->extra_context = JsonDup("ephemeral-context");
+    event->extra_context = JsonDup("ephemeral-context");
 }
 
-static void InspectBaseContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
+static void InspectBaseContext(PicoWorkspace *workspace, PicoAgentId agent_id, PicoContextEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
     bool saw_user_tail = false;
-    if (ev->history_count > 0)
+    if (event->history_count > 0)
     {
-        const char *last = ev->history_json[ev->history_count - 1];
+        const char *last = event->history_json[event->history_count - 1];
         saw_user_tail = last && strstr(last, "\"type\":\"user\"") != NULL &&
                         strstr(last, "ephemeral-context") == NULL;
     }
@@ -896,18 +921,18 @@ static void InspectBaseContext(PicoApp *app, PicoAgentId agent_id, PicoContextEv
 }
 
 /* Minimal host implementations used by the real agent worker. */
-void PicoSettings_Load(PicoApp *app)
+void PicoSettings_Load(PicoHost *app)
 {
     (void)app;
 }
 
-char *PicoSettings_LoadSystemPrompt(const PicoApp *app)
+char *PicoSettings_LoadSystemPrompt(const PicoHost *app)
 {
     (void)app;
     return JsonDup("");
 }
 
-char *PicoSettings_LoadSystemPromptSpans(const PicoApp *app, PicoPromptSpan *spans, int *span_count)
+char *PicoSettings_LoadSystemPromptSpans(const PicoHost *app, PicoPromptSpan *spans, int *span_count)
 {
     char *text = PicoSettings_LoadSystemPrompt(app);
     if (span_count)
@@ -924,19 +949,19 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoApp *app, PicoPromptSpan *spa
     return text;
 }
 
-PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent)
+PicoModel *PicoSettings_ActiveModel(PicoHost *app, const PicoAgent *agent)
 {
     (void)agent;
     return app && app->model_count > 0 ? &app->models[0] : NULL;
 }
 
-const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app, const PicoAgent *agent)
+const PicoModel *PicoSettings_ActiveModelConst(const PicoHost *app, const PicoAgent *agent)
 {
     (void)agent;
     return app && app->model_count > 0 ? &app->models[0] : NULL;
 }
 
-const PicoModel *PicoSettings_FindModelConst(const PicoApp *app, const char *id)
+const PicoModel *PicoSettings_FindModelConst(const PicoHost *app, const char *id)
 {
     if (!app || !id) return NULL;
     for (int i = 0; i < app->model_count; i++)
@@ -957,7 +982,7 @@ bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
     return false;
 }
 
-void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent)
+void PicoSettings_SyncAgent(const PicoHost *app, PicoAgent *agent)
 {
     (void)app;
     (void)agent;
@@ -970,7 +995,7 @@ const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
 }
 
 
-void PicoSettings_InitAgent(const PicoApp *app, PicoAgent *agent)
+void PicoSettings_InitAgent(const PicoHost *app, PicoAgent *agent)
 {
     if (!agent) return;
     snprintf(agent->model, sizeof(agent->model), "test-model");
@@ -1025,7 +1050,7 @@ void MdDocument_Free(MdDocument *doc)
     }
 }
 
-PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
+PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens)
 {
     (void)app;
@@ -1036,7 +1061,7 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
+PicoSessionWriteResult PicoSession_LogAssistant(PicoHost *app, PicoAgent *agent,
                                                 int message_group, const char *content,
                                                 const char *thinking, const char *thinking_signature,
                                                 const char *parts_json,
@@ -1064,7 +1089,7 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const char *content,
+PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent, const char *content,
                                            const char *display, const char *parts_json)
 {
     (void)app;
@@ -1079,7 +1104,7 @@ PicoSessionWriteResult PicoSession_LogUser(PicoApp *app, PicoAgent *agent, const
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
+PicoSessionWriteResult PicoSession_LogToolCall(PicoHost *app, PicoAgent *agent,
                                                int message_group, const char *call_id,
                                                const char *name, const char *args,
                                                const char *item_id)
@@ -1099,7 +1124,7 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent, const char *call_id, const char *name, const char *output,
+PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent, const char *call_id, const char *name, const char *output,
                                bool is_error, const char *details_json)
 {
     (void)app;
@@ -1112,7 +1137,7 @@ PicoSessionWriteResult PicoSession_LogToolResult(PicoApp *app, PicoAgent *agent,
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent, const char *summary, int tokens_before)
+PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent, const char *summary, int tokens_before)
 {
     (void)app;
     (void)agent;
@@ -1124,7 +1149,7 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoApp *app, PicoAgent *agent,
 static int g_log_title_calls;
 static char g_logged_title[PICO_COMPLETE_LABEL_MAX + 1];
 
-PicoSessionWriteResult PicoSession_LogTitle(PicoApp *app, PicoAgent *agent, const char *title)
+PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title)
 {
     (void)app;
     (void)agent;
@@ -1137,7 +1162,7 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoApp *app, PicoAgent *agent, cons
     return PICO_SESSION_WRITE_OK;
 }
 
-void PicoPlugins_Load(PicoApp *app)
+void PicoPlugins_Load(PicoHost *app)
 {
     if (app && app->reload_queued)
     {
@@ -1145,7 +1170,7 @@ void PicoPlugins_Load(PicoApp *app)
     }
 }
 
-void PicoPlugins_Reload(PicoApp *app)
+void PicoPlugins_Reload(PicoHost *app)
 {
     g_plugin_reloads++;
     if (app)
@@ -1155,29 +1180,29 @@ void PicoPlugins_Reload(PicoApp *app)
     }
 }
 
-void PicoPlugins_Shutdown(PicoApp *app)
+void PicoPlugins_Shutdown(PicoHost *app)
 {
     (void)app;
     g_plugin_shutdowns++;
 }
 
-void PicoOverlay_Notify(PicoApp *app, const char *message)
+void PicoOverlay_Notify(PicoHost *app, const char *message)
 {
     (void)app;
     (void)message;
 }
 
-void PicoAuth_Load(PicoApp *app)
+void PicoAuth_Load(PicoHost *app)
 {
     (void)app;
 }
 
-void PicoSession_Start(PicoApp *app, PicoAgent *agent, PicoSessionStart start, const char *session_file)
+void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, const char *session_file)
 {
     (void)app; (void)agent; (void)start; (void)session_file;
 }
 
-int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
+int PicoSession_Resolve(const PicoHost *app, const char *id, bool allow_prefix,
                         char *path, size_t path_cap)
 {
     (void)app;
@@ -1191,7 +1216,7 @@ int PicoSession_Resolve(const PicoApp *app, const char *id, bool allow_prefix,
     return 0;
 }
 
-int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
+int PicoSession_LoadTranscript(const PicoHost *app, const char *id,
                                PicoMessage **out, int *out_count)
 {
     (void)app;
@@ -1228,7 +1253,7 @@ int PicoSession_LoadTranscript(const PicoApp *app, const char *id,
     return 0;
 }
 
-int PicoSession_Replay(PicoApp *app, PicoAgent *agent, const char *path, bool append_interrupted)
+int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path, bool append_interrupted)
 {
     (void)append_interrupted;
     if (!g_fake_session.enabled || !g_fake_session.resolve_ok || !agent || !path ||
@@ -1269,12 +1294,12 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     return 0;
 }
 
-void PicoSession_ReplayToolDetails(PicoApp *app, PicoAgent *agent)
+void PicoSession_ReplayToolDetails(PicoHost *app, PicoAgent *agent)
 {
     (void)app; (void)agent;
 }
 
-void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent)
+void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent)
 {
     (void)app;
     (void)agent;
@@ -1284,18 +1309,18 @@ void PicoSession_AppendInterrupted(PicoApp *app, PicoAgent *agent)
     }
 }
 
-void PicoSession_Reset(PicoApp *app, PicoAgent *agent)
+void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
 {
     (void)app; (void)agent;
 }
 
-void PicoAuth_Free(PicoApp *app)
+void PicoAuth_Free(PicoHost *app)
 {
     (void)app;
     g_auth_frees++;
 }
 
-void PicoChatSel_Clear(PicoApp *app)
+void PicoChatSel_Clear(PicoHost *app)
 {
     if (app)
     {
@@ -1314,7 +1339,7 @@ void PicoChat_InspectClose(void)
 
 static bool g_composer_has_attachment;
 
-bool PicoComposer_HasAttachments(const PicoApp *app)
+bool PicoComposer_HasAttachments(const PicoHost *app)
 {
     (void)app;
     return g_composer_has_attachment;
@@ -1330,7 +1355,7 @@ bool PicoComposer_PointerOverAttachmentRemove(void)
     return false;
 }
 
-bool PicoComposer_ApplyAttachments(PicoApp *app)
+bool PicoComposer_ApplyAttachments(PicoHost *app)
 {
     if (!g_composer_has_attachment)
     {
@@ -1363,10 +1388,40 @@ bool PicoComposer_PreviewOpen(void)
     return false;
 }
 
-static void InitApp(PicoApp *app)
+static PicoWorkspace *TestWs(PicoHost *host)
 {
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(host);
+    if (ws)
+    {
+        return ws;
+    }
+    ws = (PicoWorkspace *)calloc(1, sizeof(*ws));
+    if (!ws)
+    {
+        return NULL;
+    }
+    ws->host = host;
+    ws->id = host->next_workspace_id ? host->next_workspace_id++ : 1;
+    if (host->next_workspace_id == 0)
+    {
+        host->next_workspace_id = 2;
+    }
+    snprintf(ws->path, sizeof(ws->path), ".");
+    ws->state = PICO_WORKSPACE_OPEN;
+    host->workspaces[0] = ws;
+    host->workspace_count = 1;
+    return ws;
+}
+
+static void InitApp(PicoHost *app)
+{
+    PicoWorkspace *workspace;
     g_composer_has_attachment = false;
     memset(app, 0, sizeof(*app));
+    app->next_workspace_id = 1;
+    app->next_agent_id = 1;
+    pthread_mutex_init(&app->ask_id_mu, NULL);
+    app->ask_id_mu_ready = true;
     app->settings.compact_enabled = false;
     app->models = (PicoModel *)calloc(1, sizeof(PicoModel));
     app->model_count = app->models ? 1 : 0;
@@ -1375,11 +1430,19 @@ static void InitApp(PicoApp *app)
         snprintf(app->models[0].id, sizeof(app->models[0].id), "test-model");
         snprintf(app->models[0].provider, sizeof(app->models[0].provider), "test");
     }
-    pico_add_provider(app, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
-    pico_add_tool(app, "ask_test", "test", "{}", AskTool, NULL);
-    app->agents = PicoAgentManager_Create(app);
+    workspace = (PicoWorkspace *)calloc(1, sizeof(PicoWorkspace));
+    workspace->host = app;
+    workspace->id = app->next_workspace_id++;
+    snprintf(workspace->path, sizeof(workspace->path), ".");
+    workspace->state = PICO_WORKSPACE_OPEN;
+    workspace->agents = PicoAgentManager_Create(workspace);
+    app->workspaces[0] = workspace;
+    app->workspace_count = 1;
+    app->agents = workspace->agents;
+    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
+    pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL);
     PicoAgentCreateOptions options = {
-        .kind = PICO_AGENT_NORMAL,
+        .kind = PICO_AGENT_MAIN,
         .session_start = PICO_SESSION_NONE,
         .select = true,
     };
@@ -1387,11 +1450,11 @@ static void InitApp(PicoApp *app)
     (void)pico_agent_create(app, &options, &id);
 }
 
-static bool WaitForPending(PicoApp *app, uint64_t different_from, PicoToolAsk *out)
+static bool WaitForPending(PicoHost *app, uint64_t different_from, PicoToolAsk *out)
 {
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(app, PicoApp_ActiveAgent(app));
+        PicoAgent_Pump(app, PicoHost_ActiveAgent(app));
         PicoToolAsk ask;
         if (pico_tool_pending_ask(app, &ask) && ask.id != different_from)
         {
@@ -1403,12 +1466,12 @@ static bool WaitForPending(PicoApp *app, uint64_t different_from, PicoToolAsk *o
     return false;
 }
 
-static bool WaitForIdle(PicoApp *app)
+static bool WaitForIdle(PicoHost *app)
 {
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(app, PicoApp_ActiveAgent(app));
-        if (!PicoAgent_IsBusy(PicoApp_ActiveAgent(app)))
+        PicoAgent_Pump(app, PicoHost_ActiveAgent(app));
+        if (!PicoAgent_IsBusy(PicoHost_ActiveAgent(app)))
         {
             return true;
         }
@@ -1417,13 +1480,13 @@ static bool WaitForIdle(PicoApp *app)
     return false;
 }
 
-static PicoTraceLine *LastToolTrace(PicoApp *app)
+static PicoTraceLine *LastToolTrace(PicoHost *app)
 {
-    if (!app || PicoApp_ActiveAgent(app)->message_count <= 0)
+    if (!app || PicoHost_ActiveAgent(app)->message_count <= 0)
     {
         return NULL;
     }
-    PicoMessage *m = &PicoApp_ActiveAgent(app)->messages[PicoApp_ActiveAgent(app)->message_count - 1];
+    PicoMessage *m = &PicoHost_ActiveAgent(app)->messages[PicoHost_ActiveAgent(app)->message_count - 1];
     for (int t = m->trace_count - 1; t >= 0; t--)
     {
         if (m->trace[t].is_tool)
@@ -1434,9 +1497,9 @@ static PicoTraceLine *LastToolTrace(PicoApp *app)
     return NULL;
 }
 
-static PicoTraceLine *ToolTraceByCallId(PicoApp *app, const char *call_id)
+static PicoTraceLine *ToolTraceByCallId(PicoHost *app, const char *call_id)
 {
-    PicoAgent *agent = PicoApp_ActiveAgent(app);
+    PicoAgent *agent = PicoHost_ActiveAgent(app);
     if (!agent || !call_id)
     {
         return NULL;
@@ -1456,11 +1519,11 @@ static PicoTraceLine *ToolTraceByCallId(PicoApp *app, const char *call_id)
     return NULL;
 }
 
-static bool WaitForBlockCount(PicoApp *app, int count)
+static bool WaitForBlockCount(PicoHost *app, int count)
 {
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(app, PicoApp_ActiveAgent(app));
+        PicoAgent_Pump(app, PicoHost_ActiveAgent(app));
         pthread_mutex_lock(&g_test.mu);
         bool entered = g_test.block_entered_count >= count;
         pthread_mutex_unlock(&g_test.mu);
@@ -1470,11 +1533,11 @@ static bool WaitForBlockCount(PicoApp *app, int count)
     return false;
 }
 
-static bool WaitForBlock(PicoApp *app)
+static bool WaitForBlock(PicoHost *app)
 {
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(app, PicoApp_ActiveAgent(app));
+        PicoAgent_Pump(app, PicoHost_ActiveAgent(app));
         pthread_mutex_lock(&g_test.mu);
         bool entered = g_test.block_entered;
         pthread_mutex_unlock(&g_test.mu);
@@ -1491,9 +1554,9 @@ static int TestSequential(void)
 {
     const char *name = "sequential ask delivery";
     ResetTest(TEST_SEQUENTIAL, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
 
     PicoToolAsk first;
     if (!WaitForPending(&app, 0, &first) || !strstr(first.request_json, "first"))
@@ -1524,7 +1587,7 @@ static int TestSequential(void)
               g_test.ask_answer[0][0] && strcmp(g_test.ask_answer[0][0], "{\"step\":1}") == 0 &&
               g_test.ask_answer[0][1] && strcmp(g_test.ask_answer[0][1], "{\"step\":2}") == 0;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool did not receive both answers");
 }
 
@@ -1532,16 +1595,16 @@ static int TestCancellation(void)
 {
     const char *name = "ask cancellation";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
 
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask))
     {
         return Fail(name, "request was not published");
     }
-    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not cancel");
@@ -1549,7 +1612,7 @@ static int TestCancellation(void)
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.ask_rc[0][0] == PICO_ASK_CANCEL && !g_test.ask_answer[0][0];
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool did not receive cancellation");
 }
 
@@ -1557,9 +1620,9 @@ static int TestStaleId(void)
 {
     const char *name = "stale ask id";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "first turn");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "first turn");
 
     PicoToolAsk old_ask;
     if (!WaitForPending(&app, 0, &old_ask))
@@ -1569,8 +1632,8 @@ static int TestStaleId(void)
     pthread_mutex_lock(&g_test.mu);
     g_test.provider_tool_limit = 2;
     pthread_mutex_unlock(&g_test.mu);
-    PicoAgent_ForceCancel(&app, PicoApp_ActiveAgent(&app));
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "second turn");
+    PicoAgent_ForceCancel(&app, PicoHost_ActiveAgent(&app));
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "second turn");
 
     PicoToolAsk new_ask;
     if (!WaitForPending(&app, old_ask.id, &new_ask))
@@ -1594,40 +1657,42 @@ static int TestStaleId(void)
     {
         return Fail(name, "replacement turn did not finish");
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return 0;
 }
 
 static int TestToolSchemaValidation(void)
 {
     const char *name = "tool schema validation";
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    bool null_schema = pico_add_tool(&app, "null_schema", "null", NULL, EchoTool, NULL);
-    bool empty_schema = pico_add_tool(&app, "empty_schema", "empty", "", EchoTool, NULL);
-    bool valid = pico_add_tool(&app, "valid", "valid", "{\"type\":\"object\"}", EchoTool, NULL);
+    (void)TestWs(&app);
+    bool null_schema = pico_add_tool(PicoHost_PrimaryWorkspace(&app), "null_schema", "null", NULL, EchoTool, NULL);
+    bool empty_schema = pico_add_tool(PicoHost_PrimaryWorkspace(&app), "empty_schema", "empty", "", EchoTool, NULL);
+    bool valid = pico_add_tool(PicoHost_PrimaryWorkspace(&app), "valid", "valid", "{\"type\":\"object\"}", EchoTool, NULL);
     bool rejected =
-        !pico_add_tool(&app, "extra", "invalid", "{\"type\":\"object\"}}", EchoTool, NULL) &&
-        !pico_add_tool(&app, "literal", "invalid", "{\"type\":falsee}", EchoTool, NULL) &&
-        !pico_add_tool(&app, "number", "invalid", "{\"minimum\":01}", EchoTool, NULL) &&
-        !pico_add_tool(&app, "comma", "invalid", "{\"type\":\"object\",}", EchoTool, NULL) &&
-        !pico_add_tool(&app, "array", "invalid", "[]", EchoTool, NULL) &&
-        !pico_add_tool(&app, "multiple", "invalid", "{} {}", EchoTool, NULL) &&
-        !pico_add_tool(&app, "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL);
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "extra", "invalid", "{\"type\":\"object\"}}", EchoTool, NULL) &&
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "literal", "invalid", "{\"type\":falsee}", EchoTool, NULL) &&
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "number", "invalid", "{\"minimum\":01}", EchoTool, NULL) &&
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "comma", "invalid", "{\"type\":\"object\",}", EchoTool, NULL) &&
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "array", "invalid", "[]", EchoTool, NULL) &&
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "multiple", "invalid", "{} {}", EchoTool, NULL) &&
+        !pico_add_tool(PicoHost_PrimaryWorkspace(&app), "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL);
 
-    PicoApp todo_app;
+    PicoHost todo_app;
     memset(&todo_app, 0, sizeof(todo_app));
+    (void)TestWs(&todo_app);
     PicoExt todo = pico_ext_todo();
-    todo.init(&todo_app);
+    (void)todo.host_init(&todo_app, NULL);
     bool todo_registered = todo_app.tool_count == 1 && todo_app.tools[0].params_json;
-    if (todo.shutdown) todo.shutdown(&todo_app);
+    if (todo.host_shutdown) todo.host_shutdown(&todo_app, NULL);
     bool ok = null_schema && empty_schema && valid && rejected && app.tool_count == 3 && todo_registered;
     free(app.status_warn);
     free(todo_app.status_warn);
     return ok ? 0 : Fail(name, "invalid JSON Schema was accepted or builtin todo_update was unavailable");
 }
 
-static bool WarnMentions(const PicoApp *app, const char *tool, const char *reason)
+static bool WarnMentions(const PicoHost *app, const char *tool, const char *reason)
 {
     return app->status_warn && strstr(app->status_warn, tool) && strstr(app->status_warn, reason);
 }
@@ -1635,14 +1700,15 @@ static bool WarnMentions(const PicoApp *app, const char *tool, const char *reaso
 static int TestToolRegistrationFailureWarns(void)
 {
     const char *name = "tool registration failure warns";
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    if (!pico_add_tool(&app, "ok", "ok", "{}", EchoTool, NULL) || app.status_warn)
+    (void)TestWs(&app);
+    if (!pico_add_tool(PicoHost_PrimaryWorkspace(&app), "ok", "ok", "{}", EchoTool, NULL) || app.status_warn)
     {
         free(app.status_warn);
         return Fail(name, "successful registration warned or failed");
     }
-    if (pico_add_tool(&app, "ok", "dup", "{}", EchoTool, NULL) ||
+    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "ok", "dup", "{}", EchoTool, NULL) ||
         !WarnMentions(&app, "\"ok\"", "already registered"))
     {
         free(app.status_warn);
@@ -1650,7 +1716,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    if (pico_add_tool(&app, "bad_schema", "invalid", "[]", EchoTool, NULL) ||
+    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "bad_schema", "invalid", "[]", EchoTool, NULL) ||
         !WarnMentions(&app, "\"bad_schema\"", "JSON object"))
     {
         free(app.status_warn);
@@ -1658,7 +1724,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    if (pico_add_tool(&app, "no_run", "missing", "{}", NULL, NULL) ||
+    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "no_run", "missing", "{}", NULL, NULL) ||
         !WarnMentions(&app, "\"no_run\"", "missing run function"))
     {
         free(app.status_warn);
@@ -1671,13 +1737,13 @@ static int TestToolRegistrationFailureWarns(void)
     {
         int i = app.tool_count;
         snprintf(extra[i], sizeof(extra[i]), "x%d", i);
-        if (!pico_add_tool(&app, extra[i], "pad", "{}", EchoTool, NULL))
+        if (!pico_add_tool(PicoHost_PrimaryWorkspace(&app), extra[i], "pad", "{}", EchoTool, NULL))
         {
             free(app.status_warn);
             return Fail(name, "padding tools to the limit failed");
         }
     }
-    if (pico_add_tool(&app, "overflow", "full", "{}", EchoTool, NULL) ||
+    if (pico_add_tool(PicoHost_PrimaryWorkspace(&app), "overflow", "full", "{}", EchoTool, NULL) ||
         !WarnMentions(&app, "\"overflow\"", "tool limit reached"))
     {
         free(app.status_warn);
@@ -1691,11 +1757,11 @@ static int TestProductionInit(void)
 {
     const char *name = "production app initialization";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
-    PicoApp_Init(&app, NULL, "/workspace", false, PICO_SESSION_NONE, NULL);
-    bool ok = PicoApp_ActiveAgent(&app) && PicoApp_ActiveAgent(&app)->state == PICO_AGENT_IDLE && app.composer.text;
-    PicoApp_Free(&app);
-    return ok ? 0 : Fail(name, "PicoApp_Init did not create a usable agent before session/plugin startup");
+    PicoHost app;
+    PicoHost_Start(&app, NULL, ".", false, PICO_SESSION_NONE, NULL);
+    bool ok = PicoHost_ActiveAgent(&app) && PicoHost_ActiveAgent(&app)->state == PICO_AGENT_IDLE && app.composer.text;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "PicoHost_Start did not create a usable agent before session/plugin startup");
 }
 
 static int TestReloadQuiescence(void)
@@ -1703,15 +1769,15 @@ static int TestReloadQuiescence(void)
     const char *name = "reload quiescence";
     ResetTest(TEST_BLOCK, 1);
     g_plugin_reloads = 0;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
         return Fail(name, "blocking tool did not start");
     }
 
-    PicoApp_RequestReload(&app);
+    PicoHost_RequestReload(&app);
     if (!app.reload_queued || PicoAgentManager_AcceptsNewWork(app.agents) || g_plugin_reloads != 0)
     {
         return Fail(name, "reload did not queue behind live extension work");
@@ -1726,15 +1792,15 @@ static int TestReloadQuiescence(void)
     }
 
     int issued = g_test.provider_tools_issued;
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "must wait");
-    if (PicoAgent_IsBusy(PicoApp_ActiveAgent(&app)) || g_test.provider_tools_issued != issued)
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "must wait");
+    if (PicoAgent_IsBusy(PicoHost_ActiveAgent(&app)) || g_test.provider_tools_issued != issued)
     {
         return Fail(name, "a new turn started while reload was queued");
     }
-    PicoApp_PumpLifecycle(&app);
+    pico_host_pump(&app);
     bool ok = !app.reload_queued && PicoAgentManager_AcceptsNewWork(app.agents) &&
               g_plugin_reloads == 1;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "reload did not run exactly once after quiescence");
 }
 
@@ -1752,16 +1818,16 @@ static int TestDeferredWorkspaceChange(void)
 
     ResetTest(TEST_BLOCK, 1);
     g_plugin_reloads = 0;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    snprintf(app.workspace, sizeof(app.workspace), "%s", old_dir);
+    snprintf(PicoHost_PrimaryWorkspace(&app)->path, sizeof(PicoHost_PrimaryWorkspace(&app)->path), "%s", old_dir);
     PicoAgentId old_id = pico_agent_active(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
-    if (!WaitForBlock(&app) || !PicoApp_ChangeWorkspace(&app, new_dir))
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
+    if (!WaitForBlock(&app) || !PicoHost_ChangeWorkspace(&app, new_dir))
     {
         return Fail(name, "workspace request was not accepted while busy");
     }
-    if (!app.workspace_change_queued || strcmp(app.workspace, old_dir) != 0 ||
+    if (!app.workspace_change_queued || strcmp(PicoHost_PrimaryWorkspace(&app)->path, old_dir) != 0 ||
         PicoAgentManager_AcceptsNewWork(app.agents))
     {
         return Fail(name, "workspace mutated before the quiescence barrier");
@@ -1775,9 +1841,9 @@ static int TestDeferredWorkspaceChange(void)
     {
         return Fail(name, "old workspace did not drain");
     }
-    PicoApp_PumpLifecycle(&app);
+    pico_host_pump(&app);
     g_expected_context_manager = app.agents;
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "verify rebound workspace");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "verify rebound workspace");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "replacement agent did not run");
@@ -1787,11 +1853,11 @@ static int TestDeferredWorkspaceChange(void)
     pthread_mutex_unlock(&g_test.mu);
     g_expected_context_manager = NULL;
     PicoAgentInfo ignored;
-    bool ok = !app.workspace_change_queued && strcmp(app.workspace, new_dir) == 0 &&
+    bool ok = !app.workspace_change_queued && strcmp(PicoHost_PrimaryWorkspace(&app)->path, new_dir) == 0 &&
               pico_agent_count(&app) == 1 && pico_agent_active(&app) != old_id &&
               !pico_agent_find(&app, old_id, &ignored) && rebound &&
               PicoAgentManager_AcceptsNewWork(app.agents) && g_plugin_reloads == 1;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     rmdir(old_dir);
     rmdir(new_dir);
     return ok ? 0 : Fail(name, "workspace transition was partial or did not create a fresh agent");
@@ -1801,11 +1867,11 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
 {
     const char *name = "invalid restricted policy preserves submit";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     const char *tools[] = {"ask_test"};
     PicoAgentCreateOptions options = {
-        .kind = PICO_AGENT_NORMAL,
+        .kind = PICO_AGENT_MAIN,
         .tools = tools,
         .tool_count = 1,
         .session_start = PICO_SESSION_NONE,
@@ -1814,7 +1880,7 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
     PicoAgentId restricted = 0;
     if (pico_agent_create(&app, &options, &restricted) != PICO_AGENT_RESULT_OK)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "could not create restricted agent");
     }
     app.tool_count = 0; /* simulate the allowed tool disappearing on reload */
@@ -1824,14 +1890,14 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
     app.composer.cursor = app.composer.length;
     app.composer.sel_anchor = app.composer.length;
 
-    PicoApp_Submit(&app);
+    PicoHost_Submit(&app);
     bool ok = pico_agent_active(&app) == restricted &&
               pico_agent_message_count(&app, restricted) == 0 &&
-              !PicoAgent_IsBusy(PicoApp_ActiveAgent(&app)) &&
+              !PicoAgent_IsBusy(PicoHost_ActiveAgent(&app)) &&
               app.composer.length == (int)strlen("keep this draft") &&
               strcmp(app.composer.text, "keep this draft") == 0 &&
               app.status_warn && strstr(app.status_warn, "restricted tool policy");
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "invalid policy persisted a stranded turn or cleared the draft");
 }
 
@@ -1839,17 +1905,17 @@ static int TestImageOnlySubmitStartsTurn(void)
 {
     const char *name = "image-only submit starts turn";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     app.models[0].vision = true;
     app.composer.text = JsonDup("");
     app.composer.capacity = 1;
     g_composer_has_attachment = true;
 
-    PicoApp_Submit(&app);
+    PicoHost_Submit(&app);
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "image-only turn did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
@@ -1857,7 +1923,7 @@ static int TestImageOnlySubmitStartsTurn(void)
                 strstr(g_test.last_input, "\"type\":\"image\"");
     pthread_mutex_unlock(&g_test.mu);
     bool ok = sent && !g_composer_has_attachment && app.composer.length == 0;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "image-only input was not sent as canonical media");
 }
 
@@ -1865,7 +1931,7 @@ static int TestNonVisionSubmitPreservesDraft(void)
 {
     const char *name = "non-vision submit preserves draft";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     app.models[0].vision = false;
     app.composer.text = JsonDup("  keep this draft  ");
@@ -1875,15 +1941,15 @@ static int TestNonVisionSubmitPreservesDraft(void)
     app.composer.sel_anchor = app.composer.length;
     g_composer_has_attachment = true;
 
-    PicoApp_Submit(&app);
-    bool ok = !PicoAgent_IsBusy(PicoApp_ActiveAgent(&app)) &&
+    PicoHost_Submit(&app);
+    bool ok = !PicoAgent_IsBusy(PicoHost_ActiveAgent(&app)) &&
               pico_agent_message_count(&app, pico_agent_active(&app)) == 0 &&
               g_composer_has_attachment &&
               app.composer.length == (int)strlen("  keep this draft  ") &&
               strcmp(app.composer.text, "  keep this draft  ") == 0 &&
               app.status_warn && strstr(app.status_warn, "doesn't accept images");
     g_composer_has_attachment = false;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "unsupported image submit cleared or started the draft");
 }
 
@@ -1891,9 +1957,9 @@ static int TestInvalidPayload(void)
 {
     const char *name = "invalid ask payload";
     ResetTest(TEST_INVALID, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not finish invalid request");
@@ -1910,7 +1976,7 @@ static int TestInvalidPayload(void)
               g_test.ask_rc[0][1] == PICO_ASK_OK && g_test.ask_answer[0][1] &&
               strcmp(g_test.ask_answer[0][1], expected) == 0;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool did not receive the validation error");
 }
 
@@ -1918,25 +1984,25 @@ static int TestShutdownTimeout(void)
 {
     const char *name = "shutdown timeout preservation";
     ResetTest(TEST_BLOCK, 1);
-    PicoApp *app = (PicoApp *)calloc(1, sizeof(PicoApp));
+    PicoHost *app = (PicoHost *)calloc(1, sizeof(PicoHost));
     if (!app)
     {
         return Fail(name, "allocation failed");
     }
     InitApp(app);
-    PicoAgent_StartTurn(app, PicoApp_ActiveAgent(app), "start");
+    PicoAgent_StartTurn(app, PicoHost_ActiveAgent(app), "start");
     if (!WaitForBlock(app))
     {
         return Fail(name, "blocking tool did not start");
     }
 
     PicoModel *models = app->models;
-    PicoAppShutdownResult shutdown = PicoApp_Free(app);
-    if (shutdown != PICO_APP_SHUTDOWN_RETAINED || !PicoApp_ProcessRetired() ||
+    PicoHostShutdownResult shutdown = PicoHost_Shutdown(app);
+    if (shutdown != PICO_HOST_SHUTDOWN_RETAINED || !PicoHost_ProcessRetired() ||
         g_plugin_shutdowns != 0 || g_auth_frees != 0 || app->models != models ||
         app->tool_count != 1 || !app->tools[0].run)
     {
-        return Fail(name, "PicoApp_Free tore down worker-visible state");
+        return Fail(name, "PicoHost_Shutdown tore down worker-visible state");
     }
 
     pthread_mutex_lock(&g_test.mu);
@@ -1949,8 +2015,9 @@ static int TestShutdownTimeout(void)
     bool saw_live_state = g_test.block_saw_live_state;
     pthread_mutex_unlock(&g_test.mu);
 
-    PicoApp rejected;
-    PicoApp_Init(&rejected, NULL, "/workspace", false, PICO_SESSION_NONE, NULL);
+    PicoHost rejected;
+    memset(&rejected, 0, sizeof(rejected));
+    PicoHost_Start(&rejected, NULL, ".", false, PICO_SESSION_NONE, NULL);
     bool rejected_init = rejected.terminal_shutdown && rejected.agents == NULL;
     return saw_live_state && rejected_init ? 0 :
            Fail(name, "detached worker saw torn-down state or Pico reinitialized after retained shutdown");
@@ -1960,7 +2027,7 @@ static int TestRetiredRuntimeCap(void)
 {
     const char *name = "retired runtime cap";
     ResetTest(TEST_BLOCK, PICO_MAX_RETIRED_RUNTIMES + 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
 
     bool ok = true;
@@ -1968,7 +2035,7 @@ static int TestRetiredRuntimeCap(void)
     const char *failed_why = NULL;
     for (int i = 0; i <= PICO_MAX_RETIRED_RUNTIMES; i++)
     {
-        PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "block");
+        PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "block");
         if (!WaitForBlockCount(&app, i + 1))
         {
             ok = false;
@@ -1976,10 +2043,10 @@ static int TestRetiredRuntimeCap(void)
             failed_why = "worker did not reach blocking tool";
             break;
         }
-        PicoAgentRt *before = PicoApp_ActiveAgent(&app)->runtime;
-        PicoAgent_ForceCancel(&app, PicoApp_ActiveAgent(&app));
-        if ((i < PICO_MAX_RETIRED_RUNTIMES && PicoApp_ActiveAgent(&app)->runtime == before) ||
-            (i == PICO_MAX_RETIRED_RUNTIMES && PicoApp_ActiveAgent(&app)->runtime != before))
+        PicoAgentRt *before = PicoHost_ActiveAgent(&app)->runtime;
+        PicoAgent_ForceCancel(&app, PicoHost_ActiveAgent(&app));
+        if ((i < PICO_MAX_RETIRED_RUNTIMES && PicoHost_ActiveAgent(&app)->runtime == before) ||
+            (i == PICO_MAX_RETIRED_RUNTIMES && PicoHost_ActiveAgent(&app)->runtime != before))
         {
             ok = false;
             failed_at = i;
@@ -1993,7 +2060,7 @@ static int TestRetiredRuntimeCap(void)
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
     if (!WaitForIdle(&app)) ok = false;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     if (!ok && failed_why)
     {
         fprintf(stderr, "%s: iteration %d: %s\n", name, failed_at, failed_why);
@@ -2005,17 +2072,17 @@ static int TestBeforeForceCancel(void)
 {
     const char *name = "force cancel stops remaining before hooks";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(&app, BlockingBefore);
-    pico_add_tool_before_hook(&app, CountBefore);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), BlockingBefore);
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), CountBefore);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
         return Fail(name, "blocking before hook did not start");
     }
 
-    PicoAgent_ForceCancel(&app, PicoApp_ActiveAgent(&app));
+    PicoAgent_ForceCancel(&app, PicoHost_ActiveAgent(&app));
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
@@ -2028,8 +2095,8 @@ static int TestBeforeForceCancel(void)
     bool reaped = false;
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
-        if (!PicoAgent_BlocksReload(PicoApp_ActiveAgent(&app)))
+        PicoAgent_Pump(&app, PicoHost_ActiveAgent(&app));
+        if (!PicoAgent_BlocksReload(PicoHost_ActiveAgent(&app)))
         {
             reaped = true;
             break;
@@ -2040,7 +2107,7 @@ static int TestBeforeForceCancel(void)
     bool skipped = g_test.followup_hook_calls == 0;
     bool stale_rejected = !g_test.block_saw_live_state;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     if (!reaped)
     {
         return Fail(name, "abandoned before hook was not reaped");
@@ -2053,10 +2120,10 @@ static int TestBeforeDeny(void)
 {
     const char *name = "before hook deny skips tool";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(&app, DenyBefore);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), DenyBefore);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
@@ -2064,7 +2131,7 @@ static int TestBeforeDeny(void)
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.tool_invocations == 0 && g_test.provider_tools_issued == 2;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "denied tool ran or turn did not continue");
 }
 
@@ -2072,16 +2139,16 @@ static int TestBeforeAskCancel(void)
 {
     const char *name = "cancel during before ask skips tool";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(&app, AskBefore);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), AskBefore);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask))
     {
         return Fail(name, "before-hook request was not published");
     }
-    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not cancel");
@@ -2089,7 +2156,7 @@ static int TestBeforeAskCancel(void)
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.tool_invocations == 0 && g_test.ask_rc[0][0] == PICO_ASK_CANCEL;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool ran after cancelled before-ask");
 }
 
@@ -2097,22 +2164,22 @@ static int TestBeforeRewriteArgs(void)
 {
     const char *name = "before hook rewrites tool args";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    pico_add_tool_before_hook(&app, RewriteArgsBefore);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), RewriteArgsBefore);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.tool_invocations == 1 &&
-              g_test.tool_ctx_id == pico_agent_id(PicoApp_ActiveAgent(&app)) && g_test.tool_seen_args &&
+              g_test.tool_ctx_id == pico_agent_id(PicoHost_ActiveAgent(&app)) && g_test.tool_seen_args &&
               strcmp(g_test.tool_seen_args, "{\"rewritten\":true}") == 0;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool did not see rewritten args");
 }
 
@@ -2120,13 +2187,13 @@ static int TestAfterRewriteOutput(void)
 {
     const char *name = "after hook rewrites tool output";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    pico_add_tool_after_hook(&app, RewriteOutAfter);
-    pico_add_tool_after_hook(&app, CaptureAfter);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), RewriteOutAfter);
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
@@ -2135,7 +2202,7 @@ static int TestAfterRewriteOutput(void)
     bool ok = g_test.last_input && strstr(g_test.last_input, "rewritten-output") != NULL &&
               g_test.after_seen_output && strcmp(g_test.after_seen_output, "rewritten-output") == 0;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "rewritten output was not chained to the model and later hooks");
 }
 
@@ -2143,12 +2210,12 @@ static int TestRewriteThenDenyArgs(void)
 {
     const char *name = "denied call preserves rewritten args";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool_before_hook(&app, RewriteArgsBefore);
-    pico_add_tool_before_hook(&app, DenyBefore);
-    pico_add_tool_after_hook(&app, CaptureAfter);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), RewriteArgsBefore);
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), DenyBefore);
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
@@ -2158,7 +2225,7 @@ static int TestRewriteThenDenyArgs(void)
               strcmp(g_test.after_seen_args, "{\"rewritten\":true}") == 0 &&
               g_test.after_seen_output && strcmp(g_test.after_seen_output, "User denied this tool.") == 0;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "after hook did not receive the denied call's current values");
 }
 
@@ -2166,31 +2233,31 @@ static int TestStructuredToolDetails(void)
 {
     const char *name = "structured tool details apply and reach hooks";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    if (!pico_add_tool(&app, "details_test", "details", "{}", DetailsTool, ApplyDetails) ||
-        pico_add_tool(&app, "details_test", "duplicate", "{}", DetailsTool, ApplyDetails))
+    if (!pico_add_tool(PicoHost_PrimaryWorkspace(&app), "details_test", "details", "{}", DetailsTool, ApplyDetails) ||
+        pico_add_tool(PicoHost_PrimaryWorkspace(&app), "details_test", "duplicate", "{}", DetailsTool, ApplyDetails))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "tool name uniqueness contract failed");
     }
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "details_test");
-    pico_add_tool_after_hook(&app, CaptureAfter);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
-    bool ok = g_test.apply_calls == 1 && g_test.apply_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) &&
-              g_test.after_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) &&
+    bool ok = g_test.apply_calls == 1 && g_test.apply_agent_id == pico_agent_id(PicoHost_ActiveAgent(&app)) &&
+              g_test.after_agent_id == pico_agent_id(PicoHost_ActiveAgent(&app)) &&
               g_test.after_executed && !g_test.after_is_error &&
               g_test.after_seen_details && strcmp(g_test.after_seen_details, "{\"value\":7}") == 0 &&
               g_test.last_input && strstr(g_test.last_input, "\"name\":\"details_test\"") &&
               strstr(g_test.last_input, "\"is_error\":false");
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "details were not applied or represented in the result input");
 }
 
@@ -2198,22 +2265,22 @@ static int TestInvalidDetailsFailClosed(void)
 {
     const char *name = "invalid structured details fail closed";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "invalid_details", "details", "{}", InvalidDetailsTool, ApplyDetails);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "invalid_details", "details", "{}", InvalidDetailsTool, ApplyDetails);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "invalid_details");
-    pico_add_tool_after_hook(&app, CaptureAfter);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.apply_calls == 0 && g_test.after_executed && g_test.after_is_error &&
               g_test.after_seen_details && g_test.after_seen_details[0] == '\0';
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "invalid details were applied or exposed as successful");
 }
 
@@ -2221,22 +2288,22 @@ static int TestDeniedDetailsDoNotApply(void)
 {
     const char *name = "denied structured tool does not apply";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "details_test", "details", "{}", DetailsTool, ApplyDetails);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "details_test", "details", "{}", DetailsTool, ApplyDetails);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "details_test");
-    pico_add_tool_before_hook(&app, DenyBefore);
-    pico_add_tool_after_hook(&app, CaptureAfter);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), DenyBefore);
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.apply_calls == 0 && !g_test.after_executed && g_test.after_is_error;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "denied result applied details or looked successful");
 }
 
@@ -2255,25 +2322,25 @@ static int TestRequestOnlyContext(void)
 {
     const char *name = "context hook appends request-only base-isolated context";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_context_hook(&app, AddEphemeralContext);
-    pico_add_context_hook(&app, InspectBaseContext);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "first");
+    pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), AddEphemeralContext);
+    pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), InspectBaseContext);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "first");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "first turn did not finish");
     }
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "second");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "second");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "second turn did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.context_saw_base_tail &&
-              g_test.context_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) && g_test.last_input &&
+              g_test.context_agent_id == pico_agent_id(PicoHost_ActiveAgent(&app)) && g_test.last_input &&
               CountOccurrences(g_test.last_input, "ephemeral-context") == 1 &&
               strstr(g_test.last_input, "\"type\":\"context\"") != NULL &&
               strstr(g_test.last_input,
@@ -2281,13 +2348,14 @@ static int TestRequestOnlyContext(void)
                   NULL &&
               (!g_test.last_instructions || strstr(g_test.last_instructions, "ephemeral-context") == NULL);
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "context persisted, entered instructions, used a user item, or changed the next hook's base history");
 }
 
 static int SilentProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                          PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                          PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)turn;
     (void)cancel;
@@ -2301,20 +2369,20 @@ static int TestUnmappedContextFails(void)
 {
     const char *name = "unmapped context items fail the turn";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_provider(&app, &(PicoProvider){.name = "legacy", .stream = SilentProvider});
+    pico_add_provider(PicoHost_PrimaryWorkspace(&app), &(PicoProvider){.name = "legacy", .stream = SilentProvider});
     snprintf(app.models[0].provider, sizeof(app.models[0].provider), "legacy");
-    pico_add_context_hook(&app, AddEphemeralContext);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "hello");
+    pico_add_context_hook(PicoHost_PrimaryWorkspace(&app), AddEphemeralContext);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "hello");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "turn did not finish");
     }
-    bool ok = PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoApp_ActiveAgent(&app)->error &&
-              strstr(PicoApp_ActiveAgent(&app)->error, "does not map context") != NULL;
-    PicoApp_Free(&app);
+    bool ok = PicoHost_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoHost_ActiveAgent(&app)->error &&
+              strstr(PicoHost_ActiveAgent(&app)->error, "does not map context") != NULL;
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "provider without map_context dropped context instead of failing");
 }
 
@@ -2322,10 +2390,10 @@ static int TestLlmExtraInstructions(void)
 {
     const char *name = "llm hook appends instructions";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(&app, ExtraInstructions);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraInstructions);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
@@ -2335,10 +2403,10 @@ static int TestLlmExtraInstructions(void)
                              ? strstr(g_test.last_instructions, "## Additional instructions")
                              : NULL;
     const char *extra = g_test.last_instructions ? strstr(g_test.last_instructions, "injected-line") : NULL;
-    bool ok = g_test.llm_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) && header && extra &&
+    bool ok = g_test.llm_agent_id == pico_agent_id(PicoHost_ActiveAgent(&app)) && header && extra &&
               extra > header;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "provider did not receive extra instructions under the section header");
 }
 
@@ -2346,18 +2414,18 @@ static int TestBuildInstructionsExtraSpan(void)
 {
     const char *name = "previewed extra instructions are a distinct span";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(&app, ExtraInstructions);
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraInstructions);
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
-    char *preview = PicoAgent_BuildInstructionsSpans(&app, PicoApp_ActiveAgent(&app), spans, &n);
+    char *preview = PicoAgent_BuildInstructionsSpans(&app, PicoHost_ActiveAgent(&app), spans, &n);
     bool ok = preview && n == 1 && spans[0].source == PICO_PROMPT_SOURCE_LLM_HOOK &&
               spans[0].start == 0 && spans[0].length == strlen(preview) &&
               strstr(preview, "## Additional instructions") == preview &&
               strstr(preview, "injected-line") != NULL;
     free(preview);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "extra instructions were not a single LLM-hook span");
 }
 
@@ -2365,15 +2433,15 @@ static int TestBuildInstructionsMatchTurn(void)
 {
     const char *name = "previewed instructions match the next turn";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(&app, ExtraWhenTools);
-    char *preview = PicoAgent_BuildInstructions(&app, PicoApp_ActiveAgent(&app));
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraWhenTools);
+    char *preview = PicoAgent_BuildInstructions(&app, PicoHost_ActiveAgent(&app));
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         free(preview);
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
@@ -2381,7 +2449,7 @@ static int TestBuildInstructionsMatchTurn(void)
               strcmp(preview, g_test.last_instructions) == 0;
     pthread_mutex_unlock(&g_test.mu);
     free(preview);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "preview did not match the instructions sent to the provider");
 }
 
@@ -2389,15 +2457,15 @@ static int TestAgentPolicyPrecedesLlmHooks(void)
 {
     const char *name = "agent policy precedes llm hooks";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoApp_ActiveAgent(&app)->allowed_tools = (char **)calloc(1, sizeof(char *));
-    PicoApp_ActiveAgent(&app)->allowed_tool_count = 0;
-    pico_add_llm_hook(&app, ExtraWhenTools);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoHost_ActiveAgent(&app)->allowed_tools = (char **)calloc(1, sizeof(char *));
+    PicoHost_ActiveAgent(&app)->allowed_tool_count = 0;
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExtraWhenTools);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
@@ -2405,7 +2473,7 @@ static int TestAgentPolicyPrecedesLlmHooks(void)
               strstr(g_test.last_instructions, "tool-notes") == NULL &&
               strstr(g_test.last_instructions, "## Additional instructions") == NULL;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "LLM hook or provider saw a policy-hidden tool");
 }
 
@@ -2413,10 +2481,10 @@ static int TestLlmExcludeTool(void)
 {
     const char *name = "llm hook excludes a tool";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(&app, ExcludeAskTest);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskTest);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
@@ -2424,7 +2492,7 @@ static int TestLlmExcludeTool(void)
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.last_tool_count == 0 && strstr(g_test.last_tools, "ask_test") == NULL;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "excluded tool was still in the catalog");
 }
 
@@ -2432,15 +2500,15 @@ static int TestHiddenToolCallIsControlled(void)
 {
     const char *name = "hidden tool call is controlled";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_llm_hook(&app, ExcludeAskTest);
-    pico_add_tool_before_hook(&app, CountBefore);
-    pico_add_tool_after_hook(&app, CaptureAfter);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskTest);
+    pico_add_tool_before_hook(PicoHost_PrimaryWorkspace(&app), CountBefore);
+    pico_add_tool_after_hook(PicoHost_PrimaryWorkspace(&app), CaptureAfter);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not finish the recovery round");
     }
     pthread_mutex_lock(&g_test.mu);
@@ -2448,7 +2516,7 @@ static int TestHiddenToolCallIsControlled(void)
               !g_test.after_seen_output && g_test.last_input &&
               strstr(g_test.last_input, "tool was not offered for this request") != NULL;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "hidden call executed a hook/tool or was not returned as a tool error");
 }
 
@@ -2456,14 +2524,14 @@ static int TestOfferedCatalogSnapshot(void)
 {
     const char *name = "offered tool snapshot survives registry mutation";
     ResetTest(TEST_CATALOG_BLOCK, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "provider gate did not open");
     }
     for (int i = 0; i < app.tool_count; i++)
@@ -2479,33 +2547,33 @@ static int TestOfferedCatalogSnapshot(void)
     pthread_mutex_unlock(&g_test.mu);
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.tool_invocations == 1;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool resolution used the mutated global registry");
 }
 
 static int TestMalformedCallsFail(TestMode mode, const char *expected)
 {
     ResetTest(mode, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return 1;
     }
     pthread_mutex_lock(&g_test.mu);
     bool no_tool = g_test.tool_invocations == 0;
     pthread_mutex_unlock(&g_test.mu);
-    bool ok = no_tool && PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoApp_ActiveAgent(&app)->error &&
-              strstr(PicoApp_ActiveAgent(&app)->error, expected) != NULL;
-    PicoApp_Free(&app);
+    bool ok = no_tool && PicoHost_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoHost_ActiveAgent(&app)->error &&
+              strstr(PicoHost_ActiveAgent(&app)->error, expected) != NULL;
+    PicoHost_Shutdown(&app);
     return ok ? 0 : 1;
 }
 
@@ -2521,30 +2589,30 @@ static int TestMalformedToolCalls(void)
     return 0;
 }
 
-static void AddLifeHooks(PicoApp *app)
+static void AddLifeHooks(PicoHost *app)
 {
-    pico_add_hook(app, PICO_HOOK_ON_TURN_END, LifeTurnEnd);
-    pico_add_hook(app, PICO_HOOK_ON_CANCEL, LifeCancel);
-    pico_add_hook(app, PICO_HOOK_ON_ERROR, LifeError);
-    pico_add_hook(app, PICO_HOOK_AFTER_COMPACT, LifeAfterCompact);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_TURN_END, LifeTurnEnd);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_CANCEL, LifeCancel);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_ON_ERROR, LifeError);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(app), PICO_HOOK_AFTER_COMPACT, LifeAfterCompact);
 }
 
 static int TestTurnEnd(void)
 {
     const char *name = "turn end notification";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     AddLifeHooks(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
     }
-    bool ok = g_test.life_turn_end == 1 && g_test.hook_agent_id == pico_agent_id(PicoApp_ActiveAgent(&app)) &&
+    bool ok = g_test.life_turn_end == 1 && g_test.hook_agent_id == pico_agent_id(PicoHost_ActiveAgent(&app)) &&
               g_test.life_cancel == 0 && g_test.life_error == 0 &&
-              PicoApp_ActiveAgent(&app)->state == PICO_AGENT_IDLE;
-    PicoApp_Free(&app);
+              PicoHost_ActiveAgent(&app)->state == PICO_AGENT_IDLE;
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "ON_TURN_END did not fire once");
 }
 
@@ -2552,22 +2620,22 @@ static int TestCancelNotification(void)
 {
     const char *name = "cancel notification";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     AddLifeHooks(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask))
     {
         return Fail(name, "request was not published");
     }
-    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not cancel");
     }
     bool ok = g_test.life_cancel == 1 && g_test.life_turn_end == 0 && g_test.life_error == 0;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "ON_CANCEL did not fire (or TURN_END did)");
 }
 
@@ -2578,18 +2646,18 @@ static int TestErrorNotification(void)
     g_test.provider_fail = true;
     g_test.provider_tokens = 100;
     g_test.provider_cached_tokens = 80;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     AddLifeHooks(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not leave the busy state");
     }
     bool ok = g_test.life_error == 1 && g_test.life_turn_end == 0 && g_test.life_cancel == 0 &&
-              PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoApp_ActiveAgent(&app)->error && PicoApp_ActiveAgent(&app)->session_input_tokens == 0 &&
-              PicoApp_ActiveAgent(&app)->session_cached_tokens == 0 && g_test.usage_log_count == 0;
-    PicoApp_Free(&app);
+              PicoHost_ActiveAgent(&app)->state == PICO_AGENT_ERROR && PicoHost_ActiveAgent(&app)->error && PicoHost_ActiveAgent(&app)->session_input_tokens == 0 &&
+              PicoHost_ActiveAgent(&app)->session_cached_tokens == 0 && g_test.usage_log_count == 0;
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "failed request changed usage or did not fire ON_ERROR");
 }
 
@@ -2599,18 +2667,18 @@ static int TestCancelledProviderUsage(void)
     ResetTest(TEST_PROVIDER_BLOCK, 0);
     g_test.provider_tokens = 100;
     g_test.provider_cached_tokens = 80;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
-    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
+    PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "cancelled provider did not return idle");
     }
-    bool ok = PicoApp_ActiveAgent(&app)->session_input_tokens == 0 && PicoApp_ActiveAgent(&app)->session_cached_tokens == 0 &&
+    bool ok = PicoHost_ActiveAgent(&app)->session_input_tokens == 0 && PicoHost_ActiveAgent(&app)->session_cached_tokens == 0 &&
               g_test.usage_log_count == 0;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "cancelled provider result contributed usage");
 }
 
@@ -2620,27 +2688,27 @@ static int TestSessionUsageAccumulation(void)
     ResetTest(TEST_SINGLE, 1);
     g_test.provider_tokens = 100;
     g_test.provider_cached_tokens = 25;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "first");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "first");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "tool turn did not finish");
     }
     g_test.provider_tokens = 200;
     g_test.provider_cached_tokens = 150;
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "second");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "second");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "second turn did not finish");
     }
-    bool ok = PicoApp_ActiveAgent(&app)->tokens_used == 200 && PicoApp_ActiveAgent(&app)->tokens_cached == 150 && PicoApp_ActiveAgent(&app)->session_input_tokens == 400 &&
-              PicoApp_ActiveAgent(&app)->session_cached_tokens == 200 && g_test.usage_log_count == 3;
-    PicoApp_Free(&app);
+    bool ok = PicoHost_ActiveAgent(&app)->tokens_used == 200 && PicoHost_ActiveAgent(&app)->tokens_cached == 150 && PicoHost_ActiveAgent(&app)->session_input_tokens == 400 &&
+              PicoHost_ActiveAgent(&app)->session_cached_tokens == 200 && g_test.usage_log_count == 3;
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "latest or cumulative usage did not include every successful request");
 }
 
@@ -2674,24 +2742,24 @@ static int TestAfterCompact(void)
     ResetTest(TEST_SINGLE, 0);
     g_test.provider_tokens = 100;
     g_test.provider_cached_tokens = 40;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     app.settings.compact_enabled = true;
     app.settings.compact_ratio = 0.5;
-    PicoApp_ActiveAgent(&app)->compact_enabled = true;
-    PicoApp_ActiveAgent(&app)->compact_ratio = 0.5;
-    PicoApp_ActiveAgent(&app)->context_limit = 100;
+    PicoHost_ActiveAgent(&app)->compact_enabled = true;
+    PicoHost_ActiveAgent(&app)->compact_ratio = 0.5;
+    PicoHost_ActiveAgent(&app)->context_limit = 100;
     AddLifeHooks(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "agent did not return idle");
     }
     bool ok = g_test.life_after_compact == 1 && g_test.life_turn_end == 1 && g_test.life_cancel == 0 &&
-              g_test.life_error == 0 && PicoApp_ActiveAgent(&app)->tokens_used == 0 && PicoApp_ActiveAgent(&app)->tokens_cached == 0 &&
-              PicoApp_ActiveAgent(&app)->session_input_tokens == 200 && PicoApp_ActiveAgent(&app)->session_cached_tokens == 80 &&
+              g_test.life_error == 0 && PicoHost_ActiveAgent(&app)->tokens_used == 0 && PicoHost_ActiveAgent(&app)->tokens_cached == 0 &&
+              PicoHost_ActiveAgent(&app)->session_input_tokens == 200 && PicoHost_ActiveAgent(&app)->session_cached_tokens == 80 &&
               g_test.usage_log_count == 2;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "compaction did not retain cumulative usage or fire lifecycle hooks");
 }
 
@@ -2699,18 +2767,18 @@ static int TestToolTraceError(void)
 {
     const char *name = "tool trace error flag";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "successful tool did not finish");
     }
     PicoTraceLine *ok_line = LastToolTrace(&app);
     bool ok = ok_line && ok_line->tool_output && !ok_line->tool_error;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     if (!ok)
     {
         return Fail(name, "successful tool was marked as error");
@@ -2719,14 +2787,14 @@ static int TestToolTraceError(void)
     ResetTest(TEST_SINGLE, 1);
     InitApp(&app);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
         return Fail(name, "unknown tool did not finish");
     }
     PicoTraceLine *err_line = LastToolTrace(&app);
     ok = err_line && err_line->tool_output && err_line->tool_error;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "unknown tool was not marked as error");
 }
 
@@ -2734,15 +2802,15 @@ static int TestQueuedToolCallProgress(void)
 {
     const char *name = "later tool call stays queued";
     ResetTest(TEST_BATCH_TOOLS, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
         return Fail(name, "first tool did not start");
     }
 
-    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoAgent *agent = PicoHost_ActiveAgent(&app);
     PicoTraceLine *first = ToolTraceByCallId(&app, "call-1-0");
     PicoTraceLine *second = ToolTraceByCallId(&app, "call-1-1");
     pthread_mutex_lock(&g_test.mu);
@@ -2760,34 +2828,36 @@ static int TestQueuedToolCallProgress(void)
     pthread_mutex_unlock(&g_test.mu);
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "batched tools did not finish");
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return queued ? 0 : Fail(name, "the later call was running before the first finished");
 }
 
 static int TestTodoAgentIsolation(void)
 {
     const char *name = "todo state is keyed by agent id";
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
+    (void)TestWs(&app);
     PicoExt ext = pico_ext_todo();
-    ext.init(&app);
+    ext.host_init(&app, NULL);
     const char *first =
         "{\"version\":1,\"task\":\"First\",\"todos\":[{\"id\":\"a\",\"text\":\"first-agent\",\"status\":\"pending\"}]}";
     const char *second =
         "{\"version\":1,\"task\":\"Second\",\"todos\":[{\"id\":\"b\",\"text\":\"second-agent\",\"status\":\"in_progress\"}]}";
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     bool ok = app.tool_count == 1 && app.tools[0].apply &&
-              app.tools[0].apply(&app, 11, first, true) &&
-              app.tools[0].apply(&app, 22, second, true);
+              app.tools[0].apply(ws, 11, first, true, app.tools[0].state) &&
+              app.tools[0].apply(ws, 22, second, true, app.tools[0].state);
 
     PicoContextEvent one = {.tools = app.tools, .tool_count = app.tool_count};
     PicoContextEvent two = {.tools = app.tools, .tool_count = app.tool_count};
-    app.context_hooks[0](&app, 11, &one);
-    app.context_hooks[0](&app, 22, &two);
+    app.context_hooks[0].fn(ws, 11, &one, app.context_hooks[0].state);
+    app.context_hooks[0].fn(ws, 22, &two, app.context_hooks[0].state);
     PicoContextEvent hidden = {0};
-    app.context_hooks[0](&app, 22, &hidden);
+    app.context_hooks[0].fn(ws, 22, &hidden, app.context_hooks[0].state);
     ok = ok && !hidden.extra_context && one.extra_context && strstr(one.extra_context, "first-agent") &&
          !strstr(one.extra_context, "second-agent") && two.extra_context &&
          strstr(two.extra_context, "second-agent") && !strstr(two.extra_context, "first-agent");
@@ -2799,22 +2869,22 @@ static int TestTodoAgentIsolation(void)
     {
         if (app.hooks[i].hook == reset.hook)
         {
-            app.hooks[i].fn(&app, &reset);
+            app.hooks[i].workspace_fn(PicoHost_PrimaryWorkspace(&app), &reset, app.hooks[i].state);
         }
     }
     one = (PicoContextEvent){.tools = app.tools, .tool_count = app.tool_count};
     two = (PicoContextEvent){.tools = app.tools, .tool_count = app.tool_count};
-    app.context_hooks[0](&app, 11, &one);
-    app.context_hooks[0](&app, 22, &two);
+    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 11, &one, app.context_hooks[0].state);
+    app.context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 22, &two, app.context_hooks[0].state);
     ok = ok && !one.extra_context && two.extra_context && strstr(two.extra_context, "second-agent");
     free(one.extra_context);
     free(two.extra_context);
-    ext.shutdown(&app);
+    ext.host_shutdown(&app, NULL);
     pico_clear_registrations(&app);
     return ok ? 0 : Fail(name, "apply, context, or reset crossed agent boundaries");
 }
 
-static PicoTool *FindTodoTool(PicoApp *app)
+static PicoTool *FindTodoTool(PicoHost *app)
 {
     for (int i = 0; app && i < app->tool_count; i++)
     {
@@ -2829,12 +2899,12 @@ static PicoTool *FindTodoTool(PicoApp *app)
 static int TestTodoApplyRenamesSession(void)
 {
     const char *name = "todo apply renames the session when task changes";
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_todo();
-    ext.init(&app);
+    ext.host_init(&app, NULL);
     PicoTool *tool = FindTodoTool(&app);
-    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoAgent *agent = PicoHost_ActiveAgent(&app);
     const char *first =
         "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
         "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
@@ -2852,29 +2922,29 @@ static int TestTodoApplyRenamesSession(void)
         "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"completed\"}]}";
     g_log_title_calls = 0;
     g_logged_title[0] = '\0';
-    bool ok = tool && tool->apply && agent && ext.on_frame &&
-              tool->apply(&app, agent->id, first, false) && g_log_title_calls == 0;
-    ext.on_frame(&app, 0.0f);
+    bool ok = tool && tool->apply && agent && ext.host_on_frame &&
+              tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, first, false, tool->state) && g_log_title_calls == 0;
+    ext.host_on_frame(&app, NULL, 0.0f);
     ok = ok && g_log_title_calls == 1 && strcmp(g_logged_title, "Name the session") == 0 &&
-         tool->apply(&app, agent->id, same, false);
-    ext.on_frame(&app, 0.0f);
-    ok = ok && g_log_title_calls == 1 && tool->apply(&app, agent->id, replayed_same, true);
-    ext.on_frame(&app, 0.0f);
-    ok = ok && g_log_title_calls == 1 && tool->apply(&app, agent->id, replayed_stale, true);
-    ext.on_frame(&app, 0.0f);
+         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, same, false, tool->state);
+    ext.host_on_frame(&app, NULL, 0.0f);
+    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_same, true, tool->state);
+    ext.host_on_frame(&app, NULL, 0.0f);
+    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_stale, true, tool->state);
+    ext.host_on_frame(&app, NULL, 0.0f);
     ok = ok && g_log_title_calls == 2 && strcmp(g_logged_title, "Heal replayed title") == 0 &&
-         tool->apply(&app, agent->id, renamed, false) && g_log_title_calls == 2;
-    ext.on_frame(&app, 0.0f);
+         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, renamed, false, tool->state) && g_log_title_calls == 2;
+    ext.host_on_frame(&app, NULL, 0.0f);
     ok = ok && g_log_title_calls == 3 && strcmp(g_logged_title, "Rename again") == 0;
-    if (ext.shutdown)
+    if (ext.host_shutdown)
     {
-        ext.shutdown(&app);
+        ext.host_shutdown(&app, NULL);
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "live apply did not rename on task change, or replay/unchanged task wrote a title");
 }
 
-static bool AskUserRegistered(const PicoApp *app)
+static bool AskUserRegistered(const PicoHost *app)
 {
     return app && app->tool_count == 1 && app->tools[0].name &&
            strcmp(app->tools[0].name, "ask_user") == 0 && app->tools[0].run &&
@@ -2886,43 +2956,44 @@ static int TestAskUserHiddenOmitsGuidance(void)
 {
     const char *name = "hidden ask_user omits guidance";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.init(&app);
-    pico_add_llm_hook(&app, ExcludeAskUser);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    ext.host_init(&app, NULL);
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskUser);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        ext.shutdown(&app);
-        PicoApp_Free(&app);
+        ext.host_shutdown(&app, NULL);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
     bool ok = g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user") == NULL &&
               (!g_test.last_input || strstr(g_test.last_input, "always use ask_user") == NULL);
     pthread_mutex_unlock(&g_test.mu);
-    ext.shutdown(&app);
-    PicoApp_Free(&app);
+    ext.host_shutdown(&app, NULL);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "guidance remained after ask_user was excluded");
 }
 
 static int TestAskUserRegistrationReload(void)
 {
     const char *name = "ask_user registration reload";
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
+    (void)TestWs(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.init(&app);
+    ext.host_init(&app, NULL);
     if (!AskUserRegistered(&app))
     {
-        ext.shutdown(&app);
+        ext.host_shutdown(&app, NULL);
         return Fail(name, "builtin did not register its tool, instruction hook, and overlay");
     }
     pico_clear_registrations(&app);
-    ext.init(&app);
+    ext.host_init(&app, NULL);
     bool ok = AskUserRegistered(&app);
-    ext.shutdown(&app);
+    ext.host_shutdown(&app, NULL);
     pico_clear_registrations(&app);
     return ok ? 0 : Fail(name, "builtin did not re-register cleanly after registrations were cleared");
 }
@@ -2950,34 +3021,34 @@ static int TestAskUserToolSuccess(void)
         "\"answer\":\"Keep it fast.\"}]}";
 
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.init(&app);
+    ext.host_init(&app, NULL);
     ConfigureAskUserCall();
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
 
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask) || strcmp(ask.request_json, expected_request) != 0)
     {
-        PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+        PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
         WaitForIdle(&app);
-        ext.shutdown(&app);
-        PicoApp_Free(&app);
+        ext.host_shutdown(&app, NULL);
+        PicoHost_Shutdown(&app);
         return Fail(name, "questionnaire request was not published unchanged");
     }
     if (!pico_tool_answer(&app, ask.id, answer) || !WaitForIdle(&app))
     {
-        ext.shutdown(&app);
-        PicoApp_Free(&app);
+        ext.host_shutdown(&app, NULL);
+        PicoHost_Shutdown(&app);
         return Fail(name, "answer was not delivered to the tool");
     }
 
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_output && strcmp(line->tool_output, answer) == 0 && !line->tool_error &&
               g_test.last_instructions && strstr(g_test.last_instructions, "always use ask_user");
-    ext.shutdown(&app);
-    PicoApp_Free(&app);
+    ext.host_shutdown(&app, NULL);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool result or clarification guidance was not preserved");
 }
 
@@ -2985,57 +3056,57 @@ static int TestAskUserToolCancellation(void)
 {
     const char *name = "ask_user tool cancellation";
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    ext.init(&app);
+    ext.host_init(&app, NULL);
     ConfigureAskUserCall();
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
 
     PicoToolAsk ask;
     if (!WaitForPending(&app, 0, &ask))
     {
-        ext.shutdown(&app);
-        PicoApp_Free(&app);
+        ext.host_shutdown(&app, NULL);
+        PicoHost_Shutdown(&app);
         return Fail(name, "questionnaire request was not published");
     }
-    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
     if (!WaitForIdle(&app))
     {
-        ext.shutdown(&app);
-        PicoApp_Free(&app);
+        ext.host_shutdown(&app, NULL);
+        PicoHost_Shutdown(&app);
         return Fail(name, "cancelled questionnaire did not return idle");
     }
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_error && line->tool_output &&
               strcmp(line->tool_output, "{\"error\":\"questionnaire cancelled\"}") == 0;
-    ext.shutdown(&app);
-    PicoApp_Free(&app);
+    ext.host_shutdown(&app, NULL);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "cancellation did not produce the expected tool error");
 }
 
 static int TestResumedToolCallArgs(void)
 {
     const char *name = "resumed tool args match live format";
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoApp_AddToolCall(&app, "sh", "{\"command\":\"cat examples/extra_instructions.c\"}");
+    PicoHost_AddToolCall(&app, "sh", "{\"command\":\"cat examples/extra_instructions.c\"}");
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_args &&
               strcmp(line->tool_args, "command: cat examples/extra_instructions.c") == 0 &&
               line->tool_args_json &&
               strcmp(line->tool_args_json,
                      "{\"command\":\"cat examples/extra_instructions.c\"}") == 0;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool call did not preserve display and raw arguments");
 }
 
 static int TestToolCallListArgs(void)
 {
     const char *name = "tool call lists show item counts";
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoApp_AddToolCall(&app, "todo_update",
+    PicoHost_AddToolCall(&app, "todo_update",
                         "{\"todos\":[{\"id\":\"1\",\"content\":\"a\",\"status\":\"pending\"},"
                         "{\"id\":\"2\",\"content\":\"b\",\"status\":\"pending\"},"
                         "{\"id\":\"3\",\"content\":\"c\",\"status\":\"pending\"},"
@@ -3043,7 +3114,7 @@ static int TestToolCallListArgs(void)
     PicoTraceLine *line = LastToolTrace(&app);
     bool ok = line && line->tool_args && strcmp(line->tool_args, "todos: [4 items]") == 0 &&
               line->tool_args_json && strstr(line->tool_args_json, "\"todos\"");
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "list args were not summarized as an item count");
 }
 
@@ -3054,12 +3125,12 @@ static int TestToolCallListArgs(void)
 static int TestResultItemOrder(TestMode mode, bool assistant_first, const char *name)
 {
     ResetTest(mode, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "item-order turn did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
@@ -3074,7 +3145,7 @@ static int TestResultItemOrder(TestMode mode, bool assistant_first, const char *
                        g_test.session_message_groups[0] == g_test.session_message_groups[1];
     bool ok = history_ok && session_ok && grouping_ok;
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "result item order was not preserved in history");
 }
 
@@ -3082,15 +3153,15 @@ static int TestMultipleAssistantItemsShareMessageGroup(void)
 {
     const char *name = "multiple assistant items share one live message group";
     ResetTest(TEST_MULTI_ASSISTANT_ITEMS, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "multi-item turn did not finish");
     }
-    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoAgent *agent = PicoHost_ActiveAgent(&app);
     bool live_ok = agent->message_count >= 1 &&
                    agent->messages[agent->message_count - 1].role == PICO_ROLE_ASSISTANT &&
                    agent->messages[agent->message_count - 1].source &&
@@ -3100,7 +3171,7 @@ static int TestMultipleAssistantItemsShareMessageGroup(void)
                         g_test.session_message_group_count == 2 &&
                         g_test.session_message_groups[0] == g_test.session_message_groups[1];
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return live_ok && persisted_ok
                ? 0
                : Fail(name, "live grouping and persisted message_group values diverged");
@@ -3110,15 +3181,15 @@ static int TestInterleavedTraceItemsKeepCanonicalOrder(void)
 {
     const char *name = "interleaved assistant and tool traces keep canonical order";
     ResetTest(TEST_INTERLEAVED_TRACE_ITEMS, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "interleaved trace turn did not finish");
     }
-    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoAgent *agent = PicoHost_ActiveAgent(&app);
     PicoMessage *message = agent->message_count > 0
                                ? &agent->messages[agent->message_count - 1] : NULL;
     bool live_ok = message && message->role == PICO_ROLE_ASSISTANT &&
@@ -3135,7 +3206,7 @@ static int TestInterleavedTraceItemsKeepCanonicalOrder(void)
                         g_test.session_message_groups[0] == g_test.session_message_groups[1] &&
                         g_test.session_message_groups[1] == g_test.session_message_groups[2];
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return live_ok && persisted_ok
                ? 0
                : Fail(name, "live trace order diverged from persisted item order");
@@ -3145,18 +3216,18 @@ static int TestMalformedCanonicalResult(void)
 {
     const char *name = "malformed canonical result";
     ResetTest(TEST_MALFORMED_RESULT, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
-    for (int i = 0; i < 3000 && PicoApp_ActiveAgent(&app)->state != PICO_AGENT_ERROR; i++)
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
+    for (int i = 0; i < 3000 && PicoHost_ActiveAgent(&app)->state != PICO_AGENT_ERROR; i++)
     {
-        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+        PicoAgent_Pump(&app, PicoHost_ActiveAgent(&app));
         SleepOneMs();
     }
-    bool ok = PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
-              PicoApp_ActiveAgent(&app)->error &&
-              strstr(PicoApp_ActiveAgent(&app)->error, "malformed result item array");
-    PicoApp_Free(&app);
+    bool ok = PicoHost_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
+              PicoHost_ActiveAgent(&app)->error &&
+              strstr(PicoHost_ActiveAgent(&app)->error, "malformed result item array");
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "malformed public result did not fail safely");
 }
 
@@ -3164,21 +3235,21 @@ static int TestMediaPersistenceFailureIsAtomic(void)
 {
     const char *name = "media persistence failure is atomic";
     ResetTest(TEST_MEDIA_PERSIST_FAIL, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
-    for (int i = 0; i < 3000 && PicoApp_ActiveAgent(&app)->state != PICO_AGENT_ERROR; i++)
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
+    for (int i = 0; i < 3000 && PicoHost_ActiveAgent(&app)->state != PICO_AGENT_ERROR; i++)
     {
-        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+        PicoAgent_Pump(&app, PicoHost_ActiveAgent(&app));
         SleepOneMs();
     }
     pthread_mutex_lock(&g_test.mu);
     bool no_result_events = g_test.session_item_order[0] == '\0';
     pthread_mutex_unlock(&g_test.mu);
-    bool ok = no_result_events && PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
-              PicoApp_ActiveAgent(&app)->error &&
-              strstr(PicoApp_ActiveAgent(&app)->error, "failed to persist provider media");
-    PicoApp_Free(&app);
+    bool ok = no_result_events && PicoHost_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
+              PicoHost_ActiveAgent(&app)->error &&
+              strstr(PicoHost_ActiveAgent(&app)->error, "failed to persist provider media");
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "part of a failed media result was logged");
 }
 
@@ -3186,15 +3257,15 @@ static int TestNonVisionMediaRejected(void)
 {
     const char *name = "non-vision media rejection";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     app.agent_parts = JsonDup(
         "[{\"type\":\"text\",\"text\":\"see\"},{\"type\":\"image\",\"path\":\"/tmp/pic.png\"}]");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "see");
-    bool ok = PicoApp_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
-              PicoApp_ActiveAgent(&app)->error &&
-              strcmp(PicoApp_ActiveAgent(&app)->error, "model does not accept images") == 0;
-    PicoApp_Free(&app);
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "see");
+    bool ok = PicoHost_ActiveAgent(&app)->state == PICO_AGENT_ERROR &&
+              PicoHost_ActiveAgent(&app)->error &&
+              strcmp(PicoHost_ActiveAgent(&app)->error, "model does not accept images") == 0;
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "media history was not rejected with the capability error");
 }
 
@@ -3202,20 +3273,20 @@ static int TestCanonicalContinuationState(void)
 {
     const char *name = "canonical continuation state";
     ResetTest(TEST_SIGNATURE_CONTINUATION, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "signature continuation turn did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
     bool signature_ok = g_test.last_input && strstr(g_test.last_input, "rs-only") &&
                         strstr(g_test.last_input, "thinking_signature");
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return signature_ok ? 0 : Fail(name, "signature-only assistant state was not sent on the follow-up");
 }
 
@@ -3223,34 +3294,34 @@ static int TestCancelledThinkingPersistence(void)
 {
     const char *name = "cancelled thinking persistence";
     ResetTest(TEST_PROVIDER_THINK_BLOCK, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "thinking provider did not start");
     }
-    PicoAgent_Cancel(PicoApp_ActiveAgent(&app));
+    PicoAgent_Cancel(PicoHost_ActiveAgent(&app));
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "cancelled thinking provider did not return idle");
     }
     pthread_mutex_lock(&g_test.mu);
     bool logged = strcmp(g_test.logged_thinking, "partial-think") == 0;
     g_test.mode = TEST_SINGLE;
     pthread_mutex_unlock(&g_test.mu);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "continue");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "continue");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "follow-up after cancellation did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
     bool history = g_test.last_input && strstr(g_test.last_input, "\"thinking\":\"partial-think\"");
     pthread_mutex_unlock(&g_test.mu);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return logged && history ? 0 : Fail(name, "cancelled thinking was not logged and replayed");
 }
 
@@ -3259,22 +3330,22 @@ static int TestThinkSummaryCoalesce(void)
     const char *name = "think summaries coalesce until a tool";
     ResetTest(TEST_SINGLE, 1);
     g_test.emit_think_summaries = true;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "echo_test", "echo", "{}", EchoTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "turn did not finish");
     }
     PicoMessage *msg = NULL;
-    for (int i = PicoApp_ActiveAgent(&app)->message_count - 1; i >= 0; i--)
+    for (int i = PicoHost_ActiveAgent(&app)->message_count - 1; i >= 0; i--)
     {
-        if (PicoApp_ActiveAgent(&app)->messages[i].role == PICO_ROLE_ASSISTANT)
+        if (PicoHost_ActiveAgent(&app)->messages[i].role == PICO_ROLE_ASSISTANT)
         {
-            msg = &PicoApp_ActiveAgent(&app)->messages[i];
+            msg = &PicoHost_ActiveAgent(&app)->messages[i];
             break;
         }
     }
@@ -3286,7 +3357,7 @@ static int TestThinkSummaryCoalesce(void)
               (!msg->trace[0].text || !strstr(msg->trace[0].text, "2x ")) && msg->trace[1].is_tool &&
               !msg->trace[2].is_tool && msg->trace[2].think_steps == 1 && msg->trace[2].text &&
               strcmp(msg->trace[2].text, "**third**") == 0 && g_test.logged_thinking_parts;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "consecutive summaries did not keep every step, or tool did not reset");
 }
 
@@ -3294,9 +3365,9 @@ static int TestRestoredThinkKeepsUnknownDuration(void)
 {
     const char *name = "restored thinking does not invent a duration";
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    PicoAgent *agent = PicoApp_ActiveAgent(&app);
+    PicoAgent *agent = PicoHost_ActiveAgent(&app);
     PicoAgent_AddMessage(&app, agent, PICO_ROLE_ASSISTANT, "answer");
     PicoAgent_AppendThink(&app, agent, "historic-cot", 0);
     PicoAgent_AddToolCallWithId(&app, agent, "c1", "echo_test", "{}");
@@ -3309,7 +3380,7 @@ static int TestRestoredThinkKeepsUnknownDuration(void)
     PicoAgent_AddToolCallWithId(&app, agent, "c2", "echo_test", "{}");
     PicoMessage *timed = &agent->messages[agent->message_count - 1];
     bool kept = timed->trace_count >= 1 && !timed->trace[0].is_tool && timed->trace[0].think_ms == 12500;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     if (!unknown)
     {
         return Fail(name, "replay-style restore invented a duration after a following tool");
@@ -3317,12 +3388,12 @@ static int TestRestoredThinkKeepsUnknownDuration(void)
     return kept ? 0 : Fail(name, "stored thinking_ms was not kept across a following tool");
 }
 
-static bool WaitForUi(PicoApp *app, const char *box_name, PicoUiPost *out)
+static bool WaitForUi(PicoHost *app, const char *box_name, PicoUiPost *out)
 {
     int i;
     for (i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(app, PicoApp_ActiveAgent(app));
+        PicoAgent_Pump(app, PicoHost_ActiveAgent(app));
         if (pico_ui_latest(app, box_name, out))
         {
             return true;
@@ -3332,16 +3403,16 @@ static bool WaitForUi(PicoApp *app, const char *box_name, PicoUiPost *out)
     return false;
 }
 
-static void UseUiPostTool(PicoApp *app)
+static void UseUiPostTool(PicoHost *app)
 {
-    pico_add_tool(app, "ui_post", "test", "{}", UiPostTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(app), "ui_post", "test", "{}", UiPostTool, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ui_post");
 }
 
 static int TestUiPostAppendReplace(void)
 {
     const char *name = "ui mailbox append and replace";
-    PicoApp app;
+    PicoHost app;
     PicoUiPost stream;
     PicoUiPost other;
     PicoUiPost after_clear;
@@ -3350,15 +3421,15 @@ static int TestUiPostAppendReplace(void)
     ResetTest(TEST_UI_POST, 1);
     InitApp(&app);
     UseUiPostTool(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     if (!pico_ui_latest(&app, "stream", &stream) || !pico_ui_latest(&app, "other", &other))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "published snapshots were missing");
     }
     ok = stream.status && strlen(stream.status) == PICO_UI_POST_STATUS_MAX &&
@@ -3372,41 +3443,41 @@ static int TestUiPostAppendReplace(void)
     pico_ui_clear(&app, "stream");
     ok = ok && !pico_ui_latest(&app, "stream", &after_clear) &&
          pico_ui_latest(&app, "other", &other);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "status/text snapshot contract failed");
 }
 
 static int TestUiPostCap(void)
 {
     const char *name = "ui mailbox text keeps prefix at cap";
-    PicoApp app;
+    PicoHost app;
     PicoUiPost post;
     bool ok;
 
     ResetTest(TEST_UI_POST_CAP, 1);
     InitApp(&app);
     UseUiPostTool(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     if (!pico_ui_latest(&app, "cap", &post) || !post.text)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "capped snapshot was missing");
     }
     ok = strlen(post.text) == PICO_UI_POST_TEXT_MAX &&
          post.text[0] == 'a' && post.text[PICO_UI_POST_TEXT_MAX - 1] == 'a';
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "overflow did not keep the prefix");
 }
 
 static int TestUiPostForceCancel(void)
 {
     const char *name = "ui mailbox drops abandoned generation posts";
-    PicoApp app;
+    PicoHost app;
     PicoUiPost post;
     bool reaped = false;
     int i;
@@ -3414,26 +3485,26 @@ static int TestUiPostForceCancel(void)
     ResetTest(TEST_UI_POST_BLOCK, 1);
     InitApp(&app);
     UseUiPostTool(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "blocking ui post tool did not start");
     }
     if (!WaitForUi(&app, "stream", &post) || !post.text || strcmp(post.text, "live") != 0)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "live snapshot was not published");
     }
-    PicoAgent_ForceCancel(&app, PicoApp_ActiveAgent(&app));
+    PicoAgent_ForceCancel(&app, PicoHost_ActiveAgent(&app));
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
     for (i = 0; i < 3000; i++)
     {
-        PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
-        if (!PicoAgent_BlocksReload(PicoApp_ActiveAgent(&app)))
+        PicoAgent_Pump(&app, PicoHost_ActiveAgent(&app));
+        if (!PicoAgent_BlocksReload(PicoHost_ActiveAgent(&app)))
         {
             reaped = true;
             break;
@@ -3443,10 +3514,10 @@ static int TestUiPostForceCancel(void)
     if (!reaped || !pico_ui_latest(&app, "stream", &post) || !post.text ||
         strcmp(post.text, "live") != 0)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "abandoned post replaced the live snapshot");
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return 0;
 }
 
@@ -3470,7 +3541,7 @@ static bool WaitForFlagNoPump(bool *flag)
 static int TestUiPostUnpublishedIdentity(void)
 {
     const char *name = "ui mailbox latest stays on last publish";
-    PicoApp app;
+    PicoHost app;
     PicoUiPost post;
     uint64_t first_gen;
     PicoAgentId first_agent;
@@ -3479,11 +3550,11 @@ static int TestUiPostUnpublishedIdentity(void)
     ResetTest(TEST_UI_POST_BLOCK, 1);
     InitApp(&app);
     UseUiPostTool(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForBlock(&app) || !WaitForUi(&app, "stream", &post) ||
         !post.text || strcmp(post.text, "live") != 0)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "first snapshot was not published");
     }
     first_gen = post.generation;
@@ -3495,26 +3566,26 @@ static int TestUiPostUnpublishedIdentity(void)
     pthread_mutex_unlock(&g_test.mu);
     if (!WaitForFlagNoPump(&g_test.block_done))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "second post did not finish");
     }
     if (!pico_ui_latest(&app, "stream", &post) || !post.text || strcmp(post.text, "live") != 0 ||
         post.generation != first_gen || post.agent_id != first_agent)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "unpublished append leaked into latest");
     }
-    PicoAgent_Pump(&app, PicoApp_ActiveAgent(&app));
+    PicoAgent_Pump(&app, PicoHost_ActiveAgent(&app));
     ok = pico_ui_latest(&app, "stream", &post) && post.text && strcmp(post.text, "livedead") == 0 &&
          post.generation == first_gen && post.agent_id == first_agent;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "pump did not publish the staged append");
 }
 
 static int TestUiPostLimit(void)
 {
     const char *name = "ui mailbox table rejects a new name when full";
-    PicoApp app;
+    PicoHost app;
     PicoUiPost post;
     int i;
     bool ok = true;
@@ -3522,10 +3593,10 @@ static int TestUiPostLimit(void)
     ResetTest(TEST_UI_POST_LIMIT, 1);
     InitApp(&app);
     UseUiPostTool(&app);
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "start");
+    PicoAgent_StartTurn(&app, PicoHost_ActiveAgent(&app), "start");
     if (!WaitForIdle(&app))
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "agent did not return idle");
     }
     for (i = 0; i < PICO_MAX_UI_POSTS; i++)
@@ -3543,7 +3614,7 @@ static int TestUiPostLimit(void)
         snprintf(overflow, sizeof(overflow), "b%d", PICO_MAX_UI_POSTS);
         ok = ok && !pico_ui_latest(&app, overflow, &post);
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "mailbox limit was not enforced");
 }
 

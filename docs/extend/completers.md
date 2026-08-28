@@ -3,10 +3,11 @@
 Composer completions fire when the cursor is in a triggered token.
 
 ```c
-static int HashQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
+static int HashQuery(PicoHost *host, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
-    (void)app;
+    (void)host;
     (void)prefix;
+    (void)state;
     if (max < 1)
     {
         return 0;
@@ -17,9 +18,11 @@ static int HashQuery(PicoApp *app, const char *prefix, PicoCompleteItem *out, in
     return 1;
 }
 
-static void HashInit(PicoApp *app)
+static int HashInit(PicoHost *host, void **state_out)
 {
-    pico_add_completer(app, '#', false, HashQuery, NULL);
+    (void)state_out;
+    pico_host_add_completer(host, '#', false, HashQuery, NULL);
+    return 0;
 }
 ```
 

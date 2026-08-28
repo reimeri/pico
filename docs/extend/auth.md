@@ -6,29 +6,33 @@ Register a provider so `/login` and `/logout` have something to call. Credential
 #include "pico/plugin.h"
 #include "pico/auth.h"
 
-static void MyLogin(PicoApp *app, const char *args)
+static void MyLogin(PicoHost *host, const char *args, void *state)
 {
     /* parse args: empty, "key", "cancel", … */
     (void)args;
-    pico_auth_set_active(app, "myllm", PICO_AUTH_API_KEY);
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, "Logged in.");
+    (void)state;
+    pico_auth_set_active(host, "myllm", PICO_AUTH_API_KEY);
+    PicoHost_AddMessage(host, PICO_ROLE_ASSISTANT, "Logged in.");
 }
 
-static void MyLogout(PicoApp *app)
+static void MyLogout(PicoHost *host, void *state)
 {
-    pico_auth_clear_oauth(app, "myllm");
+    (void)state;
+    pico_auth_clear_oauth(host, "myllm");
 }
 
-static void MyInit(PicoApp *app)
+static int MyInit(PicoHost *host, void **state_out)
 {
-    pico_add_auth(app, &(PicoAuth){
-                           .provider = "myllm",
-                           .help = "API key",
-                           .verbs = "key cancel",
-                           .login = MyLogin,
-                           .logout = MyLogout,
-                       });
-    pico_auth_set_env_key(app, "myllm", getenv("MYLLM_API_KEY"));
+    (void)state_out;
+    pico_add_auth(host, &(PicoAuth){
+                            .provider = "myllm",
+                            .help = "API key",
+                            .verbs = "key cancel",
+                            .login = MyLogin,
+                            .logout = MyLogout,
+                        });
+    pico_auth_set_env_key(host, "myllm", getenv("MYLLM_API_KEY"));
+    return 0;
 }
 ```
 
@@ -50,7 +54,7 @@ static void MyInit(PicoApp *app)
 ## Contract
 
 - `.provider`, `.help`, `.verbs` must outlive the extension.
-- `login` runs on the main thread from builtin `/login` (submit is already cancelled). `logout` is `void (*)(PicoApp *)`; `/logout` already cancels submit.
+- `login` runs on the main thread from builtin `/login` (submit is already cancelled). `logout` is `void (*)(PicoHost *, void *)`; `/logout` already cancels submit.
 - Auth storage is process-global and mutex-protected. Worker callbacks for different agents may overlap safely when using context variants. Builtin OpenAI, Hyper, and xAI OAuth refresh are each single-flight; waiters recheck the latest token, and a replacement fails promptly instead of racing an abandoned rotating-token exchange.
 - If shutdown detaches a callback, Pico retains the auth store and skips auth destruction so callback-scoped access cannot observe freed credentials. Pico then rejects reinitialization and must exit.
 - Max 16 auth providers (`PICO_MAX_AUTH`).

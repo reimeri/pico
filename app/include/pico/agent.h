@@ -9,6 +9,7 @@
 #endif
 
 #define PICO_MAX_AGENTS 16
+#define PICO_MAX_TOTAL_AGENTS 32
 #define PICO_MAX_SUBAGENT_PROFILES 32
 #ifndef PICO_MAX_TOOLS
 #define PICO_MAX_TOOLS 64
@@ -18,13 +19,14 @@
 
 typedef uint64_t PicoAgentId;
 
-struct PicoApp;
+typedef struct PicoHost PicoHost;
+typedef struct PicoWorkspace PicoWorkspace;
 typedef struct PicoAgent PicoAgent;
 typedef struct PicoAgentContext PicoAgentContext;
 typedef struct PicoAgentManager PicoAgentManager;
 
 typedef enum PicoAgentKind {
-    PICO_AGENT_NORMAL = 0,
+    PICO_AGENT_MAIN = 0,
     PICO_AGENT_SUBAGENT,
 } PicoAgentKind;
 
@@ -116,19 +118,18 @@ PicoAgentId pico_agent_id(const PicoAgent *agent);
 bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out);
 
 /* Main-thread-only manager API. All returned information is copied. */
-int pico_agent_count(const struct PicoApp *app);
-bool pico_agent_info(const struct PicoApp *app, int index, PicoAgentInfo *out);
-bool pico_agent_find(const struct PicoApp *app, PicoAgentId id, PicoAgentInfo *out);
-PicoAgentId pico_agent_active(const struct PicoApp *app);
-bool pico_agent_select(struct PicoApp *app, PicoAgentId id);
-PicoAgentResult pico_agent_create(struct PicoApp *app, const PicoAgentCreateOptions *options,
+int pico_agent_count(const PicoHost *host);
+bool pico_agent_info(const PicoHost *host, int index, PicoAgentInfo *out);
+bool pico_agent_find(const PicoHost *host, PicoAgentId id, PicoAgentInfo *out);
+PicoAgentId pico_agent_active(const PicoHost *host);
+bool pico_agent_select(PicoHost *host, PicoAgentId id);
+PicoAgentResult pico_agent_create(PicoHost *host, const PicoAgentCreateOptions *options,
                                   PicoAgentId *out);
-PicoAgentResult pico_agent_close(struct PicoApp *app, PicoAgentId id);
-PicoAgentResult pico_agent_cancel(struct PicoApp *app, PicoAgentId id);
-PicoAgentResult pico_agent_force_cancel(struct PicoApp *app, PicoAgentId id);
-int pico_subagent_profile_count(const struct PicoApp *app);
-bool pico_subagent_profile_info(const struct PicoApp *app, int index,
-                                PicoSubagentProfileInfo *out);
+PicoAgentResult pico_agent_close(PicoHost *host, PicoAgentId id);
+PicoAgentResult pico_agent_cancel(PicoHost *host, PicoAgentId id);
+PicoAgentResult pico_agent_force_cancel(PicoHost *host, PicoAgentId id);
+int pico_subagent_profile_count(const PicoHost *host);
+bool pico_subagent_profile_info(const PicoHost *host, int index, PicoSubagentProfileInfo *out);
 
 /* Worker callback context. All returned strings are read-only and valid only
  * for the duration of the callback that received ctx. */

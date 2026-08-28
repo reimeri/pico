@@ -2,6 +2,7 @@
 
 #include "docs_path.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +17,7 @@ static int Fail(const char *message)
 
 static int TestModelContextBeatsFallback(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     PicoModel model;
     memset(&app, 0, sizeof(app));
@@ -41,7 +42,7 @@ static int TestModelContextBeatsFallback(void)
 
 static int TestFallbackWhenModelHasNoLimit(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     PicoModel model;
     memset(&app, 0, sizeof(app));
@@ -65,7 +66,7 @@ static int TestFallbackWhenModelHasNoLimit(void)
 
 static int TestPerAgentSelection(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent first;
     PicoAgent second;
     PicoModel models[2];
@@ -137,9 +138,9 @@ static int TestDisabledExtensionsFromUserSettings(void)
     fputs("{\n  \"disabled_extensions\": [\"composer\"]\n}\n", f);
     fclose(f);
 
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    PicoHost_SetPath(&app, temp);
     setenv("XDG_CONFIG_HOME", temp, 1);
     PicoSettings_Load(&app);
     int failed = app.settings.disabled_extension_count != 1 ||
@@ -206,9 +207,9 @@ static int TestPromptSourceSpans(void)
         return Fail("could not write prompt source files");
     }
 
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", workspace);
+    PicoHost_SetPath(&app, workspace);
     setenv("XDG_CONFIG_HOME", temp, 1);
     Pico_DocsSetAppDir(NULL);
 
@@ -244,7 +245,7 @@ static int TestDocsHintIsBaseSpan(void)
     snprintf(config, sizeof(config), "%s/pico", temp);
     Pico_MkdirP(config);
 
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
     setenv("XDG_CONFIG_HOME", temp, 1);
     Pico_DocsSetAppDir(temp);

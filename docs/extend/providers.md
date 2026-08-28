@@ -20,11 +20,12 @@ xAI talks to `POST https://api.x.ai/v1/chat/completions`. Requests use `store: f
 #include "json.h"
 
 static int MyStream(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                    PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                    PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
     (void)ctx;
     (void)turn;
     (void)cancel;
+    (void)state;
     if (on_delta)
     {
         on_delta(user, PICO_LLM_DELTA_TEXT, "hello", 5);
@@ -33,9 +34,11 @@ static int MyStream(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCance
     return PICO_LLM_OK;
 }
 
-static void MyInit(PicoApp *app)
+static int MyInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "myllm", .stream = MyStream});
+    (void)state_out;
+    pico_add_provider(workspace, &(PicoProvider){.name = "myllm", .stream = MyStream});
+    return 0;
 }
 ```
 

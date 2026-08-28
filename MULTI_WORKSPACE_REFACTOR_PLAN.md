@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 0 complete; implementation starts at Phase 1  
+Status: Phase 1 complete; implementation continues at Phase 2  
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -570,6 +570,8 @@ Builtin mutable globals (Phase 4/5 extract into host or workspace instance state
 
 ### Phase 1 — Atomic host/workspace and ABI 13 foundation with one workspace
 
+Status: complete (2026-08-28)
+
 This phase is intentionally one atomic integration phase. `PicoApp` cannot be removed while ABI 12 callbacks still require `PicoApp *`, and this project does not permit a compatibility facade. Complete the ordered steps below on one integration branch and merge only after the whole phase builds and passes.
 
 Owner files:
@@ -600,6 +602,14 @@ Acceptance:
 - Startup, submit, cancel, session resume, and shutdown behavior remain observable-equivalent.
 - No process-static `next_id` remains in `agent.c`.
 - The executable, all examples, and the full tests build together; no intermediate compatibility layer is merged.
+
+#### Phase 1 recorded result
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+```
+
+25/25 tests passed. Examples compile as ABI 13 smoke tests. `PicoApp` and ABI 12 are gone from public headers and production sources. One live workspace; a second distinct open returns `PICO_LIMIT`.
 
 ### Phase 2 — Remove ambient active/workspace backend access
 

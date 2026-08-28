@@ -3,6 +3,7 @@
 #define CLAY_IMPLEMENTATION
 #include "clay/clay.h"
 #include "../clay/renderers/raylib/clay_renderer_raylib.c"
+#include "host_internal.h"
 
 #include "pico/app.h"
 #include "agent_internal.h"
@@ -123,30 +124,30 @@ int main(int argc, char **argv)
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
     RichText_SetMeasureFunction(Pico_MeasureTextUtf8, fonts);
 
-    PicoApp app = {0};
-    PicoApp_Init(&app, fonts, workspace, safe_mode, session_start, session_file);
+    PicoHost app = {0};
+    PicoHost_Start(&app, fonts, workspace, safe_mode, session_start, session_file);
     while (!WindowShouldClose())
     {
         if (Pico_NeedsClayReinit())
         {
             Pico_ReinitClay(fonts, app.debug_enabled);
         }
-        PicoApp_Frame(&app);
+        PicoHost_Frame(&app);
     }
 
     char session_path[4096];
     session_path[0] = '\0';
-    const PicoAgent *active = PicoApp_ActiveAgentConst(&app);
+    const PicoAgent *active = PicoHost_ActiveAgentConst(&app);
     if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0] &&
         access(active->session_path, F_OK) == 0)
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
-    PicoAppShutdownResult shutdown = PicoApp_Free(&app);
+    PicoHostShutdownResult shutdown = PicoHost_Shutdown(&app);
 
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();
-    if (shutdown == PICO_APP_SHUTDOWN_RETAINED)
+    if (shutdown == PICO_HOST_SHUTDOWN_RETAINED)
     {
         fprintf(stderr, "Pico retained a blocked worker and is exiting without unloading extensions.\n");
     }

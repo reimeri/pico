@@ -7,6 +7,7 @@
 #include "builtins/ask_user.h"
 #include "json.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
@@ -366,8 +367,9 @@ char *PicoAskUser_BuildRequest(const char *args_json, char *error, size_t error_
     return result;
 }
 
-static void AskUserRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void AskUserRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     if (!out)
     {
         return;
@@ -554,7 +556,7 @@ static int LoadUiRequest(const char *request_json, char *error, size_t error_cap
     return 1;
 }
 
-static void AnswerUiError(PicoApp *app, uint64_t id, const char *message)
+static void AnswerUiError(PicoHost *app, uint64_t id, const char *message)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -573,7 +575,7 @@ static void AnswerUiError(PicoApp *app, uint64_t id, const char *message)
     free(answer);
 }
 
-static void SyncPendingAsk(PicoApp *app)
+static void SyncPendingAsk(PicoHost *app)
 {
     PicoToolAsk ask;
     if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
@@ -985,7 +987,7 @@ static char *BuildAnswer(void)
     return JsonBuf_Steal(&b);
 }
 
-static void SubmitAnswers(PicoApp *app)
+static void SubmitAnswers(PicoHost *app)
 {
     for (int i = 0; i < g_ui.question_count; i++)
     {
@@ -1031,7 +1033,7 @@ static void GoBack(void)
     }
 }
 
-static void GoForward(PicoApp *app)
+static void GoForward(PicoHost *app)
 {
     AskQuestion *q = &g_ui.questions[g_ui.current];
     if (!QuestionAnswered(q))
@@ -1061,9 +1063,9 @@ static bool ShiftDown(void)
     return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 }
 
-static void HandleTextKeys(PicoApp *app, AskQuestion *q);
+static void HandleTextKeys(PicoHost *app, AskQuestion *q);
 
-static void HandleSelectKeys(PicoApp *app, AskQuestion *q)
+static void HandleSelectKeys(PicoHost *app, AskQuestion *q)
 {
     if (q->selected == q->option_count)
     {
@@ -1136,7 +1138,7 @@ static void PasteText(AskQuestion *q)
     }
 }
 
-static void HandleTextKeys(PicoApp *app, AskQuestion *q)
+static void HandleTextKeys(PicoHost *app, AskQuestion *q)
 {
     bool ctrl = CtrlDown();
     bool shift = ShiftDown();
@@ -1242,7 +1244,7 @@ static void UpdateAskScrollbarDrag(void)
                              CLAY_STRING("AskUserBodyHandle"));
 }
 
-static void AskUserOnFrame(PicoApp *app, float dt)
+static void AskUserOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     SyncPendingAsk(app);
@@ -1424,8 +1426,9 @@ static void RenderTextQuestion(const AskQuestion *q)
                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 }
 
-static void AskUserRender(PicoApp *app)
+static void AskUserRender(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
@@ -1646,8 +1649,9 @@ static void EnsureAskCaretVisible(const AskQuestion *q)
     }
 }
 
-static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
@@ -1727,8 +1731,9 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void AskUserDrawOverlay(PicoApp *app, const PicoHookEvent *event)
+static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)app;
     (void)event;
     if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
@@ -1805,9 +1810,11 @@ static void AskUserDrawOverlay(PicoApp *app, const PicoHookEvent *event)
     EndScissorMode();
 }
 
-static void AskUserLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void AskUserLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    PicoLlmEvent *ev = event;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
     bool offered = false;
     for (int i = 0; ev && i < ev->tool_count; i++)
@@ -1827,22 +1834,25 @@ static void AskUserLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
     }
 }
 
-static void AskUserInit(PicoApp *app)
+static int AskUserInit(PicoHost *app, void **state_out)
 {
-    pico_add_tool(app, "ask_user",
+    (void)state_out;
+    pico_add_tool(PicoHost_PrimaryWorkspace(app), "ask_user",
                   "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
                   "in one call. Use kind 'select' with options for a single choice; select questions always include a "
                   "required free-form Other choice. Use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL);
-    pico_add_llm_hook(app, AskUserLlm);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
-    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, AskUserDrawOverlay);
+    pico_add_llm_hook(PicoHost_PrimaryWorkspace(app), AskUserLlm);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, AskUserDrawOverlay);
+    return 0;
 }
 
-static void AskUserShutdown(PicoApp *app)
+static void AskUserShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     ClearQuestions();
     g_ui.answered_id = 0;
@@ -1854,8 +1864,8 @@ PicoExt pico_ext_ask_user(void)
         .abi = PICO_EXT_ABI,
         .name = "ask-user",
         .description = "Multi-step required select and free-form clarifying questions",
-        .init = AskUserInit,
-        .shutdown = AskUserShutdown,
-        .on_frame = AskUserOnFrame,
+        .host_init = AskUserInit,
+        .host_shutdown = AskUserShutdown,
+        .host_on_frame = AskUserOnFrame,
     };
 }

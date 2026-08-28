@@ -6,8 +6,8 @@
 #include "session.h"
 #include "settings.h"
 #include "subagent_config.h"
+#include "host_internal.h"
 
-#include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -345,27 +345,23 @@ static void FreeUiPosts(PicoAgentManager *manager)
     pthread_mutex_unlock(&manager->ui_post_mu);
 }
 
-PicoAgentManager *PicoAgentManager_Create(PicoApp *app)
+static PicoHost *MgrHost(const PicoAgentManager *manager)
+{
+    return manager && manager->workspace ? manager->workspace->host : NULL;
+}
+
+PicoAgentManager *PicoAgentManager_Create(PicoWorkspace *workspace)
 {
     PicoAgentManager *manager = (PicoAgentManager *)calloc(1, sizeof(*manager));
     if (!manager)
     {
         return NULL;
     }
-    manager->app = app;
+    manager->workspace = workspace;
     pthread_mutex_init(&manager->delegation_mu, NULL);
     pthread_mutex_init(&manager->lifecycle_mu, NULL);
     pthread_mutex_init(&manager->ui_post_mu, NULL);
     manager->accepting_work = true;
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
-    {
-        pthread_mutex_destroy(&manager->ui_post_mu);
-        pthread_mutex_destroy(&manager->lifecycle_mu);
-        pthread_mutex_destroy(&manager->delegation_mu);
-        free(manager);
-        return NULL;
-    }
-    manager->curl_initialized = true;
     return manager;
 }
 
@@ -374,7 +370,7 @@ static void FreeAgentFieldsOnCreateFailure(PicoAgent *agent)
     (void)PicoAgent_Destroy(agent);
 }
 
-static bool CopyToolPolicy(PicoApp *app, PicoAgent *agent,
+static bool CopyToolPolicy(PicoHost *app, PicoAgent *agent,
                            const char *const *tools, int tool_count)
 {
     if (!tools)
@@ -426,14 +422,14 @@ static bool CopyToolPolicy(PicoApp *app, PicoAgent *agent,
     return true;
 }
 
-static PicoAgentResult ConfigureAgent(PicoApp *app, PicoAgent *agent,
+static PicoAgentResult ConfigureAgent(PicoHost *app, PicoAgent *agent,
                                       const PicoAgentCreateOptions *options)
 {
     if (!agent || !options)
     {
         return PICO_AGENT_RESULT_INVALID;
     }
-    if (options->kind != PICO_AGENT_NORMAL && options->kind != PICO_AGENT_SUBAGENT)
+    if (options->kind != PICO_AGENT_MAIN && options->kind != PICO_AGENT_SUBAGENT)
     {
         return PICO_AGENT_RESULT_INVALID;
     }
@@ -506,12 +502,12 @@ bool PicoAgentManager_AdoptInitial(PicoAgentManager *manager, PicoAgent *agent)
     {
         return false;
     }
-    PicoAgent_RebindHost(manager->app, agent, manager);
+    PicoAgent_RebindHost(MgrHost(manager), agent, manager);
     if (agent->manager != manager)
     {
         return false;
     }
-    agent->kind = PICO_AGENT_NORMAL;
+    agent->kind = PICO_AGENT_MAIN;
     agent->parent_id = 0;
     agent->depth = 0;
     agent->profile[0] = '\0';
@@ -523,7 +519,7 @@ bool PicoAgentManager_AdoptInitial(PicoAgentManager *manager, PicoAgent *agent)
     return true;
 }
 
-PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *options,
+PicoAgentResult pico_agent_create(PicoHost *app, const PicoAgentCreateOptions *options,
                                   PicoAgentId *out)
 {
     if (out)
@@ -596,12 +592,12 @@ PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *op
     return PICO_AGENT_RESULT_OK;
 }
 
-int pico_agent_count(const PicoApp *app)
+int pico_agent_count(const PicoHost *app)
 {
     return app && app->agents ? app->agents->count : 0;
 }
 
-bool pico_agent_info(const PicoApp *app, int index, PicoAgentInfo *out)
+bool pico_agent_info(const PicoHost *app, int index, PicoAgentInfo *out)
 {
     if (!app || !app->agents || !out || index < 0 || index >= app->agents->count)
     {
@@ -611,7 +607,7 @@ bool pico_agent_info(const PicoApp *app, int index, PicoAgentInfo *out)
     return true;
 }
 
-bool pico_agent_find(const PicoApp *app, PicoAgentId id, PicoAgentInfo *out)
+bool pico_agent_find(const PicoHost *app, PicoAgentId id, PicoAgentInfo *out)
 {
     const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
     if (!agent || !out)
@@ -622,12 +618,12 @@ bool pico_agent_find(const PicoApp *app, PicoAgentId id, PicoAgentInfo *out)
     return true;
 }
 
-PicoAgentId pico_agent_active(const PicoApp *app)
+PicoAgentId pico_agent_active(const PicoHost *app)
 {
     return app && app->agents ? app->agents->active_id : 0;
 }
 
-bool pico_agent_select(PicoApp *app, PicoAgentId id)
+bool pico_agent_select(PicoHost *app, PicoAgentId id)
 {
     if (!app || !app->agents || !PicoAgentManager_Find(app->agents, id))
     {
@@ -646,7 +642,7 @@ bool pico_agent_select(PicoApp *app, PicoAgentId id)
     return true;
 }
 
-PicoAgentResult pico_agent_close(PicoApp *app, PicoAgentId id)
+PicoAgentResult pico_agent_close(PicoHost *app, PicoAgentId id)
 {
     if (!app || !app->agents)
     {
@@ -685,7 +681,7 @@ PicoAgentResult pico_agent_close(PicoApp *app, PicoAgentId id)
     return PICO_AGENT_RESULT_OK;
 }
 
-PicoAgentResult pico_agent_cancel(PicoApp *app, PicoAgentId id)
+PicoAgentResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
 {
     PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
     if (!agent)
@@ -696,7 +692,7 @@ PicoAgentResult pico_agent_cancel(PicoApp *app, PicoAgentId id)
     return PICO_AGENT_RESULT_OK;
 }
 
-PicoAgentResult pico_agent_force_cancel(PicoApp *app, PicoAgentId id)
+PicoAgentResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
 {
     PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
     if (!agent)
@@ -718,7 +714,7 @@ void PicoAgentManager_Pump(PicoAgentManager *manager)
     ProcessDelegationRequests(manager);
     for (int i = 0; i < manager->count; i++)
     {
-        PicoAgent_Pump(manager->app, manager->agents[i]);
+        PicoAgent_Pump(MgrHost(manager), manager->agents[i]);
     }
     LinkDelegationToolRows(manager);
     ProcessDelegationTerminals(manager);
@@ -795,7 +791,7 @@ void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager)
     for (int i = 0; i < manager->count; i++)
     {
         PicoAgent *agent = manager->agents[i];
-        if (!PicoAgent_RevalidateToolPolicy(manager->app, agent))
+        if (!PicoAgent_RevalidateToolPolicy(MgrHost(manager), agent))
         {
             char line[384];
             if (agent->profile[0])
@@ -810,7 +806,7 @@ void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager)
                          "Agent %llu has a restricted tool policy containing an unavailable tool.",
                          (unsigned long long)agent->id);
             }
-            pico_status_warn(manager->app, line);
+            pico_status_warn(MgrHost(manager), line);
         }
     }
 }
@@ -819,7 +815,7 @@ void PicoAgentManager_NotifySessions(PicoAgentManager *manager)
 {
     for (int i = 0; manager && i < manager->count; i++)
     {
-        pico_run_hooks(manager->app, PICO_HOOK_ON_SESSION_RESET, manager->agents[i]->id);
+        pico_run_hooks(MgrHost(manager), PICO_HOOK_ON_SESSION_RESET, manager->agents[i]->id);
     }
 }
 
@@ -845,7 +841,7 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     bool clean = true;
     for (int i = 0; i < manager->count; i++)
     {
-        pico_run_hooks(manager->app, PICO_HOOK_ON_AGENT_DESTROY, manager->agents[i]->id);
+        pico_run_hooks(MgrHost(manager), PICO_HOOK_ON_AGENT_DESTROY, manager->agents[i]->id);
         if (!PicoAgent_DestroyBefore(manager->agents[i], &deadline))
         {
             clean = false;
@@ -863,7 +859,6 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
         manager->retained_shutdown = true;
         manager->accepting_work = false;
         pthread_mutex_unlock(&manager->lifecycle_mu);
-        manager->app = NULL;
         return false;
     }
     DropDelegations(manager);
@@ -876,10 +871,6 @@ bool PicoAgentManager_Destroy(PicoAgentManager *manager)
     manager->snapshots = NULL;
     manager->snapshot_count = 0;
     manager->snapshot_capacity = 0;
-    if (manager->curl_initialized)
-    {
-        curl_global_cleanup();
-    }
     FreeUiPosts(manager);
     pthread_mutex_destroy(&manager->ui_post_mu);
     pthread_mutex_destroy(&manager->lifecycle_mu);
@@ -940,7 +931,7 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
     return false;
 }
 
-bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
+bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
 {
     if (!app || !app->agents || !out)
     {
@@ -965,7 +956,7 @@ bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
     return found;
 }
 
-bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
+bool pico_tool_answer(PicoHost *app, uint64_t id, const char *answer_json)
 {
     if (!app || !app->agents || !id)
     {
@@ -981,13 +972,13 @@ bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
     return false;
 }
 
-int pico_agent_message_count(const PicoApp *app, PicoAgentId id)
+int pico_agent_message_count(const PicoHost *app, PicoAgentId id)
 {
     const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
     return agent ? agent->message_count : 0;
 }
 
-const PicoMessage *pico_agent_message(const PicoApp *app, PicoAgentId id, int index)
+const PicoMessage *pico_agent_message(const PicoHost *app, PicoAgentId id, int index)
 {
     const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
     return agent && index >= 0 && index < agent->message_count ? &agent->messages[index] : NULL;
@@ -997,7 +988,7 @@ void PicoAgentManager_ReplayToolDetails(PicoAgentManager *manager)
 {
     for (int i = 0; manager && i < manager->count; i++)
     {
-        PicoSession_ReplayToolDetails(manager->app, manager->agents[i]);
+        PicoSession_ReplayToolDetails(MgrHost(manager), manager->agents[i]);
     }
 }
 
@@ -1006,12 +997,12 @@ void PicoAgentManager_LoadProfiles(PicoAgentManager *manager)
     PicoSubagentConfig_Load(manager);
 }
 
-int pico_subagent_profile_count(const PicoApp *app)
+int pico_subagent_profile_count(const PicoHost *app)
 {
     return app && app->agents ? app->agents->profile_count : 0;
 }
 
-bool pico_subagent_profile_info(const PicoApp *app, int index,
+bool pico_subagent_profile_info(const PicoHost *app, int index,
                                 PicoSubagentProfileInfo *out)
 {
     if (!app || !app->agents || !out || index < 0 || index >= app->agents->profile_count)
@@ -1022,9 +1013,9 @@ bool pico_subagent_profile_info(const PicoApp *app, int index,
     return true;
 }
 
-PicoAgentResult PicoAgentManager_ResumeActive(PicoApp *app, const char *id, bool allow_prefix)
+PicoAgentResult PicoAgentManager_ResumeActive(PicoHost *app, const char *id, bool allow_prefix)
 {
-    PicoAgent *old = PicoApp_ActiveAgent(app);
+    PicoAgent *old = PicoHost_ActiveAgent(app);
     if (!old || PicoAgent_IsBusy(old))
     {
         return PICO_AGENT_RESULT_BUSY;
@@ -1435,14 +1426,14 @@ static void FillInspectFromSnapshot(PicoSubagentInspect *out, const PicoSubagent
 
 static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *session_id)
 {
-    if (!manager || !manager->app || !session_id || !session_id[0] ||
+    if (!manager || !MgrHost(manager) || !session_id || !session_id[0] ||
         FindSnapshot(manager, 0, session_id))
     {
         return FindSnapshot(manager, 0, session_id) != NULL;
     }
     PicoMessage *messages = NULL;
     int count = 0;
-    if (PicoSession_LoadTranscript(manager->app, session_id, &messages, &count) != 0)
+    if (PicoSession_LoadTranscript(MgrHost(manager), session_id, &messages, &count) != 0)
     {
         return false;
     }
@@ -1458,7 +1449,7 @@ static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *sessi
     snprintf(slot->session_id, sizeof(slot->session_id), "%s", session_id);
     PicoSessionHeader header;
     char path[4096];
-    if (PicoSession_Resolve(manager->app, session_id, false, path, sizeof(path)) == 0 &&
+    if (PicoSession_Resolve(MgrHost(manager), session_id, false, path, sizeof(path)) == 0 &&
         PicoSession_ReadHeader(path, &header) == 0)
     {
         snprintf(slot->profile, sizeof(slot->profile), "%s", header.profile);
@@ -1505,7 +1496,7 @@ static void LinkDelegationToolRows(PicoAgentManager *manager)
     }
 }
 
-bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
+bool PicoAgentManager_InspectSubagent(PicoHost *app, const PicoTraceLine *line,
                                       PicoSubagentInspect *out)
 {
     if (out)
@@ -1568,7 +1559,7 @@ static char *UnknownProfileError(const PicoAgentManager *manager)
 
 static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
 {
-    PicoApp *app = manager->app;
+    PicoHost *app = MgrHost(manager);
     PicoAgent *parent = PicoAgentManager_Find(manager, job->parent_id);
     if (!parent || parent->runtime_generation != job->parent_generation)
     {
@@ -1735,7 +1726,7 @@ static void CloseDelegationChild(PicoAgentManager *manager, PicoDelegationJob *j
     pthread_mutex_lock(&job->mu);
     job->child_id = 0;
     pthread_mutex_unlock(&job->mu);
-    PicoAgentResult closed = pico_agent_close(manager->app, child_id);
+    PicoAgentResult closed = pico_agent_close(MgrHost(manager), child_id);
     if (closed == PICO_AGENT_RESULT_OK || closed == PICO_AGENT_RESULT_NOT_FOUND)
     {
         RemoveDelegation(manager, job);

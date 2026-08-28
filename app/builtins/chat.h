@@ -3,10 +3,9 @@
 
 #include <stdbool.h>
 
-struct PicoApp;
 
 void PicoChat_InspectClose(void);
-void PicoChat_HarvestVirtualHeights(struct PicoApp *app);
+void PicoChat_HarvestVirtualHeights(struct PicoHost *app);
 bool PicoChat_TakeVirtualRelayout(void);
 
 #endif

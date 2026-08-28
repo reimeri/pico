@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, register what you need in `init`. Pico compiles and `dlopen`s it.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it.
 
 ## Where to put files
 
@@ -63,4 +63,4 @@ These are the in-app implementations, shipped for reading. They are not loaded f
 - [`../../builtins/hyper.c`](../../builtins/hyper.c) — Hyper provider (uses [`../../builtins/completions.c`](../../builtins/completions.c) plus [`../../builtins/hyper_auth.c`](../../builtins/hyper_auth.c))
 - [`../../builtins/xai.c`](../../builtins/xai.c) — xAI provider (uses [`../../builtins/completions.c`](../../builtins/completions.c) plus [`../../builtins/xai_auth.c`](../../builtins/xai_auth.c))
 
-Headers you may include: `pico/plugin.h`, `pico/app.h`, `pico/agent.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat the private app-level `agent.h`, `agent_internal.h`, `session.h`, or `settings.h` as API.
+Headers you may include: `pico/plugin.h`, `pico/host.h`, `pico/workspace.h`, `pico/app.h`, `pico/agent.h`, `pico/theme.h`, `pico/http.h`, `pico/auth.h`, `pico/md_view.h`, `json.h`, Clay, Raylib. Do not treat the private app-level `agent.h`, `agent_internal.h`, `agent_manager.h`, `host_internal.h`, `workspace_internal.h`, `session.h`, or `settings.h` as API.

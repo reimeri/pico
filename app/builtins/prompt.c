@@ -2,13 +2,14 @@
 #include "agent.h"
 #include "scrollbar.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-static PicoApp *g_app;
+static PicoHost *g_app;
 static bool g_open;
 static char *g_text;
 static PicoPromptSpan g_spans[PICO_PROMPT_SPAN_MAX];
@@ -200,8 +201,9 @@ static void RenderLegend(void)
     }
 }
 
-static void PromptRender(PicoApp *app)
+static void PromptRender(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     if (!g_open)
     {
@@ -272,8 +274,9 @@ static void PromptRender(PicoApp *app)
     }
 }
 
-static void PromptAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void PromptAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     (void)app;
     if (!g_open || !pico_ui_modal_is_top(app, "prompt"))
@@ -295,7 +298,7 @@ static void PromptAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void PromptOnFrame(PicoApp *app, float dt)
+static void PromptOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     if (!g_open || !pico_ui_modal_is_top(app, "prompt"))
@@ -310,14 +313,15 @@ static void PromptOnFrame(PicoApp *app, float dt)
     }
 }
 
-static void CmdShowPrompt(PicoApp *app, const char *args)
+static void CmdShowPrompt(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     PicoExts_Close();
     free(g_text);
     g_span_count = 0;
     memset(g_spans, 0, sizeof(g_spans));
-    g_text = PicoAgent_BuildInstructionsSpans(app, PicoApp_ActiveAgent(app), g_spans, &g_span_count);
+    g_text = PicoAgent_BuildInstructionsSpans(app, PicoHost_ActiveAgent(app), g_spans, &g_span_count);
     if (!g_open && pico_ui_modal_push(app, "prompt"))
     {
         g_open = true;
@@ -326,21 +330,24 @@ static void CmdShowPrompt(PicoApp *app, const char *args)
     app->submit_cancel = true;
 }
 
-static void PromptInit(PicoApp *app)
+static int PromptInit(PicoHost *app, void **state_out)
 {
+    (void)state_out;
     g_app = app;
     if (g_open && !pico_ui_modal_has(app, "prompt"))
     {
         g_open = false;
         ClearPrompt();
     }
-    pico_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PromptAfterLayout);
+    pico_host_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PromptAfterLayout);
+    return 0;
 }
 
-static void PromptShutdown(PicoApp *app)
+static void PromptShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)Unclaim();
     g_open = false;
     ClearPrompt();
@@ -354,8 +361,8 @@ PicoExt pico_ext_prompt(void)
         .abi = PICO_EXT_ABI,
         .name = "prompt",
         .description = "System prompt viewer",
-        .init = PromptInit,
-        .shutdown = PromptShutdown,
-        .on_frame = PromptOnFrame,
+        .host_init = PromptInit,
+        .host_shutdown = PromptShutdown,
+        .host_on_frame = PromptOnFrame,
     };
 }

@@ -12,8 +12,9 @@ Tools are functions the model can call. Register in `init`:
 static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}";
 
-static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     memset(out, 0, sizeof(*out));
     JsonDoc doc;
@@ -33,9 +34,11 @@ static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult
     }
 }
 
-static void EchoInit(PicoApp *app)
+static int EchoInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_tool(app, "echo", "Echo text back", kParams, EchoRun, NULL);
+    (void)state_out;
+    pico_add_tool(workspace, "echo", "Echo text back", kParams, EchoRun, NULL);
+    return 0;
 }
 ```
 
@@ -141,8 +144,9 @@ Register `pico_add_tool_row_hook` to open your own overlay when the user clicks 
 You cannot replace a builtin by registering the same name. Use `pico_add_tool_before_hook` or `pico_add_tool_after_hook` to intercept offered calls, including `sh`. See `hooks.md` for the event fields.
 
 ```c
-static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     char *answer = NULL;
     int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"Allow this tool?\"}", &answer);
     if (rc != PICO_ASK_OK)
@@ -166,7 +170,7 @@ static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
     }
 }
 
-pico_add_tool_before_hook(app, PermitBefore);
+pico_add_tool_before_hook(workspace, PermitBefore);
 ```
 
 Deny skips `run` and sends `result` (or `User denied this tool.`) back to the model; the turn continues. Esc cancels the turn. Full file: [`../../examples/permit_tool.c`](../../examples/permit_tool.c).
@@ -176,17 +180,18 @@ Deny skips `run` and sends `result` (or `User denied this tool.`) back to the mo
 `PicoToolResult.details_json` optionally carries one JSON object (maximum `PICO_TOOL_DETAILS_MAX`) alongside the visible output. Details are not sent to the model. Pico validates them, stores them in the same session `tool_result` record, and passes them to the tool's optional main-thread apply callback after a successful live call and during session replay:
 
 ```c
-static bool ApplyState(PicoApp *app, PicoAgentId agent_id,
-                       const char *details_json, bool replay)
+static bool ApplyState(PicoWorkspace *workspace, PicoAgentId agent_id,
+                       const char *details_json, bool replay, void *state)
 {
-    (void)app;
+    (void)workspace;
     (void)replay;
+    (void)state;
     /* Parse and update only extension state keyed by agent_id. */
     /* Parse into temporary state; swap only after complete validation. */
     return true;
 }
 
-pico_add_tool(app, "stateful", "Update state", kParams, RunStateful, ApplyState);
+pico_add_tool(workspace, "stateful", "Update state", kParams, RunStateful, ApplyState);
 ```
 
 The apply callback returns `false` to reject details. A live rejection converts the tool result to an error and omits details from persistence. A replay rejection ignores that snapshot and preserves the latest valid state. Pico replays details chronologically on session resume and after extension reload, so details should be complete snapshots and apply should be idempotent. The callback runs on the main thread and may update extension state, but should not call Clay outside a view callback.
@@ -194,11 +199,11 @@ The apply callback returns `false` to reject details. A live rejection converts 
 ## Contract
 
 - `name`, `description`, `params_json` must outlive the extension — use string literals.
-- `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay (`app->status_warn`) names the tool and the reason.
+- `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay warning names the tool and the reason.
 - Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
-- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoApp *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Worker callbacks from different agents may overlap. See [agents](agents.md).
+- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Worker callbacks from different agents may overlap. See [agents](agents.md).
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 and workspace changes still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.

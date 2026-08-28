@@ -1,14 +1,15 @@
+#include "host_internal.h"
 /* Included by agent_behavior_test.c to reuse its deterministic app host. */
 
 static int TestSubagentProfileResolution(void)
 {
     const char *name = "subagent profile model and effort resolution";
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoModel *models = (PicoModel *)realloc(app.models, 2 * sizeof(PicoModel));
     if (!models)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "could not extend the model catalog");
     }
     app.models = models;
@@ -21,7 +22,7 @@ static int TestSubagentProfileResolution(void)
     app.models[1].effort_count = 2;
     snprintf(app.models[1].default_effort, sizeof(app.models[1].default_effort), "low");
 
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = PicoHost_ActiveAgent(&app);
     PicoSubagentProfileInfo profile;
     memset(&profile, 0, sizeof(profile));
     snprintf(profile.name, sizeof(profile.name), "review");
@@ -46,7 +47,7 @@ static int TestSubagentProfileResolution(void)
                                                model, sizeof(model), effort, sizeof(effort));
     bool parent_unchanged = strcmp(parent->model, "test-model") == 0 &&
                             strcmp(parent->effort, "none") == 0;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return inherited && target_default && explicit_effort && invalid && parent_unchanged
                ? 0 : Fail(name, "resolution did not follow inheritance/default/override rules");
 }
@@ -67,7 +68,7 @@ static bool WriteConfigProfile(const char *dir, const char *filename, const char
     return ok;
 }
 
-static bool FindLoadedProfile(const PicoApp *app, const char *name,
+static bool FindLoadedProfile(const PicoHost *app, const char *name,
                               PicoSubagentProfileInfo *out)
 {
     for (int i = 0; i < pico_subagent_profile_count(app); i++)
@@ -96,7 +97,7 @@ static int TestSubagentProfileDiscovery(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_SINGLE, 0);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoAgentManager_LoadProfiles(app.agents);
 
@@ -109,7 +110,7 @@ static int TestSubagentProfileDiscovery(void)
     PicoModel *models = (PicoModel *)realloc(app.models, 2 * sizeof(PicoModel));
     if (!models)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         rmdir(dir);
         rmdir(temp);
         snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
@@ -124,7 +125,7 @@ static int TestSubagentProfileDiscovery(void)
     snprintf(app.models[1].effort[1], sizeof(app.models[1].effort[1]), "high");
     app.models[1].effort_count = 2;
     snprintf(app.models[1].default_effort, sizeof(app.models[1].default_effort), "low");
-    pico_add_tool(&app, "sh", "shell fixture", "{}", EchoTool, NULL);
+    pico_add_tool(PicoHost_PrimaryWorkspace(&app), "sh", "shell fixture", "{}", EchoTool, NULL);
 
     size_t exploration_len = 0;
     size_t review_len = 0;
@@ -210,7 +211,7 @@ static int TestSubagentProfileDiscovery(void)
         unlink(nested_file);
     }
     rmdir(nested);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     rmdir(dir);
     rmdir(temp);
     snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");

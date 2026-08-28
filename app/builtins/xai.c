@@ -6,6 +6,7 @@
 #include "json.h"
 #include "builtins/completions.h"
 #include "builtins/xai_auth.h"
+#include "host_internal.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -125,9 +126,9 @@ static void StopDeviceLogin(void)
     }
 }
 
-static void Note(PicoApp *app, const char *text)
+static void Note(PicoHost *app, const char *text)
 {
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, text);
 }
 
 typedef struct TurnCancel {
@@ -211,7 +212,7 @@ static char *OauthError(const char *body)
     return error;
 }
 
-static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth, const char *body,
+static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth, const char *body,
                            const char *fallback_refresh)
 {
     const char *previous = fallback_refresh;
@@ -250,7 +251,7 @@ static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *a
     return true;
 }
 
-static int ExchangeRefreshToken(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
+static int ExchangeRefreshToken(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
                                 const char *refresh_token, TurnCancel *tc)
 {
     const char *keys[] = {"grant_type", "client_id", "refresh_token"};
@@ -523,7 +524,7 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
 
 static void *DeviceLoginMain(void *arg)
 {
-    PicoApp *app = (PicoApp *)arg;
+    PicoHost *app = (PicoHost *)arg;
     char device_code[256] = {0};
     char user_code[64] = {0};
     char verify_url[512] = {0};
@@ -597,7 +598,7 @@ static void *DeviceLoginMain(void *arg)
     return NULL;
 }
 
-static void StartDeviceLogin(PicoApp *app)
+static void StartDeviceLogin(PicoHost *app)
 {
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -622,7 +623,7 @@ static void StartDeviceLogin(PicoApp *app)
     }
 }
 
-static void DrainLoginNotes(PicoApp *app)
+static void DrainLoginNotes(PicoHost *app)
 {
     for (;;)
     {
@@ -686,8 +687,9 @@ static bool IsCancelArg(const char *s)
     return FoldEq(s, "cancel");
 }
 
-static void XaiLogin(PicoApp *app, const char *args)
+static void XaiLogin(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     const char *p = args ? args : "";
     while (*p == ' ' || *p == '\t')
     {
@@ -750,8 +752,9 @@ static void XaiLogin(PicoApp *app, const char *args)
     StartDeviceLogin(app);
 }
 
-static void XaiLogout(PicoApp *app)
+static void XaiLogout(PicoHost *app, void *state)
 {
+    (void)state;
     StopDeviceLogin();
     bool saved = pico_auth_clear_oauth(app, "xai");
     PicoAuthEntry e;
@@ -772,7 +775,7 @@ static void XaiLogout(PicoApp *app)
     pico_auth_entry_free(&e);
 }
 
-static void XaiFrame(PicoApp *app, float dt)
+static void XaiFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     DrainLoginNotes(app);
@@ -788,8 +791,10 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
 }
 
 static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                     PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                     PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
+    (void)state;
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -890,9 +895,10 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
     return PICO_LLM_OK;
 }
 
-static void XaiInit(PicoApp *app)
+static int XaiInit(PicoHost *app, void **state_out)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "xai", .stream = XaiStream, .map_context = true});
+    (void)state_out;
+    pico_add_provider(PicoHost_PrimaryWorkspace(app), &(PicoProvider){.name = "xai", .stream = XaiStream, .map_context = true});
     pico_add_auth(app, &(PicoAuth){.provider = "xai",
                                    .help = "xAI device-code or API key",
                                    .verbs = "key cancel",
@@ -900,10 +906,12 @@ static void XaiInit(PicoApp *app)
                                    .logout = XaiLogout});
     const char *key = getenv("XAI_API_KEY");
     pico_auth_set_env_key(app, "xai", (key && key[0]) ? key : NULL);
+    return 0;
 }
 
-static void XaiShutdown(PicoApp *app)
+static void XaiShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -922,8 +930,8 @@ PicoExt pico_ext_xai(void)
         .abi = PICO_EXT_ABI,
         .name = "xai",
         .description = "xAI provider",
-        .init = XaiInit,
-        .shutdown = XaiShutdown,
-        .on_frame = XaiFrame,
+        .host_init = XaiInit,
+        .host_shutdown = XaiShutdown,
+        .host_on_frame = XaiFrame,
     };
 }

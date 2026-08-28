@@ -6,6 +6,7 @@
 #include "json.h"
 #include "builtins/completions.h"
 #include "builtins/hyper_auth.h"
+#include "host_internal.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -127,9 +128,9 @@ static void StopDeviceLogin(void)
     }
 }
 
-static void Note(PicoApp *app, const char *text)
+static void Note(PicoHost *app, const char *text)
 {
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, text);
 }
 
 typedef struct TurnCancel {
@@ -272,7 +273,7 @@ static long TokenExpiry(const JsonDoc *doc, int obj)
     return expires_at - buffer;
 }
 
-static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth, const char *body,
+static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth, const char *body,
                            const char *fallback_refresh, const char *team_id)
 {
     JsonDoc doc;
@@ -324,7 +325,7 @@ static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *a
     return ok;
 }
 
-static int ExchangeRefreshToken(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
+static int ExchangeRefreshToken(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
                                 const char *refresh_token, const char *team_id, TurnCancel *tc)
 {
     JsonBuf b;
@@ -636,7 +637,7 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
 
 static void *DeviceLoginMain(void *arg)
 {
-    PicoApp *app = (PicoApp *)arg;
+    PicoHost *app = (PicoHost *)arg;
     char device_code[256] = {0};
     char user_code[64] = {0};
     char verify_url[512] = {0};
@@ -724,7 +725,7 @@ static void *DeviceLoginMain(void *arg)
     return NULL;
 }
 
-static void StartDeviceLogin(PicoApp *app)
+static void StartDeviceLogin(PicoHost *app)
 {
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -749,7 +750,7 @@ static void StartDeviceLogin(PicoApp *app)
     }
 }
 
-static void DrainLoginNotes(PicoApp *app)
+static void DrainLoginNotes(PicoHost *app)
 {
     for (;;)
     {
@@ -813,8 +814,9 @@ static bool IsCancelArg(const char *s)
     return FoldEq(s, "cancel");
 }
 
-static void HyperLogin(PicoApp *app, const char *args)
+static void HyperLogin(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     const char *p = args ? args : "";
     while (*p == ' ' || *p == '\t')
     {
@@ -877,8 +879,9 @@ static void HyperLogin(PicoApp *app, const char *args)
     StartDeviceLogin(app);
 }
 
-static void HyperLogout(PicoApp *app)
+static void HyperLogout(PicoHost *app, void *state)
 {
+    (void)state;
     StopDeviceLogin();
     bool saved = pico_auth_clear_oauth(app, "hyper");
     PicoAuthEntry e;
@@ -899,7 +902,7 @@ static void HyperLogout(PicoApp *app)
     pico_auth_entry_free(&e);
 }
 
-static void HyperFrame(PicoApp *app, float dt)
+static void HyperFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     DrainLoginNotes(app);
@@ -915,8 +918,10 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
 }
 
 static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                       PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                       PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
+    (void)state;
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -1028,9 +1033,10 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
     return PICO_LLM_OK;
 }
 
-static void HyperInit(PicoApp *app)
+static int HyperInit(PicoHost *app, void **state_out)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true});
+    (void)state_out;
+    pico_add_provider(PicoHost_PrimaryWorkspace(app), &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true});
     pico_add_auth(app, &(PicoAuth){.provider = "hyper",
                                    .help = "Hyper device-code or API key",
                                    .verbs = "key cancel",
@@ -1038,10 +1044,12 @@ static void HyperInit(PicoApp *app)
                                    .logout = HyperLogout});
     const char *key = getenv("HYPER_API_KEY");
     pico_auth_set_env_key(app, "hyper", (key && key[0]) ? key : NULL);
+    return 0;
 }
 
-static void HyperShutdown(PicoApp *app)
+static void HyperShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -1060,8 +1068,8 @@ PicoExt pico_ext_hyper(void)
         .abi = PICO_EXT_ABI,
         .name = "hyper",
         .description = "Charm Hyper provider",
-        .init = HyperInit,
-        .shutdown = HyperShutdown,
-        .on_frame = HyperFrame,
+        .host_init = HyperInit,
+        .host_shutdown = HyperShutdown,
+        .host_on_frame = HyperFrame,
     };
 }

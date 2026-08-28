@@ -7,16 +7,19 @@
 #include "pico/plugin.h"
 #include "json.h"
 
-static void ExtraLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void ExtraLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
-    ev->extra_instructions = JsonDup("Prefer short answers.");
+    event->extra_instructions = JsonDup("Prefer short answers.");
 }
 
-static void ExtraInit(PicoApp *app)
+static int ExtraInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_llm_hook(app, ExtraLlm);
+    (void)state_out;
+    pico_add_llm_hook(workspace, ExtraLlm);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -25,6 +28,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "extra_instructions",
         .description = "Append a line to the system prompt each LLM round",
-        .init = ExtraInit,
+        .workspace_init = ExtraInit,
     };
 }

@@ -6,6 +6,7 @@
 #include "session.h"
 #include "settings.h"
 #include "usage.h"
+#include "host_internal.h"
 
 #include <stdbool.h>
 #include <errno.h>
@@ -96,7 +97,7 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
     return false;
 }
 
-void pico_status_warn(PicoApp *app, const char *msg)
+void pico_status_warn(PicoHost *app, const char *msg)
 {
     (void)app;
     snprintf(g_status_warning, sizeof(g_status_warning), "%s", msg ? msg : "");
@@ -157,7 +158,7 @@ void PicoAgent_DismissError(PicoAgent *agent)
     if (agent) { free(agent->error); agent->error = NULL; }
 }
 
-void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
+void pico_run_hooks(PicoHost *app, PicoHook hook, PicoAgentId agent_id)
 {
     if (!app)
     {
@@ -166,9 +167,17 @@ void pico_run_hooks(PicoApp *app, PicoHook hook, PicoAgentId agent_id)
     PicoHookEvent event = {.hook = hook, .agent_id = agent_id};
     for (int i = 0; i < app->hook_count; i++)
     {
-        if (app->hooks[i].hook == hook && app->hooks[i].fn)
+        if (app->hooks[i].hook != hook)
         {
-            app->hooks[i].fn(app, &event);
+            continue;
+        }
+        if (app->hooks[i].host_fn)
+        {
+            app->hooks[i].host_fn(app, &event, app->hooks[i].state);
+        }
+        if (app->hooks[i].workspace_fn && app->hooks[i].workspace)
+        {
+            app->hooks[i].workspace_fn(app->hooks[i].workspace, &event, app->hooks[i].state);
         }
     }
 }
@@ -249,7 +258,7 @@ static PicoTraceLine *StubPushTrace(PicoMessage *message, bool is_tool)
     return line;
 }
 
-void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text, int think_ms)
+void PicoAgent_AppendThink(PicoHost *app, PicoAgent *agent, const char *text, int think_ms)
 {
     PicoMessage *message;
     PicoTraceLine *line;
@@ -293,7 +302,7 @@ void PicoAgent_AppendThink(PicoApp *app, PicoAgent *agent, const char *text, int
     }
 }
 
-void PicoAgent_AppendThinkSummary(PicoApp *app, PicoAgent *agent, const char *text,
+void PicoAgent_AppendThinkSummary(PicoHost *app, PicoAgent *agent, const char *text,
                                   int step, int think_ms)
 {
     (void)app;
@@ -362,39 +371,39 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
     (void)is_error;
 }
 
-void PicoApp_AddMessage(PicoApp *app, PicoRole role, const char *text)
+void PicoHost_AddMessage(PicoHost *app, PicoRole role, const char *text)
 {
     (void)app;
     (void)role;
     (void)text;
 }
 
-void PicoApp_AppendAssistant(PicoApp *app, const char *text)
+void PicoHost_AppendAssistant(PicoHost *app, const char *text)
 {
     (void)app;
     (void)text;
 }
 
-void PicoApp_AddToolCall(PicoApp *app, const char *name, const char *args_json)
+void PicoHost_AddToolCall(PicoHost *app, const char *name, const char *args_json)
 {
     (void)app;
     (void)name;
     (void)args_json;
 }
 
-void PicoApp_SetLastToolOutput(PicoApp *app, const char *output, bool is_error)
+void PicoHost_SetLastToolOutput(PicoHost *app, const char *output, bool is_error)
 {
     (void)app;
     (void)output;
     (void)is_error;
 }
 
-void PicoApp_ClearMessages(PicoApp *app)
+void PicoHost_ClearMessages(PicoHost *app)
 {
     (void)app;
 }
 
-void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const char *text)
+void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *text)
 {
     PicoMessage *message;
 
@@ -409,7 +418,7 @@ void PicoAgent_AddMessage(PicoApp *app, PicoAgent *agent, PicoRole role, const c
     message->source = JsonDup(text ? text : "");
 }
 
-void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text)
+void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text)
 {
     PicoMessage *message;
     size_t old;
@@ -445,12 +454,12 @@ void PicoAgent_AppendAssistant(PicoApp *app, PicoAgent *agent, const char *text)
     message->source = next;
 }
 
-void PicoAgent_AddToolCall(PicoApp *app, PicoAgent *agent, const char *name, const char *args_json)
+void PicoAgent_AddToolCall(PicoHost *app, PicoAgent *agent, const char *name, const char *args_json)
 {
     PicoAgent_AddToolCallWithId(app, agent, NULL, name, args_json);
 }
 
-void PicoAgent_AddToolCallWithId(PicoApp *app, PicoAgent *agent, const char *call_id,
+void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args_json)
 {
     PicoMessage *message;
@@ -608,7 +617,7 @@ void PicoMessages_PrepareDocs(PicoMessage *messages, int count)
     (void)count;
 }
 
-PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent)
+PicoModel *PicoSettings_ActiveModel(PicoHost *app, const PicoAgent *agent)
 {
     if (!app || !agent) return NULL;
     for (int i = 0; i < app->model_count; i++)
@@ -618,9 +627,9 @@ PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent)
     return NULL;
 }
 
-void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent)
+void PicoSettings_SyncAgent(const PicoHost *app, PicoAgent *agent)
 {
-    PicoModel *model = PicoSettings_ActiveModel((PicoApp *)app, agent);
+    PicoModel *model = PicoSettings_ActiveModel((PicoHost *)app, agent);
     if (!agent) return;
     snprintf(agent->model_name, sizeof(agent->model_name), "%s",
              model && model->name[0] ? model->name : agent->model);
@@ -632,23 +641,26 @@ void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent)
     }
 }
 
-static void ResetHook(PicoApp *app, const PicoHookEvent *event)
+static void ResetHook(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)app;
     (void)event;
     g_reset_hooks++;
 }
 
-static void ReplayTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void ReplayTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)args_json;
     (void)out;
 }
 
-static bool ReplayApply(PicoApp *app, PicoAgentId agent_id, const char *details_json, bool replay)
+static bool ReplayApply(PicoWorkspace *workspace, PicoAgentId agent_id, const char *details_json, bool replay, void *state)
 {
-    (void)app;
+    (void)state;
+    (void)workspace;
     (void)agent_id;
     if (!replay)
     {
@@ -669,7 +681,7 @@ static bool ReplayApply(PicoApp *app, PicoAgentId agent_id, const char *details_
     return true;
 }
 
-static void RegisterReplayTool(PicoApp *app)
+static void RegisterReplayTool(PicoHost *app)
 {
     app->tools[0] = (PicoTool){.name = "state_test", .run = ReplayTool, .apply = ReplayApply};
     app->tool_count = 1;
@@ -702,7 +714,7 @@ static int CountSubstr(const char *hay, const char *needle)
     return n;
 }
 
-static bool ListedTitleIs(PicoApp *app, const char *session_id, const char *title)
+static bool ListedTitleIs(PicoHost *app, const char *session_id, const char *title)
 {
     PicoSessionInfo *listed = NULL;
     int listed_n = PicoSession_List(app, &listed, true);
@@ -721,13 +733,13 @@ static bool ListedTitleIs(PicoApp *app, const char *session_id, const char *titl
 
 static int TestSessionTitle(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     memset(&app, 0, sizeof(app));
     memset(&agent, 0, sizeof(agent));
     agent.persistence = PICO_SESSION_DURABLE;
     snprintf(agent.model, sizeof(agent.model), "saved-model");
-    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoHost_SetPath(&app, "/workspace");
     PicoSession_LogUser(&app, &agent, "first user message should not win",
                         "first user message should not win", NULL);
     if (!agent.session_path[0])
@@ -806,12 +818,12 @@ static int TestSessionTitle(void)
         return Fail("second rename did not update the header and append a title event");
     }
 
-    PicoApp reader;
+    PicoHost reader;
     PicoAgent reader_agent;
     memset(&reader, 0, sizeof(reader));
     memset(&reader_agent, 0, sizeof(reader_agent));
     reader_agent.persistence = PICO_SESSION_DURABLE;
-    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoHost_SetPath(&reader, "/workspace");
     PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, agent.session_path);
     PicoAgent_ClearMessages(&reader_agent);
 
@@ -833,13 +845,13 @@ static int TestSessionTitle(void)
 
 static int TestTitleFailureStage(const char *stage, bool expect_original)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     memset(&app, 0, sizeof(app));
     memset(&agent, 0, sizeof(agent));
     agent.persistence = PICO_SESSION_DURABLE;
     snprintf(agent.model, sizeof(agent.model), "saved-model");
-    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoHost_SetPath(&app, "/workspace");
     PicoSession_LogUser(&app, &agent, "seed", "seed", NULL);
     size_t file_len = 0;
     char *before = Pico_ReadFile(agent.session_path, &file_len);
@@ -866,13 +878,13 @@ static int TestSessionTitleFailureStages(void)
 
 static int TestSessionTitleUtf8(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     memset(&app, 0, sizeof(app));
     memset(&agent, 0, sizeof(agent));
     agent.persistence = PICO_SESSION_DURABLE;
     snprintf(agent.model, sizeof(agent.model), "saved-model");
-    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoHost_SetPath(&app, "/workspace");
 
     char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
     for (int i = 0; i < 72; i++)
@@ -896,13 +908,13 @@ static int TestSessionTitleUtf8(void)
 
 static int TestConcurrentAppendDuringTitle(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     memset(&app, 0, sizeof(app));
     memset(&agent, 0, sizeof(agent));
     agent.persistence = PICO_SESSION_DURABLE;
     snprintf(agent.model, sizeof(agent.model), "saved-model");
-    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoHost_SetPath(&app, "/workspace");
     PicoSession_LogUser(&app, &agent, "seed", "seed", NULL);
 
     int ready[2];
@@ -979,13 +991,13 @@ static bool HasRestoredThinkSummary(const PicoMessage *messages, int count, int 
 
 static int TestThinkingRoundTrip(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     memset(&app, 0, sizeof(app));
     memset(&agent, 0, sizeof(agent));
     agent.persistence = PICO_SESSION_DURABLE;
     snprintf(agent.model, sizeof(agent.model), "saved-model");
-    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoHost_SetPath(&app, "/workspace");
     const char *sig =
         "{\"type\":\"reasoning\",\"id\":\"rs_test\",\"encrypted_content\":\"blob\"}";
     const char *thinking_parts = "[\"**first**\",\"**second**\"]";
@@ -1010,12 +1022,12 @@ static int TestThinkingRoundTrip(void)
     g_last_think[0] = '\0';
     g_last_sig[0] = '\0';
     g_last_item_id[0] = '\0';
-    PicoApp reader;
+    PicoHost reader;
     PicoAgent reader_agent;
     memset(&reader, 0, sizeof(reader));
     memset(&reader_agent, 0, sizeof(reader_agent));
     reader_agent.persistence = PICO_SESSION_DURABLE;
-    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoHost_SetPath(&reader, "/workspace");
     PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, agent.session_path);
     if (strcmp(g_last_think, "think-hard") != 0 || !strstr(g_last_sig, "rs_test") ||
         strcmp(g_last_item_id, "fc_abc") != 0)
@@ -1042,9 +1054,9 @@ static int TestThinkingRoundTrip(void)
     {
         PicoMessage *loaded = NULL;
         int loaded_n = 0;
-        PicoApp loader;
+        PicoHost loader;
         memset(&loader, 0, sizeof(loader));
-        snprintf(loader.workspace, sizeof(loader.workspace), "/workspace");
+        PicoHost_SetPath(&loader, "/workspace");
         if (PicoSession_LoadTranscript(&app, agent.session_id, &loaded, &loaded_n) != 0)
         {
             unlink(agent.session_path);
@@ -1085,7 +1097,7 @@ static int TestThinkingRoundTrip(void)
     memset(&reader, 0, sizeof(reader));
     memset(&reader_agent, 0, sizeof(reader_agent));
     reader_agent.persistence = PICO_SESSION_DURABLE;
-    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoHost_SetPath(&reader, "/workspace");
     PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, signature_only.session_path);
     bool signature_restored = strcmp(g_last_think, "") == 0 && strstr(g_last_sig, "rs_test");
     unlink(signature_only.session_path);
@@ -1158,9 +1170,9 @@ static bool TranscriptMatchesLiveGroups(const PicoMessage *messages, int count)
 
 static int TestTranscriptMessageGroups(void)
 {
-    PicoApp writer;
+    PicoHost writer;
     PicoAgent writer_agent;
-    PicoApp reader;
+    PicoHost reader;
     PicoAgent reader_agent;
     PicoMessage *loaded = NULL;
     int loaded_n = 0;
@@ -1169,7 +1181,7 @@ static int TestTranscriptMessageGroups(void)
     memset(&writer_agent, 0, sizeof(writer_agent));
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
-    snprintf(writer.workspace, sizeof(writer.workspace), "/workspace");
+    PicoHost_SetPath(&writer, "/workspace");
     PicoSession_LogUser(&writer, &writer_agent, "task", "task", NULL);
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "first", "think-1", NULL, NULL, NULL, 0);
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "second", NULL, NULL, NULL, NULL, 0);
@@ -1199,7 +1211,7 @@ static int TestTranscriptMessageGroups(void)
     memset(&reader, 0, sizeof(reader));
     memset(&reader_agent, 0, sizeof(reader_agent));
     reader_agent.persistence = PICO_SESSION_DURABLE;
-    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoHost_SetPath(&reader, "/workspace");
     PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, writer_agent.session_path);
     if (!TranscriptMatchesLiveGroups(reader_agent.messages, reader_agent.message_count))
     {
@@ -1214,13 +1226,13 @@ static int TestTranscriptMessageGroups(void)
 
 static int TestPartsReplay(void)
 {
-    PicoApp app;
+    PicoHost app;
     PicoAgent agent;
     memset(&app, 0, sizeof(app));
     memset(&agent, 0, sizeof(agent));
     agent.persistence = PICO_SESSION_DURABLE;
     snprintf(agent.model, sizeof(agent.model), "saved-model");
-    snprintf(app.workspace, sizeof(app.workspace), "/workspace");
+    PicoHost_SetPath(&app, "/workspace");
     const char *parts =
         "[{\"type\":\"refusal\",\"text\":\"nope\"},{\"type\":\"image\",\"path\":\"/tmp/pic.png\"}]";
     PicoSession_LogAssistant(&app, &agent, 1, "nope", NULL, NULL, parts, NULL, 0);
@@ -1229,12 +1241,12 @@ static int TestPartsReplay(void)
         return Fail("parts log did not create a session file");
     }
     g_last_assistant_parts[0] = '\0';
-    PicoApp reader;
+    PicoHost reader;
     PicoAgent reader_agent;
     memset(&reader, 0, sizeof(reader));
     memset(&reader_agent, 0, sizeof(reader_agent));
     reader_agent.persistence = PICO_SESSION_DURABLE;
-    snprintf(reader.workspace, sizeof(reader.workspace), "/workspace");
+    PicoHost_SetPath(&reader, "/workspace");
     PicoSession_Start(&reader, &reader_agent, PICO_SESSION_NEW, agent.session_path);
     bool ok = strstr(g_last_assistant_parts, "\"type\":\"refusal\"") &&
               strstr(g_last_assistant_parts, "/tmp/pic.png");
@@ -1251,13 +1263,13 @@ int main(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
 
-    PicoApp writer;
+    PicoHost writer;
     PicoAgent writer_agent;
     memset(&writer, 0, sizeof(writer));
     memset(&writer_agent, 0, sizeof(writer_agent));
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
-    snprintf(writer.workspace, sizeof(writer.workspace), "/workspace");
+    PicoHost_SetPath(&writer, "/workspace");
     snprintf(writer.settings.model, sizeof(writer.settings.model), "default-model");
     PicoSession_LogUsage(&writer, &writer_agent, 100, 20);
     PicoSession_LogUsage(&writer, &writer_agent, 200, 150);
@@ -1331,7 +1343,7 @@ int main(void)
     int listed_n = PicoSession_List(&writer, &listed, true);
     bool parent_offered = listed_n == 1 && listed &&
                           strcmp(listed[0].id, writer_agent.session_id) == 0 &&
-                          listed[0].kind == PICO_AGENT_NORMAL;
+                          listed[0].kind == PICO_AGENT_MAIN;
     char child_resolved[4096];
     bool child_by_id = PicoSession_Resolve(&writer, child_agent.session_id, false,
                                            child_resolved, sizeof(child_resolved)) == 0;
@@ -1341,7 +1353,7 @@ int main(void)
         return Fail("/resume listing included a subagent session, or exact child ids stopped resolving");
     }
 
-    PicoApp compacted;
+    PicoHost compacted;
     PicoAgent compacted_agent;
     memset(&compacted, 0, sizeof(compacted));
     memset(&compacted_agent, 0, sizeof(compacted_agent));
@@ -1387,7 +1399,7 @@ int main(void)
         return Fail("could not append replay boundary cases");
     }
 
-    PicoApp replayed;
+    PicoHost replayed;
     PicoAgent replayed_agent;
     memset(&replayed, 0, sizeof(replayed));
     memset(&replayed_agent, 0, sizeof(replayed_agent));
@@ -1398,11 +1410,11 @@ int main(void)
         return Fail("replay did not normalize and aggregate usage events");
     }
 
-    PicoApp opened;
+    PicoHost opened;
     PicoAgent opened_agent;
     memset(&opened, 0, sizeof(opened));
     memset(&opened_agent, 0, sizeof(opened_agent));
-    snprintf(opened.workspace, sizeof(opened.workspace), "/workspace");
+    PicoHost_SetPath(&opened, "/workspace");
     opened_agent.session_input_tokens = 999;
     opened_agent.session_cached_tokens = 999;
     if (PicoSession_Open(&opened, &opened_agent, writer_agent.session_id) != 0 || opened_agent.session_input_tokens != 360 ||
@@ -1411,7 +1423,7 @@ int main(void)
         return Fail("session open did not reset and rebuild usage totals");
     }
 
-    replayed.hooks[0] = (PicoHookEntry){.hook = PICO_HOOK_ON_SESSION_RESET, .fn = ResetHook};
+    replayed.hooks[0] = (PicoHookEntry){.hook = PICO_HOOK_ON_SESSION_RESET, .host_fn = ResetHook};
     replayed.hook_count = 1;
     g_reset_hooks = 0;
     PicoSession_Reset(&replayed, &replayed_agent);
@@ -1448,11 +1460,11 @@ int main(void)
     memset(g_config_dir, 'x', sizeof(g_config_dir) - 1);
     g_config_dir[sizeof(g_config_dir) - 1] = '\0';
     g_status_warning[0] = '\0';
-    PicoApp long_path_app;
+    PicoHost long_path_app;
     PicoAgent long_path_agent;
     memset(&long_path_app, 0, sizeof(long_path_app));
     memset(&long_path_agent, 0, sizeof(long_path_agent));
-    snprintf(long_path_app.workspace, sizeof(long_path_app.workspace), "/workspace");
+    PicoHost_SetPath(&long_path_app, "/workspace");
     long_path_agent.persistence = PICO_SESSION_DURABLE;
     PicoSessionWriteResult long_path_result =
         PicoSession_LogUser(&long_path_app, &long_path_agent, "cannot persist", "cannot persist", NULL);

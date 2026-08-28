@@ -4,6 +4,7 @@
 #include "path.h"
 #include "session.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -44,9 +45,12 @@ typedef struct LoadedPlugin {
     time_t mtime;
     void *handle;
     PicoExt ext;
+    void *host_state;
+    void *workspace_state;
     bool builtin;
     bool enabled;
-    bool inited;
+    bool host_inited;
+    bool workspace_inited;
 } LoadedPlugin;
 
 static LoadedPlugin g_plugins[PICO_MAX_USER_PLUGINS + 16];
@@ -77,7 +81,7 @@ static bool ExtPinned(const char *name)
     return name && name[0] && strcmp(name, "extensions") == 0;
 }
 
-static bool ExtDisabled(const PicoApp *app, const char *name)
+static bool ExtDisabled(const PicoHost *app, const char *name)
 {
     if (!app || !name || !name[0] || ExtPinned(name))
     {
@@ -93,27 +97,108 @@ static bool ExtDisabled(const PicoApp *app, const char *name)
     return false;
 }
 
-static void ActivatePlugin(PicoApp *app, LoadedPlugin *p)
+static void ShutdownPlugin(PicoHost *host, LoadedPlugin *p)
+{
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(host);
+    if (p->workspace_inited && p->ext.workspace_shutdown)
+    {
+        p->ext.workspace_shutdown(workspace, p->workspace_state);
+    }
+    p->workspace_inited = false;
+    p->workspace_state = NULL;
+    if (p->host_inited && p->ext.host_shutdown)
+    {
+        p->ext.host_shutdown(host, p->host_state);
+    }
+    p->host_inited = false;
+    p->host_state = NULL;
+}
+
+static int RunHostInit(PicoHost *host, LoadedPlugin *p)
+{
+    void *state = NULL;
+    int rc;
+    if (!p->ext.host_init)
+    {
+        return 0;
+    }
+    PicoHost_BeginRegistration(host, PICO_REG_HOST, NULL);
+    rc = p->ext.host_init(host, &state);
+    if (rc != 0)
+    {
+        PicoHost_DiscardRegistration(host);
+        if (state && p->ext.host_shutdown)
+        {
+            p->ext.host_shutdown(host, state);
+        }
+        return rc;
+    }
+    PicoHost_PublishRegistration(host, state);
+    p->host_state = state;
+    p->host_inited = true;
+    return 0;
+}
+
+static int RunWorkspaceInit(PicoHost *host, LoadedPlugin *p)
+{
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(host);
+    void *state = NULL;
+    int rc;
+    if (!p->ext.workspace_init)
+    {
+        return 0;
+    }
+    if (!workspace)
+    {
+        return 0;
+    }
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    rc = p->ext.workspace_init(workspace, &state);
+    if (rc != 0)
+    {
+        PicoHost_DiscardRegistration(host);
+        if (state && p->ext.workspace_shutdown)
+        {
+            p->ext.workspace_shutdown(workspace, state);
+        }
+        return rc;
+    }
+    PicoHost_PublishRegistration(host, state);
+    p->workspace_state = state;
+    p->workspace_inited = true;
+    return 0;
+}
+
+static void ActivatePlugin(PicoHost *host, LoadedPlugin *p)
 {
     bool loaded = p->builtin || p->handle != NULL;
-    p->enabled = loaded && !ExtDisabled(app, p->ext.name);
+    p->enabled = loaded && !ExtDisabled(host, p->ext.name);
     if (ExtPinned(p->ext.name))
     {
         p->enabled = loaded;
     }
-    p->inited = false;
+    p->host_inited = false;
+    p->workspace_inited = false;
+    p->host_state = NULL;
+    p->workspace_state = NULL;
     if (!p->enabled)
     {
         return;
     }
-    if (p->ext.init)
+    if (RunHostInit(host, p) != 0)
     {
-        p->ext.init(app);
+        pico_status_warn(host, "host extension init failed");
+        ShutdownPlugin(host, p);
+        return;
     }
-    p->inited = true;
+    if (RunWorkspaceInit(host, p) != 0)
+    {
+        pico_status_warn(host, "workspace extension init failed");
+        ShutdownPlugin(host, p);
+    }
 }
 
-static void WarnClear(PicoApp *app)
+static void WarnClear(PicoHost *app)
 {
     free(app->status_warn);
     app->status_warn = NULL;
@@ -169,9 +254,9 @@ static bool CacheDir(char *out, size_t cap)
     return PicoPath_Format(out, cap, "%s/.cache/pico/ext", HomeDir());
 }
 
-static bool WorkspaceExtDir(const PicoApp *app, char *out, size_t cap)
+static bool WorkspaceExtDir(const PicoHost *app, char *out, size_t cap)
 {
-    return PicoPath_Format(out, cap, "%s/.pico/extensions", app->workspace[0] ? app->workspace : ".");
+    return PicoPath_Format(out, cap, "%s/.pico/extensions", PicoHost_Path(app));
 }
 
 static unsigned PathHash(const char *s)
@@ -311,9 +396,9 @@ static void RecordStub(const char *src, time_t mtime)
     p->mtime = mtime;
 }
 
-static int LoadSo(PicoApp *app, const char *src, const char *so, time_t mtime)
+static int LoadSo(PicoHost *app, const char *src, const char *so, time_t mtime)
 {
-    void *handle = dlopen(so, RTLD_NOW | RTLD_GLOBAL);
+    void *handle = dlopen(so, RTLD_NOW | RTLD_LOCAL);
     if (!handle)
     {
         char line[2048];
@@ -360,7 +445,7 @@ static int LoadSo(PicoApp *app, const char *src, const char *so, time_t mtime)
     return 0;
 }
 
-static void LoadUserFile(PicoApp *app, const char *src)
+static void LoadUserFile(PicoHost *app, const char *src)
 {
     struct stat st;
     if (stat(src, &st) != 0)
@@ -440,10 +525,10 @@ static void WalkExtTree(const char *dir, int depth, int *seen, int seen_max,
 static void LoadWalk(void *ctx, const char *path, time_t mtime)
 {
     (void)mtime;
-    LoadUserFile((PicoApp *)ctx, path);
+    LoadUserFile((PicoHost *)ctx, path);
 }
 
-static void LoadBuiltins(PicoApp *app)
+static void LoadBuiltins(PicoHost *app)
 {
     for (size_t i = 0; i < sizeof(kBuiltins) / sizeof(kBuiltins[0]); i++)
     {
@@ -459,7 +544,7 @@ static void LoadBuiltins(PicoApp *app)
     }
 }
 
-static void ShutdownRange(PicoApp *app, bool users_only)
+static void ShutdownRange(PicoHost *app, bool users_only)
 {
     for (int i = g_plugin_count - 1; i >= 0; i--)
     {
@@ -467,11 +552,10 @@ static void ShutdownRange(PicoApp *app, bool users_only)
         {
             continue;
         }
-        if (g_plugins[i].inited && g_plugins[i].ext.shutdown)
+        if (g_plugins[i].host_inited || g_plugins[i].workspace_inited)
         {
-            g_plugins[i].ext.shutdown(app);
+            ShutdownPlugin(app, &g_plugins[i]);
         }
-        g_plugins[i].inited = false;
         if (g_plugins[i].handle)
         {
             dlclose(g_plugins[i].handle);
@@ -480,9 +564,9 @@ static void ShutdownRange(PicoApp *app, bool users_only)
     }
 }
 
-void PicoPlugins_UnloadUser(PicoApp *app)
+void PicoPlugins_UnloadUser(PicoHost *app)
 {
-    if (PicoApp_ProcessRetired())
+    if (PicoHost_ProcessRetired())
     {
         return;
     }
@@ -498,7 +582,7 @@ void PicoPlugins_UnloadUser(PicoApp *app)
     g_plugin_count = w;
 }
 
-static void LoadUsers(PicoApp *app)
+static void LoadUsers(PicoHost *app)
 {
     if (app->safe_mode)
     {
@@ -517,9 +601,9 @@ static void LoadUsers(PicoApp *app)
     }
 }
 
-void PicoPlugins_Load(PicoApp *app)
+void PicoPlugins_Load(PicoHost *app)
 {
-    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired())
+    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return;
     }
@@ -531,9 +615,9 @@ void PicoPlugins_Load(PicoApp *app)
     LoadUsers(app);
 }
 
-void PicoPlugins_Reload(PicoApp *app)
+void PicoPlugins_Reload(PicoHost *app)
 {
-    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired())
+    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return;
     }
@@ -572,9 +656,9 @@ void PicoPlugins_Reload(PicoApp *app)
     }
 }
 
-void PicoPlugins_Shutdown(PicoApp *app)
+void PicoPlugins_Shutdown(PicoHost *app)
 {
-    if (PicoApp_ProcessRetired())
+    if (PicoHost_ProcessRetired())
     {
         return;
     }
@@ -598,7 +682,7 @@ static void CollectWalk(void *ctx, const char *path, time_t mtime)
     c->mtimes[c->n] = mtime;
 }
 
-static int CollectSources(const PicoApp *app, char paths[][4096], time_t *mtimes, int cap)
+static int CollectSources(const PicoHost *app, char paths[][4096], time_t *mtimes, int cap)
 {
     CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .n = 0, .cap = cap};
     char dirs[2][4096];
@@ -616,9 +700,9 @@ static int CollectSources(const PicoApp *app, char paths[][4096], time_t *mtimes
     return ctx.n;
 }
 
-void PicoPlugins_Poll(PicoApp *app)
+void PicoPlugins_Poll(PicoHost *app)
 {
-    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired() || app->reload_queued ||
+    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired() || app->reload_queued ||
         app->workspace_change_queued)
     {
         return;
@@ -680,17 +764,26 @@ void PicoPlugins_Poll(PicoApp *app)
     }
 }
 
-void PicoPlugins_OnFrame(PicoApp *app, float dt)
+void PicoPlugins_OnFrame(PicoHost *app, float dt)
 {
-    if (!app || app->terminal_shutdown || PicoApp_ProcessRetired())
+    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return;
     }
     for (int i = 0; i < g_plugin_count; i++)
     {
-        if (g_plugins[i].enabled && g_plugins[i].ext.on_frame)
+        if (g_plugins[i].enabled && g_plugins[i].host_inited && g_plugins[i].ext.host_on_frame)
         {
-            g_plugins[i].ext.on_frame(app, dt);
+            g_plugins[i].ext.host_on_frame(app, g_plugins[i].host_state, dt);
+        }
+        if (g_plugins[i].enabled && g_plugins[i].workspace_inited && g_plugins[i].ext.workspace_on_frame)
+        {
+            PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(app);
+            if (workspace && (workspace->state == PICO_WORKSPACE_OPEN ||
+                              workspace->state == PICO_WORKSPACE_RELOADING))
+            {
+                g_plugins[i].ext.workspace_on_frame(workspace, g_plugins[i].workspace_state, dt);
+            }
         }
     }
 }
@@ -716,7 +809,7 @@ bool PicoPlugins_Get(int index, PicoExtInfo *out)
     return true;
 }
 
-bool PicoPlugins_SetEnabled(PicoApp *app, int index, bool enabled)
+bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
 {
     PicoExtInfo info;
     if (!app || !PicoPlugins_Get(index, &info))

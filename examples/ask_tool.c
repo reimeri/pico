@@ -14,8 +14,9 @@ static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":"
     "\"Confirmation prompt\"}},\"required\":[\"message\"]}";
 
-static void AskRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void AskRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -75,9 +76,11 @@ static void AskRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult 
     }
 }
 
-static void AskInit(PicoApp *app)
+static int AskInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_tool(app, "confirm", "Ask the user to confirm something", kParams, AskRun, NULL);
+    (void)state_out;
+    pico_add_tool(workspace, "confirm", "Ask the user to confirm something", kParams, AskRun, NULL);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -86,6 +89,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "confirm",
         .description = "Builtin confirm overlay via pico_tool_ask",
-        .init = AskInit,
+        .workspace_init = AskInit,
     };
 }

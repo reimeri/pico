@@ -5,6 +5,7 @@
 #include "pico/auth.h"
 #include "json.h"
 #include "builtins/responses.h"
+#include "host_internal.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -122,9 +123,9 @@ static void StopDeviceLogin(void)
     }
 }
 
-static void Note(PicoApp *app, const char *text)
+static void Note(PicoHost *app, const char *text)
 {
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddMessage(app, PICO_ROLE_ASSISTANT, text);
 }
 
 static int B64UrlVal(char c)
@@ -311,7 +312,7 @@ static char *HttpDetail(const char *body, const char *err, long http)
     return JsonDup(buf);
 }
 
-static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
+static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
                            const char *body)
 {
     JsonDoc doc;
@@ -472,7 +473,7 @@ static int IntervalOf(const JsonDoc *doc, int obj)
     return v < 1 ? 5 : v;
 }
 
-static bool ExchangeDeviceCode(PicoApp *app, const char *code, const char *verifier)
+static bool ExchangeDeviceCode(PicoHost *app, const char *code, const char *verifier)
 {
     const char *keys[] = {"grant_type", "code", "redirect_uri", "client_id", "code_verifier"};
     char redirect[256];
@@ -670,7 +671,7 @@ static bool RequestUserCode(char *id, size_t id_cap, char *code, size_t code_cap
 
 static void *DeviceLoginMain(void *arg)
 {
-    PicoApp *app = (PicoApp *)arg;
+    PicoHost *app = (PicoHost *)arg;
     char device_auth_id[128] = {0};
     char user_code[64] = {0};
     int interval = 5;
@@ -732,7 +733,7 @@ static void *DeviceLoginMain(void *arg)
     return NULL;
 }
 
-static void StartDeviceLogin(PicoApp *app)
+static void StartDeviceLogin(PicoHost *app)
 {
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -759,7 +760,7 @@ static void StartDeviceLogin(PicoApp *app)
 }
 
 /* The render thread owns the message list, so queued login text surfaces here. */
-static void DrainLoginNotes(PicoApp *app)
+static void DrainLoginNotes(PicoHost *app)
 {
     for (;;)
     {
@@ -825,8 +826,9 @@ static bool IsCancelArg(const char *s)
 
 /* `/login` forwards whatever followed the provider name, so pull out the single
  * verb here and reject anything trailing it. */
-static void OpenAiLogin(PicoApp *app, const char *args)
+static void OpenAiLogin(PicoHost *app, const char *args, void *state)
 {
+    (void)state;
     const char *p = args ? args : "";
     while (*p == ' ' || *p == '\t')
     {
@@ -889,8 +891,9 @@ static void OpenAiLogin(PicoApp *app, const char *args)
     StartDeviceLogin(app);
 }
 
-static void OpenAiLogout(PicoApp *app)
+static void OpenAiLogout(PicoHost *app, void *state)
 {
+    (void)state;
     StopDeviceLogin();
     bool saved = pico_auth_clear_oauth(app, "openai");
     PicoAuthEntry e;
@@ -911,7 +914,7 @@ static void OpenAiLogout(PicoApp *app)
     pico_auth_entry_free(&e);
 }
 
-static void OpenAiFrame(PicoApp *app, float dt)
+static void OpenAiFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     DrainLoginNotes(app);
@@ -960,8 +963,10 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
 }
 
 static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
+    (void)state;
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -1092,19 +1097,22 @@ static const char *FirstEnv(const char *a, const char *b)
     return (v && v[0]) ? v : NULL;
 }
 
-static void OpenAiInit(PicoApp *app)
+static int OpenAiInit(PicoHost *app, void **state_out)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "openai", .stream = OpenAiStream, .map_context = true});
+    (void)state_out;
+    pico_add_provider(PicoHost_PrimaryWorkspace(app), &(PicoProvider){.name = "openai", .stream = OpenAiStream, .map_context = true});
     pico_add_auth(app, &(PicoAuth){.provider = "openai",
                                    .help = "ChatGPT device-code or API key",
                                    .verbs = "key cancel",
                                    .login = OpenAiLogin,
                                    .logout = OpenAiLogout});
     pico_auth_set_env_key(app, "openai", FirstEnv("PICO_API_KEY", "OPENAI_API_KEY"));
+    return 0;
 }
 
-static void OpenAiShutdown(PicoApp *app)
+static void OpenAiShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     StopDeviceLogin();
     pthread_mutex_lock(&g_login.mu);
@@ -1123,8 +1131,8 @@ PicoExt pico_ext_openai(void)
         .abi = PICO_EXT_ABI,
         .name = "openai",
         .description = "OpenAI-compatible provider",
-        .init = OpenAiInit,
-        .shutdown = OpenAiShutdown,
-        .on_frame = OpenAiFrame,
+        .host_init = OpenAiInit,
+        .host_shutdown = OpenAiShutdown,
+        .host_on_frame = OpenAiFrame,
     };
 }

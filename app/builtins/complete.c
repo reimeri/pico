@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 #include "complete_internal.h"
@@ -68,7 +69,7 @@ static void TrackToken(int start, char trigger)
     }
 }
 
-static void Dismiss(PicoApp *app)
+static void Dismiss(PicoHost *app)
 {
     g_complete.dismissed = true;
     g_complete.dismissed_start = g_complete.token_start;
@@ -86,7 +87,7 @@ static bool IsPathByte(unsigned char c)
     return c > 32 && c != '@';
 }
 
-static const PicoCompleter *FindCompleter(const PicoApp *app, char trigger, bool bol)
+static const PicoCompleter *FindCompleter(const PicoHost *app, char trigger, bool bol)
 {
     for (int i = 0; i < app->completer_count; i++)
     {
@@ -105,7 +106,7 @@ static const PicoCompleter *FindCompleter(const PicoApp *app, char trigger, bool
     return NULL;
 }
 
-static bool ScanToken(const PicoApp *app, int *start, int *end, const PicoCompleter **out)
+static bool ScanToken(const PicoHost *app, int *start, int *end, const PicoCompleter **out)
 {
     const PicoComposer *c = &app->composer;
     if (!c->text || c->length <= 0 || c->cursor <= 0)
@@ -216,12 +217,12 @@ static void SortItems(PicoCompleteItem *items, int n, const char *prefix)
     }
 }
 
-void PicoComplete_Refresh(PicoApp *app)
+void PicoComplete_Refresh(PicoHost *app)
 {
     const PicoCompleter *comp = NULL;
     int start = 0;
     int end = 0;
-    if (!ScanToken(app, &start, &end, &comp) || !comp || !comp->query)
+    if (!ScanToken(app, &start, &end, &comp) || !comp || (!comp->host_query && !comp->workspace_query))
     {
         PicoComplete_Close();
         g_complete.dismissed = false;
@@ -250,7 +251,15 @@ void PicoComplete_Refresh(PicoApp *app)
     prefix[plen] = '\0';
 
     PicoCompleteItem raw[PICO_MAX_COMPLETE_ITEMS];
-    int n = comp->query(app, prefix, raw, PICO_MAX_COMPLETE_ITEMS);
+    int n = 0;
+    if (comp->host_query)
+    {
+        n = comp->host_query(app, prefix, raw, PICO_MAX_COMPLETE_ITEMS, comp->state);
+    }
+    else if (comp->workspace_query && comp->workspace)
+    {
+        n = comp->workspace_query(comp->workspace, prefix, raw, PICO_MAX_COMPLETE_ITEMS, comp->state);
+    }
     if (n < 0)
     {
         n = 0;
@@ -280,7 +289,7 @@ void PicoComplete_Refresh(PicoApp *app)
     }
 }
 
-static void Accept(PicoApp *app)
+static void Accept(PicoHost *app)
 {
     if (!g_complete.open || g_complete.count <= 0)
     {
@@ -296,7 +305,7 @@ static void Accept(PicoApp *app)
     int start = g_complete.token_start;
     int end = g_complete.token_end;
     ScanToken(app, &start, &end, &comp);
-    if (comp && comp->accept && comp->accept(app, item))
+    if (comp && comp->host_accept && comp->host_accept(app, item, comp->state))
     {
         PicoComplete_Refresh(app);
         return;
@@ -306,7 +315,7 @@ static void Accept(PicoApp *app)
     PicoComplete_Refresh(app);
 }
 
-bool PicoComplete_HandleKeys(PicoApp *app)
+bool PicoComplete_HandleKeys(PicoHost *app)
 {
     if (g_complete.open && IsKeyPressed(KEY_ESCAPE))
     {
@@ -349,7 +358,7 @@ bool PicoComplete_HandleKeys(PicoApp *app)
         if (strcmp(before, after) == 0)
         {
             PicoComplete_Close();
-            PicoApp_Submit(app);
+            PicoHost_Submit(app);
         }
         return true;
     }
@@ -382,7 +391,7 @@ static void SelectHoveredItem(void)
     }
 }
 
-bool PicoComplete_HandlePointer(PicoApp *app)
+bool PicoComplete_HandlePointer(PicoHost *app)
 {
     if (!g_complete.open)
     {
@@ -408,7 +417,7 @@ bool PicoComplete_HandlePointer(PicoApp *app)
     return false;
 }
 
-void PicoComplete_Render(PicoApp *app)
+void PicoComplete_Render(PicoHost *app)
 {
     (void)app;
     if (!g_complete.open || g_complete.count <= 0)

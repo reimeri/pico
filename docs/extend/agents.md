@@ -8,7 +8,7 @@ Include `pico/agent.h` directly, or include `pico/plugin.h`.
 
 `PicoAgentId` identifies one in-memory agent for the lifetime of the process. It is distinct from the durable JSONL `session_id`. Runtime generation identifies one worker generation inside that agent; force cancellation replaces the generation without changing the agent ID.
 
-Use the main-thread manager API; `PicoApp` exposes only the opaque `app->agents` owner:
+Use the main-thread manager API; `PicoHost` is the process owner and does not expose a dereferenceable agent list:
 
 ```c
 for (int i = 0; i < pico_agent_count(app); i++) {
@@ -77,7 +77,7 @@ Pico takes ownership. A stale or mismatched ID is rejected.
 
 ## Worker callback context
 
-Tools, before-tool hooks, and providers receive a callback-scoped `PicoAgentContext *`, never `PicoApp *`. Do not retain the pointer or strings returned from it after the callback.
+Tools, before-tool hooks, and providers receive a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain the pointer or strings returned from it after the callback.
 
 Read-only accessors provide copied worker values:
 
@@ -104,4 +104,4 @@ Agent/session changes produced by worker code must travel through callback resul
 
 Reload and workspace replacement stop accepting external turns/delegations, keep pumping current work and asks, and commit only after a full manager quiescence check. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn.
 
-`PicoApp_Free` returns `PICO_APP_SHUTDOWN_CLEAN` or `PICO_APP_SHUTDOWN_RETAINED`. Retained means one shared shutdown deadline expired and a callback was detached. Pico keeps every service and `.so` that callback can reach, permanently retires Pico in the process, and rejects later app/plugin initialization. The caller must proceed to process exit.
+`pico_host_free` returns `PICO_HOST_SHUTDOWN_CLEAN` or `PICO_HOST_SHUTDOWN_RETAINED`. Retained means one shared shutdown deadline expired and a callback was detached. Pico keeps every service and `.so` that callback can reach, permanently retires Pico in the process, and rejects later host/plugin initialization. The caller must proceed to process exit.

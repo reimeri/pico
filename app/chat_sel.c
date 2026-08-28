@@ -1,4 +1,5 @@
 #include "chat_sel.h"
+#include "host_internal.h"
 
 #include "pico/app.h"
 #include "text_range.h"
@@ -358,12 +359,12 @@ void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config)
     }
 }
 
-bool PicoChatSel_HasSelection(const PicoApp *app)
+bool PicoChatSel_HasSelection(const PicoHost *app)
 {
     return app && app->chat_sel.msg >= 0 && app->chat_sel.anchor != app->chat_sel.cursor;
 }
 
-void PicoChatSel_Clear(PicoApp *app)
+void PicoChatSel_Clear(PicoHost *app)
 {
     if (!app)
     {
@@ -381,7 +382,7 @@ void PicoChatSel_Clear(PicoApp *app)
     PicoClickSeq_Reset(&app->chat_sel.click_seq);
 }
 
-void PicoChatSel_Copy(PicoApp *app)
+void PicoChatSel_Copy(PicoHost *app)
 {
     if (!PicoChatSel_HasSelection(app))
     {
@@ -418,7 +419,7 @@ void PicoChatSel_Copy(PicoApp *app)
     free(copy);
 }
 
-void PicoChatSel_Clamp(PicoApp *app)
+void PicoChatSel_Clamp(PicoHost *app)
 {
     if (!app || app->chat_sel.msg < 0)
     {
@@ -471,7 +472,7 @@ static void UnitRange(const char *text, int len, int pos, int granularity, int *
     }
 }
 
-void PicoChatSel_SelectUnitAt(PicoApp *app, int msg, int pos, int granularity)
+void PicoChatSel_SelectUnitAt(PicoHost *app, int msg, int pos, int granularity)
 {
     if (!app)
     {
@@ -502,7 +503,7 @@ void PicoChatSel_SelectUnitAt(PicoApp *app, int msg, int pos, int granularity)
     app->chat_sel.cursor = to;
 }
 
-void PicoChatSel_ExtendUnitTo(PicoApp *app, int pos)
+void PicoChatSel_ExtendUnitTo(PicoHost *app, int pos)
 {
     if (!app)
     {
@@ -539,7 +540,7 @@ void PicoChatSel_ExtendUnitTo(PicoApp *app, int pos)
     }
 }
 
-static int HitOffset(PicoApp *app, const SelHit *hit, Clay_BoundingBox box, float x, float y)
+static int HitOffset(PicoHost *app, const SelHit *hit, Clay_BoundingBox box, float x, float y)
 {
     SelBuf *b = (hit->msg >= 0 && hit->msg < s_msg_n) ? &s_msgs[hit->msg] : NULL;
     if (!b || !b->text || hit->start < 0 || hit->start > b->len)
@@ -572,7 +573,7 @@ static int HitOffset(PicoApp *app, const SelHit *hit, Clay_BoundingBox box, floa
     return hit->start + OffsetOnLine(font, size, s, lines[li].start, lines[li].length, x - box.x);
 }
 
-int PicoChatSel_OffsetAtPoint(PicoApp *app, float x, float y, int lock_msg, int *out_msg)
+int PicoChatSel_OffsetAtPoint(PicoHost *app, float x, float y, int lock_msg, int *out_msg)
 {
     int best_msg = -1;
     int best_off = 0;
@@ -650,7 +651,7 @@ bool PicoChatSel_PointerOverText(void)
     return false;
 }
 
-void PicoChatSel_DrawOverlay(PicoApp *app)
+void PicoChatSel_DrawOverlay(PicoHost *app)
 {
     if (!PicoChatSel_HasSelection(app) || !app->fonts)
     {

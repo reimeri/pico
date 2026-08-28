@@ -1,9 +1,12 @@
+#include "host_internal.h"
 /* Included by agent_behavior_test.c so manager concurrency uses the same deterministic fake provider host. */
 
 static bool g_close_hook_saw_removed;
 
-static void InspectClosedAgent(PicoApp *app, const PicoHookEvent *event)
+static void InspectClosedAgent(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    (void)state;
     PicoAgentInfo info;
     if (event && event->hook == PICO_HOOK_ON_AGENT_DESTROY)
     {
@@ -44,7 +47,7 @@ static int TestManagerProfileRegistry(void)
         fclose(file);
     }
 
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoAgentManager_LoadProfiles(app.agents);
     PicoSubagentProfileInfo info;
@@ -57,13 +60,13 @@ static int TestManagerProfileRegistry(void)
     PicoAgentId only_id = pico_agent_active(&app);
     bool close_contract = pico_agent_close(&app, only_id) == PICO_AGENT_RESULT_BUSY;
     PicoAgentCreateOptions close_options = {
-        .kind = PICO_AGENT_NORMAL,
+        .kind = PICO_AGENT_MAIN,
         .session_start = PICO_SESSION_NONE,
     };
     PicoAgentId close_id = 0;
     close_contract = close_contract &&
                      pico_agent_create(&app, &close_options, &close_id) == PICO_AGENT_RESULT_OK;
-    pico_add_hook(&app, PICO_HOOK_ON_AGENT_DESTROY, InspectClosedAgent);
+    pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_ON_AGENT_DESTROY, InspectClosedAgent);
     g_close_hook_saw_removed = false;
     close_contract = close_contract && pico_agent_close(&app, close_id) == PICO_AGENT_RESULT_OK &&
                      g_close_hook_saw_removed;
@@ -73,7 +76,7 @@ static int TestManagerProfileRegistry(void)
                         !PicoAgentManager_ReserveSession(app.agents, 222, "/tmp/one.jsonl");
     PicoAgentManager_ReleaseSessions(app.agents, 111);
     reservations = reservations && !PicoAgentManager_SessionReserved(app.agents, "/tmp/one.jsonl", 0);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(valid_path);
     unlink(invalid_path);
     rmdir(dir);
@@ -90,11 +93,11 @@ static int TestManagerConcurrencyAndIsolation(void)
     ResetTest(TEST_CONCURRENT_REVERSE, 0);
     g_test.provider_tokens = 10;
     g_test.provider_cached_tokens = 3;
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoAgentId first_id = pico_agent_active(&app);
     PicoAgentCreateOptions options = {
-        .kind = PICO_AGENT_NORMAL,
+        .kind = PICO_AGENT_MAIN,
         .session_start = PICO_SESSION_NONE,
         .select = false,
     };
@@ -102,7 +105,7 @@ static int TestManagerConcurrencyAndIsolation(void)
     if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK ||
         pico_agent_count(&app) != 2 || second_id == first_id)
     {
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "could not create two independent agents");
     }
     PicoAgent *first = PicoAgentManager_Find(app.agents, first_id);
@@ -136,7 +139,7 @@ static int TestManagerConcurrencyAndIsolation(void)
         g_test.block_release = true;
         pthread_cond_broadcast(&g_test.cv);
         pthread_mutex_unlock(&g_test.mu);
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "provider callbacks did not overlap and complete in reverse order");
     }
 
@@ -148,7 +151,7 @@ static int TestManagerConcurrencyAndIsolation(void)
         g_test.block_release = true;
         pthread_cond_broadcast(&g_test.cv);
         pthread_mutex_unlock(&g_test.mu);
-        PicoApp_Free(&app);
+        PicoHost_Shutdown(&app);
         return Fail(name, "selection retained stale transcript state");
     }
     pthread_mutex_lock(&g_test.mu);
@@ -188,7 +191,7 @@ static int TestManagerConcurrencyAndIsolation(void)
         PicoAgentManager_Pump(app.agents);
         SleepOneMs();
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     return isolated && cancel_isolated
                ? 0
                : Fail(name, "events, usage, transcript, or cancellation crossed agent boundaries");

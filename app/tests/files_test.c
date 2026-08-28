@@ -1,6 +1,7 @@
 #include "canonical.h"
 #include "json.h"
 #include "pico/app.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +10,7 @@
 
 char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
                                  char **parts_json_out);
-int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max);
+int pico_files_complete(PicoHost *app, const char *prefix, PicoCompleteItem *out, int max, void *state);
 void pico_files_reset(void);
 
 static int g_failed;
@@ -36,11 +37,11 @@ static bool WriteFile(const char *path, const char *body)
     return ok;
 }
 
-static bool QueryHas(PicoApp *app, const char *prefix, const char *label)
+static bool QueryHas(PicoHost *app, const char *prefix, const char *label)
 {
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
     memset(items, 0, sizeof(items));
-    int n = pico_files_complete(app, prefix, items, PICO_MAX_COMPLETE_ITEMS);
+    int n = pico_files_complete(app, prefix, items, PICO_MAX_COMPLETE_ITEMS, NULL);
     for (int i = 0; i < n; i++)
     {
         if (strcmp(items[i].label, label) == 0)
@@ -51,7 +52,7 @@ static bool QueryHas(PicoApp *app, const char *prefix, const char *label)
     return false;
 }
 
-static void SetComposer(PicoApp *app, char *buf, size_t cap, const char *text)
+static void SetComposer(PicoHost *app, char *buf, size_t cap, const char *text)
 {
     snprintf(buf, cap, "%s", text ? text : "");
     app->composer.text = buf;
@@ -126,20 +127,27 @@ static void TestCompleteRebuildsAtTokenStart(void)
         return;
     }
 
-    PicoApp *app = (PicoApp *)calloc(1, sizeof(PicoApp));
+    PicoHost *app = (PicoHost *)calloc(1, sizeof(PicoHost));
+    PicoWorkspace *workspace;
     if (!app)
     {
-        fprintf(stderr, "FAIL: could not allocate PicoApp\n");
+        fprintf(stderr, "FAIL: could not allocate PicoHost\n");
         g_failed = 1;
         unlink(old_path);
         rmdir(temp);
         return;
     }
-    snprintf(app->workspace, sizeof(app->workspace), "%s", temp);
+    workspace = (PicoWorkspace *)calloc(1, sizeof(PicoWorkspace));
+    workspace->host = app;
+    workspace->id = 1;
+    snprintf(workspace->path, sizeof(workspace->path), "%s", temp);
+    workspace->state = PICO_WORKSPACE_OPEN;
+    app->workspaces[0] = workspace;
+    app->workspace_count = 1;
     app->completers[0] = (PicoCompleter){
         .trigger = '@',
         .bol_only = false,
-        .query = pico_files_complete,
+        .host_query = pico_files_complete,
     };
     app->completer_count = 1;
     char composer[64];

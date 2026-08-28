@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "subagent_config.h"
+#include "host_internal.h"
 
 #include "agent_manager.h"
 #include "json.h"
@@ -30,7 +31,7 @@ static bool ValidProfileName(const char *name)
     return strlen(name) <= 64;
 }
 
-static bool ToolRegistered(const PicoApp *app, const char *name)
+static bool ToolRegistered(const PicoHost *app, const char *name)
 {
     for (int i = 0; app && i < app->tool_count; i++)
     {
@@ -42,14 +43,14 @@ static bool ToolRegistered(const PicoApp *app, const char *name)
     return false;
 }
 
-static void ProfileWarning(PicoApp *app, const char *path, const char *reason)
+static void ProfileWarning(PicoHost *app, const char *path, const char *reason)
 {
     char line[4608];
     snprintf(line, sizeof(line), "%s: %s", path, reason);
     pico_status_warn(app, line);
 }
 
-static bool ParseProfile(PicoApp *app, const char *path, const char *name,
+static bool ParseProfile(PicoHost *app, const char *path, const char *name,
                          PicoSubagentProfileInfo *out)
 {
     size_t len = 0;
@@ -206,7 +207,7 @@ static bool ParseProfile(PicoApp *app, const char *path, const char *name,
 
 void PicoSubagentConfig_Load(PicoAgentManager *manager)
 {
-    if (!manager || !manager->app)
+    if (!manager || !manager->workspace || !manager->workspace->host)
     {
         return;
     }
@@ -253,10 +254,10 @@ void PicoSubagentConfig_Load(PicoAgentManager *manager)
             }
             if (!ValidProfileName(profile_name))
             {
-                ProfileWarning(manager->app, path, "invalid profile filename");
+                ProfileWarning(manager->workspace->host, path, "invalid profile filename");
                 continue;
             }
-            if (ParseProfile(manager->app, path, profile_name, &loaded[count]))
+            if (ParseProfile(manager->workspace->host, path, profile_name, &loaded[count]))
             {
                 count++;
             }
@@ -282,7 +283,7 @@ const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoAgentManager *m
     return NULL;
 }
 
-bool PicoSubagentConfig_Resolve(const PicoApp *app, const PicoAgent *parent,
+bool PicoSubagentConfig_Resolve(const PicoHost *app, const PicoAgent *parent,
                                 const PicoSubagentProfileInfo *profile,
                                 char *model, size_t model_cap,
                                 char *effort, size_t effort_cap)

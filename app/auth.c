@@ -5,6 +5,7 @@
 #include "json.h"
 #include "path.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -312,7 +313,7 @@ static void LoadFile(PicoAuthStore *s, const char *path)
 
 /* Providers own their environment variable names, so the key arrives here rather
  * than being read by the store. It is deliberately never persisted. */
-void pico_auth_set_env_key(PicoApp *app, const char *provider, const char *key)
+void pico_auth_set_env_key(PicoHost *app, const char *provider, const char *key)
 {
     if (!app || !app->auth_store || !provider || !provider[0])
     {
@@ -341,7 +342,7 @@ void pico_auth_entry_free(PicoAuthEntry *e)
     memset(e, 0, sizeof(*e));
 }
 
-void pico_add_auth(PicoApp *app, const PicoAuth *a)
+void pico_add_auth(PicoHost *app, const PicoAuth *a)
 {
     if (!app || !a || !a->provider || !a->provider[0] || !a->login || app->auth_count >= PICO_MAX_AUTH)
     {
@@ -371,7 +372,7 @@ static bool NameEq(const char *a, const char *b)
     return *a == *b;
 }
 
-const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider)
+const PicoAuth *pico_find_auth(const PicoHost *app, const char *provider)
 {
     if (!app || !provider || !provider[0])
     {
@@ -421,7 +422,7 @@ static bool AuthCopyStore(PicoAuthStore *store, const char *provider, PicoAuthEn
     return ok;
 }
 
-bool pico_auth_copy(PicoApp *app, const char *provider, PicoAuthEntry *out)
+bool pico_auth_copy(PicoHost *app, const char *provider, PicoAuthEntry *out)
 {
     return AuthCopyStore(app ? app->auth_store : NULL, provider, out);
 }
@@ -472,7 +473,7 @@ static bool AuthSetOauthStore(PicoAuthStore *store, const char *provider, const 
     return saved;
 }
 
-bool pico_auth_set_oauth(PicoApp *app, const char *provider, const char *access, const char *refresh,
+bool pico_auth_set_oauth(PicoHost *app, const char *provider, const char *access, const char *refresh,
                          const char *account_id, long expires_at)
 {
     return AuthSetOauthStore(app ? app->auth_store : NULL, provider, access, refresh,
@@ -520,7 +521,7 @@ bool pico_auth_set_oauth_ctx(PicoAgentContext *ctx, const char *provider, const 
     return saved;
 }
 
-bool pico_auth_set_active(PicoApp *app, const char *provider, const char *active)
+bool pico_auth_set_active(PicoHost *app, const char *provider, const char *active)
 {
     if (!app || !app->auth_store || !provider || !provider[0] || !active)
     {
@@ -538,7 +539,7 @@ bool pico_auth_set_active(PicoApp *app, const char *provider, const char *active
     return saved;
 }
 
-bool pico_auth_clear_oauth(PicoApp *app, const char *provider)
+bool pico_auth_clear_oauth(PicoHost *app, const char *provider)
 {
     if (!app || !app->auth_store || !provider || !provider[0])
     {
@@ -567,7 +568,7 @@ bool pico_auth_clear_oauth(PicoApp *app, const char *provider)
     return saved;
 }
 
-void PicoAuth_Load(PicoApp *app)
+void PicoAuth_Load(PicoHost *app)
 {
     if (!app)
     {
@@ -592,7 +593,7 @@ void PicoAuth_Load(PicoApp *app)
     }
 }
 
-void PicoAuth_Free(PicoApp *app)
+void PicoAuth_Free(PicoHost *app)
 {
     if (!app || !app->auth_store)
     {

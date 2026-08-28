@@ -1,6 +1,7 @@
 #include "canonical.h"
 #include "composer_internal.h"
 #include "json.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +15,7 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
 
 static int g_failed;
 
-void pico_status_warn(PicoApp *app, const char *msg)
+void pico_status_warn(PicoHost *app, const char *msg)
 {
     (void)app;
     (void)msg;
@@ -260,9 +261,9 @@ static void TestClipboardOwnerCannotBlockUi(void)
     const char *old_path_value = getenv("PATH");
     char *old_path = old_path_value ? JsonDup(old_path_value) : NULL;
     setenv("PATH", temp, 1);
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    PicoHost_SetPath(&app, temp);
 
     double started = WallSeconds();
     PicoComposer_BeginClipboardPaste(&app);

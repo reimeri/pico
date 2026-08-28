@@ -7,6 +7,7 @@
 
 struct PicoAgentRt;
 struct PicoDelegationJob;
+struct PicoWorkspace;
 
 typedef struct PicoSessionReservation {
     PicoAgentId owner;
@@ -41,7 +42,7 @@ typedef struct PicoSubagentSnapshot {
 } PicoSubagentSnapshot;
 
 struct PicoAgentManager {
-    PicoApp *app; /* main-thread owner; never exposed to workers */
+    struct PicoWorkspace *workspace; /* main-thread owner; never exposed to workers */
     PicoAgent *agents[PICO_MAX_AGENTS];
     int count;
     PicoAgentId active_id;
@@ -64,7 +65,6 @@ struct PicoAgentManager {
     PicoUiMailbox ui_mailboxes[PICO_MAX_UI_POSTS];
     int ui_mailbox_count;
     bool accepting_work;
-    bool curl_initialized;
     bool retained_shutdown;
 };
 
@@ -74,7 +74,7 @@ void PicoAgentManager_PumpUiPosts(PicoAgentManager *manager);
 bool PicoAgentManager_UiLatest(const PicoAgentManager *manager, const char *name, PicoUiPost *out);
 void PicoAgentManager_UiClear(PicoAgentManager *manager, const char *name);
 
-PicoAgentManager *PicoAgentManager_Create(PicoApp *app);
+PicoAgentManager *PicoAgentManager_Create(struct PicoWorkspace *workspace);
 /* False means a detached worker retained the execution host. */
 bool PicoAgentManager_Destroy(PicoAgentManager *manager);
 void PicoAgentManager_Pump(PicoAgentManager *manager);
@@ -101,7 +101,7 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
 
 void PicoAgentManager_LoadProfiles(PicoAgentManager *manager);
 void PicoAgentManager_ReplayToolDetails(PicoAgentManager *manager);
-PicoAgentResult PicoAgentManager_ResumeActive(PicoApp *app, const char *id, bool allow_prefix);
+PicoAgentResult PicoAgentManager_ResumeActive(PicoHost *host, const char *id, bool allow_prefix);
 char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
                                 const char *task, const char *session_id,
                                 bool *is_error);
@@ -124,7 +124,7 @@ typedef struct PicoSubagentInspect {
     int message_count;
 } PicoSubagentInspect;
 
-bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
+bool PicoAgentManager_InspectSubagent(PicoHost *host, const PicoTraceLine *line,
                                       PicoSubagentInspect *out);
 
 #endif

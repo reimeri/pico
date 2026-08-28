@@ -4,19 +4,22 @@
 #include "pico/plugin.h"
 #include "json.h"
 
-static void AddContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
+static void AddContext(PicoWorkspace *workspace, PicoAgentId agent_id, PicoContextEvent *event, void *state)
 {
-    (void)app;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
-    if (!ev->compact)
+    if (!event->compact)
     {
-        ev->extra_context = JsonDup("Verify the observable result before finishing.");
+        event->extra_context = JsonDup("Verify the observable result before finishing.");
     }
 }
 
-static void ContextInit(PicoApp *app)
+static int ContextInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_context_hook(app, AddContext);
+    (void)state_out;
+    pico_add_context_hook(workspace, AddContext);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -25,6 +28,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "ephemeral-context",
         .description = "Request-only context example",
-        .init = ContextInit,
+        .workspace_init = ContextInit,
     };
 }

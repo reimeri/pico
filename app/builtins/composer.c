@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "text_range.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
@@ -276,7 +277,7 @@ typedef struct ComposerView {
 
 static float s_wrap_width = 0;
 
-static float ComposerFallbackWrap(PicoApp *app)
+static float ComposerFallbackWrap(PicoHost *app)
 {
     float width = (float)GetScreenWidth() - 80.0f;
     float column = Pico_ChatColumnMaxPx(app);
@@ -295,7 +296,7 @@ static float ComposerFallbackWrap(PicoApp *app)
     return width;
 }
 
-static float ComposerWrapWidth(PicoApp *app)
+static float ComposerWrapWidth(PicoHost *app)
 {
     return s_wrap_width > 10 ? s_wrap_width : ComposerFallbackWrap(app);
 }
@@ -313,7 +314,7 @@ typedef struct ComposerAttach {
     bool owned;
 } ComposerAttach;
 
-static PicoApp *g_app;
+static PicoHost *g_app;
 static ComposerAttach g_attach[COMPOSER_MAX_ATTACH];
 static int g_attach_n;
 static int g_preview = -1;
@@ -517,7 +518,7 @@ void PicoComposer_DiscardAttachments(void)
     ClearAttachments(true);
 }
 
-bool PicoComposer_HasAttachments(const PicoApp *app)
+bool PicoComposer_HasAttachments(const PicoHost *app)
 {
     (void)app;
     return g_attach_n > 0;
@@ -731,7 +732,7 @@ char *pico_composer_display_message(const char *text)
     return JsonBuf_Steal(&b);
 }
 
-bool PicoComposer_ApplyAttachments(PicoApp *app)
+bool PicoComposer_ApplyAttachments(PicoHost *app)
 {
     if (!app || g_attach_n <= 0)
     {
@@ -749,9 +750,9 @@ bool PicoComposer_ApplyAttachments(PicoApp *app)
     return true;
 }
 
-static bool ComposerMediaDir(const PicoApp *app, char *out, size_t cap)
+static bool ComposerMediaDir(const PicoHost *app, char *out, size_t cap)
 {
-    const char *ws = (app && app->workspace[0]) ? app->workspace : "/tmp";
+    const char *ws = (app && PicoHost_Path(app)[0]) ? PicoHost_Path(app) : "/tmp";
     return PicoPath_Format(out, cap, "%s/.pico/media/composer", ws);
 }
 
@@ -1037,7 +1038,7 @@ static unsigned char *ClipboardImageBytes(size_t *out_n, const char **out_ext, b
     return NULL;
 }
 
-static bool PersistClipboardImage(PicoApp *app, const unsigned char *bytes, size_t n, const char *ext)
+static bool PersistClipboardImage(PicoHost *app, const unsigned char *bytes, size_t n, const char *ext)
 {
     char dir[4096];
     if (!ComposerMediaDir(app, dir, sizeof(dir)))
@@ -1054,7 +1055,7 @@ static bool PersistClipboardImage(PicoApp *app, const unsigned char *bytes, size
     return ok;
 }
 
-static bool PasteClipboardImage(PicoApp *app)
+static bool PasteClipboardImage(PicoHost *app)
 {
     if (g_attach_n >= COMPOSER_MAX_ATTACH)
     {
@@ -1103,7 +1104,7 @@ static bool ClipboardProcessStartNext(void)
     return false;
 }
 
-static void ClipboardProcessFallback(PicoApp *app)
+static void ClipboardProcessFallback(PicoHost *app)
 {
     ClipboardProcessClear();
     PasteClipboard(&app->composer);
@@ -1114,7 +1115,7 @@ bool PicoComposer_ClipboardPasteBusy(void)
     return g_clip_process.active;
 }
 
-void PicoComposer_BeginClipboardPaste(PicoApp *app)
+void PicoComposer_BeginClipboardPaste(PicoHost *app)
 {
     if (g_clip_process.active)
     {
@@ -1153,7 +1154,7 @@ static void ClipboardProcessTerminate(void)
     g_clip_process.terminating = true;
 }
 
-void PicoComposer_PumpClipboardPaste(PicoApp *app)
+void PicoComposer_PumpClipboardPaste(PicoHost *app)
 {
     ClipboardProcessPumpReapers();
     if (!g_clip_process.active || g_clip_process.pid <= 0)
@@ -1219,7 +1220,7 @@ static void NoteCaretActivity(void)
     s_caret_blink_at = GetTime();
 }
 
-static ComposerView GetComposerView(PicoApp *app)
+static ComposerView GetComposerView(PicoHost *app)
 {
     ComposerView v = {0};
     PicoComposer *c = &app->composer;
@@ -1292,7 +1293,7 @@ static int OffsetAtXOnLine(Font font, const PicoComposer *c, CompLine line, floa
     return end;
 }
 
-static void MoveVertical(PicoApp *app, int dir, bool extend)
+static void MoveVertical(PicoHost *app, int dir, bool extend)
 {
     PicoComposer *c = &app->composer;
     CompLine lines[COMPOSER_MAX_LINES];
@@ -1337,7 +1338,7 @@ static void MoveVertical(PicoApp *app, int dir, bool extend)
     s_goal_x = goal;
 }
 
-static int OffsetAtPoint(PicoApp *app, float x, float y)
+static int OffsetAtPoint(PicoHost *app, float x, float y)
 {
     PicoComposer *c = &app->composer;
     ComposerView v = GetComposerView(app);
@@ -1387,7 +1388,7 @@ static int OffsetAtPoint(PicoApp *app, float x, float y)
     return end;
 }
 
-static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
+static void CaretPos(PicoHost *app, float *out_x, float *out_y, float *out_h)
 {
     PicoComposer *c = &app->composer;
     ComposerView v = GetComposerView(app);
@@ -1414,7 +1415,7 @@ static void CaretPos(PicoApp *app, float *out_x, float *out_y, float *out_h)
              MeasureSlice(ComposerFont(), c->text ? c->text : "", start, take, ComposerPx());
 }
 
-static void EnsureCaretVisible(PicoApp *app)
+static void EnsureCaretVisible(PicoHost *app)
 {
     PicoComposer *c = &app->composer;
     if (c->cursor == s_seen_cursor && c->length == s_seen_length)
@@ -1479,7 +1480,7 @@ static int SelTo(const PicoComposer *c)
     return c->sel_anchor > c->cursor ? c->sel_anchor : c->cursor;
 }
 
-bool PicoComposer_HasSelection(const PicoApp *app)
+bool PicoComposer_HasSelection(const PicoHost *app)
 {
     return app->composer.sel_anchor != app->composer.cursor;
 }
@@ -1511,7 +1512,7 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     NoteCaretActivity();
 }
 
-void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text)
+void PicoComposer_ReplaceRange(PicoHost *app, int from, int to, const char *text)
 {
     PicoComposer *c = &app->composer;
     c->sel_anchor = c->cursor;
@@ -1528,7 +1529,7 @@ void PicoComposer_ReplaceRange(PicoApp *app, int from, int to, const char *text)
     }
 }
 
-void PicoComposer_SetText(PicoApp *app, const char *text)
+void PicoComposer_SetText(PicoHost *app, const char *text)
 {
     PicoComposer *c = &app->composer;
     c->sel_anchor = 0;
@@ -1616,7 +1617,7 @@ static int Utf8Encode(int cp, char out[4])
     return 4;
 }
 
-void PicoComposer_Copy(PicoApp *app)
+void PicoComposer_Copy(PicoHost *app)
 {
     PicoComposer *c = &app->composer;
     if (c->sel_anchor == c->cursor || !c->text)
@@ -1682,7 +1683,7 @@ static void PasteClipboard(PicoComposer *c)
     ComposerInsert(c, clip, len);
 }
 
-void PicoComposer_HandleInput(PicoApp *app)
+void PicoComposer_HandleInput(PicoHost *app)
 {
     if (PicoUi_ModalOpen(app))
     {
@@ -1819,7 +1820,7 @@ void PicoComposer_HandleInput(PicoApp *app)
 
     if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && !shift)
     {
-        PicoApp_Submit(app);
+        PicoHost_Submit(app);
         return;
     }
 
@@ -1956,7 +1957,7 @@ static bool ComposerHandleAttachPointer(void)
     return PicoComposer_PointerOverAttachments();
 }
 
-void PicoComposer_HandlePointer(PicoApp *app)
+void PicoComposer_HandlePointer(PicoHost *app)
 {
     PicoComposer *c = &app->composer;
     Vector2 mouse = GetMousePosition();
@@ -1992,10 +1993,10 @@ void PicoComposer_HandlePointer(PicoApp *app)
     }
 }
 
-static bool ComposerVision(PicoApp *app)
+static bool ComposerVision(PicoHost *app)
 {
     bool vision = true;
-    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+    PicoModel *model = PicoSettings_ActiveModel(app, PicoHost_ActiveAgent(app));
     if (model)
     {
         vision = model->vision;
@@ -2003,8 +2004,9 @@ static bool ComposerVision(PicoApp *app)
     return vision;
 }
 
-static void ComposerAttachRender(PicoApp *app)
+static void ComposerAttachRender(PicoHost *app, void *state)
 {
+    (void)state;
     if (g_attach_n <= 0)
     {
         return;
@@ -2112,8 +2114,9 @@ static void ComposerAttachRender(PicoApp *app)
     }
 }
 
-void PicoComposer_Render(PicoApp *app)
+void PicoComposer_Render(PicoHost *app, void *state)
 {
+    (void)state;
     PicoComposer *c = &app->composer;
     const char *placeholder = "Message Pico…  (Enter to send, Shift+Enter for newline)";
     bool empty = c->length == 0;
@@ -2214,8 +2217,9 @@ void PicoComposer_Render(PicoApp *app)
     }
 }
 
-static void ComposerPreviewRender(PicoApp *app)
+static void ComposerPreviewRender(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     if (g_preview < 0)
     {
@@ -2253,8 +2257,9 @@ static void ComposerPreviewRender(PicoApp *app)
     }
 }
 
-void PicoComposer_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
+void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (PicoUi_ModalOpen(app))
     {
@@ -2323,8 +2328,9 @@ void PicoComposer_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
     EndScissorMode();
 }
 
-static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     ComposerView v = GetComposerView(app);
     if (v.wrap_width > 10)
@@ -2365,13 +2371,13 @@ static void ComposerAfterLayout(PicoApp *app, const PicoHookEvent *event)
     EnsureCaretVisible(app);
 }
 
-static void UpdateComposerScrollbarDrag(PicoApp *app)
+static void UpdateComposerScrollbarDrag(PicoHost *app)
 {
     PicoScrollbar_UpdateDrag(&app->composer_scrollbar, CLAY_STRING("ComposerScroll"),
                              CLAY_STRING("CompScrollBarHandle"));
 }
 
-static void ComposerFrame(PicoApp *app, float dt)
+static void ComposerFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
 #if defined(__linux__)
@@ -2385,22 +2391,25 @@ static void ComposerFrame(PicoApp *app, float dt)
     }
 }
 
-static void ComposerInit(PicoApp *app)
+static int ComposerInit(PicoHost *app, void **state_out)
 {
+    (void)state_out;
     g_app = app;
     if (g_preview >= 0 && !pico_ui_modal_has(app, "preview"))
     {
         ResetPreview();
     }
-    pico_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 6, ComposerAttachRender);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 25, ComposerPreviewRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ComposerAfterLayout);
-    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoComposer_DrawOverlay);
+    pico_host_add_view(app, PICO_SLOT_COMPOSER, 0, PicoComposer_Render);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 6, ComposerAttachRender);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 25, ComposerPreviewRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ComposerAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoComposer_DrawOverlay);
+    return 0;
 }
 
-static void ComposerShutdown(PicoApp *app)
+static void ComposerShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
 #if defined(__linux__)
     PicoComposer_CancelClipboardPaste();
@@ -2420,8 +2429,8 @@ PicoExt pico_ext_composer(void)
         .abi = PICO_EXT_ABI,
         .name = "composer",
         .description = "Prompt input",
-        .init = ComposerInit,
-        .shutdown = ComposerShutdown,
-        .on_frame = ComposerFrame,
+        .host_init = ComposerInit,
+        .host_shutdown = ComposerShutdown,
+        .host_on_frame = ComposerFrame,
     };
 }

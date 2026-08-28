@@ -4,6 +4,7 @@
 #include "pico/plugin.h"
 #include "diff_lines.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
@@ -143,7 +144,7 @@ static DiffModel *g_model;   /* main thread only */
 static char g_workspace[4096];
 static bool g_thread_started;
 static bool g_thread_stop;
-static PicoApp *g_app;
+static PicoHost *g_app;
 static bool g_open;
 static PicoScrollbar g_scrollbar;
 static bool g_overflow;
@@ -581,13 +582,13 @@ static void *DiffThreadMain(void *unused)
     return NULL;
 }
 
-static void StartThread(PicoApp *app)
+static void StartThread(PicoHost *app)
 {
     if (g_thread_started)
     {
         return;
     }
-    snprintf(g_workspace, sizeof(g_workspace), "%s", app->workspace);
+    snprintf(g_workspace, sizeof(g_workspace), "%s", PicoHost_Path(app));
     g_thread_started = true;
     if (pthread_create(&g_thread, NULL, DiffThreadMain, NULL) != 0)
     {
@@ -629,20 +630,20 @@ static void StopThread(void)
     }
 }
 
-static void AdoptPending(PicoApp *app)
+static void AdoptPending(PicoHost *app)
 {
     pthread_mutex_lock(&g_lock);
     DiffModel *fresh = g_pending;
     g_pending = NULL;
-    if (strncmp(g_workspace, app->workspace, sizeof(g_workspace)) != 0)
+    if (strncmp(g_workspace, PicoHost_Path(app), sizeof(g_workspace)) != 0)
     {
-        snprintf(g_workspace, sizeof(g_workspace), "%s", app->workspace);
+        snprintf(g_workspace, sizeof(g_workspace), "%s", PicoHost_Path(app));
     }
     pthread_mutex_unlock(&g_lock);
 
     /* A capture that started under a previous workspace is never displayed,
      * even if it was published after the workspace switched back. */
-    if (fresh && strncmp(fresh->workspace, app->workspace, sizeof(fresh->workspace)) != 0)
+    if (fresh && strncmp(fresh->workspace, PicoHost_Path(app), sizeof(fresh->workspace)) != 0)
     {
         DiffModel_Free(fresh);
         return;
@@ -684,7 +685,7 @@ static char g_chip_adds[32];
 static char g_chip_dels[32];
 static char g_title[128];
 
-void PicoDiff_RenderChip(PicoApp *app)
+void PicoDiff_RenderChip(PicoHost *app)
 {
     (void)app;
     if (!HasChanges())
@@ -741,7 +742,7 @@ static bool CloseModal(void)
     return true;
 }
 
-static void OpenModal(PicoApp *app)
+static void OpenModal(PicoHost *app)
 {
     if (!g_open && pico_ui_modal_push(app, "diff"))
     {
@@ -820,8 +821,9 @@ static void RenderRow(int index, const DiffRow *row)
     }
 }
 
-static void DiffModalRender(PicoApp *app)
+static void DiffModalRender(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     if (!g_open)
     {
@@ -926,8 +928,9 @@ static void DiffModalRender(PicoApp *app)
 /* Input                                                               */
 /* ------------------------------------------------------------------ */
 
-static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void DiffAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
     if (g_open)
     {
@@ -966,7 +969,7 @@ static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void DiffOnFrame(PicoApp *app, float dt)
+static void DiffOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     AdoptPending(app);
@@ -985,21 +988,24 @@ static void DiffOnFrame(PicoApp *app, float dt)
 /* Extension                                                           */
 /* ------------------------------------------------------------------ */
 
-static void DiffInit(PicoApp *app)
+static int DiffInit(PicoHost *app, void **state_out)
 {
+    (void)state_out;
     g_app = app;
     if (g_open && !pico_ui_modal_has(app, "diff"))
     {
         g_open = false;
         memset(&g_scrollbar, 0, sizeof(g_scrollbar));
     }
-    pico_add_view(app, PICO_SLOT_OVERLAY, 30, DiffModalRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, DiffAfterLayout);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 30, DiffModalRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, DiffAfterLayout);
     StartThread(app);
+    return 0;
 }
 
-static void DiffShutdown(PicoApp *app)
+static void DiffShutdown(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     StopThread();
     DiffModel_Free(g_model);
@@ -1020,8 +1026,8 @@ PicoExt pico_ext_diff(void)
         .abi = PICO_EXT_ABI,
         .name = "diff",
         .description = "Git working-tree changes in the footer",
-        .init = DiffInit,
-        .shutdown = DiffShutdown,
-        .on_frame = DiffOnFrame,
+        .host_init = DiffInit,
+        .host_shutdown = DiffShutdown,
+        .host_on_frame = DiffOnFrame,
     };
 }

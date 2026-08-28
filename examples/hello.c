@@ -8,8 +8,9 @@
 
 #include "clay/clay.h"
 
-static void HelloRender(PicoApp *app)
+static void HelloRender(PicoHost *app, void *state)
 {
+    (void)state;
     (void)app;
     CLAY(CLAY_ID("HelloExt"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 6}})
@@ -21,9 +22,11 @@ static void HelloRender(PicoApp *app)
     }
 }
 
-static void HelloInit(PicoApp *app)
+static int HelloInit(PicoHost *app, void **state_out)
 {
-    pico_add_view(app, PICO_SLOT_SIDEBAR, 0, HelloRender);
+    (void)state_out;
+    pico_host_add_view(app, PICO_SLOT_SIDEBAR, 0, HelloRender);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -32,6 +35,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "hello",
         .description = "Sidebar hello view",
-        .init = HelloInit,
+        .host_init = HelloInit,
     };
 }

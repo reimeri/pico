@@ -1,14 +1,15 @@
 # Views
 
-Add Clay UI into a fixed slot. You cannot remove or replace builtins; you add alongside them. The empty-state (no messages yet) is the exception: `pico_add_empty_view` can replace it or stack panels around the builtin cards. See [Empty state](#empty-state).
+Add Clay UI into a fixed slot. You cannot remove or replace builtins; you add alongside them. The empty-state (no messages yet) is the exception: `pico_host_add_empty_view` can replace it or stack panels around the builtin cards. See [Empty state](#empty-state).
 
 ```c
 #include "pico/plugin.h"
 #include "clay/clay.h"
 
-static void HelloRender(PicoApp *app)
+static void HelloRender(PicoHost *host, void *state)
 {
-    (void)app;
+    (void)host;
+    (void)state;
     CLAY(CLAY_ID("HelloExt"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 6}})
     {
@@ -17,9 +18,11 @@ static void HelloRender(PicoApp *app)
     }
 }
 
-static void HelloInit(PicoApp *app)
+static int HelloInit(PicoHost *host, void **state_out)
 {
-    pico_add_view(app, PICO_SLOT_SIDEBAR, 0, HelloRender);
+    (void)state_out;
+    pico_host_add_view(host, PICO_SLOT_SIDEBAR, 0, HelloRender);
+    return 0;
 }
 ```
 
@@ -37,10 +40,10 @@ Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
 ## Empty state
 
-When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. Extensions register extra Clay with `pico_add_empty_view`, not a shell slot — the empty state is inside the chat column.
+When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. Extensions register extra Clay with `pico_host_add_empty_view`, not a shell slot — the empty state is inside the chat column.
 
 ```c
-pico_add_empty_view(app, PICO_EMPTY_ABOVE, 0, BannerRender);
+pico_host_add_empty_view(host, PICO_EMPTY_ABOVE, 0, BannerRender);
 ```
 
 Kinds:
@@ -58,9 +61,10 @@ Full file for a banner: [`../../examples/empty_banner.c`](../../examples/empty_b
 Replace the whole empty state:
 
 ```c
-static void CustomEmpty(PicoApp *app)
+static void CustomEmpty(PicoHost *host, void *state)
 {
-    (void)app;
+    (void)host;
+    (void)state;
     CLAY(CLAY_ID("MyEmpty"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 8,
@@ -71,9 +75,11 @@ static void CustomEmpty(PicoApp *app)
     }
 }
 
-static void CustomEmptyInit(PicoApp *app)
+static int CustomEmptyInit(PicoHost *host, void **state_out)
 {
-    pico_add_empty_view(app, PICO_EMPTY_REPLACE, 0, CustomEmpty);
+    (void)state_out;
+    pico_host_add_empty_view(host, PICO_EMPTY_REPLACE, 0, CustomEmpty);
+    return 0;
 }
 ```
 
@@ -103,7 +109,7 @@ if (pico_ui_modal_push(app, "my-modal"))
 - `pico_ui_modal_pop(app, name)` succeeds only when `name` is the current top.
 - `pico_ui_modal_top` / `pico_ui_modal_is_top` / `pico_ui_modal_count` / `pico_ui_modal_has` / `pico_ui_modal_claimed` inspect the stack. Ask UI is not a named claim; `PicoUi_ModalOpen` ORs it in separately.
 - Reload closes every named modal before rebuilding view/hook registrations. Do not attempt to preserve modal-local state across reload.
-- Workspace replacement and `PicoApp_Init` / `PicoApp_Free` also clear the stack and modal-local builtin state. Builtin inspect, extensions, prompt, diff, preview, footer menu, and folder picker use this same stack.
+- Workspace replacement and `pico_host_init` / `pico_host_free` also clear the stack and modal-local builtin state. Builtin inspect, extensions, prompt, diff, preview, footer menu, and folder picker use this same stack.
 - Draw your own dimmer and card with unique `CLAY_ID`s. Do not reuse builtin IDs such as `SubagentModalDim`. Handle Esc and dimmer clicks yourself.
 
 Full file: [`../../examples/modal.c`](../../examples/modal.c).

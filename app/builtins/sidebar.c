@@ -366,12 +366,13 @@ static void RenderWorkspaceRow(PicoHost *host, const PicoCatalogWorkspace *ws, i
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .padding = {6, 6, 4, 4},
                              .childGap = 6,
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                             .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
                   .backgroundColor = RowFill(false, hovered),
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         RenderGlyph(ws->collapsed ? ">" : "v", COLOR_MUTED);
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                      .clip = {.horizontal = true}})
         {
             CLAY_TEXT(CStr(ws->name),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -400,7 +401,7 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                          .padding = {6, 6, 3, 3},
                          .childGap = 6,
-                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
@@ -408,7 +409,8 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
         {
             RenderGlyph("o", COLOR_MUTED);
         }
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                      .clip = {.horizontal = true}})
         {
             CLAY_TEXT(CStr(title && title[0] ? title : "Untitled"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -464,13 +466,13 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     CLAY(CLAY_ID("SidebarRoot"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 6,
-                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+                     .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}}})
     {
         CLAY(CLAY_ID("SidebarAddWs"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                          .padding = {8, 8, 6, 6},
-                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
               .backgroundColor = add_hover ? (Clay_Color){42, 42, 50, 255} : COLOR_COMPOSER_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
@@ -481,7 +483,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
         CLAY(CLAY_ID("SidebarScroll"),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = 2,
-                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
             for (i = 0; i < s->workspace_count; i++)

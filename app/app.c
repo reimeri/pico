@@ -3142,7 +3142,7 @@ void PicoHost_Frame(PicoHost *app)
     }
     else if (sidebar_wheel)
     {
-        ApplyPaneWheel(CLAY_STRING("SidebarScroll"), wheel);
+        ApplyPaneWheel(CLAY_STRING("SidebarScroll"), (Clay_Vector2){.x = 0, .y = wheel.y});
     }
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 

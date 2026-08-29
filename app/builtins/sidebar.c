@@ -19,6 +19,7 @@
 
 #define SIDEBAR_SCAN_SEC 0.5
 #define SIDEBAR_SESSION_PAGE 10
+#define SIDEBAR_FOLDER_ICON 14
 
 typedef struct SidebarWsUi {
     char path[4096];
@@ -35,6 +36,9 @@ typedef struct SidebarState {
     bool folder_painted;
     bool dirty;
     double last_scan;
+    Texture2D folder_collapsed;
+    Texture2D folder_expanded;
+    bool icons_tried;
 } SidebarState;
 
 static Clay_String CStr(const char *s)
@@ -434,12 +438,93 @@ static Clay_Color RowFill(bool selected, bool hovered)
     return (Clay_Color){0, 0, 0, 0};
 }
 
+static void ResourcePath(const char *relative, char *out, size_t cap)
+{
+    const char *directory = GetApplicationDirectory();
+    size_t length = directory ? strlen(directory) : 0;
+    if (length > 0)
+    {
+        snprintf(out, cap, "%s%s%s", directory, directory[length - 1] == '/' ? "" : "/", relative);
+    }
+    else
+    {
+        snprintf(out, cap, "%s", relative);
+    }
+}
+
+static Texture2D LoadFolderIcon(const char *relative)
+{
+    char path[4096];
+    Image img;
+    Texture2D tex = {0};
+    ResourcePath(relative, path, sizeof(path));
+    img = LoadImage(path);
+    if (!img.data)
+    {
+        return tex;
+    }
+    /* Clay draws a filled rect for backgroundColor even on image elements. */
+    ImageColorTint(&img, (Color){(unsigned char)COLOR_MUTED.r, (unsigned char)COLOR_MUTED.g,
+                                 (unsigned char)COLOR_MUTED.b, (unsigned char)COLOR_MUTED.a});
+    tex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    if (tex.id != 0)
+    {
+        SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
+    }
+    return tex;
+}
+
+static void EnsureFolderIcons(SidebarState *s)
+{
+    if (!s || s->icons_tried || !IsWindowReady())
+    {
+        return;
+    }
+    s->icons_tried = true;
+    s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png");
+    s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png");
+}
+
+static void UnloadFolderIcons(SidebarState *s)
+{
+    if (!s)
+    {
+        return;
+    }
+    if (s->folder_collapsed.id != 0)
+    {
+        UnloadTexture(s->folder_collapsed);
+        memset(&s->folder_collapsed, 0, sizeof(s->folder_collapsed));
+    }
+    if (s->folder_expanded.id != 0)
+    {
+        UnloadTexture(s->folder_expanded);
+        memset(&s->folder_expanded, 0, sizeof(s->folder_expanded));
+    }
+}
+
 static void RenderGlyph(const char *glyph, Clay_Color color)
 {
     CLAY_TEXT(CStr(glyph), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                             .fontSize = 13,
                                             .textColor = color,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
+}
+
+static void RenderFolderIcon(Texture2D *tex, const char *fallback)
+{
+    float size = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+    if (tex && tex->id != 0)
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                            .height = CLAY_SIZING_FIXED(size)}},
+                      .image = {.imageData = tex}})
+        {
+        }
+        return;
+    }
+    RenderGlyph(fallback, COLOR_MUTED);
 }
 
 static bool SessionIsSelected(PicoHost *host, const char *ws_path, const char *session_id,
@@ -469,7 +554,7 @@ static int SessionRowId(int ws_index, int session_index)
     return ws_index * 512 + session_index;
 }
 
-static void RenderWorkspaceRow(PicoHost *host, const PicoCatalogWorkspace *ws, int index)
+static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws, int index)
 {
     Clay_ElementId row_id = CLAY_IDI("SidebarWs", index);
     Clay_ElementId plus_id = CLAY_IDI("SidebarPlus", index);
@@ -483,7 +568,8 @@ static void RenderWorkspaceRow(PicoHost *host, const PicoCatalogWorkspace *ws, i
                   .backgroundColor = RowFill(false, hovered),
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderGlyph(ws->collapsed ? ">" : "v", COLOR_MUTED);
+        RenderFolderIcon(ws->collapsed ? &s->folder_collapsed : &s->folder_expanded,
+                         ws->collapsed ? ">" : "v");
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {
@@ -702,6 +788,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     {
         return;
     }
+    EnsureFolderIcons(s);
 
     add_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs")));
     CLAY(CLAY_ID("SidebarRoot"),
@@ -730,7 +817,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
             for (i = 0; i < s->workspace_count; i++)
             {
                 const PicoCatalogWorkspace *ws = &s->workspaces[i];
-                RenderWorkspaceRow(host, ws, i);
+                RenderWorkspaceRow(host, s, ws, i);
                 if (ws->collapsed)
                 {
                     RenderPinnedSelected(host, ws, i);
@@ -1002,6 +1089,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
         return;
     }
     (void)ClearFolderRequest(s);
+    UnloadFolderIcons(s);
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);
     free(s);

@@ -2863,16 +2863,22 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
                     RunSlot(app, PICO_SLOT_SIDEBAR);
                 }
             }
-            CLAY(CLAY_ID("MainColumn"),
+            CLAY(CLAY_ID("RightColumn"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
-                             .childGap = 12}})
+                             .childGap = 6}})
             {
-                RunSlot(app, PICO_SLOT_MAIN);
-                RunSlot(app, PICO_SLOT_COMPOSER);
+                CLAY(CLAY_ID("MainColumn"),
+                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
+                                 .childGap = 12}})
+                {
+                    RunSlot(app, PICO_SLOT_MAIN);
+                    RunSlot(app, PICO_SLOT_COMPOSER);
+                }
+                RunSlot(app, PICO_SLOT_FOOTER);
             }
         }
-        RunSlot(app, PICO_SLOT_FOOTER);
     }
     RunSlot(app, PICO_SLOT_OVERLAY);
 

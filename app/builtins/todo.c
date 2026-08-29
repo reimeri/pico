@@ -334,7 +334,8 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
     }
 
     int completed = PicoTodoList_Completed(&todos->todos);
-    snprintf(s->header, sizeof(s->header), "Todo %d/%d", completed, todos->todos.count);
+    snprintf(s->header, sizeof(s->header), "%d/%d", completed, todos->todos.count);
+    const char *title = (todos->todos.task && todos->todos.task[0]) ? todos->todos.task : "Todo";
 
     float screen_w = (float)GetScreenWidth();
     float expanded_w = s->composer_width > 0 ? s->composer_width : TODO_EXPANDED_WIDTH;
@@ -359,7 +360,8 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
     {
         expanded_h = 150.0f;
     }
-    float width = todos->expanded ? expanded_w : TODO_COLLAPSED_WIDTH;
+    Clay_SizingAxis width = todos->expanded ? CLAY_SIZING_FIXED(expanded_w)
+                                            : CLAY_SIZING_FIT(TODO_COLLAPSED_WIDTH, expanded_w);
     Clay_SizingAxis height = todos->expanded ? CLAY_SIZING_FIT(0, expanded_h)
                                              : CLAY_SIZING_FIXED(TODO_COLLAPSED_HEIGHT);
 
@@ -375,7 +377,7 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
                      .padding = todos->expanded ? (Clay_Padding){14, 14, 12, 12} : (Clay_Padding){12, 12, 8, 8},
                      .childGap = 10,
                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                     .sizing = {.width = CLAY_SIZING_FIXED(width), .height = height}},
+                     .sizing = {.width = width, .height = height}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = todos->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
           .transition = {.handler = Clay_EaseOut,
@@ -385,13 +387,13 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
     {
         CLAY(CLAY_ID("TodoPanelHeader"),
              {.layout = {.layoutDirection = todos->expanded ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
-                         .childGap = todos->expanded ? 4 : 0,
+                         .childGap = todos->expanded ? 4 : 6,
                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                         .sizing = {.width = todos->expanded ? CLAY_SIZING_GROW(0) : CLAY_SIZING_FIT(0)}}})
         {
-            if (todos->expanded && todos->todos.task && todos->todos.task[0])
+            if (todos->expanded)
             {
-                CLAY_TEXT(CStr(todos->todos.task),
+                CLAY_TEXT(CStr(title),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
                                             .fontSize = 14,
                                             .textColor = COLOR_TEXT,
@@ -401,8 +403,16 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
             }
             else
             {
+                CLAY_TEXT(CStr(title),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                            .fontSize = 14,
+                                            .textColor = COLOR_TEXT,
+                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 CLAY_TEXT(CStr(s->header),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                            .fontSize = 14,
+                                            .textColor = COLOR_TEXT,
+                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
             }
         }
         if (todos->expanded)

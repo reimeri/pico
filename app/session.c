@@ -3079,6 +3079,15 @@ int PicoCatalog_Scan(PicoCatalogWorkspace **out)
             CatalogClearSessions(&loaded);
             continue;
         }
+        {
+            char canonical[4096];
+            if (!CanonicalWorkspacePath(ws.path, canonical, sizeof(canonical)))
+            {
+                CatalogClearSessions(&ws);
+                CatalogClearSessions(&loaded);
+                continue;
+            }
+        }
         if (!ws.name[0])
         {
             PathBasename(ws.path, ws.name, sizeof(ws.name));

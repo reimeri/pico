@@ -42,7 +42,8 @@ typedef struct PicoCatalogWorkspace {
 
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
 /* Scan ~/.config/pico/sessions. jsonl files are authoritative for sessions.
- * Recovers missing .workspace.json from jsonl cwd. Caller frees with PicoCatalog_Free. */
+ * Recovers missing .workspace.json from jsonl cwd. Omits entries whose path is
+ * not an existing directory. Caller frees with PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
 int PicoCatalog_Ensure(const char *workspace_path);
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);

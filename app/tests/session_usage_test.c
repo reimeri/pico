@@ -1418,6 +1418,35 @@ static int TestCatalog(void)
     return 0;
 }
 
+static int TestCatalogOmitsMissingPath(void)
+{
+    char ws[] = "/tmp/pico-catalog-gone-XXXXXX";
+    PicoCatalogWorkspace *list = NULL;
+    int n = 0;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("missing-path mkdtemp");
+    }
+    if (PicoCatalog_Ensure(ws) != 0)
+    {
+        rmdir(ws);
+        return Fail("missing-path ensure");
+    }
+    if (rmdir(ws) != 0)
+    {
+        return Fail("missing-path rmdir");
+    }
+    n = PicoCatalog_Scan(&list);
+    if (FindCatalogPath(list, n, ws))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("scan listed a catalog workspace whose directory is gone");
+    }
+    PicoCatalog_Free(list, n);
+    return 0;
+}
+
 static int TestModelResumeReplay(void)
 {
     PicoHost writer;
@@ -1810,7 +1839,8 @@ int main(void)
     if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
         TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
-        TestConcurrentAppendDuringTitle() != 0 || TestCatalog() != 0 || TestModelResumeReplay() != 0)
+        TestConcurrentAppendDuringTitle() != 0 || TestCatalog() != 0 ||
+        TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0)
     {
         return 1;
     }

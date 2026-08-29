@@ -45,6 +45,35 @@ PicoHost *pico_workspace_host(PicoWorkspace *workspace)
     return workspace ? workspace->host : NULL;
 }
 
+PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source)
+{
+    PicoWorkspace *best = NULL;
+    size_t best_length = 0;
+    if (!host || !source)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < host->workspace_count; i++)
+    {
+        PicoWorkspace *workspace = host->workspaces[i];
+        char directory[8192];
+        if (!workspace ||
+            snprintf(directory, sizeof(directory), "%s/.pico/extensions", workspace->path) >=
+                (int)sizeof(directory))
+        {
+            continue;
+        }
+        size_t length = strlen(directory);
+        if (length > best_length && strncmp(source, directory, length) == 0 &&
+            (source[length] == '/' || source[length] == '\0'))
+        {
+            best = workspace;
+            best_length = length;
+        }
+    }
+    return best;
+}
+
 PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id)
 {
     if (!host || id == 0)

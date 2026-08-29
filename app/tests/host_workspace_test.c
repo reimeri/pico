@@ -1893,6 +1893,182 @@ static int TestWorkspaceReloadUsesLiveOwnerAndSettings(void)
     return 0;
 }
 
+static int TestNestedWorkspaceExtensionOwnership(void)
+{
+    PicoHost host;
+    PicoWorkspace outer;
+    PicoWorkspace inner;
+    memset(&host, 0, sizeof(host));
+    memset(&outer, 0, sizeof(outer));
+    memset(&inner, 0, sizeof(inner));
+    outer.host = &host;
+    inner.host = &host;
+    snprintf(outer.path, sizeof(outer.path), "/tmp/project");
+    snprintf(inner.path, sizeof(inner.path),
+             "/tmp/project/.pico/extensions/nested-workspace");
+    host.workspaces[0] = &outer;
+    host.workspaces[1] = &inner;
+    host.workspace_count = 2;
+    const char *source =
+        "/tmp/project/.pico/extensions/nested-workspace/.pico/extensions/local.c";
+    if (PicoHost_SourceWorkspace(&host, source) != &inner)
+    {
+        Fail("nested workspace-local sources must belong to the most specific workspace");
+        return 1;
+    }
+    return 0;
+}
+
+static const char *kWorkspaceLocalPollExtV1 =
+    "#include \"pico/plugin.h\"\n"
+    "#include <stdlib.h>\n"
+    "static int Init(PicoWorkspace *workspace, void **state_out)\n"
+    "{\n"
+    "    (void)workspace;\n"
+    "    *state_out = malloc(1);\n"
+    "    return *state_out ? 0 : -1;\n"
+    "}\n"
+    "static void Shutdown(PicoWorkspace *workspace, void *state)\n"
+    "{\n"
+    "    (void)workspace;\n"
+    "    free(state);\n"
+    "}\n"
+    "PicoExt pico_ext(void)\n"
+    "{\n"
+    "    return (PicoExt){\n"
+    "        .abi = PICO_EXT_ABI,\n"
+    "        .name = \"local_poll\",\n"
+    "        .description = \"version one\",\n"
+    "        .workspace_init = Init,\n"
+    "        .workspace_shutdown = Shutdown,\n"
+    "    };\n"
+    "}\n";
+
+static const char *kWorkspaceLocalPollExtV2 =
+    "#include \"pico/plugin.h\"\n"
+    "#include <stdlib.h>\n"
+    "static int Init(PicoWorkspace *workspace, void **state_out)\n"
+    "{\n"
+    "    (void)workspace;\n"
+    "    *state_out = malloc(1);\n"
+    "    return *state_out ? 0 : -1;\n"
+    "}\n"
+    "static void Shutdown(PicoWorkspace *workspace, void *state)\n"
+    "{\n"
+    "    (void)workspace;\n"
+    "    free(state);\n"
+    "}\n"
+    "PicoExt pico_ext(void)\n"
+    "{\n"
+    "    return (PicoExt){\n"
+    "        .abi = PICO_EXT_ABI,\n"
+    "        .name = \"local_poll\",\n"
+    "        .description = \"version two\",\n"
+    "        .workspace_init = Init,\n"
+    "        .workspace_shutdown = Shutdown,\n"
+    "    };\n"
+    "}\n";
+
+static uint64_t WorkspaceSourceGeneration(const PicoWorkspace *workspace,
+                                          const char *source)
+{
+    if (!workspace || !source)
+    {
+        return 0;
+    }
+    for (int i = 0; i < workspace->workspace_plugin_count; i++)
+    {
+        const PicoPluginSlot *slot = &workspace->workspace_plugins[i];
+        if (slot->source && strcmp(slot->source, source) == 0 && slot->initialized)
+        {
+            return slot->active_generation;
+        }
+    }
+    return 0;
+}
+
+static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
+{
+    char cfg[] = "/tmp/pico-local-poll-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-local-poll-cache-XXXXXX";
+    char dir_a[] = "/tmp/pico-local-poll-a-XXXXXX";
+    char dir_b[] = "/tmp/pico-local-poll-b-XXXXXX";
+    char ext_dir[4096];
+    char source[8192];
+    PicoHost *host = NULL;
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(dir_a) || !mkdtemp(dir_b))
+    {
+        Fail("mkdtemp local polling isolation");
+        return 1;
+    }
+    snprintf(ext_dir, sizeof(ext_dir), "%s/.pico/extensions", dir_a);
+    snprintf(source, sizeof(source), "%s/local_poll.c", ext_dir);
+    if (MkdirParents(ext_dir) != 0 || WriteFile(source, kWorkspaceLocalPollExtV1) != 0)
+    {
+        Fail("write initial workspace-local polling extension");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    PicoWorkspaceId id_a = 0;
+    PicoWorkspaceId id_b = 0;
+    if (pico_host_init(&host, NULL, false) != PICO_OK || !host ||
+        pico_workspace_open(host, dir_a, &id_a) != PICO_OK ||
+        pico_workspace_open(host, dir_b, &id_b) != PICO_OK)
+    {
+        Fail("open workspaces for local polling isolation");
+        goto fail;
+    }
+    PicoWorkspace *workspace_a = PicoHost_FindWorkspace(host, id_a);
+    PicoWorkspace *workspace_b = PicoHost_FindWorkspace(host, id_b);
+    PicoRegistrationGeneration *old_a = workspace_a->active_registration;
+    PicoRegistrationGeneration *old_b = workspace_b->active_registration;
+    PicoModuleGeneration *old_host_module = host->host_plugin_count > 0
+                                                ? host->host_plugins[0].module
+                                                : NULL;
+    uint64_t old_local_generation = WorkspaceSourceGeneration(workspace_a, source);
+    if (!old_a || !old_b || !old_host_module || !old_local_generation ||
+        WriteFile(source, kWorkspaceLocalPollExtV2) != 0)
+    {
+        Fail("prepare workspace-local polling change");
+        goto fail;
+    }
+
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    uint64_t new_local_generation = WorkspaceSourceGeneration(workspace_a, source);
+    bool isolated = new_local_generation > old_local_generation &&
+                    workspace_a->active_registration != old_a &&
+                    workspace_b->active_registration == old_b &&
+                    workspace_b->state == PICO_WORKSPACE_OPEN &&
+                    PicoWorkspace_AcceptsNewWork(workspace_b) &&
+                    host->host_plugins[0].module == old_host_module;
+    if (!isolated)
+    {
+        Fail("workspace-local source polling must reload only its owning workspace");
+        goto fail;
+    }
+
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(dir_a);
+    RmRf(dir_b);
+    return 0;
+
+fail:
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(dir_a);
+    RmRf(dir_b);
+    return 1;
+}
+
 static const char *kWorkspaceLocalWithHostExt =
     "#include \"pico/plugin.h\"\n"
     "#include <stdlib.h>\n"
@@ -2255,6 +2431,172 @@ static int TestDualScopeIndependentPublicationRollback(void)
     return 0;
 }
 
+static int g_retained_host_frames;
+static int g_retained_workspace_frames;
+
+static void RetainedHostFrame(PicoHost *host, void *state, float dt)
+{
+    (void)host;
+    (void)state;
+    (void)dt;
+    g_retained_host_frames++;
+}
+
+static void RetainedWorkspaceFrame(PicoWorkspace *workspace, void *state, float dt)
+{
+    (void)workspace;
+    (void)state;
+    (void)dt;
+    g_retained_workspace_frames++;
+}
+
+static int TestRetainedActiveGenerationsReceiveFrameCallbacks(void)
+{
+    PicoHost host;
+    PicoModuleGeneration module;
+    memset(&host, 0, sizeof(host));
+    memset(&module, 0, sizeof(module));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(&host);
+
+    module.ext.name = "retained_frame_extension";
+    module.ext.host_on_frame = RetainedHostFrame;
+    module.ext.workspace_on_frame = RetainedWorkspaceFrame;
+    module.desired = false;
+    host.host_plugins[0] = (PicoPluginSlot){
+        .name = "retained_frame_extension",
+        .module = &module,
+        .initialized = true,
+    };
+    host.host_plugin_count = 1;
+    workspace->workspace_plugins[0] = (PicoPluginSlot){
+        .name = "retained_frame_extension",
+        .module = &module,
+        .initialized = true,
+    };
+    workspace->workspace_plugin_count = 1;
+
+    g_retained_host_frames = 0;
+    g_retained_workspace_frames = 0;
+    PicoHostExtensions_OnFrame(&host, 0.016f);
+    PicoWorkspaceExtensions_OnFrame(workspace, 0.016f);
+
+    host.host_plugin_count = 0;
+    workspace->workspace_plugin_count = 0;
+    host.workspaces[0] = NULL;
+    host.workspace_count = 0;
+    PicoWorkspace_Free(workspace);
+    if (g_retained_host_frames != 1 || g_retained_workspace_frames != 1)
+    {
+        Fail("active retained generations must keep receiving frame callbacks");
+        return 1;
+    }
+    return 0;
+}
+
+static int g_duplicate_host_inits;
+static int g_duplicate_workspace_inits;
+
+static int DuplicateHostInit(PicoHost *host, void **state_out)
+{
+    (void)host;
+    int *state = (int *)malloc(sizeof(*state));
+    if (!state)
+    {
+        return -1;
+    }
+    *state = ++g_duplicate_host_inits;
+    *state_out = state;
+    return 0;
+}
+
+static void DuplicateHostShutdown(PicoHost *host, void *state)
+{
+    (void)host;
+    free(state);
+}
+
+static int DuplicateWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)workspace;
+    int *state = (int *)malloc(sizeof(*state));
+    if (!state)
+    {
+        return -1;
+    }
+    *state = ++g_duplicate_workspace_inits;
+    *state_out = state;
+    return 0;
+}
+
+static void DuplicateWorkspaceShutdown(PicoWorkspace *workspace, void *state)
+{
+    (void)workspace;
+    free(state);
+}
+
+static int TestExtensionSlotsUseSourceIdentity(void)
+{
+    PicoHost host;
+    PicoModuleGeneration modules[2];
+    memset(&host, 0, sizeof(host));
+    memset(modules, 0, sizeof(modules));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(&host);
+    host.modules = modules;
+    host.module_count = 2;
+    host.module_capacity = 2;
+
+    for (int i = 0; i < 2; i++)
+    {
+        snprintf(modules[i].source, sizeof(modules[i].source), "/tmp/duplicate-%d.c", i);
+        modules[i].ext.name = "duplicate_descriptor_name";
+        modules[i].ext.host_init = DuplicateHostInit;
+        modules[i].ext.host_shutdown = DuplicateHostShutdown;
+        modules[i].ext.workspace_init = DuplicateWorkspaceInit;
+        modules[i].ext.workspace_shutdown = DuplicateWorkspaceShutdown;
+        modules[i].generation = (uint64_t)(i + 1);
+        modules[i].desired = true;
+        modules[i].ref_count = 1;
+    }
+    g_duplicate_host_inits = 0;
+    g_duplicate_workspace_inits = 0;
+    bool activated = PicoHostExtensions_Activate(&host, &modules[0]) &&
+                     PicoHostExtensions_Activate(&host, &modules[1]) &&
+                     PicoWorkspaceExtensions_Activate(workspace, &modules[0]) &&
+                     PicoWorkspaceExtensions_Activate(workspace, &modules[1]);
+    bool distinct = activated && g_duplicate_host_inits == 2 &&
+                    g_duplicate_workspace_inits == 2 && host.host_plugin_count == 2 &&
+                    workspace->workspace_plugin_count == 2 && PicoPlugins_Count(&host) == 4;
+    for (int i = 0; distinct && i < PicoPlugins_Count(&host); i++)
+    {
+        PicoExtInfo info;
+        if (!PicoPlugins_Get(&host, i, &info) || info.active_generation == 0 ||
+            !info.source || (strcmp(info.source, modules[0].source) != 0 &&
+                             strcmp(info.source, modules[1].source) != 0))
+        {
+            distinct = false;
+        }
+    }
+
+    PicoHostExtensions_Shutdown(&host);
+    PicoWorkspaceExtensions_Shutdown(workspace);
+    for (int i = 0; i < 2; i++)
+    {
+        modules[i].desired = false;
+        PicoModule_Release(&modules[i]);
+    }
+    host.workspaces[0] = NULL;
+    host.workspace_count = 0;
+    PicoWorkspace_Free(workspace);
+    if (!distinct)
+    {
+        Fail("extension instance slots and listing must use source identity, not descriptor name");
+        return 1;
+    }
+    return 0;
+}
+
 static int StatelessWsInitDummy(PicoWorkspace *ws, void **state_out)
 {
     (void)ws;
@@ -2292,6 +2634,8 @@ static int TestStatelessExtensionRollbackDoesNotLeakModule(void)
     host.modules[1] = mod2;
     host.module_count = 2;
     host.module_capacity = 2;
+    ws->state = PICO_WORKSPACE_RELOADING;
+    PicoWorkspace_SetAcceptingWork(ws, false);
 
     bool reload_ok = PicoWorkspace_Reload(ws);
     if (reload_ok)
@@ -2310,13 +2654,20 @@ static int TestStatelessExtensionRollbackDoesNotLeakModule(void)
         free(host.workspaces[0]);
         return 1;
     }
+    if (ws->state != PICO_WORKSPACE_OPEN || !PicoWorkspace_AcceptsNewWork(ws))
+    {
+        Fail("failed workspace reload must roll back to OPEN and restore work acceptance");
+        free(host.modules);
+        free(host.workspaces[0]);
+        return 1;
+    }
 
     free(host.modules);
     free(host.workspaces[0]);
     return 0;
 }
 
-static int TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork(void)
+static int TestBusyReloadQueuesAndRejectsNewWork(void)
 {
     PicoHost host;
     memset(&host, 0, sizeof(host));
@@ -2347,9 +2698,9 @@ static int TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork(void)
         return 1;
     }
 
-    if (!ws->accepting_work)
+    if (ws->state != PICO_WORKSPACE_RELOADING || ws->accepting_work)
     {
-        Fail("busy workspace must NOT have accepting_work permanently set to false");
+        Fail("busy reload must enter RELOADING and reject new work until rollout");
         free(ws->agents[0]);
         free(host.workspaces[0]);
         return 1;
@@ -3337,6 +3688,14 @@ int main(void)
     {
         return 1;
     }
+    if (TestNestedWorkspaceExtensionOwnership() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspaceLocalPollingReloadsOnlyOwner() != 0)
+    {
+        return 1;
+    }
     if (TestWorkspaceLocalExtensionWithHostCallbacksRejected() != 0)
     {
         return 1;
@@ -3357,11 +3716,19 @@ int main(void)
     {
         return 1;
     }
+    if (TestRetainedActiveGenerationsReceiveFrameCallbacks() != 0)
+    {
+        return 1;
+    }
+    if (TestExtensionSlotsUseSourceIdentity() != 0)
+    {
+        return 1;
+    }
     if (TestStatelessExtensionRollbackDoesNotLeakModule() != 0)
     {
         return 1;
     }
-    if (TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork() != 0)
+    if (TestBusyReloadQueuesAndRejectsNewWork() != 0)
     {
         return 1;
     }

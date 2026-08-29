@@ -1336,6 +1336,21 @@ int main(void)
     {
         return Fail("subagent session header did not preserve durable profile metadata");
     }
+    PicoAgent main_resume;
+    PicoAgent subagent_resume;
+    memset(&main_resume, 0, sizeof(main_resume));
+    memset(&subagent_resume, 0, sizeof(subagent_resume));
+    main_resume.workspace = &writer_ws;
+    main_resume.kind = PICO_AGENT_MAIN;
+    subagent_resume.workspace = &writer_ws;
+    subagent_resume.kind = PICO_AGENT_SUBAGENT;
+    if (PicoSession_Replay(&writer, &main_resume, child_agent.session_path, false) == 0 ||
+        main_resume.kind != PICO_AGENT_MAIN ||
+        PicoSession_Replay(&writer, &subagent_resume, writer_agent.session_path, false) == 0 ||
+        subagent_resume.kind != PICO_AGENT_SUBAGENT)
+    {
+        return Fail("session replay accepted a stored agent kind incompatible with the requested agent");
+    }
     int reserves_before_load = g_reserve_calls;
     PicoMessage *loaded = NULL;
     int loaded_n = 0;

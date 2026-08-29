@@ -120,8 +120,6 @@ int main(int argc, char **argv)
     {
         snprintf(workspace, sizeof(workspace), ".");
     }
-    ChangeDirectory(GetApplicationDirectory());
-
     Font fonts[FONT_COUNT];
     Pico_LoadFonts(fonts);
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);

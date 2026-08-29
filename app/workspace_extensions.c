@@ -183,6 +183,33 @@ bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char 
     return false;
 }
 
+static bool ModuleAppliesToWorkspace(const PicoHost *host,
+                                     const PicoWorkspace *workspace,
+                                     const PicoModuleGeneration *module)
+{
+    if (!host || !workspace || !module || module->builtin)
+    {
+        return host && workspace && module;
+    }
+    PicoWorkspace *owner = PicoHost_SourceWorkspace(host, module->source);
+    return !owner || owner == workspace;
+}
+
+static bool WorkspaceSlotMatchesModule(const PicoPluginSlot *slot,
+                                       const PicoModuleGeneration *module)
+{
+    if (!slot || !module)
+    {
+        return false;
+    }
+    if (module->source[0])
+    {
+        return slot->source && strcmp(slot->source, module->source) == 0;
+    }
+    return !slot->source && slot->name[0] && module->ext.name &&
+           strcmp(slot->name, module->ext.name) == 0;
+}
+
 static bool ActivateWorkspaceModule(PicoWorkspace *workspace, PicoWorkspace *target,
                                     PicoModuleGeneration *module)
 {
@@ -198,7 +225,7 @@ static bool ActivateWorkspaceModule(PicoWorkspace *workspace, PicoWorkspace *tar
     PicoPluginSlot *slot = NULL;
     for (int i = 0; i < target->workspace_plugin_count; i++)
     {
-        if (strcmp(target->workspace_plugins[i].name, module->ext.name) == 0)
+        if (WorkspaceSlotMatchesModule(&target->workspace_plugins[i], module))
         {
             slot = &target->workspace_plugins[i];
             break;
@@ -209,6 +236,7 @@ static bool ActivateWorkspaceModule(PicoWorkspace *workspace, PicoWorkspace *tar
         slot = &target->workspace_plugins[target->workspace_plugin_count++];
         memset(slot, 0, sizeof(*slot));
         snprintf(slot->name, sizeof(slot->name), "%s", module->ext.name);
+        slot->source = module->source[0] ? module->source : NULL;
     }
     if (slot && slot->initialized && slot->module == module)
     {
@@ -354,7 +382,7 @@ void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt)
     for (int i = 0; i < workspace->workspace_plugin_count; i++)
     {
         PicoPluginSlot *slot = &workspace->workspace_plugins[i];
-        if (slot->initialized && slot->module && slot->module->desired &&
+        if (slot->initialized && slot->module &&
             slot->module->ext.workspace_on_frame)
         {
             slot->module->ext.workspace_on_frame(workspace, slot->state, dt);
@@ -538,12 +566,22 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     if (PicoWorkspace_BlocksReload(workspace))
     {
         workspace->reload_queued = true;
+        if (workspace->state == PICO_WORKSPACE_OPEN)
+        {
+            workspace->state = PICO_WORKSPACE_RELOADING;
+        }
+        PicoWorkspace_SetAcceptingWork(workspace, false);
         return false;
     }
     PicoWorkspace_PrepareReload(workspace);
     if (PicoWorkspace_BlocksReload(workspace))
     {
         workspace->reload_queued = true;
+        if (workspace->state == PICO_WORKSPACE_OPEN)
+        {
+            workspace->state = PICO_WORKSPACE_RELOADING;
+        }
+        PicoWorkspace_SetAcceptingWork(workspace, false);
         return false;
     }
     workspace->reload_queued = false;
@@ -564,8 +602,7 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     candidate.registration_generation = workspace->registration_generation;
 
     bool staging_ok = true;
-    const char *failed_name = NULL;
-    uint64_t failed_generation = 0;
+    PicoModuleGeneration *failed_module = NULL;
     char failed_error[1024] = {0};
     for (int m = 0; m < host->module_count; m++)
     {
@@ -579,23 +616,17 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         {
             continue;
         }
-        if (!mod->builtin && strstr(mod->source, "/.pico/extensions/"))
+        if (!ModuleAppliesToWorkspace(host, workspace, mod))
         {
-            char ws_ext_dir[8192];
-            snprintf(ws_ext_dir, sizeof(ws_ext_dir), "%s/.pico/extensions", workspace->path);
-            if (strncmp(mod->source, ws_ext_dir, strlen(ws_ext_dir)) != 0)
-            {
-                continue;
-            }
+            continue;
         }
         if (!ActivateWorkspaceModule(workspace, &candidate, mod))
         {
             staging_ok = false;
-            failed_name = mod->ext.name;
-            failed_generation = mod->generation;
+            failed_module = mod;
             for (int i = 0; i < candidate.workspace_plugin_count; i++)
             {
-                if (strcmp(candidate.workspace_plugins[i].name, mod->ext.name) == 0)
+                if (WorkspaceSlotMatchesModule(&candidate.workspace_plugins[i], mod))
                 {
                     snprintf(failed_error, sizeof(failed_error), "%s",
                              candidate.workspace_plugins[i].last_error);
@@ -631,6 +662,7 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         PicoWorkspace_ReplayToolDetails(workspace);
         if (workspace->state != PICO_WORKSPACE_CLOSING && workspace->state != PICO_WORKSPACE_CLOSED)
         {
+            workspace->state = PICO_WORKSPACE_OPEN;
             PicoWorkspace_SetAcceptingWork(workspace, true);
         }
         return true;
@@ -640,12 +672,12 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
                            candidate.workspace_plugin_count);
     PicoWorkspace_RegistrationClear(&candidate);
 
-    if (failed_name)
+    if (failed_module)
     {
         PicoPluginSlot *slot = NULL;
         for (int i = 0; i < workspace->workspace_plugin_count; i++)
         {
-            if (strcmp(workspace->workspace_plugins[i].name, failed_name) == 0)
+            if (WorkspaceSlotMatchesModule(&workspace->workspace_plugins[i], failed_module))
             {
                 slot = &workspace->workspace_plugins[i];
                 break;
@@ -655,16 +687,22 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         {
             slot = &workspace->workspace_plugins[workspace->workspace_plugin_count++];
             memset(slot, 0, sizeof(*slot));
-            snprintf(slot->name, sizeof(slot->name), "%s", failed_name);
+            snprintf(slot->name, sizeof(slot->name), "%s", failed_module->ext.name);
+            slot->source = failed_module->source[0] ? failed_module->source : NULL;
         }
         if (slot)
         {
-            slot->desired_generation = failed_generation;
+            slot->desired_generation = failed_module->generation;
             snprintf(slot->last_error, sizeof(slot->last_error), "%s", failed_error);
         }
     }
 
-    PicoWorkspace_SetAcceptingWork(workspace, true);
+    if (workspace->state != PICO_WORKSPACE_CLOSING &&
+        workspace->state != PICO_WORKSPACE_CLOSED)
+    {
+        workspace->state = PICO_WORKSPACE_OPEN;
+        PicoWorkspace_SetAcceptingWork(workspace, true);
+    }
     return false;
 }
 

@@ -26,15 +26,31 @@ bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name)
     return false;
 }
 
-static PicoPluginSlot *FindOrAllocHostSlot(PicoHost *host, const char *name)
+static bool HostSlotMatchesModule(const PicoPluginSlot *slot,
+                                  const PicoModuleGeneration *module)
 {
-    if (!host || !name || !name[0])
+    if (!slot || !module)
+    {
+        return false;
+    }
+    if (module->source[0])
+    {
+        return slot->source && strcmp(slot->source, module->source) == 0;
+    }
+    return !slot->source && slot->name[0] && module->ext.name &&
+           strcmp(slot->name, module->ext.name) == 0;
+}
+
+static PicoPluginSlot *FindOrAllocHostSlot(PicoHost *host,
+                                           PicoModuleGeneration *module)
+{
+    if (!host || !module || !module->ext.name || !module->ext.name[0])
     {
         return NULL;
     }
     for (int i = 0; i < host->host_plugin_count; i++)
     {
-        if (strcmp(host->host_plugins[i].name, name) == 0)
+        if (HostSlotMatchesModule(&host->host_plugins[i], module))
         {
             return &host->host_plugins[i];
         }
@@ -43,7 +59,8 @@ static PicoPluginSlot *FindOrAllocHostSlot(PicoHost *host, const char *name)
     {
         PicoPluginSlot *slot = &host->host_plugins[host->host_plugin_count++];
         memset(slot, 0, sizeof(*slot));
-        snprintf(slot->name, sizeof(slot->name), "%s", name);
+        snprintf(slot->name, sizeof(slot->name), "%s", module->ext.name);
+        slot->source = module->source[0] ? module->source : NULL;
         return slot;
     }
     return NULL;
@@ -60,7 +77,7 @@ bool PicoHostExtensions_Activate(PicoHost *host, PicoModuleGeneration *module)
         return true;
     }
 
-    PicoPluginSlot *slot = FindOrAllocHostSlot(host, module->ext.name);
+    PicoPluginSlot *slot = FindOrAllocHostSlot(host, module);
     if (slot && slot->initialized && slot->module == module)
     {
         return true;
@@ -183,8 +200,7 @@ void PicoHostExtensions_OnFrame(PicoHost *host, float dt)
     for (int i = 0; i < host->host_plugin_count; i++)
     {
         PicoPluginSlot *slot = &host->host_plugins[i];
-        if (slot->initialized && slot->module && slot->module->desired &&
-            slot->module->ext.host_on_frame)
+        if (slot->initialized && slot->module && slot->module->ext.host_on_frame)
         {
             slot->module->ext.host_on_frame(host, slot->state, dt);
         }

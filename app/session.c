@@ -696,9 +696,6 @@ static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const 
 
 static void ApplyHeader(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int obj)
 {
-    char *kind = JsonObjStr(doc, obj, "kind");
-    agent->kind = kind && strcmp(kind, "subagent") == 0 ? PICO_AGENT_SUBAGENT : PICO_AGENT_MAIN;
-    free(kind);
     char *profile = JsonObjStr(doc, obj, "profile");
     if (profile)
     {
@@ -1095,9 +1092,11 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
             bool normal = kind && strcmp(kind, "normal") == 0;
             bool subagent = kind && strcmp(kind, "subagent") == 0 &&
                             profile && profile[0] && purpose && purpose[0];
+            bool compatible_kind = (normal && agent->kind == PICO_AGENT_MAIN) ||
+                                   (subagent && agent->kind == PICO_AGENT_SUBAGENT);
             valid_header = type && strcmp(type, "session") == 0 &&
                            header_id && header_id[0] && version == 4 &&
-                           (normal || subagent);
+                           compatible_kind;
             free(header_id);
             free(kind);
             free(profile);

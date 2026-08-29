@@ -69,6 +69,7 @@ typedef struct PicoModuleGeneration PicoModuleGeneration;
 
 typedef struct PicoPluginSlot {
     char name[64];
+    const char *source;
     void *state;
     PicoModuleGeneration *module;
     bool initialized;

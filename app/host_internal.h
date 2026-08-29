@@ -210,6 +210,7 @@ static inline PicoHost *PicoWorkspace_Host(PicoWorkspace *workspace)
 }
 
 bool PicoHost_ProcessRetired(void);
+PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source);
 PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id);
 const PicoWorkspace *PicoHost_FindWorkspaceConst(const PicoHost *host, PicoWorkspaceId id);
 PicoAgent *PicoHost_FindAgent(PicoHost *host, PicoAgentId id);

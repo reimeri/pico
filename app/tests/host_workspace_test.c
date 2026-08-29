@@ -4,12 +4,14 @@
 #include "workspace_internal.h"
 #include "settings.h"
 #include "session.h"
+#include "scrollbar.h"
 #include "agent_internal.h"
 #include "agent.h"
 #include "clay/clay.h"
 
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +36,269 @@ static void Fail(const char *msg)
 {
     fprintf(stderr, "FAIL: %s\n", msg);
     g_failed = 1;
+}
+
+static void ShellTestSidebar(PicoHost *host, void *state)
+{
+    (void)host;
+    (void)state;
+    CLAY(CLAY_ID("ShellTestSidebarRoot"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = 6,
+                     .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                            .height = CLAY_SIZING_FIXED(25)}}})
+        {
+        }
+        CLAY(CLAY_ID("ShellTestSidebarScroll"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}},
+              .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}})
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                                .height = CLAY_SIZING_FIXED(1800)}}})
+            {
+            }
+        }
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(1),
+                                            .height = CLAY_SIZING_FIXED(1400)}}})
+        {
+        }
+    }
+}
+
+static void ShellTestChat(PicoHost *host, void *state)
+{
+    (void)host;
+    (void)state;
+    CLAY(CLAY_ID("ChatRow"),
+         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                     .childGap = 8,
+                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY(CLAY_ID("ChatScroll"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+              .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}})
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                .height = CLAY_SIZING_FIXED(4803)}}})
+            {
+            }
+        }
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(6),
+                                            .height = CLAY_SIZING_GROW(0)}}})
+        {
+        }
+    }
+    /* Host and workspace views are extension points. Oversized content must not
+     * be allowed to enlarge the viewport panes that contain it. */
+    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(1),
+                                        .height = CLAY_SIZING_FIXED(1400)}}})
+    {
+    }
+}
+
+typedef struct ShellTestState {
+    float composer_height;
+} ShellTestState;
+
+static void ShellTestComposer(PicoHost *host, void *state)
+{
+    ShellTestState *test = (ShellTestState *)state;
+    (void)host;
+    CLAY(CLAY_ID("ComposerAlign"),
+         {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                .height = CLAY_SIZING_FIXED(test->composer_height)}},
+          .transition = {.handler = Clay_EaseOut,
+                         .duration = 0.18f,
+                         .properties = CLAY_TRANSITION_PROPERTY_DIMENSIONS}})
+    {
+    }
+}
+
+static void ShellTestFooter(PicoHost *host, void *state)
+{
+    (void)host;
+    (void)state;
+    CLAY(CLAY_ID("Footer"),
+         {.layout = {.padding = {0, 0, 8, 8},
+                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(16),
+                                            .height = CLAY_SIZING_FIXED(16)}}})
+        {
+        }
+    }
+}
+
+static void ShellTestAddView(PicoHost *host, PicoUiSlot slot, PicoHostViewFn render, void *state)
+{
+    host->views[slot][0].host_render = render;
+    host->views[slot][0].state = state;
+    host->view_count[slot] = 1;
+}
+
+static bool ShellBoxStable(Clay_BoundingBox expected, Clay_BoundingBox actual)
+{
+    const float tolerance = 0.001f;
+    return fabsf(expected.x - actual.x) <= tolerance &&
+           fabsf(expected.y - actual.y) <= tolerance &&
+           fabsf(expected.width - actual.width) <= tolerance &&
+           fabsf(expected.height - actual.height) <= tolerance;
+}
+
+static bool ShellVerticallyContains(Clay_BoundingBox outer, Clay_BoundingBox inner)
+{
+    const float tolerance = 0.001f;
+    return inner.y >= outer.y - tolerance &&
+           inner.y + inner.height <= outer.y + outer.height + tolerance;
+}
+
+static int RunShellStabilityCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1714, 1392};
+    const int frames = 400;
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost host;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_BoundingBox expected_root = {0};
+    Clay_BoundingBox expected_body = {0};
+    Clay_BoundingBox expected_right = {0};
+    Clay_BoundingBox expected_sidebar = {0};
+    Clay_BoundingBox expected_main = {0};
+    Clay_BoundingBox expected_chat = {0};
+    Clay_BoundingBox expected_composer = {0};
+    Clay_BoundingBox expected_footer = {0};
+    Clay_Vector2 expected_scroll = {0};
+    if (!memory)
+    {
+        Fail("shell stability arena allocation");
+        return 1;
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        free(memory);
+        Clay_SetCurrentContext(previous);
+        Fail("shell stability Clay initialization");
+        return 1;
+    }
+
+    memset(&host, 0, sizeof(host));
+    if (with_sidebar)
+    {
+        ShellTestAddView(&host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    }
+    ShellTestAddView(&host, PICO_SLOT_MAIN, ShellTestChat, NULL);
+    ShellTestAddView(&host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    ShellTestAddView(&host, PICO_SLOT_FOOTER, ShellTestFooter, NULL);
+
+    for (int frame = 0; frame < frames; frame++)
+    {
+        if (frame == 1)
+        {
+            state.composer_height = 56.003f;
+        }
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        (void)PicoHost_LayoutShell(&host, viewport.height, 1.0f / 60.0f);
+        Clay_ScrollContainerData scroll =
+            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (!scroll.found || !scroll.scrollPosition)
+        {
+            Fail("production shell did not create ChatScroll");
+            break;
+        }
+        if (PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                      scroll.contentDimensions.height,
+                                      &scroll.scrollPosition->y))
+        {
+            (void)PicoHost_LayoutShell(&host, viewport.height, 0.0f);
+            scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+            if (!scroll.found || !scroll.scrollPosition)
+            {
+                Fail("ChatScroll disappeared after bottom-follow relayout");
+                break;
+            }
+        }
+        float overflow = scroll.contentDimensions.height - scroll.scrollContainerDimensions.height;
+        float bottom = overflow > 0.0f ? -overflow : 0.0f;
+        if (overflow <= 0.0f ||
+            (frame >= 30 && fabsf(scroll.scrollPosition->y - bottom) > 0.01f))
+        {
+            Fail("ChatScroll was not pinned to its overflowing content bottom");
+            break;
+        }
+
+        Clay_ElementData root = Clay_GetElementData(CLAY_ID("Root"));
+        Clay_ElementData body = Clay_GetElementData(CLAY_ID("Body"));
+        Clay_ElementData right = Clay_GetElementData(CLAY_ID("RightColumn"));
+        Clay_ElementData sidebar = Clay_GetElementData(CLAY_ID("Sidebar"));
+        Clay_ElementData main = Clay_GetElementData(CLAY_ID("MainColumn"));
+        Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        Clay_ElementData composer = Clay_GetElementData(CLAY_ID("ComposerAlign"));
+        Clay_ElementData footer = Clay_GetElementData(CLAY_ID("Footer"));
+        if (!root.found || !body.found || !right.found || !main.found || !chat.found ||
+            !composer.found || !footer.found || (with_sidebar && !sidebar.found))
+        {
+            Fail("production shell panes were not laid out");
+            break;
+        }
+        if (fabsf(root.boundingBox.y) > 0.001f ||
+            fabsf(root.boundingBox.height - viewport.height) > 0.001f ||
+            !ShellVerticallyContains(root.boundingBox, body.boundingBox) ||
+            !ShellVerticallyContains(body.boundingBox, right.boundingBox) ||
+            (with_sidebar && !ShellVerticallyContains(body.boundingBox, sidebar.boundingBox)))
+        {
+            Fail(with_sidebar ? "oversized content escaped viewport panes with sidebar"
+                              : "oversized content escaped viewport panes without sidebar");
+            break;
+        }
+        if (frame == 30)
+        {
+            expected_root = root.boundingBox;
+            expected_body = body.boundingBox;
+            expected_right = right.boundingBox;
+            expected_sidebar = sidebar.boundingBox;
+            expected_main = main.boundingBox;
+            expected_chat = chat.boundingBox;
+            expected_composer = composer.boundingBox;
+            expected_footer = footer.boundingBox;
+            expected_scroll = *scroll.scrollPosition;
+        }
+        else if (frame > 30 &&
+                 (!ShellBoxStable(expected_root, root.boundingBox) ||
+                  !ShellBoxStable(expected_body, body.boundingBox) ||
+                  !ShellBoxStable(expected_right, right.boundingBox) ||
+                  (with_sidebar && !ShellBoxStable(expected_sidebar, sidebar.boundingBox)) ||
+                  !ShellBoxStable(expected_main, main.boundingBox) ||
+                  !ShellBoxStable(expected_chat, chat.boundingBox) ||
+                  !ShellBoxStable(expected_composer, composer.boundingBox) ||
+                  !ShellBoxStable(expected_footer, footer.boundingBox) ||
+                  fabsf(expected_scroll.y - scroll.scrollPosition->y) > 0.001f))
+        {
+            Fail(with_sidebar ? "bottom-follow shell geometry drifted with sidebar"
+                              : "bottom-follow shell geometry drifted without sidebar");
+            break;
+        }
+    }
+
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    return g_failed ? 1 : 0;
+}
+
+static int TestBottomFollowShellGeometryStable(void)
+{
+    if (RunShellStabilityCase(false) != 0)
+    {
+        return 1;
+    }
+    return RunShellStabilityCase(true);
 }
 
 static int TestCanonicalOpenAndDuplicate(void)
@@ -4366,6 +4631,10 @@ static int TestResumeLoadsStoredModel(void)
 
 int main(void)
 {
+    if (TestBottomFollowShellGeometryStable() != 0)
+    {
+        return 1;
+    }
     if (TestCanonicalOpenAndDuplicate() != 0)
     {
         return 1;

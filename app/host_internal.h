@@ -210,6 +210,7 @@ static inline PicoHost *PicoWorkspace_Host(PicoWorkspace *workspace)
 }
 
 bool PicoHost_ProcessRetired(void);
+Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *host, float viewport_height, float delta_time);
 PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source);
 PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id);
 const PicoWorkspace *PicoHost_FindWorkspaceConst(const PicoHost *host, PicoWorkspaceId id);

@@ -2830,7 +2830,7 @@ PicoHostShutdownResult pico_host_free(PicoHost *host)
     return result;
 }
 
-static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time)
+Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_height, float delta_time)
 {
     Clay_BeginLayout();
     MdView_BeginFrame();
@@ -2840,7 +2840,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
     CLAY(CLAY_ID("Root"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0),
-                                .height = CLAY_SIZING_FIXED((float)GetScreenHeight())},
+                                .height = CLAY_SIZING_FIXED(viewport_height)},
                      .padding = {12, 12, 12, 12},
                      .childGap = 6},
           .backgroundColor = COLOR_BG})
@@ -3044,7 +3044,7 @@ static Clay_RenderCommandArray RecoverClayLayoutIfNeeded(PicoHost *app, Clay_Ren
                     (int)Clay_GetMaxElementCount());
         }
         Pico_ReinitClay(app->fonts, app->debug_enabled);
-        commands = CreateShellLayout(app, 0.0f);
+        commands = PicoHost_LayoutShell(app, (float)GetScreenHeight(), 0.0f);
     }
     return commands;
 }
@@ -3155,7 +3155,7 @@ void PicoHost_Frame(PicoHost *app)
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 
     Clay_RenderCommandArray render_commands =
-        RecoverClayLayoutIfNeeded(app, CreateShellLayout(app, GetFrameTime()));
+        RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), GetFrameTime()));
 
     app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
@@ -3222,7 +3222,8 @@ void PicoHost_Frame(PicoHost *app)
         fprintf(stderr, "clay-scroll: relayout follow=%d\n", app->chat_follow_bottom ? 1 : 0);
         /* Clay has already generated command bounds with the prior offset.
          * Rebuild once so the corrected offset is visible this frame. */
-        render_commands = RecoverClayLayoutIfNeeded(app, CreateShellLayout(app, 0.0f));
+        render_commands = RecoverClayLayoutIfNeeded(
+            app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), 0.0f));
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
         {

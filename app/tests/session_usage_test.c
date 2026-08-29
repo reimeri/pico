@@ -490,7 +490,7 @@ void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *ca
     }
     line->tool_name = JsonDup(name && name[0] ? name : "tool");
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
-    line->tool_args = JsonDup(args_json ? args_json : "");
+    line->tool_args = PicoAgent_FormatToolArgs(line->tool_name, args_json);
     line->tool_args_json = JsonDup(args_json ? args_json : "");
 }
 
@@ -1152,6 +1152,11 @@ static bool TranscriptMatchesLiveGroups(const PicoMessage *messages, int count)
            messages[1].trace[1].is_tool &&
            messages[1].trace[1].tool_call_id &&
            strcmp(messages[1].trace[1].tool_call_id, "call-1") == 0 &&
+           messages[1].trace[1].tool_args &&
+           strcmp(messages[1].trace[1].tool_args, "run first command") == 0 &&
+           messages[1].trace[1].tool_args_json &&
+           strcmp(messages[1].trace[1].tool_args_json,
+                  "{\"description\":\"run first command\",\"command\":\"true\"}") == 0 &&
            messages[1].trace[1].tool_output &&
            strcmp(messages[1].trace[1].tool_output, "ok-1") == 0 &&
            !messages[1].trace[2].is_tool &&
@@ -1170,6 +1175,11 @@ static bool TranscriptMatchesLiveGroups(const PicoMessage *messages, int count)
            messages[3].trace[0].is_tool &&
            messages[3].trace[0].tool_call_id &&
            strcmp(messages[3].trace[0].tool_call_id, "call-2") == 0 &&
+           messages[3].trace[0].tool_args &&
+           strcmp(messages[3].trace[0].tool_args, "run second command") == 0 &&
+           messages[3].trace[0].tool_args_json &&
+           strcmp(messages[3].trace[0].tool_args_json,
+                  "{\"description\":\"run second command\",\"command\":\"true\"}") == 0 &&
            messages[3].trace[0].tool_output &&
            strcmp(messages[3].trace[0].tool_output, "ok-2") == 0 &&
            !messages[3].trace[1].is_tool &&
@@ -1195,12 +1205,12 @@ static int TestTranscriptMessageGroups(void)
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "first", "think-1", NULL, NULL, NULL, 0);
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "second", NULL, NULL, NULL, NULL, 0);
     PicoSession_LogToolCall(&writer, &writer_agent, 1, "call-1", "sh",
-                            "{\"command\":\"true\"}", NULL);
+                            "{\"description\":\"run first command\",\"command\":\"true\"}", NULL);
     PicoSession_LogToolResult(&writer, &writer_agent, "call-1", "sh", "ok-1", false, NULL);
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "after", "think-after-tool", NULL, NULL, NULL, 0);
     PicoSession_LogAssistant(&writer, &writer_agent, 2, "third", "think-2", NULL, NULL, NULL, 0);
     PicoSession_LogToolCall(&writer, &writer_agent, 3, "call-2", "sh",
-                            "{\"command\":\"true\"}", NULL);
+                            "{\"description\":\"run second command\",\"command\":\"true\"}", NULL);
     PicoSession_LogToolResult(&writer, &writer_agent, "call-2", "sh", "ok-2", false, NULL);
     PicoSession_LogAssistant(&writer, &writer_agent, 3, "fourth", "think-3", NULL, NULL, NULL, 0);
     if (!writer_agent.session_path[0])

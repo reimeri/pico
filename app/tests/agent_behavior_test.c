@@ -3370,6 +3370,50 @@ static int TestResumedToolCallArgs(void)
     return ok ? 0 : Fail(name, "tool call did not preserve display and raw arguments");
 }
 
+static int TestShToolCallDescriptionArgs(void)
+{
+    const char *name = "sh tool rows show description";
+    PicoHost app;
+    InitApp(&app);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "sh",
+                         "{\"description\":\"listing all folders in /tmp\","
+                         "\"command\":\"ls -la /tmp\"}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    bool ok = line && line->tool_args &&
+              strcmp(line->tool_args, "listing all folders in /tmp") == 0 &&
+              line->tool_args_json &&
+              strstr(line->tool_args_json, "\"command\":\"ls -la /tmp\"");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "sh tool row did not show description");
+}
+
+static int TestToolActivityDescriptionScope(void)
+{
+    const char *name = "tool activity description is sh-only";
+    ResetTest(TEST_BLOCK, 1);
+    PicoHost app;
+    InitApp(&app);
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
+             "{\"description\":\"unrelated summary\",\"command\":\"echo original\"}");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "blocking tool did not start");
+    }
+    bool ok = strcmp(TestAgent(&app)->activity, "Running ask_test: echo original") == 0;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    if (!WaitForIdle(&app))
+    {
+        ok = false;
+    }
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "non-sh activity used its description argument");
+}
+
 static int TestToolCallListArgs(void)
 {
     const char *name = "tool call lists show item counts";
@@ -3965,6 +4009,8 @@ int main(void)
     failed |= TestAskUserToolSuccess();
     failed |= TestAskUserToolCancellation();
     failed |= TestResumedToolCallArgs();
+    failed |= TestShToolCallDescriptionArgs();
+    failed |= TestToolActivityDescriptionScope();
     failed |= TestToolCallListArgs();
     failed |= TestManagerProfileRegistry();
     failed |= TestManagerConcurrencyAndIsolation();

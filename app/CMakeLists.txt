@@ -81,6 +81,7 @@ add_executable(pico
     http.c
     http_capture.c
     agent.c
+    tool_args.c
     workspace.c
     subagent_config.c
     session.c
@@ -315,6 +316,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        tool_args.c
         workspace.c
         host_extensions.c
         workspace_extensions.c
@@ -344,6 +346,7 @@ if(BUILD_TESTING)
     add_executable(pico_session_usage_tests
         tests/session_usage_test.c
         session.c
+        tool_args.c
         canonical.c
         json.c
         usage.c)
@@ -368,6 +371,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        tool_args.c
         workspace.c
         host_extensions.c
         workspace_extensions.c
@@ -404,6 +408,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        tool_args.c
         workspace.c
         host_extensions.c
         workspace_extensions.c
@@ -517,6 +522,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        tool_args.c
         workspace.c
         plugin.c
         host_extensions.c

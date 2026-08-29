@@ -13,8 +13,11 @@
 #define SH_TAIL 27200
 
 static const char *kShParams =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell "
-    "command to run in the workspace\"}},\"required\":[\"command\"]}";
+    "{\"type\":\"object\",\"properties\":{"
+    "\"description\":{\"type\":\"string\",\"description\":\"Succinct 2-10 word summary of what the "
+    "command achieves\"},"
+    "\"command\":{\"type\":\"string\",\"description\":\"Shell command to run in the workspace\"}},"
+    "\"required\":[\"description\",\"command\"]}";
 
 static char *ExtractCommand(const char *args_json)
 {

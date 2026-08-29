@@ -71,6 +71,8 @@ void PicoTraceLine_FreezeThink(PicoTraceLine *line);
 void PicoAgent_AddToolCall(PicoHost *app, PicoAgent *agent, const char *name, const char *args);
 void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args);
+/* Malloc'd transcript display string for tool args. Caller frees. */
+char *PicoAgent_FormatToolArgs(const char *name, const char *args_json);
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error);
 void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                                    const char *args);

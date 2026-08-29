@@ -1908,7 +1908,15 @@ static char *FormatToolLine(const char *name, const char *args_json)
         JsonDoc doc;
         if (JsonParse(&doc, args_json, strlen(args_json)) == 0)
         {
-            detail = JsonObjStr(&doc, 0, "command");
+            if (name && strcmp(name, "sh") == 0)
+            {
+                detail = JsonObjStr(&doc, 0, "description");
+            }
+            if (!detail || !detail[0])
+            {
+                free(detail);
+                detail = JsonObjStr(&doc, 0, "command");
+            }
             JsonFree(&doc);
         }
     }

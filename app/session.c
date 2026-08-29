@@ -1513,7 +1513,7 @@ static bool LoadedAddTool(PicoMessage **messages, int *count, int *capacity,
     line->is_tool = true;
     line->tool_name = JsonDup(name && name[0] ? name : "tool");
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
-    line->tool_args = JsonDup(args ? args : "");
+    line->tool_args = PicoAgent_FormatToolArgs(line->tool_name, args);
     line->tool_args_json = JsonDup(args ? args : "");
     return line->tool_name != NULL && line->tool_args != NULL &&
            line->tool_args_json != NULL &&

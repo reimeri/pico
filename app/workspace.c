@@ -919,20 +919,17 @@ void PicoWorkspace_NotifySessions(PicoWorkspace *workspace)
     }
 }
 
-bool PicoWorkspace_Quiesce(PicoWorkspace *workspace)
+bool PicoWorkspace_QuiesceBefore(PicoWorkspace *workspace, const struct timespec *deadline)
 {
     if (!workspace)
     {
         return true;
     }
-    if (workspace->retained_shutdown)
+    if (!deadline || workspace->retained_shutdown)
     {
         return false;
     }
     PicoWorkspace_SetAcceptingWork(workspace, false);
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 1;
     PicoWorkspace_CancelDelegations(workspace, 0, 0);
     for (int i = 0; i < workspace->count; i++)
     {
@@ -942,14 +939,14 @@ bool PicoWorkspace_Quiesce(PicoWorkspace *workspace)
     for (int i = 0; i < workspace->count; i++)
     {
         pico_run_hooks(workspace->host, PICO_HOOK_ON_AGENT_DESTROY, workspace->agents[i]->id);
-        if (!PicoAgent_DestroyBefore(workspace->agents[i], &deadline))
+        if (!PicoAgent_DestroyBefore(workspace->agents[i], deadline))
         {
             clean = false;
         }
         workspace->agents[i] = NULL;
     }
     workspace->count = 0;
-    if (!PicoAgent_ShutdownRetired(workspace, &deadline))
+    if (!PicoAgent_ShutdownRetired(workspace, deadline))
     {
         clean = false;
     }
@@ -962,6 +959,14 @@ bool PicoWorkspace_Quiesce(PicoWorkspace *workspace)
         return false;
     }
     return true;
+}
+
+bool PicoWorkspace_Quiesce(PicoWorkspace *workspace)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    return PicoWorkspace_QuiesceBefore(workspace, &deadline);
 }
 
 void PicoWorkspace_Free(PicoWorkspace *workspace)

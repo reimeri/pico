@@ -2158,15 +2158,17 @@ void pico_host_pump(PicoHost *host)
         return;
     }
     PicoHost_PumpLifecycle(host);
+    float dt = GetFrameTime();
     for (int w = 0; w < host->workspace_count; w++)
     {
-        PicoWorkspace *ws = host->workspaces[w];
-        if (ws && (ws->state == PICO_WORKSPACE_OPEN || ws->state == PICO_WORKSPACE_RELOADING))
+        PicoWorkspace *workspace = host->workspaces[w];
+        if (workspace && (workspace->state == PICO_WORKSPACE_OPEN ||
+                          workspace->state == PICO_WORKSPACE_RELOADING))
         {
-            PicoWorkspaceExtensions_OnFrame(ws, 0.0f);
+            PicoWorkspaceExtensions_OnFrame(workspace, dt);
         }
     }
-    PicoHostExtensions_OnFrame(host, 0.0f);
+    PicoHostExtensions_OnFrame(host, dt);
 }
 
 PicoResult pico_host_init_and_start(PicoHost **out, Font *fonts, const char *workspace, bool safe_mode,
@@ -2764,11 +2766,14 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     }
     PicoChat_InspectClose();
     bool clean = true;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
     for (i = 0; i < host->workspace_count; i++)
     {
         if (host->workspaces[i])
         {
-            if (!PicoWorkspace_Quiesce(host->workspaces[i]))
+            if (!PicoWorkspace_QuiesceBefore(host->workspaces[i], &deadline))
             {
                 clean = false;
             }
@@ -3082,7 +3087,6 @@ void PicoHost_Frame(PicoHost *app)
     bool had_complete = PicoComplete_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
     bool had_modal = pico_ui_modal_claimed(app);
-    PicoPlugins_OnFrame(app, GetFrameTime());
     if (!had_warn && !had_complete && !had_todo && !had_modal && IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgentId id = app->selected_agent_id;

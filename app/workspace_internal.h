@@ -198,6 +198,7 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace);
 bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name);
 
 /* False means a detached worker retained the execution host. */
+bool PicoWorkspace_QuiesceBefore(PicoWorkspace *workspace, const struct timespec *deadline);
 bool PicoWorkspace_Quiesce(PicoWorkspace *workspace);
 void PicoWorkspace_Free(PicoWorkspace *workspace);
 bool PicoWorkspace_Destroy(PicoWorkspace *workspace);

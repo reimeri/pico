@@ -402,13 +402,53 @@ static int CompileExt(const char *src, const char *so, char *err, size_t err_cap
     return -1;
 }
 
+static bool ModuleSlotFree(const LoadedPlugin *module)
+{
+    return module && module->generation == 0 && module->ref_count == 0 &&
+           !module->desired && module->handle == NULL;
+}
+
 static LoadedPlugin *NewModuleSlot(PicoHost *app)
 {
-    if (!app || !app->modules || app->module_count >= ModuleCapacity(app))
+    if (!app || !app->modules)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < app->module_count; i++)
+    {
+        if (ModuleSlotFree(&app->modules[i]))
+        {
+            return &app->modules[i];
+        }
+    }
+    if (app->module_count >= ModuleCapacity(app))
     {
         return NULL;
     }
     return &app->modules[app->module_count++];
+}
+
+static void TrimModuleSlots(PicoHost *app)
+{
+    while (app && app->module_count > 0 &&
+           ModuleSlotFree(&app->modules[app->module_count - 1]))
+    {
+        app->module_count--;
+    }
+}
+
+static void RollbackModuleCandidates(PicoHost *app, uint64_t generation_floor)
+{
+    for (int i = app ? app->module_count - 1 : -1; i >= 0; i--)
+    {
+        LoadedPlugin *module = &app->modules[i];
+        if (module->generation > generation_floor && module->desired)
+        {
+            module->desired = false;
+            PicoModule_Release(module);
+        }
+    }
+    TrimModuleSlots(app);
 }
 
 static void RecordStub(PicoHost *app, const char *src, time_t mtime, const char *err)
@@ -857,7 +897,7 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     time_t mtimes[PICO_MAX_USER_PLUGINS];
     uint64_t hashes[PICO_MAX_USER_PLUGINS];
     char ws_ext_dir[4096];
-    int old_module_count;
+    uint64_t old_module_generation;
     int n;
     int i;
     bool ok = true;
@@ -870,7 +910,7 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     n = CollectWorkspaceSources(workspace, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS);
     (void)mtimes;
     (void)hashes;
-    old_module_count = app->module_count;
+    old_module_generation = app->next_module_generation;
     for (i = 0; i < n && ok; i++)
     {
         if (LoadUserCandidate(app, paths[i]) != 0)
@@ -880,15 +920,7 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     }
     if (!ok)
     {
-        for (i = app->module_count - 1; i >= old_module_count; i--)
-        {
-            if (app->modules[i].desired)
-            {
-                app->modules[i].desired = false;
-                PicoModule_Release(&app->modules[i]);
-            }
-        }
-        app->module_count = old_module_count;
+        RollbackModuleCandidates(app, old_module_generation);
         return;
     }
     if (!WorkspaceExtDir(workspace, ws_ext_dir, sizeof(ws_ext_dir)))
@@ -896,10 +928,11 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
         return;
     }
     {
-        for (i = 0; i < old_module_count; i++)
+        for (i = 0; i < app->module_count; i++)
         {
             LoadedPlugin *p = &app->modules[i];
-            if (p->desired && !p->builtin && SourceWorkspace(app, p->source) == workspace)
+            if (p->generation <= old_module_generation && p->desired && !p->builtin &&
+                SourceWorkspace(app, p->source) == workspace)
             {
                 p->desired = false;
                 PicoModule_Release(p);
@@ -920,8 +953,7 @@ bool PicoPlugins_ReloadHost(PicoHost *app)
         return false;
     }
 
-    int old_module_count = app->module_count;
-    int first_candidate = old_module_count;
+    uint64_t old_module_generation = app->next_module_generation;
     bool candidate_ok = true;
 
     for (size_t b = 0; candidate_ok && b < sizeof(kBuiltins) / sizeof(kBuiltins[0]); b++)
@@ -935,21 +967,15 @@ bool PicoPlugins_ReloadHost(PicoHost *app)
 
     if (!candidate_ok)
     {
-        for (int i = app->module_count - 1; i >= first_candidate; i--)
-        {
-            if (app->modules[i].desired)
-            {
-                app->modules[i].desired = false;
-                PicoModule_Release(&app->modules[i]);
-            }
-        }
-        app->module_count = old_module_count;
+        RollbackModuleCandidates(app, old_module_generation);
         return false;
     }
 
-    for (int i = 0; i < old_module_count; i++)
+    for (int i = 0; i < app->module_count; i++)
     {
-        if (app->modules[i].desired && !IsWorkspaceLocalSource(app, app->modules[i].source))
+        if (app->modules[i].generation <= old_module_generation &&
+            app->modules[i].desired &&
+            !IsWorkspaceLocalSource(app, app->modules[i].source))
         {
             app->modules[i].desired = false;
             PicoModule_Release(&app->modules[i]);

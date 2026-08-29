@@ -2292,6 +2292,94 @@ static int TestGenerationRolloutAndDlcloseOnRelease(void)
     return 0;
 }
 
+static int TestReloadReusesReleasedModuleSlots(void)
+{
+    char cfg[] = "/tmp/pico-slot-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-slot-cache-XXXXXX";
+    PicoHost *host = NULL;
+    if (!mkdtemp(cfg) || !mkdtemp(cache))
+    {
+        Fail("mkdtemp module slot reuse");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        Fail("host init module slot reuse");
+        return 1;
+    }
+    PicoPlugins_Load(host);
+    int high_water = host->module_count;
+    bool reloaded = high_water > 0 && PicoPlugins_ReloadHost(host);
+
+    /* Force a failed transaction after it reuses one released hole. The
+     * candidate must be removed without disturbing occupied old generations. */
+    int rollback_count = host->module_count;
+    int kept_hole = -1;
+    for (int i = 0; reloaded && i < rollback_count; i++)
+    {
+        PicoModuleGeneration *module = &host->modules[i];
+        if (module->generation == 0)
+        {
+            if (kept_hole < 0)
+            {
+                kept_hole = i;
+            }
+            else
+            {
+                snprintf(module->source, sizeof(module->source), "/tmp/module-slot-sentinel");
+                module->generation = 1;
+                module->desired = true;
+                module->ref_count = 1;
+            }
+        }
+    }
+    host->module_capacity = rollback_count;
+    bool failed_cleanly = kept_hole >= 0 && !PicoPlugins_ReloadHost(host) &&
+                          host->module_count == rollback_count &&
+                          host->modules[kept_hole].generation == 0;
+    for (int i = 0; i < rollback_count; i++)
+    {
+        PicoModuleGeneration *module = &host->modules[i];
+        if (strcmp(module->source, "/tmp/module-slot-sentinel") == 0)
+        {
+            failed_cleanly = failed_cleanly && module->desired && module->ref_count == 1;
+            module->desired = false;
+            PicoModule_Release(module);
+        }
+    }
+    host->module_capacity = PICO_MAX_MODULE_GENERATIONS;
+    reloaded = reloaded && failed_cleanly;
+    for (int i = 0; i < 32 && reloaded; i++)
+    {
+        reloaded = PicoPlugins_ReloadHost(host);
+        if (host->module_count > high_water * 2)
+        {
+            reloaded = false;
+        }
+    }
+    int final_count = host->module_count;
+    uint64_t final_generation = host->next_module_generation;
+    bool reused = reloaded && final_count <= high_water * 2 &&
+                  final_generation > (uint64_t)final_count;
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    if (!reused)
+    {
+        Fail("repeated host reloads must reuse released module-generation slots");
+        return 1;
+    }
+    return 0;
+}
+
 static int TestScopedExtensionListingRecords(void)
 {
     char cfg[256];
@@ -2478,8 +2566,7 @@ static int TestRetainedActiveGenerationsReceiveFrameCallbacks(void)
 
     g_retained_host_frames = 0;
     g_retained_workspace_frames = 0;
-    PicoHostExtensions_OnFrame(&host, 0.016f);
-    PicoWorkspaceExtensions_OnFrame(workspace, 0.016f);
+    pico_host_pump(&host);
 
     host.host_plugin_count = 0;
     workspace->workspace_plugin_count = 0;
@@ -2488,7 +2575,7 @@ static int TestRetainedActiveGenerationsReceiveFrameCallbacks(void)
     PicoWorkspace_Free(workspace);
     if (g_retained_host_frames != 1 || g_retained_workspace_frames != 1)
     {
-        Fail("active retained generations must keep receiving frame callbacks");
+        Fail("one host pump must dispatch each active retained frame callback exactly once");
         return 1;
     }
     return 0;
@@ -2968,6 +3055,199 @@ static int TestMultiWorkspaceMailboxIsolation(void)
     return 0;
 }
 
+typedef enum MatrixProviderMode {
+    MATRIX_PROVIDER_ASK = 0,
+    MATRIX_PROVIDER_BLOCK,
+    MATRIX_PROVIDER_STREAM,
+    MATRIX_PROVIDER_COMPLETE,
+} MatrixProviderMode;
+
+static struct MatrixProviderState *g_matrix_states[PICO_MAX_WORKSPACES + 1];
+
+typedef struct MatrixProviderState {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    MatrixProviderMode mode;
+    bool entered;
+    bool release;
+    bool exited;
+    int calls;
+    char *answer;
+} MatrixProviderState;
+
+static void MatrixStateInit(MatrixProviderState *state, MatrixProviderMode mode)
+{
+    memset(state, 0, sizeof(*state));
+    pthread_mutex_init(&state->mu, NULL);
+    pthread_cond_init(&state->cv, NULL);
+    state->mode = mode;
+}
+
+static void MatrixStateRelease(MatrixProviderState *state)
+{
+    pthread_mutex_lock(&state->mu);
+    state->release = true;
+    pthread_cond_broadcast(&state->cv);
+    pthread_mutex_unlock(&state->mu);
+}
+
+static void MatrixStateDestroy(MatrixProviderState *state)
+{
+    free(state->answer);
+    pthread_mutex_destroy(&state->mu);
+    pthread_cond_destroy(&state->cv);
+}
+
+static bool MatrixStateFlag(MatrixProviderState *state, bool exited)
+{
+    pthread_mutex_lock(&state->mu);
+    bool value = exited ? state->exited : state->entered;
+    pthread_mutex_unlock(&state->mu);
+    return value;
+}
+
+static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
+                          PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta,
+                          void *user, PicoLlmResult *out, void *opaque)
+{
+    (void)ctx;
+    (void)turn;
+    (void)cancel;
+    (void)user;
+    MatrixProviderState *state = (MatrixProviderState *)opaque;
+    PicoWorkspaceId workspace_id = pico_agent_context_workspace_id(ctx);
+    if (!state && workspace_id <= PICO_MAX_WORKSPACES)
+    {
+        state = g_matrix_states[workspace_id];
+    }
+    if (!state)
+    {
+        return PICO_LLM_FAIL;
+    }
+    pthread_mutex_lock(&state->mu);
+    int call = state->calls++;
+    state->entered = true;
+    pthread_cond_broadcast(&state->cv);
+    MatrixProviderMode mode = state->mode;
+    if (mode == MATRIX_PROVIDER_BLOCK)
+    {
+        while (!state->release)
+        {
+            pthread_cond_wait(&state->cv, &state->mu);
+        }
+    }
+    pthread_mutex_unlock(&state->mu);
+
+    if (mode == MATRIX_PROVIDER_STREAM)
+    {
+        for (;;)
+        {
+            pthread_mutex_lock(&state->mu);
+            bool release = state->release;
+            pthread_mutex_unlock(&state->mu);
+            if (release)
+            {
+                break;
+            }
+            if (on_delta)
+            {
+                on_delta(user, PICO_LLM_DELTA_TEXT, "x", 1);
+            }
+            usleep(100);
+        }
+    }
+    if (mode == MATRIX_PROVIDER_ASK && call == 0)
+    {
+        pico_llm_result_add_tool_call(out, "matrix-ask", "matrix_ask", "{}", NULL);
+    }
+    else
+    {
+        pico_llm_result_add_text(out, mode == MATRIX_PROVIDER_COMPLETE ? "complete" : "done");
+    }
+
+    pthread_mutex_lock(&state->mu);
+    state->exited = true;
+    pthread_cond_broadcast(&state->cv);
+    pthread_mutex_unlock(&state->mu);
+    return PICO_LLM_OK;
+}
+
+static void MatrixAskTool(PicoAgentContext *ctx, const char *args_json,
+                          PicoToolResult *out, void *opaque)
+{
+    (void)args_json;
+    MatrixProviderState *state = (MatrixProviderState *)opaque;
+    PicoWorkspaceId workspace_id = pico_agent_context_workspace_id(ctx);
+    if (!state && workspace_id <= PICO_MAX_WORKSPACES)
+    {
+        state = g_matrix_states[workspace_id];
+    }
+    if (!state)
+    {
+        return;
+    }
+    char *answer = NULL;
+    int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"matrix ask\"}",
+                           &answer);
+    pthread_mutex_lock(&state->mu);
+    if (rc == PICO_ASK_OK)
+    {
+        state->answer = answer;
+        answer = NULL;
+    }
+    pthread_cond_broadcast(&state->cv);
+    pthread_mutex_unlock(&state->mu);
+    free(answer);
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+        out->output = DupStr(rc == PICO_ASK_OK ? "answered" : "cancelled");
+    }
+}
+
+static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
+                                     MatrixProviderState *state, bool add_ask_tool)
+{
+    if (workspace->id <= PICO_MAX_WORKSPACES)
+    {
+        g_matrix_states[workspace->id] = state;
+    }
+    workspace->models = (PicoModel *)calloc(1, sizeof(*workspace->models));
+    if (!workspace->models)
+    {
+        return false;
+    }
+    workspace->model_count = 1;
+    snprintf(workspace->models[0].id, sizeof(workspace->models[0].id), "matrix-model");
+    snprintf(workspace->models[0].name, sizeof(workspace->models[0].name), "matrix-model");
+    snprintf(workspace->models[0].provider, sizeof(workspace->models[0].provider), "matrix");
+    snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model),
+             "matrix-model");
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_add_provider(workspace, &(PicoProvider){
+        .name = "matrix", .stream = MatrixProvider, .map_context = true, .state = state,
+    });
+    bool tool_ok = !add_ask_tool ||
+                   pico_add_tool(workspace, "matrix_ask", "matrix ask", "{}",
+                                 MatrixAskTool, NULL);
+    PicoHost_PublishRegistration(host, state);
+    return tool_ok && pico_workspace_find_provider(workspace, "matrix") != NULL;
+}
+
+static bool PumpUntilIdle(PicoHost *host, PicoAgent *agent, int attempts)
+{
+    for (int i = 0; i < attempts; i++)
+    {
+        pico_host_pump(host);
+        if (!PicoAgent_IsBusy(agent))
+        {
+            return true;
+        }
+        usleep(1000);
+    }
+    return false;
+}
+
 static int TestMultiWorkspaceAskOrderingAndRouting(void)
 {
     PicoHost *host = NULL;
@@ -2988,26 +3268,77 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
     PicoWorkspaceId idA = 0, idB = 0;
     pico_workspace_open(host, dirA, &idA);
     pico_workspace_open(host, dirB, &idB);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+    MatrixProviderState stateA, stateB;
+    MatrixStateInit(&stateA, MATRIX_PROVIDER_ASK);
+    MatrixStateInit(&stateB, MATRIX_PROVIDER_ASK);
+    bool configured = ConfigureMatrixWorkspace(host, wsA, &stateA, true) &&
+                      ConfigureMatrixWorkspace(host, wsB, &stateB, true);
 
     PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
     PicoAgentId a1 = 0, b1 = 0;
     pico_main_agent_create(host, idA, &opt, &a1);
     pico_main_agent_create(host, idB, &opt, &b1);
-
-    PicoToolAsk pending;
-    if (pico_tool_pending_ask(host, &pending))
+    PicoAgent *agentA = PicoHost_FindAgent(host, a1);
+    PicoAgent *agentB = PicoHost_FindAgent(host, b1);
+    bool started = configured && agentA && agentB;
+    if (started)
     {
-        Fail("pending ask should be false when no asks are active");
+        PicoAgent_StartTurn(host, agentA, "ask A");
+        PicoAgent_StartTurn(host, agentB, "ask B");
+        started = PicoAgent_IsBusy(agentA) && PicoAgent_IsBusy(agentB);
     }
 
-    if (pico_tool_answer(host, 0, "{}") || pico_tool_answer(host, 9999, "{}"))
+    PicoToolAsk first = {0}, second = {0};
+    for (int i = 0; started && i < 3000 && first.id == 0; i++)
     {
-        Fail("answering invalid/stale ask ID must return false");
+        pico_host_pump(host);
+        if (!pico_tool_pending_ask(host, &first))
+        {
+            usleep(1000);
+        }
     }
+    bool first_answered = first.id != 0 &&
+                          (first.agent_id == a1 || first.agent_id == b1) &&
+                          pico_tool_answer(host, first.id, "{\"step\":1}");
+    for (int i = 0; first_answered && i < 3000 && second.id == 0; i++)
+    {
+        pico_host_pump(host);
+        PicoToolAsk candidate = {0};
+        if (pico_tool_pending_ask(host, &candidate) && candidate.id != first.id)
+        {
+            second = candidate;
+            break;
+        }
+        usleep(1000);
+    }
+    bool routed = second.id > first.id && second.agent_id != first.agent_id &&
+                  pico_tool_answer(host, second.id, "{\"step\":2}") &&
+                  !pico_tool_answer(host, first.id, "{\"stale\":true}") &&
+                  !pico_tool_answer(host, 0, "{}") &&
+                  !pico_tool_answer(host, 9999, "{}");
+    bool completed = routed && PumpUntilIdle(host, agentA, 3000) &&
+                     PumpUntilIdle(host, agentB, 3000);
+    const char *expectedA = first.agent_id == a1 ? "{\"step\":1}" : "{\"step\":2}";
+    const char *expectedB = first.agent_id == b1 ? "{\"step\":1}" : "{\"step\":2}";
+    pthread_mutex_lock(&stateA.mu);
+    bool answerA = stateA.answer && strcmp(stateA.answer, expectedA) == 0;
+    pthread_mutex_unlock(&stateA.mu);
+    pthread_mutex_lock(&stateB.mu);
+    bool answerB = stateB.answer && strcmp(stateB.answer, expectedB) == 0;
+    pthread_mutex_unlock(&stateB.mu);
 
     pico_host_free(host);
+    MatrixStateDestroy(&stateA);
+    MatrixStateDestroy(&stateB);
     rmdir(dirA);
     rmdir(dirB);
+    if (!started || !completed || !answerA || !answerB)
+    {
+        Fail("oldest asks must be ordered globally and answers routed by ask ID");
+        return 1;
+    }
     return 0;
 }
 
@@ -3099,54 +3430,55 @@ static int TestMultiWorkspaceStuckWorkerIsolation(void)
     pico_workspace_open(host, dirB, &idB);
     PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
     PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+    MatrixProviderState stateA, stateB;
+    MatrixStateInit(&stateA, MATRIX_PROVIDER_BLOCK);
+    MatrixStateInit(&stateB, MATRIX_PROVIDER_COMPLETE);
+    bool configured = ConfigureMatrixWorkspace(host, wsA, &stateA, false) &&
+                      ConfigureMatrixWorkspace(host, wsB, &stateB, false);
 
     PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
     PicoAgentId a1 = 0, b1 = 0;
     pico_main_agent_create(host, idA, &opt, &a1);
     pico_main_agent_create(host, idB, &opt, &b1);
-
     PicoAgent *agentA = PicoHost_FindAgent(host, a1);
-
-    /* Start turn in workspace A */
-    PicoAgent_StartTurn(host, agentA, "turn in A");
-
-    /* Request close on A while turn is active */
-    pico_workspace_request_close(host, idA);
-    if (wsA->state != PICO_WORKSPACE_CLOSING)
+    PicoAgent *agentB = PicoHost_FindAgent(host, b1);
+    if (configured && agentA && agentB)
     {
-        Fail("workspace A should enter CLOSING");
+        PicoAgent_StartTurn(host, agentA, "blocked A");
+        PicoAgent_StartTurn(host, agentB, "complete B");
     }
-
-    /* Pump host while worker is busy */
-    pico_host_pump(host);
-
-    if (PicoHost_FindWorkspace(host, idA) == NULL || wsA->state != PICO_WORKSPACE_CLOSING)
-    {
-        Fail("workspace A with busy turn must remain in CLOSING without being freed prematurely");
-    }
-    if (PicoHost_FindWorkspace(host, idB) == NULL || wsB->state != PICO_WORKSPACE_OPEN)
-    {
-        Fail("workspace B must continue operating normally while A is in CLOSING");
-    }
-
-    /* Cancel agent A and pump until quiescence */
-    pico_agent_cancel(host, a1);
-    for (int i = 0; i < 50 && PicoAgent_IsBusy(agentA); i++)
+    for (int i = 0; i < 3000 && !MatrixStateFlag(&stateA, false); i++)
     {
         pico_host_pump(host);
-        usleep(5000);
+        usleep(1000);
     }
+    pico_workspace_request_close(host, idA);
+    bool b_completed = agentB && PumpUntilIdle(host, agentB, 3000);
+    bool isolated_while_blocked = MatrixStateFlag(&stateA, false) &&
+                                  PicoHost_FindWorkspace(host, idA) == wsA &&
+                                  wsA->state == PICO_WORKSPACE_CLOSING &&
+                                  PicoHost_FindWorkspace(host, idB) == wsB &&
+                                  wsB->state == PICO_WORKSPACE_OPEN && b_completed;
 
-    pico_host_pump(host);
-
-    if (PicoHost_FindWorkspace(host, idA) != NULL || pico_workspace_count(host) != 1)
+    MatrixStateRelease(&stateA);
+    for (int i = 0; i < 3000 && PicoHost_FindWorkspace(host, idA); i++)
     {
-        Fail("workspace A should cleanly close and be removed after worker finishes");
+        pico_host_pump(host);
+        usleep(1000);
     }
+    bool closed_after_release = PicoHost_FindWorkspace(host, idA) == NULL &&
+                                PicoHost_FindWorkspace(host, idB) == wsB;
 
     pico_host_free(host);
+    MatrixStateDestroy(&stateA);
+    MatrixStateDestroy(&stateB);
     rmdir(dirA);
     rmdir(dirB);
+    if (!isolated_while_blocked || !closed_after_release)
+    {
+        Fail("a controlled stuck worker must hold only its closing workspace");
+        return 1;
+    }
     return 0;
 }
 
@@ -3515,54 +3847,186 @@ static int TestMultiWorkspaceFairPumping(void)
 
     char dirA[] = "/tmp/pico-ws-fairA-XXXXXX";
     char dirB[] = "/tmp/pico-ws-fairB-XXXXXX";
-    char dirC[] = "/tmp/pico-ws-fairC-XXXXXX";
-    if (!mkdtemp(dirA) || !mkdtemp(dirB) || !mkdtemp(dirC))
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
     {
         Fail("mkdtemp fair pumping test");
         return 1;
     }
 
-    PicoWorkspaceId idA = 0, idB = 0, idC = 0;
+    PicoWorkspaceId idA = 0, idB = 0;
     pico_workspace_open(host, dirA, &idA);
     pico_workspace_open(host, dirB, &idB);
-    pico_workspace_open(host, dirC, &idC);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+    MatrixProviderState stateA, stateB;
+    MatrixStateInit(&stateA, MATRIX_PROVIDER_STREAM);
+    MatrixStateInit(&stateB, MATRIX_PROVIDER_COMPLETE);
+    bool configured = ConfigureMatrixWorkspace(host, wsA, &stateA, false) &&
+                      ConfigureMatrixWorkspace(host, wsB, &stateB, false);
 
     PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
-    PicoAgentId a1 = 0, b1 = 0, c1 = 0;
+    PicoAgentId a1 = 0, b1 = 0;
     pico_main_agent_create(host, idA, &opt, &a1);
     pico_main_agent_create(host, idB, &opt, &b1);
-    pico_main_agent_create(host, idC, &opt, &c1);
-
-    /* Verify fair round-robin pumping across workspaces */
-    host->pump_rr_index = 0;
-    pico_host_pump(host);
-    if (host->pump_rr_index != 1)
+    PicoAgent *agentA = PicoHost_FindAgent(host, a1);
+    PicoAgent *agentB = PicoHost_FindAgent(host, b1);
+    if (configured && agentA && agentB)
     {
-        Fail("pump 1 should advance rr index to 1");
+        PicoAgent_StartTurn(host, agentA, "large stream A");
+        PicoAgent_StartTurn(host, agentB, "short B");
     }
+    bool b_completed = agentB && PumpUntilIdle(host, agentB, 3000);
+    bool progress = configured && MatrixStateFlag(&stateA, false) && b_completed &&
+                    PicoAgent_IsBusy(agentA) && agentB->message_count > 0;
 
-    pico_host_pump(host);
-    if (host->pump_rr_index != 2)
-    {
-        Fail("pump 2 should advance rr index to 2");
-    }
-
-    pico_host_pump(host);
-    if (host->pump_rr_index != 0)
-    {
-        Fail("pump 3 should wrap rr index to 0");
-    }
-
-    pico_host_pump(host);
-    if (host->pump_rr_index != 1)
-    {
-        Fail("pump 4 should advance rr index to 1");
-    }
-
+    MatrixStateRelease(&stateA);
+    bool a_completed = agentA && PumpUntilIdle(host, agentA, 3000);
     pico_host_free(host);
+    MatrixStateDestroy(&stateA);
+    MatrixStateDestroy(&stateB);
     rmdir(dirA);
     rmdir(dirB);
-    rmdir(dirC);
+    if (!progress || !a_completed)
+    {
+        Fail("a short workspace turn must complete while another workspace keeps streaming");
+        return 1;
+    }
+    return 0;
+}
+
+static double ElapsedSeconds(const struct timespec *start, const struct timespec *end)
+{
+    return (double)(end->tv_sec - start->tv_sec) +
+           (double)(end->tv_nsec - start->tv_nsec) / 1000000000.0;
+}
+
+static int TestDiffShutdownDoesNotWaitForGit(void)
+{
+    char bin[] = "/tmp/pico-diff-bin-XXXXXX";
+    char workspace[] = "/tmp/pico-diff-ws-XXXXXX";
+    char git_path[512];
+    char marker[512];
+    char release[512];
+    PicoHost *host = NULL;
+    PicoWorkspaceId id = 0;
+    if (!mkdtemp(bin) || !mkdtemp(workspace))
+    {
+        Fail("mkdtemp diff shutdown");
+        return 1;
+    }
+    snprintf(git_path, sizeof(git_path), "%s/git", bin);
+    snprintf(marker, sizeof(marker), "%s/entered", bin);
+    snprintf(release, sizeof(release), "%s/release", bin);
+    const char *script =
+        "#!/bin/sh\n"
+        "printf E >> \"$PICO_DIFF_TEST_MARKER\"\n"
+        "while [ ! -f \"$PICO_DIFF_TEST_RELEASE\" ]; do sleep 0.01; done\n"
+        "printf D >> \"$PICO_DIFF_TEST_MARKER\"\n"
+        "exit 0\n";
+    char *old_path = DupStr(getenv("PATH") ? getenv("PATH") : "");
+    char test_path[8192];
+    snprintf(test_path, sizeof(test_path), "%s:%s", bin, old_path ? old_path : "");
+    if (WriteFile(git_path, script) != 0 || chmod(git_path, 0755) != 0)
+    {
+        Fail("write fake git");
+        free(old_path);
+        RmRf(bin);
+        RmRf(workspace);
+        return 1;
+    }
+    setenv("PATH", test_path, 1);
+    setenv("PICO_DIFF_TEST_MARKER", marker, 1);
+    setenv("PICO_DIFF_TEST_RELEASE", release, 1);
+    bool opened = pico_host_init(&host, NULL, true) == PICO_OK && host &&
+                  pico_workspace_open(host, workspace, &id) == PICO_OK;
+    for (int i = 0; opened && i < 3000 && access(marker, F_OK) != 0; i++)
+    {
+        usleep(1000);
+    }
+    bool blocked = access(marker, F_OK) == 0;
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    if (blocked)
+    {
+        pico_workspace_request_close(host, id);
+        pico_host_pump(host);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = ElapsedSeconds(&start, &end);
+    WriteFile(release, "release\n");
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    free(old_path);
+    /* The worker is intentionally detached. Keep its fake executable,
+     * workspace, PATH, and release marker valid until this test process exits
+     * instead of imposing a timing-dependent cleanup wait on the main thread. */
+    if (!opened || !blocked || elapsed >= 0.1)
+    {
+        Fail("diff workspace shutdown must detach without waiting for blocked git");
+        return 1;
+    }
+    return 0;
+}
+
+static int TestProcessShutdownUsesSharedDeadline(void)
+{
+    char dirA[] = "/tmp/pico-deadline-a-XXXXXX";
+    char dirB[] = "/tmp/pico-deadline-b-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId idA = 0, idB = 0;
+    MatrixProviderState stateA, stateB;
+    MatrixStateInit(&stateA, MATRIX_PROVIDER_BLOCK);
+    MatrixStateInit(&stateB, MATRIX_PROVIDER_BLOCK);
+    if (!mkdtemp(dirA) || !mkdtemp(dirB) ||
+        pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        pico_workspace_open(host, dirA, &idA) != PICO_OK ||
+        pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("setup shared shutdown deadline");
+        return 1;
+    }
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+    bool configured = ConfigureMatrixWorkspace(host, wsA, &stateA, false) &&
+                      ConfigureMatrixWorkspace(host, wsB, &stateB, false);
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId a1 = 0, b1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idB, &opt, &b1);
+    PicoAgent *agentA = PicoHost_FindAgent(host, a1);
+    PicoAgent *agentB = PicoHost_FindAgent(host, b1);
+    if (configured && agentA && agentB)
+    {
+        PicoAgent_StartTurn(host, agentA, "block A at shutdown");
+        PicoAgent_StartTurn(host, agentB, "block B at shutdown");
+    }
+    for (int i = 0; i < 3000 &&
+                    (!MatrixStateFlag(&stateA, false) || !MatrixStateFlag(&stateB, false)); i++)
+    {
+        usleep(1000);
+    }
+    bool both_blocked = MatrixStateFlag(&stateA, false) && MatrixStateFlag(&stateB, false);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    PicoHostShutdownResult result = PicoHost_Shutdown(host);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    MatrixStateRelease(&stateA);
+    MatrixStateRelease(&stateB);
+    for (int i = 0; i < 3000 &&
+                    (!MatrixStateFlag(&stateA, true) || !MatrixStateFlag(&stateB, true)); i++)
+    {
+        usleep(1000);
+    }
+    double elapsed = ElapsedSeconds(&start, &end);
+    bool shared = both_blocked && result == PICO_HOST_SHUTDOWN_RETAINED &&
+                  elapsed >= 0.75 && elapsed < 1.7;
+    if (!shared)
+    {
+        Fail("all workspaces must consume one process-wide shutdown deadline");
+        return 1;
+    }
     return 0;
 }
 
@@ -3708,6 +4172,10 @@ int main(void)
     {
         return 1;
     }
+    if (TestReloadReusesReleasedModuleSlots() != 0)
+    {
+        return 1;
+    }
     if (TestScopedExtensionListingRecords() != 0)
     {
         return 1;
@@ -3788,7 +4256,16 @@ int main(void)
     {
         return 1;
     }
+    if (TestDiffShutdownDoesNotWaitForGit() != 0)
+    {
+        return 1;
+    }
     if (g_failed)
+    {
+        return 1;
+    }
+    /* Retained shutdown permanently retires this test process, so it is last. */
+    if (TestProcessShutdownUsesSharedDeadline() != 0)
     {
         return 1;
     }

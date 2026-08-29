@@ -35,7 +35,7 @@ PicoHostShutdownResult rc = pico_host_free(host);
 
 Startup convenience (CLI) is this sequence, not a special lifecycle: init, open the initial directory, create one main agent, optional session resume on that agent, then select it. Opening a workspace does not create a main agent.
 
-`pico_host_pump` does one bounded round-robin pass: host posts and process services, then each non-closed workspace once (at most 256 queued runtime events and one new delegation per workspace), then host-extension `on_frame`. Contextual views render only for the selected workspace. Inactive workspaces still pump and still run workspace `on_frame`; they must not draw.
+`pico_host_pump` does one bounded round-robin pass: host posts and process services, then each non-closed workspace once (at most 256 queued runtime events and one new delegation per workspace), then each eligible workspace-extension `on_frame` and each host-extension `on_frame` exactly once with the current frame delta. Contextual views render only for the selected workspace. Inactive workspaces still pump and still run workspace `on_frame`; they must not draw.
 
 `pico_host_free` applies the process-wide bounded shutdown deadline of about one second. It returns `PICO_HOST_SHUTDOWN_CLEAN` when every worker joins, or `PICO_HOST_SHUTDOWN_RETAINED` when a callback is still blocked. Retained shutdown detaches that callback and keeps every registration, auth store, builtin state, and user-extension `.so` it can reach. No extension `shutdown`, `dlclose`, auth destruction, or curl cleanup runs. Pico is then permanently retired in that process; later `pico_host_init` is rejected. Only `pico_host_free` uses this process deadline. Workspace close never does.
 

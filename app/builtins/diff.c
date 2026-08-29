@@ -1,4 +1,4 @@
-#define _GNU_SOURCE /* pthread_timedjoin_np */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
@@ -666,23 +666,9 @@ static void StopThread(DiffState *s)
     pthread_cond_signal(&w->wake);
     pthread_mutex_unlock(&w->lock);
 
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_nsec += 300 * 1000 * 1000;
-    if (deadline.tv_nsec >= 1000 * 1000 * 1000)
-    {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000 * 1000 * 1000;
-    }
-    if (pthread_timedjoin_np(w->thread, NULL, &deadline) == 0)
-    {
-        w->thread_started = false;
-        w->thread_stop = false;
-    }
-    else
-    {
-        pthread_detach(w->thread);
-    }
+    /* Shutdown callbacks run on the main thread and must never wait for a
+     * worker. The worker owns its second context reference until it exits. */
+    pthread_detach(w->thread);
     DiffWorkerCtx_Release(w);
 }
 

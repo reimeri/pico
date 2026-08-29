@@ -32,8 +32,9 @@ static char *ExtractCommand(const char *args_json)
     return cmd;
 }
 
-static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -152,9 +153,11 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
     }
 }
 
-static void ShellInit(PicoApp *app)
+static int ShellInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_tool(app, "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL);
+    (void)state_out;
+    pico_add_tool(workspace, "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL);
+    return 0;
 }
 
 PicoExt pico_ext_shell(void)
@@ -163,6 +166,6 @@ PicoExt pico_ext_shell(void)
         .abi = PICO_EXT_ABI,
         .name = "sh",
         .description = "Shell tool",
-        .init = ShellInit,
+        .workspace_init = ShellInit,
     };
 }

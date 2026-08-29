@@ -1,8 +1,9 @@
 #include "pico/plugin.h"
+#include "host_internal.h"
 
 #include "../agent_internal.h"
 #include "agent.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "pico/md_view.h"
 #include "chat_sel.h"
 #include "chat.h"
@@ -43,16 +44,10 @@ typedef struct ThinkLabelBlock {
     char data[];
 } ThinkLabelBlock;
 
-static ThinkLabelBlock *g_think_label_blocks;
-static ThinkLabelBlock *g_think_label_block;
-static MdDocument *g_think_docs;
-static int g_think_doc_count;
-static int g_think_doc_cap;
-
 typedef struct ToolWrapCacheSet ToolWrapCacheSet;
 
 typedef struct TranscriptView {
-    PicoApp *app;
+    PicoHost *app;
     const PicoMessage *messages;
     int message_count;
     PicoAgentState state;
@@ -88,23 +83,60 @@ typedef struct InspectFrame {
     char *fallback;
 } InspectFrame;
 
-static PicoApp *g_app;
-static InspectFrame g_inspect[PICO_MAX_DELEGATION_DEPTH + 1];
-static int g_inspect_n;
-static bool g_inspect_follow = true;
-static bool g_inspect_overflow;
-static PicoScrollbar g_inspect_bar;
-static bool g_inspect_pressed_dim;
-static bool g_inspect_pressed_back;
-static bool g_inspect_pressed_tool;
-static int g_inspect_tool_msg;
-static int g_inspect_tool_idx;
-static PicoTranscriptVirtual g_main_virtual;
-static PicoTranscriptVirtual g_inspect_virtual;
-static ToolWrapCacheSet g_main_tool_wrap;
-static ToolWrapCacheSet g_inspect_tool_wrap;
-static int g_inspect_virtual_ns;
-static bool g_virtual_relayout;
+typedef struct ChatState {
+    ThinkLabelBlock *think_label_blocks;
+    ThinkLabelBlock *think_label_block;
+    MdDocument *think_docs;
+    int think_doc_count;
+    int think_doc_cap;
+    PicoHost *app;
+    InspectFrame inspect[PICO_MAX_DELEGATION_DEPTH + 1];
+    int inspect_n;
+    bool inspect_follow;
+    bool inspect_overflow;
+    PicoScrollbar inspect_bar;
+    bool inspect_pressed_dim;
+    bool inspect_pressed_back;
+    bool inspect_pressed_tool;
+    int inspect_tool_msg;
+    int inspect_tool_idx;
+    PicoTranscriptVirtual main_virtual;
+    PicoTranscriptVirtual inspect_virtual;
+    ToolWrapCacheSet main_tool_wrap;
+    ToolWrapCacheSet inspect_tool_wrap;
+    int inspect_virtual_ns;
+    bool virtual_relayout;
+} ChatState;
+
+static __thread ChatState *s_active_chat_state = NULL;
+
+static ChatState *ActiveChatState(void)
+{
+    return s_active_chat_state;
+}
+
+#define g_think_label_blocks (ActiveChatState()->think_label_blocks)
+#define g_think_label_block (ActiveChatState()->think_label_block)
+#define g_think_docs (ActiveChatState()->think_docs)
+#define g_think_doc_count (ActiveChatState()->think_doc_count)
+#define g_think_doc_cap (ActiveChatState()->think_doc_cap)
+#define g_app (ActiveChatState()->app)
+#define g_inspect (ActiveChatState()->inspect)
+#define g_inspect_n (ActiveChatState()->inspect_n)
+#define g_inspect_follow (ActiveChatState()->inspect_follow)
+#define g_inspect_overflow (ActiveChatState()->inspect_overflow)
+#define g_inspect_bar (ActiveChatState()->inspect_bar)
+#define g_inspect_pressed_dim (ActiveChatState()->inspect_pressed_dim)
+#define g_inspect_pressed_back (ActiveChatState()->inspect_pressed_back)
+#define g_inspect_pressed_tool (ActiveChatState()->inspect_pressed_tool)
+#define g_inspect_tool_msg (ActiveChatState()->inspect_tool_msg)
+#define g_inspect_tool_idx (ActiveChatState()->inspect_tool_idx)
+#define g_main_virtual (ActiveChatState()->main_virtual)
+#define g_inspect_virtual (ActiveChatState()->inspect_virtual)
+#define g_main_tool_wrap (ActiveChatState()->main_tool_wrap)
+#define g_inspect_tool_wrap (ActiveChatState()->inspect_tool_wrap)
+#define g_inspect_virtual_ns (ActiveChatState()->inspect_virtual_ns)
+#define g_virtual_relayout (ActiveChatState()->virtual_relayout)
 
 static bool IsSubagentTool(const PicoTraceLine *line)
 {
@@ -304,7 +336,7 @@ static void ViewWrappedToolArgs(const TranscriptView *view, Clay_String text,
     ViewWrappedTextWithCache(view, text, config, width, wrapped);
 }
 
-static float ChatWidth(PicoApp *app)
+static float ChatWidth(PicoHost *app)
 {
     float width = (float)GetScreenWidth() - CONTENT_PADDING - 12;
     if (app->chat_overflow)
@@ -320,7 +352,7 @@ static float ChatWidth(PicoApp *app)
     return width;
 }
 
-static Clay_SizingAxis ChatColumnWidth(PicoApp *app)
+static Clay_SizingAxis ChatColumnWidth(PicoHost *app)
 {
     float column_max = Pico_ChatColumnMaxPx(app);
     if (column_max > 0.0f)
@@ -768,9 +800,9 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
     ViewBreak(view);
 }
 
-static const char *SubagentActivity(PicoApp *app, const PicoTraceLine *line)
+static const char *SubagentActivity(PicoHost *app, const PicoTraceLine *line)
 {
-    PicoAgent *child = line->child_id ? PicoAgentManager_Find(app->agents, line->child_id) : NULL;
+    PicoAgent *child = line->child_id ? PicoHost_FindAgent(app, line->child_id) : NULL;
     if (child)
     {
         return child->activity[0] ? child->activity : "Thinking…";
@@ -962,19 +994,20 @@ static void RenderEmptyCard(int id, Clay_String title, const char **items, int n
     }
 }
 
-static void RenderEmptyCards(PicoApp *app)
+static void RenderEmptyCards(PicoHost *app)
 {
     const char *tools[PICO_MAX_TOOLS];
     int tool_n = 0;
-    for (int i = 0; i < app->tool_count && tool_n < PICO_MAX_TOOLS; i++)
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    for (int i = 0; ws && i < ws->tool_count && tool_n < PICO_MAX_TOOLS; i++)
     {
-        if (app->tools[i].name && app->tools[i].name[0])
+        if (ws->tools[i].name && ws->tools[i].name[0])
         {
-            tools[tool_n++] = app->tools[i].name;
+            tools[tool_n++] = ws->tools[i].name;
         }
     }
     const char *ctx[8];
-    int ctx_n = PicoSettings_LoadedContext(app, ctx, 8);
+    int ctx_n = PicoSettings_LoadedContext(PicoAgent_Workspace(PicoHost_SelectedAgentConst(app)), ctx, 8);
     bool narrow = GetScreenWidth() < 720;
     CLAY(CLAY_ID("EmptyCards"),
          {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
@@ -987,11 +1020,16 @@ static void RenderEmptyCards(PicoApp *app)
     }
 }
 
-static bool EmptyReplaced(PicoApp *app)
+static bool EmptyReplaced(PicoHost *app)
 {
-    for (int i = 0; i < app->empty_view_count; i++)
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (!ws)
     {
-        if (app->empty_views[i].kind == PICO_EMPTY_REPLACE)
+        return false;
+    }
+    for (int i = 0; i < ws->empty_view_count; i++)
+    {
+        if (ws->empty_views[i].kind == PICO_EMPTY_REPLACE)
         {
             return true;
         }
@@ -999,18 +1037,30 @@ static bool EmptyReplaced(PicoApp *app)
     return false;
 }
 
-static void RunEmpty(PicoApp *app, PicoEmptyKind kind)
+static void RunEmpty(PicoHost *app, PicoEmptyKind kind)
 {
-    for (int i = 0; i < app->empty_view_count; i++)
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (!ws)
     {
-        if (app->empty_views[i].kind == kind && app->empty_views[i].render)
+        return;
+    }
+    const PicoAgent *selected = PicoHost_SelectedAgentConst(app);
+    PicoAgentId selected_id = selected ? selected->id : 0;
+    for (int i = 0; i < ws->empty_view_count; i++)
+    {
+        PicoEmptyView *view = &ws->empty_views[i];
+        if (view->kind != kind)
         {
-            app->empty_views[i].render(app);
+            continue;
+        }
+        if (view->workspace_render)
+        {
+            view->workspace_render(ws, selected_id, view->state);
         }
     }
 }
 
-static void RenderEmptyState(PicoApp *app)
+static void RenderEmptyState(PicoHost *app)
 {
     if (EmptyReplaced(app))
     {
@@ -1343,7 +1393,7 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
     }
 }
 
-void PicoChat_HarvestVirtualHeights(PicoApp *app)
+void PicoChat_HarvestVirtualHeights(PicoHost *app)
 {
     if (!app)
     {
@@ -1362,11 +1412,16 @@ bool PicoChat_TakeVirtualRelayout(void)
     return relayout;
 }
 
-void PicoChat_Render(PicoApp *app)
+void PicoChat_Render(PicoHost *app, void *state)
 {
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     app->hovered_tool = false;
     ThinkFrameReset();
-    PicoChatSel_BeginFrame(PicoApp_ActiveAgent(app)->message_count);
+    PicoChatSel_BeginFrame(PicoHost_SelectedAgent(app)->message_count);
     CLAY(CLAY_ID("ChatRow"),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                      .childGap = SCROLLBAR_GAP,
@@ -1378,7 +1433,7 @@ void PicoChat_Render(PicoApp *app)
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
-            bool empty = PicoApp_ActiveAgent(app)->message_count == 0;
+            bool empty = PicoHost_SelectedAgent(app)->message_count == 0;
             Clay_ChildAlignment align = empty ? (Clay_ChildAlignment){.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}
                                               : (Clay_ChildAlignment){0};
             Clay_Sizing content_size = {.width = ChatColumnWidth(app)};
@@ -1397,7 +1452,7 @@ void PicoChat_Render(PicoApp *app)
                     RenderEmptyState(app);
                 }
                 float available_width = ChatWidth(app);
-                PicoAgent *active = PicoApp_ActiveAgent(app);
+                PicoAgent *active = PicoHost_SelectedAgent(app);
                 TranscriptView view = {
                     .app = app,
                     .messages = active->messages,
@@ -1424,9 +1479,9 @@ void PicoChat_Render(PicoApp *app)
     }
 }
 
-static TranscriptView MainTranscriptView(PicoApp *app)
+static TranscriptView MainTranscriptView(PicoHost *app)
 {
-    PicoAgent *active = PicoApp_ActiveAgent(app);
+    PicoAgent *active = PicoHost_SelectedAgent(app);
     TranscriptView view = {
         .app = app,
         .messages = active->messages,
@@ -1449,7 +1504,7 @@ bool PicoChat_InspectIsOpen(void)
     return g_inspect_n > 0;
 }
 
-static bool InspectIsTopModal(PicoApp *app)
+static bool InspectIsTopModal(PicoHost *app)
 {
     const char *top = pico_ui_modal_top(app);
     return g_inspect_n > 0 && top && strcmp(top, "inspect") == 0;
@@ -1476,6 +1531,11 @@ static bool InspectPop(void)
 
 void PicoChat_InspectClose(void)
 {
+    ChatState *s = ActiveChatState();
+    if (!s)
+    {
+        return;
+    }
     while (g_inspect_n > 0 && InspectPop())
     {
         /* pop every nested frame */
@@ -1561,7 +1621,7 @@ static void InspectPushLine(const PicoTraceLine *line, PicoAgentId parent_id)
     g_inspect_follow = true;
 }
 
-static PicoTraceLine *FindToolLine(PicoApp *app, PicoAgentId agent_id, const char *call_id)
+static PicoTraceLine *FindToolLine(PicoHost *app, PicoAgentId agent_id, const char *call_id)
 {
     PicoAgent *agent;
     int i;
@@ -1570,7 +1630,7 @@ static PicoTraceLine *FindToolLine(PicoApp *app, PicoAgentId agent_id, const cha
     {
         return NULL;
     }
-    agent = PicoAgentManager_Find(app->agents, agent_id);
+    agent = PicoHost_FindAgent(app, agent_id);
     if (!agent)
     {
         return NULL;
@@ -1590,8 +1650,15 @@ static PicoTraceLine *FindToolLine(PicoApp *app, PicoAgentId agent_id, const cha
     return NULL;
 }
 
-static void SubagentToolRow(PicoApp *app, PicoToolRowEvent *ev)
+void PicoChat_SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
+    PicoToolRowEvent *ev = event;
     PicoTraceLine scratch;
     PicoTraceLine *line;
     if (!ev || !ev->name || strcmp(ev->name, "subagent") != 0)
@@ -1621,14 +1688,14 @@ static void SubagentToolRow(PicoApp *app, PicoToolRowEvent *ev)
     ev->handled = true;
 }
 
-static void InspectRefreshFrame(PicoApp *app, InspectFrame *frame)
+static void InspectRefreshFrame(PicoHost *app, InspectFrame *frame)
 {
-    if (!app || !app->agents || !frame || frame->child_id || frame->session_id[0] ||
+    if (!app || !frame || frame->child_id || frame->session_id[0] ||
         frame->fallback || !frame->parent_id || !frame->tool_call_id)
     {
         return;
     }
-    PicoAgent *parent = PicoAgentManager_Find(app->agents, frame->parent_id);
+    PicoAgent *parent = PicoHost_FindAgent(app, frame->parent_id);
     for (int i = parent ? parent->message_count - 1 : -1; i >= 0; i--)
     {
         PicoMessage *message = &parent->messages[i];
@@ -1644,7 +1711,7 @@ static void InspectRefreshFrame(PicoApp *app, InspectFrame *frame)
     }
 }
 
-static bool InspectCurrent(PicoApp *app, PicoSubagentInspect *out, const char **fallback)
+static bool InspectCurrent(PicoHost *app, PicoSubagentInspect *out, const char **fallback)
 {
     InspectFrame *frame = &g_inspect[g_inspect_n - 1];
     InspectRefreshFrame(app, frame);
@@ -1657,7 +1724,7 @@ static bool InspectCurrent(PicoApp *app, PicoSubagentInspect *out, const char **
     {
         *fallback = frame->fallback;
     }
-    return PicoAgentManager_InspectSubagent(app, &line, out);
+    return PicoWorkspace_InspectSubagent(app, &line, out);
 }
 
 static void InspectFollowScroll(void)
@@ -1675,9 +1742,10 @@ static void InspectFollowScroll(void)
     }
 }
 
-static void InspectRender(PicoApp *app)
+static void InspectRender(PicoHost *app, void *state)
 {
-    if (g_inspect_n <= 0)
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state || g_inspect_n <= 0)
     {
         return;
     }
@@ -1830,7 +1898,7 @@ static void InspectRender(PicoApp *app)
                     if (found && inspect.message_count > 0)
                     {
                         PicoAgent *owner =
-                            inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+                            inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
                         TranscriptView view = {
                             .app = app,
                             .messages = inspect.messages,
@@ -1887,7 +1955,7 @@ static bool HitTraceRow(const TranscriptView *view, const PicoTraceLine *line, i
            (line->is_tool || ThinkHasBody(line));
 }
 
-static void InspectHandlePointer(PicoApp *app)
+static void InspectHandlePointer(PicoHost *app)
 {
     if (!InspectIsTopModal(app))
     {
@@ -1964,7 +2032,8 @@ static void InspectHandlePointer(PicoApp *app)
              tool_idx == g_inspect_tool_idx && found && tool_msg < inspect.message_count)
     {
         PicoTraceLine *line = (PicoTraceLine *)&inspect.messages[tool_msg].trace[tool_idx];
-        if (line->is_tool && pico_tool_row_activate(app, inspect.live_id, line))
+        PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+        if (line->is_tool && pico_tool_row_activate(ws, inspect.live_id, line))
         {
             /* hook handled the row */
         }
@@ -1978,16 +2047,16 @@ static void InspectHandlePointer(PicoApp *app)
     g_inspect_pressed_tool = false;
 }
 
-void PicoChat_HandleToolRelease(PicoApp *app)
+void PicoChat_HandleToolRelease(PicoHost *app)
 {
     if (!app || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
         !app->chat_sel.mouse_selecting || app->chat_sel.dragging || !app->chat_sel.pressed_tool ||
-        app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= PicoApp_ActiveAgent(app)->message_count)
+        app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= PicoHost_SelectedAgent(app)->message_count)
     {
         return;
     }
 
-    PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
+    PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[app->chat_sel.tool_msg];
     int t = app->chat_sel.tool_idx;
     TranscriptView main;
     if (t < 0 || t >= msg->trace_count)
@@ -1999,7 +2068,8 @@ void PicoChat_HandleToolRelease(PicoApp *app)
     {
         return;
     }
-    if (msg->trace[t].is_tool && pico_tool_row_activate(app, PicoApp_ActiveAgent(app)->id, &msg->trace[t]))
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    if (msg->trace[t].is_tool && pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
     {
         app->chat_sel.pressed_tool = false;
         return;
@@ -2012,9 +2082,14 @@ void PicoChat_HandleToolRelease(PicoApp *app)
     app->chat_sel.pressed_tool = false;
 }
 
-void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
+void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     InspectHandlePointer(app);
     InspectFollowScroll();
     PicoChatSel_Clamp(app);
@@ -2050,9 +2125,9 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
     {
         int tool_msg = -1;
         int tool_idx = -1;
-        for (int i = 0; i < PicoApp_ActiveAgent(app)->message_count; i++)
+        for (int i = 0; i < PicoHost_SelectedAgent(app)->message_count; i++)
         {
-            PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[i];
+            PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[i];
             for (int t = 0; t < msg->trace_count; t++)
             {
                 if ((msg->trace[t].is_tool || ThinkHasBody(&msg->trace[t])) &&
@@ -2099,15 +2174,16 @@ void PicoChat_HandlePointer(PicoApp *app, const PicoHookEvent *event)
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
         if (app->chat_sel.mouse_selecting && !app->chat_sel.dragging && app->chat_sel.pressed_tool &&
-            app->chat_sel.tool_msg >= 0 && app->chat_sel.tool_msg < PicoApp_ActiveAgent(app)->message_count)
+            app->chat_sel.tool_msg >= 0 && app->chat_sel.tool_msg < PicoHost_SelectedAgent(app)->message_count)
         {
-            PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[app->chat_sel.tool_msg];
+            PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[app->chat_sel.tool_msg];
             int t = app->chat_sel.tool_idx;
             if (t >= 0 && t < msg->trace_count &&
                 HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
             {
+                PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
                 if (msg->trace[t].is_tool &&
-                    pico_tool_row_activate(app, PicoApp_ActiveAgent(app)->id, &msg->trace[t]))
+                    pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
                 {
                     /* hook handled the row */
                 }
@@ -2280,7 +2356,7 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
     EndScissorMode();
 }
 
-static void PicoChat_DrawChevrons(PicoApp *app)
+static void PicoChat_DrawChevrons(PicoHost *app)
 {
     if (!app->fonts)
     {
@@ -2306,7 +2382,7 @@ static void PicoChat_DrawChevrons(PicoApp *app)
             if (InspectScrollClip(&clip))
             {
                 PicoAgent *owner =
-                    inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+                    inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
                 TranscriptView view = {
                     .app = app,
                     .messages = inspect.messages,
@@ -2392,7 +2468,7 @@ static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, 
     }
 }
 
-static void PicoChat_DrawThinkSheen(PicoApp *app)
+static void PicoChat_DrawThinkSheen(PicoHost *app)
 {
     if (!app || !app->fonts)
     {
@@ -2409,7 +2485,7 @@ static void PicoChat_DrawThinkSheen(PicoApp *app)
     {
         return;
     }
-    PicoMessage *msg = &PicoApp_ActiveAgent(app)->messages[last];
+    PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[last];
     if (msg->role != PICO_ROLE_ASSISTANT || (msg->source && msg->source[0]))
     {
         return;
@@ -2426,7 +2502,7 @@ static void PicoChat_DrawThinkSheen(PicoApp *app)
     DrawThinkSheenLabel(ThinkSynthId(&main, last), scroll.boundingBox, "Thinking…");
 }
 
-static void PicoChat_DrawInspectSheen(PicoApp *app)
+static void PicoChat_DrawInspectSheen(PicoHost *app)
 {
     if (g_inspect_n <= 0)
     {
@@ -2445,7 +2521,7 @@ static void PicoChat_DrawInspectSheen(PicoApp *app)
     {
         return;
     }
-    PicoAgent *owner = inspect.live_id ? PicoAgentManager_Find(app->agents, inspect.live_id) : NULL;
+    PicoAgent *owner = inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
     TranscriptView view = {
         .app = app,
         .messages = inspect.messages,
@@ -2473,9 +2549,14 @@ static void PicoChat_DrawInspectSheen(PicoApp *app)
     DrawThinkSheenLabel(ThinkSynthId(&view, last), clip, "Thinking…");
 }
 
-void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
+void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state)
+    {
+        return;
+    }
     if (!PicoUi_ModalOpen(app))
     {
         PicoChatSel_DrawOverlay(app);
@@ -2488,10 +2569,11 @@ void PicoChat_DrawOverlay(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void ChatOnFrame(PicoApp *app, float dt)
+static void ChatOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
-    if (g_inspect_n <= 0)
+    s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (!s_active_chat_state || g_inspect_n <= 0)
     {
         return;
     }
@@ -2511,46 +2593,50 @@ static void ChatOnFrame(PicoApp *app, float dt)
     }
 }
 
-static void ChatSessionReset(PicoApp *app, const PicoHookEvent *event)
-{
-    PicoAgent *active = PicoApp_ActiveAgent(app);
-    if (!event || !active || event->agent_id == active->id)
-    {
-        PicoTranscriptVirtual_Free(&g_main_virtual);
-        ToolWrapCacheSet_Free(&g_main_tool_wrap);
-    }
-    PicoTranscriptVirtual_Free(&g_inspect_virtual);
-    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
-    g_virtual_relayout = false;
-}
-
-static void ChatShutdown(PicoApp *app)
+static void ChatShutdown(PicoHost *app, void *state)
 {
     (void)app;
+    ChatState *s = (ChatState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_chat_state = s;
     ThinkFrameFree();
-    PicoTranscriptVirtual_Free(&g_main_virtual);
-    PicoTranscriptVirtual_Free(&g_inspect_virtual);
-    ToolWrapCacheSet_Free(&g_main_tool_wrap);
-    ToolWrapCacheSet_Free(&g_inspect_tool_wrap);
-    g_virtual_relayout = false;
+    PicoTranscriptVirtual_Free(&s->main_virtual);
+    PicoTranscriptVirtual_Free(&s->inspect_virtual);
+    ToolWrapCacheSet_Free(&s->main_tool_wrap);
+    ToolWrapCacheSet_Free(&s->inspect_tool_wrap);
+    s->virtual_relayout = false;
     PicoChat_InspectClose();
     InspectForceReset();
-    g_app = NULL;
+    free(s);
+    s_active_chat_state = NULL;
 }
 
-static void ChatInit(PicoApp *app)
+static int ChatInit(PicoHost *app, void **state_out)
 {
-    g_app = app;
-    if (g_inspect_n > 0 && !pico_ui_modal_has(app, "inspect"))
+    ChatState *s = (ChatState *)calloc(1, sizeof(ChatState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->app = app;
+    s->inspect_follow = true;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_chat_state = s;
+    if (s->inspect_n > 0 && !pico_ui_modal_has(app, "inspect"))
     {
         InspectForceReset();
     }
-    pico_add_view(app, PICO_SLOT_MAIN, 0, PicoChat_Render);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 20, InspectRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoChat_HandlePointer);
-    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoChat_DrawOverlay);
-    pico_add_hook(app, PICO_HOOK_ON_SESSION_RESET, ChatSessionReset);
-    pico_add_tool_row_hook(app, SubagentToolRow);
+    pico_host_add_view(app, PICO_SLOT_MAIN, 0, PicoChat_Render);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 20, InspectRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PicoChat_HandlePointer);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, PicoChat_DrawOverlay);
+    return 0;
 }
 
 PicoExt pico_ext_chat(void)
@@ -2559,8 +2645,8 @@ PicoExt pico_ext_chat(void)
         .abi = PICO_EXT_ABI,
         .name = "chat",
         .description = "Chat transcript",
-        .init = ChatInit,
-        .shutdown = ChatShutdown,
-        .on_frame = ChatOnFrame,
+        .host_init = ChatInit,
+        .host_shutdown = ChatShutdown,
+        .host_on_frame = ChatOnFrame,
     };
 }

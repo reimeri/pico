@@ -1,3 +1,4 @@
+#include "host_internal.h"
 /* Included by agent_behavior_test.c to reuse its deterministic provider and worker barriers. */
 
 static bool WriteSubagentProfile(const char *root, const char *json,
@@ -15,12 +16,12 @@ static bool WriteSubagentProfile(const char *root, const char *json,
     return ok;
 }
 
-static bool WaitForManagerIdle(PicoApp *app)
+static bool WaitForManagerIdle(PicoHost *app)
 {
     for (int i = 0; i < 4000; i++)
     {
-        PicoAgentManager_Pump(app->agents);
-        PicoAgent *parent = PicoApp_ActiveAgent(app);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(app));
+        PicoAgent *parent = TestAgent(app);
         if (parent && !PicoAgent_IsBusy(parent) && pico_agent_count(app) == 1)
         {
             return true;
@@ -49,15 +50,15 @@ static int TestNamedSubagentDelegation(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"delegated question\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "parent request");
     bool completed = WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
@@ -77,7 +78,7 @@ static int TestNamedSubagentDelegation(void)
                   strstr(trace->tool_output, "\"final_answer\":\"done\"");
     bool isolated = strcmp(parent->model, "test-model") == 0 &&
                     strcmp(parent->effort, "none") == 0 && pico_agent_count(&app) == 1;
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -104,20 +105,20 @@ static int TestSubagentParentCancellation(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION_CHILD_BLOCK, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"block\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "delegate and cancel");
     bool child_running = false;
     for (int i = 0; i < 3000; i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         if (pico_agent_count(&app) == 2)
         {
             child_running = true;
@@ -127,7 +128,7 @@ static int TestSubagentParentCancellation(void)
     }
     PicoAgent_Cancel(parent);
     bool cancelled = WaitForManagerIdle(&app);
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -155,13 +156,13 @@ static int TestSubagentCancellationBeforeEnqueue(void)
 
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_SINGLE, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
-    pico_add_tool(&app, "late_delegate", "delegate after a barrier", "{}",
-                  LateDelegateTool, NULL);
-    PicoAgentManager_LoadProfiles(app.agents);
+    TestAddTool(&app, "late_delegate", "delegate after a barrier", "{}",
+                LateDelegateTool, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "late_delegate");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "delegate after cancellation");
 
     bool entered = WaitForBlock(&app);
@@ -178,7 +179,7 @@ static int TestSubagentCancellationBeforeEnqueue(void)
     bool no_child_started = g_test.child_input == NULL;
     pthread_mutex_unlock(&g_test.mu);
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -220,18 +221,18 @@ static int TestSubagentSessionContinuation(void)
 
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     ConfigureFakeSession("exploration");
     int random_before = g_random_hex_calls;
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"continue review\","
              "\"session_id\":\"continued-child\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "parent continuation request");
     bool completed = WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
@@ -254,10 +255,10 @@ static int TestSubagentSessionContinuation(void)
     bool durable = g_fake_session.replay_count == 1 &&
                    g_fake_session.log_user_count == 1 &&
                    g_fake_session.append_interrupted_count == 1 &&
-                   !PicoAgentManager_SessionReserved(app.agents, g_fake_session.path, 0);
+                   !PicoWorkspace_SessionReserved(PicoHost_PrimaryWorkspace(&app), g_fake_session.path, 0);
     bool rotated_latest_model = g_random_hex_calls == random_before + 2;
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -286,17 +287,17 @@ static int TestSubagentContinuationEmptyAnswer(void)
 
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION_CHILD_EMPTY, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     ConfigureFakeSession("exploration");
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"return nothing\","
              "\"session_id\":\"continued-child\"}");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "continue with empty result");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "continue with empty result");
     bool completed = WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     bool current_answer = trace && !trace->tool_error && trace->tool_output &&
@@ -304,7 +305,7 @@ static int TestSubagentContinuationEmptyAnswer(void)
                           strstr(trace->tool_output, "\"final_answer\":\"\"") &&
                           !strstr(trace->tool_output, "previous answer");
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -332,30 +333,30 @@ static int TestSubagentResumeFailures(void)
 
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
 
     ConfigureFakeSession("review");
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"mismatch\","
              "\"session_id\":\"continued-child\"}");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "mismatch");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "mismatch");
     bool mismatch_done = WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     bool mismatch = trace && trace->tool_error && trace->tool_output &&
                     strstr(trace->tool_output, "profile does not match") &&
                     g_fake_session.replay_count == 0 && pico_agent_count(&app) == 1 &&
-                    !PicoAgentManager_SessionReserved(app.agents, g_fake_session.path, 0);
+                    !PicoWorkspace_SessionReserved(PicoHost_PrimaryWorkspace(&app), g_fake_session.path, 0);
 
     ResetTest(TEST_DELEGATION, 1);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"missing\",\"task\":\"unknown\"}");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "unknown");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "unknown");
     bool unknown_done = WaitForManagerIdle(&app);
     trace = LastToolTrace(&app);
     bool unknown = trace && trace->tool_error && trace->tool_output &&
@@ -370,15 +371,15 @@ static int TestSubagentResumeFailures(void)
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"missing session\","
              "\"session_id\":\"continued-child\"}");
-    PicoAgent_StartTurn(&app, PicoApp_ActiveAgent(&app), "missing session");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "missing session");
     bool missing_done = WaitForManagerIdle(&app);
     trace = LastToolTrace(&app);
     bool missing = trace && trace->tool_error && trace->tool_output &&
                    strstr(trace->tool_output, "not found or is invalid") &&
                    pico_agent_count(&app) == 1 &&
-                   !PicoAgentManager_SessionReserved(app.agents, g_fake_session.path, 0);
+                   !PicoWorkspace_SessionReserved(PicoHost_PrimaryWorkspace(&app), g_fake_session.path, 0);
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -407,22 +408,22 @@ static int TestSubagentChildAsk(void)
 
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION_CHILD_ASK, 2);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"ask a question\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "delegate with ask");
 
     PicoToolAsk ask;
     bool pending = false;
     for (int i = 0; i < 4000; i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         if (pico_tool_pending_ask(&app, &ask))
         {
             pending = true;
@@ -451,7 +452,7 @@ static int TestSubagentChildAsk(void)
         PicoAgent_Cancel(parent);
         WaitForManagerIdle(&app);
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -460,12 +461,12 @@ static int TestSubagentChildAsk(void)
                ? 0 : Fail(name, "child ask was not routable while the parent remained in tool wait");
 }
 
-static bool WaitForAgentIdle(PicoApp *app, PicoAgentId id, int expected_count)
+static bool WaitForAgentIdle(PicoHost *app, PicoAgentId id, int expected_count)
 {
     for (int i = 0; i < 4000; i++)
     {
-        PicoAgentManager_Pump(app->agents);
-        PicoAgent *agent = PicoAgentManager_Find(app->agents, id);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(app));
+        PicoAgent *agent = PicoHost_FindAgent(app, id);
         if (agent && !PicoAgent_IsBusy(agent) && pico_agent_count(app) == expected_count)
         {
             return true;
@@ -485,7 +486,7 @@ static int TestSubagentDelegationCaps(void)
     }
     char dir[4096];
     char path[4096];
-    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Nested work\",\"tools\":[]}",
+    if (!WriteSubagentProfile(temp, "{\"purpose\":\"Caps\",\"tools\":[]}",
                               dir, sizeof(dir), path, sizeof(path)))
     {
         rmdir(temp);
@@ -494,11 +495,11 @@ static int TestSubagentDelegationCaps(void)
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
 
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp depth_app;
+    PicoHost depth_app;
     InitApp(&depth_app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&depth_app);
-    PicoAgentManager_LoadProfiles(depth_app.agents);
+    InitExt(&depth_app, PicoHost_PrimaryWorkspace(&depth_app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&depth_app));
     PicoAgentId parent_id = pico_agent_active(&depth_app);
     PicoAgentId deepest_id = 0;
     for (int depth = 1; depth <= PICO_MAX_DELEGATION_DEPTH; depth++)
@@ -510,9 +511,9 @@ static int TestSubagentDelegationCaps(void)
             .purpose = "manual chain",
             .session_start = PICO_SESSION_NONE,
         };
-        if (pico_agent_create(&depth_app, &options, &deepest_id) != PICO_AGENT_RESULT_OK)
+        if (PicoWorkspace_CreateAgent(PicoHost_PrimaryWorkspace(&depth_app), &options, &deepest_id) != PICO_OK)
         {
-            PicoApp_Free(&depth_app);
+            PicoHost_Shutdown(&depth_app);
             unlink(path);
             rmdir(dir);
             rmdir(temp);
@@ -524,31 +525,31 @@ static int TestSubagentDelegationCaps(void)
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"too deep\"}");
-    PicoAgent_StartTurn(&depth_app, PicoAgentManager_Find(depth_app.agents, deepest_id), "depth");
+    PicoAgent_StartTurn(&depth_app, PicoHost_FindAgent(&depth_app, deepest_id), "depth");
     bool depth_done = WaitForAgentIdle(&depth_app, deepest_id,
-                                       PICO_MAX_DELEGATION_DEPTH + 1);
+                                        PICO_MAX_DELEGATION_DEPTH + 1);
     PicoTraceLine *trace = LastToolTrace(&depth_app);
     bool depth_limited = trace && trace->tool_error && trace->tool_output &&
                          strstr(trace->tool_output, "depth limit");
-    PicoApp_Free(&depth_app);
+    PicoHost_Shutdown(&depth_app);
 
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp count_app;
+    PicoHost count_app;
     InitApp(&count_app);
     extension = pico_ext_subagent();
-    extension.init(&count_app);
-    PicoAgentManager_LoadProfiles(count_app.agents);
+    InitExt(&count_app, PicoHost_PrimaryWorkspace(&count_app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&count_app));
     PicoAgentId root_id = pico_agent_active(&count_app);
     for (int i = 1; i < PICO_MAX_AGENTS; i++)
     {
         PicoAgentCreateOptions options = {
-            .kind = PICO_AGENT_NORMAL,
+            .kind = PICO_AGENT_MAIN,
             .session_start = PICO_SESSION_NONE,
         };
         PicoAgentId id = 0;
-        if (pico_agent_create(&count_app, &options, &id) != PICO_AGENT_RESULT_OK)
+        if (pico_main_agent_create(&count_app, PicoHost_PrimaryWorkspace(&count_app)->id, &options, &id) != PICO_OK)
         {
-            PicoApp_Free(&count_app);
+            PicoHost_Shutdown(&count_app);
             unlink(path);
             rmdir(dir);
             rmdir(temp);
@@ -558,12 +559,12 @@ static int TestSubagentDelegationCaps(void)
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"one too many\"}");
-    PicoAgent_StartTurn(&count_app, PicoAgentManager_Find(count_app.agents, root_id), "limit");
+    PicoAgent_StartTurn(&count_app, PicoHost_FindAgent(&count_app, root_id), "limit");
     bool count_done = WaitForAgentIdle(&count_app, root_id, PICO_MAX_AGENTS);
     trace = LastToolTrace(&count_app);
     bool count_limited = trace && trace->tool_error && trace->tool_output &&
                          strstr(trace->tool_output, "agent or delegation depth limit reached");
-    PicoApp_Free(&count_app);
+    PicoHost_Shutdown(&count_app);
 
     unlink(path);
     rmdir(dir);
@@ -591,33 +592,34 @@ static int TestSubagentDirectChildCancellation(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION_CHILD_BLOCK, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"block\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "delegate and cancel child");
 
     PicoAgentId child_id = 0;
     for (int i = 0; i < 3000 && !child_id; i++)
     {
-        PicoAgentManager_Pump(app.agents);
-        for (int a = 0; a < app.agents->count; a++)
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
+        PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+        for (int a = 0; ws && a < ws->count; a++)
         {
-            if (app.agents->agents[a]->id != parent->id)
+            if (ws->agents[a]->id != parent->id)
             {
-                child_id = app.agents->agents[a]->id;
+                child_id = ws->agents[a]->id;
                 break;
             }
         }
         SleepOneMs();
     }
     bool cancelled = child_id &&
-                     pico_agent_cancel(&app, child_id) == PICO_AGENT_RESULT_OK &&
+                     pico_agent_cancel(&app, child_id) == PICO_OK &&
                      WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     bool reported = trace && trace->tool_error && trace->tool_output &&
@@ -629,7 +631,7 @@ static int TestSubagentDirectChildCancellation(void)
         PicoAgent_Cancel(parent);
         WaitForManagerIdle(&app);
     }
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -656,23 +658,23 @@ static int TestSubagentLiveInspect(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION_CHILD_BLOCK, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"delegated inspect task\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
-    PicoApp_AddToolCall(&app, "subagent", "{\"task\":\"older pending row\"}");
+    PicoAgent *parent = TestAgent(&app);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "subagent", "{\"task\":\"older pending row\"}");
     PicoAgent_StartTurn(&app, parent, "parent inspect request");
 
     PicoAgentId child_id = 0;
     PicoTraceLine *live_line = NULL;
     for (int i = 0; i < 3000 && !child_id; i++)
     {
-        PicoAgentManager_Pump(app.agents);
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         live_line = LastToolTrace(&app);
         if (live_line && live_line->child_id)
         {
@@ -689,7 +691,7 @@ static int TestSubagentLiveInspect(void)
     bool linked = child_id && live_line && live_line->child_id == child_id &&
                   live_line->tool_call_id && live_line->tool_call_id[0] &&
                   older && older->child_id == 0 &&
-                  PicoAgentManager_InspectSubagent(&app, live_line, &live) && live.live &&
+                  PicoWorkspace_InspectSubagent(&app, live_line, &live) && live.live &&
                   live.live_id == child_id;
     bool readable = false;
     if (linked)
@@ -707,12 +709,12 @@ static int TestSubagentLiveInspect(void)
     memset(&done, 0, sizeof(done));
     PicoAgentInfo gone;
     bool snapshot = done_line && done_line->child_id == child_id &&
-                    PicoAgentManager_InspectSubagent(&app, done_line, &done) && !done.live &&
+                    PicoWorkspace_InspectSubagent(&app, done_line, &done) && !done.live &&
                     done.message_count > 0 && done.messages && done.messages[0].source &&
                     strstr(done.messages[0].source, "delegated inspect task") &&
                     !pico_agent_find(&app, child_id, &gone);
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -739,15 +741,15 @@ static int TestSubagentInspectRetention(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"retained child\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoTraceLine first;
     memset(&first, 0, sizeof(first));
     bool completed = true;
@@ -776,11 +778,11 @@ static int TestSubagentInspectRetention(void)
     PicoSubagentInspect inspect;
     memset(&inspect, 0, sizeof(inspect));
     bool retained = completed && first.child_id &&
-                    PicoAgentManager_InspectSubagent(&app, &first, &inspect) &&
+                    PicoWorkspace_InspectSubagent(&app, &first, &inspect) &&
                     !inspect.live && inspect.message_count > 0 && inspect.messages &&
                     inspect.messages[0].source && strstr(inspect.messages[0].source, "retained child");
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);
@@ -806,24 +808,24 @@ static int TestSubagentInspectThenContinue(void)
     }
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
     ResetTest(TEST_DELEGATION, 1);
-    PicoApp app;
+    PicoHost app;
     InitApp(&app);
     PicoExt extension = pico_ext_subagent();
-    extension.init(&app);
-    PicoAgentManager_LoadProfiles(app.agents);
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
     ConfigureFakeSession("exploration");
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "subagent");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"first look\","
              "\"session_id\":\"continued-child\"}");
-    PicoAgent *parent = PicoApp_ActiveAgent(&app);
+    PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "first");
     bool first = WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     PicoSubagentInspect inspect;
     memset(&inspect, 0, sizeof(inspect));
     bool inspected = first && trace &&
-                     PicoAgentManager_InspectSubagent(&app, trace, &inspect) &&
+                     PicoWorkspace_InspectSubagent(&app, trace, &inspect) &&
                      inspect.message_count > 0;
 
     pthread_mutex_lock(&g_test.mu);
@@ -838,7 +840,7 @@ static int TestSubagentInspectThenContinue(void)
     bool continued = second && again && !again->tool_error && again->tool_output &&
                      strstr(again->tool_output, "\"session_id\":\"continued-child\"");
 
-    PicoApp_Free(&app);
+    PicoHost_Shutdown(&app);
     unlink(path);
     rmdir(dir);
     rmdir(temp);

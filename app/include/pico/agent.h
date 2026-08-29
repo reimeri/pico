@@ -8,7 +8,8 @@
 #define PICO_EFFORT_LEN 16
 #endif
 
-#define PICO_MAX_AGENTS 16
+#define PICO_MAX_AGENTS 16       /* per workspace, including subagents */
+#define PICO_MAX_TOTAL_AGENTS 32 /* host-wide across all workspaces */
 #define PICO_MAX_SUBAGENT_PROFILES 32
 #ifndef PICO_MAX_TOOLS
 #define PICO_MAX_TOOLS 64
@@ -17,14 +18,15 @@
 #define PICO_MAX_RETIRED_RUNTIMES 16
 
 typedef uint64_t PicoAgentId;
+typedef uint64_t PicoWorkspaceId;
 
-struct PicoApp;
+typedef struct PicoHost PicoHost;
+typedef struct PicoWorkspace PicoWorkspace;
 typedef struct PicoAgent PicoAgent;
 typedef struct PicoAgentContext PicoAgentContext;
-typedef struct PicoAgentManager PicoAgentManager;
 
 typedef enum PicoAgentKind {
-    PICO_AGENT_NORMAL = 0,
+    PICO_AGENT_MAIN = 0,
     PICO_AGENT_SUBAGENT,
 } PicoAgentKind;
 
@@ -53,17 +55,6 @@ typedef enum PicoSessionWriteResult {
     PICO_SESSION_WRITE_OK,
     PICO_SESSION_WRITE_FAILED,
 } PicoSessionWriteResult;
-
-typedef enum PicoAgentResult {
-    PICO_AGENT_RESULT_OK = 0,
-    PICO_AGENT_RESULT_INVALID,
-    PICO_AGENT_RESULT_NOT_FOUND,
-    PICO_AGENT_RESULT_BUSY,
-    PICO_AGENT_RESULT_LIMIT,
-    PICO_AGENT_RESULT_SESSION_IN_USE,
-    PICO_AGENT_RESULT_SESSION_INVALID,
-    PICO_AGENT_RESULT_NO_MEMORY,
-} PicoAgentResult;
 
 typedef struct PicoAgentCreateOptions {
     PicoAgentKind kind;
@@ -115,25 +106,21 @@ typedef struct PicoAgentInfo {
 PicoAgentId pico_agent_id(const PicoAgent *agent);
 bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out);
 
-/* Main-thread-only manager API. All returned information is copied. */
-int pico_agent_count(const struct PicoApp *app);
-bool pico_agent_info(const struct PicoApp *app, int index, PicoAgentInfo *out);
-bool pico_agent_find(const struct PicoApp *app, PicoAgentId id, PicoAgentInfo *out);
-PicoAgentId pico_agent_active(const struct PicoApp *app);
-bool pico_agent_select(struct PicoApp *app, PicoAgentId id);
-PicoAgentResult pico_agent_create(struct PicoApp *app, const PicoAgentCreateOptions *options,
-                                  PicoAgentId *out);
-PicoAgentResult pico_agent_close(struct PicoApp *app, PicoAgentId id);
-PicoAgentResult pico_agent_cancel(struct PicoApp *app, PicoAgentId id);
-PicoAgentResult pico_agent_force_cancel(struct PicoApp *app, PicoAgentId id);
-int pico_subagent_profile_count(const struct PicoApp *app);
-bool pico_subagent_profile_info(const struct PicoApp *app, int index,
-                                PicoSubagentProfileInfo *out);
+/* Main-thread-only host API. All returned information is copied. */
+int pico_agent_count(const PicoHost *host);
+bool pico_agent_info(const PicoHost *host, int index, PicoAgentInfo *out);
+bool pico_agent_find(const PicoHost *host, PicoAgentId id, PicoAgentInfo *out);
+PicoAgentId pico_agent_active(const PicoHost *host);
+bool pico_agent_select(PicoHost *host, PicoAgentId id);
+int pico_subagent_profile_count(const PicoHost *host);
+bool pico_subagent_profile_info(const PicoHost *host, int index, PicoSubagentProfileInfo *out);
 
 /* Worker callback context. All returned strings are read-only and valid only
  * for the duration of the callback that received ctx. */
 PicoAgentId pico_agent_context_id(const PicoAgentContext *ctx);
 uint64_t pico_agent_context_generation(const PicoAgentContext *ctx);
+uint64_t pico_agent_context_registration_generation(const PicoAgentContext *ctx);
+PicoWorkspaceId pico_agent_context_workspace_id(const PicoAgentContext *ctx);
 const char *pico_agent_context_workspace(const PicoAgentContext *ctx);
 const char *pico_agent_context_session_id(const PicoAgentContext *ctx);
 const char *pico_agent_context_profile(const PicoAgentContext *ctx);

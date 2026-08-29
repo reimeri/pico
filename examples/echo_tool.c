@@ -1,4 +1,4 @@
-// Example Pico tool extension. Copy to ~/.config/pico/extensions/ or
+// Example workspace-scoped Pico tool. Copy to ~/.config/pico/extensions/ or
 // <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/echo
@@ -14,8 +14,9 @@ static const char *kParams =
     "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to "
     "echo back\"}},\"required\":[\"text\"]}";
 
-static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     if (out)
     {
@@ -45,9 +46,11 @@ static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult
     }
 }
 
-static void EchoInit(PicoApp *app)
+static int EchoInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_tool(app, "echo", "Echo text back", kParams, EchoRun, NULL);
+    (void)state_out;
+    pico_add_tool(workspace, "echo", "Echo text back", kParams, EchoRun, NULL);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -56,6 +59,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "echo",
         .description = "Echo tool example",
-        .init = EchoInit,
+        .workspace_init = EchoInit,
     };
 }

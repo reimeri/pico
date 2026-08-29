@@ -1,4 +1,4 @@
-// Example Pico extension. Copy to ~/.config/pico/extensions/ or
+// Example workspace-scoped empty-state view. Copy to ~/.config/pico/extensions/ or
 // <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/empty_banner
@@ -11,9 +11,11 @@
 
 #include "clay/clay.h"
 
-static void BannerRender(PicoApp *app)
+static void BannerRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
 {
-    (void)app;
+    (void)state;
+    (void)selected_agent_id;
+    (void)workspace;
     CLAY(CLAY_ID("EmptyBanner"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4}})
     {
@@ -24,9 +26,11 @@ static void BannerRender(PicoApp *app)
     }
 }
 
-static void BannerInit(PicoApp *app)
+static int BannerInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_empty_view(app, PICO_EMPTY_ABOVE, 0, BannerRender);
+    (void)state_out;
+    pico_workspace_add_empty_view(workspace, PICO_EMPTY_ABOVE, 0, BannerRender);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -35,6 +39,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "empty_banner",
         .description = "Banner above the empty-state cards",
-        .init = BannerInit,
+        .workspace_init = BannerInit,
     };
 }

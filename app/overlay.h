@@ -3,6 +3,6 @@
 
 #include "pico/app.h"
 
-void PicoOverlay_Notify(PicoApp *app, const char *text);
+void PicoOverlay_Notify(PicoHost *app, const char *text);
 
 #endif

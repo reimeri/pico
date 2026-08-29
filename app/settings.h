@@ -24,24 +24,27 @@ typedef struct PicoPromptSpan {
 void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);
-void PicoSettings_Load(PicoApp *app);
+void PicoHostPreferences_Load(PicoHost *host);
+void PicoWorkspaceSettings_Load(PicoWorkspace *workspace);
 float Pico_ClampChatWidth(float available, float text_max);
-float Pico_ChatTextMaxPx(const PicoApp *app);
-float Pico_ChatColumnMaxPx(const PicoApp *app);
-char *PicoSettings_LoadSystemPrompt(const PicoApp *app);
-char *PicoSettings_LoadSystemPromptSpans(const PicoApp *app, PicoPromptSpan *spans, int *span_count);
-int PicoSettings_LoadedContext(const PicoApp *app, const char **labels, int max);
-PicoModel *PicoSettings_FindModel(PicoApp *app, const char *id);
-const PicoModel *PicoSettings_FindModelConst(const PicoApp *app, const char *id);
-PicoModel *PicoSettings_ActiveModel(PicoApp *app, const PicoAgent *agent);
-const PicoModel *PicoSettings_ActiveModelConst(const PicoApp *app, const PicoAgent *agent);
+float Pico_ChatTextMaxPx(const PicoHost *app);
+float Pico_ChatColumnMaxPx(const PicoHost *app);
+char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace);
+char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPromptSpan *spans,
+                                         int *span_count);
+int PicoSettings_LoadedContext(const PicoWorkspace *workspace, const char **labels, int max);
+PicoModel *PicoSettings_FindModel(PicoWorkspace *workspace, const char *id);
+const PicoModel *PicoSettings_FindModelConst(const PicoWorkspace *workspace, const char *id);
+PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent);
+const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent);
 const char *PicoSettings_ActiveEffort(const PicoAgent *agent);
-void PicoSettings_InitAgent(const PicoApp *app, PicoAgent *agent);
-void PicoSettings_SyncAgent(const PicoApp *app, PicoAgent *agent);
+void PicoSettings_InitAgent(PicoAgent *agent);
+void PicoSettings_SyncAgent(PicoAgent *agent);
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort);
-bool PicoSettings_SetModel(PicoApp *app, PicoAgent *agent, const char *id_or_name);
-bool PicoSettings_SetEffort(PicoApp *app, PicoAgent *agent, const char *level);
-bool PicoSettings_SaveSelection(PicoApp *app, const PicoAgent *agent, bool save_model, bool save_effort);
-bool PicoSettings_SetExtensionDisabled(PicoApp *app, const char *name, bool disabled);
+bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name);
+bool PicoSettings_SetEffort(PicoAgent *agent, const char *level);
+bool PicoSettings_SaveSelection(const PicoAgent *agent, bool save_model, bool save_effort);
+bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
+bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
 
 #endif

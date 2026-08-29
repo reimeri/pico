@@ -3,6 +3,7 @@
 #define CLAY_IMPLEMENTATION
 #include "clay/clay.h"
 #include "../clay/renderers/raylib/clay_renderer_raylib.c"
+#include "host_internal.h"
 
 #include "pico/app.h"
 #include "agent_internal.h"
@@ -47,8 +48,10 @@ static void PrintUsage(const char *argv0)
             "  PICO_MODEL                        default gpt-4o\n"
             "  PICO_EFFORT                       override selected_effort of the active model\n"
             "  PICO_FONT_SCALE                   override font_scale (0.5-3.0, default 1.0)\n"
-            "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale,\n"
-            "                                    chat_width, disabled_extensions}\n"
+            "  ~/.config/pico/host_preferences.json  {font_scale, chat_width, disabled_host_extensions}\n"
+            "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last,\n"
+            "                                    disabled_extensions}\n"
+            "  <workspace>/.pico/settings.json   workspace model/defaults override\n"
             "  ~/.config/pico/auth.json          per-provider credentials (api_key or oauth)\n"
             "  /login openai                     Codex device-code (ChatGPT subscription)\n"
             "  /login hyper                      Hyper device-code (Charm subscription)\n"
@@ -59,8 +62,9 @@ static void PrintUsage(const char *argv0)
             "  <workspace>/AGENTS.md             optional project instructions\n"
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n"
             "  ~/.config/pico/subagents/         named JSONC subagent profiles (see /docs subagents)\n"
+            "  /cd DIR                           open or select a workspace; previous stays open\n"
             "  F2                                 open the extension manager\n"
-            "  F5 or /reload                     reload extensions and profiles after quiescence\n",
+            "  F5 or /reload                     reload host extensions and the selected workspace\n",
             argv0);
 }
 
@@ -116,37 +120,42 @@ int main(int argc, char **argv)
     {
         snprintf(workspace, sizeof(workspace), ".");
     }
-    ChangeDirectory(GetApplicationDirectory());
-
     Font fonts[FONT_COUNT];
     Pico_LoadFonts(fonts);
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
     RichText_SetMeasureFunction(Pico_MeasureTextUtf8, fonts);
 
-    PicoApp app = {0};
-    PicoApp_Init(&app, fonts, workspace, safe_mode, session_start, session_file);
+    PicoHost *app = NULL;
+    if (pico_host_init(&app, fonts, safe_mode) != PICO_OK || !app)
+    {
+        fprintf(stderr, "Pico could not initialize.\n");
+        Pico_UnloadFonts(fonts);
+        Clay_Raylib_Close();
+        return 1;
+    }
+    PicoHost_Start(app, fonts, workspace, safe_mode, session_start, session_file);
     while (!WindowShouldClose())
     {
         if (Pico_NeedsClayReinit())
         {
-            Pico_ReinitClay(fonts, app.debug_enabled);
+            Pico_ReinitClay(fonts, app->debug_enabled);
         }
-        PicoApp_Frame(&app);
+        PicoHost_Frame(app);
     }
 
     char session_path[4096];
     session_path[0] = '\0';
-    const PicoAgent *active = PicoApp_ActiveAgentConst(&app);
+    const PicoAgent *active = PicoHost_SelectedAgentConst(app);
     if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0] &&
         access(active->session_path, F_OK) == 0)
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
-    PicoAppShutdownResult shutdown = PicoApp_Free(&app);
+    PicoHostShutdownResult shutdown = pico_host_free(app);
 
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();
-    if (shutdown == PICO_APP_SHUTDOWN_RETAINED)
+    if (shutdown == PICO_HOST_SHUTDOWN_RETAINED)
     {
         fprintf(stderr, "Pico retained a blocked worker and is exiting without unloading extensions.\n");
     }

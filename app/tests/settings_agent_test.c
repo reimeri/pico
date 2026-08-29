@@ -2,6 +2,7 @@
 
 #include "docs_path.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,22 +17,23 @@ static int Fail(const char *message)
 
 static int TestModelContextBeatsFallback(void)
 {
-    PicoApp app;
+    PicoWorkspace ws;
     PicoAgent agent;
     PicoModel model;
-    memset(&app, 0, sizeof(app));
+    memset(&ws, 0, sizeof(ws));
     memset(&agent, 0, sizeof(agent));
     memset(&model, 0, sizeof(model));
 
     snprintf(model.id, sizeof(model.id), "grok-4.6");
     snprintf(model.name, sizeof(model.name), "Grok 4.6");
     model.context_limit = 500000;
-    app.models = &model;
-    app.model_count = 1;
-    snprintf(app.settings.model, sizeof(app.settings.model), "grok-4.6");
-    app.settings.context_limit = 1000000;
+    ws.models = &model;
+    ws.model_count = 1;
+    snprintf(ws.settings.default_model, sizeof(ws.settings.default_model), "grok-4.6");
+    ws.settings.context_limit_fallback = 1000000;
+    agent.workspace = &ws;
 
-    PicoSettings_InitAgent(&app, &agent);
+    PicoSettings_InitAgent(&agent);
     if (agent.context_limit != 500000)
     {
         return Fail("selected model context_limit lost to root/env fallback");
@@ -41,21 +43,22 @@ static int TestModelContextBeatsFallback(void)
 
 static int TestFallbackWhenModelHasNoLimit(void)
 {
-    PicoApp app;
+    PicoWorkspace ws;
     PicoAgent agent;
     PicoModel model;
-    memset(&app, 0, sizeof(app));
+    memset(&ws, 0, sizeof(ws));
     memset(&agent, 0, sizeof(agent));
     memset(&model, 0, sizeof(model));
 
     snprintf(model.id, sizeof(model.id), "custom");
     snprintf(model.name, sizeof(model.name), "Custom");
-    app.models = &model;
-    app.model_count = 1;
-    snprintf(app.settings.model, sizeof(app.settings.model), "custom");
-    app.settings.context_limit = 128000;
+    ws.models = &model;
+    ws.model_count = 1;
+    snprintf(ws.settings.default_model, sizeof(ws.settings.default_model), "custom");
+    ws.settings.context_limit_fallback = 128000;
+    agent.workspace = &ws;
 
-    PicoSettings_InitAgent(&app, &agent);
+    PicoSettings_InitAgent(&agent);
     if (agent.context_limit != 128000)
     {
         return Fail("missing model context_limit did not use root/env fallback");
@@ -65,11 +68,11 @@ static int TestFallbackWhenModelHasNoLimit(void)
 
 static int TestPerAgentSelection(void)
 {
-    PicoApp app;
+    PicoWorkspace ws;
     PicoAgent first;
     PicoAgent second;
     PicoModel models[2];
-    memset(&app, 0, sizeof(app));
+    memset(&ws, 0, sizeof(ws));
     memset(&first, 0, sizeof(first));
     memset(&second, 0, sizeof(second));
     memset(models, 0, sizeof(models));
@@ -88,17 +91,19 @@ static int TestPerAgentSelection(void)
     models[1].effort_count = 1;
     snprintf(models[1].default_effort, sizeof(models[1].default_effort), "low");
 
-    app.models = models;
-    app.model_count = 2;
-    snprintf(app.settings.model, sizeof(app.settings.model), "model-a");
-    app.settings.compact_enabled = true;
-    app.settings.compact_ratio = 0.75;
+    ws.models = models;
+    ws.model_count = 2;
+    snprintf(ws.settings.default_model, sizeof(ws.settings.default_model), "model-a");
+    ws.settings.compact_enabled = true;
+    ws.settings.compact_ratio = 0.75;
+    first.workspace = &ws;
+    second.workspace = &ws;
 
-    PicoSettings_InitAgent(&app, &first);
-    PicoSettings_InitAgent(&app, &second);
+    PicoSettings_InitAgent(&first);
+    PicoSettings_InitAgent(&second);
     snprintf(first.model, sizeof(first.model), "model-b");
     first.effort[0] = '\0';
-    PicoSettings_SyncAgent(&app, &first);
+    PicoSettings_SyncAgent(&first);
 
     if (strcmp(first.model, "model-b") != 0 || strcmp(first.effort, "low") != 0 ||
         first.context_limit != 200)
@@ -126,31 +131,30 @@ static int TestDisabledExtensionsFromUserSettings(void)
     snprintf(dir, sizeof(dir), "%s/pico", temp);
     Pico_MkdirP(dir);
     char path[sizeof(temp) + 32];
-    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    snprintf(path, sizeof(path), "%s/pico/host_preferences.json", temp);
     FILE *f = fopen(path, "w");
     if (!f)
     {
         rmdir(dir);
         rmdir(temp);
-        return Fail("could not write isolated settings.json");
+        return Fail("could not write isolated host_preferences.json");
     }
-    fputs("{\n  \"disabled_extensions\": [\"composer\"]\n}\n", f);
+    fputs("{\n  \"disabled_host_extensions\": [\"composer\"]\n}\n", f);
     fclose(f);
 
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    PicoHost_SetPath(&app, temp);
     setenv("XDG_CONFIG_HOME", temp, 1);
-    PicoSettings_Load(&app);
-    int failed = app.settings.disabled_extension_count != 1 ||
-                 strcmp(app.settings.disabled_extensions[0], "composer") != 0;
+    PicoHostPreferences_Load(&app);
+    int failed = app.preferences.disabled_host_extension_count != 1 ||
+                 strcmp(app.preferences.disabled_host_extensions[0], "composer") != 0;
 
-    free(app.models);
     unsetenv("XDG_CONFIG_HOME");
     unlink(path);
     rmdir(dir);
     rmdir(temp);
-    return failed ? Fail("user disabled_extensions did not populate the disabled set") : 0;
+    return failed ? Fail("user disabled_host_extensions did not populate the disabled set") : 0;
 }
 
 static int WriteFile(const char *path, const char *contents)
@@ -206,15 +210,21 @@ static int TestPromptSourceSpans(void)
         return Fail("could not write prompt source files");
     }
 
-    PicoApp app;
+    PicoHost app;
+    PicoWorkspace ws;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", workspace);
+    memset(&ws, 0, sizeof(ws));
+    ws.host = &app;
+    snprintf(ws.path, sizeof(ws.path), "%s", workspace);
+    app.workspaces[0] = &ws;
+    app.workspace_count = 1;
+    PicoHost_SetPath(&app, workspace);
     setenv("XDG_CONFIG_HOME", temp, 1);
     Pico_DocsSetAppDir(NULL);
 
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
-    char *text = PicoSettings_LoadSystemPromptSpans(&app, spans, &n);
+    char *text = PicoSettings_LoadSystemPromptSpans(PicoHost_PrimaryWorkspace(&app), spans, &n);
     int failed = !text || n != 3 || ExpectSpan(&spans[0], PICO_PROMPT_SOURCE_BASE, text, "user-system") ||
                  ExpectSpan(&spans[1], PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM, text, "workspace-system") ||
                  ExpectSpan(&spans[2], PICO_PROMPT_SOURCE_AGENTS, text, "agents-md") ||
@@ -244,14 +254,20 @@ static int TestDocsHintIsBaseSpan(void)
     snprintf(config, sizeof(config), "%s/pico", temp);
     Pico_MkdirP(config);
 
-    PicoApp app;
+    PicoHost app;
+    PicoWorkspace ws;
     memset(&app, 0, sizeof(app));
+    memset(&ws, 0, sizeof(ws));
+    ws.host = &app;
+    snprintf(ws.path, sizeof(ws.path), "%s", temp);
+    app.workspaces[0] = &ws;
+    app.workspace_count = 1;
     setenv("XDG_CONFIG_HOME", temp, 1);
     Pico_DocsSetAppDir(temp);
 
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
-    char *text = PicoSettings_LoadSystemPromptSpans(&app, spans, &n);
+    char *text = PicoSettings_LoadSystemPromptSpans(PicoHost_PrimaryWorkspace(&app), spans, &n);
     const char *hint = text ? strstr(text, "If the user asks about Pico") : NULL;
     bool covered = false;
     if (hint && text)

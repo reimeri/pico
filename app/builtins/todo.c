@@ -1,10 +1,11 @@
 #include "pico/plugin.h"
 #include "todo.h"
 #include "todo_model.h"
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "session.h"
 #include "json.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
@@ -26,12 +27,15 @@ typedef struct TodoAgentState {
     bool title_pending;
 } TodoAgentState;
 
-static TodoAgentState g_states[PICO_MAX_AGENTS];
-static float g_composer_width = TODO_EXPANDED_WIDTH;
-static float g_space_above = TODO_EXPANDED_HEIGHT;
-static char g_header[64];
-static bool g_overflow;
-static PicoScrollbar g_scrollbar;
+typedef struct TodoState {
+    PicoWorkspace *workspace;
+    TodoAgentState states[PICO_MAX_AGENTS];
+    float composer_width;
+    float space_above;
+    char header[64];
+    bool overflow;
+    PicoScrollbar scrollbar;
+} TodoState;
 
 static const char *kTodoParams =
     "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":72,"
@@ -56,22 +60,22 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
-static TodoAgentState *FindState(PicoAgentId agent_id, bool create)
+static TodoAgentState *FindState(TodoState *s, PicoAgentId agent_id, bool create)
 {
-    if (!agent_id)
+    if (!s || !agent_id)
     {
         return NULL;
     }
     TodoAgentState *empty = NULL;
     for (int i = 0; i < PICO_MAX_AGENTS; i++)
     {
-        if (g_states[i].agent_id == agent_id)
+        if (s->states[i].agent_id == agent_id)
         {
-            return &g_states[i];
+            return &s->states[i];
         }
-        if (!g_states[i].agent_id && !empty)
+        if (!s->states[i].agent_id && !empty)
         {
-            empty = &g_states[i];
+            empty = &s->states[i];
         }
     }
     if (create && empty)
@@ -82,20 +86,31 @@ static TodoAgentState *FindState(PicoAgentId agent_id, bool create)
     return NULL;
 }
 
-static TodoAgentState *ActiveState(const PicoApp *app)
+static TodoState *ActiveTodoState(const PicoHost *app)
 {
-    return FindState(pico_agent_active(app), false);
+    const PicoWorkspace *ws = PicoHost_SelectedWorkspaceConst(app);
+    return (TodoState *)PicoPlugins_WorkspaceState(ws, "todos");
 }
 
-bool PicoTodo_IsExpanded(const PicoApp *app)
+static TodoAgentState *ActiveState(TodoState *s, const PicoHost *app)
 {
-    TodoAgentState *state = ActiveState(app);
+    return FindState(s, pico_agent_active(app), false);
+}
+
+bool PicoTodo_IsExpanded(const PicoHost *app)
+{
+    TodoState *s = ActiveTodoState(app);
+    if (!s)
+    {
+        return false;
+    }
+    TodoAgentState *state = ActiveState(s, app);
     return state && state->expanded && state->todos.count > 0;
 }
 
-static void ClearState(PicoAgentId agent_id)
+static void ClearState(TodoState *s, PicoAgentId agent_id)
 {
-    TodoAgentState *state = FindState(agent_id, false);
+    TodoAgentState *state = FindState(s, agent_id, false);
     if (!state)
     {
         return;
@@ -104,17 +119,22 @@ static void ClearState(PicoAgentId agent_id)
     memset(state, 0, sizeof(*state));
 }
 
-static void TodoReset(PicoApp *app, const PicoHookEvent *event)
+static void TodoReset(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
-    (void)app;
-    if (event)
+    TodoState *s = (TodoState *)state;
+    if (!s)
     {
-        ClearState(event->agent_id);
+        s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
+    }
+    if (s && event)
+    {
+        ClearState(s, event->agent_id);
     }
 }
 
-static void TodoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void TodoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     if (!out)
     {
@@ -142,8 +162,17 @@ static void TodoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult
     PicoTodoList_Free(&parsed);
 }
 
-static bool TodoApply(PicoApp *app, PicoAgentId agent_id, const char *details_json, bool replay)
+static bool TodoApply(PicoWorkspace *workspace, PicoAgentId agent_id, const char *details_json, bool replay, void *state)
 {
+    TodoState *s = (TodoState *)state;
+    if (!s)
+    {
+        s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
+    }
+    if (!s)
+    {
+        return false;
+    }
     PicoTodoList parsed;
     char *error = NULL;
     if (!PicoTodoList_ParseDetails(details_json, &parsed, &error))
@@ -151,28 +180,28 @@ static bool TodoApply(PicoApp *app, PicoAgentId agent_id, const char *details_js
         free(error);
         return false;
     }
-    TodoAgentState *state = FindState(agent_id, true);
-    if (!state)
+    TodoAgentState *todos = FindState(s, agent_id, true);
+    if (!todos)
     {
         PicoTodoList_Free(&parsed);
         return false;
     }
-    const char *old_task = state->todos.task;
+    const char *old_task = todos->todos.task;
     const char *new_task = parsed.task;
     bool changed = !old_task || !new_task || strcmp(old_task, new_task) != 0;
-    PicoTodoList_Swap(&state->todos, &parsed);
+    PicoTodoList_Swap(&todos->todos, &parsed);
     PicoTodoList_Free(&parsed);
-    if (state->todos.count == 0)
+    if (todos->todos.count == 0)
     {
-        state->expanded = false;
+        todos->expanded = false;
     }
     if (replay)
     {
-        state->title_pending = state->todos.task && state->todos.task[0];
+        todos->title_pending = todos->todos.task && todos->todos.task[0];
     }
-    else if (changed && state->todos.task && state->todos.task[0])
+    else if (changed && todos->todos.task && todos->todos.task[0])
     {
-        state->title_pending = true;
+        todos->title_pending = true;
     }
     return true;
 }
@@ -197,9 +226,15 @@ static bool LastInputIsSuccessfulTodo(const PicoContextEvent *ev)
     return match;
 }
 
-static void TodoContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
+static void TodoContext(PicoWorkspace *workspace, PicoAgentId agent_id, PicoContextEvent *event, void *state)
 {
-    (void)app;
+    TodoState *s = (TodoState *)state;
+    if (!s)
+    {
+        s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
+    }
+    PicoContextEvent *ev = (PicoContextEvent *)event;
+    TodoAgentState *todos;
     bool offered = false;
     for (int i = 0; ev && i < ev->tool_count; i++)
     {
@@ -209,13 +244,13 @@ static void TodoContext(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev
             break;
         }
     }
-    TodoAgentState *state = FindState(agent_id, false);
-    if (!ev || !offered || !state || ev->compact || state->todos.count == 0 ||
-        PicoTodoList_AllCompleted(&state->todos) || LastInputIsSuccessfulTodo(ev))
+    todos = FindState(s, agent_id, false);
+    if (!ev || !offered || !todos || ev->compact || todos->todos.count == 0 ||
+        PicoTodoList_AllCompleted(&todos->todos) || LastInputIsSuccessfulTodo(ev))
     {
         return;
     }
-    ev->extra_context = PicoTodoList_FormatReminder(&state->todos);
+    ev->extra_context = PicoTodoList_FormatReminder(&todos->todos);
 }
 
 static Clay_Color StatusColor(PicoTodoStatus status)
@@ -279,19 +314,30 @@ static void RenderTodoRows(TodoAgentState *state)
     }
 }
 
-static void TodoRender(PicoApp *app)
+static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
 {
-    TodoAgentState *state = ActiveState(app);
-    if (!state || state->todos.count == 0)
+    (void)selected_agent_id;
+    TodoState *s = (TodoState *)state;
+    if (!s)
+    {
+        s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
+    }
+    if (!s)
+    {
+        return;
+    }
+    PicoHost *app = workspace ? workspace->host : NULL;
+    TodoAgentState *todos = ActiveState(s, app);
+    if (!todos || todos->todos.count == 0)
     {
         return;
     }
 
-    int completed = PicoTodoList_Completed(&state->todos);
-    snprintf(g_header, sizeof(g_header), "Todo %d/%d", completed, state->todos.count);
+    int completed = PicoTodoList_Completed(&todos->todos);
+    snprintf(s->header, sizeof(s->header), "Todo %d/%d", completed, todos->todos.count);
 
     float screen_w = (float)GetScreenWidth();
-    float expanded_w = g_composer_width > 0 ? g_composer_width : TODO_EXPANDED_WIDTH;
+    float expanded_w = s->composer_width > 0 ? s->composer_width : TODO_EXPANDED_WIDTH;
     if (expanded_w > TODO_EXPANDED_WIDTH)
     {
         expanded_w = TODO_EXPANDED_WIDTH;
@@ -304,7 +350,7 @@ static void TodoRender(PicoApp *app)
     {
         expanded_w = 220.0f;
     }
-    float expanded_h = g_space_above;
+    float expanded_h = s->space_above;
     if (expanded_h > TODO_EXPANDED_HEIGHT)
     {
         expanded_h = TODO_EXPANDED_HEIGHT;
@@ -313,8 +359,8 @@ static void TodoRender(PicoApp *app)
     {
         expanded_h = 150.0f;
     }
-    float width = state->expanded ? expanded_w : TODO_COLLAPSED_WIDTH;
-    Clay_SizingAxis height = state->expanded ? CLAY_SIZING_FIT(0, expanded_h)
+    float width = todos->expanded ? expanded_w : TODO_COLLAPSED_WIDTH;
+    Clay_SizingAxis height = todos->expanded ? CLAY_SIZING_FIT(0, expanded_h)
                                              : CLAY_SIZING_FIXED(TODO_COLLAPSED_HEIGHT);
 
     CLAY(CLAY_ID("TodoPanel"),
@@ -326,40 +372,40 @@ static void TodoRender(PicoApp *app)
                        .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
                        .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID},
           .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .padding = state->expanded ? (Clay_Padding){14, 14, 12, 12} : (Clay_Padding){12, 12, 8, 8},
+                     .padding = todos->expanded ? (Clay_Padding){14, 14, 12, 12} : (Clay_Padding){12, 12, 8, 8},
                      .childGap = 10,
                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                      .sizing = {.width = CLAY_SIZING_FIXED(width), .height = height}},
           .backgroundColor = COLOR_CONTENT_BG,
-          .cornerRadius = state->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
+          .cornerRadius = todos->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
           .transition = {.handler = Clay_EaseOut,
                          .duration = 0.18f,
                          .properties = CLAY_TRANSITION_PROPERTY_DIMENSIONS |
                                        CLAY_TRANSITION_PROPERTY_CORNER_RADIUS}})
     {
         CLAY(CLAY_ID("TodoPanelHeader"),
-             {.layout = {.layoutDirection = state->expanded ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
-                         .childGap = state->expanded ? 4 : 0,
+             {.layout = {.layoutDirection = todos->expanded ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
+                         .childGap = todos->expanded ? 4 : 0,
                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                          .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            if (state->expanded && state->todos.task && state->todos.task[0])
+            if (todos->expanded && todos->todos.task && todos->todos.task[0])
             {
-                CLAY_TEXT(CStr(state->todos.task),
+                CLAY_TEXT(CStr(todos->todos.task),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
                                             .fontSize = 14,
                                             .textColor = COLOR_TEXT,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                CLAY_TEXT(CStr(g_header),
+                CLAY_TEXT(CStr(s->header),
                           CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED}));
             }
             else
             {
-                CLAY_TEXT(CStr(g_header),
+                CLAY_TEXT(CStr(s->header),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
             }
         }
-        if (state->expanded)
+        if (todos->expanded)
         {
             CLAY(CLAY_ID("TodoListScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -372,9 +418,9 @@ static void TodoRender(PicoApp *app)
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}},
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
-                    RenderTodoRows(state);
+                    RenderTodoRows(todos);
                 }
-                if (g_overflow)
+                if (s->overflow)
                 {
                     PicoScrollbar_Render(CLAY_STRING("TodoListScroll"), CLAY_STRING("TodoListScrollTrack"),
                                          CLAY_STRING("TodoListScrollHandle"));
@@ -384,31 +430,43 @@ static void TodoRender(PicoApp *app)
     }
 }
 
-static void TodoAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void TodoHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    TodoAgentState *state = FindState(event ? event->agent_id : 0, false);
+    (void)state;
+    if (!app)
+    {
+        return;
+    }
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
+    TodoState *s = (TodoState *)PicoPlugins_WorkspaceState(workspace, "todos");
+    if (!s)
+    {
+        return;
+    }
+    PicoAgentId agent_id = event && event->agent_id ? event->agent_id : pico_agent_active(app);
+    TodoAgentState *todos = FindState(s, agent_id, false);
     Clay_ElementData composer = Clay_GetElementData(CLAY_ID("Composer"));
     if (composer.found)
     {
-        g_composer_width = composer.boundingBox.width;
-        g_space_above = composer.boundingBox.y - 20.0f;
+        s->composer_width = composer.boundingBox.width;
+        s->space_above = composer.boundingBox.y - 20.0f;
     }
-    if (!state || state->todos.count == 0)
+    if (!todos || todos->todos.count == 0)
     {
-        g_overflow = false;
+        s->overflow = false;
         return;
     }
-    if (state->expanded)
+    if (todos->expanded)
     {
-        g_overflow = PicoScrollbar_Overflows(CLAY_STRING("TodoListScroll"));
+        s->overflow = PicoScrollbar_Overflows(CLAY_STRING("TodoListScroll"));
     }
     else
     {
-        g_overflow = false;
+        s->overflow = false;
     }
     bool over_panel = Clay_PointerOver(CLAY_ID("TodoPanel"));
     bool over_header = Clay_PointerOver(CLAY_ID("TodoPanelHeader"));
-    if ((!state->expanded && over_panel) || (state->expanded && over_header))
+    if ((!todos->expanded && over_panel) || (todos->expanded && over_header))
     {
         app->hovered_clickable = true;
     }
@@ -416,31 +474,37 @@ static void TodoAfterLayout(PicoApp *app, const PicoHookEvent *event)
     {
         return;
     }
-    if (!state->expanded && over_panel)
+    if (!todos->expanded && over_panel)
     {
-        state->expanded = true;
+        todos->expanded = true;
     }
-    else if (state->expanded && over_header)
+    else if (todos->expanded && over_header)
     {
-        state->expanded = false;
+        todos->expanded = false;
     }
-    else if (state->expanded && !over_panel)
+    else if (todos->expanded && !over_panel)
     {
-        state->expanded = false;
+        todos->expanded = false;
     }
 }
 
-static void TodoFrame(PicoApp *app, float dt)
+static void TodoWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt)
 {
     (void)dt;
+    TodoState *s = (TodoState *)state;
+    if (!s)
+    {
+        return;
+    }
+    PicoHost *app = workspace ? workspace->host : NULL;
     for (int i = 0; app && i < PICO_MAX_AGENTS; i++)
     {
-        TodoAgentState *pending = &g_states[i];
+        TodoAgentState *pending = &s->states[i];
         if (!pending->agent_id || !pending->title_pending)
         {
             continue;
         }
-        PicoAgent *agent = app->agents ? PicoAgentManager_Find(app->agents, pending->agent_id) : NULL;
+        PicoAgent *agent = PicoHost_FindAgent(app, pending->agent_id);
         if (agent && pending->todos.task && pending->todos.task[0])
         {
             (void)PicoSession_LogTitle(app, agent, pending->todos.task);
@@ -448,42 +512,67 @@ static void TodoFrame(PicoApp *app, float dt)
         pending->title_pending = false;
     }
 
-    TodoAgentState *state = ActiveState(app);
-    if (state && state->expanded)
+    TodoAgentState *todos = ActiveState(s, app);
+    if (todos && todos->expanded)
     {
-        PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("TodoListScroll"),
+        PicoScrollbar_UpdateDrag(&s->scrollbar, CLAY_STRING("TodoListScroll"),
                                  CLAY_STRING("TodoListScrollHandle"));
         if (IsKeyPressed(KEY_ESCAPE))
         {
-            state->expanded = false;
+            todos->expanded = false;
         }
     }
 }
 
-static void TodoInit(PicoApp *app)
+static int TodoHostInit(PicoHost *app, void **state_out)
 {
-    pico_add_tool(app, "todo_update",
+    (void)state_out;
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, TodoHostAfterLayout);
+    return 0;
+}
+
+static int TodoWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    TodoState *s = (TodoState *)calloc(1, sizeof(TodoState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->workspace = workspace;
+    s->composer_width = TODO_EXPANDED_WIDTH;
+    s->space_above = TODO_EXPANDED_HEIGHT;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    pico_add_tool(workspace, "todo_update",
                   "Replace the complete canonical TODO list. Set task to a succinct session title for the current "
                   "work and keep it stable unless the goal changes. Include every current item, use stable IDs and "
                   "statuses pending, in_progress, or completed, and keep at most one item in_progress.",
                   kTodoParams, TodoRun, TodoApply);
-    pico_add_context_hook(app, TodoContext);
-    pico_add_hook(app, PICO_HOOK_ON_SESSION_RESET, TodoReset);
-    pico_add_hook(app, PICO_HOOK_ON_AGENT_DESTROY, TodoReset);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, TodoAfterLayout);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 5, TodoRender);
+    pico_add_context_hook(workspace, TodoContext);
+    pico_workspace_add_hook(workspace, PICO_HOOK_ON_SESSION_RESET, TodoReset);
+    pico_workspace_add_hook(workspace, PICO_HOOK_ON_AGENT_DESTROY, TodoReset);
+    pico_workspace_add_view(workspace, PICO_SLOT_OVERLAY, 5, TodoRender);
+    return 0;
 }
 
-static void TodoShutdown(PicoApp *app)
+static void TodoWorkspaceShutdown(PicoWorkspace *workspace, void *state)
 {
-    (void)app;
+    (void)workspace;
+    TodoState *s = (TodoState *)state;
+    if (!s)
+    {
+        return;
+    }
     for (int i = 0; i < PICO_MAX_AGENTS; i++)
     {
-        if (g_states[i].agent_id)
+        if (s->states[i].agent_id)
         {
-            ClearState(g_states[i].agent_id);
+            ClearState(s, s->states[i].agent_id);
         }
     }
+    free(s);
 }
 
 PicoExt pico_ext_todo(void)
@@ -492,8 +581,9 @@ PicoExt pico_ext_todo(void)
         .abi = PICO_EXT_ABI,
         .name = "todos",
         .description = "Agent TODO tracking",
-        .init = TodoInit,
-        .shutdown = TodoShutdown,
-        .on_frame = TodoFrame,
+        .host_init = TodoHostInit,
+        .workspace_init = TodoWorkspaceInit,
+        .workspace_shutdown = TodoWorkspaceShutdown,
+        .workspace_on_frame = TodoWorkspaceOnFrame,
     };
 }

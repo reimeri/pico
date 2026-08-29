@@ -7,6 +7,7 @@
 #include "builtins/ask_user.h"
 #include "json.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
@@ -89,7 +90,14 @@ typedef struct AskUiState {
     PicoScrollbar body_scrollbar;
 } AskUiState;
 
-static AskUiState g_ui;
+static __thread AskUiState *s_active_ask_state = NULL;
+
+static AskUiState *ActiveAskState(void)
+{
+    return s_active_ask_state;
+}
+
+#define g_ui (*ActiveAskState())
 
 static void MarkTextViewDirty(void);
 
@@ -366,8 +374,9 @@ char *PicoAskUser_BuildRequest(const char *args_json, char *error, size_t error_
     return result;
 }
 
-static void AskUserRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void AskUserRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     if (!out)
     {
         return;
@@ -554,7 +563,7 @@ static int LoadUiRequest(const char *request_json, char *error, size_t error_cap
     return 1;
 }
 
-static void AnswerUiError(PicoApp *app, uint64_t id, const char *message)
+static void AnswerUiError(PicoHost *app, uint64_t id, const char *message)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -573,7 +582,7 @@ static void AnswerUiError(PicoApp *app, uint64_t id, const char *message)
     free(answer);
 }
 
-static void SyncPendingAsk(PicoApp *app)
+static void SyncPendingAsk(PicoHost *app)
 {
     PicoToolAsk ask;
     if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
@@ -985,7 +994,7 @@ static char *BuildAnswer(void)
     return JsonBuf_Steal(&b);
 }
 
-static void SubmitAnswers(PicoApp *app)
+static void SubmitAnswers(PicoHost *app)
 {
     for (int i = 0; i < g_ui.question_count; i++)
     {
@@ -1031,7 +1040,7 @@ static void GoBack(void)
     }
 }
 
-static void GoForward(PicoApp *app)
+static void GoForward(PicoHost *app)
 {
     AskQuestion *q = &g_ui.questions[g_ui.current];
     if (!QuestionAnswered(q))
@@ -1061,9 +1070,9 @@ static bool ShiftDown(void)
     return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 }
 
-static void HandleTextKeys(PicoApp *app, AskQuestion *q);
+static void HandleTextKeys(PicoHost *app, AskQuestion *q);
 
-static void HandleSelectKeys(PicoApp *app, AskQuestion *q)
+static void HandleSelectKeys(PicoHost *app, AskQuestion *q)
 {
     if (q->selected == q->option_count)
     {
@@ -1136,7 +1145,7 @@ static void PasteText(AskQuestion *q)
     }
 }
 
-static void HandleTextKeys(PicoApp *app, AskQuestion *q)
+static void HandleTextKeys(PicoHost *app, AskQuestion *q)
 {
     bool ctrl = CtrlDown();
     bool shift = ShiftDown();
@@ -1242,9 +1251,14 @@ static void UpdateAskScrollbarDrag(void)
                              CLAY_STRING("AskUserBodyHandle"));
 }
 
-static void AskUserOnFrame(PicoApp *app, float dt)
+static void AskUserOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state)
+    {
+        return;
+    }
     SyncPendingAsk(app);
     if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
@@ -1424,10 +1438,10 @@ static void RenderTextQuestion(const AskQuestion *q)
                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 }
 
-static void AskUserRender(PicoApp *app)
+static void AskUserRender(PicoHost *app, void *state)
 {
-    (void)app;
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
@@ -1646,10 +1660,11 @@ static void EnsureAskCaretVisible(const AskQuestion *q)
     }
 }
 
-static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
@@ -1727,11 +1742,11 @@ static void AskUserAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void AskUserDrawOverlay(PicoApp *app, const PicoHookEvent *event)
+static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)app;
     (void)event;
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
+    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
@@ -1805,9 +1820,11 @@ static void AskUserDrawOverlay(PicoApp *app, const PicoHookEvent *event)
     EndScissorMode();
 }
 
-static void AskUserLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
+static void AskUserLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
-    (void)app;
+    PicoLlmEvent *ev = event;
+    (void)workspace;
+    (void)state;
     (void)agent_id;
     bool offered = false;
     for (int i = 0; ev && i < ev->tool_count; i++)
@@ -1827,25 +1844,53 @@ static void AskUserLlm(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *ev)
     }
 }
 
-static void AskUserInit(PicoApp *app)
+static int AskUserHostInit(PicoHost *app, void **state_out)
 {
-    pico_add_tool(app, "ask_user",
+    AskUiState *s = (AskUiState *)calloc(1, sizeof(AskUiState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->seen_cursor = -1;
+    s->seen_length = -1;
+    s->text_box_max = 120.0f;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_ask_state = s;
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, AskUserDrawOverlay);
+    return 0;
+}
+
+static void AskUserHostShutdown(PicoHost *app, void *state)
+{
+    (void)app;
+    AskUiState *s = (AskUiState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_ask_state = s;
+    ClearQuestions();
+    s->answered_id = 0;
+    free(s);
+    s_active_ask_state = NULL;
+}
+
+static int AskUserWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)state_out;
+    pico_add_tool(workspace, "ask_user",
                   "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
                   "in one call. Use kind 'select' with options for a single choice; select questions always include a "
                   "required free-form Other choice. Use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL);
-    pico_add_llm_hook(app, AskUserLlm);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
-    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, AskUserDrawOverlay);
-}
-
-static void AskUserShutdown(PicoApp *app)
-{
-    (void)app;
-    ClearQuestions();
-    g_ui.answered_id = 0;
+    pico_add_llm_hook(workspace, AskUserLlm);
+    return 0;
 }
 
 PicoExt pico_ext_ask_user(void)
@@ -1854,8 +1899,9 @@ PicoExt pico_ext_ask_user(void)
         .abi = PICO_EXT_ABI,
         .name = "ask-user",
         .description = "Multi-step required select and free-form clarifying questions",
-        .init = AskUserInit,
-        .shutdown = AskUserShutdown,
-        .on_frame = AskUserOnFrame,
+        .host_init = AskUserHostInit,
+        .host_shutdown = AskUserHostShutdown,
+        .host_on_frame = AskUserOnFrame,
+        .workspace_init = AskUserWorkspaceInit,
     };
 }

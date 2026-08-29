@@ -2,16 +2,18 @@
 
 Request-context hooks append app-authored, request-only text to an LLM request without changing system instructions or saved agent history.
 
-Register on the main thread in `init` (full file: [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c)):
+Register on the main thread in `workspace_init` (full file: [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c)):
 
 ```c
 #include "pico/plugin.h"
 #include "json.h"
 
-static void AddReminder(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev)
+static void AddReminder(PicoWorkspace *workspace, PicoAgentId agent_id, PicoContextEvent *ev,
+                        void *state)
 {
-    (void)app;
+    (void)workspace;
     (void)agent_id;
+    (void)state;
     if (ev->compact)
     {
         return;
@@ -19,9 +21,11 @@ static void AddReminder(PicoApp *app, PicoAgentId agent_id, PicoContextEvent *ev
     ev->extra_context = JsonDup("Remember to verify the result.");
 }
 
-static void Init(PicoApp *app)
+static int Init(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_context_hook(app, AddReminder);
+    (void)state_out;
+    pico_add_context_hook(workspace, AddReminder);
+    return 0;
 }
 ```
 

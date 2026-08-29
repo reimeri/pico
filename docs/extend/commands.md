@@ -2,24 +2,31 @@
 
 Slash commands are handled on submit, not sent to the model.
 
+Commands can be registered at two scopes:
+- **Host commands** (`pico_host_add_command`) — registered during `host_init`. Callback signature: `void (*PicoHostCmdFn)(PicoHost *host, PicoAgentId agent_id, const char *args, void *state);` (e.g. `/quit`, `/help`, `/docs`, `/login`, `/logout`). `/reload` is a host command that also requests reload of the command agent's workspace.
+- **Workspace commands** (`pico_workspace_add_command`) — registered during `workspace_init`. Callback signature: `void (*PicoWorkspaceCmdFn)(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state);` (e.g. `/model`, `/effort`, `/new`, `/resume`, `/cd`, `/compact`).
+
 ```c
 #include "pico/plugin.h"
 
 #include <time.h>
 
-static void TimeCmd(PicoApp *app, const char *args)
+static void TimeCmd(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
 {
+    (void)state;
     (void)args;
     time_t now = time(NULL);
     char *line = ctime(&now);
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
-    PicoComposer_SetText(app, "");
-    app->submit_cancel = true;
+    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
+    PicoComposer_SetText(host, "");
+    PicoHost_RequestSubmitCancel(host);
 }
 
-static void TimeInit(PicoApp *app)
+static int TimeInit(PicoHost *host, void **state_out)
 {
-    pico_add_command(app, "time", "Show the local time", TimeCmd);
+    (void)state_out;
+    pico_host_add_command(host, "time", "Show the local time", TimeCmd);
+    return 0;
 }
 ```
 
@@ -29,10 +36,10 @@ Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types 
 
 - `name` has no leading slash. Completer inserts `/name`.
 - `name` and `help` must outlive the extension — string literals.
-- `run` receives the rest of the line after `/name` (may be empty).
-- **Always set `app->submit_cancel = true`**, or the slash line is also sent to the agent. Clear the composer with `PicoComposer_SetText(app, "")`.
-- Runs on the **main thread** from `PICO_HOOK_BEFORE_SUBMIT` (builtin `commands` extension). Safe to call `PicoApp_AddMessage`.
+- `run` receives the snapshotted `PicoAgentId` from the submit that invoked the command, then the rest of the line after `/name` (may be empty). Workspace-scoped command lookup uses the submitting agent's workspace. A later selection change cannot retarget that command. Builtin `/cd` resolves relative paths against that same command workspace, opens or reuses the canonical target, creates a main agent there only if that workspace has none, and leaves the previous workspace open. Builtin `/reload` reloads host extensions and the command agent's workspace only.
+- **Always call `PicoHost_RequestSubmitCancel(host)`** (or `pico_workspace_host(workspace)` for workspace commands), or the slash line is also sent to the agent. Clear the composer with `PicoComposer_SetText(host, "")`.
+- Runs on the **main thread** from `PICO_HOOK_BEFORE_SUBMIT` (builtin `commands` extension). Safe to call `PicoHost_AddMessage(host, agent_id, ...)`. Builtin `/login` and `/logout` forward that same snapshotted ID into auth callbacks, including later device-login notes.
 - Max 64 commands (`PICO_MAX_COMMANDS`).
 - Builtin `/` completer (`bol_only`) lists your command automatically.
 
-To offer argument completions (`/docs topic`), add a `pico_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`. `/resume` completions list parent sessions; a subagent session can still be opened by typing its session ID.
+To offer argument completions (`/docs topic`), add a `pico_host_add_completer` or `pico_workspace_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`. `/resume` completions list parent sessions; a subagent session can still be opened by typing its session ID.

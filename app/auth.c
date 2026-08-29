@@ -5,6 +5,7 @@
 #include "json.h"
 #include "path.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -23,6 +24,11 @@ typedef struct StoredAuth {
     char *refresh_token;
     char *account_id;
     long expires_at;
+    pthread_cond_t refresh_cv;
+    bool refresh_cv_inited;
+    bool refreshing;
+    PicoLlmCancelFn refresh_owner_cancel;
+    void *refresh_owner_user;
 } StoredAuth;
 
 /* Entries are individually allocated so a `StoredAuth *` stays valid across
@@ -50,6 +56,11 @@ static void FreeStrings(StoredAuth *e)
     e->access_token = NULL;
     e->refresh_token = NULL;
     e->account_id = NULL;
+    if (e->refresh_cv_inited)
+    {
+        pthread_cond_destroy(&e->refresh_cv);
+        e->refresh_cv_inited = false;
+    }
 }
 
 static void SetStr(char **slot, const char *v)
@@ -117,6 +128,8 @@ static StoredAuth *Ensure(PicoAuthStore *s, const char *provider)
     {
         return NULL;
     }
+    pthread_cond_init(&e->refresh_cv, NULL);
+    e->refresh_cv_inited = true;
     snprintf(e->provider, sizeof(e->provider), "%s", provider);
     s->entries[s->count++] = e;
     return e;
@@ -146,13 +159,23 @@ static bool WriteSecret(const char *path, const char *data, size_t len)
     {
         return false;
     }
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash)
+    {
+        *slash = '\0';
+    }
+    else
+    {
+        snprintf(dir, sizeof(dir), ".");
+    }
     char tmp[4096];
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp))
     {
         return false;
     }
-    unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    int fd = mkstemp(tmp);
     if (fd < 0)
     {
         return false;
@@ -179,6 +202,20 @@ static bool WriteSecret(const char *path, const char *data, size_t len)
     if (!ok || rename(tmp, path) != 0)
     {
         unlink(tmp);
+        return false;
+    }
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0)
+    {
+        return false;
+    }
+    if (fsync(dfd) != 0)
+    {
+        close(dfd);
+        return false;
+    }
+    if (close(dfd) != 0)
+    {
         return false;
     }
     return true;
@@ -312,7 +349,7 @@ static void LoadFile(PicoAuthStore *s, const char *path)
 
 /* Providers own their environment variable names, so the key arrives here rather
  * than being read by the store. It is deliberately never persisted. */
-void pico_auth_set_env_key(PicoApp *app, const char *provider, const char *key)
+void pico_auth_set_env_key(PicoHost *app, const char *provider, const char *key)
 {
     if (!app || !app->auth_store || !provider || !provider[0])
     {
@@ -341,14 +378,45 @@ void pico_auth_entry_free(PicoAuthEntry *e)
     memset(e, 0, sizeof(*e));
 }
 
-void pico_add_auth(PicoApp *app, const PicoAuth *a)
+void pico_add_auth(PicoHost *app, const PicoAuth *a)
 {
-    if (!app || !a || !a->provider || !a->provider[0] || !a->login || app->auth_count >= PICO_MAX_AUTH)
+    if (!app)
     {
         return;
     }
-    app->auths[app->auth_count] = *a;
-    app->auth_count++;
+    if (app->reg_scope != PICO_REG_HOST)
+    {
+        pico_status_warn(app, "pico_add_auth is only valid during host extension init");
+        return;
+    }
+    if (!a || !a->provider || !a->provider[0] || !a->login)
+    {
+        pico_status_warn(app, "pico_add_auth: invalid auth descriptor");
+        return;
+    }
+    if (app->auth_count + app->staging.host_auth_count >= PICO_MAX_AUTH)
+    {
+        pico_status_warn(app, "pico_add_auth: auth limit reached");
+        return;
+    }
+    for (int i = 0; i < app->auth_count; i++)
+    {
+        if (app->auths[i].provider && strcmp(app->auths[i].provider, a->provider) == 0)
+        {
+            pico_status_warn(app, "pico_add_auth: duplicate auth provider");
+            return;
+        }
+    }
+    for (int i = 0; i < app->staging.host_auth_count; i++)
+    {
+        if (app->staging.host_auths[i].provider && strcmp(app->staging.host_auths[i].provider, a->provider) == 0)
+        {
+            pico_status_warn(app, "pico_add_auth: duplicate auth provider");
+            return;
+        }
+    }
+    app->staging.host_auths[app->staging.host_auth_count] = *a;
+    app->staging.host_auth_count++;
 }
 
 static bool NameEq(const char *a, const char *b)
@@ -371,7 +439,7 @@ static bool NameEq(const char *a, const char *b)
     return *a == *b;
 }
 
-const PicoAuth *pico_find_auth(const PicoApp *app, const char *provider)
+const PicoAuth *pico_find_auth(const PicoHost *app, const char *provider)
 {
     if (!app || !provider || !provider[0])
     {
@@ -421,7 +489,7 @@ static bool AuthCopyStore(PicoAuthStore *store, const char *provider, PicoAuthEn
     return ok;
 }
 
-bool pico_auth_copy(PicoApp *app, const char *provider, PicoAuthEntry *out)
+bool pico_auth_copy(PicoHost *app, const char *provider, PicoAuthEntry *out)
 {
     return AuthCopyStore(app ? app->auth_store : NULL, provider, out);
 }
@@ -472,7 +540,7 @@ static bool AuthSetOauthStore(PicoAuthStore *store, const char *provider, const 
     return saved;
 }
 
-bool pico_auth_set_oauth(PicoApp *app, const char *provider, const char *access, const char *refresh,
+bool pico_auth_set_oauth(PicoHost *app, const char *provider, const char *access, const char *refresh,
                          const char *account_id, long expires_at)
 {
     return AuthSetOauthStore(app ? app->auth_store : NULL, provider, access, refresh,
@@ -520,7 +588,7 @@ bool pico_auth_set_oauth_ctx(PicoAgentContext *ctx, const char *provider, const 
     return saved;
 }
 
-bool pico_auth_set_active(PicoApp *app, const char *provider, const char *active)
+bool pico_auth_set_active(PicoHost *app, const char *provider, const char *active)
 {
     if (!app || !app->auth_store || !provider || !provider[0] || !active)
     {
@@ -538,7 +606,7 @@ bool pico_auth_set_active(PicoApp *app, const char *provider, const char *active
     return saved;
 }
 
-bool pico_auth_clear_oauth(PicoApp *app, const char *provider)
+bool pico_auth_clear_oauth(PicoHost *app, const char *provider)
 {
     if (!app || !app->auth_store || !provider || !provider[0])
     {
@@ -567,7 +635,7 @@ bool pico_auth_clear_oauth(PicoApp *app, const char *provider)
     return saved;
 }
 
-void PicoAuth_Load(PicoApp *app)
+void PicoAuth_Load(PicoHost *app)
 {
     if (!app)
     {
@@ -592,7 +660,7 @@ void PicoAuth_Load(PicoApp *app)
     }
 }
 
-void PicoAuth_Free(PicoApp *app)
+void PicoAuth_Free(PicoHost *app)
 {
     if (!app || !app->auth_store)
     {
@@ -610,4 +678,124 @@ void PicoAuth_Free(PicoApp *app)
     pthread_mutex_destroy(&s->mu);
     free(s);
     app->auth_store = NULL;
+}
+
+static bool OauthDue(const PicoAuthEntry *auth)
+{
+    if (!auth || !auth->access_token || !auth->access_token[0])
+    {
+        return true;
+    }
+    if (auth->expires_at <= 0)
+    {
+        return false;
+    }
+    long now = (long)time(NULL);
+    return (auth->expires_at - now) <= 300;
+}
+
+int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
+                                PicoLlmCancelFn cancel, void *user,
+                                PicoAuthEntry *auth_out)
+{
+    if (!ctx || !provider || !provider[0] || !auth_out)
+    {
+        return PICO_AUTH_REFRESH_FAILED;
+    }
+    PicoAuthStore *store = PicoAgentContext_AuthStore(ctx);
+    if (!store)
+    {
+        return PICO_AUTH_REFRESH_FAILED;
+    }
+
+    pthread_mutex_lock(&store->mu);
+    StoredAuth *e = Ensure(store, provider);
+    if (!e)
+    {
+        pthread_mutex_unlock(&store->mu);
+        return PICO_AUTH_REFRESH_FAILED;
+    }
+
+    while (e->refreshing)
+    {
+        bool owner_abandoned = e->refresh_owner_cancel &&
+                               e->refresh_owner_cancel(e->refresh_owner_user);
+        if (owner_abandoned || (cancel && cancel(user)) ||
+            pico_agent_context_cancelled(ctx))
+        {
+            pthread_mutex_unlock(&store->mu);
+            return PICO_AUTH_REFRESH_FAILED;
+        }
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 100000000L;
+        if (until.tv_nsec >= 1000000000L)
+        {
+            until.tv_sec++;
+            until.tv_nsec -= 1000000000L;
+        }
+        (void)pthread_cond_timedwait(&e->refresh_cv, &store->mu, &until);
+    }
+
+    PicoAuthEntry latest;
+    memset(&latest, 0, sizeof(latest));
+    snprintf(latest.provider, sizeof(latest.provider), "%s", e->provider);
+    snprintf(latest.active, sizeof(latest.active), "%s", e->active);
+    latest.api_key = EffectiveKey(e) ? JsonDup(EffectiveKey(e)) : NULL;
+    latest.access_token = (e->access_token && e->access_token[0]) ? JsonDup(e->access_token) : NULL;
+    latest.refresh_token = (e->refresh_token && e->refresh_token[0]) ? JsonDup(e->refresh_token) : NULL;
+    latest.account_id = (e->account_id && e->account_id[0]) ? JsonDup(e->account_id) : NULL;
+    latest.expires_at = e->expires_at;
+
+    pico_auth_entry_free(auth_out);
+    *auth_out = latest;
+
+    if (strcmp(auth_out->active, PICO_AUTH_OAUTH) != 0)
+    {
+        pthread_mutex_unlock(&store->mu);
+        return PICO_AUTH_REFRESH_FAILED;
+    }
+    if (auth_out->access_token && auth_out->access_token[0] && !OauthDue(auth_out))
+    {
+        pthread_mutex_unlock(&store->mu);
+        return PICO_AUTH_REFRESH_ALREADY_VALID;
+    }
+    if (!auth_out->refresh_token || !auth_out->refresh_token[0] ||
+        (cancel && cancel(user)) || pico_agent_context_cancelled(ctx))
+    {
+        pthread_mutex_unlock(&store->mu);
+        return PICO_AUTH_REFRESH_FAILED;
+    }
+
+    e->refreshing = true;
+    e->refresh_owner_cancel = cancel;
+    e->refresh_owner_user = user;
+    pthread_mutex_unlock(&store->mu);
+    return PICO_AUTH_REFRESH_OWNER;
+}
+
+void pico_auth_end_refresh_ctx(PicoAgentContext *ctx, const char *provider)
+{
+    if (!ctx || !provider || !provider[0])
+    {
+        return;
+    }
+    PicoAuthStore *store = PicoAgentContext_AuthStore(ctx);
+    if (!store)
+    {
+        return;
+    }
+    pthread_mutex_lock(&store->mu);
+    StoredAuth *e = Find(store, provider);
+    if (e)
+    {
+        e->refreshing = false;
+        e->refresh_owner_cancel = NULL;
+        e->refresh_owner_user = NULL;
+        if (e->refresh_cv_inited)
+        {
+            pthread_cond_broadcast(&e->refresh_cv);
+        }
+    }
+    pthread_mutex_unlock(&store->mu);
 }

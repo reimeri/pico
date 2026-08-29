@@ -1,5 +1,6 @@
-// Example Pico extension. Copy to ~/.config/pico/extensions/ or
-// <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
+// Example host-scoped Pico extension (sidebar view). Copy to
+// ~/.config/pico/extensions/ (a subfolder is fine) then press F5.
+// Workspace-local sources must not set host callbacks.
 //
 //   mkdir -p ~/.config/pico/extensions/hello
 //   cp examples/hello.c ~/.config/pico/extensions/hello/
@@ -8,9 +9,10 @@
 
 #include "clay/clay.h"
 
-static void HelloRender(PicoApp *app)
+static void HelloRender(PicoHost *host, void *state)
 {
-    (void)app;
+    (void)state;
+    (void)host;
     CLAY(CLAY_ID("HelloExt"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 6}})
     {
@@ -21,9 +23,11 @@ static void HelloRender(PicoApp *app)
     }
 }
 
-static void HelloInit(PicoApp *app)
+static int HelloInit(PicoHost *host, void **state_out)
 {
-    pico_add_view(app, PICO_SLOT_SIDEBAR, 0, HelloRender);
+    (void)state_out;
+    pico_host_add_view(host, PICO_SLOT_SIDEBAR, 0, HelloRender);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -32,6 +36,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "hello",
         .description = "Sidebar hello view",
-        .init = HelloInit,
+        .host_init = HelloInit,
     };
 }

@@ -33,7 +33,8 @@ int main(void)
     {
         return 1;
     }
-    if (ExpectRel("subagents", "docs/subagents.md") || ExpectRel("anatomy", "docs/extend/anatomy.md"))
+    if (ExpectRel("subagents", "docs/subagents.md") || ExpectRel("anatomy", "docs/extend/anatomy.md") ||
+        ExpectRel("host", "docs/extend/host.md") || ExpectRel("workspace", "docs/extend/workspace.md"))
     {
         return 1;
     }

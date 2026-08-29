@@ -2,6 +2,7 @@
 
 #include "settings.h"
 #include "theme_internal.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,19 +65,18 @@ static int TestNonFiniteSetting(void)
         return Fail("could not create isolated settings directory");
     }
 
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    PicoHost_SetPath(&app, temp);
     setenv("XDG_CONFIG_HOME", temp, 1);
     setenv("PICO_FONT_SCALE", "2.0", 1);
-    PicoSettings_Load(&app);
-    int valid_failed = app.settings.font_scale != 2.0 || Pico_FontScale() != 2.0f;
+    PicoHostPreferences_Load(&app);
+    int valid_failed = app.preferences.font_scale != 2.0 || Pico_FontScale() != 2.0f;
 
     setenv("PICO_FONT_SCALE", "nan", 1);
-    PicoSettings_Load(&app);
-    int non_finite_failed = app.settings.font_scale != 1.0 || Pico_FontScale() != 1.0f;
+    PicoHostPreferences_Load(&app);
+    int non_finite_failed = app.preferences.font_scale != 1.0 || Pico_FontScale() != 1.0f;
 
-    free(app.models);
     unsetenv("PICO_FONT_SCALE");
     unsetenv("XDG_CONFIG_HOME");
     char config_dir[4096];

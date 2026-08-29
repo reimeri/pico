@@ -2,15 +2,17 @@
 #define PICO_AGENT_INTERNAL_H
 
 #include "pico/app.h"
+#include "pico/host.h"
 
 struct PicoAgentRt;
 typedef struct PicoAgentRt PicoAgentRt;
+typedef struct PicoRegistrationGeneration PicoRegistrationGeneration;
 
-PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager);
-const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager);
+void PicoAgent_RefreshRegistration(PicoHost *app, PicoAgent *agent);
+PicoRegistrationGeneration *PicoAgent_Registration(PicoAgent *agent);
 
 struct PicoAgent {
-    PicoAgentManager *manager;
+    PicoWorkspace *workspace;
     PicoAgentId id;
     PicoAgentId parent_id;
     uint64_t runtime_generation;
@@ -50,15 +52,5 @@ struct PicoAgent {
     int allowed_tool_count;
     bool tool_policy_valid;
 };
-
-static inline PicoAgent *PicoApp_ActiveAgent(PicoApp *app)
-{
-    return app ? PicoAgentManager_Active(app->agents) : NULL;
-}
-
-static inline const PicoAgent *PicoApp_ActiveAgentConst(const PicoApp *app)
-{
-    return app ? PicoAgentManager_ActiveConst(app->agents) : NULL;
-}
 
 #endif

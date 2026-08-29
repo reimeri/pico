@@ -1,4 +1,4 @@
-// Named overlay modal + tool-row click. Copy then F5:
+// Host overlay modal plus workspace tool-row click. Copy then F5:
 //
 //   mkdir -p ~/.config/pico/extensions/modal
 //   cp examples/modal.c ~/.config/pico/extensions/modal/
@@ -11,46 +11,27 @@
 #include <string.h>
 
 static const char *kName = "example-modal";
-static bool g_open;
-
 static const char *kParams = "{\"type\":\"object\",\"properties\":{}}";
 
-static void CloseModal(PicoApp *app)
+static void CloseModal(PicoHost *host)
 {
-    if (!g_open)
-    {
-        return;
-    }
-    if (!pico_ui_modal_pop(app, kName))
-    {
-        return;
-    }
-    g_open = false;
+    (void)pico_ui_modal_pop(host, kName);
 }
 
-static void OpenModal(PicoApp *app)
+static void OpenModal(PicoHost *host)
 {
-    if (g_open)
-    {
-        return;
-    }
-    if (!pico_ui_modal_push(app, kName))
-    {
-        return;
-    }
-    g_open = true;
+    (void)pico_ui_modal_push(host, kName);
 }
 
-static void ModalRender(PicoApp *app)
+static void ModalRender(PicoHost *host, void *state)
 {
-    float sw;
-    float sh;
-    if (!g_open)
+    (void)state;
+    if (!pico_ui_modal_has(host, kName))
     {
         return;
     }
-    sw = (float)GetScreenWidth();
-    sh = (float)GetScreenHeight();
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
     CLAY(CLAY_ID("ExampleModalDim"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
                        .zIndex = 50,
@@ -76,60 +57,65 @@ static void ModalRender(PicoApp *app)
                                         .fontSize = 14,
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            (void)app;
+            (void)host;
         }
     }
 }
 
-static void ModalAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void ModalAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
-    if (!g_open || !pico_ui_modal_is_top(app, kName))
+    if (!pico_ui_modal_is_top(host, kName))
     {
         return;
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ExampleModalCard"))))
     {
-        app->hovered_clickable = true;
+        pico_host_set_hovered_clickable(host);
         return;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ExampleModalDim"))))
     {
-        CloseModal(app);
+        CloseModal(host);
     }
 }
 
-static void ModalOnFrame(PicoApp *app, float dt)
+static void ModalOnFrame(PicoHost *host, void *state, float dt)
 {
     (void)dt;
-    if (!g_open || !pico_ui_modal_is_top(app, kName))
+    (void)state;
+    if (!pico_ui_modal_is_top(host, kName))
     {
         return;
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {
-        CloseModal(app);
+        CloseModal(host);
     }
 }
 
-static void CmdModal(PicoApp *app, const char *args)
+static void CmdModal(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
 {
+    (void)state;
     (void)args;
-    if (g_open)
+    (void)agent_id;
+    if (pico_ui_modal_has(host, kName))
     {
-        CloseModal(app);
+        CloseModal(host);
     }
     else
     {
-        OpenModal(app);
+        OpenModal(host);
     }
-    PicoComposer_SetText(app, "");
-    app->submit_cancel = true;
+    PicoComposer_SetText(host, "");
+    PicoHost_RequestSubmitCancel(host);
 }
 
-static void ModalDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void ModalDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)ctx;
     (void)args_json;
     if (out)
@@ -139,34 +125,39 @@ static void ModalDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolR
     }
 }
 
-static void ModalToolRow(PicoApp *app, PicoToolRowEvent *ev)
+static void ModalToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
-    if (!ev || !ev->name || strcmp(ev->name, "modal_demo") != 0)
+    (void)state;
+    if (!event || !event->name || strcmp(event->name, "modal_demo") != 0)
     {
         return;
     }
-    OpenModal(app);
-    ev->handled = true;
+    OpenModal(pico_workspace_host(workspace));
+    event->handled = true;
 }
 
-static void ModalInit(PicoApp *app)
+static int ModalHostInit(PicoHost *host, void **state_out)
 {
-    if (g_open && !pico_ui_modal_has(app, kName))
-    {
-        (void)pico_ui_modal_push(app, kName);
-    }
-    pico_add_view(app, PICO_SLOT_OVERLAY, 50, ModalRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ModalAfterLayout);
-    pico_add_command(app, "modal", "Toggle the example overlay modal", CmdModal);
-    pico_add_tool(app, "modal_demo", "Open the example overlay from its tool row", kParams, ModalDemoRun,
+    (void)state_out;
+    pico_host_add_view(host, PICO_SLOT_OVERLAY, 50, ModalRender);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, ModalAfterLayout);
+    pico_host_add_command(host, "modal", "Toggle the example overlay modal", CmdModal);
+    return 0;
+}
+
+static int ModalWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)state_out;
+    pico_add_tool(workspace, "modal_demo", "Open the example overlay from its tool row", kParams, ModalDemoRun,
                   NULL);
-    pico_add_tool_row_hook(app, ModalToolRow);
+    pico_add_tool_row_hook(workspace, ModalToolRow);
+    return 0;
 }
 
-static void ModalShutdown(PicoApp *app)
+static void ModalShutdown(PicoHost *host, void *state)
 {
-    CloseModal(app);
-    g_open = false;
+    (void)state;
+    CloseModal(host);
 }
 
 PicoExt pico_ext(void)
@@ -175,8 +166,9 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "modal",
         .description = "Named overlay modal and tool-row click example",
-        .init = ModalInit,
-        .shutdown = ModalShutdown,
-        .on_frame = ModalOnFrame,
+        .host_init = ModalHostInit,
+        .workspace_init = ModalWorkspaceInit,
+        .host_shutdown = ModalShutdown,
+        .host_on_frame = ModalOnFrame,
     };
 }

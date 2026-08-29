@@ -1,8 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "subagent_config.h"
+#include "host_internal.h"
 
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -30,11 +31,11 @@ static bool ValidProfileName(const char *name)
     return strlen(name) <= 64;
 }
 
-static bool ToolRegistered(const PicoApp *app, const char *name)
+static bool ToolRegistered(const PicoWorkspace *workspace, const char *name)
 {
-    for (int i = 0; app && i < app->tool_count; i++)
+    for (int i = 0; workspace && i < workspace->tool_count; i++)
     {
-        if (app->tools[i].name && strcmp(app->tools[i].name, name) == 0)
+        if (workspace->tools[i].name && strcmp(workspace->tools[i].name, name) == 0)
         {
             return true;
         }
@@ -42,16 +43,17 @@ static bool ToolRegistered(const PicoApp *app, const char *name)
     return false;
 }
 
-static void ProfileWarning(PicoApp *app, const char *path, const char *reason)
+static void ProfileWarning(PicoHost *app, const char *path, const char *reason)
 {
     char line[4608];
     snprintf(line, sizeof(line), "%s: %s", path, reason);
     pico_status_warn(app, line);
 }
 
-static bool ParseProfile(PicoApp *app, const char *path, const char *name,
+static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char *name,
                          PicoSubagentProfileInfo *out)
 {
+    PicoHost *app = workspace ? workspace->host : NULL;
     size_t len = 0;
     char *source = Pico_ReadFile(path, &len);
     if (!source)
@@ -104,7 +106,7 @@ static bool ParseProfile(PicoApp *app, const char *path, const char *name,
     {
         error = "model must be a string";
     }
-    else if (model && (!model[0] || !PicoSettings_FindModelConst(app, model)))
+    else if (model && (!model[0] || !PicoSettings_FindModelConst(workspace, model)))
     {
         error = "model is not in the model catalog";
     }
@@ -113,7 +115,7 @@ static bool ParseProfile(PicoApp *app, const char *path, const char *name,
         error = "effort must be a string";
     }
     else if (effort && model &&
-             !PicoSettings_EffortAllowed(PicoSettings_FindModelConst(app, model), effort))
+             !PicoSettings_EffortAllowed(PicoSettings_FindModelConst(workspace, model), effort))
     {
         error = "effort is not supported by the configured model";
     }
@@ -136,7 +138,7 @@ static bool ParseProfile(PicoApp *app, const char *path, const char *name,
                 {
                     error = "tool names must be non-empty strings shorter than 128 bytes";
                 }
-                else if (!ToolRegistered(app, tool))
+                else if (!ToolRegistered(workspace, tool))
                 {
                     error = "tools contains an unknown tool name";
                 }
@@ -204,9 +206,9 @@ static bool ParseProfile(PicoApp *app, const char *path, const char *name,
     return error == NULL;
 }
 
-void PicoSubagentConfig_Load(PicoAgentManager *manager)
+void PicoSubagentConfig_Load(PicoWorkspace *workspace)
 {
-    if (!manager || !manager->app)
+    if (!workspace || !workspace->host)
     {
         return;
     }
@@ -253,10 +255,10 @@ void PicoSubagentConfig_Load(PicoAgentManager *manager)
             }
             if (!ValidProfileName(profile_name))
             {
-                ProfileWarning(manager->app, path, "invalid profile filename");
+                ProfileWarning(workspace->host, path, "invalid profile filename");
                 continue;
             }
-            if (ParseProfile(manager->app, path, profile_name, &loaded[count]))
+            if (ParseProfile(workspace, path, profile_name, &loaded[count]))
             {
                 count++;
             }
@@ -264,25 +266,25 @@ void PicoSubagentConfig_Load(PicoAgentManager *manager)
         closedir(directory);
     }
 
-    memset(manager->profiles, 0, sizeof(manager->profiles));
-    memcpy(manager->profiles, loaded, (size_t)count * sizeof(loaded[0]));
-    manager->profile_count = count;
+    memset(workspace->profiles, 0, sizeof(workspace->profiles));
+    memcpy(workspace->profiles, loaded, (size_t)count * sizeof(loaded[0]));
+    workspace->profile_count = count;
 }
 
-const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoAgentManager *manager,
+const PicoSubagentProfileInfo *PicoSubagentConfig_Find(const PicoWorkspace *workspace,
                                                        const char *name)
 {
-    for (int i = 0; manager && name && i < manager->profile_count; i++)
+    for (int i = 0; workspace && name && i < workspace->profile_count; i++)
     {
-        if (strcmp(manager->profiles[i].name, name) == 0)
+        if (strcmp(workspace->profiles[i].name, name) == 0)
         {
-            return &manager->profiles[i];
+            return &workspace->profiles[i];
         }
     }
     return NULL;
 }
 
-bool PicoSubagentConfig_Resolve(const PicoApp *app, const PicoAgent *parent,
+bool PicoSubagentConfig_Resolve(const PicoHost *app, const PicoAgent *parent,
                                 const PicoSubagentProfileInfo *profile,
                                 char *model, size_t model_cap,
                                 char *effort, size_t effort_cap)
@@ -292,7 +294,7 @@ bool PicoSubagentConfig_Resolve(const PicoApp *app, const PicoAgent *parent,
         return false;
     }
     const char *resolved_model = profile->has_model ? profile->model : parent->model;
-    const PicoModel *catalog = PicoSettings_FindModelConst(app, resolved_model);
+    const PicoModel *catalog = PicoSettings_FindModelConst(parent->workspace, resolved_model);
     if (!catalog)
     {
         return false;

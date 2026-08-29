@@ -2,17 +2,29 @@
 #define PICO_PLUGIN_H
 
 #include "pico/app.h"
+#include "pico/host.h"
+#include "pico/workspace.h"
 
-#define PICO_EXT_ABI 12
+#define PICO_EXT_ABI 13 /* host and workspace instances; no ABI 12 loader */
 
-// User/agent extensions export a function named pico_ext with this signature.
+typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);
+typedef void (*PicoHostExtShutdownFn)(PicoHost *host, void *state);
+typedef void (*PicoHostExtFrameFn)(PicoHost *host, void *state, float dt);
+
+typedef int (*PicoWorkspaceExtInitFn)(PicoWorkspace *workspace, void **state_out);
+typedef void (*PicoWorkspaceExtShutdownFn)(PicoWorkspace *workspace, void *state);
+typedef void (*PicoWorkspaceExtFrameFn)(PicoWorkspace *workspace, void *state, float dt);
+
 typedef struct PicoExt {
     int abi;
     const char *name;
-    const char *description; /* optional; shown in /extensions */
-    void (*init)(PicoApp *app);
-    void (*shutdown)(PicoApp *app);
-    void (*on_frame)(PicoApp *app, float dt);
+    const char *description;
+    PicoHostExtInitFn host_init;
+    PicoHostExtShutdownFn host_shutdown;
+    PicoHostExtFrameFn host_on_frame;
+    PicoWorkspaceExtInitFn workspace_init;
+    PicoWorkspaceExtShutdownFn workspace_shutdown;
+    PicoWorkspaceExtFrameFn workspace_on_frame;
 } PicoExt;
 
 PicoExt pico_ext_chat(void);

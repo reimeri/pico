@@ -1,6 +1,7 @@
 #include "canonical.h"
 #include "composer_internal.h"
 #include "json.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,13 +12,38 @@
 
 char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
                                  char **parts_json_out);
+PicoExt pico_ext_composer(void);
 
 static int g_failed;
+static void *g_composer_state = NULL;
 
-void pico_status_warn(PicoApp *app, const char *msg)
+void *PicoPlugins_HostState(const PicoHost *host, const char *name)
 {
-    (void)app;
-    (void)msg;
+    (void)host;
+    if (name && strcmp(name, "composer") == 0)
+    {
+        return g_composer_state;
+    }
+    return NULL;
+}
+
+void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name)
+{
+    (void)workspace;
+    (void)name;
+    return NULL;
+}
+
+void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
+}
+
+void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
 }
 
 static void Check(bool ok, const char *message)
@@ -260,9 +286,9 @@ static void TestClipboardOwnerCannotBlockUi(void)
     const char *old_path_value = getenv("PATH");
     char *old_path = old_path_value ? JsonDup(old_path_value) : NULL;
     setenv("PATH", temp, 1);
-    PicoApp app;
+    PicoHost app;
     memset(&app, 0, sizeof(app));
-    snprintf(app.workspace, sizeof(app.workspace), "%s", temp);
+    PicoHost_SetPath(&app, temp);
 
     double started = WallSeconds();
     PicoComposer_BeginClipboardPaste(&app);
@@ -319,6 +345,11 @@ static void TestOwnedAttachmentLifetime(void)
 
 int main(void)
 {
+    PicoExt comp_ext = pico_ext_composer();
+    PicoHost app;
+    memset(&app, 0, sizeof(app));
+    comp_ext.host_init(&app, &g_composer_state);
+
     TestAttachMergeImagePart();
     TestMergeKeepsMentionAndPaste();
     TestRemoveDropsPath();
@@ -329,5 +360,8 @@ int main(void)
 #endif
     TestOwnedAttachmentLifetime();
     PicoComposer_DiscardAttachments();
+
+    comp_ext.host_shutdown(&app, g_composer_state);
+    g_composer_state = NULL;
     return g_failed;
 }

@@ -6,6 +6,7 @@
 #include "json.h"
 #include "builtins/completions.h"
 #include "builtins/hyper_auth.h"
+#include "host_internal.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -17,12 +18,6 @@
 static const char kDefaultBase[] = "https://hyper.charm.land/v1";
 static const char kHyperOrigin[] = "https://hyper.charm.land";
 static const char kJsonContent[] = "Content-Type: application/json";
-
-static pthread_mutex_t g_refresh_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_refresh_cv = PTHREAD_COND_INITIALIZER;
-static bool g_refreshing;
-static PicoLlmCancelFn g_refresh_owner_cancel;
-static void *g_refresh_owner_user;
 
 static bool EffortOn(const char *effort)
 {
@@ -54,48 +49,60 @@ typedef struct DeviceLogin {
     bool joinable;
     bool running;
     bool cancel;
+    PicoAgentId agent_id;
     char *notes[PICO_DEVICE_MAX_NOTES];
     int note_count;
 } DeviceLogin;
 
-static DeviceLogin g_login = {.mu = PTHREAD_MUTEX_INITIALIZER};
+typedef struct HostAuthState {
+    PicoHost *host;
+    DeviceLogin login;
+} HostAuthState;
 
-static void LoginNote(const char *text)
+static void LoginNote(HostAuthState *s, const char *text)
 {
-    if (!text || !text[0])
+    if (!s || !text || !text[0])
     {
         return;
     }
-    pthread_mutex_lock(&g_login.mu);
-    if (g_login.note_count < PICO_DEVICE_MAX_NOTES)
+    pthread_mutex_lock(&s->login.mu);
+    if (s->login.note_count < PICO_DEVICE_MAX_NOTES)
     {
-        g_login.notes[g_login.note_count] = JsonDup(text);
-        if (g_login.notes[g_login.note_count])
+        s->login.notes[s->login.note_count] = JsonDup(text);
+        if (s->login.notes[s->login.note_count])
         {
-            g_login.note_count++;
+            s->login.note_count++;
         }
     }
-    pthread_mutex_unlock(&g_login.mu);
+    pthread_mutex_unlock(&s->login.mu);
 }
 
 static bool LoginCancelled(void *user)
 {
-    (void)user;
-    pthread_mutex_lock(&g_login.mu);
-    bool c = g_login.cancel;
-    pthread_mutex_unlock(&g_login.mu);
+    HostAuthState *s = (HostAuthState *)user;
+    if (!s)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&s->login.mu);
+    bool c = s->login.cancel;
+    pthread_mutex_unlock(&s->login.mu);
     return c;
 }
 
-static bool LoginActive(void)
+static bool LoginActive(HostAuthState *s)
 {
-    pthread_mutex_lock(&g_login.mu);
-    bool r = g_login.running;
-    pthread_mutex_unlock(&g_login.mu);
+    if (!s)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&s->login.mu);
+    bool r = s->login.running;
+    pthread_mutex_unlock(&s->login.mu);
     return r;
 }
 
-static bool LoginSleep(int seconds)
+static bool LoginSleep(HostAuthState *s, int seconds)
 {
     if (seconds < PICO_HYPER_MIN_INTERVAL_SEC)
     {
@@ -103,33 +110,37 @@ static bool LoginSleep(int seconds)
     }
     for (int i = 0; i < seconds * 5; i++)
     {
-        if (LoginCancelled(NULL))
+        if (LoginCancelled(s))
         {
             return false;
         }
         struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
-    return !LoginCancelled(NULL);
+    return !LoginCancelled(s);
 }
 
-static void StopDeviceLogin(void)
+static void StopDeviceLogin(HostAuthState *s)
 {
-    pthread_mutex_lock(&g_login.mu);
-    g_login.cancel = true;
-    bool joinable = g_login.joinable;
-    pthread_t t = g_login.thread;
-    g_login.joinable = false;
-    pthread_mutex_unlock(&g_login.mu);
+    if (!s)
+    {
+        return;
+    }
+    pthread_mutex_lock(&s->login.mu);
+    s->login.cancel = true;
+    bool joinable = s->login.joinable;
+    pthread_t t = s->login.thread;
+    s->login.joinable = false;
+    pthread_mutex_unlock(&s->login.mu);
     if (joinable)
     {
         pthread_join(t, NULL);
     }
 }
 
-static void Note(PicoApp *app, const char *text)
+static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
 {
-    PicoApp_AddMessage(app, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, text);
 }
 
 typedef struct TurnCancel {
@@ -272,7 +283,7 @@ static long TokenExpiry(const JsonDoc *doc, int obj)
     return expires_at - buffer;
 }
 
-static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth, const char *body,
+static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth, const char *body,
                            const char *fallback_refresh, const char *team_id)
 {
     JsonDoc doc;
@@ -301,8 +312,9 @@ static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *a
                          : pico_auth_set_oauth(app, "hyper", access, use_refresh, account, expires_at);
         if (!saved && !ctx)
         {
-            LoginNote("Warning: could not write `~/.config/pico/auth.json`. This session stays "
-                      "signed in, but the login will not survive a restart.");
+            HostAuthState *s = (HostAuthState *)PicoPlugins_HostState(app, "hyper");
+            LoginNote(s, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
+                         "signed in, but the login will not survive a restart.");
         }
         if (auth)
         {
@@ -324,7 +336,7 @@ static bool ApplyTokenBody(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *a
     return ok;
 }
 
-static int ExchangeRefreshToken(PicoApp *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
+static int ExchangeRefreshToken(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
                                 const char *refresh_token, const char *team_id, TurnCancel *tc)
 {
     JsonBuf b;
@@ -378,74 +390,30 @@ static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel 
         return false;
     }
 
-    pthread_mutex_lock(&g_refresh_mu);
-    while (g_refreshing)
+    if (!force)
     {
-        bool owner_abandoned = g_refresh_owner_cancel && g_refresh_owner_cancel(g_refresh_owner_user);
-        if (owner_abandoned || (tc && TurnCancelled(tc)) || pico_agent_context_cancelled(ctx))
+        int res = pico_auth_begin_refresh_ctx(ctx, "hyper", tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
+        if (res == PICO_AUTH_REFRESH_ALREADY_VALID)
         {
-            pthread_mutex_unlock(&g_refresh_mu);
+            return true;
+        }
+        if (res != PICO_AUTH_REFRESH_OWNER)
+        {
             return false;
         }
-        struct timespec until;
-        clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_nsec += 100000000L;
-        if (until.tv_nsec >= 1000000000L)
+    }
+    else
+    {
+        int res = pico_auth_begin_refresh_ctx(ctx, "hyper", tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
+        if (res == PICO_AUTH_REFRESH_FAILED)
         {
-            until.tv_sec++;
-            until.tv_nsec -= 1000000000L;
+            return false;
         }
-        (void)pthread_cond_timedwait(&g_refresh_cv, &g_refresh_mu, &until);
     }
-
-    PicoAuthEntry latest;
-    if (!pico_auth_copy_ctx(ctx, "hyper", &latest))
-    {
-        pthread_mutex_unlock(&g_refresh_mu);
-        return false;
-    }
-    bool rejected_token_replaced =
-        force && pico_hyper_oauth_token_replaced(auth->access_token, latest.access_token);
-    pico_auth_entry_free(auth);
-    *auth = latest;
-    if (strcmp(auth->active, PICO_AUTH_OAUTH) != 0)
-    {
-        pthread_mutex_unlock(&g_refresh_mu);
-        return false;
-    }
-    bool refresh_needed =
-        pico_hyper_oauth_refresh_needed(auth->access_token, auth->expires_at, time(NULL), false);
-    if (rejected_token_replaced && !refresh_needed)
-    {
-        pthread_mutex_unlock(&g_refresh_mu);
-        return true;
-    }
-    if (!force && !refresh_needed)
-    {
-        pthread_mutex_unlock(&g_refresh_mu);
-        return true;
-    }
-    if (!auth->refresh_token || !auth->refresh_token[0] || (tc && TurnCancelled(tc)) ||
-        pico_agent_context_cancelled(ctx))
-    {
-        pthread_mutex_unlock(&g_refresh_mu);
-        return false;
-    }
-    g_refreshing = true;
-    g_refresh_owner_cancel = tc ? tc->fn : NULL;
-    g_refresh_owner_user = tc ? tc->user : NULL;
-    pthread_mutex_unlock(&g_refresh_mu);
 
     int rc = ExchangeRefreshToken(NULL, ctx, auth, auth->refresh_token, auth->account_id, tc);
-    bool ok = rc == PICO_HTTP_OK;
-
-    pthread_mutex_lock(&g_refresh_mu);
-    g_refreshing = false;
-    g_refresh_owner_cancel = NULL;
-    g_refresh_owner_user = NULL;
-    pthread_cond_broadcast(&g_refresh_cv);
-    pthread_mutex_unlock(&g_refresh_mu);
-    return ok;
+    pico_auth_end_refresh_ctx(ctx, "hyper");
+    return rc == PICO_HTTP_OK;
 }
 
 typedef enum DevicePoll {
@@ -457,8 +425,8 @@ typedef enum DevicePoll {
     DEVICE_CANCELLED,
 } DevicePoll;
 
-static DevicePoll PollDeviceOnce(const char *device_code, char **out_refresh, char **out_team,
-                                 int *out_interval, char **out_error)
+static DevicePoll PollDeviceOnce(HostAuthState *s, const char *device_code, char **out_refresh,
+                                 char **out_team, int *out_interval, char **out_error)
 {
     JsonBuf path;
     JsonBuf_Init(&path);
@@ -472,6 +440,7 @@ static DevicePoll PollDeviceOnce(const char *device_code, char **out_refresh, ch
     req.headers[0] = kJsonContent;
     req.header_count = 1;
     req.cancel = LoginCancelled;
+    req.user = s;
     long http = 0;
     char *body = NULL;
     char *err = NULL;
@@ -551,8 +520,9 @@ static DevicePoll PollDeviceOnce(const char *device_code, char **out_refresh, ch
     return state;
 }
 
-static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_code, size_t user_cap,
-                              char *verify_url, size_t url_cap, int *interval, int *expires_in)
+static bool RequestDeviceAuth(HostAuthState *s, char *device_code, size_t code_cap, char *user_code,
+                              size_t user_cap, char *verify_url, size_t url_cap, int *interval,
+                              int *expires_in)
 {
     char name[320];
     DeviceName(name, sizeof(name));
@@ -571,6 +541,7 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
     req.headers[0] = kJsonContent;
     req.header_count = 1;
     req.cancel = LoginCancelled;
+    req.user = s;
     long http = 0;
     char *body = NULL;
     char *err = NULL;
@@ -588,7 +559,7 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
         char buf[512];
         snprintf(buf, sizeof(buf), "Could not start Hyper login: %s", detail ? detail : "unknown error");
         free(detail);
-        LoginNote(buf);
+        LoginNote(s, buf);
         free(body);
         free(err);
         return false;
@@ -596,7 +567,7 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
     JsonDoc doc;
     if (!body || JsonParse(&doc, body, strlen(body)) != 0)
     {
-        LoginNote("Could not start Hyper login: bad response.");
+        LoginNote(s, "Could not start Hyper login: bad response.");
         free(body);
         free(err);
         return false;
@@ -623,7 +594,7 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
     }
     else
     {
-        LoginNote("Could not start Hyper login: missing device code.");
+        LoginNote(s, "Could not start Hyper login: missing device code.");
     }
     free(got_code);
     free(got_user);
@@ -636,13 +607,18 @@ static bool RequestDeviceAuth(char *device_code, size_t code_cap, char *user_cod
 
 static void *DeviceLoginMain(void *arg)
 {
-    PicoApp *app = (PicoApp *)arg;
+    HostAuthState *s = (HostAuthState *)arg;
+    if (!s)
+    {
+        return NULL;
+    }
+    PicoHost *app = s->host;
     char device_code[256] = {0};
     char user_code[64] = {0};
     char verify_url[512] = {0};
     int interval = 5;
     int expires_in = PICO_DEVICE_TIMEOUT_SEC;
-    if (RequestDeviceAuth(device_code, sizeof(device_code), user_code, sizeof(user_code), verify_url,
+    if (RequestDeviceAuth(s, device_code, sizeof(device_code), user_code, sizeof(user_code), verify_url,
                           sizeof(verify_url), &interval, &expires_in))
     {
         char msg[768];
@@ -650,33 +626,33 @@ static void *DeviceLoginMain(void *arg)
                  "Sign in at %s\nEnter code: `%s`\n\nThe code expires in %d minutes. "
                  "`/login hyper cancel` to stop.",
                  verify_url, user_code, expires_in / 60);
-        LoginNote(msg);
+        LoginNote(s, msg);
 
         time_t deadline = time(NULL) + expires_in;
         int fails = 0;
-        while (LoginSleep(interval))
+        while (LoginSleep(s, interval))
         {
             if (time(NULL) >= deadline)
             {
-                LoginNote("Hyper login timed out. Run `/login hyper` to try again.");
+                LoginNote(s, "Hyper login timed out. Run `/login hyper` to try again.");
                 break;
             }
             char *refresh = NULL;
             char *team = NULL;
             int slow_interval = 0;
             char *error = NULL;
-            DevicePoll state = PollDeviceOnce(device_code, &refresh, &team, &slow_interval, &error);
+            DevicePoll state = PollDeviceOnce(s, device_code, &refresh, &team, &slow_interval, &error);
             bool keep_polling = state == DEVICE_PENDING || state == DEVICE_SLOW_DOWN;
             if (state == DEVICE_READY)
             {
                 int rc = ExchangeRefreshToken(app, NULL, NULL, refresh, team, NULL);
                 if (rc == PICO_HTTP_OK)
                 {
-                    LoginNote("Signed in with Charm Hyper.");
+                    LoginNote(s, "Signed in with Charm Hyper.");
                 }
                 else if (rc != PICO_HTTP_CANCEL)
                 {
-                    LoginNote("Hyper token exchange failed. Run `/login hyper` to try again.");
+                    LoginNote(s, "Hyper token exchange failed. Run `/login hyper` to try again.");
                 }
             }
             else if (state == DEVICE_PENDING)
@@ -707,7 +683,7 @@ static void *DeviceLoginMain(void *arg)
             {
                 char buf[512];
                 snprintf(buf, sizeof(buf), "Hyper login failed: %s", error ? error : "unknown error");
-                LoginNote(buf);
+                LoginNote(s, buf);
             }
             free(refresh);
             free(team);
@@ -718,63 +694,76 @@ static void *DeviceLoginMain(void *arg)
             }
         }
     }
-    pthread_mutex_lock(&g_login.mu);
-    g_login.running = false;
-    pthread_mutex_unlock(&g_login.mu);
+    pthread_mutex_lock(&s->login.mu);
+    s->login.running = false;
+    pthread_mutex_unlock(&s->login.mu);
     return NULL;
 }
 
-static void StartDeviceLogin(PicoApp *app)
+static void StartDeviceLogin(HostAuthState *s, PicoAgentId agent_id)
 {
-    StopDeviceLogin();
-    pthread_mutex_lock(&g_login.mu);
-    for (int i = 0; i < g_login.note_count; i++)
+    if (!s)
     {
-        free(g_login.notes[i]);
-        g_login.notes[i] = NULL;
+        return;
     }
-    g_login.note_count = 0;
-    g_login.cancel = false;
-    g_login.running = true;
-    bool spawned = pthread_create(&g_login.thread, NULL, DeviceLoginMain, app) == 0;
-    g_login.joinable = spawned;
+    PicoHost *app = s->host;
+    StopDeviceLogin(s);
+    pthread_mutex_lock(&s->login.mu);
+    for (int i = 0; i < s->login.note_count; i++)
+    {
+        free(s->login.notes[i]);
+        s->login.notes[i] = NULL;
+    }
+    s->login.note_count = 0;
+    s->login.cancel = false;
+    s->login.running = true;
+    s->login.agent_id = agent_id;
+    bool spawned = pthread_create(&s->login.thread, NULL, DeviceLoginMain, s) == 0;
+    s->login.joinable = spawned;
     if (!spawned)
     {
-        g_login.running = false;
+        s->login.running = false;
+        s->login.agent_id = 0;
     }
-    pthread_mutex_unlock(&g_login.mu);
+    pthread_mutex_unlock(&s->login.mu);
     if (!spawned)
     {
-        Note(app, "Could not start Hyper login: thread creation failed.");
+        Note(app, agent_id, "Could not start Hyper login: thread creation failed.");
     }
 }
 
-static void DrainLoginNotes(PicoApp *app)
+static void DrainLoginNotes(HostAuthState *s)
 {
+    if (!s)
+    {
+        return;
+    }
+    PicoHost *app = s->host;
     for (;;)
     {
-        pthread_mutex_lock(&g_login.mu);
+        pthread_mutex_lock(&s->login.mu);
         char *text = NULL;
-        if (g_login.note_count > 0)
+        PicoAgentId agent_id = s->login.agent_id;
+        if (s->login.note_count > 0)
         {
-            text = g_login.notes[0];
-            for (int i = 1; i < g_login.note_count; i++)
+            text = s->login.notes[0];
+            for (int i = 1; i < s->login.note_count; i++)
             {
-                g_login.notes[i - 1] = g_login.notes[i];
+                s->login.notes[i - 1] = s->login.notes[i];
             }
-            g_login.note_count--;
+            s->login.note_count--;
         }
-        bool reap = !text && !g_login.running && g_login.joinable;
-        pthread_mutex_unlock(&g_login.mu);
+        bool reap = !text && !s->login.running && s->login.joinable;
+        pthread_mutex_unlock(&s->login.mu);
         if (text)
         {
-            Note(app, text);
+            Note(app, agent_id, text);
             free(text);
             continue;
         }
         if (reap)
         {
-            StopDeviceLogin();
+            StopDeviceLogin(s);
         }
         return;
     }
@@ -813,8 +802,9 @@ static bool IsCancelArg(const char *s)
     return FoldEq(s, "cancel");
 }
 
-static void HyperLogin(PicoApp *app, const char *args)
+static void HyperLogin(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
+    HostAuthState *s = (HostAuthState *)state;
     const char *p = args ? args : "";
     while (*p == ' ' || *p == '\t')
     {
@@ -835,74 +825,77 @@ static void HyperLogin(PicoApp *app, const char *args)
     }
     if (tail[0] || (verb[0] && !IsCancelArg(verb) && !IsKeyArg(verb)))
     {
-        Note(app, "Usage: `/login hyper`, `/login hyper key`, or `/login hyper cancel`.");
+        Note(app, agent_id, "Usage: `/login hyper`, `/login hyper key`, or `/login hyper cancel`.");
         return;
     }
     if (IsCancelArg(verb))
     {
-        if (LoginActive())
+        if (LoginActive(s))
         {
-            StopDeviceLogin();
-            Note(app, "Login cancelled.");
+            StopDeviceLogin(s);
+            Note(app, agent_id, "Login cancelled.");
         }
         else
         {
-            Note(app, "No login in progress.");
+            Note(app, agent_id, "No login in progress.");
         }
         return;
     }
     if (IsKeyArg(verb))
     {
-        StopDeviceLogin();
+        StopDeviceLogin(s);
         PicoAuthEntry e;
         pico_auth_copy(app, "hyper", &e);
         if (!e.api_key || !e.api_key[0])
         {
-            Note(app, "No API key. Set `HYPER_API_KEY`.");
+            Note(app, agent_id, "No API key. Set `HYPER_API_KEY`.");
             pico_auth_entry_free(&e);
             return;
         }
         if (pico_auth_set_active(app, "hyper", PICO_AUTH_API_KEY))
         {
-            Note(app, "Using Hyper API key.");
+            Note(app, agent_id, "Using Hyper API key.");
         }
         else
         {
-            Note(app, "Using Hyper API key, but `~/.config/pico/auth.json` could not be written, so "
-                      "this choice will not survive a restart.");
+            Note(app, agent_id, "Using Hyper API key, but `~/.config/pico/auth.json` could not be written, so "
+                                "this choice will not survive a restart.");
         }
         pico_auth_entry_free(&e);
         return;
     }
-    StartDeviceLogin(app);
+    StartDeviceLogin(s, agent_id);
 }
 
-static void HyperLogout(PicoApp *app)
+static void HyperLogout(PicoHost *app, PicoAgentId agent_id, void *state)
 {
-    StopDeviceLogin();
+    HostAuthState *s = (HostAuthState *)state;
+    StopDeviceLogin(s);
     bool saved = pico_auth_clear_oauth(app, "hyper");
     PicoAuthEntry e;
     pico_auth_copy(app, "hyper", &e);
     if (!saved)
     {
-        Note(app, "Logged out of Hyper, but `~/.config/pico/auth.json` could not be written, so the "
-                  "stored tokens may still be on disk.");
+        Note(app, agent_id, "Logged out of Charm Hyper, but `~/.config/pico/auth.json` could not be written, so the "
+                            "stored tokens may still be on disk.");
     }
     else if (e.api_key && e.api_key[0])
     {
-        Note(app, "Logged out of Hyper. Using API key.");
+        Note(app, agent_id, "Logged out of Charm Hyper. Using API key.");
     }
     else
     {
-        Note(app, "Logged out of Hyper.");
+        Note(app, agent_id, "Logged out of Charm Hyper.");
     }
     pico_auth_entry_free(&e);
 }
 
-static void HyperFrame(PicoApp *app, float dt)
+static void HyperFrame(PicoHost *app, void *state, float dt)
 {
+    (void)app;
     (void)dt;
-    DrainLoginNotes(app);
+    HostAuthState *s = (HostAuthState *)state;
+    DrainLoginNotes(s);
 }
 
 static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
@@ -915,8 +908,10 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
 }
 
 static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                       PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out)
+                       PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
+    (void)state;
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -1028,30 +1023,56 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
     return PICO_LLM_OK;
 }
 
-static void HyperInit(PicoApp *app)
+static int HyperHostInit(PicoHost *app, void **state_out)
 {
-    pico_add_provider(app, &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true});
+    HostAuthState *s = (HostAuthState *)calloc(1, sizeof(HostAuthState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->host = app;
+    pthread_mutex_init(&s->login.mu, NULL);
+    if (state_out)
+    {
+        *state_out = s;
+    }
     pico_add_auth(app, &(PicoAuth){.provider = "hyper",
                                    .help = "Hyper device-code or API key",
                                    .verbs = "key cancel",
                                    .login = HyperLogin,
-                                   .logout = HyperLogout});
+                                   .logout = HyperLogout,
+                                   .state = s});
     const char *key = getenv("HYPER_API_KEY");
     pico_auth_set_env_key(app, "hyper", (key && key[0]) ? key : NULL);
+    return 0;
 }
 
-static void HyperShutdown(PicoApp *app)
+static void HyperHostShutdown(PicoHost *app, void *state)
 {
     (void)app;
-    StopDeviceLogin();
-    pthread_mutex_lock(&g_login.mu);
-    for (int i = 0; i < g_login.note_count; i++)
+    HostAuthState *s = (HostAuthState *)state;
+    if (!s)
     {
-        free(g_login.notes[i]);
-        g_login.notes[i] = NULL;
+        return;
     }
-    g_login.note_count = 0;
-    pthread_mutex_unlock(&g_login.mu);
+    StopDeviceLogin(s);
+    pthread_mutex_lock(&s->login.mu);
+    for (int i = 0; i < s->login.note_count; i++)
+    {
+        free(s->login.notes[i]);
+        s->login.notes[i] = NULL;
+    }
+    s->login.note_count = 0;
+    pthread_mutex_unlock(&s->login.mu);
+    pthread_mutex_destroy(&s->login.mu);
+    free(s);
+}
+
+static int HyperWorkspaceInit(PicoWorkspace *workspace, void **state_out)
+{
+    (void)state_out;
+    pico_add_provider(workspace, &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true});
+    return 0;
 }
 
 PicoExt pico_ext_hyper(void)
@@ -1060,8 +1081,9 @@ PicoExt pico_ext_hyper(void)
         .abi = PICO_EXT_ABI,
         .name = "hyper",
         .description = "Charm Hyper provider",
-        .init = HyperInit,
-        .shutdown = HyperShutdown,
-        .on_frame = HyperFrame,
+        .host_init = HyperHostInit,
+        .host_shutdown = HyperHostShutdown,
+        .host_on_frame = HyperFrame,
+        .workspace_init = HyperWorkspaceInit,
     };
 }

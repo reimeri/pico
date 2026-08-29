@@ -82,6 +82,22 @@ float Pico_FontScale(void)
     return g_font_scale;
 }
 
+static void FontPath(uint16_t fontId, char *out, size_t cap)
+{
+    const char *directory = GetApplicationDirectory();
+    const char *relative = kFontPaths[fontId];
+    size_t length = directory ? strlen(directory) : 0;
+    if (length > 0)
+    {
+        snprintf(out, cap, "%s%s%s", directory,
+                 directory[length - 1] == '/' ? "" : "/", relative);
+    }
+    else
+    {
+        snprintf(out, cap, "%s", relative);
+    }
+}
+
 static int RoundedFontPx(uint16_t design)
 {
     float px = (float)design * g_font_scale;
@@ -117,7 +133,9 @@ Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
 
     EnsureCodepoints();
     int pixel_size = idx + PICO_FONT_SIZE_MIN;
-    Font font = LoadFontEx(kFontPaths[fontId], pixel_size, g_codepoints, g_codepoint_count);
+    char path[4096];
+    FontPath(fontId, path, sizeof(path));
+    Font font = LoadFontEx(path, pixel_size, g_codepoints, g_codepoint_count);
     Font fallback = GetFontDefault();
     bool owned = font.texture.id != 0 && font.texture.id != fallback.texture.id;
     if (!owned)

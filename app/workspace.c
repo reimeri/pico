@@ -1,13 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "agent.h"
 #include "json.h"
 #include "session.h"
 #include "settings.h"
 #include "subagent_config.h"
+#include "host_internal.h"
 
-#include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,20 +43,20 @@ typedef struct PicoDelegationJob {
     bool result_is_error;
 } PicoDelegationJob;
 
-static void ProcessDelegationRequests(PicoAgentManager *manager);
-static void ProcessDelegationTerminals(PicoAgentManager *manager);
-static void DropDelegations(PicoAgentManager *manager);
-static void LinkDelegationToolRows(PicoAgentManager *manager);
+static void ProcessDelegationRequests(PicoWorkspace *workspace);
+static void ProcessDelegationTerminals(PicoWorkspace *workspace);
+static void DropDelegations(PicoWorkspace *workspace);
+static void LinkDelegationToolRows(PicoWorkspace *workspace);
 
-static int FindIndex(const PicoAgentManager *manager, PicoAgentId id)
+static int FindIndex(const PicoWorkspace *workspace, PicoAgentId id)
 {
-    if (!manager || !id)
+    if (!workspace || !id)
     {
         return -1;
     }
-    for (int i = 0; i < manager->count; i++)
+    for (int i = 0; i < workspace->count; i++)
     {
-        if (manager->agents[i] && manager->agents[i]->id == id)
+        if (workspace->agents[i] && workspace->agents[i]->id == id)
         {
             return i;
         }
@@ -64,48 +64,43 @@ static int FindIndex(const PicoAgentManager *manager, PicoAgentId id)
     return -1;
 }
 
-PicoAgent *PicoAgentManager_Find(PicoAgentManager *manager, PicoAgentId id)
+PicoAgent *PicoWorkspace_FindAgent(PicoWorkspace *workspace, PicoAgentId id)
 {
-    int index = FindIndex(manager, id);
-    return index >= 0 ? manager->agents[index] : NULL;
+    int index = FindIndex(workspace, id);
+    return index >= 0 ? workspace->agents[index] : NULL;
 }
 
-const PicoAgent *PicoAgentManager_FindConst(const PicoAgentManager *manager, PicoAgentId id)
+const PicoAgent *PicoWorkspace_FindAgentConst(const PicoWorkspace *workspace, PicoAgentId id)
 {
-    int index = FindIndex(manager, id);
-    return index >= 0 ? manager->agents[index] : NULL;
+    int index = FindIndex(workspace, id);
+    return index >= 0 ? workspace->agents[index] : NULL;
 }
 
-PicoAgent *PicoAgentManager_Active(PicoAgentManager *manager)
+static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
 {
-    return PicoAgentManager_Find(manager, manager ? manager->active_id : 0);
+    if (!host)
+    {
+        return;
+    }
+    host->selected_agent_id = id;
 }
 
-const PicoAgent *PicoAgentManager_ActiveConst(const PicoAgentManager *manager)
-{
-    return PicoAgentManager_FindConst(manager, manager ? manager->active_id : 0);
-}
-
-static PicoUiMailbox *FindMailbox(PicoAgentManager *manager, const char *name)
+static PicoUiMailbox *FindMailbox(PicoWorkspace *workspace, PicoAgentId agent_id, uint64_t generation, const char *name)
 {
     int i;
-    if (!manager || !name || !name[0])
+    if (!workspace || !name || !name[0] || !agent_id)
     {
         return NULL;
     }
-    for (i = 0; i < manager->ui_mailbox_count; i++)
+    for (i = 0; i < workspace->ui_mailbox_count; i++)
     {
-        if (strcmp(manager->ui_mailboxes[i].name, name) == 0)
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        if (box->agent_id == agent_id && box->generation == generation && strcmp(box->name, name) == 0)
         {
-            return &manager->ui_mailboxes[i];
+            return box;
         }
     }
     return NULL;
-}
-
-static const PicoUiMailbox *FindMailboxConst(const PicoAgentManager *manager, const char *name)
-{
-    return FindMailbox((PicoAgentManager *)manager, name);
 }
 
 static void FreeMailbox(PicoUiMailbox *box)
@@ -119,18 +114,18 @@ static void FreeMailbox(PicoUiMailbox *box)
     memset(box, 0, sizeof(*box));
 }
 
-static void RemoveMailboxAt(PicoAgentManager *manager, int index)
+static void RemoveMailboxAt(PicoWorkspace *workspace, int index)
 {
-    if (!manager || index < 0 || index >= manager->ui_mailbox_count)
+    if (!workspace || index < 0 || index >= workspace->ui_mailbox_count)
     {
         return;
     }
-    FreeMailbox(&manager->ui_mailboxes[index]);
-    manager->ui_mailbox_count--;
-    if (index < manager->ui_mailbox_count)
+    FreeMailbox(&workspace->ui_mailboxes[index]);
+    workspace->ui_mailbox_count--;
+    if (index < workspace->ui_mailbox_count)
     {
-        manager->ui_mailboxes[index] = manager->ui_mailboxes[manager->ui_mailbox_count];
-        memset(&manager->ui_mailboxes[manager->ui_mailbox_count], 0, sizeof(manager->ui_mailboxes[0]));
+        workspace->ui_mailboxes[index] = workspace->ui_mailboxes[workspace->ui_mailbox_count];
+        memset(&workspace->ui_mailboxes[workspace->ui_mailbox_count], 0, sizeof(workspace->ui_mailboxes[0]));
     }
 }
 
@@ -163,11 +158,11 @@ static bool MailboxAppend(PicoUiMailbox *box, const char *s, size_t n)
     return true;
 }
 
-void PicoAgentManager_UiPost(PicoAgentManager *manager, const char *name, PicoUiPostKind kind,
-                             PicoAgentId agent_id, uint64_t generation, const char *text, size_t n)
+void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPostKind kind,
+                          PicoAgentId agent_id, uint64_t generation, const char *text, size_t n)
 {
     PicoUiMailbox *box;
-    if (!manager || !name || !name[0] || !generation ||
+    if (!workspace || !name || !name[0] || !generation || !agent_id ||
         (kind != PICO_UI_POST_TEXT && kind != PICO_UI_POST_STATUS))
     {
         return;
@@ -181,43 +176,30 @@ void PicoAgentManager_UiPost(PicoAgentManager *manager, const char *name, PicoUi
         text = "";
         n = 0;
     }
-    pthread_mutex_lock(&manager->ui_post_mu);
+    pthread_mutex_lock(&workspace->ui_post_mu);
     {
-        const PicoAgent *agent = PicoAgentManager_FindConst(manager, agent_id);
+        const PicoAgent *agent = PicoWorkspace_FindAgentConst(workspace, agent_id);
         if (!agent || agent->runtime_generation != generation)
         {
-            pthread_mutex_unlock(&manager->ui_post_mu);
+            pthread_mutex_unlock(&workspace->ui_post_mu);
             return;
         }
     }
-    box = FindMailbox(manager, name);
+    box = FindMailbox(workspace, agent_id, generation, name);
     if (!box)
     {
-        if (manager->ui_mailbox_count >= PICO_MAX_UI_POSTS)
+        if (workspace->ui_mailbox_count >= PICO_MAX_UI_POSTS)
         {
-            pthread_mutex_unlock(&manager->ui_post_mu);
+            pthread_mutex_unlock(&workspace->ui_post_mu);
             return;
         }
-        box = &manager->ui_mailboxes[manager->ui_mailbox_count];
+        box = &workspace->ui_mailboxes[workspace->ui_mailbox_count];
         memset(box, 0, sizeof(*box));
         snprintf(box->name, sizeof(box->name), "%s", name);
-        manager->ui_mailbox_count++;
+        box->agent_id = agent_id;
+        box->generation = generation;
+        workspace->ui_mailbox_count++;
     }
-    if (box->generation != 0 && box->agent_id == agent_id && generation < box->generation)
-    {
-        pthread_mutex_unlock(&manager->ui_post_mu);
-        return;
-    }
-    if (box->generation != 0 &&
-        (box->agent_id != agent_id || generation != box->generation))
-    {
-        free(box->text);
-        box->text = NULL;
-        box->text_len = 0;
-        box->status[0] = '\0';
-    }
-    box->agent_id = agent_id;
-    box->generation = generation;
     if (kind == PICO_UI_POST_STATUS)
     {
         size_t copy = n < PICO_UI_POST_STATUS_MAX ? n : PICO_UI_POST_STATUS_MAX;
@@ -229,20 +211,20 @@ void PicoAgentManager_UiPost(PicoAgentManager *manager, const char *name, PicoUi
     {
         box->dirty = true;
     }
-    pthread_mutex_unlock(&manager->ui_post_mu);
+    pthread_mutex_unlock(&workspace->ui_post_mu);
 }
 
-void PicoAgentManager_PumpUiPosts(PicoAgentManager *manager)
+void PicoWorkspace_PumpUiPosts(PicoWorkspace *workspace)
 {
     int i;
-    if (!manager)
+    if (!workspace)
     {
         return;
     }
-    pthread_mutex_lock(&manager->ui_post_mu);
-    for (i = 0; i < manager->ui_mailbox_count;)
+    pthread_mutex_lock(&workspace->ui_post_mu);
+    for (i = 0; i < workspace->ui_mailbox_count;)
     {
-        PicoUiMailbox *box = &manager->ui_mailboxes[i];
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
         const PicoAgent *agent;
         bool live;
         if (!box->dirty)
@@ -250,14 +232,14 @@ void PicoAgentManager_PumpUiPosts(PicoAgentManager *manager)
             i++;
             continue;
         }
-        agent = PicoAgentManager_FindConst(manager, box->agent_id);
+        agent = PicoWorkspace_FindAgentConst(workspace, box->agent_id);
         live = agent && agent->runtime_generation == box->generation;
         if (!live)
         {
             box->dirty = false;
             if (!box->published)
             {
-                RemoveMailboxAt(manager, i);
+                RemoveMailboxAt(workspace, i);
                 continue;
             }
             i++;
@@ -280,93 +262,94 @@ void PicoAgentManager_PumpUiPosts(PicoAgentManager *manager)
         box->dirty = false;
         i++;
     }
-    pthread_mutex_unlock(&manager->ui_post_mu);
+    pthread_mutex_unlock(&workspace->ui_post_mu);
 }
 
-bool PicoAgentManager_UiLatest(const PicoAgentManager *manager, const char *name, PicoUiPost *out)
+bool PicoWorkspace_UiLatest(const PicoWorkspace *workspace, PicoAgentId agent_id, const char *name, PicoUiPost *out)
 {
-    const PicoUiMailbox *box;
     bool found = false;
     if (!out)
     {
         return false;
     }
     memset(out, 0, sizeof(*out));
-    if (!manager)
+    if (!workspace || !name || !name[0] || agent_id == 0)
     {
         return false;
     }
-    pthread_mutex_lock((pthread_mutex_t *)&manager->ui_post_mu);
-    box = FindMailboxConst(manager, name);
-    if (box && box->published)
+    pthread_mutex_lock((pthread_mutex_t *)&workspace->ui_post_mu);
+    for (int i = 0; i < workspace->ui_mailbox_count; i++)
     {
-        out->agent_id = box->pub_agent_id;
-        out->generation = box->pub_generation;
-        out->status = box->pub_status;
-        out->text = box->pub_text ? box->pub_text : "";
-        found = true;
-    }
-    pthread_mutex_unlock((pthread_mutex_t *)&manager->ui_post_mu);
-    return found;
-}
-
-void PicoAgentManager_UiClear(PicoAgentManager *manager, const char *name)
-{
-    int i;
-    if (!manager || !name || !name[0])
-    {
-        return;
-    }
-    pthread_mutex_lock(&manager->ui_post_mu);
-    for (i = 0; i < manager->ui_mailbox_count; i++)
-    {
-        if (strcmp(manager->ui_mailboxes[i].name, name) == 0)
+        const PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        if (box->published && box->pub_agent_id == agent_id && strcmp(box->name, name) == 0)
         {
-            RemoveMailboxAt(manager, i);
+            out->agent_id = box->pub_agent_id;
+            out->generation = box->pub_generation;
+            out->status = box->pub_status;
+            out->text = box->pub_text ? box->pub_text : "";
+            found = true;
             break;
         }
     }
-    pthread_mutex_unlock(&manager->ui_post_mu);
+    pthread_mutex_unlock((pthread_mutex_t *)&workspace->ui_post_mu);
+    return found;
 }
 
-static void FreeUiPosts(PicoAgentManager *manager)
+void PicoWorkspace_UiClear(PicoWorkspace *workspace, PicoAgentId agent_id, const char *name)
 {
-    int i;
-    if (!manager)
+    if (!workspace || !name || !name[0] || agent_id == 0)
     {
         return;
     }
-    pthread_mutex_lock(&manager->ui_post_mu);
-    for (i = 0; i < manager->ui_mailbox_count; i++)
+    pthread_mutex_lock(&workspace->ui_post_mu);
+    for (int i = 0; i < workspace->ui_mailbox_count;)
     {
-        FreeMailbox(&manager->ui_mailboxes[i]);
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        if (strcmp(box->name, name) == 0 && (box->agent_id == agent_id || box->pub_agent_id == agent_id))
+        {
+            RemoveMailboxAt(workspace, i);
+            continue;
+        }
+        i++;
     }
-    manager->ui_mailbox_count = 0;
-    pthread_mutex_unlock(&manager->ui_post_mu);
+    pthread_mutex_unlock(&workspace->ui_post_mu);
 }
 
-PicoAgentManager *PicoAgentManager_Create(PicoApp *app)
+void PicoWorkspace_DropAgentMailboxes(PicoWorkspace *workspace, PicoAgentId agent_id, uint64_t generation)
 {
-    PicoAgentManager *manager = (PicoAgentManager *)calloc(1, sizeof(*manager));
-    if (!manager)
+    if (!workspace || !agent_id)
     {
-        return NULL;
+        return;
     }
-    manager->app = app;
-    pthread_mutex_init(&manager->delegation_mu, NULL);
-    pthread_mutex_init(&manager->lifecycle_mu, NULL);
-    pthread_mutex_init(&manager->ui_post_mu, NULL);
-    manager->accepting_work = true;
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
+    pthread_mutex_lock(&workspace->ui_post_mu);
+    for (int i = 0; i < workspace->ui_mailbox_count;)
     {
-        pthread_mutex_destroy(&manager->ui_post_mu);
-        pthread_mutex_destroy(&manager->lifecycle_mu);
-        pthread_mutex_destroy(&manager->delegation_mu);
-        free(manager);
-        return NULL;
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        bool match = (box->agent_id == agent_id || box->pub_agent_id == agent_id);
+        if (match && (generation == 0 || box->generation == generation || box->pub_generation == generation))
+        {
+            RemoveMailboxAt(workspace, i);
+            continue;
+        }
+        i++;
     }
-    manager->curl_initialized = true;
-    return manager;
+    pthread_mutex_unlock(&workspace->ui_post_mu);
+}
+
+static void FreeUiPosts(PicoWorkspace *workspace)
+{
+    int i;
+    if (!workspace)
+    {
+        return;
+    }
+    pthread_mutex_lock(&workspace->ui_post_mu);
+    for (i = 0; i < workspace->ui_mailbox_count; i++)
+    {
+        FreeMailbox(&workspace->ui_mailboxes[i]);
+    }
+    workspace->ui_mailbox_count = 0;
+    pthread_mutex_unlock(&workspace->ui_post_mu);
 }
 
 static void FreeAgentFieldsOnCreateFailure(PicoAgent *agent)
@@ -374,7 +357,7 @@ static void FreeAgentFieldsOnCreateFailure(PicoAgent *agent)
     (void)PicoAgent_Destroy(agent);
 }
 
-static bool CopyToolPolicy(PicoApp *app, PicoAgent *agent,
+static bool CopyToolPolicy(PicoHost *app, PicoAgent *agent,
                            const char *const *tools, int tool_count)
 {
     if (!tools)
@@ -397,9 +380,10 @@ static bool CopyToolPolicy(PicoApp *app, PicoAgent *agent,
             return false;
         }
         bool registered = false;
-        for (int t = 0; t < app->tool_count; t++)
+        PicoWorkspace *ws = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
+        for (int t = 0; ws && t < ws->tool_count; t++)
         {
-            if (app->tools[t].name && strcmp(app->tools[t].name, tools[i]) == 0)
+            if (ws->tools[t].name && strcmp(ws->tools[t].name, tools[i]) == 0)
             {
                 registered = true;
                 break;
@@ -426,127 +410,118 @@ static bool CopyToolPolicy(PicoApp *app, PicoAgent *agent,
     return true;
 }
 
-static PicoAgentResult ConfigureAgent(PicoApp *app, PicoAgent *agent,
-                                      const PicoAgentCreateOptions *options)
+static PicoResult ConfigureAgent(PicoHost *app, PicoAgent *agent,
+                                 const PicoAgentCreateOptions *options)
 {
     if (!agent || !options)
     {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_INVALID;
     }
-    if (options->kind != PICO_AGENT_NORMAL && options->kind != PICO_AGENT_SUBAGENT)
+    PicoWorkspace *workspace = agent->workspace;
+    if (options->kind != PICO_AGENT_MAIN && options->kind != PICO_AGENT_SUBAGENT)
     {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_INVALID;
+    }
+    if (options->kind == PICO_AGENT_MAIN && options->parent_id)
+    {
+        return PICO_INVALID;
     }
     agent->kind = options->kind;
     agent->parent_id = options->parent_id;
     if (options->parent_id)
     {
-        PicoAgent *parent = PicoAgentManager_Find(app->agents, options->parent_id);
+        PicoAgent *parent = PicoHost_FindAgent(app, options->parent_id);
         if (!parent)
         {
-            return PICO_AGENT_RESULT_NOT_FOUND;
+            return PICO_NOT_FOUND;
+        }
+        if (parent->workspace != workspace)
+        {
+            return PICO_INVALID;
         }
         agent->depth = parent->depth + 1;
         if (agent->depth > PICO_MAX_DELEGATION_DEPTH)
         {
-            return PICO_AGENT_RESULT_LIMIT;
+            return PICO_LIMIT;
         }
     }
     else if (options->kind == PICO_AGENT_SUBAGENT)
     {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_INVALID;
     }
     if ((options->profile && strlen(options->profile) > 64) ||
         (options->purpose && strlen(options->purpose) > 1024))
     {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_INVALID;
     }
     snprintf(agent->profile, sizeof(agent->profile), "%s", options->profile ? options->profile : "");
     snprintf(agent->purpose, sizeof(agent->purpose), "%s", options->purpose ? options->purpose : "");
     if (options->model && options->model[0])
     {
-        const PicoModel *model = PicoSettings_FindModelConst(app, options->model);
+        const PicoModel *model = PicoSettings_FindModelConst(workspace, options->model);
         if (!model)
         {
-            return PICO_AGENT_RESULT_INVALID;
+            return PICO_INVALID;
         }
         snprintf(agent->model, sizeof(agent->model), "%s", model->id);
         agent->effort[0] = '\0';
-        PicoSettings_SyncAgent(app, agent);
+        PicoSettings_SyncAgent(agent);
     }
     if (options->effort && options->effort[0])
     {
-        const PicoModel *model = PicoSettings_ActiveModelConst(app, agent);
+        const PicoModel *model = PicoSettings_ActiveModelConst(agent);
         if (!PicoSettings_EffortAllowed(model, options->effort) &&
             !(model && model->effort_count == 0 && strcmp(options->effort, "none") == 0))
         {
-            return PICO_AGENT_RESULT_INVALID;
+            return PICO_INVALID;
         }
         snprintf(agent->effort, sizeof(agent->effort), "%s", options->effort);
     }
     if (!CopyToolPolicy(app, agent, options->tools, options->tool_count))
     {
-        return options->tools ? PICO_AGENT_RESULT_INVALID : PICO_AGENT_RESULT_NO_MEMORY;
+        return options->tools ? PICO_INVALID : PICO_NO_MEMORY;
     }
-    return PICO_AGENT_RESULT_OK;
+    return PICO_OK;
 }
 
-static void PublishAgent(PicoAgentManager *manager, PicoAgent *agent, bool select)
+static void PublishAgent(PicoWorkspace *workspace, PicoAgent *agent, bool select)
 {
-    manager->agents[manager->count++] = agent;
-    if (!manager->active_id || select)
+    PicoHost *host = workspace ? workspace->host : NULL;
+    workspace->agents[workspace->count++] = agent;
+    if (host && (!host->selected_agent_id || select))
     {
-        manager->active_id = agent->id;
+        SyncSelectedAgent(host, agent->id);
     }
 }
 
-bool PicoAgentManager_AdoptInitial(PicoAgentManager *manager, PicoAgent *agent)
-{
-    if (!manager || !agent || manager->count != 0 || PicoAgent_IsBusy(agent))
-    {
-        return false;
-    }
-    PicoAgent_RebindHost(manager->app, agent, manager);
-    if (agent->manager != manager)
-    {
-        return false;
-    }
-    agent->kind = PICO_AGENT_NORMAL;
-    agent->parent_id = 0;
-    agent->depth = 0;
-    agent->profile[0] = '\0';
-    agent->purpose[0] = '\0';
-    agent->parent_session_id[0] = '\0';
-    agent->persistence = PICO_SESSION_DURABLE;
-    agent->tool_policy_valid = true;
-    PublishAgent(manager, agent, true);
-    return true;
-}
-
-PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *options,
-                                  PicoAgentId *out)
+PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                     PicoAgentId *out)
 {
     if (out)
     {
         *out = 0;
     }
-    if (!app || !app->agents || !options)
+    if (!workspace || !options)
     {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_INVALID;
     }
-    PicoAgentManager *manager = app->agents;
-    PicoAgent_ReapRetired(manager);
-    if (manager->count >= PICO_MAX_AGENTS)
+    PicoHost *app = workspace->host;
+    if (workspace->state != PICO_WORKSPACE_OPEN && workspace->state != PICO_WORKSPACE_RELOADING)
     {
-        return PICO_AGENT_RESULT_LIMIT;
+        return PICO_BUSY;
     }
-    PicoAgent *agent = PicoAgent_Create(app);
+    PicoAgent_ReapRetired(workspace);
+    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS)
+    {
+        return PICO_LIMIT;
+    }
+    PicoAgent *agent = PicoAgent_Create(app, workspace);
     if (!agent)
     {
-        return PICO_AGENT_RESULT_NO_MEMORY;
+        return PICO_NO_MEMORY;
     }
-    PicoAgentResult result = ConfigureAgent(app, agent, options);
-    if (result != PICO_AGENT_RESULT_OK)
+    PicoResult result = ConfigureAgent(app, agent, options);
+    if (result != PICO_OK)
     {
         FreeAgentFieldsOnCreateFailure(agent);
         return result;
@@ -559,23 +534,23 @@ PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *op
     else if (options->session_start == PICO_SESSION_RESUME)
     {
         char path[4096];
-        if (!options->session_id || PicoSession_Resolve(app, options->session_id, false,
+        if (!options->session_id || PicoSession_Resolve(workspace, options->session_id, false,
                                                        path, sizeof(path)) != 0)
         {
             FreeAgentFieldsOnCreateFailure(agent);
-            return PICO_AGENT_RESULT_SESSION_INVALID;
+            return PICO_SESSION_INVALID;
         }
-        if (!PicoAgentManager_ReserveSession(manager, agent->id, path))
+        if (!PicoWorkspace_ReserveSession(workspace, agent->id, path))
         {
             FreeAgentFieldsOnCreateFailure(agent);
-            return PICO_AGENT_RESULT_SESSION_IN_USE;
+            return PICO_SESSION_IN_USE;
         }
         agent->persistence = PICO_SESSION_DURABLE;
         if (PicoSession_Replay(app, agent, path, false) != 0)
         {
-            PicoAgentManager_ReleaseSessions(manager, agent->id);
+            PicoWorkspace_ReleaseSessions(workspace, agent->id);
             FreeAgentFieldsOnCreateFailure(agent);
-            return PICO_AGENT_RESULT_SESSION_INVALID;
+            return PICO_SESSION_INVALID;
         }
     }
     else
@@ -583,7 +558,7 @@ PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *op
         agent->persistence = PICO_SESSION_DURABLE;
     }
 
-    PublishAgent(manager, agent, options->select);
+    PublishAgent(workspace, agent, options->select);
     if (options->session_start == PICO_SESSION_RESUME)
     {
         PicoSession_AppendInterrupted(app, agent);
@@ -593,27 +568,41 @@ PicoAgentResult pico_agent_create(PicoApp *app, const PicoAgentCreateOptions *op
     {
         *out = agent->id;
     }
-    return PICO_AGENT_RESULT_OK;
+    return PICO_OK;
 }
 
-int pico_agent_count(const PicoApp *app)
+int pico_agent_count(const PicoHost *app)
 {
-    return app && app->agents ? app->agents->count : 0;
+    return PicoHost_TotalAgentCount(app);
 }
 
-bool pico_agent_info(const PicoApp *app, int index, PicoAgentInfo *out)
+bool pico_agent_info(const PicoHost *app, int index, PicoAgentInfo *out)
 {
-    if (!app || !app->agents || !out || index < 0 || index >= app->agents->count)
+    if (!app || !out || index < 0)
     {
         return false;
     }
-    PicoAgent_CopyInfo(app->agents->agents[index], out);
-    return true;
+    int cur = 0;
+    for (int w = 0; w < app->workspace_count; w++)
+    {
+        const PicoWorkspace *workspace = app->workspaces[w];
+        if (!workspace)
+        {
+            continue;
+        }
+        if (index < cur + workspace->count)
+        {
+            PicoAgent_CopyInfo(workspace->agents[index - cur], out);
+            return true;
+        }
+        cur += workspace->count;
+    }
+    return false;
 }
 
-bool pico_agent_find(const PicoApp *app, PicoAgentId id, PicoAgentInfo *out)
+bool pico_agent_find(const PicoHost *app, PicoAgentId id, PicoAgentInfo *out)
 {
-    const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
+    const PicoAgent *agent = PicoHost_FindAgentConst(app, id);
     if (!agent || !out)
     {
         return false;
@@ -622,22 +611,22 @@ bool pico_agent_find(const PicoApp *app, PicoAgentId id, PicoAgentInfo *out)
     return true;
 }
 
-PicoAgentId pico_agent_active(const PicoApp *app)
+PicoAgentId pico_agent_active(const PicoHost *app)
 {
-    return app && app->agents ? app->agents->active_id : 0;
+    return app ? app->selected_agent_id : 0;
 }
 
-bool pico_agent_select(PicoApp *app, PicoAgentId id)
+bool pico_agent_select(PicoHost *app, PicoAgentId id)
 {
-    if (!app || !app->agents || !PicoAgentManager_Find(app->agents, id))
+    if (!app || !PicoHost_FindAgent(app, id))
     {
         return false;
     }
-    if (app->agents->active_id == id)
+    if (app->selected_agent_id == id)
     {
         return true;
     }
-    app->agents->active_id = id;
+    SyncSelectedAgent(app, id);
     PicoChatSel_Clear(app);
     memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
     app->chat_follow_bottom = true;
@@ -646,127 +635,234 @@ bool pico_agent_select(PicoApp *app, PicoAgentId id)
     return true;
 }
 
-PicoAgentResult pico_agent_close(PicoApp *app, PicoAgentId id)
+PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
 {
-    if (!app || !app->agents)
+    PicoAgent *agent = PicoHost_FindAgent(app, id);
+    if (!agent)
     {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_NOT_FOUND;
     }
-    PicoAgentManager *manager = app->agents;
-    PicoAgent_ReapRetired(manager);
-    int index = FindIndex(manager, id);
+    PicoWorkspace *workspace = agent->workspace;
+    if (!workspace)
+    {
+        return PICO_INVALID;
+    }
+    PicoAgent_ReapRetired(workspace);
+    int index = FindIndex(workspace, id);
     if (index < 0)
     {
-        return PICO_AGENT_RESULT_NOT_FOUND;
+        return PICO_NOT_FOUND;
     }
-    PicoAgent *agent = manager->agents[index];
-    if (manager->count == 1 || PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(manager, id) ||
-        PicoAgentManager_JobReferences(manager, id))
+    /* Cancel delegation tree for this agent */
+    PicoWorkspace_CancelDelegations(workspace, id, 0);
+    for (int i = 0; i < workspace->count; i++)
     {
-        return PICO_AGENT_RESULT_BUSY;
+        PicoAgent *child = workspace->agents[i];
+        if (child && child->parent_id == id)
+        {
+            PicoAgent_Cancel(child);
+        }
     }
-    if (!PicoAgent_Destroy(agent))
+
+    bool has_busy_children = false;
+    for (int i = 0; i < workspace->count; i++)
     {
-        return PICO_AGENT_RESULT_BUSY;
+        PicoAgent *child = workspace->agents[i];
+        if (child && child->parent_id == id)
+        {
+            if (PicoAgent_IsBusy(child) || PicoAgent_RetiredReferences(workspace, child->id) ||
+                PicoWorkspace_JobReferences(workspace, child->id))
+            {
+                has_busy_children = true;
+                break;
+            }
+        }
     }
-    for (int i = index + 1; i < manager->count; i++)
+    if (has_busy_children || PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(workspace, id) ||
+        PicoWorkspace_JobReferences(workspace, id))
     {
-        manager->agents[i - 1] = manager->agents[i];
+        return PICO_BUSY;
     }
-    manager->agents[--manager->count] = NULL;
-    if (manager->active_id == id)
+
+    /* Destroy any idle child agents first */
+    for (int i = workspace->count - 1; i >= 0; i--)
     {
-        manager->active_id = manager->agents[index < manager->count ? index : manager->count - 1]->id;
+        PicoAgent *child = workspace->agents[i];
+        if (child && child->parent_id == id)
+        {
+            PicoAgentId cid = child->id;
+            for (int k = i + 1; k < workspace->count; k++)
+            {
+                workspace->agents[k - 1] = workspace->agents[k];
+            }
+            workspace->agents[--workspace->count] = NULL;
+            PicoWorkspace_ReleaseSessions(workspace, cid);
+            PicoWorkspace_DropAgentMailboxes(workspace, cid, 0);
+            PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, cid);
+            PicoAgent_Destroy(child);
+        }
+    }
+
+    index = FindIndex(workspace, id);
+    if (index < 0)
+    {
+        return PICO_NOT_FOUND;
+    }
+
+    for (int i = index + 1; i < workspace->count; i++)
+    {
+        workspace->agents[i - 1] = workspace->agents[i];
+    }
+    workspace->agents[--workspace->count] = NULL;
+
+    if (app && app->selected_agent_id == id)
+    {
+        PicoAgentId next = 0;
+        if (workspace->count > 0)
+        {
+            next = workspace->agents[index < workspace->count ? index : workspace->count - 1]->id;
+        }
+        else
+        {
+            for (int w = 0; w < app->workspace_count; w++)
+            {
+                PicoWorkspace *ws = app->workspaces[w];
+                if (ws && ws->count > 0 && ws->agents[0])
+                {
+                    next = ws->agents[0]->id;
+                    break;
+                }
+            }
+        }
+        SyncSelectedAgent(app, next);
         PicoChatSel_Clear(app);
         app->chat_follow_bottom = true;
     }
-    PicoAgentManager_ReleaseSessions(manager, id);
-    pico_run_hooks(app, PICO_HOOK_ON_AGENT_DESTROY, id);
-    return PICO_AGENT_RESULT_OK;
+
+    PicoWorkspace_ReleaseSessions(workspace, id);
+    PicoWorkspace_DropAgentMailboxes(workspace, id, 0);
+    PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, id);
+    if (!PicoAgent_Destroy(agent))
+    {
+        return PICO_BUSY;
+    }
+    return PICO_OK;
 }
 
-PicoAgentResult pico_agent_cancel(PicoApp *app, PicoAgentId id)
+PicoResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
 {
-    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
-        return PICO_AGENT_RESULT_NOT_FOUND;
+        return PICO_NOT_FOUND;
     }
     PicoAgent_Cancel(agent);
-    return PICO_AGENT_RESULT_OK;
+    return PICO_OK;
 }
 
-PicoAgentResult pico_agent_force_cancel(PicoApp *app, PicoAgentId id)
+PicoResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
 {
-    PicoAgent *agent = app && app->agents ? PicoAgentManager_Find(app->agents, id) : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
-        return PICO_AGENT_RESULT_NOT_FOUND;
+        return PICO_NOT_FOUND;
     }
     PicoAgent_ForceCancel(app, agent);
-    return PICO_AGENT_RESULT_OK;
+    if (agent->workspace)
+    {
+        PicoWorkspace_DropAgentMailboxes(agent->workspace, agent->id, 0);
+    }
+    return PICO_OK;
 }
 
-void PicoAgentManager_Pump(PicoAgentManager *manager)
+void PicoWorkspace_Pump(PicoWorkspace *workspace)
 {
-    if (!manager)
+    if (!workspace)
     {
         return;
     }
-    PicoAgentManager_PumpUiPosts(manager);
-    PicoAgent_ReapRetired(manager);
-    ProcessDelegationRequests(manager);
-    for (int i = 0; i < manager->count; i++)
+    PicoWorkspace_PumpUiPosts(workspace);
+    PicoAgent_ReapRetired(workspace);
+    ProcessDelegationRequests(workspace);
+    int budget = 256;
+    for (int i = 0; i < workspace->count && budget > 0; i++)
     {
-        PicoAgent_Pump(manager->app, manager->agents[i]);
+        PicoAgent_PumpBounded(workspace->host, workspace->agents[i], &budget);
     }
-    LinkDelegationToolRows(manager);
-    ProcessDelegationTerminals(manager);
+    LinkDelegationToolRows(workspace);
+    ProcessDelegationTerminals(workspace);
 }
 
-bool PicoAgentManager_AcceptsNewWork(const PicoAgentManager *manager)
+bool PicoWorkspace_IsQuiescent(const PicoWorkspace *workspace)
 {
-    if (!manager)
+    if (!workspace)
     {
         return true;
     }
-    pthread_mutex_lock((pthread_mutex_t *)&manager->lifecycle_mu);
-    bool accepting = manager->accepting_work && !manager->retained_shutdown;
-    pthread_mutex_unlock((pthread_mutex_t *)&manager->lifecycle_mu);
-    return accepting;
-}
-
-void PicoAgentManager_SetAcceptingWork(PicoAgentManager *manager, bool accepting)
-{
-    if (!manager)
-    {
-        return;
-    }
-    pthread_mutex_lock(&manager->lifecycle_mu);
-    manager->accepting_work = accepting && !manager->retained_shutdown;
-    pthread_mutex_unlock(&manager->lifecycle_mu);
-}
-
-bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager)
-{
-    if (!manager)
+    if (workspace->retired_count > 0)
     {
         return false;
     }
-    if (manager->retired_count > 0)
+    pthread_mutex_lock((pthread_mutex_t *)&workspace->delegation_mu);
+    bool delegating = (workspace->delegations != NULL);
+    pthread_mutex_unlock((pthread_mutex_t *)&workspace->delegation_mu);
+    if (delegating)
+    {
+        return false;
+    }
+    for (int i = 0; i < workspace->count; i++)
+    {
+        if (PicoAgent_IsBusy(workspace->agents[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PicoWorkspace_AcceptsNewWork(const PicoWorkspace *workspace)
+{
+    if (!workspace)
     {
         return true;
     }
-    pthread_mutex_lock((pthread_mutex_t *)&manager->delegation_mu);
-    bool delegating = manager->delegations != NULL;
-    pthread_mutex_unlock((pthread_mutex_t *)&manager->delegation_mu);
+    pthread_mutex_lock((pthread_mutex_t *)&workspace->lifecycle_mu);
+    bool accepting = workspace->accepting_work && !workspace->retained_shutdown;
+    pthread_mutex_unlock((pthread_mutex_t *)&workspace->lifecycle_mu);
+    return accepting;
+}
+
+void PicoWorkspace_SetAcceptingWork(PicoWorkspace *workspace, bool accepting)
+{
+    if (!workspace)
+    {
+        return;
+    }
+    pthread_mutex_lock(&workspace->lifecycle_mu);
+    workspace->accepting_work = accepting && !workspace->retained_shutdown;
+    pthread_mutex_unlock(&workspace->lifecycle_mu);
+}
+
+bool PicoWorkspace_BlocksReload(const PicoWorkspace *workspace)
+{
+    if (!workspace)
+    {
+        return false;
+    }
+    if (workspace->retired_count > 0)
+    {
+        return true;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&workspace->delegation_mu);
+    bool delegating = workspace->delegations != NULL;
+    pthread_mutex_unlock((pthread_mutex_t *)&workspace->delegation_mu);
     if (delegating)
     {
         return true;
     }
-    for (int i = 0; i < manager->count; i++)
+    for (int i = 0; i < workspace->count; i++)
     {
-        if (PicoAgent_BlocksReload(manager->agents[i]))
+        if (PicoAgent_BlocksReload(workspace->agents[i]))
         {
             return true;
         }
@@ -774,28 +870,28 @@ bool PicoAgentManager_BlocksReload(const PicoAgentManager *manager)
     return false;
 }
 
-void PicoAgentManager_PrepareReload(PicoAgentManager *manager)
+void PicoWorkspace_PrepareReload(PicoWorkspace *workspace)
 {
-    if (!manager || PicoAgentManager_BlocksReload(manager))
+    if (!workspace || PicoWorkspace_BlocksReload(workspace))
     {
         return;
     }
-    for (int i = 0; i < manager->count; i++)
+    for (int i = 0; i < workspace->count; i++)
     {
-        PicoAgent_PrepareReload(manager->agents[i]);
+        PicoAgent_PrepareReload(workspace->agents[i]);
     }
 }
 
-void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager)
+void PicoWorkspace_RevalidateToolPolicies(PicoWorkspace *workspace)
 {
-    if (!manager)
+    if (!workspace)
     {
         return;
     }
-    for (int i = 0; i < manager->count; i++)
+    for (int i = 0; i < workspace->count; i++)
     {
-        PicoAgent *agent = manager->agents[i];
-        if (!PicoAgent_RevalidateToolPolicy(manager->app, agent))
+        PicoAgent *agent = workspace->agents[i];
+        if (!PicoAgent_RevalidateToolPolicy(workspace->host, agent))
         {
             char line[384];
             if (agent->profile[0])
@@ -810,129 +906,151 @@ void PicoAgentManager_RevalidateToolPolicies(PicoAgentManager *manager)
                          "Agent %llu has a restricted tool policy containing an unavailable tool.",
                          (unsigned long long)agent->id);
             }
-            pico_status_warn(manager->app, line);
+            pico_status_warn(workspace->host, line);
         }
     }
 }
 
-void PicoAgentManager_NotifySessions(PicoAgentManager *manager)
+void PicoWorkspace_NotifySessions(PicoWorkspace *workspace)
 {
-    for (int i = 0; manager && i < manager->count; i++)
+    for (int i = 0; workspace && i < workspace->count; i++)
     {
-        pico_run_hooks(manager->app, PICO_HOOK_ON_SESSION_RESET, manager->agents[i]->id);
+        pico_run_hooks(workspace->host, PICO_HOOK_ON_SESSION_RESET, workspace->agents[i]->id);
     }
 }
 
-bool PicoAgentManager_Destroy(PicoAgentManager *manager)
+bool PicoWorkspace_QuiesceBefore(PicoWorkspace *workspace, const struct timespec *deadline)
 {
-    if (!manager)
+    if (!workspace)
     {
         return true;
     }
-    if (manager->retained_shutdown)
+    if (!deadline || workspace->retained_shutdown)
     {
         return false;
     }
-    PicoAgentManager_SetAcceptingWork(manager, false);
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 1;
-    PicoAgentManager_CancelDelegations(manager, 0, 0);
-    for (int i = 0; i < manager->count; i++)
+    PicoWorkspace_SetAcceptingWork(workspace, false);
+    PicoWorkspace_CancelDelegations(workspace, 0, 0);
+    for (int i = 0; i < workspace->count; i++)
     {
-        PicoAgent_Cancel(manager->agents[i]);
+        PicoAgent_Cancel(workspace->agents[i]);
     }
     bool clean = true;
-    for (int i = 0; i < manager->count; i++)
+    for (int i = 0; i < workspace->count; i++)
     {
-        pico_run_hooks(manager->app, PICO_HOOK_ON_AGENT_DESTROY, manager->agents[i]->id);
-        if (!PicoAgent_DestroyBefore(manager->agents[i], &deadline))
+        pico_run_hooks(workspace->host, PICO_HOOK_ON_AGENT_DESTROY, workspace->agents[i]->id);
+        if (!PicoAgent_DestroyBefore(workspace->agents[i], deadline))
         {
             clean = false;
         }
-        manager->agents[i] = NULL;
+        workspace->agents[i] = NULL;
     }
-    manager->count = 0;
-    if (!PicoAgent_ShutdownRetired(manager, &deadline))
+    workspace->count = 0;
+    if (!PicoAgent_ShutdownRetired(workspace, deadline))
     {
         clean = false;
     }
     if (!clean)
     {
-        pthread_mutex_lock(&manager->lifecycle_mu);
-        manager->retained_shutdown = true;
-        manager->accepting_work = false;
-        pthread_mutex_unlock(&manager->lifecycle_mu);
-        manager->app = NULL;
+        pthread_mutex_lock(&workspace->lifecycle_mu);
+        workspace->retained_shutdown = true;
+        workspace->accepting_work = false;
+        pthread_mutex_unlock(&workspace->lifecycle_mu);
         return false;
     }
-    DropDelegations(manager);
-    for (int i = 0; i < manager->snapshot_count; i++)
-    {
-        PicoMessages_Free(manager->snapshots[i].messages, manager->snapshots[i].message_count);
-        memset(&manager->snapshots[i], 0, sizeof(manager->snapshots[i]));
-    }
-    free(manager->snapshots);
-    manager->snapshots = NULL;
-    manager->snapshot_count = 0;
-    manager->snapshot_capacity = 0;
-    if (manager->curl_initialized)
-    {
-        curl_global_cleanup();
-    }
-    FreeUiPosts(manager);
-    pthread_mutex_destroy(&manager->ui_post_mu);
-    pthread_mutex_destroy(&manager->lifecycle_mu);
-    pthread_mutex_destroy(&manager->delegation_mu);
-    free(manager);
     return true;
 }
 
-bool PicoAgentManager_ReserveSession(PicoAgentManager *manager, PicoAgentId owner,
-                                     const char *path)
+bool PicoWorkspace_Quiesce(PicoWorkspace *workspace)
 {
-    if (!manager || !owner || !path || !path[0] ||
-        manager->reservation_count >= (int)(sizeof(manager->reservations) / sizeof(manager->reservations[0])))
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    return PicoWorkspace_QuiesceBefore(workspace, &deadline);
+}
+
+void PicoWorkspace_Free(PicoWorkspace *workspace)
+{
+    if (!workspace)
+    {
+        return;
+    }
+    DropDelegations(workspace);
+    for (int i = 0; i < workspace->snapshot_count; i++)
+    {
+        PicoMessages_Free(workspace->snapshots[i].messages, workspace->snapshots[i].message_count);
+        memset(&workspace->snapshots[i], 0, sizeof(workspace->snapshots[i]));
+    }
+    free(workspace->snapshots);
+    workspace->snapshots = NULL;
+    workspace->snapshot_count = 0;
+    workspace->snapshot_capacity = 0;
+    FreeUiPosts(workspace);
+    free(workspace->models);
+    workspace->models = NULL;
+    workspace->model_count = 0;
+    pthread_mutex_destroy(&workspace->settings_mu);
+    pthread_mutex_destroy(&workspace->ui_post_mu);
+    pthread_mutex_destroy(&workspace->lifecycle_mu);
+    pthread_mutex_destroy(&workspace->delegation_mu);
+    free(workspace);
+}
+
+bool PicoWorkspace_Destroy(PicoWorkspace *workspace)
+{
+    if (!PicoWorkspace_Quiesce(workspace))
     {
         return false;
     }
-    for (int i = 0; i < manager->reservation_count; i++)
+    PicoWorkspace_Free(workspace);
+    return true;
+}
+
+bool PicoWorkspace_ReserveSession(PicoWorkspace *workspace, PicoAgentId owner,
+                                  const char *path)
+{
+    if (!workspace || !owner || !path || !path[0] ||
+        workspace->reservation_count >= (int)(sizeof(workspace->reservations) / sizeof(workspace->reservations[0])))
     {
-        if (strcmp(manager->reservations[i].path, path) == 0)
+        return false;
+    }
+    for (int i = 0; i < workspace->reservation_count; i++)
+    {
+        if (strcmp(workspace->reservations[i].path, path) == 0)
         {
-            return manager->reservations[i].owner == owner;
+            return workspace->reservations[i].owner == owner;
         }
     }
-    PicoSessionReservation *reservation = &manager->reservations[manager->reservation_count++];
+    PicoSessionReservation *reservation = &workspace->reservations[workspace->reservation_count++];
     reservation->owner = owner;
     snprintf(reservation->path, sizeof(reservation->path), "%s", path);
     return true;
 }
 
-void PicoAgentManager_ReleaseSessions(PicoAgentManager *manager, PicoAgentId owner)
+void PicoWorkspace_ReleaseSessions(PicoWorkspace *workspace, PicoAgentId owner)
 {
-    if (!manager)
+    if (!workspace)
     {
         return;
     }
-    for (int i = 0; i < manager->reservation_count;)
+    for (int i = 0; i < workspace->reservation_count;)
     {
-        if (manager->reservations[i].owner != owner)
+        if (workspace->reservations[i].owner != owner)
         {
             i++;
             continue;
         }
-        manager->reservations[i] = manager->reservations[--manager->reservation_count];
+        workspace->reservations[i] = workspace->reservations[--workspace->reservation_count];
     }
 }
 
-bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const char *path,
-                                      PicoAgentId except_owner)
+bool PicoWorkspace_SessionReserved(const PicoWorkspace *workspace, const char *path,
+                                   PicoAgentId except_owner)
 {
-    for (int i = 0; manager && path && i < manager->reservation_count; i++)
+    for (int i = 0; workspace && path && i < workspace->reservation_count; i++)
     {
-        if (manager->reservations[i].owner != except_owner &&
-            strcmp(manager->reservations[i].path, path) == 0)
+        if (workspace->reservations[i].owner != except_owner &&
+            strcmp(workspace->reservations[i].path, path) == 0)
         {
             return true;
         }
@@ -940,22 +1058,30 @@ bool PicoAgentManager_SessionReserved(const PicoAgentManager *manager, const cha
     return false;
 }
 
-bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
+bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
 {
-    if (!app || !app->agents || !out)
+    if (!app || !out)
     {
         return false;
     }
     bool found = false;
     PicoToolAsk oldest = {0};
-    for (int i = 0; i < app->agents->count; i++)
+    for (int w = 0; w < app->workspace_count; w++)
     {
-        PicoToolAsk ask;
-        if (PicoAgent_PendingAsk(app->agents->agents[i], &ask) &&
-            (!found || ask.id < oldest.id))
+        PicoWorkspace *workspace = app->workspaces[w];
+        if (!workspace)
         {
-            oldest = ask;
-            found = true;
+            continue;
+        }
+        for (int i = 0; i < workspace->count; i++)
+        {
+            PicoToolAsk ask;
+            if (PicoAgent_PendingAsk(workspace->agents[i], &ask) &&
+                (!found || ask.id < oldest.id))
+            {
+                oldest = ask;
+                found = true;
+            }
         }
     }
     if (found)
@@ -965,117 +1091,153 @@ bool pico_tool_pending_ask(const PicoApp *app, PicoToolAsk *out)
     return found;
 }
 
-bool pico_tool_answer(PicoApp *app, uint64_t id, const char *answer_json)
+bool pico_tool_answer(PicoHost *app, uint64_t id, const char *answer_json)
 {
-    if (!app || !app->agents || !id)
+    if (!app || !id)
     {
         return false;
     }
-    for (int i = 0; i < app->agents->count; i++)
+    for (int w = 0; w < app->workspace_count; w++)
     {
-        if (PicoAgent_AnswerAsk(app->agents->agents[i], id, answer_json))
+        PicoWorkspace *workspace = app->workspaces[w];
+        if (!workspace)
         {
-            return true;
+            continue;
+        }
+        for (int i = 0; i < workspace->count; i++)
+        {
+            if (PicoAgent_AnswerAsk(workspace->agents[i], id, answer_json))
+            {
+                return true;
+            }
         }
     }
     return false;
 }
 
-int pico_agent_message_count(const PicoApp *app, PicoAgentId id)
+int pico_agent_message_count(const PicoHost *app, PicoAgentId id)
 {
-    const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
+    const PicoAgent *agent = PicoHost_FindAgentConst(app, id);
     return agent ? agent->message_count : 0;
 }
 
-const PicoMessage *pico_agent_message(const PicoApp *app, PicoAgentId id, int index)
+const PicoMessage *pico_agent_message(const PicoHost *app, PicoAgentId id, int index)
 {
-    const PicoAgent *agent = app && app->agents ? PicoAgentManager_FindConst(app->agents, id) : NULL;
+    const PicoAgent *agent = PicoHost_FindAgentConst(app, id);
     return agent && index >= 0 && index < agent->message_count ? &agent->messages[index] : NULL;
 }
 
-void PicoAgentManager_ReplayToolDetails(PicoAgentManager *manager)
+void PicoWorkspace_ReplayToolDetails(PicoWorkspace *workspace)
 {
-    for (int i = 0; manager && i < manager->count; i++)
+    for (int i = 0; workspace && i < workspace->count; i++)
     {
-        PicoSession_ReplayToolDetails(manager->app, manager->agents[i]);
+        PicoSession_ReplayToolDetails(workspace->host, workspace->agents[i]);
     }
 }
 
-void PicoAgentManager_LoadProfiles(PicoAgentManager *manager)
+void PicoWorkspace_LoadProfiles(PicoWorkspace *workspace)
 {
-    PicoSubagentConfig_Load(manager);
+    PicoSubagentConfig_Load(workspace);
 }
 
-int pico_subagent_profile_count(const PicoApp *app)
+int pico_subagent_profile_count(const PicoHost *app)
 {
-    return app && app->agents ? app->agents->profile_count : 0;
+    const PicoWorkspace *workspace = PicoHost_PrimaryWorkspaceConst(app);
+    return workspace ? workspace->profile_count : 0;
 }
 
-bool pico_subagent_profile_info(const PicoApp *app, int index,
+bool pico_subagent_profile_info(const PicoHost *app, int index,
                                 PicoSubagentProfileInfo *out)
 {
-    if (!app || !app->agents || !out || index < 0 || index >= app->agents->profile_count)
+    const PicoWorkspace *workspace = PicoHost_PrimaryWorkspaceConst(app);
+    if (!workspace || !out || index < 0 || index >= workspace->profile_count)
     {
         return false;
     }
-    *out = app->agents->profiles[index];
+    *out = workspace->profiles[index];
     return true;
 }
 
-PicoAgentResult PicoAgentManager_ResumeActive(PicoApp *app, const char *id, bool allow_prefix)
+PicoResult PicoWorkspace_Resume(PicoHost *app, PicoAgentId agent_id, const char *id,
+                                     bool allow_prefix)
 {
-    PicoAgent *old = PicoApp_ActiveAgent(app);
-    if (!old || PicoAgent_IsBusy(old))
-    {
-        return PICO_AGENT_RESULT_BUSY;
-    }
+    PicoAgent *old = PicoHost_FindAgent(app, agent_id);
+    PicoWorkspace *workspace;
+    PicoAgentId old_id;
+    bool was_selected;
     char path[4096];
-    if (PicoSession_Resolve(app, id, allow_prefix, path, sizeof(path)) != 0)
+    PicoAgent *replacement;
+    int index;
+
+    if (!old)
     {
-        return PICO_AGENT_RESULT_SESSION_INVALID;
+        return PICO_NOT_FOUND;
+    }
+    if (PicoAgent_IsBusy(old))
+    {
+        return PICO_BUSY;
+    }
+    workspace = old->workspace;
+    if (!workspace)
+    {
+        return PICO_INVALID;
+    }
+    if (PicoSession_Resolve(workspace, id, allow_prefix, path, sizeof(path)) != 0)
+    {
+        return PICO_SESSION_INVALID;
     }
     if (old->session_path[0] && strcmp(old->session_path, path) == 0)
     {
-        return PICO_AGENT_RESULT_OK;
+        return PICO_OK;
     }
-    if (PicoAgentManager_SessionReserved(app->agents, path, old->id))
+    if (PicoWorkspace_SessionReserved(workspace, path, old->id))
     {
-        return PICO_AGENT_RESULT_SESSION_IN_USE;
+        return PICO_SESSION_IN_USE;
     }
-    PicoAgent *replacement = PicoAgent_Create(app);
+    replacement = PicoAgent_Create(app, workspace);
     if (!replacement)
     {
-        return PICO_AGENT_RESULT_NO_MEMORY;
+        return PICO_NO_MEMORY;
     }
     replacement->persistence = PICO_SESSION_DURABLE;
-    if (!PicoAgentManager_ReserveSession(app->agents, replacement->id, path))
+    if (!PicoWorkspace_ReserveSession(workspace, replacement->id, path))
     {
         PicoAgent_Destroy(replacement);
-        return PICO_AGENT_RESULT_SESSION_IN_USE;
+        return PICO_SESSION_IN_USE;
     }
     if (PicoSession_Replay(app, replacement, path, false) != 0)
     {
-        PicoAgentManager_ReleaseSessions(app->agents, replacement->id);
+        PicoWorkspace_ReleaseSessions(workspace, replacement->id);
         PicoAgent_Destroy(replacement);
-        return PICO_AGENT_RESULT_SESSION_INVALID;
+        return PICO_SESSION_INVALID;
     }
-    int index = FindIndex(app->agents, old->id);
-    PicoAgentId old_id = old->id;
+    index = FindIndex(workspace, old->id);
+    if (index < 0)
+    {
+        PicoWorkspace_ReleaseSessions(workspace, replacement->id);
+        PicoAgent_Destroy(replacement);
+        return PICO_NOT_FOUND;
+    }
+    old_id = old->id;
+    was_selected = app && app->selected_agent_id == old_id;
     if (!PicoAgent_Destroy(old))
     {
-        PicoAgentManager_ReleaseSessions(app->agents, replacement->id);
+        PicoWorkspace_ReleaseSessions(workspace, replacement->id);
         PicoAgent_Destroy(replacement);
-        return PICO_AGENT_RESULT_BUSY;
+        return PICO_BUSY;
     }
-    app->agents->agents[index] = replacement;
-    app->agents->active_id = replacement->id;
-    PicoAgentManager_ReleaseSessions(app->agents, old_id);
+    workspace->agents[index] = replacement;
+    PicoWorkspace_ReleaseSessions(workspace, old_id);
+    if (was_selected)
+    {
+        SyncSelectedAgent(app, replacement->id);
+        PicoChatSel_Clear(app);
+        app->chat_follow_bottom = true;
+    }
     pico_run_hooks(app, PICO_HOOK_ON_AGENT_DESTROY, old_id);
     PicoSession_AppendInterrupted(app, replacement);
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, replacement->id);
-    PicoChatSel_Clear(app);
-    app->chat_follow_bottom = true;
-    return PICO_AGENT_RESULT_OK;
+    return PICO_OK;
 }
 
 static bool DelegationTerminal(PicoDelegationState state)
@@ -1166,11 +1328,11 @@ static bool PublishDelegation(PicoDelegationJob *job, PicoDelegationState state,
     return true;
 }
 
-static void RemoveDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
+static void RemoveDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
 {
     bool removed = false;
-    pthread_mutex_lock(&manager->delegation_mu);
-    PicoDelegationJob **link = &manager->delegations;
+    pthread_mutex_lock(&workspace->delegation_mu);
+    PicoDelegationJob **link = &workspace->delegations;
     while (*link)
     {
         if (*link == job)
@@ -1182,22 +1344,22 @@ static void RemoveDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
         }
         link = &(*link)->next;
     }
-    pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_unlock(&workspace->delegation_mu);
     if (removed)
     {
         DelegationRelease(job);
     }
 }
 
-static const char *AgentResultText(PicoAgentResult result)
+static const char *AgentResultText(PicoResult result)
 {
     switch (result)
     {
-    case PICO_AGENT_RESULT_LIMIT: return "agent or delegation depth limit reached";
-    case PICO_AGENT_RESULT_SESSION_IN_USE: return "session is already open";
-    case PICO_AGENT_RESULT_SESSION_INVALID: return "session is invalid";
-    case PICO_AGENT_RESULT_NO_MEMORY: return "out of memory";
-    case PICO_AGENT_RESULT_NOT_FOUND: return "parent agent no longer exists";
+    case PICO_LIMIT: return "agent or delegation depth limit reached";
+    case PICO_SESSION_IN_USE: return "session is already open";
+    case PICO_SESSION_INVALID: return "session is invalid";
+    case PICO_NO_MEMORY: return "out of memory";
+    case PICO_NOT_FOUND: return "parent agent no longer exists";
     default: return "could not create subagent";
     }
 }
@@ -1318,72 +1480,72 @@ static void CopySessionIdFromOutput(const char *output, char *out, size_t cap)
     JsonFree(&doc);
 }
 
-static PicoSubagentSnapshot *FindSnapshot(PicoAgentManager *manager, PicoAgentId child_id,
+static PicoSubagentSnapshot *FindSnapshot(PicoWorkspace *workspace, PicoAgentId child_id,
                                           const char *session_id)
 {
-    if (!manager)
+    if (!workspace)
     {
         return NULL;
     }
     if (child_id)
     {
-        for (int i = 0; i < manager->snapshot_count; i++)
+        for (int i = 0; i < workspace->snapshot_count; i++)
         {
-            if (manager->snapshots[i].child_id == child_id)
+            if (workspace->snapshots[i].child_id == child_id)
             {
-                return &manager->snapshots[i];
+                return &workspace->snapshots[i];
             }
         }
     }
     if (session_id && session_id[0])
     {
-        for (int i = 0; i < manager->snapshot_count; i++)
+        for (int i = 0; i < workspace->snapshot_count; i++)
         {
-            if (manager->snapshots[i].session_id[0] &&
-                strcmp(manager->snapshots[i].session_id, session_id) == 0)
+            if (workspace->snapshots[i].session_id[0] &&
+                strcmp(workspace->snapshots[i].session_id, session_id) == 0)
             {
-                return &manager->snapshots[i];
+                return &workspace->snapshots[i];
             }
         }
     }
     return NULL;
 }
 
-static PicoSubagentSnapshot *AllocSnapshot(PicoAgentManager *manager)
+static PicoSubagentSnapshot *AllocSnapshot(PicoWorkspace *workspace)
 {
-    if (!manager)
+    if (!workspace)
     {
         return NULL;
     }
-    if (manager->snapshot_count >= manager->snapshot_capacity)
+    if (workspace->snapshot_count >= workspace->snapshot_capacity)
     {
-        int next_capacity = manager->snapshot_capacity == 0 ? 16 : manager->snapshot_capacity * 2;
+        int next_capacity = workspace->snapshot_capacity == 0 ? 16 : workspace->snapshot_capacity * 2;
         PicoSubagentSnapshot *next = (PicoSubagentSnapshot *)realloc(
-            manager->snapshots, (size_t)next_capacity * sizeof(PicoSubagentSnapshot));
+            workspace->snapshots, (size_t)next_capacity * sizeof(PicoSubagentSnapshot));
         if (!next)
         {
             return NULL;
         }
-        memset(&next[manager->snapshot_capacity], 0,
-               (size_t)(next_capacity - manager->snapshot_capacity) * sizeof(PicoSubagentSnapshot));
-        manager->snapshots = next;
-        manager->snapshot_capacity = next_capacity;
+        memset(&next[workspace->snapshot_capacity], 0,
+               (size_t)(next_capacity - workspace->snapshot_capacity) * sizeof(PicoSubagentSnapshot));
+        workspace->snapshots = next;
+        workspace->snapshot_capacity = next_capacity;
     }
-    PicoSubagentSnapshot *slot = &manager->snapshots[manager->snapshot_count++];
+    PicoSubagentSnapshot *slot = &workspace->snapshots[workspace->snapshot_count++];
     memset(slot, 0, sizeof(*slot));
     return slot;
 }
 
-static void SnapshotChild(PicoAgentManager *manager, const PicoAgent *child)
+static void SnapshotChild(PicoWorkspace *workspace, const PicoAgent *child)
 {
-    if (!manager || !child)
+    if (!workspace || !child)
     {
         return;
     }
-    PicoSubagentSnapshot *slot = FindSnapshot(manager, child->id, child->session_id);
+    PicoSubagentSnapshot *slot = FindSnapshot(workspace, child->id, child->session_id);
     if (!slot)
     {
-        slot = AllocSnapshot(manager);
+        slot = AllocSnapshot(workspace);
     }
     if (!slot)
     {
@@ -1433,21 +1595,21 @@ static void FillInspectFromSnapshot(PicoSubagentInspect *out, const PicoSubagent
     out->message_count = slot->message_count;
 }
 
-static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *session_id)
+static bool LoadSnapshotFromSession(PicoWorkspace *workspace, const char *session_id)
 {
-    if (!manager || !manager->app || !session_id || !session_id[0] ||
-        FindSnapshot(manager, 0, session_id))
+    if (!workspace || !workspace->host || !session_id || !session_id[0] ||
+        FindSnapshot(workspace, 0, session_id))
     {
-        return FindSnapshot(manager, 0, session_id) != NULL;
+        return FindSnapshot(workspace, 0, session_id) != NULL;
     }
     PicoMessage *messages = NULL;
     int count = 0;
-    if (PicoSession_LoadTranscript(manager->app, session_id, &messages, &count) != 0)
+    if (PicoSession_LoadTranscript(workspace, session_id, &messages, &count) != 0)
     {
         return false;
     }
     PicoMessages_PrepareDocs(messages, count);
-    PicoSubagentSnapshot *slot = AllocSnapshot(manager);
+    PicoSubagentSnapshot *slot = AllocSnapshot(workspace);
     if (!slot)
     {
         PicoMessages_Free(messages, count);
@@ -1458,7 +1620,7 @@ static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *sessi
     snprintf(slot->session_id, sizeof(slot->session_id), "%s", session_id);
     PicoSessionHeader header;
     char path[4096];
-    if (PicoSession_Resolve(manager->app, session_id, false, path, sizeof(path)) == 0 &&
+    if (PicoSession_Resolve(workspace, session_id, false, path, sizeof(path)) == 0 &&
         PicoSession_ReadHeader(path, &header) == 0)
     {
         snprintf(slot->profile, sizeof(slot->profile), "%s", header.profile);
@@ -1468,17 +1630,17 @@ static bool LoadSnapshotFromSession(PicoAgentManager *manager, const char *sessi
     return true;
 }
 
-static void LinkDelegationToolRows(PicoAgentManager *manager)
+static void LinkDelegationToolRows(PicoWorkspace *workspace)
 {
     PicoDelegationJob *jobs[PICO_MAX_AGENTS * 2];
     int count = 0;
-    pthread_mutex_lock(&manager->delegation_mu);
-    for (PicoDelegationJob *it = manager->delegations;
+    pthread_mutex_lock(&workspace->delegation_mu);
+    for (PicoDelegationJob *it = workspace->delegations;
          it && count < (int)(sizeof(jobs) / sizeof(jobs[0])); it = it->next)
     {
         jobs[count++] = it;
     }
-    pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_unlock(&workspace->delegation_mu);
     for (int i = 0; i < count; i++)
     {
         PicoDelegationJob *job = jobs[i];
@@ -1492,8 +1654,8 @@ static void LinkDelegationToolRows(PicoAgentManager *manager)
         {
             continue;
         }
-        PicoAgent *parent = PicoAgentManager_Find(manager, parent_id);
-        PicoAgent *child = PicoAgentManager_Find(manager, child_id);
+        PicoAgent *parent = PicoWorkspace_FindAgent(workspace, parent_id);
+        PicoAgent *child = PicoWorkspace_FindAgent(workspace, child_id);
         const char *sid = session_id[0] ? session_id :
                           (child && child->session_id[0] ? child->session_id : NULL);
         PicoTraceLine *line = FindSubagentLine(parent, child_id, job->call_id);
@@ -1505,18 +1667,22 @@ static void LinkDelegationToolRows(PicoAgentManager *manager)
     }
 }
 
-bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
-                                      PicoSubagentInspect *out)
+bool PicoWorkspace_InspectSubagent(PicoHost *host, const PicoTraceLine *line,
+                                   PicoSubagentInspect *out)
 {
     if (out)
     {
         memset(out, 0, sizeof(*out));
     }
-    if (!app || !app->agents || !line || !out)
+    if (!host || !line || !out)
     {
         return false;
     }
-    PicoAgentManager *manager = app->agents;
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(host);
+    if (!workspace)
+    {
+        return false;
+    }
     char session_id[40];
     snprintf(session_id, sizeof(session_id), "%s", line->child_session_id);
     if (!session_id[0])
@@ -1525,17 +1691,21 @@ bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
     }
     if (line->child_id)
     {
-        PicoAgent *child = PicoAgentManager_Find(manager, line->child_id);
+        PicoAgent *child = PicoWorkspace_FindAgent(workspace, line->child_id);
+        if (!child)
+        {
+            child = PicoHost_FindAgent(host, line->child_id);
+        }
         if (child)
         {
             FillInspectFromAgent(out, child);
             return true;
         }
     }
-    PicoSubagentSnapshot *slot = FindSnapshot(manager, line->child_id, session_id);
-    if (!slot && session_id[0] && LoadSnapshotFromSession(manager, session_id))
+    PicoSubagentSnapshot *slot = FindSnapshot(workspace, line->child_id, session_id);
+    if (!slot && session_id[0] && LoadSnapshotFromSession(workspace, session_id))
     {
-        slot = FindSnapshot(manager, 0, session_id);
+        slot = FindSnapshot(workspace, 0, session_id);
     }
     if (!slot)
     {
@@ -1545,41 +1715,41 @@ bool PicoAgentManager_InspectSubagent(PicoApp *app, const PicoTraceLine *line,
     return true;
 }
 
-static char *UnknownProfileError(const PicoAgentManager *manager)
+static char *UnknownProfileError(const PicoWorkspace *workspace)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "unknown subagent profile; available: ");
-    if (!manager || manager->profile_count <= 0)
+    if (!workspace || workspace->profile_count <= 0)
     {
         JsonBuf_Puts(&b, "(none)");
         return JsonBuf_Steal(&b);
     }
-    for (int i = 0; i < manager->profile_count; i++)
+    for (int i = 0; i < workspace->profile_count; i++)
     {
         if (i > 0)
         {
             JsonBuf_Puts(&b, ", ");
         }
-        JsonBuf_Puts(&b, manager->profiles[i].name);
+        JsonBuf_Puts(&b, workspace->profiles[i].name);
     }
     return JsonBuf_Steal(&b);
 }
 
-static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
+static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
 {
-    PicoApp *app = manager->app;
-    PicoAgent *parent = PicoAgentManager_Find(manager, job->parent_id);
+    PicoHost *app = workspace ? workspace->host : NULL;
+    PicoAgent *parent = PicoWorkspace_FindAgent(workspace, job->parent_id);
     if (!parent || parent->runtime_generation != job->parent_generation)
     {
         PublishDelegation(job, PICO_DELEGATION_ABANDONED, "cancelled", NULL,
                           "parent runtime is no longer live", true);
         return false;
     }
-    const PicoSubagentProfileInfo *profile = PicoSubagentConfig_Find(manager, job->profile);
+    const PicoSubagentProfileInfo *profile = PicoSubagentConfig_Find(workspace, job->profile);
     if (!profile)
     {
-        char *message = UnknownProfileError(manager);
+        char *message = UnknownProfileError(workspace);
         PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
                           message ? message : "unknown subagent profile", true);
         free(message);
@@ -1604,7 +1774,7 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
     if (job->session_id[0])
     {
         char path[4096];
-        if (PicoSession_Resolve(app, job->session_id, false, path, sizeof(path)) != 0 ||
+        if (PicoSession_Resolve(workspace, job->session_id, false, path, sizeof(path)) != 0 ||
             PicoSession_ReadHeader(path, &header) != 0)
         {
             PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
@@ -1639,14 +1809,14 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
         .select = false,
     };
     PicoAgentId child_id = 0;
-    PicoAgentResult created = pico_agent_create(app, &options, &child_id);
-    if (created != PICO_AGENT_RESULT_OK)
+    PicoResult created = PicoWorkspace_CreateAgent(workspace, &options, &child_id);
+    if (created != PICO_OK)
     {
         PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
                           AgentResultText(created), true);
         return false;
     }
-    PicoAgent *child = PicoAgentManager_Find(manager, child_id);
+    PicoAgent *child = PicoWorkspace_FindAgent(workspace, child_id);
     if (!child)
     {
         PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
@@ -1668,7 +1838,7 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
         snprintf(child->parent_session_id, sizeof(child->parent_session_id), "%s",
                  parent->persistence == PICO_SESSION_DURABLE ? parent->session_id : "");
     }
-    PicoSettings_SyncAgent(app, child);
+    PicoSettings_SyncAgent(child);
     if (job->session_id[0] && replayed_model[0] && strcmp(replayed_model, model) != 0)
     {
         PicoAgent_RotateCacheKey(child);
@@ -1685,60 +1855,57 @@ static bool StartDelegation(PicoAgentManager *manager, PicoDelegationJob *job)
     return true;
 }
 
-static void ProcessDelegationRequests(PicoAgentManager *manager)
+static void ProcessDelegationRequests(PicoWorkspace *workspace)
 {
-    for (;;)
+    PicoDelegationJob *job = NULL;
+    pthread_mutex_lock(&workspace->delegation_mu);
+    for (PicoDelegationJob *it = workspace->delegations; it; it = it->next)
     {
-        PicoDelegationJob *job = NULL;
-        pthread_mutex_lock(&manager->delegation_mu);
-        for (PicoDelegationJob *it = manager->delegations; it; it = it->next)
+        pthread_mutex_lock(&it->mu);
+        if (it->state == PICO_DELEGATION_REQUESTED)
         {
-            pthread_mutex_lock(&it->mu);
-            if (it->state == PICO_DELEGATION_REQUESTED)
-            {
-                it->state = PICO_DELEGATION_STARTING;
-                job = it;
-                pthread_mutex_unlock(&it->mu);
-                break;
-            }
+            it->state = PICO_DELEGATION_STARTING;
+            job = it;
             pthread_mutex_unlock(&it->mu);
-        }
-        pthread_mutex_unlock(&manager->delegation_mu);
-        if (!job)
-        {
             break;
         }
-        if (!PicoAgentManager_AcceptsNewWork(manager))
-        {
-            PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
-                              "reload or workspace transition is pending", true);
-            RemoveDelegation(manager, job);
-        }
-        else if (!StartDelegation(manager, job))
-        {
-            RemoveDelegation(manager, job);
-        }
+        pthread_mutex_unlock(&it->mu);
+    }
+    pthread_mutex_unlock(&workspace->delegation_mu);
+    if (!job)
+    {
+        return;
+    }
+    if (!PicoWorkspace_AcceptsNewWork(workspace))
+    {
+        PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                          "reload or workspace transition is pending", true);
+        RemoveDelegation(workspace, job);
+    }
+    else if (!StartDelegation(workspace, job))
+    {
+        RemoveDelegation(workspace, job);
     }
 }
 
-static void CloseDelegationChild(PicoAgentManager *manager, PicoDelegationJob *job,
+static void CloseDelegationChild(PicoWorkspace *workspace, PicoDelegationJob *job,
                                  PicoAgentId child_id)
 {
-    PicoAgent *child = child_id ? PicoAgentManager_Find(manager, child_id) : NULL;
-    PicoAgent *parent = PicoAgentManager_Find(manager, job->parent_id);
+    PicoAgent *child = child_id ? PicoWorkspace_FindAgent(workspace, child_id) : NULL;
+    PicoAgent *parent = PicoWorkspace_FindAgent(workspace, job->parent_id);
     if (child)
     {
         PicoTraceLine *line = FindSubagentLine(parent, child_id, job->call_id);
         StampSubagentLine(line, child_id, child->session_id[0] ? child->session_id : NULL);
-        SnapshotChild(manager, child);
+        SnapshotChild(workspace, child);
     }
     pthread_mutex_lock(&job->mu);
     job->child_id = 0;
     pthread_mutex_unlock(&job->mu);
-    PicoAgentResult closed = pico_agent_close(manager->app, child_id);
-    if (closed == PICO_AGENT_RESULT_OK || closed == PICO_AGENT_RESULT_NOT_FOUND)
+    PicoResult closed = pico_agent_close(workspace->host, child_id);
+    if (closed == PICO_OK || closed == PICO_NOT_FOUND)
     {
-        RemoveDelegation(manager, job);
+        RemoveDelegation(workspace, job);
         return;
     }
     pthread_mutex_lock(&job->mu);
@@ -1746,18 +1913,18 @@ static void CloseDelegationChild(PicoAgentManager *manager, PicoDelegationJob *j
     pthread_mutex_unlock(&job->mu);
 }
 
-static void ProcessDelegationTerminals(PicoAgentManager *manager)
+static void ProcessDelegationTerminals(PicoWorkspace *workspace)
 {
     PicoDelegationJob *jobs[PICO_MAX_AGENTS * 2];
     int count = 0;
-    pthread_mutex_lock(&manager->delegation_mu);
-    for (PicoDelegationJob *it = manager->delegations;
+    pthread_mutex_lock(&workspace->delegation_mu);
+    for (PicoDelegationJob *it = workspace->delegations;
          it && count < (int)(sizeof(jobs) / sizeof(jobs[0])); it = it->next)
     {
         DelegationRetain(it);
         jobs[count++] = it;
     }
-    pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_unlock(&workspace->delegation_mu);
 
     for (int i = 0; i < count; i++)
     {
@@ -1767,7 +1934,7 @@ static void ProcessDelegationTerminals(PicoAgentManager *manager)
         PicoAgentId child_id = job->child_id;
         int child_message_start = job->child_message_start;
         pthread_mutex_unlock(&job->mu);
-        PicoAgent *child = child_id ? PicoAgentManager_Find(manager, child_id) : NULL;
+        PicoAgent *child = child_id ? PicoWorkspace_FindAgent(workspace, child_id) : NULL;
 
         if ((state == PICO_DELEGATION_CANCELLED || state == PICO_DELEGATION_ABANDONED) && child)
         {
@@ -1777,7 +1944,7 @@ static void ProcessDelegationTerminals(PicoAgentManager *manager)
             }
             else
             {
-                CloseDelegationChild(manager, job, child_id);
+                CloseDelegationChild(workspace, job, child_id);
             }
         }
         else if (state == PICO_DELEGATION_RUNNING)
@@ -1786,19 +1953,19 @@ static void ProcessDelegationTerminals(PicoAgentManager *manager)
             {
                 PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
                                   "subagent disappeared before completion", true);
-                RemoveDelegation(manager, job);
+                RemoveDelegation(workspace, job);
             }
             else if (child->state == PICO_AGENT_ERROR)
             {
                 PublishDelegation(job, PICO_DELEGATION_ERROR, "error", child,
                                   child->error ? child->error : "subagent failed", true);
-                CloseDelegationChild(manager, job, child_id);
+                CloseDelegationChild(workspace, job, child_id);
             }
             else if (!PicoAgent_IsBusy(child) && child->state == PICO_AGENT_IDLE)
             {
                 PublishDelegation(job, PICO_DELEGATION_DONE, "completed", child,
                                   LastAssistantSince(child, child_message_start), false);
-                CloseDelegationChild(manager, job, child_id);
+                CloseDelegationChild(workspace, job, child_id);
             }
         }
         else if (DelegationTerminal(state))
@@ -1807,28 +1974,28 @@ static void ProcessDelegationTerminals(PicoAgentManager *manager)
             {
                 if (!PicoAgent_IsBusy(child))
                 {
-                    CloseDelegationChild(manager, job, child_id);
+                    CloseDelegationChild(workspace, job, child_id);
                 }
             }
             else
             {
-                RemoveDelegation(manager, job);
+                RemoveDelegation(workspace, job);
             }
         }
         DelegationRelease(job);
     }
 }
 
-char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
-                                const char *task, const char *session_id,
-                                bool *is_error)
+char *PicoWorkspace_Delegate(PicoAgentContext *ctx, const char *profile,
+                             const char *task, const char *session_id,
+                             bool *is_error)
 {
     if (is_error)
     {
         *is_error = true;
     }
-    PicoAgentManager *manager = PicoAgentContext_Manager(ctx);
-    if (!manager || !PicoAgentManager_AcceptsNewWork(manager))
+    PicoWorkspace *workspace = PicoAgentContext_Workspace(ctx);
+    if (!workspace || !PicoWorkspace_AcceptsNewWork(workspace))
     {
         return JsonDup("{\"status\":\"error\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"reload or workspace transition is pending\"}");
     }
@@ -1869,10 +2036,10 @@ char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
         DelegationRelease(job);
         return result ? result : JsonDup("{\"status\":\"cancelled\",\"profile\":\"unknown\",\"resumable\":false,\"final_answer\":\"parent cancelled delegation\"}");
     }
-    pthread_mutex_lock(&manager->lifecycle_mu);
-    if (!manager->accepting_work || manager->retained_shutdown)
+    pthread_mutex_lock(&workspace->lifecycle_mu);
+    if (!workspace->accepting_work || workspace->retained_shutdown)
     {
-        pthread_mutex_unlock(&manager->lifecycle_mu);
+        pthread_mutex_unlock(&workspace->lifecycle_mu);
         PicoAgentContext_UnlockLive(ctx);
         pthread_mutex_lock(&job->mu);
         job->state = PICO_DELEGATION_ERROR;
@@ -1885,12 +2052,12 @@ char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
         DelegationRelease(job);
         return result;
     }
-    pthread_mutex_lock(&manager->delegation_mu);
-    PicoDelegationJob **tail = &manager->delegations;
+    pthread_mutex_lock(&workspace->delegation_mu);
+    PicoDelegationJob **tail = &workspace->delegations;
     while (*tail) tail = &(*tail)->next;
     *tail = job;
-    pthread_mutex_unlock(&manager->delegation_mu);
-    pthread_mutex_unlock(&manager->lifecycle_mu);
+    pthread_mutex_unlock(&workspace->delegation_mu);
+    pthread_mutex_unlock(&workspace->lifecycle_mu);
     PicoAgentContext_UnlockLive(ctx);
 
     pthread_mutex_lock(&job->mu);
@@ -1910,15 +2077,15 @@ char *PicoAgentManager_Delegate(PicoAgentContext *ctx, const char *profile,
     return result;
 }
 
-void PicoAgentManager_CancelChildDelegation(PicoAgentManager *manager, PicoAgentId child_id)
+void PicoWorkspace_CancelChildDelegation(PicoWorkspace *workspace, PicoAgentId child_id)
 {
-    if (!manager || !child_id)
+    if (!workspace || !child_id)
     {
         return;
     }
-    PicoAgent *child = PicoAgentManager_Find(manager, child_id);
-    pthread_mutex_lock(&manager->delegation_mu);
-    for (PicoDelegationJob *job = manager->delegations; job; job = job->next)
+    PicoAgent *child = PicoWorkspace_FindAgent(workspace, child_id);
+    pthread_mutex_lock(&workspace->delegation_mu);
+    for (PicoDelegationJob *job = workspace->delegations; job; job = job->next)
     {
         pthread_mutex_lock(&job->mu);
         if (job->child_id == child_id && !DelegationTerminal(job->state))
@@ -1933,24 +2100,25 @@ void PicoAgentManager_CancelChildDelegation(PicoAgentManager *manager, PicoAgent
         }
         pthread_mutex_unlock(&job->mu);
     }
-    pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_unlock(&workspace->delegation_mu);
 }
 
-void PicoAgentManager_CancelDelegations(PicoAgentManager *manager, PicoAgentId parent_id,
-                                        uint64_t runtime_generation)
+void PicoWorkspace_CancelDelegations(PicoWorkspace *workspace, PicoAgentId parent_id,
+                                     uint64_t runtime_generation)
 {
-    if (!manager)
+    if (!workspace)
     {
         return;
     }
     PicoAgentId children[PICO_MAX_AGENTS];
     int child_count = 0;
-    pthread_mutex_lock(&manager->delegation_mu);
-    for (PicoDelegationJob *job = manager->delegations; job; job = job->next)
+    pthread_mutex_lock(&workspace->delegation_mu);
+    for (PicoDelegationJob *job = workspace->delegations; job; job = job->next)
     {
         pthread_mutex_lock(&job->mu);
         bool match = parent_id == 0 ||
-                     (job->parent_id == parent_id && job->parent_generation == runtime_generation);
+                     (job->parent_id == parent_id &&
+                      (runtime_generation == 0 || job->parent_generation == runtime_generation));
         if (match && !DelegationTerminal(job->state))
         {
             free(job->result);
@@ -1966,10 +2134,10 @@ void PicoAgentManager_CancelDelegations(PicoAgentManager *manager, PicoAgentId p
         }
         pthread_mutex_unlock(&job->mu);
     }
-    pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_unlock(&workspace->delegation_mu);
     for (int i = 0; i < child_count; i++)
     {
-        PicoAgent *child = PicoAgentManager_Find(manager, children[i]);
+        PicoAgent *child = PicoWorkspace_FindAgent(workspace, children[i]);
         if (child)
         {
             PicoAgent_Cancel(child);
@@ -1977,30 +2145,30 @@ void PicoAgentManager_CancelDelegations(PicoAgentManager *manager, PicoAgentId p
     }
 }
 
-bool PicoAgentManager_JobReferences(const PicoAgentManager *manager, PicoAgentId id)
+bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id)
 {
-    if (!manager || !id)
+    if (!workspace || !id)
     {
         return false;
     }
     bool found = false;
-    pthread_mutex_lock((pthread_mutex_t *)&manager->delegation_mu);
-    for (PicoDelegationJob *job = manager->delegations; job && !found; job = job->next)
+    pthread_mutex_lock((pthread_mutex_t *)&workspace->delegation_mu);
+    for (PicoDelegationJob *job = workspace->delegations; job && !found; job = job->next)
     {
         pthread_mutex_lock(&job->mu);
         found = job->parent_id == id || job->child_id == id;
         pthread_mutex_unlock(&job->mu);
     }
-    pthread_mutex_unlock((pthread_mutex_t *)&manager->delegation_mu);
+    pthread_mutex_unlock((pthread_mutex_t *)&workspace->delegation_mu);
     return found;
 }
 
-static void DropDelegations(PicoAgentManager *manager)
+static void DropDelegations(PicoWorkspace *workspace)
 {
-    pthread_mutex_lock(&manager->delegation_mu);
-    PicoDelegationJob *job = manager->delegations;
-    manager->delegations = NULL;
-    pthread_mutex_unlock(&manager->delegation_mu);
+    pthread_mutex_lock(&workspace->delegation_mu);
+    PicoDelegationJob *job = workspace->delegations;
+    workspace->delegations = NULL;
+    pthread_mutex_unlock(&workspace->delegation_mu);
     while (job)
     {
         PicoDelegationJob *next = job->next;

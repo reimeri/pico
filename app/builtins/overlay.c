@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "host_internal.h"
 
 #include "../agent_internal.h"
 #include "../composer_internal.h"
@@ -18,18 +19,38 @@
 #define NOTIFY_TIMER_H 3.0f
 #define INVALID_ASK_ANSWER "{\"error\":\"invalid ask payload; fix it and try again\"}"
 
-static char *g_notify;
-static float g_notify_ttl;
+typedef struct OverlayState {
+    char *notify;
+    float notify_ttl;
+    uint64_t ask_id;
+    bool ask_show;
+    char *ask_msg;
+    bool ask_overflow;
+    PicoScrollbar ask_bar;
+} OverlayState;
 
-static uint64_t g_ask_id;
-static bool g_ask_show;
-static char *g_ask_msg;
-static bool g_ask_overflow;
-static PicoScrollbar g_ask_bar;
+static __thread OverlayState *s_active_overlay_state = NULL;
 
-void PicoOverlay_Notify(PicoApp *app, const char *text)
+static OverlayState *ActiveOverlayState(void)
 {
-    (void)app;
+    return s_active_overlay_state;
+}
+
+#define g_notify (ActiveOverlayState()->notify)
+#define g_notify_ttl (ActiveOverlayState()->notify_ttl)
+#define g_ask_id (ActiveOverlayState()->ask_id)
+#define g_ask_show (ActiveOverlayState()->ask_show)
+#define g_ask_msg (ActiveOverlayState()->ask_msg)
+#define g_ask_overflow (ActiveOverlayState()->ask_overflow)
+#define g_ask_bar (ActiveOverlayState()->ask_bar)
+
+void PicoOverlay_Notify(PicoHost *app, const char *text)
+{
+    s_active_overlay_state = (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     free(g_notify);
     g_notify = NULL;
     g_notify_ttl = 0.0f;
@@ -44,9 +65,9 @@ void PicoOverlay_Notify(PicoApp *app, const char *text)
     }
 }
 
-static bool HasError(const PicoApp *app)
+static bool HasError(const PicoHost *app)
 {
-    const PicoAgent *agent = PicoApp_ActiveAgentConst(app);
+    const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
     return (app->status_warn && app->status_warn[0]) || (agent->error && agent->error[0]);
 }
 
@@ -69,13 +90,13 @@ static void ClearAskUi(void)
     memset(&g_ask_bar, 0, sizeof(g_ask_bar));
 }
 
-static void RejectInvalidAsk(PicoApp *app, uint64_t id)
+static void RejectInvalidAsk(PicoHost *app, uint64_t id)
 {
     ClearAskUi();
     pico_tool_answer(app, id, INVALID_ASK_ANSWER);
 }
 
-static void PrepareAsk(PicoApp *app)
+static void PrepareAsk(PicoHost *app)
 {
     PicoToolAsk ask;
     if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
@@ -126,7 +147,7 @@ static void AskButton(Clay_String id, const char *label)
     }
 }
 
-static void RenderAsk(PicoApp *app)
+static void RenderAsk(PicoHost *app)
 {
     PrepareAsk(app);
     if (!g_ask_show)
@@ -206,10 +227,10 @@ static void RenderAsk(PicoApp *app)
     }
 }
 
-static void RenderError(PicoApp *app)
+static void RenderError(PicoHost *app)
 {
     const char *warn = app->status_warn;
-    const char *agent = (!warn || !warn[0]) ? PicoApp_ActiveAgent(app)->error : NULL;
+    const char *agent = (!warn || !warn[0]) ? PicoHost_SelectedAgent(app)->error : NULL;
     if ((!warn || !warn[0]) && (!agent || !agent[0]))
     {
         return;
@@ -260,7 +281,7 @@ static float NotifyRemaining(void)
     return remaining;
 }
 
-static void RenderToast(PicoApp *app)
+static void RenderToast(PicoHost *app)
 {
     if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
     {
@@ -296,15 +317,25 @@ static void RenderToast(PicoApp *app)
     }
 }
 
-void PicoOverlay_Render(PicoApp *app)
+void PicoOverlay_Render(PicoHost *app, void *state)
 {
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     RenderError(app);
     RenderToast(app);
     RenderAsk(app);
 }
 
-void PicoOverlay_OnFrame(PicoApp *app, float dt)
+void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
 {
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     if (g_ask_show)
     {
         PicoScrollbar_UpdateDrag(&g_ask_bar, CLAY_STRING("AskModalScroll"),
@@ -337,9 +368,14 @@ static bool OverAsk(Clay_String id)
     return Clay_PointerOver(CLAY_SID(id));
 }
 
-static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state)
+    {
+        return;
+    }
     if (g_ask_show)
     {
         g_ask_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskModalScroll"));
@@ -362,7 +398,8 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
         }
     }
 
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !PicoApp_ActiveAgent(app)->error))
+    PicoAgent *agent = PicoHost_SelectedAgent(app);
+    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !(agent && agent->error)))
     {
         return;
     }
@@ -374,20 +411,20 @@ static void OverlayAfterLayout(PicoApp *app, const PicoHookEvent *event)
             free(app->status_warn);
             app->status_warn = NULL;
         }
-        else if (PicoApp_ActiveAgent(app)->error && PicoApp_ActiveAgent(app)->state == PICO_AGENT_ERROR)
+        else if (agent && agent->error && agent->state == PICO_AGENT_ERROR)
         {
-            free(PicoApp_ActiveAgent(app)->error);
-            PicoApp_ActiveAgent(app)->error = NULL;
-            PicoApp_ActiveAgent(app)->state = PICO_AGENT_IDLE;
+            free(agent->error);
+            agent->error = NULL;
+            agent->state = PICO_AGENT_IDLE;
         }
     }
 }
 
-static void OverlayAfterRender(PicoApp *app, const PicoHookEvent *event)
+static void OverlayAfterRender(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    (void)app;
     (void)event;
-    if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
+    s_active_overlay_state = state ? (OverlayState *)state : (OverlayState *)PicoPlugins_HostState(app, "overlay");
+    if (!s_active_overlay_state || !g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
     {
         return;
     }
@@ -426,11 +463,34 @@ static void OverlayAfterRender(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void OverlayInit(PicoApp *app)
+static int OverlayInit(PicoHost *app, void **state_out)
 {
-    pico_add_view(app, PICO_SLOT_OVERLAY, 0, PicoOverlay_Render);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, OverlayAfterLayout);
-    pico_add_hook(app, PICO_HOOK_AFTER_RENDER, OverlayAfterRender);
+    OverlayState *s = (OverlayState *)calloc(1, sizeof(OverlayState));
+    if (!s)
+    {
+        return 1;
+    }
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 0, PicoOverlay_Render);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, OverlayAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, OverlayAfterRender);
+    return 0;
+}
+
+static void OverlayShutdown(PicoHost *app, void *state)
+{
+    (void)app;
+    OverlayState *s = (OverlayState *)state;
+    if (!s)
+    {
+        return;
+    }
+    free(s->notify);
+    free(s->ask_msg);
+    free(s);
 }
 
 PicoExt pico_ext_overlay(void)
@@ -439,7 +499,8 @@ PicoExt pico_ext_overlay(void)
         .abi = PICO_EXT_ABI,
         .name = "overlay",
         .description = "Errors and notifications",
-        .init = OverlayInit,
-        .on_frame = PicoOverlay_OnFrame,
+        .host_init = OverlayInit,
+        .host_shutdown = OverlayShutdown,
+        .host_on_frame = PicoOverlay_OnFrame,
     };
 }

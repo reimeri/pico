@@ -1,6 +1,6 @@
 #include "pico/plugin.h"
 
-#include "agent_manager.h"
+#include "workspace_internal.h"
 #include "json.h"
 
 #include <stdlib.h>
@@ -13,8 +13,9 @@ static const char *kSubagentParams =
     "\"session_id\":{\"type\":\"string\",\"description\":\"Optional exact previous child session ID\"}},"
     "\"required\":[\"profile\",\"task\"]}";
 
-static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));
@@ -47,7 +48,7 @@ static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolRe
         return;
     }
     bool is_error = false;
-    char *result = PicoAgentManager_Delegate(ctx, profile, task, session_id, &is_error);
+    char *result = PicoWorkspace_Delegate(ctx, profile, task, session_id, &is_error);
     if (out)
     {
         out->output = result ? result : JsonDup("subagent: delegation failed");
@@ -62,8 +63,10 @@ static void SubagentRun(PicoAgentContext *ctx, const char *args_json, PicoToolRe
     free(session_id);
 }
 
-static void SubagentGuidance(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *event)
+static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)
 {
+    PicoHost *app = pico_workspace_host(workspace);
+    (void)state;
     (void)agent_id;
     bool offered = false;
     for (int i = 0; event && event->include_tools && i < event->tool_count; i++)
@@ -105,12 +108,17 @@ static void SubagentGuidance(PicoApp *app, PicoAgentId agent_id, PicoLlmEvent *e
     event->extra_instructions = JsonBuf_Steal(&b);
 }
 
-static void SubagentInit(PicoApp *app)
+#include "builtins/chat.h"
+
+static int SubagentInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_tool(app, "subagent",
+    (void)state_out;
+    pico_add_tool(workspace, "subagent",
                   "Delegate a task synchronously to a discovered named subagent profile",
                   kSubagentParams, SubagentRun, NULL);
-    pico_add_llm_hook(app, SubagentGuidance);
+    pico_add_llm_hook(workspace, SubagentGuidance);
+    pico_add_tool_row_hook(workspace, PicoChat_SubagentToolRow);
+    return 0;
 }
 
 PicoExt pico_ext_subagent(void)
@@ -119,6 +127,6 @@ PicoExt pico_ext_subagent(void)
         .abi = PICO_EXT_ABI,
         .name = "subagent",
         .description = "Named synchronous subagent delegation",
-        .init = SubagentInit,
+        .workspace_init = SubagentInit,
     };
 }

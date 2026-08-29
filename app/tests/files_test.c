@@ -1,6 +1,7 @@
 #include "canonical.h"
 #include "json.h"
 #include "pico/app.h"
+#include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,8 +10,44 @@
 
 char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
                                  char **parts_json_out);
-int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max);
-void pico_files_reset(void);
+int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state);
+PicoExt pico_ext_files(void);
+PicoExt pico_ext_composer(void);
+
+static void *g_files_state = NULL;
+static void *g_composer_state = NULL;
+
+void *PicoPlugins_HostState(const PicoHost *host, const char *name)
+{
+    (void)host;
+    if (name && strcmp(name, "composer") == 0)
+    {
+        return g_composer_state;
+    }
+    return NULL;
+}
+
+void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name)
+{
+    (void)workspace;
+    if (name && strcmp(name, "files") == 0)
+    {
+        return g_files_state;
+    }
+    return NULL;
+}
+
+void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
+}
+
+void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
+}
 
 static int g_failed;
 
@@ -36,11 +73,11 @@ static bool WriteFile(const char *path, const char *body)
     return ok;
 }
 
-static bool QueryHas(PicoApp *app, const char *prefix, const char *label)
+static bool QueryHas(PicoWorkspace *workspace, const char *prefix, const char *label)
 {
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
     memset(items, 0, sizeof(items));
-    int n = pico_files_complete(app, prefix, items, PICO_MAX_COMPLETE_ITEMS);
+    int n = pico_files_complete(workspace, prefix, items, PICO_MAX_COMPLETE_ITEMS, NULL);
     for (int i = 0; i < n; i++)
     {
         if (strcmp(items[i].label, label) == 0)
@@ -51,7 +88,7 @@ static bool QueryHas(PicoApp *app, const char *prefix, const char *label)
     return false;
 }
 
-static void SetComposer(PicoApp *app, char *buf, size_t cap, const char *text)
+static void SetComposer(PicoHost *app, char *buf, size_t cap, const char *text)
 {
     snprintf(buf, cap, "%s", text ? text : "");
     app->composer.text = buf;
@@ -126,33 +163,47 @@ static void TestCompleteRebuildsAtTokenStart(void)
         return;
     }
 
-    PicoApp *app = (PicoApp *)calloc(1, sizeof(PicoApp));
+    PicoHost *app = (PicoHost *)calloc(1, sizeof(PicoHost));
+    PicoWorkspace *workspace;
     if (!app)
     {
-        fprintf(stderr, "FAIL: could not allocate PicoApp\n");
+        fprintf(stderr, "FAIL: could not allocate PicoHost\n");
         g_failed = 1;
         unlink(old_path);
         rmdir(temp);
         return;
     }
-    snprintf(app->workspace, sizeof(app->workspace), "%s", temp);
+    workspace = (PicoWorkspace *)calloc(1, sizeof(PicoWorkspace));
+    workspace->host = app;
+    workspace->id = 1;
+    snprintf(workspace->path, sizeof(workspace->path), "%s", temp);
+    workspace->state = PICO_WORKSPACE_OPEN;
+    app->workspaces[0] = workspace;
+    app->workspace_count = 1;
+    PicoExt ext = pico_ext_files();
+    ext.workspace_init(workspace, &g_files_state);
+    PicoExt comp_ext = pico_ext_composer();
+    comp_ext.host_init(app, &g_composer_state);
     app->completers[0] = (PicoCompleter){
         .trigger = '@',
         .bol_only = false,
-        .query = pico_files_complete,
+        .workspace_query = pico_files_complete,
     };
     app->completer_count = 1;
     char composer[64];
-    pico_files_reset();
     SetComposer(app, composer, sizeof(composer), "@");
     PicoComplete_Refresh(app);
-    bool saw_old = QueryHas(app, "", "old.txt");
+    bool saw_old = QueryHas(workspace, "", "old.txt");
 
     if (!WriteFile(new_path, "new\n"))
     {
         fprintf(stderr, "FAIL: could not write new.txt\n");
         g_failed = 1;
-        pico_files_reset();
+        ext.workspace_shutdown(workspace, g_files_state);
+        g_files_state = NULL;
+        comp_ext.host_shutdown(app, g_composer_state);
+        g_composer_state = NULL;
+        free(workspace);
         free(app);
         unlink(old_path);
         rmdir(temp);
@@ -160,16 +211,20 @@ static void TestCompleteRebuildsAtTokenStart(void)
     }
     SetComposer(app, composer, sizeof(composer), "@n");
     PicoComplete_Refresh(app);
-    bool same_token_misses_new = saw_old && !QueryHas(app, "n", "new.txt");
+    bool same_token_misses_new = saw_old && !QueryHas(workspace, "n", "new.txt");
     Check(same_token_misses_new,
           "a file created after @ is typed stays out of the active token snapshot");
 
     PicoComposer_ReplaceRange(app, 0, app->composer.length, "@");
     PicoComplete_Refresh(app);
-    Check(QueryHas(app, "", "new.txt"),
+    Check(QueryHas(workspace, "", "new.txt"),
           "replacing a mention at the same offset starts a fresh file snapshot");
 
-    pico_files_reset();
+    ext.workspace_shutdown(workspace, g_files_state);
+    g_files_state = NULL;
+    comp_ext.host_shutdown(app, g_composer_state);
+    g_composer_state = NULL;
+    free(workspace);
     free(app);
     unlink(old_path);
     unlink(new_path);

@@ -1,9 +1,10 @@
-#define _GNU_SOURCE /* pthread_timedjoin_np */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
 #include "diff_lines.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
@@ -135,18 +136,28 @@ static void FilePushRow(DiffFile *f, DiffRowKind kind, const char *text, int len
 
 #define DIFF_POLL_SECONDS 2
 
-static pthread_t g_thread;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_wake = PTHREAD_COND_INITIALIZER;
-static DiffModel *g_pending; /* worker -> main */
-static DiffModel *g_model;   /* main thread only */
-static char g_workspace[4096];
-static bool g_thread_started;
-static bool g_thread_stop;
-static PicoApp *g_app;
-static bool g_open;
-static PicoScrollbar g_scrollbar;
-static bool g_overflow;
+typedef struct DiffWorkerCtx {
+    int refcount; /* 1 for DiffState, 1 for worker thread */
+    pthread_mutex_t lock;
+    pthread_cond_t wake;
+    DiffModel *pending; /* worker -> main */
+    char workspace[4096];
+    bool thread_started;
+    bool thread_stop;
+    pthread_t thread;
+} DiffWorkerCtx;
+
+typedef struct DiffState {
+    PicoWorkspace *workspace;
+    DiffWorkerCtx *worker;
+    DiffModel *model;   /* main thread only */
+    bool open;
+    PicoScrollbar scrollbar;
+    bool overflow;
+    char chip_adds[32];
+    char chip_dels[32];
+    char title[128];
+} DiffState;
 
 static char *ShellQuote(const char *path)
 {
@@ -530,16 +541,34 @@ static DiffModel *Capture(const char *ws)
     return m;
 }
 
-static void *DiffThreadMain(void *unused)
+static void DiffWorkerCtx_Release(DiffWorkerCtx *w)
 {
-    (void)unused;
+    if (!w)
+    {
+        return;
+    }
+    pthread_mutex_lock(&w->lock);
+    int r = --w->refcount;
+    pthread_mutex_unlock(&w->lock);
+    if (r == 0)
+    {
+        DiffModel_Free(w->pending);
+        pthread_mutex_destroy(&w->lock);
+        pthread_cond_destroy(&w->wake);
+        free(w);
+    }
+}
+
+static void *DiffThreadMain(void *arg)
+{
+    DiffWorkerCtx *w = (DiffWorkerCtx *)arg;
     for (;;)
     {
-        pthread_mutex_lock(&g_lock);
-        bool stop = g_thread_stop;
+        pthread_mutex_lock(&w->lock);
+        bool stop = w->thread_stop;
         char ws[4096];
-        snprintf(ws, sizeof(ws), "%s", g_workspace);
-        pthread_mutex_unlock(&g_lock);
+        snprintf(ws, sizeof(ws), "%s", w->workspace);
+        pthread_mutex_unlock(&w->lock);
         if (stop)
         {
             break;
@@ -547,110 +576,130 @@ static void *DiffThreadMain(void *unused)
 
         DiffModel *fresh = Capture(ws);
 
-        pthread_mutex_lock(&g_lock);
-        DiffModel *old = g_pending;
-        g_pending = fresh;
-        stop = g_thread_stop;
-        pthread_mutex_unlock(&g_lock);
+        pthread_mutex_lock(&w->lock);
+        DiffModel *old = w->pending;
+        w->pending = fresh;
+        stop = w->thread_stop;
+        pthread_mutex_unlock(&w->lock);
         DiffModel_Free(old);
         if (stop)
         {
             break;
         }
 
-        /* Interruptible poll interval: StopThread signals g_wake so shutdown
+        /* Interruptible poll interval: StopThread signals wake so shutdown
          * does not wait out a sleep. Absolute deadline against CLOCK_REALTIME
          * (the condvar's default clock). */
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline);
         deadline.tv_sec += DIFF_POLL_SECONDS;
-        pthread_mutex_lock(&g_lock);
-        while (!g_thread_stop)
+        pthread_mutex_lock(&w->lock);
+        while (!w->thread_stop)
         {
-            if (pthread_cond_timedwait(&g_wake, &g_lock, &deadline) != 0)
+            if (pthread_cond_timedwait(&w->wake, &w->lock, &deadline) != 0)
             {
                 break; /* timeout: poll again */
             }
         }
-        pthread_mutex_unlock(&g_lock);
+        stop = w->thread_stop;
+        pthread_mutex_unlock(&w->lock);
         if (stop)
         {
             break;
         }
     }
+    DiffWorkerCtx_Release(w);
     return NULL;
 }
 
-static void StartThread(PicoApp *app)
+static void StartThread(DiffState *s, const char *ws_path)
 {
-    if (g_thread_started)
+    if (!s)
     {
         return;
     }
-    snprintf(g_workspace, sizeof(g_workspace), "%s", app->workspace);
-    g_thread_started = true;
-    if (pthread_create(&g_thread, NULL, DiffThreadMain, NULL) != 0)
+    if (!s->worker)
     {
-        g_thread_started = false;
+        s->worker = (DiffWorkerCtx *)calloc(1, sizeof(DiffWorkerCtx));
+        if (!s->worker)
+        {
+            return;
+        }
+        s->worker->refcount = 1;
+        pthread_mutex_init(&s->worker->lock, NULL);
+        pthread_cond_init(&s->worker->wake, NULL);
     }
-}
-
-static void StopThread(void)
-{
-    if (!g_thread_started)
+    DiffWorkerCtx *w = s->worker;
+    if (w->thread_started)
     {
         return;
     }
-    pthread_mutex_lock(&g_lock);
-    g_thread_stop = true;
-    pthread_cond_signal(&g_wake);
-    pthread_mutex_unlock(&g_lock);
-
-    /* The worker can be blocked in popen; a clean exit must not wait on git
-     * longer than Pico's shutdown budget. Wait briefly, then detach and let
-     * process exit reap it. A detached thread only touches mutex-protected
-     * globals, which stay valid until exit. */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_nsec += 300 * 1000 * 1000;
-    if (deadline.tv_nsec >= 1000 * 1000 * 1000)
+    snprintf(w->workspace, sizeof(w->workspace), "%s", ws_path ? ws_path : ".");
+    w->thread_started = true;
+    pthread_mutex_lock(&w->lock);
+    w->refcount++;
+    pthread_mutex_unlock(&w->lock);
+    if (pthread_create(&w->thread, NULL, DiffThreadMain, w) != 0)
     {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000 * 1000 * 1000;
-    }
-    if (pthread_timedjoin_np(g_thread, NULL, &deadline) == 0)
-    {
-        g_thread_started = false;
-        g_thread_stop = false;
-    }
-    else
-    {
-        pthread_detach(g_thread);
+        w->thread_started = false;
+        pthread_mutex_lock(&w->lock);
+        w->refcount--;
+        pthread_mutex_unlock(&w->lock);
     }
 }
 
-static void AdoptPending(PicoApp *app)
+static void StopThread(DiffState *s)
 {
-    pthread_mutex_lock(&g_lock);
-    DiffModel *fresh = g_pending;
-    g_pending = NULL;
-    if (strncmp(g_workspace, app->workspace, sizeof(g_workspace)) != 0)
+    if (!s || !s->worker)
     {
-        snprintf(g_workspace, sizeof(g_workspace), "%s", app->workspace);
+        return;
     }
-    pthread_mutex_unlock(&g_lock);
+    DiffWorkerCtx *w = s->worker;
+    s->worker = NULL;
+    if (!w->thread_started)
+    {
+        DiffWorkerCtx_Release(w);
+        return;
+    }
+    pthread_mutex_lock(&w->lock);
+    w->thread_stop = true;
+    pthread_cond_signal(&w->wake);
+    pthread_mutex_unlock(&w->lock);
+
+    /* Shutdown callbacks run on the main thread and must never wait for a
+     * worker. The worker owns its second context reference until it exits. */
+    pthread_detach(w->thread);
+    DiffWorkerCtx_Release(w);
+}
+
+static void AdoptPending(DiffState *s)
+{
+    if (!s || !s->worker)
+    {
+        return;
+    }
+    DiffWorkerCtx *w = s->worker;
+    pthread_mutex_lock(&w->lock);
+    DiffModel *fresh = w->pending;
+    w->pending = NULL;
+    const char *root = s->workspace ? s->workspace->path : "";
+    if (strncmp(w->workspace, root, sizeof(w->workspace)) != 0)
+    {
+        snprintf(w->workspace, sizeof(w->workspace), "%s", root);
+    }
+    pthread_mutex_unlock(&w->lock);
 
     /* A capture that started under a previous workspace is never displayed,
      * even if it was published after the workspace switched back. */
-    if (fresh && strncmp(fresh->workspace, app->workspace, sizeof(fresh->workspace)) != 0)
+    if (fresh && strncmp(fresh->workspace, root, sizeof(fresh->workspace)) != 0)
     {
         DiffModel_Free(fresh);
         return;
     }
     if (fresh)
     {
-        DiffModel_Free(g_model);
-        g_model = fresh;
+        DiffModel_Free(s->model);
+        s->model = fresh;
     }
 }
 
@@ -658,41 +707,36 @@ static void AdoptPending(PicoApp *app)
 /* Footer chip                                                         */
 /* ------------------------------------------------------------------ */
 
-static Clay_String CStr(const char *s)
+static Clay_String CStr(const char *str)
 {
-    if (!s)
+    if (!str)
     {
-        s = "";
+        str = "";
     }
-    return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+    return (Clay_String){.length = (int32_t)strlen(str), .chars = str};
 }
 
-static Clay_String Slice(const char *s, int len)
+static Clay_String Slice(const char *str, int len)
 {
-    return (Clay_String){.length = (int32_t)len, .chars = s};
+    return (Clay_String){.length = (int32_t)len, .chars = str};
 }
 
-static bool HasChanges(void)
+static bool HasChanges(const DiffState *s)
 {
-    return g_model && g_model->is_repo &&
-           (g_model->adds > 0 || g_model->dels > 0 || g_model->untracked > 0);
+    return s && s->model && s->model->is_repo &&
+           (s->model->adds > 0 || s->model->dels > 0 || s->model->untracked > 0);
 }
 
-/* Clay borrows Clay_String pointers past the render call, so formatted chip
- * text must live in static storage (same pattern as the footer builtin). */
-static char g_chip_adds[32];
-static char g_chip_dels[32];
-static char g_title[128];
-
-void PicoDiff_RenderChip(PicoApp *app)
+void PicoDiff_RenderChip(PicoHost *app)
 {
-    (void)app;
-    if (!HasChanges())
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    DiffState *s = (DiffState *)PicoPlugins_WorkspaceState(ws, "diff");
+    if (!s || !HasChanges(s))
     {
         return;
     }
-    snprintf(g_chip_adds, sizeof(g_chip_adds), "+%d", g_model->adds);
-    snprintf(g_chip_dels, sizeof(g_chip_dels), "-%d", g_model->dels);
+    snprintf(s->chip_adds, sizeof(s->chip_adds), "+%d", s->model->adds);
+    snprintf(s->chip_dels, sizeof(s->chip_dels), "-%d", s->model->dels);
     bool hovered = Clay_PointerOver(CLAY_ID("FooterDiff"));
 
     CLAY_TEXT(CLAY_STRING("  ·  "), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -704,16 +748,16 @@ void PicoDiff_RenderChip(PicoApp *app)
                      .childGap = 6,
                      .sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
-        CLAY_TEXT(CStr(g_chip_adds), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                       .fontSize = 13,
-                                                       .textColor = hovered ? COLOR_DIFF_ADD_TEXT
-                                                                            : COLOR_DIFF_ADD,
-                                                       .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        CLAY_TEXT(CStr(g_chip_dels), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                       .fontSize = 13,
-                                                       .textColor = hovered ? COLOR_DIFF_DEL_TEXT
-                                                                            : COLOR_DIFF_DEL,
-                                                       .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        CLAY_TEXT(CStr(s->chip_adds), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                        .fontSize = 13,
+                                                        .textColor = hovered ? COLOR_DIFF_ADD_TEXT
+                                                                             : COLOR_DIFF_ADD,
+                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        CLAY_TEXT(CStr(s->chip_dels), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                        .fontSize = 13,
+                                                        .textColor = hovered ? COLOR_DIFF_DEL_TEXT
+                                                                             : COLOR_DIFF_DEL,
+                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
 }
 
@@ -721,31 +765,34 @@ void PicoDiff_RenderChip(PicoApp *app)
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-bool PicoDiff_IsOpen(void)
+bool PicoDiff_IsOpen(const PicoHost *app)
 {
-    return g_open;
+    const PicoWorkspace *ws = PicoHost_SelectedWorkspaceConst(app);
+    DiffState *s = (DiffState *)PicoPlugins_WorkspaceState(ws, "diff");
+    return s ? s->open : false;
 }
 
-static bool CloseModal(void)
+static bool CloseModal(DiffState *s)
 {
-    if (!g_open)
+    if (!s || !s->open)
     {
         return true;
     }
-    if (g_app && !pico_ui_modal_pop(g_app, "diff"))
+    PicoHost *host = s->workspace ? s->workspace->host : NULL;
+    if (host && !pico_ui_modal_pop(host, "diff"))
     {
         return false;
     }
-    g_open = false;
-    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+    s->open = false;
+    memset(&s->scrollbar, 0, sizeof(s->scrollbar));
     return true;
 }
 
-static void OpenModal(PicoApp *app)
+static void OpenModal(DiffState *s, PicoHost *app)
 {
-    if (!g_open && pico_ui_modal_push(app, "diff"))
+    if (s && !s->open && pico_ui_modal_push(app, "diff"))
     {
-        g_open = true;
+        s->open = true;
     }
 }
 
@@ -800,10 +847,10 @@ static void RenderRow(int index, const DiffRow *row)
         if (row->kind == ROW_HEADER)
         {
             CLAY_TEXT(Slice(row->text, row->len),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                        .fontSize = 13,
-                                        .textColor = RowFg(row->kind),
-                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                         .fontSize = 13,
+                                         .textColor = RowFg(row->kind),
+                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
         else
         {
@@ -812,21 +859,27 @@ static void RenderRow(int index, const DiffRow *row)
                                                     .textColor = RowFg(row->kind),
                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
             CLAY_TEXT(Slice(row->text, row->len),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                        .fontSize = 13,
-                                        .textColor = RowFg(row->kind),
-                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                         .fontSize = 13,
+                                         .textColor = RowFg(row->kind),
+                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
     }
 }
 
-static void DiffModalRender(PicoApp *app)
+static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
 {
-    (void)app;
-    if (!g_open)
+    (void)selected_agent_id;
+    DiffState *s = (DiffState *)state;
+    if (!s)
+    {
+        s = (DiffState *)PicoPlugins_WorkspaceState(workspace, "diff");
+    }
+    if (!s || !s->open)
     {
         return;
     }
+    PicoHost *app = workspace ? workspace->host : NULL;
 
     float sw = (float)GetScreenWidth();
     float sh = (float)GetScreenHeight();
@@ -845,13 +898,13 @@ static void DiffModalRender(PicoApp *app)
         card_h = 280.0f;
     }
 
-    if (HasChanges())
+    if (HasChanges(s))
     {
-        snprintf(g_title, sizeof(g_title), "Changes  ·  +%d -%d", g_model->adds, g_model->dels);
+        snprintf(s->title, sizeof(s->title), "Changes  ·  +%d -%d", s->model->adds, s->model->dels);
     }
     else
     {
-        snprintf(g_title, sizeof(g_title), "Changes");
+        snprintf(s->title, sizeof(s->title), "Changes");
     }
 
     CLAY(CLAY_ID("DiffModalDim"),
@@ -873,7 +926,7 @@ static void DiffModalRender(PicoApp *app)
               .backgroundColor = COLOR_CONTENT_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
-            CLAY_TEXT(CStr(g_title),
+            CLAY_TEXT(CStr(s->title),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
 
             CLAY(CLAY_ID("DiffScrollRow"),
@@ -891,7 +944,7 @@ static void DiffModalRender(PicoApp *app)
                                .horizontal = true,
                                .childOffset = Clay_GetScrollOffset()}})
                 {
-                    if (!g_model || g_model->file_count == 0)
+                    if (!s->model || s->model->file_count == 0)
                     {
                         CLAY_TEXT(CLAY_STRING("No changes"),
                                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -902,9 +955,9 @@ static void DiffModalRender(PicoApp *app)
                     else
                     {
                         int row_index = 0;
-                        for (int fi = 0; fi < g_model->file_count; fi++)
+                        for (int fi = 0; fi < s->model->file_count; fi++)
                         {
-                            DiffFile *f = &g_model->files[fi];
+                            DiffFile *f = &s->model->files[fi];
                             for (int ri = 0; ri < f->row_count; ri++)
                             {
                                 RenderRow(row_index++, &f->rows[ri]);
@@ -912,7 +965,7 @@ static void DiffModalRender(PicoApp *app)
                         }
                     }
                 }
-                if (g_overflow)
+                if (s->overflow)
                 {
                     PicoScrollbar_Render(CLAY_STRING("DiffScroll"), CLAY_STRING("DiffScrollTrack"),
                                          CLAY_STRING("DiffScrollHandle"));
@@ -926,16 +979,27 @@ static void DiffModalRender(PicoApp *app)
 /* Input                                                               */
 /* ------------------------------------------------------------------ */
 
-static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void DiffHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
+    (void)state;
     (void)event;
-    if (g_open)
+    if (!app)
+    {
+        return;
+    }
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
+    DiffState *s = (DiffState *)PicoPlugins_WorkspaceState(workspace, "diff");
+    if (!s)
+    {
+        return;
+    }
+    if (s->open)
     {
         if (!pico_ui_modal_is_top(app, "diff"))
         {
             return;
         }
-        g_overflow = PicoScrollbar_Overflows(CLAY_STRING("DiffScroll"));
+        s->overflow = PicoScrollbar_Overflows(CLAY_STRING("DiffScroll"));
         app->hovered_clickable = false;
         if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
@@ -947,12 +1011,12 @@ static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
         }
         if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("DiffModalDim"))))
         {
-            CloseModal();
+            CloseModal(s);
         }
         return;
     }
 
-    if (!HasChanges() || PicoUi_ModalOpen(app))
+    if (!HasChanges(s) || PicoUi_ModalOpen(app))
     {
         return;
     }
@@ -961,23 +1025,29 @@ static void DiffAfterLayout(PicoApp *app, const PicoHookEvent *event)
         app->hovered_clickable = true;
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            OpenModal(app);
+            OpenModal(s, app);
         }
     }
 }
 
-static void DiffOnFrame(PicoApp *app, float dt)
+static void DiffWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt)
 {
+    (void)workspace;
     (void)dt;
-    AdoptPending(app);
-    if (!g_open || !pico_ui_modal_is_top(app, "diff"))
+    DiffState *s = (DiffState *)state;
+    if (!s)
     {
         return;
     }
-    PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("DiffScroll"), CLAY_STRING("DiffScrollHandle"));
+    AdoptPending(s);
+    if (!s->open)
+    {
+        return;
+    }
+    PicoScrollbar_UpdateDrag(&s->scrollbar, CLAY_STRING("DiffScroll"), CLAY_STRING("DiffScrollHandle"));
     if (IsKeyPressed(KEY_ESCAPE))
     {
-        CloseModal();
+        CloseModal(s);
     }
 }
 
@@ -985,33 +1055,43 @@ static void DiffOnFrame(PicoApp *app, float dt)
 /* Extension                                                           */
 /* ------------------------------------------------------------------ */
 
-static void DiffInit(PicoApp *app)
+static int DiffHostInit(PicoHost *host, void **state_out)
 {
-    g_app = app;
-    if (g_open && !pico_ui_modal_has(app, "diff"))
-    {
-        g_open = false;
-        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
-    }
-    pico_add_view(app, PICO_SLOT_OVERLAY, 30, DiffModalRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, DiffAfterLayout);
-    StartThread(app);
+    (void)state_out;
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, DiffHostAfterLayout);
+    return 0;
 }
 
-static void DiffShutdown(PicoApp *app)
+static int DiffWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
-    (void)app;
-    StopThread();
-    DiffModel_Free(g_model);
-    g_model = NULL;
-    pthread_mutex_lock(&g_lock);
-    DiffModel_Free(g_pending);
-    g_pending = NULL;
-    pthread_mutex_unlock(&g_lock);
-    (void)CloseModal();
-    g_open = false;
-    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
-    g_app = NULL;
+    DiffState *s = (DiffState *)calloc(1, sizeof(DiffState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->workspace = workspace;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    pico_workspace_add_view(workspace, PICO_SLOT_OVERLAY, 30, DiffModalRender);
+    StartThread(s, workspace ? workspace->path : ".");
+    return 0;
+}
+
+static void DiffWorkspaceShutdown(PicoWorkspace *workspace, void *state)
+{
+    (void)workspace;
+    DiffState *s = (DiffState *)state;
+    if (!s)
+    {
+        return;
+    }
+    StopThread(s);
+    DiffModel_Free(s->model);
+    s->model = NULL;
+    (void)CloseModal(s);
+    free(s);
 }
 
 PicoExt pico_ext_diff(void)
@@ -1020,8 +1100,9 @@ PicoExt pico_ext_diff(void)
         .abi = PICO_EXT_ABI,
         .name = "diff",
         .description = "Git working-tree changes in the footer",
-        .init = DiffInit,
-        .shutdown = DiffShutdown,
-        .on_frame = DiffOnFrame,
+        .host_init = DiffHostInit,
+        .workspace_init = DiffWorkspaceInit,
+        .workspace_shutdown = DiffWorkspaceShutdown,
+        .workspace_on_frame = DiffWorkspaceOnFrame,
     };
 }

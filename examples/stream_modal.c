@@ -1,4 +1,5 @@
-// Stream worker text into a named overlay. Copy then F5:
+// Stream worker text into a named overlay mailbox keyed by
+// (agent_id, runtime_generation, name). Copy then F5:
 //
 //   mkdir -p ~/.config/pico/extensions/stream_modal
 //   cp examples/stream_modal.c ~/.config/pico/extensions/stream_modal/
@@ -9,36 +10,48 @@
 #include "clay/clay.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *kName = "stream-modal";
-static bool g_open;
-static char g_status[PICO_UI_POST_STATUS_MAX];
-static char g_text[PICO_UI_POST_TEXT_MAX + 1];
+
+typedef struct StreamState {
+    PicoAgentId owner_id;
+    char status[PICO_UI_POST_STATUS_MAX];
+    char text[PICO_UI_POST_TEXT_MAX + 1];
+} StreamState;
 
 static const char *kParams = "{\"type\":\"object\",\"properties\":{}}";
 
-static void CloseModal(PicoApp *app)
+static void CloseModal(PicoHost *host)
 {
-    if (!g_open)
-    {
-        return;
-    }
-    (void)pico_ui_modal_pop(app, kName);
-    g_open = false;
+    (void)pico_ui_modal_pop(host, kName);
 }
 
-static void OpenModal(PicoApp *app)
+static void OpenModal(PicoHost *host)
 {
-    if (g_open)
+    (void)pico_ui_modal_push(host, kName);
+}
+
+static void ResetDisplay(StreamState *s)
+{
+    if (!s)
     {
         return;
     }
-    if (!pico_ui_modal_push(app, kName))
+    s->owner_id = 0;
+    s->status[0] = '\0';
+    s->text[0] = '\0';
+}
+
+static void CloseOwned(PicoHost *host, StreamState *s, bool clear_mailbox)
+{
+    CloseModal(host);
+    if (clear_mailbox && s && s->owner_id)
     {
-        return;
+        pico_agent_ui_clear(host, s->owner_id, kName);
     }
-    g_open = true;
+    ResetDisplay(s);
 }
 
 static Clay_String CStr(const char *s)
@@ -50,16 +63,15 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
-static void StreamRender(PicoApp *app)
+static void StreamRender(PicoHost *host, void *state)
 {
-    float sw;
-    float sh;
-    if (!g_open)
+    StreamState *s = (StreamState *)state;
+    if (!s || !pico_ui_modal_has(host, kName))
     {
         return;
     }
-    sw = (float)GetScreenWidth();
-    sh = (float)GetScreenHeight();
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
     CLAY(CLAY_ID("StreamModalDim"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
                        .zIndex = 50,
@@ -80,89 +92,101 @@ static void StreamRender(PicoApp *app)
         {
             CLAY_TEXT(CLAY_STRING("Stream mailbox"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 16, .textColor = COLOR_TEXT}));
-            if (g_status[0])
+            if (s->status[0])
             {
-                CLAY_TEXT(CStr(g_status),
+                CLAY_TEXT(CStr(s->status),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
                                             .fontSize = 14,
                                             .textColor = COLOR_MUTED,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
-            CLAY_TEXT(g_text[0] ? CStr(g_text) : CLAY_STRING("Waiting for worker posts…"),
+            CLAY_TEXT(s->text[0] ? CStr(s->text) : CLAY_STRING("Waiting for worker posts…"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = 14,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            (void)app;
+            (void)host;
         }
     }
 }
 
-static void StreamAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void StreamAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
 {
+    StreamState *s = (StreamState *)state;
     (void)event;
-    if (!g_open)
+    if (!s || !pico_ui_modal_is_top(host, kName))
     {
         return;
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("StreamModalCard"))))
     {
-        app->hovered_clickable = true;
+        pico_host_set_hovered_clickable(host);
         return;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("StreamModalDim"))))
     {
-        CloseModal(app);
-        pico_ui_clear(app, kName);
-        g_status[0] = '\0';
-        g_text[0] = '\0';
+        CloseOwned(host, s, true);
     }
 }
 
-static void StreamOnFrame(PicoApp *app, float dt)
+static void StreamOnFrame(PicoHost *host, void *state, float dt)
 {
+    StreamState *s = (StreamState *)state;
     PicoUiPost post;
+    PicoAgentId selected = pico_agent_active(host);
     (void)dt;
-    if (pico_ui_latest(app, kName, &post))
+    if (!s)
     {
-        snprintf(g_status, sizeof(g_status), "%s", post.status ? post.status : "");
-        snprintf(g_text, sizeof(g_text), "%s", post.text ? post.text : "");
-        OpenModal(app);
+        return;
     }
-    if (!g_open)
+    if (pico_ui_modal_has(host, kName) && s->owner_id && selected != s->owner_id)
+    {
+        CloseOwned(host, s, false);
+    }
+    if (selected && pico_agent_ui_latest(host, selected, kName, &post))
+    {
+        s->owner_id = selected;
+        snprintf(s->status, sizeof(s->status), "%s", post.status ? post.status : "");
+        snprintf(s->text, sizeof(s->text), "%s", post.text ? post.text : "");
+        OpenModal(host);
+    }
+    if (!pico_ui_modal_is_top(host, kName))
     {
         return;
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {
-        CloseModal(app);
-        pico_ui_clear(app, kName);
-        g_status[0] = '\0';
-        g_text[0] = '\0';
+        CloseOwned(host, s, true);
     }
 }
 
-static void CmdStream(PicoApp *app, const char *args)
+static void CmdStream(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
 {
+    StreamState *s = (StreamState *)state;
     (void)args;
-    if (g_open)
+    if (!s)
     {
-        CloseModal(app);
-        pico_ui_clear(app, kName);
-        g_status[0] = '\0';
-        g_text[0] = '\0';
+        return;
+    }
+    if (pico_ui_modal_has(host, kName))
+    {
+        CloseModal(host);
+        pico_agent_ui_clear(host, agent_id, kName);
+        ResetDisplay(s);
     }
     else
     {
-        OpenModal(app);
+        s->owner_id = agent_id;
+        OpenModal(host);
     }
-    PicoComposer_SetText(app, "");
-    app->submit_cancel = true;
+    PicoComposer_SetText(host, "");
+    PicoHost_RequestSubmitCancel(host);
 }
 
-static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out)
+static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
+    (void)state;
     (void)args_json;
     pico_ui_post(ctx, kName, PICO_UI_POST_STATUS, "searching", 9);
     pico_ui_post(ctx, kName, PICO_UI_POST_TEXT, "Query: example\n", 15);
@@ -176,41 +200,57 @@ static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoTool
     }
 }
 
-static void StreamToolRow(PicoApp *app, PicoToolRowEvent *ev)
+static void StreamToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state)
 {
-    if (!ev || !ev->name || strcmp(ev->name, "stream_demo") != 0)
+    (void)state;
+    if (!event || !event->name || strcmp(event->name, "stream_demo") != 0)
     {
         return;
     }
-    OpenModal(app);
-    ev->handled = true;
+    OpenModal(pico_workspace_host(workspace));
+    event->handled = true;
 }
 
-static void StreamInit(PicoApp *app)
+static int StreamHostInit(PicoHost *host, void **state_out)
 {
+    StreamState *s = (StreamState *)calloc(1, sizeof(StreamState));
+    if (!s)
+    {
+        return 1;
+    }
+    if (state_out)
+    {
+        *state_out = s;
+    }
     PicoUiPost post;
-    if (pico_ui_latest(app, kName, &post) && !pico_ui_modal_has(app, kName))
+    PicoAgentId id = pico_agent_active(host);
+    if (id && pico_agent_ui_latest(host, id, kName, &post) && !pico_ui_modal_has(host, kName))
     {
-        snprintf(g_status, sizeof(g_status), "%s", post.status ? post.status : "");
-        snprintf(g_text, sizeof(g_text), "%s", post.text ? post.text : "");
-        (void)pico_ui_modal_push(app, kName);
-        g_open = true;
+        s->owner_id = id;
+        snprintf(s->status, sizeof(s->status), "%s", post.status ? post.status : "");
+        snprintf(s->text, sizeof(s->text), "%s", post.text ? post.text : "");
+        (void)pico_ui_modal_push(host, kName);
     }
-    else if (g_open && !pico_ui_modal_has(app, kName))
-    {
-        (void)pico_ui_modal_push(app, kName);
-    }
-    pico_add_view(app, PICO_SLOT_OVERLAY, 50, StreamRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
-    pico_add_command(app, "stream", "Toggle the streaming overlay modal", CmdStream);
-    pico_add_tool(app, "stream_demo", "Post fake search progress into the overlay mailbox", kParams,
-                  StreamDemoRun, NULL);
-    pico_add_tool_row_hook(app, StreamToolRow);
+    pico_host_add_view(host, PICO_SLOT_OVERLAY, 50, StreamRender);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
+    pico_host_add_command(host, "stream", "Toggle the streaming overlay modal", CmdStream);
+    return 0;
 }
 
-static void StreamShutdown(PicoApp *app)
+static int StreamWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
-    CloseModal(app);
+    (void)state_out;
+    pico_add_tool(workspace, "stream_demo", "Post fake search progress into the overlay mailbox", kParams,
+                  StreamDemoRun, NULL);
+    pico_add_tool_row_hook(workspace, StreamToolRow);
+    return 0;
+}
+
+static void StreamShutdown(PicoHost *host, void *state)
+{
+    StreamState *s = (StreamState *)state;
+    CloseOwned(host, s, false);
+    free(s);
 }
 
 PicoExt pico_ext(void)
@@ -219,8 +259,9 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "stream-modal",
         .description = "Named mailbox streaming into an overlay modal",
-        .init = StreamInit,
-        .shutdown = StreamShutdown,
-        .on_frame = StreamOnFrame,
+        .host_init = StreamHostInit,
+        .workspace_init = StreamWorkspaceInit,
+        .host_shutdown = StreamShutdown,
+        .host_on_frame = StreamOnFrame,
     };
 }

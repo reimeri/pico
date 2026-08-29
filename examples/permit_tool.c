@@ -1,4 +1,4 @@
-// Permission prompt in front of every tool, including builtin sh.
+// Workspace-scoped permission prompt in front of every tool, including builtin sh.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/permit
@@ -10,8 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
+static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev, void *state)
 {
+    (void)state;
     JsonBuf msg;
     JsonBuf_Init(&msg);
     JsonBuf_Puts(&msg, "Allow `");
@@ -58,9 +59,11 @@ static void PermitBefore(PicoAgentContext *ctx, PicoToolEvent *ev)
     }
 }
 
-static void PermitInit(PicoApp *app)
+static int PermitInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_tool_before_hook(app, PermitBefore);
+    (void)state_out;
+    pico_add_tool_before_hook(workspace, PermitBefore);
+    return 0;
 }
 
 PicoExt pico_ext(void)
@@ -69,6 +72,6 @@ PicoExt pico_ext(void)
         .abi = PICO_EXT_ABI,
         .name = "permit",
         .description = "Confirm each tool call before it runs",
-        .init = PermitInit,
+        .workspace_init = PermitInit,
     };
 }

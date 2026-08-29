@@ -1,14 +1,29 @@
 #include "pico/plugin.h"
 #include "scrollbar.h"
+#include "host_internal.h"
 
 #include "clay/clay.h"
 
 #include <string.h>
 
-static PicoApp *g_app;
-static bool g_open;
-static bool g_overflow;
-static PicoScrollbar g_scrollbar;
+typedef struct ExtensionsState {
+    PicoHost *app;
+    bool open;
+    bool overflow;
+    PicoScrollbar scrollbar;
+} ExtensionsState;
+
+static __thread ExtensionsState *s_active_exts_state = NULL;
+
+static ExtensionsState *ActiveExtensionsState(void)
+{
+    return s_active_exts_state;
+}
+
+#define g_app (ActiveExtensionsState()->app)
+#define g_open (ActiveExtensionsState()->open)
+#define g_overflow (ActiveExtensionsState()->overflow)
+#define g_scrollbar (ActiveExtensionsState()->scrollbar)
 
 static bool Claim(void)
 {
@@ -118,7 +133,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
     const char *desc = NULL;
     if (!info->loaded)
     {
-        desc = "Failed to load";
+        desc = info->last_error ? info->last_error : "Failed to load";
     }
     else if (info->description && info->description[0])
     {
@@ -161,7 +176,17 @@ static void RenderRow(int index, const PicoExtInfo *info)
                                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 if (info->builtin)
                 {
-                    CLAY_TEXT(CLAY_STRING("built-in"),
+                    const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "built-in host" : "built-in workspace";
+                    CLAY_TEXT(CStr(badge),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = 12,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+                else
+                {
+                    const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "host" : "workspace";
+                    CLAY_TEXT(CStr(badge),
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                 .fontSize = 12,
                                                 .textColor = COLOR_MUTED,
@@ -186,19 +211,19 @@ static void RenderRow(int index, const PicoExtInfo *info)
     }
 }
 
-static void RenderSection(bool builtin, Clay_String title)
+static void RenderSection(PicoHost *app, bool builtin, Clay_String title)
 {
     CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                        .fontSize = 12,
                                        .textColor = COLOR_MUTED,
                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
 
-    int n = PicoPlugins_Count();
+    int n = PicoPlugins_Count(app);
     int shown = 0;
     for (int i = 0; i < n; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(i, &info) || info.builtin != builtin)
+        if (!PicoPlugins_Get(app, i, &info) || info.builtin != builtin)
         {
             continue;
         }
@@ -214,10 +239,10 @@ static void RenderSection(bool builtin, Clay_String title)
     }
 }
 
-static void ExtsRender(PicoApp *app)
+static void ExtsRender(PicoHost *app, void *state)
 {
-    (void)app;
-    if (!g_open)
+    s_active_exts_state = state ? (ExtensionsState *)state : (ExtensionsState *)PicoPlugins_HostState(app, "extensions");
+    if (!s_active_exts_state || !g_open)
     {
         return;
     }
@@ -271,8 +296,8 @@ static void ExtsRender(PicoApp *app)
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
-                    RenderSection(true, CLAY_STRING("Built-in"));
-                    RenderSection(false, CLAY_STRING("User"));
+                    RenderSection(app, true, CLAY_STRING("Built-in"));
+                    RenderSection(app, false, CLAY_STRING("User"));
                 }
                 if (g_overflow)
                 {
@@ -284,20 +309,21 @@ static void ExtsRender(PicoApp *app)
     }
 }
 
-static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
+static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
-    if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
+    s_active_exts_state = state ? (ExtensionsState *)state : (ExtensionsState *)PicoPlugins_HostState(app, "extensions");
+    if (!s_active_exts_state || !g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
         return;
     }
     g_overflow = PicoScrollbar_Overflows(CLAY_STRING("ExtModalScroll"));
-    int n = PicoPlugins_Count();
+    int n = PicoPlugins_Count(app);
     int over_row = -1;
     for (int i = 0; i < n; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(i, &info) || !RowToggleable(&info))
+        if (!PicoPlugins_Get(app, i, &info) || !RowToggleable(&info))
         {
             continue;
         }
@@ -322,10 +348,11 @@ static void ExtsAfterLayout(PicoApp *app, const PicoHookEvent *event)
     }
 }
 
-static void ExtsOnFrame(PicoApp *app, float dt)
+static void ExtsOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
-    if (!g_open || !pico_ui_modal_is_top(app, "extensions"))
+    s_active_exts_state = state ? (ExtensionsState *)state : (ExtensionsState *)PicoPlugins_HostState(app, "extensions");
+    if (!s_active_exts_state || !g_open || !pico_ui_modal_is_top(app, "extensions"))
     {
         return;
     }
@@ -340,11 +367,11 @@ static void ExtsOnFrame(PicoApp *app, float dt)
     {
         return;
     }
-    int n = PicoPlugins_Count();
+    int n = PicoPlugins_Count(app);
     for (int i = 0; i < n; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(i, &info) || !RowToggleable(&info))
+        if (!PicoPlugins_Get(app, i, &info) || !RowToggleable(&info))
         {
             continue;
         }
@@ -356,36 +383,50 @@ static void ExtsOnFrame(PicoApp *app, float dt)
     }
 }
 
-static void CmdExtensions(PicoApp *app, const char *args)
+static void CmdExtensions(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
+    (void)state;
     (void)args;
+    (void)agent_id;
     PicoExts_Open();
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;
 }
 
-static void ExtsInit(PicoApp *app)
+static int ExtsInit(PicoHost *app, void **state_out)
 {
-    g_app = app;
-    if (g_open && !pico_ui_modal_has(app, "extensions"))
+    ExtensionsState *s = (ExtensionsState *)calloc(1, sizeof(ExtensionsState));
+    if (!s)
     {
-        g_open = false;
-        g_overflow = false;
-        memset(&g_scrollbar, 0, sizeof(g_scrollbar));
+        return 1;
     }
-    pico_add_command(app, "extensions", "Manage extensions", CmdExtensions);
-    pico_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
-    pico_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
+    s->app = app;
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    s_active_exts_state = s;
+    pico_host_add_command(app, "extensions", "Manage extensions", CmdExtensions);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
+    return 0;
 }
 
-static void ExtsShutdown(PicoApp *app)
+static void ExtsShutdown(PicoHost *app, void *state)
 {
-    (void)Unclaim();
-    g_open = false;
-    g_overflow = false;
-    memset(&g_scrollbar, 0, sizeof(g_scrollbar));
-    g_app = NULL;
     (void)app;
+    ExtensionsState *s = (ExtensionsState *)state;
+    if (!s)
+    {
+        return;
+    }
+    s_active_exts_state = s;
+    (void)Unclaim();
+    s->open = false;
+    s->overflow = false;
+    memset(&s->scrollbar, 0, sizeof(s->scrollbar));
+    free(s);
+    s_active_exts_state = NULL;
 }
 
 PicoExt pico_ext_extensions(void)
@@ -394,8 +435,8 @@ PicoExt pico_ext_extensions(void)
         .abi = PICO_EXT_ABI,
         .name = "extensions",
         .description = "Extension manager",
-        .init = ExtsInit,
-        .shutdown = ExtsShutdown,
-        .on_frame = ExtsOnFrame,
+        .host_init = ExtsInit,
+        .host_shutdown = ExtsShutdown,
+        .host_on_frame = ExtsOnFrame,
     };
 }

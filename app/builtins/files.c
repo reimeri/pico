@@ -7,6 +7,7 @@
 #include "json.h"
 #include "path.h"
 #include "settings.h"
+#include "host_internal.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -21,10 +22,14 @@
 #define FILES_MAX_BYTES (1024 * 1024)
 #define FILES_WALK_DEPTH 12
 
-static char **g_files;
-static int g_file_count;
-static bool g_scanned;
-static uint64_t g_token_id;
+typedef struct FilesState {
+    PicoWorkspace *workspace;
+    char **files;
+    int file_count;
+    bool scanned;
+    uint64_t token_id;
+    char root[4096];
+} FilesState;
 
 static bool SkipDirName(const char *name)
 {
@@ -36,40 +41,44 @@ static bool SkipDirName(const char *name)
            strcmp(name, "target") == 0 || strcmp(name, "__pycache__") == 0;
 }
 
-static void FilesClear(void)
+static void FilesClear(FilesState *s)
 {
-    for (int i = 0; i < g_file_count; i++)
-    {
-        free(g_files[i]);
-    }
-    free(g_files);
-    g_files = NULL;
-    g_file_count = 0;
-    g_scanned = false;
-}
-
-static void FilesAdd(const char *rel)
-{
-    if (!rel || !rel[0] || g_file_count >= FILES_MAX)
+    if (!s)
     {
         return;
     }
-    char **next = (char **)realloc(g_files, (size_t)(g_file_count + 1) * sizeof(char *));
+    for (int i = 0; i < s->file_count; i++)
+    {
+        free(s->files[i]);
+    }
+    free(s->files);
+    s->files = NULL;
+    s->file_count = 0;
+    s->scanned = false;
+}
+
+static void FilesAdd(FilesState *s, const char *rel)
+{
+    if (!s || !rel || !rel[0] || s->file_count >= FILES_MAX)
+    {
+        return;
+    }
+    char **next = (char **)realloc(s->files, (size_t)(s->file_count + 1) * sizeof(char *));
     if (!next)
     {
         return;
     }
-    g_files = next;
-    g_files[g_file_count] = JsonDup(rel);
-    if (g_files[g_file_count])
+    s->files = next;
+    s->files[s->file_count] = JsonDup(rel);
+    if (s->files[s->file_count])
     {
-        g_file_count++;
+        s->file_count++;
     }
 }
 
-static void Walk(const char *root, const char *rel, int depth)
+static void Walk(FilesState *s, const char *root, const char *rel, int depth)
 {
-    if (depth > FILES_WALK_DEPTH || g_file_count >= FILES_MAX)
+    if (depth > FILES_WALK_DEPTH || !s || s->file_count >= FILES_MAX)
     {
         return;
     }
@@ -88,7 +97,7 @@ static void Walk(const char *root, const char *rel, int depth)
         return;
     }
     struct dirent *ent;
-    while ((ent = readdir(d)) != NULL && g_file_count < FILES_MAX)
+    while ((ent = readdir(d)) != NULL && s->file_count < FILES_MAX)
     {
         if (SkipDirName(ent->d_name) || strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
         {
@@ -112,24 +121,29 @@ static void Walk(const char *root, const char *rel, int depth)
         }
         if (S_ISDIR(st.st_mode))
         {
-            Walk(root, child, depth + 1);
+            Walk(s, root, child, depth + 1);
         }
         else if (S_ISREG(st.st_mode))
         {
-            FilesAdd(child);
+            FilesAdd(s, child);
         }
     }
     closedir(d);
 }
 
-static void FilesRebuild(PicoApp *app)
+static void FilesRebuild(FilesState *s, const char *root)
 {
-    FilesClear();
-    if (app && app->workspace[0])
+    if (!s)
     {
-        Walk(app->workspace, "", 0);
+        return;
     }
-    g_scanned = true;
+    FilesClear(s);
+    snprintf(s->root, sizeof(s->root), "%s", root ? root : "");
+    if (root && root[0])
+    {
+        Walk(s, root, "", 0);
+    }
+    s->scanned = true;
 }
 
 static int Fold(int c)
@@ -166,20 +180,34 @@ static const char *BaseName(const char *path)
     return slash ? slash + 1 : path;
 }
 
-int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out, int max)
+int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
-    uint64_t token_id = PicoComplete_TokenId();
-    if (!g_scanned || token_id != g_token_id)
+    FilesState *s = (FilesState *)state;
+    if (!s)
     {
-        FilesRebuild(app);
-        g_token_id = token_id;
+        s = (FilesState *)PicoPlugins_WorkspaceState(workspace, "files");
+    }
+    if (!s)
+    {
+        return 0;
+    }
+    uint64_t token_id = PicoComplete_TokenId();
+    const char *root = (s->workspace && s->workspace->path[0]) ? s->workspace->path : s->root;
+    if (!root[0] && workspace)
+    {
+        root = PicoWorkspace_Path(workspace);
+    }
+    if (!s->scanned || token_id != s->token_id || strcmp(s->root, root) != 0)
+    {
+        FilesRebuild(s, root);
+        s->token_id = token_id;
     }
     int n = 0;
     for (int pass = 0; pass < 2 && n < max; pass++)
     {
-        for (int i = 0; i < g_file_count && n < max; i++)
+        for (int i = 0; i < s->file_count && n < max; i++)
         {
-            const char *path = g_files[i];
+            const char *path = s->files[i];
             bool prefix_hit = ContainsFold(path, prefix) || ContainsFold(BaseName(path), prefix);
             if (!prefix_hit)
             {
@@ -187,15 +215,15 @@ int pico_files_complete(PicoApp *app, const char *prefix, PicoCompleteItem *out,
             }
             bool starts = true;
             const char *p = prefix;
-            const char *s = path;
+            const char *s_str = path;
             while (*p)
             {
-                if (Fold((unsigned char)*s) != Fold((unsigned char)*p))
+                if (Fold((unsigned char)*s_str) != Fold((unsigned char)*p))
                 {
                     starts = false;
                     break;
                 }
-                s++;
+                s_str++;
                 p++;
             }
             if ((pass == 0 && !starts) || (pass == 1 && starts))
@@ -379,45 +407,64 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
     return inline_text;
 }
 
-static void FilesBeforeSubmit(PicoApp *app, const PicoHookEvent *event)
+static void FilesBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
 {
-    (void)event;
-    if (app->submit_cancel || !app->composer.text)
+    PicoHost *app = workspace ? workspace->host : NULL;
+    PicoAgent *agent = PicoHost_FindAgent(app, event ? event->agent_id : 0);
+    const char *root;
+    (void)state;
+    if (!app || app->submit_cancel || !app->composer.text)
     {
         return;
     }
     bool vision = false;
-    PicoModel *model = PicoSettings_ActiveModel(app, PicoApp_ActiveAgent(app));
+    PicoModel *model = PicoSettings_ActiveModel(agent);
     if (model)
     {
         vision = model->vision;
     }
+    root = PicoAgent_WorkspacePath(agent);
+    if (!root[0])
+    {
+        root = PicoWorkspace_Path(workspace);
+    }
     char *parts = NULL;
-    char *expanded = pico_files_expand_mentions(app->workspace, app->composer.text, vision, &parts);
+    char *expanded = pico_files_expand_mentions(root[0] ? root : ".", app->composer.text, vision, &parts);
     if (!expanded)
     {
         return;
     }
-    app->agent_input = expanded;
-    app->agent_parts = parts;
+    pico_host_set_agent_input(app, expanded);
+    pico_host_set_agent_parts(app, parts);
 }
 
-static void FilesInit(PicoApp *app)
+static int FilesWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
-    pico_add_completer(app, '@', false, pico_files_complete, NULL);
-    pico_add_hook(app, PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
+    FilesState *s = (FilesState *)calloc(1, sizeof(FilesState));
+    if (!s)
+    {
+        return 1;
+    }
+    s->workspace = workspace;
+    snprintf(s->root, sizeof(s->root), "%s", workspace ? workspace->path : "");
+    if (state_out)
+    {
+        *state_out = s;
+    }
+    pico_workspace_add_completer(workspace, '@', false, pico_files_complete, NULL);
+    pico_workspace_add_hook(workspace, PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
+    return 0;
 }
 
-void pico_files_reset(void)
+static void FilesWorkspaceShutdown(PicoWorkspace *workspace, void *state)
 {
-    FilesClear();
-    g_token_id = 0;
-}
-
-static void FilesShutdown(PicoApp *app)
-{
-    (void)app;
-    pico_files_reset();
+    (void)workspace;
+    FilesState *s = (FilesState *)state;
+    if (s)
+    {
+        FilesClear(s);
+        free(s);
+    }
 }
 
 PicoExt pico_ext_files(void)
@@ -426,7 +473,7 @@ PicoExt pico_ext_files(void)
         .abi = PICO_EXT_ABI,
         .name = "files",
         .description = "Workspace file completion",
-        .init = FilesInit,
-        .shutdown = FilesShutdown,
+        .workspace_init = FilesWorkspaceInit,
+        .workspace_shutdown = FilesWorkspaceShutdown,
     };
 }

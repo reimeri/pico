@@ -586,10 +586,20 @@ void PicoHost_Frame(PicoHost *host);
 void PicoHost_RequestReload(PicoHost *host);
 bool PicoHost_ChangeWorkspace(PicoHost *host, const char *path);
 
+typedef enum PicoExtensionScope {
+    PICO_EXTENSION_HOST = 0,
+    PICO_EXTENSION_WORKSPACE,
+} PicoExtensionScope;
+
 typedef struct PicoExtInfo {
     const char *name;        /* NULL if unnamed / failed stub */
     const char *description; /* NULL if omitted */
     const char *source;      /* user .c path; NULL for builtins */
+    PicoExtensionScope scope;
+    PicoWorkspaceId workspace_id; /* 0 for host scope */
+    uint64_t desired_generation;
+    uint64_t active_generation;
+    const char *last_error;  /* NULL if none */
     bool builtin;
     bool loaded;  /* false for compile/dlopen stubs */
     bool enabled; /* independent of loaded; false when toggled off */
@@ -601,8 +611,8 @@ void PicoPlugins_Poll(PicoHost *host);
 void PicoPlugins_OnFrame(PicoHost *host, float dt);
 void PicoPlugins_UnloadUser(PicoHost *host);
 void PicoPlugins_Shutdown(PicoHost *host);
-int PicoPlugins_Count(void);
-bool PicoPlugins_Get(int index, PicoExtInfo *out);
+int PicoPlugins_Count(const PicoHost *host);
+bool PicoPlugins_Get(const PicoHost *host, int index, PicoExtInfo *out);
 bool PicoPlugins_SetEnabled(PicoHost *host, int index, bool enabled);
 void *PicoPlugins_HostState(const PicoHost *host, const char *name);
 void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name);

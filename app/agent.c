@@ -81,6 +81,7 @@ struct PicoAgentContext {
 struct PicoAgentRt {
     /* Heap-owned worker services and callback-scoped public context. */
     PicoAgentContext context;
+    PicoRegistrationGeneration *registration;
     PicoToolBeforeEntry tool_before_hooks[PICO_MAX_TOOL_HOOKS];
     int tool_before_hook_count;
     pthread_t thread;
@@ -649,20 +650,20 @@ static char *RunToolBeforeHooks(PicoAgentRt *rt, const char *name, const char *c
     return NULL;
 }
 
-static char *RunToolAfterHooks(PicoHost *app, PicoAgentId agent_id, const char *name,
-                               const char *call_id, const char *args, const char *output,
-                               const char *details_json, bool executed, bool is_error)
+static char *RunToolAfterHooks(PicoAgentRt *rt, const char *name, const char *call_id,
+                               const char *args, const char *output, const char *details_json,
+                               bool executed, bool is_error)
 {
     char *cur = Dup(output ? output : "");
-    PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
-    PicoWorkspace *workspace = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
-    if (!workspace)
+    PicoWorkspace *workspace = rt ? rt->context.workspace_owner : NULL;
+    const PicoRegistrationGeneration *registration = rt ? rt->registration : NULL;
+    if (!workspace || !registration)
     {
         return cur;
     }
-    for (int i = 0; i < workspace->tool_after_hook_count; i++)
+    for (int i = 0; i < registration->tool_after_hook_count; i++)
     {
-        if (!workspace->tool_after_hooks[i].fn)
+        if (!registration->tool_after_hooks[i].fn)
         {
             continue;
         }
@@ -675,7 +676,8 @@ static char *RunToolAfterHooks(PicoHost *app, PicoAgentId agent_id, const char *
         ev.details_json = details_json;
         ev.executed = executed;
         ev.is_error = is_error;
-        workspace->tool_after_hooks[i].fn(workspace, agent_id, &ev, workspace->tool_after_hooks[i].state);
+        registration->tool_after_hooks[i].fn(workspace, rt->context.agent_id, &ev,
+                                             registration->tool_after_hooks[i].state);
         free(ev.args_json_out);
         if (ev.result)
         {
@@ -734,26 +736,27 @@ static bool AgentAllowsTool(const PicoAgent *agent, const char *name)
     return false;
 }
 
-static void RunLlmHooks(PicoHost *app, PicoAgent *agent, bool compact, bool include_tools,
+static void RunLlmHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool include_tools,
                         const char *base, char **instructions, PicoTool **tools, int *tool_count)
 {
     char *instr = Dup(base);
     PicoTool eligible[PICO_MAX_TOOLS];
     int ntools = 0;
-    PicoWorkspace *workspace = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
-    for (int i = 0; workspace && i < workspace->tool_count && ntools < PICO_MAX_TOOLS; i++)
+    PicoWorkspace *workspace = rt ? rt->context.workspace_owner : NULL;
+    const PicoRegistrationGeneration *registration = rt ? rt->registration : NULL;
+    for (int i = 0; registration && i < registration->tool_count && ntools < PICO_MAX_TOOLS; i++)
     {
-        if (AgentAllowsTool(agent, workspace->tools[i].name))
+        if (AgentAllowsTool(agent, registration->tools[i].name))
         {
-            eligible[ntools++] = workspace->tools[i];
+            eligible[ntools++] = registration->tools[i];
         }
     }
     bool exclude[PICO_MAX_TOOLS];
     memset(exclude, 0, sizeof(exclude));
     /* Filtering pass: collect exclusions so every hook sees the final catalog. */
-    for (int i = 0; workspace && i < workspace->llm_hook_count; i++)
+    for (int i = 0; registration && i < registration->llm_hook_count; i++)
     {
-        if (!workspace->llm_hooks[i].fn)
+        if (!registration->llm_hooks[i].fn)
         {
             continue;
         }
@@ -765,14 +768,15 @@ static void RunLlmHooks(PicoHost *app, PicoAgent *agent, bool compact, bool incl
         ev.tool_count = ntools;
         ev.exclude = include_tools ? exclude : NULL;
         ev.instructions = instr ? instr : "";
-        workspace->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev, workspace->llm_hooks[i].state);
+        registration->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev,
+                                       registration->llm_hooks[i].state);
         free(ev.extra_instructions);
     }
     /* Instructions pass: extras go under one heading; later hooks see the section. */
     bool extras = false;
-    for (int i = 0; workspace && i < workspace->llm_hook_count; i++)
+    for (int i = 0; registration && i < registration->llm_hook_count; i++)
     {
-        if (!workspace->llm_hooks[i].fn)
+        if (!registration->llm_hooks[i].fn)
         {
             continue;
         }
@@ -784,7 +788,8 @@ static void RunLlmHooks(PicoHost *app, PicoAgent *agent, bool compact, bool incl
         ev.tool_count = ntools;
         ev.exclude = include_tools ? exclude : NULL;
         ev.instructions = instr ? instr : "";
-        workspace->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev, workspace->llm_hooks[i].state);
+        registration->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev,
+                                       registration->llm_hooks[i].state);
         if (ev.extra_instructions)
         {
             if (ev.extra_instructions[0] && !extras)
@@ -1151,7 +1156,7 @@ static void *WorkerMain(void *arg)
     return NULL;
 }
 
-static void RunContextHooks(PicoHost *app, PicoAgent *agent, bool compact,
+static void RunContextHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact,
                             const PicoTool *tools, int tool_count,
                             char ***input_inout, int *count_inout)
 {
@@ -1160,15 +1165,16 @@ static void RunContextHooks(PicoHost *app, PicoAgent *agent, bool compact,
     char *extras[PICO_MAX_CONTEXT_HOOKS];
     int extra_count = 0;
     memset(extras, 0, sizeof(extras));
-    PicoWorkspace *workspace = agent ? agent->workspace : PicoHost_SelectedWorkspace(app);
-    if (!workspace)
+    PicoWorkspace *workspace = rt ? rt->context.workspace_owner : NULL;
+    const PicoRegistrationGeneration *registration = rt ? rt->registration : NULL;
+    if (!workspace || !registration)
     {
         return;
     }
 
-    for (int i = 0; i < workspace->context_hook_count; i++)
+    for (int i = 0; i < registration->context_hook_count; i++)
     {
-        if (!workspace->context_hooks[i].fn)
+        if (!registration->context_hooks[i].fn)
         {
             continue;
         }
@@ -1179,8 +1185,8 @@ static void RunContextHooks(PicoHost *app, PicoAgent *agent, bool compact,
         ev.history_count = base_count;
         ev.tools = tools;
         ev.tool_count = tool_count;
-        workspace->context_hooks[i].fn(workspace, agent ? agent->id : 0, &ev,
-                                       workspace->context_hooks[i].state);
+        registration->context_hooks[i].fn(workspace, agent ? agent->id : 0, &ev,
+                                           registration->context_hooks[i].state);
         if (ev.extra_context && ev.extra_context[0])
         {
             extras[extra_count++] = ev.extra_context;
@@ -1247,7 +1253,16 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         SetErrorState(app, agent, "Active model has no provider. Set `provider` on the model in settings.json.");
         return false;
     }
-    const PicoProvider *p = pico_find_provider(app, m->provider);
+    const PicoProvider *p = NULL;
+    for (int i = 0; rt->registration && i < rt->registration->provider_count; i++)
+    {
+        if (rt->registration->providers[i].name &&
+            strcmp(rt->registration->providers[i].name, m->provider) == 0)
+        {
+            p = &rt->registration->providers[i];
+            break;
+        }
+    }
     if (!p || !p->stream)
     {
         char buf[256];
@@ -1276,8 +1291,8 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     char *instructions = NULL;
     PicoTool *tools = NULL;
     int tool_count = 0;
-    RunLlmHooks(app, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
-    RunContextHooks(app, agent, compact, tools, tool_count, &input, &input_count);
+    RunLlmHooks(rt, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
+    RunContextHooks(rt, agent, compact, tools, tool_count, &input, &input_count);
 
     if (InputHasContextItem(input, input_count) && !p->map_context)
     {
@@ -2492,7 +2507,7 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
     char *apply_error = NULL;
     PicoTool *tool = FindOfferedTool(rt, name);
     if (!is_error && ev->executed && details && tool && tool->apply &&
-        !tool->apply(PicoHost_PrimaryWorkspace(app), agent->id, details, false, tool->state))
+        !tool->apply(rt->context.workspace_owner, agent->id, details, false, tool->state))
     {
         is_error = true;
         details = NULL;
@@ -2503,8 +2518,7 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
     char *output = NULL;
     if (!cancel)
     {
-        output = RunToolAfterHooks(app, agent->id, name, call_id,
-                                   call ? call->arguments : NULL, raw, details,
+        output = RunToolAfterHooks(rt, name, call_id, call ? call->arguments : NULL, raw, details,
                                    ev->executed, is_error);
     }
     const char *use = output ? output : raw;
@@ -2612,13 +2626,21 @@ static void PublishAskSnapshot(PicoAgentRt *rt)
 
 bool PicoAgent_BlocksReload(const PicoAgent *agent)
 {
-    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!agent)
+    {
+        return false;
+    }
+    if (PicoAgent_IsBusy(agent))
+    {
+        return true;
+    }
+    PicoAgentRt *rt = agent->runtime;
     if (!rt)
     {
         return false;
     }
     pthread_mutex_lock(&rt->mu);
-    bool blocked = PicoAgent_IsBusy(agent) || rt->busy || rt->work != PICO_WORK_IDLE ||
+    bool blocked = rt->busy || rt->work != PICO_WORK_IDLE ||
                    rt->event_count > 0 || rt->ask_waiting || rt->pending_count > 0 ||
                    rt->offered_tool_count > 0 || rt->stream != NULL || rt->think != NULL ||
                    rt->summary != NULL;
@@ -2728,6 +2750,8 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt->ask_request);
     free(rt->ask_answer);
     free(rt->snap_request);
+    PicoWorkspace_RegistrationRelease(rt->registration);
+    rt->registration = NULL;
     pthread_mutex_destroy(&rt->mu);
     pthread_cond_destroy(&rt->cv);
     free(rt);
@@ -2746,17 +2770,43 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
     ctx->agent_id = agent->id;
     ctx->runtime_generation = agent->runtime_generation;
     ctx->workspace_id = workspace ? workspace->id : 0;
-    ctx->registration_generation = workspace ? workspace->registration_generation : 0;
+    PicoRegistrationGeneration *active = PicoWorkspace_RegistrationActive(workspace);
+    if (rt->registration != active)
+    {
+        bool quiescent;
+        PicoRegistrationGeneration *old;
+        pthread_mutex_lock(&rt->mu);
+        quiescent = !rt->busy && rt->work == PICO_WORK_IDLE && rt->event_count == 0 &&
+                    !rt->ask_waiting && rt->pending_count == 0;
+        if (quiescent)
+        {
+            if (active)
+            {
+                PicoWorkspace_RegistrationRetain(active);
+            }
+            old = rt->registration;
+            rt->registration = active;
+        }
+        else
+        {
+            old = NULL;
+        }
+        pthread_mutex_unlock(&rt->mu);
+        PicoWorkspace_RegistrationRelease(old);
+    }
+    ctx->registration_generation = rt->registration ? rt->registration->id
+                                                    : (workspace ? workspace->registration_generation : 0);
     snprintf(ctx->workspace, sizeof(ctx->workspace), "%s", PicoWorkspace_Path(workspace));
     snprintf(ctx->session_id, sizeof(ctx->session_id), "%s", agent->session_id);
     snprintf(ctx->profile, sizeof(ctx->profile), "%s", agent->profile);
     snprintf(ctx->purpose, sizeof(ctx->purpose), "%s", agent->purpose);
     ctx->safe_mode = app->safe_mode;
     ctx->auth_store = app->auth_store;
-    if (workspace)
+    if (rt->registration)
     {
-        memcpy(rt->tool_before_hooks, workspace->tool_before_hooks, sizeof(rt->tool_before_hooks));
-        rt->tool_before_hook_count = workspace->tool_before_hook_count;
+        memcpy(rt->tool_before_hooks, rt->registration->tool_before_hooks,
+               sizeof(rt->tool_before_hooks));
+        rt->tool_before_hook_count = rt->registration->tool_before_hook_count;
     }
     else
     {
@@ -2771,10 +2821,10 @@ static PicoAgentRt *CreateRt(PicoHost *app, PicoAgent *agent)
     {
         return NULL;
     }
-    RefreshWorkerContext(rt, app, agent);
     rt->stream_msg = -1;
     pthread_mutex_init(&rt->mu, NULL);
     pthread_cond_init(&rt->cv, NULL);
+    RefreshWorkerContext(rt, app, agent);
     if (pthread_create(&rt->thread, NULL, WorkerMain, rt) == 0)
     {
         rt->started = true;
@@ -2889,6 +2939,19 @@ void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
         return;
     }
     StartCompact(app, agent);
+}
+
+void PicoAgent_RefreshRegistration(PicoHost *app, PicoAgent *agent)
+{
+    if (agent && agent->runtime)
+    {
+        RefreshWorkerContext(agent->runtime, app, agent);
+    }
+}
+
+PicoRegistrationGeneration *PicoAgent_Registration(PicoAgent *agent)
+{
+    return agent && agent->runtime ? agent->runtime->registration : NULL;
 }
 
 void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoWorkspace *workspace)
@@ -3648,12 +3711,17 @@ char *PicoAgent_BuildInstructionsSpans(PicoHost *app, PicoAgent *agent, PicoProm
     }
     PicoPromptSpan base_spans[PICO_PROMPT_SPAN_MAX];
     int base_count = 0;
+    if (agent && agent->runtime)
+    {
+        RefreshWorkerContext(agent->runtime, app, agent);
+    }
     char *base = PicoSettings_LoadSystemPromptSpans(PicoAgent_Workspace(agent), base_spans, &base_count);
     size_t base_len = base ? strlen(base) : 0;
     char *instr = NULL;
     PicoTool *tools = NULL;
     int tool_count = 0;
-    RunLlmHooks(app, agent, false, true, base, &instr, &tools, &tool_count);
+    RunLlmHooks(agent ? agent->runtime : NULL, agent, false, true, base, &instr, &tools,
+                 &tool_count);
     free(base);
     free(tools);
     if (!instr)

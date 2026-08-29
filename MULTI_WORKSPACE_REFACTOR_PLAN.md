@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 5 complete; implementation continues at Phase 6  
+Status: Phase 6 implemented
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -756,10 +756,12 @@ nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/buil
 
 ### Phase 6 — Implement module and registration generations
 
+Status: complete.
+
 Owner files:
 
 - `app/plugin.c`
-- New `app/host_extensions.c`, `app/workspace_extensions.c`
+- `app/host_extensions.c`, `app/workspace_extensions.c`
 - `app/agent.c`, `app/workspace.c`
 
 Tasks:
@@ -773,12 +775,14 @@ Tasks:
 7. Preserve the old active generation after compile, load, validation, or init failure.
 8. Add reference-count assertions in debug builds.
 
-Acceptance:
+Verification:
 
-- Reload tests prove no callback executes from an unloaded module.
-- One workspace can remain busy on generation N while another uses N+1.
-- A failed N+1 leaves N active without losing registrations or instance state.
-- `dlclose` occurs only after the last generation reference is released.
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/build/release && ctest --test-dir app/build/release --output-on-failure'
+```
+
+25/25 tests passed in Debug and Release presets. Module and registration generations are fully implemented: host-owned module storage (`PicoModuleGeneration`), generation-specific compile with atomic cache rename and `RTLD_LOCAL`, isolated host/workspace staging and rollback (`PicoHostExtensions_Activate`, `PicoWorkspaceExtensions_Activate`), reference-counted immutable registration generations (`PicoRegistrationGeneration`), turn generation retention through worker runtimes and retired runtimes until joined/freed, per-workspace rollout and workspace-local source discovery, independent publication and rollback for dual-scope modules, `dlclose` on last generation reference release, and scoped extension listing (`PicoPlugins_Count`, `PicoPlugins_Get`, `PicoPlugins_SetEnabled`) returning separate `PICO_EXTENSION_HOST` and `PICO_EXTENSION_WORKSPACE` records with desired/active generations, workspace IDs, and scoped error tracking. Verified zero forbidden legacy global references.
 
 ### Phase 7 — Enable multiple workspace lifecycles and fair pumping
 

@@ -67,6 +67,8 @@ add_executable(pico
     app.c
     ui.c
     plugin.c
+    host_extensions.c
+    workspace_extensions.c
     theme.c
     md_view.c
     markdown.c
@@ -313,6 +315,8 @@ if(BUILD_TESTING)
         scrollbar.c
         agent.c
         workspace.c
+        host_extensions.c
+        workspace_extensions.c
         subagent_config.c
         builtins/ask_user.c
         builtins/subagent.c
@@ -364,6 +368,8 @@ if(BUILD_TESTING)
         scrollbar.c
         agent.c
         workspace.c
+        host_extensions.c
+        workspace_extensions.c
         subagent_config.c
         json.c
         canonical.c
@@ -398,6 +404,8 @@ if(BUILD_TESTING)
         scrollbar.c
         agent.c
         workspace.c
+        host_extensions.c
+        workspace_extensions.c
         subagent_config.c
         json.c
         canonical.c
@@ -510,6 +518,8 @@ if(BUILD_TESTING)
         agent.c
         workspace.c
         plugin.c
+        host_extensions.c
+        workspace_extensions.c
         subagent_config.c
         json.c
         canonical.c

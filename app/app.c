@@ -354,7 +354,10 @@ void PicoHost_PublishRegistration(PicoHost *host, void *state)
                 ws->providers[ws->provider_count++] = p;
             }
         }
-        ws->registration_generation++;
+        if (!PicoWorkspace_PublishRegistrationGeneration(ws))
+        {
+            pico_workspace_status_warn(ws, "could not retain extension registration generation");
+        }
     }
     memset(&host->staging, 0, sizeof(host->staging));
     host->reg_scope = PICO_REG_NONE;
@@ -1101,8 +1104,6 @@ void pico_clear_registrations(PicoHost *app)
     app->completer_count = 0;
     memset(app->auths, 0, sizeof(app->auths));
     app->auth_count = 0;
-    memset(app->host_plugins, 0, sizeof(app->host_plugins));
-    app->host_plugin_count = 0;
     memset(&app->staging, 0, sizeof(app->staging));
 
     for (int w = 0; w < app->workspace_count; w++)
@@ -1112,6 +1113,7 @@ void pico_clear_registrations(PicoHost *app)
         {
             continue;
         }
+        PicoWorkspace_RegistrationClear(ws);
         memset(ws->views, 0, sizeof(ws->views));
         memset(ws->view_count, 0, sizeof(ws->view_count));
         memset(ws->empty_views, 0, sizeof(ws->empty_views));
@@ -1136,9 +1138,6 @@ void pico_clear_registrations(PicoHost *app)
         ws->completer_count = 0;
         memset(ws->providers, 0, sizeof(ws->providers));
         ws->provider_count = 0;
-        memset(ws->workspace_plugins, 0, sizeof(ws->workspace_plugins));
-        ws->workspace_plugin_count = 0;
-        ws->registration_generation++;
     }
 }
 
@@ -1165,13 +1164,21 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
     {
         PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
         PicoWorkspace *ws = agent ? agent->workspace : PicoHost_SelectedWorkspace(host);
-        if (ws)
+        if (agent)
         {
-            for (int i = 0; i < ws->hook_count; i++)
+            PicoAgent_RefreshRegistration(host, agent);
+        }
+        PicoRegistrationGeneration *agent_registration = agent ? PicoAgent_Registration(agent) : NULL;
+        if (ws && (agent_registration || ws->active_registration))
+        {
+            const PicoRegistrationGeneration *registration = agent_registration
+                                                                  ? agent_registration
+                                                                  : ws->active_registration;
+            for (int i = 0; i < registration->hook_count; i++)
             {
-                if (ws->hooks[i].hook == hook && ws->hooks[i].workspace_fn)
+                if (registration->hooks[i].hook == hook && registration->hooks[i].workspace_fn)
                 {
-                    ws->hooks[i].workspace_fn(ws, &event, ws->hooks[i].state);
+                    registration->hooks[i].workspace_fn(ws, &event, registration->hooks[i].state);
                 }
             }
         }
@@ -1800,6 +1807,13 @@ static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
     host->chat_follow_bottom = true;
     host->chat_overflow = true;
     host->safe_mode = safe_mode;
+    host->module_capacity = PICO_MAX_MODULE_GENERATIONS;
+    host->modules = (PicoModuleGeneration *)calloc((size_t)host->module_capacity,
+                                                    sizeof(*host->modules));
+    if (!host->modules)
+    {
+        host->module_capacity = 0;
+    }
     host->composer.capacity = 256;
     host->composer.text = (char *)malloc((size_t)host->composer.capacity);
     if (host->composer.text)
@@ -1898,6 +1912,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
     {
         pthread_mutex_destroy(&host->ask_id_mu);
+        free(host->modules);
         free(host->composer.text);
         free(host);
         return PICO_NO_MEMORY;
@@ -2124,6 +2139,9 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
         PicoHost_InitFields(host, fonts, safe_mode);
         if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
         {
+            free(host->modules);
+            host->modules = NULL;
+            host->module_capacity = 0;
             pico_status_warn(host, "Could not initialize HTTP.");
             return;
         }
@@ -2686,6 +2704,8 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     host->workspace_count = 0;
     PicoAuth_Free(host);
     PicoHost_ClearMessages(host, host->selected_agent_id);
+    free(host->modules);
+    host->modules = NULL;
     free(host->composer.text);
     free(host->status_warn);
     free(host->agent_input);

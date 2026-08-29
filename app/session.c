@@ -806,9 +806,12 @@ static void ApplyToolDetails(PicoHost *app, PicoAgent *agent, const char *name,
     {
         return;
     }
-    for (int i = 0; i < ws->tool_count; i++)
+    const PicoRegistrationGeneration *registration = ws->active_registration;
+    const PicoTool *tools = registration ? registration->tools : ws->tools;
+    int tool_count = registration ? registration->tool_count : ws->tool_count;
+    for (int i = 0; i < tool_count; i++)
     {
-        PicoTool *tool = &ws->tools[i];
+        const PicoTool *tool = &tools[i];
         if (tool->name && strcmp(tool->name, name) == 0)
         {
             if (tool->apply)

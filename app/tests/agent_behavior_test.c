@@ -3347,7 +3347,8 @@ static int TestWorkerContextCapturesRegistrationGeneration(void)
     ResetTest(TEST_BLOCK, 1);
     PicoHost app;
     InitApp(&app);
-    PicoHost_PrimaryWorkspace(&app)->registration_generation = 7;
+    PicoHost_PrimaryWorkspace(&app)->registration_generation = 6;
+    PicoWorkspace_PublishRegistrationGeneration(PicoHost_PrimaryWorkspace(&app));
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForBlock(&app))
     {

@@ -133,7 +133,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
     const char *desc = NULL;
     if (!info->loaded)
     {
-        desc = "Failed to load";
+        desc = info->last_error ? info->last_error : "Failed to load";
     }
     else if (info->description && info->description[0])
     {
@@ -176,7 +176,17 @@ static void RenderRow(int index, const PicoExtInfo *info)
                                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 if (info->builtin)
                 {
-                    CLAY_TEXT(CLAY_STRING("built-in"),
+                    const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "built-in host" : "built-in workspace";
+                    CLAY_TEXT(CStr(badge),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = 12,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+                else
+                {
+                    const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "host" : "workspace";
+                    CLAY_TEXT(CStr(badge),
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                 .fontSize = 12,
                                                 .textColor = COLOR_MUTED,
@@ -201,19 +211,19 @@ static void RenderRow(int index, const PicoExtInfo *info)
     }
 }
 
-static void RenderSection(bool builtin, Clay_String title)
+static void RenderSection(PicoHost *app, bool builtin, Clay_String title)
 {
     CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                        .fontSize = 12,
                                        .textColor = COLOR_MUTED,
                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
 
-    int n = PicoPlugins_Count();
+    int n = PicoPlugins_Count(app);
     int shown = 0;
     for (int i = 0; i < n; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(i, &info) || info.builtin != builtin)
+        if (!PicoPlugins_Get(app, i, &info) || info.builtin != builtin)
         {
             continue;
         }
@@ -286,8 +296,8 @@ static void ExtsRender(PicoHost *app, void *state)
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
-                    RenderSection(true, CLAY_STRING("Built-in"));
-                    RenderSection(false, CLAY_STRING("User"));
+                    RenderSection(app, true, CLAY_STRING("Built-in"));
+                    RenderSection(app, false, CLAY_STRING("User"));
                 }
                 if (g_overflow)
                 {
@@ -308,12 +318,12 @@ static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *sta
         return;
     }
     g_overflow = PicoScrollbar_Overflows(CLAY_STRING("ExtModalScroll"));
-    int n = PicoPlugins_Count();
+    int n = PicoPlugins_Count(app);
     int over_row = -1;
     for (int i = 0; i < n; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(i, &info) || !RowToggleable(&info))
+        if (!PicoPlugins_Get(app, i, &info) || !RowToggleable(&info))
         {
             continue;
         }
@@ -357,11 +367,11 @@ static void ExtsOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
-    int n = PicoPlugins_Count();
+    int n = PicoPlugins_Count(app);
     for (int i = 0; i < n; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(i, &info) || !RowToggleable(&info))
+        if (!PicoPlugins_Get(app, i, &info) || !RowToggleable(&info))
         {
             continue;
         }

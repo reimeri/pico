@@ -12,6 +12,10 @@
 struct PicoAgentRt;
 struct PicoDelegationJob;
 
+#ifndef PICO_MAX_EXTENSION_SLOTS
+#define PICO_MAX_EXTENSION_SLOTS 64
+#endif
+
 typedef struct PicoSessionReservation {
     PicoAgentId owner;
     char path[4096];
@@ -61,10 +65,48 @@ typedef struct PicoSubagentInspect {
 #include "pico/app.h"
 #include "pico/plugin.h"
 
+typedef struct PicoModuleGeneration PicoModuleGeneration;
+
 typedef struct PicoPluginSlot {
     char name[64];
     void *state;
+    PicoModuleGeneration *module;
+    bool initialized;
+    uint64_t desired_generation;
+    uint64_t active_generation;
+    char last_error[1024];
 } PicoPluginSlot;
+
+typedef struct PicoRegistrationGeneration {
+    uint64_t id;
+    int ref_count;
+    PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int view_count[PICO_SLOT_COUNT];
+    PicoEmptyView empty_views[PICO_MAX_EMPTY_VIEWS];
+    int empty_view_count;
+    PicoHookEntry hooks[PICO_MAX_HOOKS];
+    int hook_count;
+    PicoToolBeforeEntry tool_before_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_before_hook_count;
+    PicoToolAfterEntry tool_after_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_after_hook_count;
+    PicoLlmHookEntry llm_hooks[PICO_MAX_LLM_HOOKS];
+    int llm_hook_count;
+    PicoContextHookEntry context_hooks[PICO_MAX_CONTEXT_HOOKS];
+    int context_hook_count;
+    PicoToolRowEntry tool_row_hooks[PICO_MAX_TOOL_ROW_HOOKS];
+    int tool_row_hook_count;
+    PicoTool tools[PICO_MAX_TOOLS];
+    int tool_count;
+    PicoCommand commands[PICO_MAX_COMMANDS];
+    int command_count;
+    PicoCompleter completers[PICO_MAX_COMPLETERS];
+    int completer_count;
+    PicoProvider providers[PICO_MAX_PROVIDERS];
+    int provider_count;
+    PicoPluginSlot plugins[PICO_MAX_EXTENSION_SLOTS];
+    int plugin_count;
+} PicoRegistrationGeneration;
 
 struct PicoWorkspace {
     PicoHost *host;
@@ -72,6 +114,7 @@ struct PicoWorkspace {
     char path[4096];
     PicoWorkspaceState state;
     uint64_t registration_generation;
+    PicoRegistrationGeneration *active_registration;
 
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
@@ -122,9 +165,10 @@ struct PicoWorkspace {
     pthread_mutex_t settings_mu;
     PicoModel *models;
     int model_count;
-    PicoPluginSlot workspace_plugins[64];
+    PicoPluginSlot workspace_plugins[PICO_MAX_EXTENSION_SLOTS];
     int workspace_plugin_count;
     bool accepting_work;
+    bool reload_queued;
     bool retained_shutdown;
 };
 
@@ -133,6 +177,21 @@ void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPost
 void PicoWorkspace_PumpUiPosts(PicoWorkspace *workspace);
 bool PicoWorkspace_UiLatest(const PicoWorkspace *workspace, const char *name, PicoUiPost *out);
 void PicoWorkspace_UiClear(PicoWorkspace *workspace, const char *name);
+
+PicoRegistrationGeneration *PicoWorkspace_RegistrationActive(PicoWorkspace *workspace);
+const PicoRegistrationGeneration *PicoWorkspace_RegistrationActiveConst(const PicoWorkspace *workspace);
+void PicoWorkspace_RegistrationRetain(PicoRegistrationGeneration *generation);
+void PicoWorkspace_RegistrationRelease(PicoRegistrationGeneration *generation);
+bool PicoWorkspace_PublishRegistrationGeneration(PicoWorkspace *workspace);
+void PicoWorkspace_RegistrationClear(PicoWorkspace *workspace);
+
+bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGeneration *module);
+void PicoWorkspaceExtensions_Shutdown(PicoWorkspace *workspace);
+void PicoWorkspaceExtensions_ShutdownModule(PicoWorkspace *workspace, PicoModuleGeneration *module);
+void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt);
+void *PicoWorkspaceExtensions_State(const PicoWorkspace *workspace, const char *name);
+bool PicoWorkspace_Reload(PicoWorkspace *workspace);
+bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name);
 
 /* False means a detached worker retained the execution host. */
 bool PicoWorkspace_Quiesce(PicoWorkspace *workspace);

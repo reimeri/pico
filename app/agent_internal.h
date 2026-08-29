@@ -6,6 +6,10 @@
 
 struct PicoAgentRt;
 typedef struct PicoAgentRt PicoAgentRt;
+typedef struct PicoRegistrationGeneration PicoRegistrationGeneration;
+
+void PicoAgent_RefreshRegistration(PicoHost *app, PicoAgent *agent);
+PicoRegistrationGeneration *PicoAgent_Registration(PicoAgent *agent);
 
 struct PicoAgent {
     PicoWorkspace *workspace;

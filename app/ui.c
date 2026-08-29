@@ -126,13 +126,16 @@ bool pico_tool_row_activate(PicoWorkspace *workspace, PicoAgentId agent_id, cons
     ev.child_id = line->child_id;
     ev.child_session_id = line->child_session_id[0] ? line->child_session_id : NULL;
     ev.is_error = line->tool_error;
-    for (i = 0; i < workspace->tool_row_hook_count; i++)
+    const PicoRegistrationGeneration *registration = workspace->active_registration;
+    const PicoToolRowEntry *hooks = registration ? registration->tool_row_hooks : workspace->tool_row_hooks;
+    int hook_count = registration ? registration->tool_row_hook_count : workspace->tool_row_hook_count;
+    for (i = 0; i < hook_count; i++)
     {
-        if (!workspace->tool_row_hooks[i].fn)
+        if (!hooks[i].fn)
         {
             continue;
         }
-        workspace->tool_row_hooks[i].fn(workspace, &ev, workspace->tool_row_hooks[i].state);
+        hooks[i].fn(workspace, &ev, hooks[i].state);
         if (ev.handled)
         {
             return true;

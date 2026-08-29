@@ -253,9 +253,11 @@ static int TestWorkspaceBuiltinsRegisterThroughWorkspaceInit(void)
     if (!has_sh || !has_subagent)
     {
         Fail("workspace init must register sh and subagent tools");
+        PicoWorkspace_RegistrationClear(host.workspaces[0]);
         free(host.workspaces[0]);
         return 1;
     }
+    PicoWorkspace_RegistrationClear(host.workspaces[0]);
     free(host.workspaces[0]);
     return 0;
 }
@@ -281,6 +283,17 @@ static void RmRf(const char *path)
     }
     closedir(d);
     rmdir(path);
+}
+
+static void WriteFileStr(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        return;
+    }
+    fputs(content, f);
+    fclose(f);
 }
 
 static int MkdirParents(const char *path)
@@ -408,7 +421,6 @@ static int StartLifecycleHost(PicoHost **host_out, char *cfg, char *cache, char 
 {
     char ext_dir[320];
     char src[336];
-    PicoWorkspaceId id = 0;
 
     snprintf(cfg, 256, "/tmp/pico-cfg-XXXXXX");
     snprintf(cache, 256, "/tmp/pico-cache-XXXXXX");
@@ -442,6 +454,7 @@ static int StartLifecycleHost(PicoHost **host_out, char *cfg, char *cache, char 
         Fail("pico_host_init lifecycle");
         return -1;
     }
+    PicoWorkspaceId id = 0;
     if (pico_workspace_open(*host_out, ws, &id) != PICO_OK)
     {
         Fail("open lifecycle workspace");
@@ -792,12 +805,12 @@ static int TestHostPreferencesPersistence(void)
     }
     PicoPlugins_Load(host);
 
-    int ext_count = PicoPlugins_Count();
+    int ext_count = PicoPlugins_Count(host);
     int target_idx = -1;
     for (int i = 0; i < ext_count; i++)
     {
         PicoExtInfo info;
-        if (PicoPlugins_Get(i, &info) && info.name && strcmp(info.name, "footer") == 0)
+        if (PicoPlugins_Get(host, i, &info) && info.name && strcmp(info.name, "footer") == 0)
         {
             target_idx = i;
             break;
@@ -1100,6 +1113,394 @@ static int TestWorkspaceLocalExtensionWithHostCallbacksRejected(void)
     return 0;
 }
 
+static int TestReloadInitRollbackPreservesActiveState(void)
+{
+    char cfg[256];
+    char cache[256];
+    char ws[256];
+    char life[512];
+    char log[32];
+    PicoHost *host = NULL;
+
+    cfg[0] = cache[0] = ws[0] = '\0';
+    if (StartLifecycleHost(&host, cfg, cache, ws, life, 0) != 0)
+    {
+        FinishLifecycleHost(host, cfg, cache, ws);
+        return 1;
+    }
+    void *host_state = PicoPlugins_HostState(host, "lifecycle");
+    void *workspace_state = PicoPlugins_WorkspaceState(PicoHost_PrimaryWorkspace(host), "lifecycle");
+    char source[512];
+    snprintf(source, sizeof(source), "%s/pico/extensions/lifecycle.c", cfg);
+    bool preserved = host_state && workspace_state;
+    if (preserved && WriteFile(source, "this is not valid C\n") != 0)
+    {
+        preserved = false;
+    }
+    PicoPlugins_Reload(host);
+    preserved = preserved && PicoPlugins_HostState(host, "lifecycle") == host_state &&
+                PicoPlugins_WorkspaceState(PicoHost_PrimaryWorkspace(host), "lifecycle") == workspace_state;
+    if (WriteFile(source, kLifecycleExt) != 0)
+    {
+        preserved = false;
+    }
+    setenv("PICO_TEST_FAIL_WORKSPACE", "1", 1);
+    PicoPlugins_Reload(host);
+    ReadFileStr(life, log, sizeof(log));
+    preserved = preserved &&
+                PicoPlugins_WorkspaceState(PicoHost_PrimaryWorkspace(host), "lifecycle") == workspace_state &&
+                PicoPlugins_HostState(host, "lifecycle") != NULL;
+    pico_host_free(host);
+    host = NULL;
+    FinishLifecycleHost(NULL, cfg, cache, ws);
+    if (!preserved)
+    {
+        Fail("failed reload must preserve the previous initialized extension state");
+        return 1;
+    }
+    return 0;
+}
+
+static int TestGenerationRolloutAndDlcloseOnRelease(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+
+    PicoModuleGeneration mod_n;
+    memset(&mod_n, 0, sizeof(mod_n));
+    mod_n.ext.name = "test_gen_mod";
+    mod_n.generation = 1;
+    mod_n.desired = true;
+    mod_n.ref_count = 1; /* module store */
+
+    ws->workspace_plugin_count = 1;
+    snprintf(ws->workspace_plugins[0].name, sizeof(ws->workspace_plugins[0].name), "%s", mod_n.ext.name);
+    ws->workspace_plugins[0].module = &mod_n;
+    ws->workspace_plugins[0].initialized = true;
+
+    /* Publish registration generation N */
+    if (!PicoWorkspace_PublishRegistrationGeneration(ws))
+    {
+        Fail("publish registration generation N failed");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    PicoRegistrationGeneration *gen_n = PicoWorkspace_RegistrationActive(ws);
+    if (!gen_n || mod_n.ref_count != 2) /* store + snapshot */
+    {
+        Fail("gen N should be active and ref_count should be 2");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    /* Simulate a running turn worker retaining gen_n */
+    PicoWorkspace_RegistrationRetain(gen_n);
+    if (gen_n->ref_count != 2)
+    {
+        Fail("gen_n ref_count should be 2 (workspace active + turn worker)");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    /* Now rollout generation N+1 */
+    PicoModuleGeneration mod_n1;
+    memset(&mod_n1, 0, sizeof(mod_n1));
+    mod_n1.ext.name = "test_gen_mod";
+    mod_n1.generation = 2;
+    mod_n1.desired = true;
+    mod_n1.ref_count = 1; /* module store */
+
+    ws->workspace_plugins[0].module = &mod_n1;
+    if (!PicoWorkspace_PublishRegistrationGeneration(ws))
+    {
+        Fail("publish registration generation N+1 failed");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    PicoRegistrationGeneration *gen_n1 = PicoWorkspace_RegistrationActive(ws);
+    if (!gen_n1 || gen_n1 == gen_n || mod_n1.ref_count != 2)
+    {
+        Fail("gen N+1 should be active with ref_count 2");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    /* Old generation mod_n is no longer desired in store */
+    mod_n.desired = false;
+    PicoModule_Release(&mod_n); /* release store ref */
+
+    /* mod_n is still referenced by turn worker's gen_n */
+    if (mod_n.ref_count != 1)
+    {
+        Fail("mod_n should still have ref_count 1 from retained gen_n snapshot");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    /* Now turn worker completes and releases gen_n */
+    PicoWorkspace_RegistrationRelease(gen_n);
+
+    /* mod_n should now have ref_count 0 */
+    if (mod_n.ref_count != 0)
+    {
+        Fail("mod_n should have ref_count 0 after gen_n released");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    PicoWorkspace_RegistrationClear(ws);
+    free(host.workspaces[0]);
+    return 0;
+}
+
+static int TestScopedExtensionListingRecords(void)
+{
+    char cfg[256];
+    char cache[256];
+    char ws1[256];
+    char life[512];
+    PicoHost *host = NULL;
+    if (StartLifecycleHost(&host, cfg, cache, ws1, life, 0) != 0 || !host)
+    {
+        Fail("lifecycle host init failed");
+        return 1;
+    }
+
+    char ws2[256];
+    snprintf(ws2, sizeof(ws2), "/tmp/pico_test_ws2_%ld", (long)time(NULL));
+    mkdir(ws2, 0755);
+    PicoWorkspaceId ws2_id = 0;
+    (void)pico_workspace_open(host, ws2, &ws2_id);
+
+    int count = PicoPlugins_Count(host);
+    if (count <= 0)
+    {
+        Fail("plugin count should be positive");
+        FinishLifecycleHost(host, cfg, cache, ws1);
+        rmdir(ws2);
+        return 1;
+    }
+
+    bool found_host = false;
+    bool found_ws = false;
+    for (int i = 0; i < count; i++)
+    {
+        PicoExtInfo info;
+        if (!PicoPlugins_Get(host, i, &info))
+        {
+            Fail("PicoPlugins_Get failed for valid index");
+            FinishLifecycleHost(host, cfg, cache, ws1);
+            rmdir(ws2);
+            return 1;
+        }
+        if (info.scope == PICO_EXTENSION_HOST)
+        {
+            found_host = true;
+            if (info.workspace_id != 0)
+            {
+                Fail("host-scoped plugin record must have workspace_id == 0");
+                FinishLifecycleHost(host, cfg, cache, ws1);
+                rmdir(ws2);
+                return 1;
+            }
+        }
+        else if (info.scope == PICO_EXTENSION_WORKSPACE)
+        {
+            found_ws = true;
+            if (info.workspace_id == 0)
+            {
+                Fail("workspace-scoped plugin record must have non-zero workspace_id");
+                FinishLifecycleHost(host, cfg, cache, ws1);
+                rmdir(ws2);
+                return 1;
+            }
+        }
+    }
+
+    if (!found_host || !found_ws)
+    {
+        Fail("scoped listing must report both host and workspace records");
+        FinishLifecycleHost(host, cfg, cache, ws1);
+        rmdir(ws2);
+        return 1;
+    }
+
+    FinishLifecycleHost(host, cfg, cache, ws1);
+    rmdir(ws2);
+    return 0;
+}
+
+static int FailingWsInitDummy(PicoWorkspace *ws, void **state_out)
+{
+    (void)ws;
+    (void)state_out;
+    return -1;
+}
+
+static int SuccessfulHostInitDummy(PicoHost *host, void **state_out)
+{
+    (void)host;
+    static int s_host_state = 42;
+    *state_out = &s_host_state;
+    return 0;
+}
+
+static int TestDualScopeIndependentPublicationRollback(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+
+    PicoModuleGeneration mod;
+    memset(&mod, 0, sizeof(mod));
+    mod.ext.name = "dual_scope_ext";
+    mod.generation = 1;
+    mod.desired = true;
+    mod.builtin = true;
+    mod.ext.host_init = SuccessfulHostInitDummy;
+    mod.ext.workspace_init = FailingWsInitDummy;
+
+    bool host_ok = PicoHostExtensions_Activate(&host, &mod);
+    bool ws_ok = PicoWorkspaceExtensions_Activate(ws, &mod);
+
+    if (!host_ok || host.host_plugin_count != 1 || !host.host_plugins[0].initialized ||
+        PicoHostExtensions_State(&host, "dual_scope_ext") == NULL)
+    {
+        Fail("host activation must succeed independently of workspace activation");
+        free(host.workspaces[0]);
+        return 1;
+    }
+    if (ws_ok || PicoWorkspaceExtensions_State(ws, "dual_scope_ext") != NULL)
+    {
+        Fail("workspace activation must fail and stay inactive without crashing");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    /* Host instance is alive and working */
+    if (host.host_plugin_count != 1 || !host.host_plugins[0].initialized)
+    {
+        Fail("host plugin slot must remain initialized");
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    PicoHostExtensions_Shutdown(&host);
+    PicoWorkspaceExtensions_Shutdown(ws);
+    free(host.workspaces[0]);
+    return 0;
+}
+
+static int StatelessWsInitDummy(PicoWorkspace *ws, void **state_out)
+{
+    (void)ws;
+    (void)state_out;
+    return 0;
+}
+
+static int TestStatelessExtensionRollbackDoesNotLeakModule(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+
+    /* Setup 2 candidate modules: mod1 is stateless (no shutdown callback), mod2 fails init */
+    PicoModuleGeneration mod1;
+    memset(&mod1, 0, sizeof(mod1));
+    mod1.ext.name = "stateless_ext";
+    mod1.generation = 1;
+    mod1.desired = true;
+    mod1.ext.workspace_init = StatelessWsInitDummy;
+    mod1.ext.workspace_shutdown = NULL;
+    mod1.ref_count = 1;
+
+    PicoModuleGeneration mod2;
+    memset(&mod2, 0, sizeof(mod2));
+    mod2.ext.name = "failing_ext";
+    mod2.generation = 1;
+    mod2.desired = true;
+    mod2.ext.workspace_init = FailingWsInitDummy;
+    mod2.ref_count = 1;
+
+    host.modules = (PicoModuleGeneration *)calloc(2, sizeof(PicoModuleGeneration));
+    host.modules[0] = mod1;
+    host.modules[1] = mod2;
+    host.module_count = 2;
+    host.module_capacity = 2;
+
+    bool reload_ok = PicoWorkspace_Reload(ws);
+    if (reload_ok)
+    {
+        Fail("workspace reload must fail when one module fails init");
+        free(host.modules);
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    /* mod1 was activated during staging, but on rollback must be released! */
+    if (host.modules[0].ref_count != 1)
+    {
+        Fail("stateless extension module must be released on staging rollback even without shutdown callback");
+        free(host.modules);
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    free(host.modules);
+    free(host.workspaces[0]);
+    return 0;
+}
+
+static int TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+
+    /* Simulate workspace being busy */
+    ws->accepting_work = true;
+    ws->count = 1;
+    ws->agents[0] = (PicoAgent *)calloc(1, sizeof(PicoAgent));
+    ws->agents[0]->workspace = ws;
+    ws->agents[0]->state = PICO_AGENT_TOOL_WAIT;
+
+    bool ok = PicoWorkspace_Reload(ws);
+    if (ok)
+    {
+        Fail("reload must not proceed while workspace is busy");
+        free(ws->agents[0]);
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    if (!ws->reload_queued)
+    {
+        Fail("busy workspace must set reload_queued = true");
+        free(ws->agents[0]);
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    if (!ws->accepting_work)
+    {
+        Fail("busy workspace must NOT have accepting_work permanently set to false");
+        free(ws->agents[0]);
+        free(host.workspaces[0]);
+        return 1;
+    }
+
+    free(ws->agents[0]);
+    free(host.workspaces[0]);
+    return 0;
+}
+
 int main(void)
 {
     if (TestCanonicalOpenAndDuplicate() != 0)
@@ -1155,6 +1556,30 @@ int main(void)
         return 1;
     }
     if (TestWorkspaceLocalExtensionWithHostCallbacksRejected() != 0)
+    {
+        return 1;
+    }
+    if (TestReloadInitRollbackPreservesActiveState() != 0)
+    {
+        return 1;
+    }
+    if (TestGenerationRolloutAndDlcloseOnRelease() != 0)
+    {
+        return 1;
+    }
+    if (TestScopedExtensionListingRecords() != 0)
+    {
+        return 1;
+    }
+    if (TestDualScopeIndependentPublicationRollback() != 0)
+    {
+        return 1;
+    }
+    if (TestStatelessExtensionRollbackDoesNotLeakModule() != 0)
+    {
+        return 1;
+    }
+    if (TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork() != 0)
     {
         return 1;
     }

@@ -10,12 +10,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum {
     PICO_REG_NONE = 0,
     PICO_REG_HOST,
     PICO_REG_WORKSPACE,
 };
+
+#define PICO_MAX_MODULE_GENERATIONS 256
+#define PICO_MAX_EXTENSION_SLOTS 64
+
+typedef struct PicoModuleGeneration {
+    char source[4096];
+    char so_path[4096];
+    time_t mtime;
+    uint64_t content_hash;
+    uint64_t generation;
+    void *handle;
+    PicoExt ext;
+    int ref_count;
+    bool builtin;
+    bool desired;
+} PicoModuleGeneration;
+
+typedef struct PicoExtensionInstance {
+    PicoModuleGeneration *module;
+    void *state;
+    bool host_scoped;
+    bool initialized;
+} PicoExtensionInstance;
 
 typedef struct PicoHostStaging {
     /* Host staged registrations */
@@ -106,8 +130,13 @@ struct PicoHost {
     pthread_mutex_t settings_mu;
     bool curl_initialized;
     bool ask_id_mu_ready;
-    PicoPluginSlot host_plugins[64];
+    PicoPluginSlot host_plugins[PICO_MAX_EXTENSION_SLOTS];
     int host_plugin_count;
+    PicoModuleGeneration *modules;
+    int module_count;
+    int module_capacity;
+    uint64_t next_module_generation;
+    double plugin_last_poll;
 
     int reg_scope;
     PicoWorkspace *reg_workspace;
@@ -224,8 +253,19 @@ static inline const PicoWorkspace *PicoHost_SelectedWorkspaceConst(const PicoHos
 
 uint64_t PicoHost_AllocAskId(PicoHost *host);
 int PicoHost_TotalAgentCount(const PicoHost *host);
+void PicoModule_Retain(PicoModuleGeneration *module);
+void PicoModule_Release(PicoModuleGeneration *module);
+
 void PicoHost_BeginRegistration(PicoHost *host, int scope, PicoWorkspace *workspace);
 void PicoHost_PublishRegistration(PicoHost *host, void *state);
 void PicoHost_DiscardRegistration(PicoHost *host);
+
+bool PicoHostExtensions_Activate(PicoHost *host, PicoModuleGeneration *module);
+void PicoHostExtensions_Shutdown(PicoHost *host);
+void PicoHostExtensions_ShutdownModule(PicoHost *host, PicoModuleGeneration *module);
+void PicoHostExtensions_OnFrame(PicoHost *host, float dt);
+void *PicoHostExtensions_State(const PicoHost *host, const char *name);
+bool PicoHostExtensions_Reload(PicoHost *host);
+bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name);
 
 #endif

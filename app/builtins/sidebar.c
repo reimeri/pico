@@ -19,7 +19,8 @@
 
 #define SIDEBAR_SCAN_SEC 0.5
 #define SIDEBAR_SESSION_PAGE 10
-#define SIDEBAR_FOLDER_ICON 14
+#define SIDEBAR_FOLDER_ICON 17
+#define SIDEBAR_SESSION_DOT 8
 
 typedef struct SidebarWsUi {
     char path[4096];
@@ -507,7 +508,7 @@ static void UnloadFolderIcons(SidebarState *s)
 static void RenderGlyph(const char *glyph, Clay_Color color)
 {
     CLAY_TEXT(CStr(glyph), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                            .fontSize = 13,
+                                            .fontSize = 16,
                                             .textColor = color,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
@@ -525,6 +526,17 @@ static void RenderFolderIcon(Texture2D *tex, const char *fallback)
         return;
     }
     RenderGlyph(fallback, COLOR_MUTED);
+}
+
+static void RenderSessionDot(void)
+{
+    float size = Pico_FontPx(SIDEBAR_SESSION_DOT);
+    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                        .height = CLAY_SIZING_FIXED(size)}},
+                  .backgroundColor = COLOR_MUTED,
+                  .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
+    {
+    }
 }
 
 static bool SessionIsSelected(PicoHost *host, const char *ws_path, const char *session_id,
@@ -575,7 +587,7 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
         {
             CLAY_TEXT(CStr(ws->name),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 13,
+                                        .fontSize = 16,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -598,19 +610,19 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
     bool hovered = Clay_PointerOver(id);
     CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                         .padding = {6, 6, 3, 3},
+                         .padding = {8, 6, 3, 3},
                          .childGap = 6,
                          .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderGlyph("o", COLOR_MUTED);
+        RenderSessionDot();
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {
             CLAY_TEXT(CStr(title && title[0] ? title : "Untitled"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 13,
+                                        .fontSize = 16,
                                         .textColor = selected ? COLOR_TEXT : COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -708,7 +720,7 @@ static void RenderMoreLessLabel(Clay_ElementId id, Clay_String label)
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                          .fontSize = 12,
+                                          .fontSize = 14,
                                           .textColor = COLOR_MUTED,
                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
@@ -805,7 +817,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
             CLAY_TEXT(CLAY_STRING("Add workspace"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 16, .textColor = COLOR_TEXT}));
         }
 
         CLAY(CLAY_ID("SidebarScroll"),

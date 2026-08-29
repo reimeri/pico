@@ -813,11 +813,14 @@ static void RenderMoreLessRow(int ws_index, int shown, int total)
     CLAY(CLAY_IDI("SidebarMoreLess", ws_index),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                      .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                     .padding = {6, 6, 2, 2},
+                     .padding = {SIDEBAR_ROW_PAD_X - 6, SIDEBAR_ROW_PAD_X - 6, 2, 2},
+                     .childGap = SIDEBAR_ROW_GAP,
                      .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
     {
         if (more)
         {
+            float gutter = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter)}}}) {}
             RenderMoreLessLabel(CLAY_IDI("SidebarMore", ws_index), CLAY_STRING("More"));
         }
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}

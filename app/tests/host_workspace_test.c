@@ -4066,6 +4066,177 @@ static int TestMultiWorkspaceDeletedDirectoryIntegrity(void)
     return 0;
 }
 
+static int TestSecondMainAgentStaysLive(void)
+{
+    char dir[] = "/tmp/pico-ws-side-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-side-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId second = 0;
+    PicoAgentInfo a;
+    PicoAgentInfo b;
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp sidebar agents");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init sidebar agents");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("create first main agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &second) != PICO_OK || second == 0 || second == first)
+    {
+        Fail("create second main agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    if (!pico_agent_select(host, second) || pico_agent_active(host) != second)
+    {
+        Fail("select second main agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    if (!pico_agent_find(host, first, &a) || !pico_agent_find(host, second, &b) ||
+        pico_agent_count(host) < 2)
+    {
+        Fail("first main agent must stay live after creating and selecting a second session");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
+static int TestResumeLoadsStoredModel(void)
+{
+    char dir[] = "/tmp/pico-ws-model-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-model-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoWorkspace *workspace;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId resumed = 0;
+    PicoAgent *agent;
+    PicoAgentInfo info;
+    PicoModel models[2];
+    char session_id[40];
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp resume model");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init resume model");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    workspace = PicoHost_FindWorkspace(host, ws);
+    memset(models, 0, sizeof(models));
+    snprintf(models[0].id, sizeof(models[0].id), "default-model");
+    snprintf(models[0].name, sizeof(models[0].name), "default-model");
+    snprintf(models[1].id, sizeof(models[1].id), "changed-model");
+    snprintf(models[1].name, sizeof(models[1].name), "changed-model");
+    snprintf(models[1].effort[0], sizeof(models[1].effort[0]), "high");
+    models[1].effort_count = 1;
+    workspace->models = models;
+    workspace->model_count = 2;
+    snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model), "default-model");
+
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK)
+    {
+        Fail("create agent for model resume");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    agent = PicoHost_FindAgent(host, first);
+    if (!agent || strcmp(agent->model, "default-model") != 0)
+    {
+        Fail("new main agent must use the workspace default model");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    if (!PicoSettings_SetModel(agent, "changed-model") || strcmp(agent->model, "changed-model") != 0 ||
+        !agent->session_id[0])
+    {
+        Fail("SetModel must persist a session id for resume");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    snprintf(session_id, sizeof(session_id), "%s", agent->session_id);
+    if (pico_agent_close(host, first) != PICO_OK)
+    {
+        Fail("close agent before resume");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_RESUME;
+    opt.session_id = session_id;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &resumed) != PICO_OK ||
+        !pico_agent_find(host, resumed, &info) || strcmp(info.model, "changed-model") != 0)
+    {
+        Fail("resume must load the stored model from jsonl");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    workspace->models = NULL;
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
 int main(void)
 {
     if (TestCanonicalOpenAndDuplicate() != 0)
@@ -4257,6 +4428,14 @@ int main(void)
         return 1;
     }
     if (TestDiffShutdownDoesNotWaitForGit() != 0)
+    {
+        return 1;
+    }
+    if (TestSecondMainAgentStaysLive() != 0)
+    {
+        return 1;
+    }
+    if (TestResumeLoadsStoredModel() != 0)
     {
         return 1;
     }

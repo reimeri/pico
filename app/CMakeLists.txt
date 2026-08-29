@@ -94,6 +94,7 @@ add_executable(pico
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
+    builtins/sidebar.c
     builtins/overlay.c
     builtins/ask_user.c
     builtins/todo.c
@@ -537,6 +538,7 @@ if(BUILD_TESTING)
         builtins/chat.c
         builtins/composer.c
         builtins/footer.c
+        builtins/sidebar.c
         builtins/overlay.c
         builtins/shell.c
         builtins/commands.c

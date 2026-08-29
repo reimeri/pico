@@ -38,13 +38,13 @@ If close is requested during a staged reload, Pico aborts the rollout: it does n
 
 A worker callback that never returns leaves **that** workspace in `CLOSING`. Other workspaces continue. Main-thread callbacks cannot be isolated: they must return promptly, and a violation blocks the host pump.
 
-Closing a workspace is backend-only (`pico_workspace_request_close`) until a workspace-management UX exists. `/cd` never closes the previous workspace.
+Closing a workspace is backend-only (`pico_workspace_request_close`). The builtin sidebar is the workspace-management UX: it lists the **disk catalog** under `~/.config/pico/sessions/` (each encoded-key folder, with `.workspace.json` for `path` / display name / order / collapsed, and parent `*.jsonl` files as sessions). A catalog entry is not a live `PicoWorkspace` until the user opens it. Startup still opens cwd and creates one main agent; it also ensures cwd has a catalog folder so it appears immediately. Catalog size is not capped at 8; opening a ninth live workspace still returns `PICO_LIMIT` (“Too many workspaces are open.”). This pass has no close/remove control in the sidebar. `/cd` never closes the previous workspace.
 
 ## `/cd`
 
 `/cd` canonicalizes and opens the target (or reuses an already-open canonical path), creates a main agent there if that workspace has none, and selects a main agent with `pico_agent_select`. Relative paths resolve against the command agent's workspace, never UI selection. A newly opened workspace is closed if creating its first main agent fails. `/cd` does not select into a closing workspace. The previous workspace stays open and keeps pumping.
 
-The folder picker uses the same open-or-select path.
+The folder picker (footer cwd and sidebar Add workspace) uses the same open-or-select path. Sidebar Add workspace also creates the catalog folder and `.workspace.json` before opening.
 
 ## Agents
 

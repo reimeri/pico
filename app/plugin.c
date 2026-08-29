@@ -66,6 +66,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_chat,
     pico_ext_composer,
     pico_ext_footer,
+    pico_ext_sidebar,
     pico_ext_overlay,
     pico_ext_ask_user,
     pico_ext_todo,

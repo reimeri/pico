@@ -1264,6 +1264,198 @@ static int TestPartsReplay(void)
     return ok ? 0 : Fail("session replay did not restore image path and refusal parts");
 }
 
+static const PicoCatalogWorkspace *FindCatalogPath(PicoCatalogWorkspace *list, int n, const char *path)
+{
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        if (strcmp(list[i].path, path) == 0)
+        {
+            return &list[i];
+        }
+    }
+    return NULL;
+}
+
+static int TestCatalog(void)
+{
+    char ws[] = "/tmp/pico-catalog-ws-XXXXXX";
+    PicoCatalogWorkspace *list = NULL;
+    int n = 0;
+    const PicoCatalogWorkspace *found;
+    char key[4096];
+    char meta[4096];
+    char jsonl[4096];
+    char *raw;
+    size_t raw_len = 0;
+    const char *slash;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("catalog mkdtemp");
+    }
+    if (PicoCatalog_Ensure(ws) != 0)
+    {
+        return Fail("catalog ensure");
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    slash = strrchr(ws, '/');
+    if (!found || !slash || strcmp(found->name, slash + 1) != 0 || found->session_count != 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("ensure did not create a catalog workspace named after the folder");
+    }
+    snprintf(key, sizeof(key), "%s", found->key);
+    if (!PicoPath_Format(meta, sizeof(meta), "%s/sessions/%s/.workspace.json", g_config_dir, key) ||
+        !PicoPath_Format(jsonl, sizeof(jsonl), "%s/sessions/%s/2026-01-01T00-00-00Z_catalogsess.jsonl",
+                         g_config_dir, key))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("catalog paths");
+    }
+    raw = Pico_ReadFile(meta, &raw_len);
+    if (!raw || !strstr(raw, ws) || !strstr(raw, found->name))
+    {
+        free(raw);
+        PicoCatalog_Free(list, n);
+        return Fail("workspace.json missing path or name");
+    }
+    free(raw);
+    PicoCatalog_Free(list, n);
+
+    {
+        FILE *f = fopen(jsonl, "wb");
+        if (!f)
+        {
+            return Fail("catalog jsonl write");
+        }
+        fprintf(f,
+                "{\"type\":\"session\",\"version\":4,\"id\":\"catalogsess\","
+                "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n",
+                ws);
+        fclose(f);
+    }
+    if (!AppendRaw(jsonl, "{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello catalog\"}") ||
+        !AppendRaw(jsonl, "{\"type\":\"model_change\",\"model\":\"changed-model\",\"effort\":\"high\"}"))
+    {
+        return Fail("catalog jsonl write");
+    }
+
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 || strcmp(found->sessions[0].id, "catalogsess") != 0 ||
+        strcmp(found->sessions[0].model, "changed-model") != 0 ||
+        strcmp(found->sessions[0].effort, "high") != 0 ||
+        !strstr(found->sessions[0].title, "hello catalog"))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("scan did not take parent jsonl title and last model_change");
+    }
+    PicoCatalog_Free(list, n);
+
+    {
+        FILE *f = fopen(meta, "wb");
+        if (!f)
+        {
+            return Fail("open meta for ghost");
+        }
+        fprintf(f,
+                "{\"version\":1,\"key\":\"%s\",\"path\":\"%s\",\"name\":\"%s\",\"order\":0,"
+                "\"collapsed\":false,\"sessions\":[{\"id\":\"ghostid\",\"model\":\"x\","
+                "\"effort\":\"\",\"mtime\":1}]}",
+                key, ws, slash + 1);
+        fclose(f);
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 || strcmp(found->sessions[0].id, "catalogsess") != 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("session-only metadata id must not appear without jsonl");
+    }
+    PicoCatalog_Free(list, n);
+
+    if (PicoCatalog_SetCollapsed(ws, true) != 0)
+    {
+        return Fail("set collapsed");
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || !found->collapsed)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("collapsed did not persist");
+    }
+    PicoCatalog_Free(list, n);
+
+    unlink(meta);
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    raw = Pico_ReadFile(meta, &raw_len);
+    if (!found || !raw || !strstr(raw, ws))
+    {
+        free(raw);
+        PicoCatalog_Free(list, n);
+        return Fail("legacy folder without metadata was not recovered from jsonl cwd");
+    }
+    free(raw);
+    PicoCatalog_Free(list, n);
+
+    if (PicoCatalog_SetSessionModel(ws, "catalogsess", "overlay-model", "low") != 0)
+    {
+        return Fail("set session model");
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count < 1 || strcmp(found->sessions[0].id, "catalogsess") != 0 ||
+        strcmp(found->sessions[0].model, "changed-model") != 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("jsonl model_change must win over overlay on scan");
+    }
+    PicoCatalog_Free(list, n);
+    return 0;
+}
+
+static int TestModelResumeReplay(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    PicoAgent resumed;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    memset(&resumed, 0, sizeof(resumed));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    snprintf(writer_ws.settings.default_model, sizeof(writer_ws.settings.default_model), "default-model");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "%s", writer_ws.settings.default_model);
+    if (PicoSession_LogUser(&writer, &writer_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogModelChange(&writer, &writer_agent, "changed-model", "high") != PICO_SESSION_WRITE_OK)
+    {
+        return Fail("model resume jsonl write");
+    }
+    resumed.workspace = &writer_ws;
+    resumed.kind = PICO_AGENT_MAIN;
+    snprintf(resumed.model, sizeof(resumed.model), "%s", writer_ws.settings.default_model);
+    if (PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        strcmp(resumed.model, "changed-model") != 0 || strcmp(resumed.effort, "high") != 0)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("resume must load the stored model and effort from jsonl");
+    }
+    unlink(writer_agent.session_path);
+    return 0;
+}
+
 int main(void)
 {
     char temp[] = "/tmp/pico-session-usage-XXXXXX";
@@ -1618,7 +1810,7 @@ int main(void)
     if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
         TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
-        TestConcurrentAppendDuringTitle() != 0)
+        TestConcurrentAppendDuringTitle() != 0 || TestCatalog() != 0 || TestModelResumeReplay() != 0)
     {
         return 1;
     }

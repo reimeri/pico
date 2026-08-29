@@ -2243,6 +2243,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
     }
     PicoPlugins_Load(host);
     PicoWorkspace_LoadProfiles(PicoHost_FindWorkspace(host, workspace_id));
+    PicoCatalog_Ensure(PicoWorkspace_Path(PicoHost_FindWorkspace(host, workspace_id)));
     initial = PicoHost_FindAgent(host, initial_id);
     pico_run_hooks(host, PICO_HOOK_ON_SESSION_RESET, initial_id);
     if (session_file && session_file[0])
@@ -2496,6 +2497,7 @@ bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const c
         return false;
     }
 
+    PicoCatalog_Ensure(resolved);
     FormatHomePath(resolved, pretty, sizeof(pretty));
     snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
     PicoOverlay_Notify(host, line);
@@ -2854,7 +2856,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
                                  .padding = {8, 8, 8, 8},
-                                 .sizing = {.width = CLAY_SIZING_FIT(120, 280), .height = CLAY_SIZING_GROW(0)}},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(200), .height = CLAY_SIZING_GROW(0)}},
                       .backgroundColor = COLOR_CONTENT_BG,
                       .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {
@@ -3111,6 +3113,7 @@ void PicoHost_Frame(PicoHost *app)
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
     bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    bool over_sidebar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll")));
     bool modal_open = PicoUi_ModalOpen(app);
     if (!modal_open)
     {
@@ -3126,14 +3129,20 @@ void PicoHost_Frame(PicoHost *app)
     bool over_inspect = PicoChat_InspectIsOpen() &&
                         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
     bool pane_wheel = over_inspect || (over_chat && !modal_open);
+    bool sidebar_wheel = over_sidebar && !modal_open && !over_inspect;
     Clay_Vector2 wheel = {.x = mouse_delta.x, .y = mouse_delta.y};
     Clay_UpdateScrollContainers(
-        !bar_drag && (modal_open || (!over_composer && !over_chat && !app->chat_sel.mouse_selecting)),
-        pane_wheel ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
+        !bar_drag && (modal_open ||
+                      (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
+        (pane_wheel || sidebar_wheel) ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
     if (pane_wheel)
     {
         ApplyPaneWheel(over_inspect ? CLAY_STRING("SubagentChatScroll") : CLAY_STRING("ChatScroll"),
                        wheel);
+    }
+    else if (sidebar_wheel)
+    {
+        ApplyPaneWheel(CLAY_STRING("SidebarScroll"), wheel);
     }
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
 

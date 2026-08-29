@@ -1276,6 +1276,12 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
     (void)app; (void)agent; (void)start; (void)session_file;
 }
 
+int PicoCatalog_Ensure(const char *workspace_path)
+{
+    (void)workspace_path;
+    return 0;
+}
+
 int PicoSession_Resolve(const PicoWorkspace *workspace, const char *id, bool allow_prefix,
                         char *path, size_t path_cap)
 {

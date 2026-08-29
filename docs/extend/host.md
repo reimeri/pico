@@ -69,7 +69,7 @@ Register these only from `host_init`. Workspace init cannot add them:
 - Host after-layout / after-render hooks (`pico_host_add_hook`)
 - Descriptor `host_on_frame`
 
-Host builtins include chat renderer, composer, footer shell, overlay presentation, extension manager UI, prompt UI, clipboard state, and auth UI. Dual-scope builtins keep separate host and workspace states connected only through core APIs and IDs.
+Host builtins include the sidebar catalog, chat renderer, composer, footer shell, overlay presentation, extension manager UI, prompt UI, clipboard state, and auth UI. Dual-scope builtins keep separate host and workspace states connected only through core APIs and IDs.
 
 Host-extension replacement happens between frames. Host extensions cannot register worker callbacks, so only active host callback depth must reach zero before replacement. F5 and `/reload` reload host extensions immediately (user-global / config sources only) and request reload of the selected agent's workspace; other workspaces keep accepting work. See [workspace](workspace.md) and [anatomy](anatomy.md).
 

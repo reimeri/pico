@@ -9,11 +9,45 @@
 
 typedef struct PicoSessionInfo {
     char path[4096];
+    char cwd[4096];
     char id[40];
     char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
     PicoAgentKind kind;
     time_t mtime;
 } PicoSessionInfo;
+
+#define PICO_CATALOG_NAME_MAX 128
+#define PICO_MAX_CATALOG_WORKSPACES 64
+#define PICO_MAX_CATALOG_SESSIONS 256
+
+typedef struct PicoCatalogSession {
+    char id[40];
+    char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
+    char model[128];
+    char effort[PICO_EFFORT_LEN];
+    time_t mtime;
+} PicoCatalogSession;
+
+typedef struct PicoCatalogWorkspace {
+    char key[4096];
+    char path[4096];
+    char name[PICO_CATALOG_NAME_MAX];
+    int order;
+    bool collapsed;
+    PicoCatalogSession *sessions;
+    int session_count;
+} PicoCatalogWorkspace;
+
+void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
+/* Scan ~/.config/pico/sessions. jsonl files are authoritative for sessions.
+ * Recovers missing .workspace.json from jsonl cwd. Caller frees with PicoCatalog_Free. */
+int PicoCatalog_Scan(PicoCatalogWorkspace **out);
+int PicoCatalog_Ensure(const char *workspace_path);
+int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
+int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_id,
+                                const char *model, const char *effort);
 
 typedef struct PicoSessionHeader {
     int version;

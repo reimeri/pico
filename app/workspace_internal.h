@@ -175,8 +175,9 @@ struct PicoWorkspace {
 void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPostKind kind,
                           PicoAgentId agent_id, uint64_t generation, const char *text, size_t n);
 void PicoWorkspace_PumpUiPosts(PicoWorkspace *workspace);
-bool PicoWorkspace_UiLatest(const PicoWorkspace *workspace, const char *name, PicoUiPost *out);
-void PicoWorkspace_UiClear(PicoWorkspace *workspace, const char *name);
+bool PicoWorkspace_UiLatest(const PicoWorkspace *workspace, PicoAgentId agent_id, const char *name, PicoUiPost *out);
+void PicoWorkspace_UiClear(PicoWorkspace *workspace, PicoAgentId agent_id, const char *name);
+void PicoWorkspace_DropAgentMailboxes(PicoWorkspace *workspace, PicoAgentId agent_id, uint64_t generation);
 
 PicoRegistrationGeneration *PicoWorkspace_RegistrationActive(PicoWorkspace *workspace);
 const PicoRegistrationGeneration *PicoWorkspace_RegistrationActiveConst(const PicoWorkspace *workspace);
@@ -190,6 +191,7 @@ void PicoWorkspaceExtensions_Shutdown(PicoWorkspace *workspace);
 void PicoWorkspaceExtensions_ShutdownModule(PicoWorkspace *workspace, PicoModuleGeneration *module);
 void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt);
 void *PicoWorkspaceExtensions_State(const PicoWorkspace *workspace, const char *name);
+void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId agent_id);
 bool PicoWorkspace_Reload(PicoWorkspace *workspace);
 bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name);
 
@@ -199,6 +201,7 @@ void PicoWorkspace_Free(PicoWorkspace *workspace);
 bool PicoWorkspace_Destroy(PicoWorkspace *workspace);
 void PicoWorkspace_Pump(PicoWorkspace *workspace);
 bool PicoWorkspace_BlocksReload(const PicoWorkspace *workspace);
+bool PicoWorkspace_IsQuiescent(const PicoWorkspace *workspace);
 bool PicoWorkspace_AcceptsNewWork(const PicoWorkspace *workspace);
 void PicoWorkspace_SetAcceptingWork(PicoWorkspace *workspace, bool accepting);
 /* Drop idle runtime snapshots that may contain extension function pointers. */
@@ -228,6 +231,9 @@ void PicoWorkspace_CancelDelegations(PicoWorkspace *workspace, PicoAgentId paren
                                      uint64_t runtime_generation);
 void PicoWorkspace_CancelChildDelegation(PicoWorkspace *workspace, PicoAgentId child_id);
 bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id);
+
+PicoAgentResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                          PicoAgentId *out);
 
 bool PicoWorkspace_InspectSubagent(PicoHost *host, const PicoTraceLine *line,
                                    PicoSubagentInspect *out);

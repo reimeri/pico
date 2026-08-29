@@ -209,6 +209,10 @@ bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGenera
         memset(slot, 0, sizeof(*slot));
         snprintf(slot->name, sizeof(slot->name), "%s", module->ext.name);
     }
+    if (slot && slot->initialized && slot->module == module)
+    {
+        return true;
+    }
     if (slot)
     {
         slot->desired_generation = module->generation;
@@ -369,9 +373,35 @@ void *PicoWorkspaceExtensions_State(const PicoWorkspace *workspace, const char *
     return NULL;
 }
 
+void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId agent_id)
+{
+    if (!workspace)
+    {
+        return;
+    }
+    PicoHookEvent event;
+    memset(&event, 0, sizeof(event));
+    event.hook = hook;
+    event.agent_id = agent_id;
+
+    const PicoRegistrationGeneration *registration = workspace->active_registration;
+    if (registration)
+    {
+        for (int i = 0; i < registration->hook_count; i++)
+        {
+            if (registration->hooks[i].hook == hook && registration->hooks[i].workspace_fn)
+            {
+                registration->hooks[i].workspace_fn(workspace, &event, registration->hooks[i].state);
+            }
+        }
+    }
+}
+
 bool PicoWorkspace_Reload(PicoWorkspace *workspace)
 {
-    if (!workspace || workspace->state == PICO_WORKSPACE_CLOSING ||
+    if (!workspace || (workspace->host && workspace->host->terminal_shutdown) ||
+        PicoHost_ProcessRetired() ||
+        workspace->state == PICO_WORKSPACE_CLOSING ||
         workspace->state == PICO_WORKSPACE_CLOSED)
     {
         return false;
@@ -408,6 +438,11 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     bool staging_ok = true;
     for (int m = 0; m < host->module_count; m++)
     {
+        if (workspace->state == PICO_WORKSPACE_CLOSING || workspace->state == PICO_WORKSPACE_CLOSED)
+        {
+            staging_ok = false;
+            break;
+        }
         PicoModuleGeneration *mod = &host->modules[m];
         if (!mod->desired || !mod->ext.workspace_init)
         {
@@ -445,11 +480,24 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         }
     }
 
+    if (workspace->state == PICO_WORKSPACE_CLOSING || workspace->state == PICO_WORKSPACE_CLOSED)
+    {
+        staging_ok = false;
+    }
+
     if (staging_ok)
     {
         if (!candidate.active_registration)
         {
             PicoWorkspace_PublishRegistrationGeneration(&candidate);
+        }
+
+        if (workspace->state == PICO_WORKSPACE_CLOSING || workspace->state == PICO_WORKSPACE_CLOSED)
+        {
+            PicoWorkspaceExtensions_Shutdown(&candidate);
+            PicoWorkspace_RegistrationRelease(candidate.active_registration);
+            candidate.active_registration = NULL;
+            return false;
         }
 
         /* Publication succeeded! Atomically apply candidate to workspace */
@@ -509,7 +557,10 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         PicoWorkspace_RevalidateToolPolicies(workspace);
         PicoWorkspace_NotifySessions(workspace);
         PicoWorkspace_ReplayToolDetails(workspace);
-        PicoWorkspace_SetAcceptingWork(workspace, true);
+        if (workspace->state != PICO_WORKSPACE_CLOSING && workspace->state != PICO_WORKSPACE_CLOSED)
+        {
+            PicoWorkspace_SetAcceptingWork(workspace, true);
+        }
         return true;
     }
 

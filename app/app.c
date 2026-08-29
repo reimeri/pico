@@ -1163,7 +1163,19 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
     else
     {
         PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
-        PicoWorkspace *ws = agent ? agent->workspace : PicoHost_SelectedWorkspace(host);
+        PicoWorkspace *ws = NULL;
+        if (agent_id != 0)
+        {
+            if (!agent)
+            {
+                return;
+            }
+            ws = agent->workspace;
+        }
+        else
+        {
+            ws = PicoHost_SelectedWorkspace(host);
+        }
         if (agent)
         {
             PicoAgent_RefreshRegistration(host, agent);
@@ -1982,7 +1994,7 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
             return PICO_ALREADY_OPEN;
         }
     }
-    if (host->workspace_count >= 1)
+    if (host->workspace_count >= PICO_MAX_WORKSPACES)
     {
         return PICO_LIMIT;
     }
@@ -2002,6 +2014,7 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     workspace->accepting_work = true;
     host->workspaces[host->workspace_count++] = workspace;
     PicoWorkspaceSettings_Load(workspace);
+    PicoPlugins_InitWorkspace(host, workspace);
     if (out)
     {
         *out = workspace->id;
@@ -2020,10 +2033,11 @@ PicoResult pico_workspace_request_reload(PicoHost *host, PicoWorkspaceId id)
     {
         return PICO_BUSY;
     }
-    PicoHost_RequestReload(host);
     if (workspace->state == PICO_WORKSPACE_OPEN)
     {
         workspace->state = PICO_WORKSPACE_RELOADING;
+        PicoWorkspace_SetAcceptingWork(workspace, false);
+        PicoWorkspace_PrepareReload(workspace);
     }
     return PICO_OK;
 }
@@ -2042,6 +2056,7 @@ PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id)
     }
     workspace->state = PICO_WORKSPACE_CLOSING;
     PicoWorkspace_SetAcceptingWork(workspace, false);
+    PicoWorkspace_CancelDelegations(workspace, 0, 0);
     for (i = 0; i < workspace->count; i++)
     {
         if (workspace->agents[i])
@@ -2073,13 +2088,13 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
     {
         return PICO_BUSY;
     }
-    if (PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS)
+    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS)
     {
         return PICO_LIMIT;
     }
     copy = *options;
     copy.kind = PICO_AGENT_MAIN;
-    return MapAgentResult(pico_agent_create(host, &copy, out));
+    return MapAgentResult(PicoWorkspace_CreateAgent(workspace, &copy, out));
 }
 
 PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json)
@@ -2101,7 +2116,20 @@ static void PicoHost_PumpLifecycle(PicoHost *host);
 
 void pico_host_pump(PicoHost *host)
 {
+    if (!host || host->terminal_shutdown || g_pico_process_retired)
+    {
+        return;
+    }
     PicoHost_PumpLifecycle(host);
+    for (int w = 0; w < host->workspace_count; w++)
+    {
+        PicoWorkspace *ws = host->workspaces[w];
+        if (ws && (ws->state == PICO_WORKSPACE_OPEN || ws->state == PICO_WORKSPACE_RELOADING))
+        {
+            PicoWorkspaceExtensions_OnFrame(ws, 0.0f);
+        }
+    }
+    PicoHostExtensions_OnFrame(host, 0.0f);
 }
 
 PicoResult pico_host_init_and_start(PicoHost **out, Font *fonts, const char *workspace, bool safe_mode,
@@ -2476,24 +2504,95 @@ static void ApplyWorkspaceChange(PicoHost *host)
 
 static void PicoHost_PumpLifecycle(PicoHost *host)
 {
-    PicoWorkspace *workspace;
-    int i;
     if (!host || host->terminal_shutdown || g_pico_process_retired)
     {
         return;
     }
-    for (i = 0; i < host->workspace_count; i++)
+    int count = host->workspace_count;
+    if (count > 0)
     {
-        workspace = host->workspaces[i];
-        if (!workspace)
+        int start = (host->pump_rr_index + 1) % count;
+        host->pump_rr_index = start;
+        for (int step = 0; step < count; step++)
         {
-            continue;
+            int i = (start + step) % count;
+            PicoWorkspace *workspace = host->workspaces[i];
+            if (!workspace || workspace->state == PICO_WORKSPACE_CLOSED)
+            {
+                continue;
+            }
+            PicoWorkspace_Pump(workspace);
+            if (workspace->state == PICO_WORKSPACE_RELOADING && !PicoWorkspace_BlocksReload(workspace))
+            {
+                if (PicoWorkspace_Reload(workspace) && workspace->state == PICO_WORKSPACE_RELOADING)
+                {
+                    workspace->state = PICO_WORKSPACE_OPEN;
+                    PicoWorkspace_SetAcceptingWork(workspace, true);
+                }
+            }
+            else if (workspace->state == PICO_WORKSPACE_CLOSING)
+            {
+                if (PicoWorkspace_IsQuiescent(workspace))
+                {
+                    bool all_destroyed = true;
+                    for (int a = 0; a < workspace->count; a++)
+                    {
+                        if (workspace->agents[a])
+                        {
+                            PicoAgentId aid = workspace->agents[a]->id;
+                            PicoWorkspace_ReleaseSessions(workspace, aid);
+                            PicoWorkspace_DropAgentMailboxes(workspace, aid, 0);
+                            PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, aid);
+                            if (!PicoAgent_Destroy(workspace->agents[a]))
+                            {
+                                all_destroyed = false;
+                                break;
+                            }
+                            workspace->agents[a] = NULL;
+                        }
+                    }
+                    if (all_destroyed)
+                    {
+                        workspace->count = 0;
+                        PicoWorkspaceExtensions_Shutdown(workspace);
+                        workspace->state = PICO_WORKSPACE_CLOSED;
+                    }
+                }
+            }
         }
-        PicoWorkspace_Pump(workspace);
-        if (workspace->state == PICO_WORKSPACE_RELOADING && host->reload_queued &&
-            !PicoWorkspace_BlocksReload(workspace))
+        for (int i = 0; i < host->workspace_count;)
         {
-            workspace->state = PICO_WORKSPACE_OPEN;
+            PicoWorkspace *ws = host->workspaces[i];
+            if (ws && ws->state == PICO_WORKSPACE_CLOSED)
+            {
+                if (host->selected_agent_id)
+                {
+                    PicoAgent *sel = PicoHost_FindAgent(host, host->selected_agent_id);
+                    if (!sel)
+                    {
+                        PicoAgentId next_id = 0;
+                        for (int w2 = 0; w2 < host->workspace_count; w2++)
+                        {
+                            if (w2 != i && host->workspaces[w2] && host->workspaces[w2]->count > 0 && host->workspaces[w2]->agents[0])
+                            {
+                                next_id = host->workspaces[w2]->agents[0]->id;
+                                break;
+                            }
+                        }
+                        host->selected_agent_id = next_id;
+                        PicoChatSel_Clear(host);
+                        host->chat_follow_bottom = true;
+                    }
+                }
+                PicoWorkspace_Free(ws);
+                for (int j = i + 1; j < host->workspace_count; j++)
+                {
+                    host->workspaces[j - 1] = host->workspaces[j];
+                }
+                host->workspaces[--host->workspace_count] = NULL;
+                continue;
+            }
+            i++;
         }
     }
     if (host->workspace_change_queued)

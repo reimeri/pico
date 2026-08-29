@@ -34,6 +34,12 @@ void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *nam
     return NULL;
 }
 
+void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
+}
+
 static void Check(bool ok, const char *message)
 {
     if (!ok)

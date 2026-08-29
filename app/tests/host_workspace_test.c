@@ -4,6 +4,7 @@
 #include "workspace_internal.h"
 #include "settings.h"
 #include "agent_internal.h"
+#include "agent.h"
 #include "clay/clay.h"
 
 #include <dirent.h>
@@ -114,15 +115,52 @@ static int TestCanonicalOpenAndDuplicate(void)
             rmdir(dir);
             return 1;
         }
-        if (pico_workspace_open(host, other, &second) != PICO_LIMIT || second != 0 ||
-            pico_workspace_count(host) != 1)
+        if (pico_workspace_open(host, other, &second) != PICO_OK || second == 0 || second == first ||
+            pico_workspace_count(host) != 2)
         {
-            Fail("a second live workspace must return PICO_LIMIT");
+            Fail("a second live workspace should succeed");
             pico_host_free(host);
             unlink(alias);
             rmdir(other);
             rmdir(dir);
             return 1;
+        }
+
+        /* Test exhausting workspace limit (PICO_MAX_WORKSPACES = 8) */
+        char extra_dirs[6][32];
+        PicoWorkspaceId extra_ids[6];
+        for (int i = 0; i < 6; i++)
+        {
+            snprintf(extra_dirs[i], sizeof(extra_dirs[i]), "/tmp/pico-ws-ext-%d-XXXXXX", i);
+            if (!mkdtemp(extra_dirs[i]))
+            {
+                Fail("mkdtemp extra");
+                return 1;
+            }
+            if (pico_workspace_open(host, extra_dirs[i], &extra_ids[i]) != PICO_OK)
+            {
+                Fail("open extra workspace up to limit");
+            }
+        }
+        if (pico_workspace_count(host) != PICO_MAX_WORKSPACES)
+        {
+            Fail("workspace count should reach PICO_MAX_WORKSPACES");
+        }
+
+        char ninth[] = "/tmp/pico-ws-ninth-XXXXXX";
+        PicoWorkspaceId ninth_id = 0;
+        if (mkdtemp(ninth))
+        {
+            if (pico_workspace_open(host, ninth, &ninth_id) != PICO_LIMIT || ninth_id != 0)
+            {
+                Fail("opening ninth workspace should return PICO_LIMIT");
+            }
+            rmdir(ninth);
+        }
+
+        for (int i = 0; i < 6; i++)
+        {
+            rmdir(extra_dirs[i]);
         }
         rmdir(other);
     }
@@ -1501,6 +1539,897 @@ static int TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork(void)
     return 0;
 }
 
+static int TestMultiWorkspaceInstructionsIsolation(void)
+{
+    char dirA[] = "/tmp/pico-ws-instA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-instB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp instructions test");
+        return 1;
+    }
+
+    char fileA[4096];
+    char fileB[4096];
+    snprintf(fileA, sizeof(fileA), "%s/AGENTS.md", dirA);
+    snprintf(fileB, sizeof(fileB), "%s/AGENTS.md", dirB);
+    FILE *fA = fopen(fileA, "wb");
+    if (fA) { fputs("INSTRUCTION_ALPHA", fA); fclose(fA); }
+    FILE *fB = fopen(fileB, "wb");
+    if (fB) { fputs("INSTRUCTION_BETA", fB); fclose(fB); }
+
+    char picoA[4096];
+    char picoB[4096];
+    snprintf(picoA, sizeof(picoA), "%s/.pico", dirA);
+    snprintf(picoB, sizeof(picoB), "%s/.pico", dirB);
+    mkdir(picoA, 0755);
+    mkdir(picoB, 0755);
+
+    char sysA[4096];
+    char sysB[4096];
+    snprintf(sysA, sizeof(sysA), "%s/.pico/SYSTEM.md", dirA);
+    snprintf(sysB, sizeof(sysB), "%s/.pico/SYSTEM.md", dirB);
+    fA = fopen(sysA, "wb");
+    if (fA) { fputs("SYSTEM_ALPHA", fA); fclose(fA); }
+    fB = fopen(sysB, "wb");
+    if (fB) { fputs("SYSTEM_BETA", fB); fclose(fB); }
+
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init instructions");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK ||
+        pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces for instructions");
+        pico_host_free(host);
+        return 1;
+    }
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId agA = 0, agB = 0;
+    if (pico_main_agent_create(host, idA, &opt, &agA) != PICO_OK ||
+        pico_main_agent_create(host, idB, &opt, &agB) != PICO_OK)
+    {
+        Fail("create agents for instructions");
+        pico_host_free(host);
+        return 1;
+    }
+
+    PicoAgent *agentA = PicoHost_FindAgent(host, agA);
+    PicoAgent *agentB = PicoHost_FindAgent(host, agB);
+    char *instA = PicoAgent_BuildInstructions(host, agentA);
+    char *instB = PicoAgent_BuildInstructions(host, agentB);
+
+    if (!instA || strstr(instA, "INSTRUCTION_ALPHA") == NULL || strstr(instA, "SYSTEM_ALPHA") == NULL ||
+        strstr(instA, "INSTRUCTION_BETA") != NULL || strstr(instA, "SYSTEM_BETA") != NULL)
+    {
+        Fail("agent A instructions should only contain workspace A instructions");
+    }
+    if (!instB || strstr(instB, "INSTRUCTION_BETA") == NULL || strstr(instB, "SYSTEM_BETA") == NULL ||
+        strstr(instB, "INSTRUCTION_ALPHA") != NULL || strstr(instB, "SYSTEM_ALPHA") != NULL)
+    {
+        Fail("agent B instructions should only contain workspace B instructions");
+    }
+
+    free(instA);
+    free(instB);
+    pico_host_free(host);
+
+    unlink(fileA);
+    unlink(fileB);
+    unlink(sysA);
+    unlink(sysB);
+    rmdir(picoA);
+    rmdir(picoB);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static void RunToolA(PicoAgentContext *ctx, const char *args, PicoToolResult *out, void *state)
+{
+    (void)ctx; (void)args; (void)state;
+    out->output = strdup("TOOL_OUTPUT_ALPHA");
+    out->is_error = false;
+}
+
+static void RunToolB(PicoAgentContext *ctx, const char *args, PicoToolResult *out, void *state)
+{
+    (void)ctx; (void)args; (void)state;
+    out->output = strdup("TOOL_OUTPUT_BETA");
+    out->is_error = false;
+}
+
+static int TestMultiWorkspaceToolNameIsolation(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init tool isolation");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-toolA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-toolB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp tool isolation");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, wsA);
+    pico_add_tool(wsA, "custom_worker_tool", "desc A", "{}", RunToolA, NULL);
+    PicoHost_PublishRegistration(host, NULL);
+
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, wsB);
+    pico_add_tool(wsB, "custom_worker_tool", "desc B", "{}", RunToolB, NULL);
+    PicoHost_PublishRegistration(host, NULL);
+
+    int idxA = -1, idxB = -1;
+    for (int i = 0; i < wsA->tool_count; i++)
+    {
+        if (wsA->tools[i].name && strcmp(wsA->tools[i].name, "custom_worker_tool") == 0)
+        {
+            idxA = i;
+            break;
+        }
+    }
+    for (int i = 0; i < wsB->tool_count; i++)
+    {
+        if (wsB->tools[i].name && strcmp(wsB->tools[i].name, "custom_worker_tool") == 0)
+        {
+            idxB = i;
+            break;
+        }
+    }
+
+    if (idxA < 0 || idxB < 0)
+    {
+        Fail("workspace tool registrations must register in both workspaces");
+        pico_host_free(host);
+        return 1;
+    }
+
+    PicoToolResult resA = {0}, resB = {0};
+    wsA->tools[idxA].run(NULL, "{}", &resA, wsA->tools[idxA].state);
+    wsB->tools[idxB].run(NULL, "{}", &resB, wsB->tools[idxB].state);
+
+    if (!resA.output || strcmp(resA.output, "TOOL_OUTPUT_ALPHA") != 0 ||
+        !resB.output || strcmp(resB.output, "TOOL_OUTPUT_BETA") != 0)
+    {
+        Fail("executing tool with same name in workspace A and B must execute distinct implementations");
+    }
+
+    free(resA.output);
+    free(resB.output);
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceMailboxIsolation(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init mailbox isolation");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-mbA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-mbB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp mailbox isolation");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0, a2 = 0, b1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idA, &opt, &a2);
+    pico_main_agent_create(host, idB, &opt, &b1);
+
+    PicoAgent *agentA1 = PicoHost_FindAgent(host, a1);
+    PicoAgent *agentA2 = PicoHost_FindAgent(host, a2);
+    PicoAgent *agentB1 = PicoHost_FindAgent(host, b1);
+
+    PicoWorkspace_UiPost(wsA, "status_box", PICO_UI_POST_TEXT, a1, agentA1->runtime_generation, "A1_POST", 7);
+    PicoWorkspace_UiPost(wsA, "status_box", PICO_UI_POST_TEXT, a2, agentA2->runtime_generation, "A2_POST", 7);
+    PicoWorkspace_UiPost(wsB, "status_box", PICO_UI_POST_TEXT, b1, agentB1->runtime_generation, "B1_POST", 7);
+
+    PicoWorkspace_PumpUiPosts(wsA);
+    PicoWorkspace_PumpUiPosts(wsB);
+
+    PicoUiPost p1 = {0}, p2 = {0}, p3 = {0};
+    if (!pico_agent_ui_latest(host, a1, "status_box", &p1) || !p1.text || strcmp(p1.text, "A1_POST") != 0 ||
+        !pico_agent_ui_latest(host, a2, "status_box", &p2) || !p2.text || strcmp(p2.text, "A2_POST") != 0 ||
+        !pico_agent_ui_latest(host, b1, "status_box", &p3) || !p3.text || strcmp(p3.text, "B1_POST") != 0)
+    {
+        Fail("mailbox posts with the same name across agents and workspaces must remain completely isolated");
+    }
+
+    /* Stale/zero ID must not match or fall back to selection */
+    PicoUiPost p_invalid = {0};
+    if (pico_agent_ui_latest(host, 0, "status_box", &p_invalid) ||
+        pico_agent_ui_latest(host, 9999, "status_box", &p_invalid))
+    {
+        Fail("lookup on zero or stale agent ID must return false");
+    }
+
+    pico_agent_ui_clear(host, a1, "status_box");
+    PicoUiPost p1_cleared = {0};
+    if (pico_agent_ui_latest(host, a1, "status_box", &p1_cleared))
+    {
+        Fail("clearing agent a1 mailbox should make it not found");
+    }
+    if (!pico_agent_ui_latest(host, a2, "status_box", &p2) || strcmp(p2.text, "A2_POST") != 0)
+    {
+        Fail("clearing a1 mailbox must not clear a2 mailbox");
+    }
+    if (!pico_agent_ui_latest(host, b1, "status_box", &p3) || strcmp(p3.text, "B1_POST") != 0)
+    {
+        Fail("clearing a1 mailbox must not clear b1 mailbox");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceAskOrderingAndRouting(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init ask ordering");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-askA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-askB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp ask ordering");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0, b1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idB, &opt, &b1);
+
+    PicoToolAsk pending;
+    if (pico_tool_pending_ask(host, &pending))
+    {
+        Fail("pending ask should be false when no asks are active");
+    }
+
+    if (pico_tool_answer(host, 0, "{}") || pico_tool_answer(host, 9999, "{}"))
+    {
+        Fail("answering invalid/stale ask ID must return false");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceReloadAndCloseIsolation(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init reload close isolation");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-rcA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-rcB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp reload close isolation");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0, b1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idB, &opt, &b1);
+
+    /* Request reload on A */
+    if (pico_workspace_request_reload(host, idA) != PICO_OK || wsA->state != PICO_WORKSPACE_RELOADING)
+    {
+        Fail("workspace A should enter RELOADING");
+    }
+    if (PicoWorkspace_AcceptsNewWork(wsA))
+    {
+        Fail("workspace A in RELOADING should reject new work");
+    }
+    if (!PicoWorkspace_AcceptsNewWork(wsB) || wsB->state != PICO_WORKSPACE_OPEN)
+    {
+        Fail("workspace B should remain OPEN and accepting work while A is reloading");
+    }
+
+    /* Request close on A while reloading */
+    if (pico_workspace_request_close(host, idA) != PICO_OK || wsA->state != PICO_WORKSPACE_CLOSING)
+    {
+        Fail("workspace A should enter CLOSING");
+    }
+
+    /* Pump host - A is quiescent so it should close and be removed */
+    pico_host_pump(host);
+
+    if (PicoHost_FindWorkspace(host, idA) != NULL || pico_workspace_count(host) != 1)
+    {
+        Fail("workspace A should be destroyed and removed after quiescence");
+    }
+    if (PicoHost_FindWorkspace(host, idB) == NULL || wsB->state != PICO_WORKSPACE_OPEN)
+    {
+        Fail("workspace B should continue running normally");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceStuckWorkerIsolation(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init stuck worker isolation");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-stuckA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-stuckB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp stuck worker isolation");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0, b1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idB, &opt, &b1);
+
+    PicoAgent *agentA = PicoHost_FindAgent(host, a1);
+
+    /* Start turn in workspace A */
+    PicoAgent_StartTurn(host, agentA, "turn in A");
+
+    /* Request close on A while turn is active */
+    pico_workspace_request_close(host, idA);
+    if (wsA->state != PICO_WORKSPACE_CLOSING)
+    {
+        Fail("workspace A should enter CLOSING");
+    }
+
+    /* Pump host while worker is busy */
+    pico_host_pump(host);
+
+    if (PicoHost_FindWorkspace(host, idA) == NULL || wsA->state != PICO_WORKSPACE_CLOSING)
+    {
+        Fail("workspace A with busy turn must remain in CLOSING without being freed prematurely");
+    }
+    if (PicoHost_FindWorkspace(host, idB) == NULL || wsB->state != PICO_WORKSPACE_OPEN)
+    {
+        Fail("workspace B must continue operating normally while A is in CLOSING");
+    }
+
+    /* Cancel agent A and pump until quiescence */
+    pico_agent_cancel(host, a1);
+    for (int i = 0; i < 50 && PicoAgent_IsBusy(agentA); i++)
+    {
+        pico_host_pump(host);
+        usleep(5000);
+    }
+
+    pico_host_pump(host);
+
+    if (PicoHost_FindWorkspace(host, idA) != NULL || pico_workspace_count(host) != 1)
+    {
+        Fail("workspace A should cleanly close and be removed after worker finishes");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceMainAgentDelegationDrain(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init delegation drain test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-delgA-XXXXXX";
+    if (!mkdtemp(dirA))
+    {
+        Fail("mkdtemp delegation drain");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0;
+    pico_workspace_open(host, dirA, &idA);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId main1 = 0, main2 = 0;
+    pico_main_agent_create(host, idA, &opt, &main1);
+    pico_main_agent_create(host, idA, &opt, &main2);
+
+    /* Create a child subagent descended from main1 */
+    PicoAgentCreateOptions child_opt = {
+        .kind = PICO_AGENT_SUBAGENT,
+        .parent_id = main1,
+        .session_start = PICO_SESSION_NONE,
+    };
+    PicoAgentId sub1 = 0;
+    if (pico_agent_create(host, &child_opt, &sub1) != PICO_AGENT_RESULT_OK || sub1 == 0)
+    {
+        Fail("subagent creation under main1 should succeed");
+    }
+
+    if (wsA->count != 3)
+    {
+        Fail("workspace should have 3 agents (main1, main2, sub1)");
+    }
+
+    /* Close main1: child tree is cancelled and drained, sub1 and main1 destroyed, main2 survives */
+    PicoAgentResult res = pico_agent_close(host, main1);
+    if (res != PICO_AGENT_RESULT_OK)
+    {
+        Fail("closing main1 should cancel/drain subagent and destroy main1");
+    }
+
+    if (PicoHost_FindAgent(host, main1) != NULL || PicoHost_FindAgent(host, sub1) != NULL)
+    {
+        Fail("main1 and sub1 should be destroyed");
+    }
+    if (PicoHost_FindAgent(host, main2) == NULL || wsA->count != 1)
+    {
+        Fail("main2 in workspace A should survive unharmed");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    return 0;
+}
+
+static int TestMultiWorkspaceModelAndSettingsIsolation(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init model isolation test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-modA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-modB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp model isolation");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+    PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
+
+    PicoModel modelsA[2];
+    memset(modelsA, 0, sizeof(modelsA));
+    snprintf(modelsA[0].id, sizeof(modelsA[0].id), "model-alpha");
+    snprintf(modelsA[0].name, sizeof(modelsA[0].name), "model-alpha");
+    snprintf(modelsA[0].default_effort, sizeof(modelsA[0].default_effort), "low");
+    snprintf(modelsA[0].effort[0], sizeof(modelsA[0].effort[0]), "low");
+    modelsA[0].effort_count = 1;
+    snprintf(modelsA[1].id, sizeof(modelsA[1].id), "model-shared");
+    snprintf(modelsA[1].name, sizeof(modelsA[1].name), "model-shared");
+    wsA->models = modelsA;
+    wsA->model_count = 2;
+
+    PicoModel modelsB[2];
+    memset(modelsB, 0, sizeof(modelsB));
+    snprintf(modelsB[0].id, sizeof(modelsB[0].id), "model-beta");
+    snprintf(modelsB[0].name, sizeof(modelsB[0].name), "model-beta");
+    snprintf(modelsB[0].default_effort, sizeof(modelsB[0].default_effort), "high");
+    snprintf(modelsB[0].effort[0], sizeof(modelsB[0].effort[0]), "high");
+    modelsB[0].effort_count = 1;
+    snprintf(modelsB[1].id, sizeof(modelsB[1].id), "model-shared");
+    snprintf(modelsB[1].name, sizeof(modelsB[1].name), "model-shared");
+    wsB->models = modelsB;
+    wsB->model_count = 2;
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0, b1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idB, &opt, &b1);
+
+    PicoAgent *agentA = PicoHost_FindAgent(host, a1);
+    PicoAgent *agentB = PicoHost_FindAgent(host, b1);
+
+    PicoSettings_SetModel(agentA, "model-alpha");
+    PicoSettings_SetModel(agentB, "model-beta");
+
+    if (strcmp(agentA->model, "model-alpha") != 0 ||
+        strcmp(agentB->model, "model-beta") != 0)
+    {
+        Fail("workspaces must maintain isolated agent model catalogs and assignments");
+    }
+
+    /* Model alpha in workspace A must not be visible or settable in workspace B */
+    if (PicoSettings_SetModel(agentB, "model-alpha"))
+    {
+        Fail("workspace B should reject models that only exist in workspace A");
+    }
+
+    wsA->models = NULL;
+    wsA->model_count = 0;
+    wsB->models = NULL;
+    wsB->model_count = 0;
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceFrameCallbacks(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init frame callbacks");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-fcA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-fcB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp frame callbacks");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+
+    /* Pump host three times */
+    pico_host_pump(host);
+    pico_host_pump(host);
+    pico_host_pump(host);
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceCloseLastMainAgentAndZeroAgents(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init zero agent test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-zeroA-XXXXXX";
+    if (!mkdtemp(dirA))
+    {
+        Fail("mkdtemp zero agent test");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0;
+    pico_workspace_open(host, dirA, &idA);
+    PicoWorkspace *wsA = PicoHost_FindWorkspace(host, idA);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+
+    if (wsA->count != 1)
+    {
+        Fail("workspace should have 1 agent");
+    }
+
+    /* Closing the only/last main agent in workspace */
+    if (pico_agent_close(host, a1) != PICO_AGENT_RESULT_OK)
+    {
+        Fail("pico_agent_close on last agent should succeed");
+    }
+    if (wsA->count != 0 || wsA->state != PICO_WORKSPACE_OPEN || pico_workspace_count(host) != 1)
+    {
+        Fail("closing last main agent should leave workspace open with 0 agents");
+    }
+
+    /* Creating a new main agent in the 0-agent workspace succeeds */
+    PicoAgentId a2 = 0;
+    if (pico_main_agent_create(host, idA, &opt, &a2) != PICO_OK || a2 == 0 || wsA->count != 1)
+    {
+        Fail("creating new main agent in 0-agent workspace should succeed");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    return 0;
+}
+
+static int TestMultiWorkspaceAgentLimits(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init limits test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-limA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-limB-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp limits test");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+
+    /* Fill workspace A up to PICO_MAX_AGENTS (16) */
+    PicoAgentId idsA[16];
+    for (int i = 0; i < 16; i++)
+    {
+        if (pico_main_agent_create(host, idA, &opt, &idsA[i]) != PICO_OK)
+        {
+            Fail("create agent in A up to 16");
+            pico_host_free(host);
+            return 1;
+        }
+    }
+    PicoAgentId overflowA = 0;
+    if (pico_main_agent_create(host, idA, &opt, &overflowA) != PICO_LIMIT || overflowA != 0)
+    {
+        Fail("17th agent in workspace A should return PICO_LIMIT");
+    }
+
+    /* Fill workspace B with 16 agents (total agents in host = 32) */
+    PicoAgentId idsB[16];
+    for (int i = 0; i < 16; i++)
+    {
+        if (pico_main_agent_create(host, idB, &opt, &idsB[i]) != PICO_OK)
+        {
+            Fail("create agent in B up to 16");
+            pico_host_free(host);
+            return 1;
+        }
+    }
+    if (PicoHost_TotalAgentCount(host) != PICO_MAX_TOTAL_AGENTS)
+    {
+        Fail("total agents in host should reach PICO_MAX_TOTAL_AGENTS (32)");
+    }
+
+    /* 33rd agent in host should return PICO_LIMIT */
+    PicoAgentId overflowB = 0;
+    if (pico_main_agent_create(host, idB, &opt, &overflowB) != PICO_LIMIT || overflowB != 0)
+    {
+        Fail("exceeding PICO_MAX_TOTAL_AGENTS should return PICO_LIMIT");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestMultiWorkspaceStaleIds(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init stale ids test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-staleA-XXXXXX";
+    if (!mkdtemp(dirA))
+    {
+        Fail("mkdtemp stale ids test");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0;
+    pico_workspace_open(host, dirA, &idA);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+
+    /* Close agent a1 */
+    pico_agent_close(host, a1);
+
+    /* Stale agent ID operations should return not found / invalid */
+    PicoAgentInfo info;
+    if (pico_agent_find(host, a1, &info))
+    {
+        Fail("stale agent id find should return false");
+    }
+    if (pico_agent_submit(host, a1, "hello", NULL) != PICO_NOT_FOUND)
+    {
+        Fail("stale agent submit should return PICO_NOT_FOUND");
+    }
+    if (pico_agent_cancel(host, a1) != PICO_AGENT_RESULT_NOT_FOUND)
+    {
+        Fail("stale agent cancel should return PICO_AGENT_RESULT_NOT_FOUND");
+    }
+    if (pico_agent_close(host, a1) != PICO_AGENT_RESULT_NOT_FOUND)
+    {
+        Fail("stale agent close should return PICO_AGENT_RESULT_NOT_FOUND");
+    }
+
+    /* Creating a new agent allocates a new unique ID != stale a1 */
+    PicoAgentId a2 = 0;
+    pico_main_agent_create(host, idA, &opt, &a2);
+    if (a2 == a1 || a2 == 0)
+    {
+        Fail("new agent id must be monotonically unique and not reuse stale id");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    return 0;
+}
+
+static int TestMultiWorkspaceFairPumping(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init fair pumping test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-fairA-XXXXXX";
+    char dirB[] = "/tmp/pico-ws-fairB-XXXXXX";
+    char dirC[] = "/tmp/pico-ws-fairC-XXXXXX";
+    if (!mkdtemp(dirA) || !mkdtemp(dirB) || !mkdtemp(dirC))
+    {
+        Fail("mkdtemp fair pumping test");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0, idB = 0, idC = 0;
+    pico_workspace_open(host, dirA, &idA);
+    pico_workspace_open(host, dirB, &idB);
+    pico_workspace_open(host, dirC, &idC);
+
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId a1 = 0, b1 = 0, c1 = 0;
+    pico_main_agent_create(host, idA, &opt, &a1);
+    pico_main_agent_create(host, idB, &opt, &b1);
+    pico_main_agent_create(host, idC, &opt, &c1);
+
+    /* Verify fair round-robin pumping across workspaces */
+    host->pump_rr_index = 0;
+    pico_host_pump(host);
+    if (host->pump_rr_index != 1)
+    {
+        Fail("pump 1 should advance rr index to 1");
+    }
+
+    pico_host_pump(host);
+    if (host->pump_rr_index != 2)
+    {
+        Fail("pump 2 should advance rr index to 2");
+    }
+
+    pico_host_pump(host);
+    if (host->pump_rr_index != 0)
+    {
+        Fail("pump 3 should wrap rr index to 0");
+    }
+
+    pico_host_pump(host);
+    if (host->pump_rr_index != 1)
+    {
+        Fail("pump 4 should advance rr index to 1");
+    }
+
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    rmdir(dirC);
+    return 0;
+}
+
+static int TestMultiWorkspaceDeletedDirectoryIntegrity(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init deleted dir test");
+        return 1;
+    }
+
+    char dirA[] = "/tmp/pico-ws-delA-XXXXXX";
+    if (!mkdtemp(dirA))
+    {
+        Fail("mkdtemp deleted dir test");
+        return 1;
+    }
+
+    PicoWorkspaceId idA = 0;
+    pico_workspace_open(host, dirA, &idA);
+    PicoWorkspaceInfo info;
+    pico_workspace_info(host, 0, &info);
+
+    /* Delete directory from filesystem */
+    rmdir(dirA);
+
+    /* Workspace identity and stored canonical path remain intact */
+    PicoWorkspaceInfo info_after;
+    if (!pico_workspace_info(host, 0, &info_after) || info_after.id != idA ||
+        strcmp(info_after.path, info.path) != 0)
+    {
+        Fail("deleted directory should not change workspace identity or canonical path");
+    }
+
+    pico_host_free(host);
+    return 0;
+}
+
 int main(void)
 {
     if (TestCanonicalOpenAndDuplicate() != 0)
@@ -1580,6 +2509,62 @@ int main(void)
         return 1;
     }
     if (TestExtensionToggleWhileBusyQueuesReloadAndKeepsAcceptingWork() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceInstructionsIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceToolNameIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceMailboxIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceAskOrderingAndRouting() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceReloadAndCloseIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceStuckWorkerIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceMainAgentDelegationDrain() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceModelAndSettingsIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceFrameCallbacks() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceCloseLastMainAgentAndZeroAgents() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceAgentLimits() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceStaleIds() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceFairPumping() != 0)
+    {
+        return 1;
+    }
+    if (TestMultiWorkspaceDeletedDirectoryIntegrity() != 0)
     {
         return 1;
     }

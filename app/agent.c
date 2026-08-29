@@ -3256,28 +3256,58 @@ void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
     PicoWorkspace_UiPost(workspace, name, kind, ctx->agent_id, ctx->runtime_generation, text, n);
 }
 
-bool pico_ui_latest(const PicoHost *app, const char *name, PicoUiPost *out)
+bool pico_agent_ui_latest(const PicoHost *app, PicoAgentId agent_id, const char *name, PicoUiPost *out)
 {
-    const PicoWorkspace *workspace;
-    if (!app || !name || !name[0])
+    if (out)
     {
-        if (out)
-        {
-            memset(out, 0, sizeof(*out));
-        }
+        memset(out, 0, sizeof(*out));
+    }
+    if (!app || !name || !name[0] || agent_id == 0)
+    {
         return false;
     }
-    workspace = PicoHost_SelectedWorkspaceConst(app);
-    return PicoWorkspace_UiLatest(workspace, name, out);
+    PicoAgent *agent = PicoHost_FindAgent((PicoHost *)app, agent_id);
+    if (!agent || !agent->workspace)
+    {
+        return false;
+    }
+    return PicoWorkspace_UiLatest(agent->workspace, agent_id, name, out);
+}
+
+bool pico_ui_latest(const PicoHost *app, const char *name, PicoUiPost *out)
+{
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    if (!app || !name || !name[0] || app->selected_agent_id == 0)
+    {
+        return false;
+    }
+    return pico_agent_ui_latest(app, app->selected_agent_id, name, out);
+}
+
+void pico_agent_ui_clear(PicoHost *app, PicoAgentId agent_id, const char *name)
+{
+    if (!app || !name || !name[0] || agent_id == 0)
+    {
+        return;
+    }
+    PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
+    if (!agent || !agent->workspace)
+    {
+        return;
+    }
+    PicoWorkspace_UiClear(agent->workspace, agent_id, name);
 }
 
 void pico_ui_clear(PicoHost *app, const char *name)
 {
-    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
-    if (workspace)
+    if (!app || !name || !name[0] || app->selected_agent_id == 0)
     {
-        PicoWorkspace_UiClear(workspace, name);
+        return;
     }
+    pico_agent_ui_clear(app, app->selected_agent_id, name);
 }
 
 int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer_json)
@@ -3433,7 +3463,7 @@ void PicoAgent_DismissError(PicoAgent *agent)
     agent->error = NULL;
 }
 
-void PicoAgent_Pump(PicoHost *app, PicoAgent *agent)
+void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (agent && agent->workspace)
@@ -3479,11 +3509,35 @@ void PicoAgent_Pump(PicoHost *app, PicoAgent *agent)
     char status[128];
     memcpy(status, rt->status, sizeof(status));
     rt->status[0] = '\0';
-    PicoAgentEv *events = rt->events;
-    int event_count = rt->event_count;
-    rt->events = NULL;
-    rt->event_count = 0;
-    rt->event_cap = 0;
+
+    int max_to_drain = rt->event_count;
+    if (budget && *budget >= 0 && max_to_drain > *budget)
+    {
+        max_to_drain = *budget;
+    }
+    PicoAgentEv *events = NULL;
+    int event_count = max_to_drain;
+    if (event_count > 0)
+    {
+        events = (PicoAgentEv *)malloc((size_t)event_count * sizeof(PicoAgentEv));
+        if (events)
+        {
+            memcpy(events, rt->events, (size_t)event_count * sizeof(PicoAgentEv));
+            if (rt->event_count > event_count)
+            {
+                memmove(rt->events, rt->events + event_count, (size_t)(rt->event_count - event_count) * sizeof(PicoAgentEv));
+            }
+            rt->event_count -= event_count;
+            if (budget)
+            {
+                *budget -= event_count;
+            }
+        }
+        else
+        {
+            event_count = 0;
+        }
+    }
     pthread_mutex_unlock(&rt->mu);
 
     if (stream && stream_len && rt->stream_msg >= 0)
@@ -3570,6 +3624,11 @@ void PicoAgent_Pump(PicoHost *app, PicoAgent *agent)
         free(ev->tool_details);
     }
     free(events);
+}
+
+void PicoAgent_Pump(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgent_PumpBounded(app, agent, NULL);
 }
 
 const char *PicoAgent_CacheKey(const PicoAgent *agent)

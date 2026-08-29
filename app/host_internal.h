@@ -84,6 +84,7 @@ typedef struct PicoHostStaging {
 struct PicoHost {
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;
+    int pump_rr_index;
     PicoAgentId selected_agent_id;
 
     PicoComposer composer;

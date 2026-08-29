@@ -526,7 +526,6 @@ static void LoadUserFile(PicoHost *app, const char *src)
     LoadedPlugin *current = FindDesiredSource(app, src);
     if (current && current->mtime == st.st_mtime && current->content_hash == content_hash)
     {
-        ActivatePlugin(app, current);
         return;
     }
     if (!SoPathFor(src, st.st_mtime, content_hash, so, sizeof(so)))
@@ -761,6 +760,51 @@ void PicoPlugins_Load(PicoHost *app)
         LoadBuiltins(app);
     }
     LoadUsers(app);
+}
+
+void PicoPlugins_InitWorkspace(PicoHost *app, PicoWorkspace *workspace)
+{
+    if (!app || !workspace || app->terminal_shutdown || PicoHost_ProcessRetired())
+    {
+        return;
+    }
+    if (app->module_count == 0)
+    {
+        PicoPlugins_Load(app);
+        return;
+    }
+    for (int i = 0; i < app->module_count; i++)
+    {
+        LoadedPlugin *p = &app->modules[i];
+        if (!p->desired || !p->ext.workspace_init)
+        {
+            continue;
+        }
+        if (!p->builtin && strstr(p->source, "/.pico/extensions/"))
+        {
+            char ws_ext_dir[4096];
+            if (WorkspaceExtDir(workspace, ws_ext_dir, sizeof(ws_ext_dir)) &&
+                strncmp(p->source, ws_ext_dir, strlen(ws_ext_dir)) != 0)
+            {
+                continue;
+            }
+        }
+        PicoWorkspaceExtensions_Activate(workspace, p);
+    }
+    if (!app->safe_mode)
+    {
+        char dir[4096];
+        int seen = 0;
+        if (WorkspaceExtDir(workspace, dir, sizeof(dir)))
+        {
+            WalkExtTree(dir, 0, &seen, PICO_MAX_USER_PLUGINS, LoadWalk, app);
+        }
+    }
+    if (!workspace->active_registration)
+    {
+        PicoWorkspace_PublishRegistrationGeneration(workspace);
+    }
+    PicoWorkspace_LoadProfiles(workspace);
 }
 
 void PicoPlugins_Reload(PicoHost *app)

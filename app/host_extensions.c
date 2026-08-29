@@ -61,6 +61,10 @@ bool PicoHostExtensions_Activate(PicoHost *host, PicoModuleGeneration *module)
     }
 
     PicoPluginSlot *slot = FindOrAllocHostSlot(host, module->ext.name);
+    if (slot && slot->initialized && slot->module == module)
+    {
+        return true;
+    }
     if (slot)
     {
         slot->desired_generation = module->generation;

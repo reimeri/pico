@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 6 implemented
+Status: Phase 7 implemented
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -786,6 +786,8 @@ nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/buil
 
 ### Phase 7 — Enable multiple workspace lifecycles and fair pumping
 
+Status: complete (2026-08-29).
+
 Owner files:
 
 - `app/host.c`, `app/workspace.c`, `app/main.c`
@@ -809,6 +811,15 @@ Acceptance:
 - Reloading or closing one workspace does not block turns in another.
 - A stuck callback leaves only its workspace in `CLOSING`.
 - The host remains responsive under event load from two workspaces.
+
+Verification:
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/build/release && ctest --test-dir app/build/release --output-on-failure'
+```
+
+25/25 tests passed in Debug and Release presets. Multiple workspace lifecycles are fully enabled: `PICO_MAX_WORKSPACES` (8), `PICO_MAX_AGENTS` (16 per workspace), and `PICO_MAX_TOTAL_AGENTS` (32 host-wide) limits enforced; canonical path uniqueness verified via `pico_workspace_open`; workspace extension/profile activation on open wired via `PicoPlugins_InitWorkspace`; safe workspace close quiescence without use-after-free; reload staging abort on close request; isolated workspace-specific agent-destroy hooks (`PicoWorkspace_RunHooks`); closing main agents drains only their descendant subagent trees; workspace lifecycle states (`OPEN`, `RELOADING`, `CLOSING`, `CLOSED`) and non-blocking background transitions implemented; fair bounded round-robin pumping with `pump_rr_index` and 256-event draining budget per agent pass implemented (`PicoAgent_PumpBounded`); frame callbacks (`PicoWorkspaceExtensions_OnFrame`, `PicoHostExtensions_OnFrame`) executed across all open workspaces and host in `pico_host_pump`; global monotonic ask ID allocation and oldest-ask routing (`pico_tool_pending_ask`, `pico_tool_answer`) implemented; strict UI mailbox keying by `(agent_id, runtime_generation, name)` and explicit lookup (`pico_agent_ui_latest`, `pico_agent_ui_clear`) implemented without selection fallback; closing last main agent leaves workspace open with 0 agents; multi-workspace test matrix validated across all 22 observable behavior rules without synthetic test hooks.
 
 ### Phase 8 — Remove obsolete workspace-switch behavior
 

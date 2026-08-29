@@ -58,20 +58,13 @@ static int TestManagerProfileRegistry(void)
                   info.restricted_tools && info.tool_count == 1 &&
                   strcmp(info.tools[0], "ask_test") == 0;
     PicoAgentId only_id = pico_agent_active(&app);
-    bool close_contract = pico_agent_close(&app, only_id) == PICO_AGENT_RESULT_BUSY;
-    PicoAgentCreateOptions close_options = {
-        .kind = PICO_AGENT_MAIN,
-        .session_start = PICO_SESSION_NONE,
-    };
-    PicoAgentId close_id = 0;
-    close_contract = close_contract &&
-                     pico_agent_create(&app, &close_options, &close_id) == PICO_AGENT_RESULT_OK;
     PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, PicoHost_PrimaryWorkspace(&app));
     pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_ON_AGENT_DESTROY, InspectClosedAgent);
     PicoHost_PublishRegistration(&app, NULL);
     g_close_hook_saw_removed = false;
-    close_contract = close_contract && pico_agent_close(&app, close_id) == PICO_AGENT_RESULT_OK &&
-                     g_close_hook_saw_removed;
+    bool close_contract = pico_agent_close(&app, only_id) == PICO_AGENT_RESULT_OK &&
+                         g_close_hook_saw_removed &&
+                         PicoHost_PrimaryWorkspace(&app)->count == 0;
 
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     bool reservations = PicoWorkspace_ReserveSession(ws, 111, "/tmp/one.jsonl") &&

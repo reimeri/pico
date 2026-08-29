@@ -513,8 +513,10 @@ void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
 /* Main thread. Latest published snapshot for `name`. Pointers are valid until
  * the next pump, clear of this name, or workspace replacement. */
 bool pico_ui_latest(const PicoHost *host, const char *name, PicoUiPost *out);
+bool pico_agent_ui_latest(const PicoHost *host, PicoAgentId agent_id, const char *name, PicoUiPost *out);
 /* Main thread. Drops the snapshot and any unpublished posts for `name`. */
 void pico_ui_clear(PicoHost *host, const char *name);
+void pico_agent_ui_clear(PicoHost *host, PicoAgentId agent_id, const char *name);
 /* Main thread. Runs tool-row hooks in registration order. Returns true when a
  * hook set handled. Strings are borrowed from `line` for this callback. */
 bool pico_tool_row_activate(PicoWorkspace *workspace, PicoAgentId agent_id, const PicoTraceLine *line);
@@ -606,6 +608,7 @@ typedef struct PicoExtInfo {
 } PicoExtInfo;
 
 void PicoPlugins_Load(PicoHost *host);
+void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace);
 void PicoPlugins_Reload(PicoHost *host);
 void PicoPlugins_Poll(PicoHost *host);
 void PicoPlugins_OnFrame(PicoHost *host, float dt);

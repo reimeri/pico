@@ -33,6 +33,7 @@ bool PicoAgent_CancelRequested(const PicoAgent *agent);
 bool PicoAgent_AskUiOpen(const PicoAgent *agent);
 void PicoAgent_DismissError(PicoAgent *agent);
 void PicoAgent_Pump(PicoHost *app, PicoAgent *agent);
+void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget);
 bool PicoAgent_PendingAsk(const PicoAgent *agent, PicoToolAsk *out);
 bool PicoAgent_AnswerAsk(PicoAgent *agent, uint64_t id, const char *answer_json);
 bool PicoAgent_BlocksReload(const PicoAgent *agent);

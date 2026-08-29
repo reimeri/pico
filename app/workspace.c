@@ -85,26 +85,22 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     host->selected_agent_id = id;
 }
 
-static PicoUiMailbox *FindMailbox(PicoWorkspace *workspace, const char *name)
+static PicoUiMailbox *FindMailbox(PicoWorkspace *workspace, PicoAgentId agent_id, uint64_t generation, const char *name)
 {
     int i;
-    if (!workspace || !name || !name[0])
+    if (!workspace || !name || !name[0] || !agent_id)
     {
         return NULL;
     }
     for (i = 0; i < workspace->ui_mailbox_count; i++)
     {
-        if (strcmp(workspace->ui_mailboxes[i].name, name) == 0)
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        if (box->agent_id == agent_id && box->generation == generation && strcmp(box->name, name) == 0)
         {
-            return &workspace->ui_mailboxes[i];
+            return box;
         }
     }
     return NULL;
-}
-
-static const PicoUiMailbox *FindMailboxConst(const PicoWorkspace *workspace, const char *name)
-{
-    return FindMailbox((PicoWorkspace *)workspace, name);
 }
 
 static void FreeMailbox(PicoUiMailbox *box)
@@ -166,7 +162,7 @@ void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPost
                           PicoAgentId agent_id, uint64_t generation, const char *text, size_t n)
 {
     PicoUiMailbox *box;
-    if (!workspace || !name || !name[0] || !generation ||
+    if (!workspace || !name || !name[0] || !generation || !agent_id ||
         (kind != PICO_UI_POST_TEXT && kind != PICO_UI_POST_STATUS))
     {
         return;
@@ -189,7 +185,7 @@ void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPost
             return;
         }
     }
-    box = FindMailbox(workspace, name);
+    box = FindMailbox(workspace, agent_id, generation, name);
     if (!box)
     {
         if (workspace->ui_mailbox_count >= PICO_MAX_UI_POSTS)
@@ -200,23 +196,10 @@ void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPost
         box = &workspace->ui_mailboxes[workspace->ui_mailbox_count];
         memset(box, 0, sizeof(*box));
         snprintf(box->name, sizeof(box->name), "%s", name);
+        box->agent_id = agent_id;
+        box->generation = generation;
         workspace->ui_mailbox_count++;
     }
-    if (box->generation != 0 && box->agent_id == agent_id && generation < box->generation)
-    {
-        pthread_mutex_unlock(&workspace->ui_post_mu);
-        return;
-    }
-    if (box->generation != 0 &&
-        (box->agent_id != agent_id || generation != box->generation))
-    {
-        free(box->text);
-        box->text = NULL;
-        box->text_len = 0;
-        box->status[0] = '\0';
-    }
-    box->agent_id = agent_id;
-    box->generation = generation;
     if (kind == PICO_UI_POST_STATUS)
     {
         size_t copy = n < PICO_UI_POST_STATUS_MAX ? n : PICO_UI_POST_STATUS_MAX;
@@ -282,48 +265,73 @@ void PicoWorkspace_PumpUiPosts(PicoWorkspace *workspace)
     pthread_mutex_unlock(&workspace->ui_post_mu);
 }
 
-bool PicoWorkspace_UiLatest(const PicoWorkspace *workspace, const char *name, PicoUiPost *out)
+bool PicoWorkspace_UiLatest(const PicoWorkspace *workspace, PicoAgentId agent_id, const char *name, PicoUiPost *out)
 {
-    const PicoUiMailbox *box;
     bool found = false;
     if (!out)
     {
         return false;
     }
     memset(out, 0, sizeof(*out));
-    if (!workspace)
+    if (!workspace || !name || !name[0] || agent_id == 0)
     {
         return false;
     }
     pthread_mutex_lock((pthread_mutex_t *)&workspace->ui_post_mu);
-    box = FindMailboxConst(workspace, name);
-    if (box && box->published)
+    for (int i = 0; i < workspace->ui_mailbox_count; i++)
     {
-        out->agent_id = box->pub_agent_id;
-        out->generation = box->pub_generation;
-        out->status = box->pub_status;
-        out->text = box->pub_text ? box->pub_text : "";
-        found = true;
+        const PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        if (box->published && box->pub_agent_id == agent_id && strcmp(box->name, name) == 0)
+        {
+            out->agent_id = box->pub_agent_id;
+            out->generation = box->pub_generation;
+            out->status = box->pub_status;
+            out->text = box->pub_text ? box->pub_text : "";
+            found = true;
+            break;
+        }
     }
     pthread_mutex_unlock((pthread_mutex_t *)&workspace->ui_post_mu);
     return found;
 }
 
-void PicoWorkspace_UiClear(PicoWorkspace *workspace, const char *name)
+void PicoWorkspace_UiClear(PicoWorkspace *workspace, PicoAgentId agent_id, const char *name)
 {
-    int i;
-    if (!workspace || !name || !name[0])
+    if (!workspace || !name || !name[0] || agent_id == 0)
     {
         return;
     }
     pthread_mutex_lock(&workspace->ui_post_mu);
-    for (i = 0; i < workspace->ui_mailbox_count; i++)
+    for (int i = 0; i < workspace->ui_mailbox_count;)
     {
-        if (strcmp(workspace->ui_mailboxes[i].name, name) == 0)
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        if (strcmp(box->name, name) == 0 && (box->agent_id == agent_id || box->pub_agent_id == agent_id))
         {
             RemoveMailboxAt(workspace, i);
-            break;
+            continue;
         }
+        i++;
+    }
+    pthread_mutex_unlock(&workspace->ui_post_mu);
+}
+
+void PicoWorkspace_DropAgentMailboxes(PicoWorkspace *workspace, PicoAgentId agent_id, uint64_t generation)
+{
+    if (!workspace || !agent_id)
+    {
+        return;
+    }
+    pthread_mutex_lock(&workspace->ui_post_mu);
+    for (int i = 0; i < workspace->ui_mailbox_count;)
+    {
+        PicoUiMailbox *box = &workspace->ui_mailboxes[i];
+        bool match = (box->agent_id == agent_id || box->pub_agent_id == agent_id);
+        if (match && (generation == 0 || box->generation == generation || box->pub_generation == generation))
+        {
+            RemoveMailboxAt(workspace, i);
+            continue;
+        }
+        i++;
     }
     pthread_mutex_unlock(&workspace->ui_post_mu);
 }
@@ -501,37 +509,24 @@ bool PicoWorkspace_AdoptInitial(PicoWorkspace *workspace, PicoAgent *agent)
     return true;
 }
 
-PicoAgentResult pico_agent_create(PicoHost *app, const PicoAgentCreateOptions *options,
-                                  PicoAgentId *out)
+PicoAgentResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                          PicoAgentId *out)
 {
     if (out)
     {
         *out = 0;
     }
-    if (!app || !options)
+    if (!workspace || !options)
     {
         return PICO_AGENT_RESULT_INVALID;
     }
-    PicoWorkspace *workspace = NULL;
-    if (options->parent_id)
+    PicoHost *app = workspace->host;
+    if (workspace->state != PICO_WORKSPACE_OPEN && workspace->state != PICO_WORKSPACE_RELOADING)
     {
-        PicoAgent *parent = PicoHost_FindAgent(app, options->parent_id);
-        if (!parent)
-        {
-            return PICO_AGENT_RESULT_NOT_FOUND;
-        }
-        workspace = parent->workspace;
-    }
-    else
-    {
-        workspace = PicoHost_PrimaryWorkspace(app);
-    }
-    if (!workspace)
-    {
-        return PICO_AGENT_RESULT_INVALID;
+        return PICO_AGENT_RESULT_BUSY;
     }
     PicoAgent_ReapRetired(workspace);
-    if (workspace->count >= PICO_MAX_AGENTS)
+    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS)
     {
         return PICO_AGENT_RESULT_LIMIT;
     }
@@ -591,21 +586,69 @@ PicoAgentResult pico_agent_create(PicoHost *app, const PicoAgentCreateOptions *o
     return PICO_AGENT_RESULT_OK;
 }
 
+PicoAgentResult pico_agent_create(PicoHost *app, const PicoAgentCreateOptions *options,
+                                  PicoAgentId *out)
+{
+    if (out)
+    {
+        *out = 0;
+    }
+    if (!app || !options)
+    {
+        return PICO_AGENT_RESULT_INVALID;
+    }
+    PicoWorkspace *workspace = NULL;
+    if (options->parent_id)
+    {
+        PicoAgent *parent = PicoHost_FindAgent(app, options->parent_id);
+        if (!parent)
+        {
+            return PICO_AGENT_RESULT_NOT_FOUND;
+        }
+        workspace = parent->workspace;
+    }
+    else
+    {
+        workspace = PicoHost_SelectedWorkspace(app);
+        if (!workspace)
+        {
+            workspace = PicoHost_PrimaryWorkspace(app);
+        }
+    }
+    if (!workspace)
+    {
+        return PICO_AGENT_RESULT_INVALID;
+    }
+    return PicoWorkspace_CreateAgent(workspace, options, out);
+}
+
 int pico_agent_count(const PicoHost *app)
 {
-    const PicoWorkspace *workspace = PicoHost_PrimaryWorkspaceConst(app);
-    return workspace ? workspace->count : 0;
+    return PicoHost_TotalAgentCount(app);
 }
 
 bool pico_agent_info(const PicoHost *app, int index, PicoAgentInfo *out)
 {
-    const PicoWorkspace *workspace = PicoHost_PrimaryWorkspaceConst(app);
-    if (!workspace || !out || index < 0 || index >= workspace->count)
+    if (!app || !out || index < 0)
     {
         return false;
     }
-    PicoAgent_CopyInfo(workspace->agents[index], out);
-    return true;
+    int cur = 0;
+    for (int w = 0; w < app->workspace_count; w++)
+    {
+        const PicoWorkspace *workspace = app->workspaces[w];
+        if (!workspace)
+        {
+            continue;
+        }
+        if (index < cur + workspace->count)
+        {
+            PicoAgent_CopyInfo(workspace->agents[index - cur], out);
+            return true;
+        }
+        cur += workspace->count;
+    }
+    return false;
 }
 
 bool pico_agent_find(const PicoHost *app, PicoAgentId id, PicoAgentInfo *out)
@@ -661,29 +704,99 @@ PicoAgentResult pico_agent_close(PicoHost *app, PicoAgentId id)
     {
         return PICO_AGENT_RESULT_NOT_FOUND;
     }
-    if (workspace->count == 1 || PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(workspace, id) ||
+    /* Cancel delegation tree for this agent */
+    PicoWorkspace_CancelDelegations(workspace, id, 0);
+    for (int i = 0; i < workspace->count; i++)
+    {
+        PicoAgent *child = workspace->agents[i];
+        if (child && child->parent_id == id)
+        {
+            PicoAgent_Cancel(child);
+        }
+    }
+
+    bool has_busy_children = false;
+    for (int i = 0; i < workspace->count; i++)
+    {
+        PicoAgent *child = workspace->agents[i];
+        if (child && child->parent_id == id)
+        {
+            if (PicoAgent_IsBusy(child) || PicoAgent_RetiredReferences(workspace, child->id) ||
+                PicoWorkspace_JobReferences(workspace, child->id))
+            {
+                has_busy_children = true;
+                break;
+            }
+        }
+    }
+    if (has_busy_children || PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(workspace, id) ||
         PicoWorkspace_JobReferences(workspace, id))
     {
         return PICO_AGENT_RESULT_BUSY;
     }
-    if (!PicoAgent_Destroy(agent))
+
+    /* Destroy any idle child agents first */
+    for (int i = workspace->count - 1; i >= 0; i--)
     {
-        return PICO_AGENT_RESULT_BUSY;
+        PicoAgent *child = workspace->agents[i];
+        if (child && child->parent_id == id)
+        {
+            PicoAgentId cid = child->id;
+            for (int k = i + 1; k < workspace->count; k++)
+            {
+                workspace->agents[k - 1] = workspace->agents[k];
+            }
+            workspace->agents[--workspace->count] = NULL;
+            PicoWorkspace_ReleaseSessions(workspace, cid);
+            PicoWorkspace_DropAgentMailboxes(workspace, cid, 0);
+            PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, cid);
+            PicoAgent_Destroy(child);
+        }
     }
+
+    index = FindIndex(workspace, id);
+    if (index < 0)
+    {
+        return PICO_AGENT_RESULT_NOT_FOUND;
+    }
+
     for (int i = index + 1; i < workspace->count; i++)
     {
         workspace->agents[i - 1] = workspace->agents[i];
     }
     workspace->agents[--workspace->count] = NULL;
+
     if (app && app->selected_agent_id == id)
     {
-        PicoAgentId next = workspace->agents[index < workspace->count ? index : workspace->count - 1]->id;
+        PicoAgentId next = 0;
+        if (workspace->count > 0)
+        {
+            next = workspace->agents[index < workspace->count ? index : workspace->count - 1]->id;
+        }
+        else
+        {
+            for (int w = 0; w < app->workspace_count; w++)
+            {
+                PicoWorkspace *ws = app->workspaces[w];
+                if (ws && ws->count > 0 && ws->agents[0])
+                {
+                    next = ws->agents[0]->id;
+                    break;
+                }
+            }
+        }
         SyncSelectedAgent(app, next);
         PicoChatSel_Clear(app);
         app->chat_follow_bottom = true;
     }
+
     PicoWorkspace_ReleaseSessions(workspace, id);
-    pico_run_hooks(app, PICO_HOOK_ON_AGENT_DESTROY, id);
+    PicoWorkspace_DropAgentMailboxes(workspace, id, 0);
+    PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, id);
+    if (!PicoAgent_Destroy(agent))
+    {
+        return PICO_AGENT_RESULT_BUSY;
+    }
     return PICO_AGENT_RESULT_OK;
 }
 
@@ -706,6 +819,10 @@ PicoAgentResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
         return PICO_AGENT_RESULT_NOT_FOUND;
     }
     PicoAgent_ForceCancel(app, agent);
+    if (agent->workspace)
+    {
+        PicoWorkspace_DropAgentMailboxes(agent->workspace, agent->id, 0);
+    }
     return PICO_AGENT_RESULT_OK;
 }
 
@@ -718,12 +835,40 @@ void PicoWorkspace_Pump(PicoWorkspace *workspace)
     PicoWorkspace_PumpUiPosts(workspace);
     PicoAgent_ReapRetired(workspace);
     ProcessDelegationRequests(workspace);
-    for (int i = 0; i < workspace->count; i++)
+    int budget = 256;
+    for (int i = 0; i < workspace->count && budget > 0; i++)
     {
-        PicoAgent_Pump(workspace->host, workspace->agents[i]);
+        PicoAgent_PumpBounded(workspace->host, workspace->agents[i], &budget);
     }
     LinkDelegationToolRows(workspace);
     ProcessDelegationTerminals(workspace);
+}
+
+bool PicoWorkspace_IsQuiescent(const PicoWorkspace *workspace)
+{
+    if (!workspace)
+    {
+        return true;
+    }
+    if (workspace->retired_count > 0)
+    {
+        return false;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&workspace->delegation_mu);
+    bool delegating = (workspace->delegations != NULL);
+    pthread_mutex_unlock((pthread_mutex_t *)&workspace->delegation_mu);
+    if (delegating)
+    {
+        return false;
+    }
+    for (int i = 0; i < workspace->count; i++)
+    {
+        if (PicoAgent_IsBusy(workspace->agents[i]))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool PicoWorkspace_AcceptsNewWork(const PicoWorkspace *workspace)
@@ -1758,37 +1903,34 @@ static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
 
 static void ProcessDelegationRequests(PicoWorkspace *workspace)
 {
-    for (;;)
+    PicoDelegationJob *job = NULL;
+    pthread_mutex_lock(&workspace->delegation_mu);
+    for (PicoDelegationJob *it = workspace->delegations; it; it = it->next)
     {
-        PicoDelegationJob *job = NULL;
-        pthread_mutex_lock(&workspace->delegation_mu);
-        for (PicoDelegationJob *it = workspace->delegations; it; it = it->next)
+        pthread_mutex_lock(&it->mu);
+        if (it->state == PICO_DELEGATION_REQUESTED)
         {
-            pthread_mutex_lock(&it->mu);
-            if (it->state == PICO_DELEGATION_REQUESTED)
-            {
-                it->state = PICO_DELEGATION_STARTING;
-                job = it;
-                pthread_mutex_unlock(&it->mu);
-                break;
-            }
+            it->state = PICO_DELEGATION_STARTING;
+            job = it;
             pthread_mutex_unlock(&it->mu);
-        }
-        pthread_mutex_unlock(&workspace->delegation_mu);
-        if (!job)
-        {
             break;
         }
-        if (!PicoWorkspace_AcceptsNewWork(workspace))
-        {
-            PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
-                              "reload or workspace transition is pending", true);
-            RemoveDelegation(workspace, job);
-        }
-        else if (!StartDelegation(workspace, job))
-        {
-            RemoveDelegation(workspace, job);
-        }
+        pthread_mutex_unlock(&it->mu);
+    }
+    pthread_mutex_unlock(&workspace->delegation_mu);
+    if (!job)
+    {
+        return;
+    }
+    if (!PicoWorkspace_AcceptsNewWork(workspace))
+    {
+        PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
+                          "reload or workspace transition is pending", true);
+        RemoveDelegation(workspace, job);
+    }
+    else if (!StartDelegation(workspace, job))
+    {
+        RemoveDelegation(workspace, job);
     }
 }
 
@@ -2021,7 +2163,8 @@ void PicoWorkspace_CancelDelegations(PicoWorkspace *workspace, PicoAgentId paren
     {
         pthread_mutex_lock(&job->mu);
         bool match = parent_id == 0 ||
-                     (job->parent_id == parent_id && job->parent_generation == runtime_generation);
+                     (job->parent_id == parent_id &&
+                      (runtime_generation == 0 || job->parent_generation == runtime_generation));
         if (match && !DelegationTerminal(job->state))
         {
             free(job->result);

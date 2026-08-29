@@ -1240,6 +1240,12 @@ void PicoPlugins_Shutdown(PicoHost *app)
     g_plugin_shutdowns++;
 }
 
+void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
+}
+
 void PicoOverlay_Notify(PicoHost *app, const char *message)
 {
     (void)app;

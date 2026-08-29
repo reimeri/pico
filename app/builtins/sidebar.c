@@ -1016,6 +1016,58 @@ static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws)
     return extra;
 }
 
+static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
+{
+    int i;
+    int j;
+    int extras;
+    int total;
+    int shown;
+    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))))
+    {
+        return true;
+    }
+    for (i = 0; i < s->workspace_count; i++)
+    {
+        const PicoCatalogWorkspace *ws = &s->workspaces[i];
+        if (Clay_PointerOver(CLAY_IDI("SidebarPlus", i)) || Clay_PointerOver(CLAY_IDI("SidebarWs", i)))
+        {
+            return true;
+        }
+        if (ws->collapsed)
+        {
+            SidebarPin pin = FindSelectedSidebarRow(host, ws, i);
+            if (pin.found && Clay_PointerOver(CLAY_IDI("SidebarSess", pin.row_id)))
+            {
+                return true;
+            }
+            continue;
+        }
+        extras = CountLiveExtras(host, ws);
+        total = extras + ws->session_count;
+        shown = ShownForIndex(s, i, total);
+        if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)) || Clay_PointerOver(CLAY_IDI("SidebarLess", i)))
+        {
+            return true;
+        }
+        for (j = 0; j < extras && j < shown; j++)
+        {
+            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, j))))
+            {
+                return true;
+            }
+        }
+        for (j = 0; j < ws->session_count && extras + j < shown; j++)
+        {
+            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, extras + j))))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
 {
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
@@ -1033,8 +1085,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     {
         return;
     }
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))) ||
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll"))))
+    if (SidebarPointerOverClickable(host, s))
     {
         host->hovered_clickable = true;
     }

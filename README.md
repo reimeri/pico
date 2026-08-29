@@ -14,7 +14,8 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 - Charm Hyper (`HYPER_API_KEY` or `/login hyper`)
 - xAI (`XAI_API_KEY` or `/login xai`)
 - Workspace tools (`sh`), structured `ask_user` questionnaires, built-in agent TODO tracking, sessions, compaction
-- Concurrent full agents and synchronous named-profile subagent delegation with exact session continuation
+- Concurrent main agents across multiple workspaces in one window; `/cd` opens or selects without replacing the others
+- Synchronous named-profile subagent delegation with exact session continuation
 - Hot-reloadable C99 extensions (views, tools, commands, providers)
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 
@@ -63,7 +64,7 @@ outputs; handle them as sensitive data. Release builds do not capture responses.
 
 A relocatable copy of the build output needs `pico`, `resources/` (fonts), `docs/` (markdown for `/docs` and the agent hint), `examples/` (templates the docs link to), and `builtins/` (reference sources for `sh`, OpenAI, Hyper, and xAI).
 
-The cwd is the workspace. `pico -h` lists flags. Sign in with `/login openai` / `/login hyper` / `/login xai`, or `PICO_API_KEY` / `OPENAI_API_KEY` / `HYPER_API_KEY` / `XAI_API_KEY`.
+The process starts in the current directory as the first workspace. `/cd` opens or selects another workspace without replacing the others. `pico -h` lists flags. Sign in with `/login openai` / `/login hyper` / `/login xai`, or `PICO_API_KEY` / `OPENAI_API_KEY` / `HYPER_API_KEY` / `XAI_API_KEY`.
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 

@@ -85,4 +85,4 @@ Profiles load at startup and on F5 or `/reload`, after extensions have registere
 
 After reload, Pico validates profiles against the new model/tool registries. A profile that names a missing tool or model is unavailable until the configuration or registration returns. Existing restricted agents are also revalidated. Errors appear in the warning overlay with the profile path and reason.
 
-`/cd` opens or selects a workspace and leaves the previous workspace running. Profiles for the target workspace load with that workspace.
+`/cd` opens or selects a workspace and leaves the previous workspace running. Profiles for the target workspace load with that workspace; they are not process-global.

@@ -2,7 +2,7 @@
 
 Request-context hooks append app-authored, request-only text to an LLM request without changing system instructions or saved agent history.
 
-Register on the main thread in `init` (full file: [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c)):
+Register on the main thread in `workspace_init` (full file: [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c)):
 
 ```c
 #include "pico/plugin.h"

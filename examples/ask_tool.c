@@ -1,4 +1,4 @@
-// Example Pico tool that asks the user before returning.
+// Example workspace-scoped tool that asks the user before returning.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/ask

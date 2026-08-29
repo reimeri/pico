@@ -1,4 +1,5 @@
-// Stream worker text into a named overlay. Copy then F5:
+// Stream worker text into a named overlay mailbox keyed by
+// (agent_id, runtime_generation, name). Copy then F5:
 //
 //   mkdir -p ~/.config/pico/extensions/stream_modal
 //   cp examples/stream_modal.c ~/.config/pico/extensions/stream_modal/
@@ -9,25 +10,48 @@
 #include "clay/clay.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *kName = "stream-modal";
 
 typedef struct StreamState {
+    PicoAgentId owner_id;
     char status[PICO_UI_POST_STATUS_MAX];
     char text[PICO_UI_POST_TEXT_MAX + 1];
 } StreamState;
 
 static const char *kParams = "{\"type\":\"object\",\"properties\":{}}";
 
-static void CloseModal(PicoHost *app)
+static void CloseModal(PicoHost *host)
 {
-    (void)pico_ui_modal_pop(app, kName);
+    (void)pico_ui_modal_pop(host, kName);
 }
 
-static void OpenModal(PicoHost *app)
+static void OpenModal(PicoHost *host)
 {
-    (void)pico_ui_modal_push(app, kName);
+    (void)pico_ui_modal_push(host, kName);
+}
+
+static void ResetDisplay(StreamState *s)
+{
+    if (!s)
+    {
+        return;
+    }
+    s->owner_id = 0;
+    s->status[0] = '\0';
+    s->text[0] = '\0';
+}
+
+static void CloseOwned(PicoHost *host, StreamState *s, bool clear_mailbox)
+{
+    CloseModal(host);
+    if (clear_mailbox && s && s->owner_id)
+    {
+        pico_agent_ui_clear(host, s->owner_id, kName);
+    }
+    ResetDisplay(s);
 }
 
 static Clay_String CStr(const char *s)
@@ -39,10 +63,10 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
-static void StreamRender(PicoHost *app, void *state)
+static void StreamRender(PicoHost *host, void *state)
 {
     StreamState *s = (StreamState *)state;
-    if (!s || !pico_ui_modal_has(app, kName))
+    if (!s || !pico_ui_modal_has(host, kName))
     {
         return;
     }
@@ -81,84 +105,83 @@ static void StreamRender(PicoHost *app, void *state)
                                         .fontSize = 14,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            (void)app;
+            (void)host;
         }
     }
 }
 
-static void StreamAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
+static void StreamAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
 {
     StreamState *s = (StreamState *)state;
     (void)event;
-    if (!s || !pico_ui_modal_is_top(app, kName))
+    if (!s || !pico_ui_modal_is_top(host, kName))
     {
         return;
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("StreamModalCard"))))
     {
-        pico_host_set_hovered_clickable(app);
+        pico_host_set_hovered_clickable(host);
         return;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("StreamModalDim"))))
     {
-        CloseModal(app);
-        pico_ui_clear(app, kName);
-        s->status[0] = '\0';
-        s->text[0] = '\0';
+        CloseOwned(host, s, true);
     }
 }
 
-static void StreamOnFrame(PicoHost *app, void *state, float dt)
+static void StreamOnFrame(PicoHost *host, void *state, float dt)
 {
     StreamState *s = (StreamState *)state;
     PicoUiPost post;
+    PicoAgentId selected = pico_agent_active(host);
     (void)dt;
     if (!s)
     {
         return;
     }
-    if (pico_ui_latest(app, kName, &post))
+    if (pico_ui_modal_has(host, kName) && s->owner_id && selected != s->owner_id)
     {
+        CloseOwned(host, s, false);
+    }
+    if (selected && pico_agent_ui_latest(host, selected, kName, &post))
+    {
+        s->owner_id = selected;
         snprintf(s->status, sizeof(s->status), "%s", post.status ? post.status : "");
         snprintf(s->text, sizeof(s->text), "%s", post.text ? post.text : "");
-        OpenModal(app);
+        OpenModal(host);
     }
-    if (!pico_ui_modal_is_top(app, kName))
+    if (!pico_ui_modal_is_top(host, kName))
     {
         return;
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {
-        CloseModal(app);
-        pico_ui_clear(app, kName);
-        s->status[0] = '\0';
-        s->text[0] = '\0';
+        CloseOwned(host, s, true);
     }
 }
 
-static void CmdStream(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void CmdStream(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
 {
     StreamState *s = (StreamState *)state;
     (void)args;
-    (void)agent_id;
     if (!s)
     {
         return;
     }
-    if (pico_ui_modal_has(app, kName))
+    if (pico_ui_modal_has(host, kName))
     {
-        CloseModal(app);
-        pico_ui_clear(app, kName);
-        s->status[0] = '\0';
-        s->text[0] = '\0';
+        CloseModal(host);
+        pico_agent_ui_clear(host, agent_id, kName);
+        ResetDisplay(s);
     }
     else
     {
-        OpenModal(app);
+        s->owner_id = agent_id;
+        OpenModal(host);
     }
-    PicoComposer_SetText(app, "");
-    PicoHost_RequestSubmitCancel(app);
+    PicoComposer_SetText(host, "");
+    PicoHost_RequestSubmitCancel(host);
 }
 
 static void StreamDemoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
@@ -188,7 +211,7 @@ static void StreamToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event, voi
     event->handled = true;
 }
 
-static int StreamHostInit(PicoHost *app, void **state_out)
+static int StreamHostInit(PicoHost *host, void **state_out)
 {
     StreamState *s = (StreamState *)calloc(1, sizeof(StreamState));
     if (!s)
@@ -200,15 +223,17 @@ static int StreamHostInit(PicoHost *app, void **state_out)
         *state_out = s;
     }
     PicoUiPost post;
-    if (pico_ui_latest(app, kName, &post) && !pico_ui_modal_has(app, kName))
+    PicoAgentId id = pico_agent_active(host);
+    if (id && pico_agent_ui_latest(host, id, kName, &post) && !pico_ui_modal_has(host, kName))
     {
+        s->owner_id = id;
         snprintf(s->status, sizeof(s->status), "%s", post.status ? post.status : "");
         snprintf(s->text, sizeof(s->text), "%s", post.text ? post.text : "");
-        (void)pico_ui_modal_push(app, kName);
+        (void)pico_ui_modal_push(host, kName);
     }
-    pico_host_add_view(app, PICO_SLOT_OVERLAY, 50, StreamRender);
-    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
-    pico_host_add_command(app, "stream", "Toggle the streaming overlay modal", CmdStream);
+    pico_host_add_view(host, PICO_SLOT_OVERLAY, 50, StreamRender);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
+    pico_host_add_command(host, "stream", "Toggle the streaming overlay modal", CmdStream);
     return 0;
 }
 
@@ -221,10 +246,10 @@ static int StreamWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     return 0;
 }
 
-static void StreamShutdown(PicoHost *app, void *state)
+static void StreamShutdown(PicoHost *host, void *state)
 {
     StreamState *s = (StreamState *)state;
-    CloseModal(app);
+    CloseOwned(host, s, false);
     free(s);
 }
 

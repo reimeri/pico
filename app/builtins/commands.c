@@ -240,12 +240,12 @@ static void CmdResume(PicoWorkspace *workspace, PicoAgentId agent_id, const char
         }
         return;
     }
-    PicoAgentResult result = PicoWorkspace_Resume(app, agent_id, args, true);
-    if (result != PICO_AGENT_RESULT_OK)
+    PicoResult result = PicoWorkspace_Resume(app, agent_id, args, true);
+    if (result != PICO_OK)
     {
         char line[256];
         snprintf(line, sizeof(line),
-                 result == PICO_AGENT_RESULT_SESSION_IN_USE
+                 result == PICO_SESSION_IN_USE
                      ? "Session `%s` is already open by another agent."
                      : "Unknown session `%s`. Try `/resume`.", args);
         Note(app, agent_id, line);
@@ -274,7 +274,8 @@ static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void 
 }
 
 static const char *const kDocTopics[] = {
-    "README", "subagents", "anatomy", "agents", "views", "hooks", "context", "tools", "commands", "completers", "providers", "auth", "contracts",
+    "README", "subagents", "anatomy", "host", "workspace", "agents", "views", "hooks", "context",
+    "tools", "commands", "completers", "providers", "auth", "contracts",
 };
 
 static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);

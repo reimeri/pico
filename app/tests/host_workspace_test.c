@@ -2581,7 +2581,7 @@ static int TestMultiWorkspaceMainAgentDelegationDrain(void)
         .session_start = PICO_SESSION_NONE,
     };
     PicoAgentId sub1 = 0;
-    if (pico_agent_create(host, &child_opt, &sub1) != PICO_AGENT_RESULT_OK || sub1 == 0)
+    if (PicoWorkspace_CreateAgent(wsA, &child_opt, &sub1) != PICO_OK || sub1 == 0)
     {
         Fail("subagent creation under main1 should succeed");
     }
@@ -2592,8 +2592,8 @@ static int TestMultiWorkspaceMainAgentDelegationDrain(void)
     }
 
     /* Close main1: child tree is cancelled and drained, sub1 and main1 destroyed, main2 survives */
-    PicoAgentResult res = pico_agent_close(host, main1);
-    if (res != PICO_AGENT_RESULT_OK)
+    PicoResult res = pico_agent_close(host, main1);
+    if (res != PICO_OK)
     {
         Fail("closing main1 should cancel/drain subagent and destroy main1");
     }
@@ -2755,7 +2755,7 @@ static int TestMultiWorkspaceCloseLastMainAgentAndZeroAgents(void)
     }
 
     /* Closing the only/last main agent in workspace */
-    if (pico_agent_close(host, a1) != PICO_AGENT_RESULT_OK)
+    if (pico_agent_close(host, a1) != PICO_OK)
     {
         Fail("pico_agent_close on last agent should succeed");
     }
@@ -2881,13 +2881,13 @@ static int TestMultiWorkspaceStaleIds(void)
     {
         Fail("stale agent submit should return PICO_NOT_FOUND");
     }
-    if (pico_agent_cancel(host, a1) != PICO_AGENT_RESULT_NOT_FOUND)
+    if (pico_agent_cancel(host, a1) != PICO_NOT_FOUND)
     {
-        Fail("stale agent cancel should return PICO_AGENT_RESULT_NOT_FOUND");
+        Fail("stale agent cancel should return PICO_NOT_FOUND");
     }
-    if (pico_agent_close(host, a1) != PICO_AGENT_RESULT_NOT_FOUND)
+    if (pico_agent_close(host, a1) != PICO_NOT_FOUND)
     {
-        Fail("stale agent close should return PICO_AGENT_RESULT_NOT_FOUND");
+        Fail("stale agent close should return PICO_NOT_FOUND");
     }
 
     /* Creating a new agent allocates a new unique ID != stale a1 */

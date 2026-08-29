@@ -15,7 +15,7 @@ typedef enum PicoWorkspaceState {
     PICO_WORKSPACE_RELOADING,
     PICO_WORKSPACE_CLOSING,
     PICO_WORKSPACE_CLOSED,
-} PicoWorkspaceState;
+} PicoWorkspaceState; /* CLOSING has no transition back to OPEN */
 
 typedef struct PicoWorkspaceInfo {
     PicoWorkspaceId id;
@@ -25,7 +25,7 @@ typedef struct PicoWorkspaceInfo {
     int total_agent_count;
 } PicoWorkspaceInfo;
 
-PicoHost *pico_workspace_host(PicoWorkspace *workspace);
+PicoHost *pico_workspace_host(PicoWorkspace *workspace); /* owning host; main thread */
 
 #ifdef __cplusplus
 }

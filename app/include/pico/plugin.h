@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 13
+#define PICO_EXT_ABI 13 /* host and workspace instances; no ABI 12 loader */
 
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);
 typedef void (*PicoHostExtShutdownFn)(PicoHost *host, void *state);

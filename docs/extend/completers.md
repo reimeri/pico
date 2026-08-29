@@ -2,6 +2,8 @@
 
 Composer completions fire when the cursor is in a triggered token.
 
+Host-scoped completers register in `host_init`; workspace-scoped completers (for example `@` files) register in `workspace_init`. Query/accept run on the main thread while typing.
+
 ```c
 static int HashQuery(PicoHost *host, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
@@ -26,7 +28,7 @@ static int HashInit(PicoHost *host, void **state_out)
 }
 ```
 
-Workspace-scoped completers (e.g. `@` files) register via `pico_workspace_add_completer(workspace, '@', false, WorkspaceQuery, NULL)` in `workspace_init`.
+Workspace-scoped completers register via `pico_workspace_add_completer(workspace, '@', false, WorkspaceQuery, NULL)` in `workspace_init`. The `@` builtin rescans the target workspace, not UI selection or process CWD.
 
 ## Fields
 
@@ -46,4 +48,4 @@ Each item:
 - Query/accept run on the **main thread** while typing.
 - Esc (or a click outside the popup) dismisses completions. Query stays skipped until the composer text changes or the cursor moves to a different token.
 - Max 16 completers (`PICO_MAX_COMPLETERS`). First match for a trigger wins (`bol_only` preferred when the cursor is at bol).
-- Builtins: `/` commands, `@` workspace files. `@` rescans the workspace when a mention token starts and keeps that snapshot while the cursor stays in the token.
+- Builtins: `/` commands, `@` workspace files. `@` rescans the selected agent's workspace when a mention token starts and keeps that snapshot while the cursor stays in the token.

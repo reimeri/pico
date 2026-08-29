@@ -1,5 +1,6 @@
-// Example Pico command extension. Copy to ~/.config/pico/extensions/ or
-// <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
+// Example host-scoped slash command. Copy to ~/.config/pico/extensions/
+// (a subfolder is fine) then press F5. Workspace-local sources must not set
+// host callbacks.
 //
 //   mkdir -p ~/.config/pico/extensions/time
 //   cp examples/time_cmd.c ~/.config/pico/extensions/time/
@@ -8,21 +9,21 @@
 
 #include <time.h>
 
-static void TimeCmd(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
+static void TimeCmd(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
 {
     (void)state;
     (void)args;
     time_t now = time(NULL);
     char *line = ctime(&now);
-    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
-    PicoComposer_SetText(app, "");
-    PicoHost_RequestSubmitCancel(app);
+    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
+    PicoComposer_SetText(host, "");
+    PicoHost_RequestSubmitCancel(host);
 }
 
-static int TimeInit(PicoHost *app, void **state_out)
+static int TimeInit(PicoHost *host, void **state_out)
 {
     (void)state_out;
-    pico_host_add_command(app, "time", "Show the local time", TimeCmd);
+    pico_host_add_command(host, "time", "Show the local time", TimeCmd);
     return 0;
 }
 

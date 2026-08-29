@@ -62,7 +62,7 @@ static int TestManagerProfileRegistry(void)
     pico_workspace_add_hook(PicoHost_PrimaryWorkspace(&app), PICO_HOOK_ON_AGENT_DESTROY, InspectClosedAgent);
     PicoHost_PublishRegistration(&app, NULL);
     g_close_hook_saw_removed = false;
-    bool close_contract = pico_agent_close(&app, only_id) == PICO_AGENT_RESULT_OK &&
+    bool close_contract = pico_agent_close(&app, only_id) == PICO_OK &&
                          g_close_hook_saw_removed &&
                          PicoHost_PrimaryWorkspace(&app)->count == 0;
 
@@ -98,7 +98,7 @@ static int TestManagerConcurrencyAndIsolation(void)
         .select = false,
     };
     PicoAgentId second_id = 0;
-    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK ||
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &second_id) != PICO_OK ||
         pico_agent_count(&app) != 2 || second_id == first_id)
     {
         PicoHost_Shutdown(&app);
@@ -206,7 +206,7 @@ static int TestSubmitTargetsExplicitAgentWithoutChangingSelection(void)
         .select = false,
     };
     PicoAgentId second_id = 0;
-    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK ||
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &second_id) != PICO_OK ||
         pico_agent_active(&app) != first_id)
     {
         PicoHost_Shutdown(&app);
@@ -257,7 +257,7 @@ static int TestSubmitIsCompleteExplicitTurn(void)
     };
     PicoAgentId second_id = 0;
     const char *parts = "[{\"type\":\"text\",\"text\":\"second\"}]";
-    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &second_id) != PICO_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create a second main agent");
@@ -367,7 +367,7 @@ static int TestLoginRoutesToSnapshottedAgent(void)
         .select = false,
     };
     PicoAgentId second_id = 0;
-    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &second_id) != PICO_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create a second main agent");
@@ -397,11 +397,11 @@ static int TestResumeMissingAgentReturnsNotFound(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    PicoAgentResult result = PicoWorkspace_Resume(&app, 999, "missing", false);
+    PicoResult result = PicoWorkspace_Resume(&app, 999, "missing", false);
     PicoHost_Shutdown(&app);
-    return result == PICO_AGENT_RESULT_NOT_FOUND
+    return result == PICO_NOT_FOUND
                ? 0
-               : Fail(name, "stale resume id was not PICO_AGENT_RESULT_NOT_FOUND");
+               : Fail(name, "stale resume id was not PICO_NOT_FOUND");
 }
 
 static int TestResumeLeavesUnselectedAgentSelection(void)
@@ -418,7 +418,7 @@ static int TestResumeLeavesUnselectedAgentSelection(void)
     };
     PicoAgentId second_id = 0;
     PicoAgentInfo info;
-    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &second_id) != PICO_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create a second main agent");
@@ -428,7 +428,7 @@ static int TestResumeLeavesUnselectedAgentSelection(void)
     snprintf(g_fake_session.id, sizeof(g_fake_session.id), "resume-target");
     snprintf(g_fake_session.path, sizeof(g_fake_session.path), "/tmp/resume-target.jsonl");
     snprintf(g_fake_session.replayed_model, sizeof(g_fake_session.replayed_model), "test-model");
-    if (PicoWorkspace_Resume(&app, second_id, "resume-target", false) != PICO_AGENT_RESULT_OK)
+    if (PicoWorkspace_Resume(&app, second_id, "resume-target", false) != PICO_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "explicit resume failed");

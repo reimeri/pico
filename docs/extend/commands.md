@@ -3,7 +3,7 @@
 Slash commands are handled on submit, not sent to the model.
 
 Commands can be registered at two scopes:
-- **Host commands** (`pico_host_add_command`) — registered during `host_init`. Callback signature: `void (*PicoHostCmdFn)(PicoHost *host, PicoAgentId agent_id, const char *args, void *state);` (e.g. `/quit`, `/reload`, `/help`, `/docs`, `/login`, `/logout`).
+- **Host commands** (`pico_host_add_command`) — registered during `host_init`. Callback signature: `void (*PicoHostCmdFn)(PicoHost *host, PicoAgentId agent_id, const char *args, void *state);` (e.g. `/quit`, `/help`, `/docs`, `/login`, `/logout`). `/reload` is a host command that also requests reload of the command agent's workspace.
 - **Workspace commands** (`pico_workspace_add_command`) — registered during `workspace_init`. Callback signature: `void (*PicoWorkspaceCmdFn)(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state);` (e.g. `/model`, `/effort`, `/new`, `/resume`, `/cd`, `/compact`).
 
 ```c
@@ -36,7 +36,7 @@ Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types 
 
 - `name` has no leading slash. Completer inserts `/name`.
 - `name` and `help` must outlive the extension — string literals.
-- `run` receives the snapshotted `PicoAgentId` from the submit that invoked the command, then the rest of the line after `/name` (may be empty). Workspace-scoped command lookup uses the submitting agent's workspace. A later selection change cannot retarget that command. Builtin `/cd` resolves relative paths against that same command workspace.
+- `run` receives the snapshotted `PicoAgentId` from the submit that invoked the command, then the rest of the line after `/name` (may be empty). Workspace-scoped command lookup uses the submitting agent's workspace. A later selection change cannot retarget that command. Builtin `/cd` resolves relative paths against that same command workspace, opens or reuses the canonical target, creates a main agent there only if that workspace has none, and leaves the previous workspace open. Builtin `/reload` reloads host extensions and the command agent's workspace only.
 - **Always call `PicoHost_RequestSubmitCancel(host)`** (or `pico_workspace_host(workspace)` for workspace commands), or the slash line is also sent to the agent. Clear the composer with `PicoComposer_SetText(host, "")`.
 - Runs on the **main thread** from `PICO_HOOK_BEFORE_SUBMIT` (builtin `commands` extension). Safe to call `PicoHost_AddMessage(host, agent_id, ...)`. Builtin `/login` and `/logout` forward that same snapshotted ID into auth callbacks, including later device-login notes.
 - Max 64 commands (`PICO_MAX_COMMANDS`).

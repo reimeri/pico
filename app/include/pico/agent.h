@@ -8,8 +8,8 @@
 #define PICO_EFFORT_LEN 16
 #endif
 
-#define PICO_MAX_AGENTS 16
-#define PICO_MAX_TOTAL_AGENTS 32
+#define PICO_MAX_AGENTS 16       /* per workspace, including subagents */
+#define PICO_MAX_TOTAL_AGENTS 32 /* host-wide across all workspaces */
 #define PICO_MAX_SUBAGENT_PROFILES 32
 #ifndef PICO_MAX_TOOLS
 #define PICO_MAX_TOOLS 64
@@ -55,17 +55,6 @@ typedef enum PicoSessionWriteResult {
     PICO_SESSION_WRITE_OK,
     PICO_SESSION_WRITE_FAILED,
 } PicoSessionWriteResult;
-
-typedef enum PicoAgentResult {
-    PICO_AGENT_RESULT_OK = 0,
-    PICO_AGENT_RESULT_INVALID,
-    PICO_AGENT_RESULT_NOT_FOUND,
-    PICO_AGENT_RESULT_BUSY,
-    PICO_AGENT_RESULT_LIMIT,
-    PICO_AGENT_RESULT_SESSION_IN_USE,
-    PICO_AGENT_RESULT_SESSION_INVALID,
-    PICO_AGENT_RESULT_NO_MEMORY,
-} PicoAgentResult;
 
 typedef struct PicoAgentCreateOptions {
     PicoAgentKind kind;
@@ -117,17 +106,12 @@ typedef struct PicoAgentInfo {
 PicoAgentId pico_agent_id(const PicoAgent *agent);
 bool pico_agent_info_snapshot(const PicoAgent *agent, PicoAgentInfo *out);
 
-/* Main-thread-only manager API. All returned information is copied. */
+/* Main-thread-only host API. All returned information is copied. */
 int pico_agent_count(const PicoHost *host);
 bool pico_agent_info(const PicoHost *host, int index, PicoAgentInfo *out);
 bool pico_agent_find(const PicoHost *host, PicoAgentId id, PicoAgentInfo *out);
 PicoAgentId pico_agent_active(const PicoHost *host);
 bool pico_agent_select(PicoHost *host, PicoAgentId id);
-PicoAgentResult pico_agent_create(PicoHost *host, const PicoAgentCreateOptions *options,
-                                  PicoAgentId *out);
-PicoAgentResult pico_agent_close(PicoHost *host, PicoAgentId id);
-PicoAgentResult pico_agent_cancel(PicoHost *host, PicoAgentId id);
-PicoAgentResult pico_agent_force_cancel(PicoHost *host, PicoAgentId id);
 int pico_subagent_profile_count(const PicoHost *host);
 bool pico_subagent_profile_info(const PicoHost *host, int index, PicoSubagentProfileInfo *out);
 

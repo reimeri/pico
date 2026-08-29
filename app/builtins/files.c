@@ -456,11 +456,6 @@ static int FilesWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     return 0;
 }
 
-void pico_files_reset(void)
-{
-    /* No-op legacy call or workspace-scoped reset */
-}
-
 static void FilesWorkspaceShutdown(PicoWorkspace *workspace, void *state)
 {
     (void)workspace;

@@ -1,4 +1,5 @@
 // Example Pico extension demonstrating a stateful workspace-scoped tool.
+// Each workspace instance gets its own CounterState; host callbacks stay NULL.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/counter_tool

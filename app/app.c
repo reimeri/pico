@@ -1083,11 +1083,6 @@ const PicoProvider *pico_workspace_find_provider(const PicoWorkspace *workspace,
     return NULL;
 }
 
-const PicoProvider *pico_find_provider(const PicoHost *host, const char *name)
-{
-    return pico_workspace_find_provider(PicoHost_SelectedWorkspaceConst(host), name);
-}
-
 void pico_clear_registrations(PicoHost *app)
 {
     if (!app)
@@ -1834,31 +1829,6 @@ static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
     }
 }
 
-static PicoResult MapAgentResult(PicoAgentResult result)
-{
-    switch (result)
-    {
-    case PICO_AGENT_RESULT_OK:
-        return PICO_OK;
-    case PICO_AGENT_RESULT_INVALID:
-        return PICO_INVALID;
-    case PICO_AGENT_RESULT_NOT_FOUND:
-        return PICO_NOT_FOUND;
-    case PICO_AGENT_RESULT_BUSY:
-        return PICO_BUSY;
-    case PICO_AGENT_RESULT_LIMIT:
-        return PICO_LIMIT;
-    case PICO_AGENT_RESULT_SESSION_IN_USE:
-        return PICO_SESSION_IN_USE;
-    case PICO_AGENT_RESULT_SESSION_INVALID:
-        return PICO_SESSION_INVALID;
-    case PICO_AGENT_RESULT_NO_MEMORY:
-        return PICO_NO_MEMORY;
-    default:
-        return PICO_INVALID;
-    }
-}
-
 static int CanonicalizeWorkspacePath(const char *path, char *out, size_t cap)
 {
     char trimmed[4096];
@@ -2094,7 +2064,8 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
     }
     copy = *options;
     copy.kind = PICO_AGENT_MAIN;
-    return MapAgentResult(PicoWorkspace_CreateAgent(workspace, &copy, out));
+    copy.parent_id = 0;
+    return PicoWorkspace_CreateAgent(workspace, &copy, out);
 }
 
 PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json)

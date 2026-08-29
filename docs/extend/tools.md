@@ -1,6 +1,6 @@
 # Tools
 
-Tools are functions the model can call. Register in `init`:
+Tools are functions the model can call. Register in `workspace_init`:
 
 ```c
 #include "pico/plugin.h"
@@ -70,14 +70,14 @@ Main thread:
 
 ```c
 PicoToolAsk ask;
-if (pico_tool_pending_ask(app, &ask))
+if (pico_tool_pending_ask(host, &ask))
 {
-    /* ask.request_json is valid until the next PicoAgent_Pump. Do not store it. */
-    pico_tool_answer(app, ask.id, "{\"ok\":true}"); /* false if id is stale */
+    /* ask.request_json is valid until the next pump. Do not store it. */
+    pico_tool_answer(host, ask.id, "{\"ok\":true}"); /* false if id is stale */
 }
 ```
 
-`pico_tool_answer` returns false if the id is stale, cancelled, or already answered. Ask ids are not reused during the process lifetime. Overlay **Deny/Approve** must answer; **Esc** cancels the turn (`PICO_ASK_CANCEL`), not the same as Deny.
+`pico_tool_answer` returns false if the id is stale, cancelled, or already answered. Ask ids are host-allocated and are not reused for the lifetime of that host. Overlay **Deny/Approve** must answer; **Esc** cancels the turn (`PICO_ASK_CANCEL`), not the same as Deny.
 
 Builtin overlay handles `{"type":"confirm","message":"…"}` (Approve/Deny → `{"ok":true}` / `{"ok":false}`) and scrolls long messages without truncating them. Set `"ui":"custom"` or use another `type` to render your own overlay. Custom UIs may read characters from `on_frame` while a pending ask is open (`PicoUi_ModalOpen` skips the composer). Invalid JSON and invalid builtin confirmations return the immediate error answer instead of opening UI.
 
@@ -122,7 +122,7 @@ Controls: Up/Down, number keys 1–9 (0 for 10), or click selects an option; Ent
 
 ## Streaming into a modal
 
-`pico_ui_post` is a mailbox, not a second worker. The tool already runs on Pico's worker; post copies bytes and the main thread publishes a snapshot on the next pump. Read it from `on_frame` or overlay render with `pico_ui_latest`. See [`../../examples/stream_modal.c`](../../examples/stream_modal.c).
+`pico_ui_post` is a mailbox, not a second worker. The tool already runs on Pico's worker; post copies bytes and the main thread publishes a snapshot on the next pump. Read it from `on_frame` or overlay render with `pico_agent_ui_latest`. See [`../../examples/stream_modal.c`](../../examples/stream_modal.c).
 
 ```c
 pico_ui_post(ctx, "web_search", PICO_UI_POST_STATUS, "searching", 9);
@@ -131,9 +131,9 @@ pico_ui_post(ctx, "web_search", PICO_UI_POST_TEXT, chunk, n);
 
 - Worker only (`PicoToolFn` or `PicoToolBeforeFn`). Inactive/force-cancelled generations are dropped. Do not wait on your own condvar.
 - `PICO_UI_POST_TEXT` appends up to `PICO_UI_POST_TEXT_MAX` (64 KiB) and keeps the prefix. `PICO_UI_POST_STATUS` replaces a line of at most `PICO_UI_POST_STATUS_MAX` (128 bytes).
-- Names use the same length limit as modals (`PICO_UI_MODAL_NAME`). At most `PICO_MAX_UI_POSTS` (16) names; a new name is dropped when the table is full. Last accepted writer wins if two agents share a name.
-- The snapshot outlives the tool call until `pico_ui_clear` or workspace replacement. Reload does not clear it. `pico_ui_latest` pointers are valid until the next pump, clear of that name, or workspace replacement.
-- Copy the snapshot into your own display buffer in `on_frame` if Clay will hold the string. Popping the modal is the usual time to `pico_ui_clear`.
+- Names use the same length limit as modals (`PICO_UI_MODAL_NAME`). At most `PICO_MAX_UI_POSTS` (16) mailbox keys per workspace. The key is `(agent_id, runtime_generation, name)`, so two agents may share a name without collision, and each such pair consumes a slot. A new key is dropped when the table is full.
+- The snapshot outlives the tool call until `pico_agent_ui_clear`, force-cancel, generation retirement, or workspace close. Reload does not clear it. `pico_agent_ui_latest` pointers are valid until the next pump, clear of that agent and name, or those same drops. `pico_ui_latest` / `pico_ui_clear` target the UI-selected agent.
+- Copy the snapshot into your own display buffer in `on_frame` if Clay will hold the string. Popping the modal is the usual time to `pico_agent_ui_clear`.
 
 ## Tool-row click
 
@@ -205,9 +205,9 @@ The apply callback returns `false` to reject details. A live rejection converts 
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
 - Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Worker callbacks from different agents may overlap. See [agents](agents.md).
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
-- A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload/F5 and workspace changes still wait until that abandoned worker finishes so your code is not `dlclose`d underneath it. Do not use your own condition variable to wait for UI; Pico cannot wake it.
+- A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload of that workspace still waits until that abandoned worker finishes so your code is not `dlclose`d underneath it. Other workspaces are not blocked. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.
 - Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. Failed registration also appends a `status_warn` line with the tool name and reason.
 - Pico applies agent policy before LLM-hook exclusions. Execution and apply resolve from the retained offered snapshot. Hidden/unoffered calls become controlled tool errors and invoke no before hook, tool, apply, or after hook. Malformed/duplicate/oversized call arrays fail the provider round.
 - A model response may include several tool calls; Pico executes them one at a time. Later calls stay queued until earlier ones finish, including a parent `subagent` tool that is blocked on its child. Chat shows queued rows as queued, not running.
-- A queued reload or workspace transition refuses new external turns and `subagent` delegations. Work already in a turn drains through its tool/model follow-ups before registrations change.
+- A queued reload of that workspace refuses new external turns and `subagent` delegations there. Work already in a turn drains through its tool/model follow-ups before registrations change. Other workspaces keep accepting work. `/cd` does not pause or destroy the previous workspace.

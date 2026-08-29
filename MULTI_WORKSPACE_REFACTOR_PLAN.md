@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 8 implemented
+Status: Phase 9 implemented
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -29,7 +29,7 @@ Do not add these during this refactor:
 
 Use these names consistently in code and documentation:
 
-- **Host** / `PicoHost`: one process/window owner. Owns process services, UI state, IDs, module code, and all workspaces.
+- **Host** / `PicoHost`: window owner. The CLI constructs one host per process. Tests may construct independent hosts. Owns process services, UI state, IDs, module code, and all workspaces of that host.
 - **Workspace** / `PicoWorkspace`: one canonical directory and its complete execution environment. It replaces the ownership role currently split between `PicoApp` and `PicoAgentManager`.
 - **Main agent**: a user-owned root agent. Rename `PICO_AGENT_NORMAL` to `PICO_AGENT_MAIN`.
 - **Subagent**: a delegated agent with a parent in the same workspace.
@@ -46,7 +46,7 @@ typedef uint64_t PicoWorkspaceId;
 typedef uint64_t PicoAgentId;
 ```
 
-Zero is invalid for every ID. IDs are monotonically allocated by `PicoHost` on the main thread and are never reused during the process lifetime.
+Zero is invalid for every ID. Each `PicoHost` monotonically allocates IDs on the main thread and never reuses them for the lifetime of that host. IDs are unique within a host; independent hosts in the same process have separate ID spaces. The CLI constructs one host. Tests may construct multiple independent hosts.
 
 ## 4. Required ownership model
 
@@ -855,6 +855,8 @@ nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/buil
 
 ### Phase 9 — Documentation and cleanup
 
+Status: complete (2026-08-29).
+
 Owner files:
 
 - `docs/extend/` all affected topics
@@ -875,6 +877,15 @@ Acceptance:
 - Public headers, docs, builtins, and examples describe one consistent ABI.
 - No documentation claims `/cd` replaces all agents or reload is globally blocked by workspace work.
 - Full debug and release builds pass.
+
+Verification:
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/build/release && ctest --test-dir app/build/release --output-on-failure'
+```
+
+25/25 tests passed in Debug and Release presets. Extension docs describe ABI 13 host/workspace instances, instance state, module and registration generations, and the Section 9.1 scope matrix. New `docs/extend/host.md` and `docs/extend/workspace.md` cover host pump/shutdown, canonical uniqueness, lifecycle states, `/cd` open-or-select, per-workspace reload/close, and agent/workspace limits. `/docs` topic list includes `host` and `workspace`. Examples compile as ABI 13 smoke tests, including host UI and stateful workspace tools. Dead compatibility names removed (`pico_files_reset`, selection-based `pico_find_provider`). Public headers and docs no longer claim `/cd` replaces agents or that reload is globally blocked.
 
 ## 14. Required multi-workspace test matrix
 

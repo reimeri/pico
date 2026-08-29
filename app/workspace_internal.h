@@ -221,8 +221,8 @@ bool PicoWorkspace_SessionReserved(const PicoWorkspace *workspace, const char *p
 
 void PicoWorkspace_LoadProfiles(PicoWorkspace *workspace);
 void PicoWorkspace_ReplayToolDetails(PicoWorkspace *workspace);
-PicoAgentResult PicoWorkspace_Resume(PicoHost *host, PicoAgentId agent_id, const char *id,
-                                     bool allow_prefix);
+PicoResult PicoWorkspace_Resume(PicoHost *host, PicoAgentId agent_id, const char *id,
+                                bool allow_prefix);
 char *PicoWorkspace_Delegate(PicoAgentContext *ctx, const char *profile,
                              const char *task, const char *session_id,
                              bool *is_error);
@@ -231,8 +231,8 @@ void PicoWorkspace_CancelDelegations(PicoWorkspace *workspace, PicoAgentId paren
 void PicoWorkspace_CancelChildDelegation(PicoWorkspace *workspace, PicoAgentId child_id);
 bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id);
 
-PicoAgentResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
-                                          PicoAgentId *out);
+PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                     PicoAgentId *out);
 
 bool PicoWorkspace_InspectSubagent(PicoHost *host, const PicoTraceLine *line,
                                    PicoSubagentInspect *out);

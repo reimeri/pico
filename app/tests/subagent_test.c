@@ -511,7 +511,7 @@ static int TestSubagentDelegationCaps(void)
             .purpose = "manual chain",
             .session_start = PICO_SESSION_NONE,
         };
-        if (pico_agent_create(&depth_app, &options, &deepest_id) != PICO_AGENT_RESULT_OK)
+        if (PicoWorkspace_CreateAgent(PicoHost_PrimaryWorkspace(&depth_app), &options, &deepest_id) != PICO_OK)
         {
             PicoHost_Shutdown(&depth_app);
             unlink(path);
@@ -547,7 +547,7 @@ static int TestSubagentDelegationCaps(void)
             .session_start = PICO_SESSION_NONE,
         };
         PicoAgentId id = 0;
-        if (pico_agent_create(&count_app, &options, &id) != PICO_AGENT_RESULT_OK)
+        if (pico_main_agent_create(&count_app, PicoHost_PrimaryWorkspace(&count_app)->id, &options, &id) != PICO_OK)
         {
             PicoHost_Shutdown(&count_app);
             unlink(path);
@@ -619,7 +619,7 @@ static int TestSubagentDirectChildCancellation(void)
         SleepOneMs();
     }
     bool cancelled = child_id &&
-                     pico_agent_cancel(&app, child_id) == PICO_AGENT_RESULT_OK &&
+                     pico_agent_cancel(&app, child_id) == PICO_OK &&
                      WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     bool reported = trace && trace->tool_error && trace->tool_output &&

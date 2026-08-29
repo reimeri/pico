@@ -11,7 +11,6 @@
 char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
                                  char **parts_json_out);
 int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state);
-void pico_files_reset(void);
 PicoExt pico_ext_files(void);
 PicoExt pico_ext_composer(void);
 
@@ -192,7 +191,6 @@ static void TestCompleteRebuildsAtTokenStart(void)
     };
     app->completer_count = 1;
     char composer[64];
-    pico_files_reset();
     SetComposer(app, composer, sizeof(composer), "@");
     PicoComplete_Refresh(app);
     bool saw_old = QueryHas(workspace, "", "old.txt");
@@ -201,7 +199,6 @@ static void TestCompleteRebuildsAtTokenStart(void)
     {
         fprintf(stderr, "FAIL: could not write new.txt\n");
         g_failed = 1;
-        pico_files_reset();
         ext.workspace_shutdown(workspace, g_files_state);
         g_files_state = NULL;
         comp_ext.host_shutdown(app, g_composer_state);
@@ -223,7 +220,6 @@ static void TestCompleteRebuildsAtTokenStart(void)
     Check(QueryHas(workspace, "", "new.txt"),
           "replacing a mention at the same offset starts a fresh file snapshot");
 
-    pico_files_reset();
     ext.workspace_shutdown(workspace, g_files_state);
     g_files_state = NULL;
     comp_ext.host_shutdown(app, g_composer_state);

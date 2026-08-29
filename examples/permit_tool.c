@@ -1,4 +1,4 @@
-// Permission prompt in front of every tool, including builtin sh.
+// Workspace-scoped permission prompt in front of every tool, including builtin sh.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/permit

@@ -18,21 +18,21 @@ typedef struct PicoAuthEntry {
 
 void pico_auth_entry_free(PicoAuthEntry *e);
 /* Copies the named provider's credentials. `api_key` is the effective key (env overlay). */
-bool pico_auth_copy(PicoHost *app, const char *provider, PicoAuthEntry *out);
+bool pico_auth_copy(PicoHost *host, const char *provider, PicoAuthEntry *out);
 /* Worker callback variant. ctx is valid only for the callback that received it. */
 bool pico_auth_copy_ctx(PicoAgentContext *ctx, const char *provider, PicoAuthEntry *out);
 /* Registers an environment-supplied API key, which overrides a stored one and is
  * never written to disk. Pass NULL to clear. */
-void pico_auth_set_env_key(PicoHost *app, const char *provider, const char *key);
+void pico_auth_set_env_key(PicoHost *host, const char *provider, const char *key);
 /* The mutators update memory unconditionally and return whether auth.json was
  * also written; false means the change is lost on restart. */
-bool pico_auth_set_oauth(PicoHost *app, const char *provider, const char *access, const char *refresh,
+bool pico_auth_set_oauth(PicoHost *host, const char *provider, const char *access, const char *refresh,
                          const char *account_id, long expires_at);
 /* Synchronized worker callback variant used by providers refreshing credentials. */
 bool pico_auth_set_oauth_ctx(PicoAgentContext *ctx, const char *provider, const char *access,
                              const char *refresh, const char *account_id, long expires_at);
-bool pico_auth_set_active(PicoHost *app, const char *provider, const char *active);
-bool pico_auth_clear_oauth(PicoHost *app, const char *provider);
+bool pico_auth_set_active(PicoHost *host, const char *provider, const char *active);
+bool pico_auth_clear_oauth(PicoHost *host, const char *provider);
 
 enum {
     PICO_AUTH_REFRESH_FAILED = 0,
@@ -46,7 +46,7 @@ int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
                                 PicoAuthEntry *auth_out);
 void pico_auth_end_refresh_ctx(PicoAgentContext *ctx, const char *provider);
 
-void PicoAuth_Load(PicoHost *app);
-void PicoAuth_Free(PicoHost *app);
+void PicoAuth_Load(PicoHost *host);
+void PicoAuth_Free(PicoHost *host);
 
 #endif

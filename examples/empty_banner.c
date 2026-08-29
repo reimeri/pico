@@ -1,4 +1,4 @@
-// Example Pico extension. Copy to ~/.config/pico/extensions/ or
+// Example workspace-scoped empty-state view. Copy to ~/.config/pico/extensions/ or
 // <workspace>/.pico/extensions/ (a subfolder is fine) then press F5.
 //
 //   mkdir -p ~/.config/pico/extensions/empty_banner

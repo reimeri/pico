@@ -1533,7 +1533,7 @@ static void InitApp(PicoHost *app)
         .select = true,
     };
     PicoAgentId id = 0;
-    (void)pico_agent_create(app, &options, &id);
+    (void)pico_main_agent_create(app, workspace->id, &options, &id);
 }
 
 static void InitExt(PicoHost *app, PicoWorkspace *ws, PicoExt ext, void **host_state, void **ws_state)
@@ -2071,7 +2071,7 @@ static int TestSubmitHookCannotRetarget(void)
         .select = false,
     };
     PicoAgentId second_id = 0;
-    if (pico_agent_create(&app, &options, &second_id) != PICO_AGENT_RESULT_OK)
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &second_id) != PICO_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create a second main agent");
@@ -2118,7 +2118,7 @@ static int TestInvalidRestrictedPolicyPreservesSubmit(void)
         .select = true,
     };
     PicoAgentId restricted = 0;
-    if (pico_agent_create(&app, &options, &restricted) != PICO_AGENT_RESULT_OK)
+    if (pico_main_agent_create(&app, PicoHost_PrimaryWorkspace(&app)->id, &options, &restricted) != PICO_OK)
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "could not create restricted agent");

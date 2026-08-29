@@ -1,4 +1,4 @@
-// Append extra system instructions on every LLM round.
+// Workspace-scoped LLM hook: append extra system instructions on every round.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/extra

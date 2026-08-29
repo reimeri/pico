@@ -48,8 +48,10 @@ static void PrintUsage(const char *argv0)
             "  PICO_MODEL                        default gpt-4o\n"
             "  PICO_EFFORT                       override selected_effort of the active model\n"
             "  PICO_FONT_SCALE                   override font_scale (0.5-3.0, default 1.0)\n"
-            "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale,\n"
-            "                                    chat_width, disabled_extensions}\n"
+            "  ~/.config/pico/host_preferences.json  {font_scale, chat_width, disabled_host_extensions}\n"
+            "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last,\n"
+            "                                    disabled_extensions}\n"
+            "  <workspace>/.pico/settings.json   workspace model/defaults override\n"
             "  ~/.config/pico/auth.json          per-provider credentials (api_key or oauth)\n"
             "  /login openai                     Codex device-code (ChatGPT subscription)\n"
             "  /login hyper                      Hyper device-code (Charm subscription)\n"
@@ -60,6 +62,7 @@ static void PrintUsage(const char *argv0)
             "  <workspace>/AGENTS.md             optional project instructions\n"
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n"
             "  ~/.config/pico/subagents/         named JSONC subagent profiles (see /docs subagents)\n"
+            "  /cd DIR                           open or select a workspace; previous stays open\n"
             "  F2                                 open the extension manager\n"
             "  F5 or /reload                     reload host extensions and the selected workspace\n",
             argv0);

@@ -56,7 +56,7 @@ Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`) 
 
 They come from context hooks, are not persisted in history, and must be mapped to a non-user role. Set `PicoProvider.map_context` when the stream does that. Pico fails the turn if a context item is present and `map_context` is false.
 
-`tools` is the retained effective catalog for this round after agent policy and `pico_add_llm_hook` exclusions. It may be empty or a subset of registered tools. Calls are authorized and resolved against this exact snapshot. Pointers inside each `PicoTool` stay extension-owned; reload and workspace replacement are deferred while a live/retired runtime retains them or has undrained events that can start follow-up work.
+`tools` is the retained effective catalog for this round after agent policy and `pico_add_llm_hook` exclusions. It may be empty or a subset of registered tools. Calls are authorized and resolved against this exact snapshot. Pointers inside each `PicoTool` stay extension-owned; reload of that workspace is deferred while a live/retired runtime retains them or has undrained events that can start follow-up work. Other workspaces keep accepting work.
 
 Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_THINKING_SUMMARY`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
 
@@ -80,7 +80,8 @@ HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_htt
 
 ## Contract
 
-- Stream runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never the UI app. Do not retain it, use Clay, mutate UI, or inspect agent state outside context accessors. Provider callbacks for different agents may overlap. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
+- Stream runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, use Clay, mutate UI, or inspect agent state outside context accessors. Provider callbacks for different agents and workspaces may overlap. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
+- Providers are workspace-scoped. Register with `pico_add_provider` during `workspace_init`. Look up a workspace's provider with `pico_workspace_find_provider`.
 - `name` must outlive the extension. Max 16 providers (`PICO_MAX_PROVIDERS`).
 - Set `map_context` if the stream maps canonical `type: "context"` items to a non-user role. Pico fails the turn when those items are present and the flag is false.
 - Look up credentials with `pico_auth_copy_ctx(ctx, ...)` — see `auth.md`.

@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define PICO_MAX_WORKSPACES 8
+#define PICO_MAX_WORKSPACES 8 /* live workspaces in one host */
 
 typedef enum PicoResult {
     PICO_OK = 0,
@@ -32,18 +32,24 @@ typedef enum PicoHostShutdownResult {
 } PicoHostShutdownResult;
 
 PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode);
-PicoHostShutdownResult pico_host_free(PicoHost *host);
-void pico_host_pump(PicoHost *host);
+PicoHostShutdownResult pico_host_free(PicoHost *host); /* process deadline; may return RETAINED */
+void pico_host_pump(PicoHost *host);                   /* fair round-robin of every live workspace */
 
 int pico_workspace_count(const PicoHost *host);
 bool pico_workspace_info(const PicoHost *host, int index, PicoWorkspaceInfo *out);
+/* Canonicalize `path`, open or reuse the directory. Duplicate returns ALREADY_OPEN. */
 PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId *out);
 PicoResult pico_workspace_request_reload(PicoHost *host, PicoWorkspaceId id);
 PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id);
 
+/* `options->kind` must be PICO_AGENT_MAIN. Does not read UI selection.
+ * Delegated subagent creation is private to workspace delegation. */
 PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
                                   const PicoAgentCreateOptions *options, PicoAgentId *out);
 PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json);
+PicoResult pico_agent_cancel(PicoHost *host, PicoAgentId id);
+PicoResult pico_agent_force_cancel(PicoHost *host, PicoAgentId id);
+PicoResult pico_agent_close(PicoHost *host, PicoAgentId id);
 
 #ifdef __cplusplus
 }

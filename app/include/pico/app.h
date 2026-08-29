@@ -504,14 +504,17 @@ bool pico_ui_modal_is_top(const PicoHost *host, const char *name);
 /* Core lifecycle helper. Drops every named claim before registrations are rebuilt. */
 void pico_ui_modal_reset(PicoHost *host);
 /* Worker thread, inside PicoToolFn or a before-tool hook. Copies bytes into a
- * named mailbox and publishes them on the next main-thread pump. Drops the
- * post when ctx is inactive, the name is empty/oversized, or kind is invalid.
- * TEXT appends up to PICO_UI_POST_TEXT_MAX (prefix kept). STATUS replaces up
- * to PICO_UI_POST_STATUS_MAX. Last accepted writer wins if names collide. */
+ * named mailbox keyed by (agent_id, runtime_generation, name) and publishes
+ * them on the next main-thread pump. Drops the post when ctx is inactive, the
+ * name is empty/oversized, kind is invalid, or the workspace already holds
+ * PICO_MAX_UI_POSTS keys. TEXT appends up to PICO_UI_POST_TEXT_MAX (prefix
+ * kept). STATUS replaces up to PICO_UI_POST_STATUS_MAX. Two agents may share
+ * a name without collision; each (agent, generation, name) occupies a slot. */
 void pico_ui_post(PicoAgentContext *ctx, const char *name, PicoUiPostKind kind,
                   const char *text, size_t n);
-/* Main thread. Latest published snapshot for `name`. Pointers are valid until
- * the next pump, clear of this name, or workspace replacement. */
+/* Main thread. Latest published snapshot for the UI-selected agent's `name`.
+ * Pointers are valid until the next pump, clear of this name, force-cancel,
+ * generation retirement, or workspace close. Prefer pico_agent_ui_latest. */
 bool pico_ui_latest(const PicoHost *host, const char *name, PicoUiPost *out);
 bool pico_agent_ui_latest(const PicoHost *host, PicoAgentId agent_id, const char *name, PicoUiPost *out);
 /* Main thread. Drops the snapshot and any unpublished posts for `name`. */
@@ -540,7 +543,7 @@ bool pico_tool_pending_ask(const PicoHost *host, PicoToolAsk *out);
 /* Main thread. False if id is stale, cancelled, or no longer pending. */
 bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer_json);
 /* Main-thread-only borrowed transcript access. The pointer is invalidated by
- * the next manager pump, transcript mutation, close, or workspace change. */
+ * the next pump, transcript mutation, agent close, or workspace close. */
 int pico_agent_message_count(const PicoHost *host, PicoAgentId id);
 const PicoMessage *pico_agent_message(const PicoHost *host, PicoAgentId id, int index);
 /* True while the named modal stack is non-empty or a tool ask is showing. */
@@ -553,7 +556,7 @@ void pico_host_add_completer(PicoHost *host, char trigger, bool bol_only, PicoHo
 void pico_workspace_add_completer(PicoWorkspace *workspace, char trigger, bool bol_only,
                                   PicoWorkspaceCompleteQueryFn query, PicoWorkspaceCompleteAcceptFn accept);
 void pico_add_provider(PicoWorkspace *workspace, const PicoProvider *p);
-const PicoProvider *pico_find_provider(const PicoHost *host, const char *name);
+const PicoProvider *pico_workspace_find_provider(const PicoWorkspace *workspace, const char *name);
 void pico_add_auth(PicoHost *host, const PicoAuth *a);
 const PicoAuth *pico_find_auth(const PicoHost *host, const char *provider);
 void pico_llm_result_free(PicoLlmResult *r);

@@ -1990,6 +1990,10 @@ static void GoIdle(PicoHost *app, PicoAgent *agent)
 static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
 {
     GoIdle(app, agent);
+    if (pico_agent_active(app) != agent->id)
+    {
+        agent->unseen_complete = true;
+    }
     pico_run_hooks(app, PICO_HOOK_ON_TURN_END, agent->id);
 }
 

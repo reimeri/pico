@@ -4629,6 +4629,75 @@ static int TestResumeLoadsStoredModel(void)
     return 0;
 }
 
+static int TestSelectClearsUnseenComplete(void)
+{
+    char dir[] = "/tmp/pico-ws-unseen-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-unseen-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId second = 0;
+    PicoAgent *background;
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp unseen complete");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init unseen complete");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("create first agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, ws, &opt, &second) != PICO_OK || second == 0 || second == first)
+    {
+        Fail("create background agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    background = PicoHost_FindAgent(host, second);
+    if (!background || pico_agent_active(host) != first)
+    {
+        Fail("background agent must remain unselected");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    background->unseen_complete = true;
+    if (!pico_agent_select(host, second) || pico_agent_active(host) != second ||
+        background->unseen_complete)
+    {
+        Fail("selecting a session must clear unseen completion");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
 int main(void)
 {
     if (TestBottomFollowShellGeometryStable() != 0)
@@ -4840,6 +4909,10 @@ int main(void)
         return 1;
     }
     if (TestResumeLoadsStoredModel() != 0)
+    {
+        return 1;
+    }
+    if (TestSelectClearsUnseenComplete() != 0)
     {
         return 1;
     }

@@ -27,6 +27,7 @@ struct PicoAgent {
     int message_capacity;
 
     PicoAgentState state;
+    bool unseen_complete;
     PicoAgentRt *runtime;
     char *error;
     char activity[256];

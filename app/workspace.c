@@ -78,11 +78,17 @@ const PicoAgent *PicoWorkspace_FindAgentConst(const PicoWorkspace *workspace, Pi
 
 static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
 {
+    PicoAgent *agent;
     if (!host)
     {
         return;
     }
     host->selected_agent_id = id;
+    agent = PicoHost_FindAgent(host, id);
+    if (agent)
+    {
+        agent->unseen_complete = false;
+    }
 }
 
 static bool IsUnusedPendingDraft(const PicoAgent *agent)
@@ -646,10 +652,12 @@ PicoAgentId pico_agent_active(const PicoHost *app)
 
 bool pico_agent_select(PicoHost *app, PicoAgentId id)
 {
-    if (!app || !PicoHost_FindAgent(app, id))
+    PicoAgent *agent = app ? PicoHost_FindAgent(app, id) : NULL;
+    if (!app || !agent)
     {
         return false;
     }
+    agent->unseen_complete = false;
     if (app->selected_agent_id == id)
     {
         return true;

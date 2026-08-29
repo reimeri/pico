@@ -13,6 +13,7 @@
 
 #include "clay/clay.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -528,12 +529,78 @@ static void RenderFolderIcon(Texture2D *tex, const char *fallback)
     RenderGlyph(fallback, COLOR_MUTED);
 }
 
-static void RenderSessionDot(void)
+typedef enum SidebarDotKind {
+    SIDEBAR_DOT_IDLE = 0,
+    SIDEBAR_DOT_RUNNING,
+    SIDEBAR_DOT_WAITING_USER,
+    SIDEBAR_DOT_DONE,
+    SIDEBAR_DOT_ERROR,
+} SidebarDotKind;
+
+static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const char *session_id,
+                                     PicoAgentId live_id)
+{
+    PicoAgent *agent;
+    if (!live_id)
+    {
+        live_id = LiveMainAgent(host, ws_path, session_id);
+    }
+    if (!live_id)
+    {
+        return SIDEBAR_DOT_IDLE;
+    }
+    agent = PicoHost_FindAgent(host, live_id);
+    if (!agent)
+    {
+        return SIDEBAR_DOT_IDLE;
+    }
+    switch (agent->state)
+    {
+        case PICO_AGENT_ERROR:
+            return SIDEBAR_DOT_ERROR;
+        case PICO_AGENT_TOOL_WAIT:
+            if (PicoAgent_AskUiOpen(agent))
+            {
+                return SIDEBAR_DOT_WAITING_USER;
+            }
+            return SIDEBAR_DOT_RUNNING;
+        case PICO_AGENT_LLM_WAIT:
+        case PICO_AGENT_COMPACT_WAIT:
+            return SIDEBAR_DOT_RUNNING;
+        case PICO_AGENT_IDLE:
+        default:
+            return agent->unseen_complete ? SIDEBAR_DOT_DONE : SIDEBAR_DOT_IDLE;
+    }
+}
+
+static void RenderSessionDot(SidebarDotKind kind)
 {
     float size = Pico_FontPx(SIDEBAR_SESSION_DOT);
+    Clay_Color color = {0, 0, 0, 0};
+    switch (kind)
+    {
+        case SIDEBAR_DOT_ERROR:
+            color = COLOR_STATUS_ERR;
+            break;
+        case SIDEBAR_DOT_WAITING_USER:
+            color = COLOR_STATUS_RUN;
+            break;
+        case SIDEBAR_DOT_RUNNING: {
+            float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.28318530718f * 1.25f);
+            color = COLOR_STATUS_ON;
+            color.a = 90.0f + 165.0f * pulse;
+            break;
+        }
+        case SIDEBAR_DOT_DONE:
+            color = COLOR_STATUS_DONE;
+            break;
+        case SIDEBAR_DOT_IDLE:
+        default:
+            break;
+    }
     CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
                                         .height = CLAY_SIZING_FIXED(size)}},
-                  .backgroundColor = COLOR_MUTED,
+                  .backgroundColor = color,
                   .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
     {
     }
@@ -616,7 +683,7 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderSessionDot();
+        RenderSessionDot(SessionDotKind(host, ws_path, session_id, live_id));
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {

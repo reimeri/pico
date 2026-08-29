@@ -20,6 +20,8 @@
 
 #define SIDEBAR_SCAN_SEC 0.5
 #define SIDEBAR_SESSION_PAGE 10
+#define SIDEBAR_ROW_PAD_X 6
+#define SIDEBAR_ROW_GAP 6
 #define SIDEBAR_FOLDER_ICON 17
 #define SIDEBAR_SESSION_DOT 8
 
@@ -575,6 +577,7 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
 
 static void RenderSessionDot(SidebarDotKind kind)
 {
+    float gutter = Pico_FontPx(SIDEBAR_FOLDER_ICON);
     float size = Pico_FontPx(SIDEBAR_SESSION_DOT);
     Clay_Color color = {0, 0, 0, 0};
     switch (kind)
@@ -598,11 +601,17 @@ static void RenderSessionDot(SidebarDotKind kind)
         default:
             break;
     }
-    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
-                                        .height = CLAY_SIZING_FIXED(size)}},
-                  .backgroundColor = color,
-                  .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
+    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter),
+                                        .height = CLAY_SIZING_FIXED(size)},
+                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
+                                                .y = CLAY_ALIGN_Y_CENTER}}})
     {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                            .height = CLAY_SIZING_FIXED(size)}},
+                      .backgroundColor = color,
+                      .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
+        {
+        }
     }
 }
 
@@ -641,8 +650,8 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
     bool hovered = Clay_PointerOver(row_id) || plus_hovered;
     CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .padding = {6, 6, 4, 4},
-                             .childGap = 6,
+                             .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
+                             .childGap = SIDEBAR_ROW_GAP,
                              .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
                   .backgroundColor = RowFill(false, hovered),
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
@@ -677,8 +686,8 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
     bool hovered = Clay_PointerOver(id);
     CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                         .padding = {8, 6, 3, 3},
-                         .childGap = 6,
+                         .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 3, 3},
+                         .childGap = SIDEBAR_ROW_GAP,
                          .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})

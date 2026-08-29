@@ -18,11 +18,19 @@
 #include <string.h>
 
 #define SIDEBAR_SCAN_SEC 0.5
+#define SIDEBAR_SESSION_PAGE 10
+
+typedef struct SidebarWsUi {
+    char path[4096];
+    int shown;
+} SidebarWsUi;
 
 typedef struct SidebarState {
     PicoHost *host;
     PicoCatalogWorkspace *workspaces;
     int workspace_count;
+    SidebarWsUi *ui;
+    int ui_count;
     bool want_folder;
     bool folder_painted;
     bool dirty;
@@ -38,18 +46,94 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
+static int ClampShown(int shown, int total)
+{
+    if (total <= SIDEBAR_SESSION_PAGE)
+    {
+        return total;
+    }
+    if (shown < SIDEBAR_SESSION_PAGE)
+    {
+        shown = SIDEBAR_SESSION_PAGE;
+    }
+    if (shown > total)
+    {
+        shown = total;
+    }
+    return shown;
+}
+
+static int ShownForIndex(SidebarState *s, int index, int total)
+{
+    int shown;
+    if (!s || index < 0 || index >= s->ui_count)
+    {
+        return ClampShown(SIDEBAR_SESSION_PAGE, total);
+    }
+    shown = ClampShown(s->ui[index].shown, total);
+    s->ui[index].shown = shown;
+    return shown;
+}
+
+static void AdjustShown(SidebarState *s, int index, int delta, int total)
+{
+    if (!s || index < 0 || index >= s->ui_count)
+    {
+        return;
+    }
+    s->ui[index].shown = ClampShown(s->ui[index].shown + delta, total);
+}
+
+static int PrevShownForPath(const SidebarWsUi *ui, int ui_count, const char *path)
+{
+    int i;
+    if (!ui || !path || !path[0])
+    {
+        return SIDEBAR_SESSION_PAGE;
+    }
+    for (i = 0; i < ui_count; i++)
+    {
+        if (strcmp(ui[i].path, path) == 0)
+        {
+            return ui[i].shown;
+        }
+    }
+    return SIDEBAR_SESSION_PAGE;
+}
+
 static void SidebarRefresh(SidebarState *s)
 {
     PicoCatalogWorkspace *next = NULL;
+    SidebarWsUi *next_ui = NULL;
+    SidebarWsUi *prev_ui;
+    int prev_ui_count;
     int n;
+    int i;
     if (!s)
     {
         return;
     }
     n = PicoCatalog_Scan(&next);
+    prev_ui = s->ui;
+    prev_ui_count = s->ui_count;
+    if (n > 0)
+    {
+        next_ui = (SidebarWsUi *)calloc((size_t)n, sizeof(SidebarWsUi));
+        if (next_ui)
+        {
+            for (i = 0; i < n; i++)
+            {
+                snprintf(next_ui[i].path, sizeof(next_ui[i].path), "%s", next[i].path);
+                next_ui[i].shown = PrevShownForPath(prev_ui, prev_ui_count, next[i].path);
+            }
+        }
+    }
     PicoCatalog_Free(s->workspaces, s->workspace_count);
+    free(prev_ui);
     s->workspaces = next;
     s->workspace_count = n;
+    s->ui = next_ui;
+    s->ui_count = next_ui ? n : 0;
     s->dirty = false;
     s->last_scan = GetTime();
 }
@@ -449,7 +533,48 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
 static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index);
 static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws);
 
-static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
+static void RenderMoreLessLabel(Clay_ElementId id, Clay_String label)
+{
+    bool hovered = Clay_PointerOver(id);
+    CLAY(id, {.layout = {.padding = {6, 6, 2, 2}},
+              .backgroundColor = RowFill(false, hovered),
+              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                          .fontSize = 12,
+                                          .textColor = COLOR_MUTED,
+                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
+    }
+}
+
+static void RenderMoreLessRow(int ws_index, int shown, int total)
+{
+    bool more = shown < total;
+    bool less = shown > SIDEBAR_SESSION_PAGE;
+    if (!more && !less)
+    {
+        return;
+    }
+    CLAY(CLAY_IDI("SidebarMoreLess", ws_index),
+         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                     .padding = {6, 6, 2, 2},
+                     .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
+    {
+        if (more)
+        {
+            RenderMoreLessLabel(CLAY_IDI("SidebarMore", ws_index), CLAY_STRING("More"));
+        }
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+        if (less)
+        {
+            RenderMoreLessLabel(CLAY_IDI("SidebarLess", ws_index), CLAY_STRING("Less"));
+        }
+    }
+}
+
+static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index,
+                             int max_extras)
 {
     int n = pico_agent_count(host);
     int extra = 0;
@@ -473,6 +598,10 @@ static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int
         {
             continue;
         }
+        if (extra >= max_extras)
+        {
+            break;
+        }
         RenderSessionRow(host, ws->path, info.session_id[0] ? "Untitled" : "New session",
                          info.session_id, info.id, SessionRowId(ws_index, extra));
         extra++;
@@ -485,6 +614,8 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     int i;
     int j;
     int extras;
+    int total;
+    int shown;
     bool add_hover;
     if (!s)
     {
@@ -523,13 +654,16 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 {
                     continue;
                 }
-                RenderLiveExtras(host, ws, i);
                 extras = CountLiveExtras(host, ws);
-                for (j = 0; j < ws->session_count; j++)
+                total = extras + ws->session_count;
+                shown = ShownForIndex(s, i, total);
+                RenderLiveExtras(host, ws, i, shown < extras ? shown : extras);
+                for (j = 0; j < shown - extras && j < ws->session_count; j++)
                 {
                     RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id, 0,
                                      SessionRowId(i, extras + j));
                 }
+                RenderMoreLessRow(i, shown, total);
             }
         }
     }
@@ -631,6 +765,8 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     int i;
     int j;
     int extras;
+    int total;
+    int shown;
     (void)event;
     if (!s)
     {
@@ -672,7 +808,19 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
             continue;
         }
         extras = CountLiveExtras(host, ws);
-        for (j = 0; j < extras; j++)
+        total = extras + ws->session_count;
+        shown = ShownForIndex(s, i, total);
+        if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)))
+        {
+            AdjustShown(s, i, SIDEBAR_SESSION_PAGE, total);
+            return;
+        }
+        if (Clay_PointerOver(CLAY_IDI("SidebarLess", i)))
+        {
+            AdjustShown(s, i, -SIDEBAR_SESSION_PAGE, total);
+            return;
+        }
+        for (j = 0; j < extras && j < shown; j++)
         {
             PicoAgentId extra = LiveExtraAt(host, ws, j);
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, j))))
@@ -681,7 +829,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
                 return;
             }
         }
-        for (j = 0; j < ws->session_count; j++)
+        for (j = 0; j < ws->session_count && extras + j < shown; j++)
         {
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, extras + j))))
             {
@@ -769,6 +917,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
     }
     (void)ClearFolderRequest(s);
     PicoCatalog_Free(s->workspaces, s->workspace_count);
+    free(s->ui);
     free(s);
 }
 

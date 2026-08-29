@@ -35,7 +35,7 @@ Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
 ## Slots
 
-- `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes), with Add workspace (native folder picker and a wait modal), expand/collapse, `+` for a new main agent, and click-to-resume or select. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).
+- `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes), with Add workspace (native folder picker and a wait modal), expand/collapse (latest 10 sessions, More/Less to page by 10), `+` for a new main agent, and click-to-resume or select. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).
 - `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this).
 - `PICO_SLOT_COMPOSER` — input box.
 - `PICO_SLOT_FOOTER` — status line. Builtin footer: click cwd for a folder picker (native dialog; Pico dims the window with a “select a folder” modal until it closes), model/effort for dropdowns. In a git workspace with uncommitted changes the footer also shows a `+adds -dels` chip (including untracked files) that opens the unified diff modal.

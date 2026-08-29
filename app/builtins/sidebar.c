@@ -473,7 +473,8 @@ static void RenderWorkspaceRow(PicoHost *host, const PicoCatalogWorkspace *ws, i
 {
     Clay_ElementId row_id = CLAY_IDI("SidebarWs", index);
     Clay_ElementId plus_id = CLAY_IDI("SidebarPlus", index);
-    bool hovered = Clay_PointerOver(row_id) || Clay_PointerOver(plus_id);
+    bool plus_hovered = Clay_PointerOver(plus_id);
+    bool hovered = Clay_PointerOver(row_id) || plus_hovered;
     CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .padding = {6, 6, 4, 4},
@@ -496,7 +497,7 @@ static void RenderWorkspaceRow(PicoHost *host, const PicoCatalogWorkspace *ws, i
         {
             CLAY(plus_id, {.layout = {.padding = {4, 4, 0, 0}}})
             {
-                RenderGlyph("+", COLOR_TEXT);
+                RenderGlyph("+", plus_hovered ? COLOR_TEXT : COLOR_MUTED);
             }
         }
     }

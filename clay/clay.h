@@ -2251,7 +2251,8 @@ void Clay__InitializePersistentMemory(Clay_Context* context) {
     int32_t maxMeasureTextCacheWordCount = context->maxMeasureTextCacheWordCount;
     Clay_Arena *arena = &context->internalArena;
 
-    context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(100, arena);
+    // Scroll data from the previous layout remains until the next update while a new set is registered.
+    context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(maxElementCount * 2, arena);
     context->transitionDatas = Clay__TransitionDataInternalArray_Allocate_Arena(200, arena);
     context->layoutElementsHashMapInternal = Clay__LayoutElementHashMapItemArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMap = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);

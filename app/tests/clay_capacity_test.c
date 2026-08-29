@@ -91,6 +91,89 @@ static int TestUnbalancedOverflowGrows(void)
     return failed;
 }
 
+static int clay_internal_error_count;
+
+static void CountClayInternalErrors(Clay_ErrorData error)
+{
+    if (error.errorType == CLAY_ERROR_TYPE_INTERNAL_ERROR)
+    {
+        clay_internal_error_count++;
+    }
+}
+
+static void LayoutClippedElements(Clay_String id_prefix, int32_t count)
+{
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("ClipRoot"),
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(100), .height = CLAY_SIZING_FIXED(100)}}})
+    {
+        for (int32_t i = 0; i < count; i++)
+        {
+            CLAY(Clay_GetElementIdWithIndex(id_prefix, (uint32_t)i),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(1), .height = CLAY_SIZING_FIXED(1)}},
+                  .clip = {.horizontal = true}})
+            {
+            }
+        }
+    }
+    Clay_EndLayout(0.0f);
+}
+
+static int TestManyClippedElements(void)
+{
+    uint32_t size = Clay_MinMemorySize();
+    void *memory = malloc(size);
+    if (!memory)
+    {
+        return Fail("could not allocate Clay arena for clipped elements");
+    }
+
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(size, memory);
+    if (!Clay_Initialize(arena, (Clay_Dimensions){200, 200},
+                         (Clay_ErrorHandler){CountClayInternalErrors, 0}))
+    {
+        DropClay(memory);
+        return Fail("could not initialize Clay for clipped elements");
+    }
+
+    Clay_SetMaxElementCount(300);
+    uint32_t resized_size = Clay_MinMemorySize();
+    void *resized_memory = malloc(resized_size);
+    if (!resized_memory)
+    {
+        DropClay(memory);
+        return Fail("could not resize Clay arena for clipped elements");
+    }
+    Clay_Arena resized_arena = Clay_CreateArenaWithCapacityAndMemory(resized_size, resized_memory);
+    if (!Clay_Initialize(resized_arena, (Clay_Dimensions){200, 200},
+                         (Clay_ErrorHandler){CountClayInternalErrors, 0}))
+    {
+        free(resized_memory);
+        DropClay(memory);
+        return Fail("could not reinitialize Clay for clipped elements");
+    }
+    free(memory);
+    memory = resized_memory;
+
+    clay_internal_error_count = 0;
+    LayoutClippedElements(CLAY_STRING("ClipA"), 200);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+    LayoutClippedElements(CLAY_STRING("ClipB"), 200);
+
+    int failed = 0;
+    if (clay_internal_error_count != 0)
+    {
+        failed = Fail("clipped elements exhausted Clay's internal scroll container array");
+    }
+    else if (!Clay_GetScrollContainerData(Clay_GetElementIdWithIndex(CLAY_STRING("ClipB"), 199)).found)
+    {
+        failed = Fail("last clipped element was not registered as a scroll container");
+    }
+
+    DropClay(memory);
+    return failed;
+}
+
 static void LayoutChat(float content_h)
 {
     Clay_BeginLayout();
@@ -185,5 +268,10 @@ int main(void)
         return rc;
     }
     rc = TestUnbalancedOverflowGrows();
+    if (rc != 0)
+    {
+        return rc;
+    }
+    rc = TestManyClippedElements();
     return rc != 0 ? rc : TestScrollSurvivesReinit();
 }

@@ -2,7 +2,7 @@
 
 `PicoHost` is the window owner. The CLI constructs one host per process. Tests may construct independent hosts; each owns its live workspaces, process services, module generations, host-scoped extension instances, and UI state. It is opaque; include `pico/host.h` (or `pico/plugin.h`).
 
-A host is not a workspace. Backend work always takes an explicit workspace or agent ID. `pico_agent_active` / `pico_agent_select` are UI selection only.
+A host is not a workspace. Backend work always takes an explicit workspace or agent ID. `pico_agent_active` / `pico_agent_select` are UI selection only; selecting away from an unused pending main draft closes that agent (see [agents](agents.md)).
 
 ## Lifecycle
 

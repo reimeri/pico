@@ -3,6 +3,7 @@
 #include "host_internal.h"
 #include "workspace_internal.h"
 #include "settings.h"
+#include "session.h"
 #include "agent_internal.h"
 #include "agent.h"
 #include "clay/clay.h"
@@ -4066,7 +4067,7 @@ static int TestMultiWorkspaceDeletedDirectoryIntegrity(void)
     return 0;
 }
 
-static int TestSecondMainAgentStaysLive(void)
+static int TestUnusedPendingDraftDiscardedOnSelectedCreate(void)
 {
     char dir[] = "/tmp/pico-ws-side-XXXXXX";
     char cfg[] = "/tmp/pico-cfg-side-XXXXXX";
@@ -4075,8 +4076,7 @@ static int TestSecondMainAgentStaysLive(void)
     PicoAgentCreateOptions opt;
     PicoAgentId first = 0;
     PicoAgentId second = 0;
-    PicoAgentInfo a;
-    PicoAgentInfo b;
+    PicoAgentInfo info;
 
     if (!mkdtemp(dir) || !mkdtemp(cfg))
     {
@@ -4105,7 +4105,6 @@ static int TestSecondMainAgentStaysLive(void)
         unsetenv("XDG_CONFIG_HOME");
         return 1;
     }
-    opt.select = true;
     if (pico_main_agent_create(host, ws, &opt, &second) != PICO_OK || second == 0 || second == first)
     {
         Fail("create second main agent");
@@ -4113,23 +4112,151 @@ static int TestSecondMainAgentStaysLive(void)
         unsetenv("XDG_CONFIG_HOME");
         return 1;
     }
-    if (!pico_agent_select(host, second) || pico_agent_active(host) != second)
+    if (pico_agent_active(host) != second || pico_agent_find(host, first, &info) ||
+        !pico_agent_find(host, second, &info) || pico_agent_count(host) != 1)
     {
-        Fail("select second main agent");
-        pico_host_free(host);
-        unsetenv("XDG_CONFIG_HOME");
-        return 1;
-    }
-    if (!pico_agent_find(host, first, &a) || !pico_agent_find(host, second, &b) ||
-        pico_agent_count(host) < 2)
-    {
-        Fail("first main agent must stay live after creating and selecting a second session");
+        Fail("creating a selected new session must discard the unused pending draft");
         pico_host_free(host);
         unsetenv("XDG_CONFIG_HOME");
         return 1;
     }
     pico_host_free(host);
     unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
+static int TestUnusedPendingDraftDiscardedOnSelect(void)
+{
+    char dir[] = "/tmp/pico-ws-draft-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-draft-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId other = 0;
+    PicoAgentInfo info;
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp select discards draft");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init select discards draft");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("create pending draft");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = false;
+    if (pico_main_agent_create(host, ws, &opt, &other) != PICO_OK || other == 0)
+    {
+        Fail("create other main agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    if (!pico_agent_select(host, other) || pico_agent_active(host) != other ||
+        pico_agent_find(host, first, &info) || !pico_agent_find(host, other, &info))
+    {
+        Fail("selecting another agent must discard the unused pending draft");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
+static int TestPersistedSessionKeptOnSelect(void)
+{
+    char dir[] = "/tmp/pico-ws-keep-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-keep-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId second = 0;
+    PicoAgent *agent;
+    PicoAgentInfo info;
+    char session_path[4096];
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp keep persisted");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init keep persisted");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("create first session");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    agent = PicoHost_FindAgent(host, first);
+    if (!agent || PicoSession_LogUser(host, agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_OK ||
+        !agent->session_id[0] || !agent->session_path[0])
+    {
+        Fail("first user write must persist the session");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    snprintf(session_path, sizeof(session_path), "%s", agent->session_path);
+    if (pico_main_agent_create(host, ws, &opt, &second) != PICO_OK || second == 0 || second == first)
+    {
+        Fail("create second session");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unlink(session_path);
+        return 1;
+    }
+    if (pico_agent_active(host) != second || !pico_agent_find(host, first, &info) ||
+        !pico_agent_find(host, second, &info) || pico_agent_count(host) != 2 || access(session_path, F_OK) != 0)
+    {
+        Fail("a persisted session must stay live after selecting another agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unlink(session_path);
+        return 1;
+    }
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(session_path);
     rmdir(dir);
     return 0;
 }
@@ -4431,7 +4558,15 @@ int main(void)
     {
         return 1;
     }
-    if (TestSecondMainAgentStaysLive() != 0)
+    if (TestUnusedPendingDraftDiscardedOnSelectedCreate() != 0)
+    {
+        return 1;
+    }
+    if (TestUnusedPendingDraftDiscardedOnSelect() != 0)
+    {
+        return 1;
+    }
+    if (TestPersistedSessionKeptOnSelect() != 0)
     {
         return 1;
     }

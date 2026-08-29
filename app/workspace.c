@@ -85,6 +85,34 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     host->selected_agent_id = id;
 }
 
+static bool IsUnusedPendingDraft(const PicoAgent *agent)
+{
+    return agent && agent->kind == PICO_AGENT_MAIN && agent->persistence == PICO_SESSION_DURABLE &&
+           !agent->session_id[0] && !agent->session_path[0] && agent->message_count == 0 &&
+           !PicoAgent_IsBusy(agent);
+}
+
+static void SelectAgentAndDiscardDraft(PicoHost *host, PicoAgentId id)
+{
+    PicoAgentId previous;
+    PicoAgent *old;
+    if (!host)
+    {
+        return;
+    }
+    previous = host->selected_agent_id;
+    SyncSelectedAgent(host, id);
+    if (!previous || previous == id)
+    {
+        return;
+    }
+    old = PicoHost_FindAgent(host, previous);
+    if (IsUnusedPendingDraft(old))
+    {
+        (void)pico_agent_close(host, previous);
+    }
+}
+
 static PicoUiMailbox *FindMailbox(PicoWorkspace *workspace, PicoAgentId agent_id, uint64_t generation, const char *name)
 {
     int i;
@@ -490,7 +518,7 @@ static void PublishAgent(PicoWorkspace *workspace, PicoAgent *agent, bool select
     workspace->agents[workspace->count++] = agent;
     if (host && (!host->selected_agent_id || select))
     {
-        SyncSelectedAgent(host, agent->id);
+        SelectAgentAndDiscardDraft(host, agent->id);
     }
 }
 
@@ -626,7 +654,7 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
     {
         return true;
     }
-    SyncSelectedAgent(app, id);
+    SelectAgentAndDiscardDraft(app, id);
     PicoChatSel_Clear(app);
     memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
     app->chat_follow_bottom = true;

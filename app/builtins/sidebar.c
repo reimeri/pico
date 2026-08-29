@@ -207,13 +207,43 @@ static void SelectAgent(PicoHost *host, PicoAgentId id)
     (void)pico_agent_select(host, id);
 }
 
-static void NewSessionInWorkspace(PicoHost *host, SidebarState *s, const char *path)
+static void ExpandWorkspace(SidebarState *s, int index)
 {
+    PicoCatalogWorkspace *ws;
+    if (!s || index < 0 || index >= s->workspace_count)
+    {
+        return;
+    }
+    ws = &s->workspaces[index];
+    if (!ws->collapsed)
+    {
+        return;
+    }
+    ws->collapsed = false;
+    PicoCatalog_SetCollapsed(ws->path, false);
+}
+
+static void NewSessionInWorkspace(PicoHost *host, SidebarState *s, int index)
+{
+    PicoCatalogWorkspace *ws;
     PicoWorkspaceId id;
     PicoAgentCreateOptions options;
     PicoAgentId agent_id = 0;
+    PicoAgentId live;
     PicoResult created;
-    id = OpenLiveWorkspace(host, path, NULL);
+    if (!s || index < 0 || index >= s->workspace_count)
+    {
+        return;
+    }
+    ws = &s->workspaces[index];
+    ExpandWorkspace(s, index);
+    live = LiveMainAgent(host, ws->path, NULL);
+    if (live)
+    {
+        SelectAgent(host, live);
+        return;
+    }
+    id = OpenLiveWorkspace(host, ws->path, NULL);
     if (!id)
     {
         return;
@@ -236,10 +266,7 @@ static void NewSessionInWorkspace(PicoHost *host, SidebarState *s, const char *p
         }
         return;
     }
-    if (s)
-    {
-        s->dirty = true;
-    }
+    s->dirty = true;
 }
 
 static void OpenCatalogSession(PicoHost *host, SidebarState *s, const char *path, const char *session_id)
@@ -331,7 +358,8 @@ static void RenderGlyph(const char *glyph, Clay_Color color)
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
 
-static bool SessionIsSelected(PicoHost *host, const char *ws_path, const char *session_id)
+static bool SessionIsSelected(PicoHost *host, const char *ws_path, const char *session_id,
+                              PicoAgentId live_id)
 {
     PicoAgentId selected = pico_agent_active(host);
     PicoAgentInfo info;
@@ -345,11 +373,11 @@ static bool SessionIsSelected(PicoHost *host, const char *ws_path, const char *s
     {
         return false;
     }
-    if (session_id && session_id[0])
+    if (live_id)
     {
-        return strcmp(info.session_id, session_id) == 0;
+        return selected == live_id;
     }
-    return !info.session_id[0];
+    return session_id && session_id[0] && strcmp(info.session_id, session_id) == 0;
 }
 
 static int SessionRowId(int ws_index, int session_index)
@@ -392,9 +420,9 @@ static void RenderWorkspaceRow(PicoHost *host, const PicoCatalogWorkspace *ws, i
 }
 
 static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *title,
-                             const char *session_id, int row_id)
+                             const char *session_id, PicoAgentId live_id, int row_id)
 {
-    bool selected = SessionIsSelected(host, ws_path, session_id);
+    bool selected = SessionIsSelected(host, ws_path, session_id, live_id);
     Clay_ElementId id = CLAY_IDI("SidebarSess", row_id);
     bool hovered = Clay_PointerOver(id);
     CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -417,6 +445,9 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
         }
     }
 }
+
+static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index);
+static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws);
 
 static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
 {
@@ -443,7 +474,7 @@ static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int
             continue;
         }
         RenderSessionRow(host, ws->path, info.session_id[0] ? "Untitled" : "New session",
-                         info.session_id, SessionRowId(ws_index, ws->session_count + extra));
+                         info.session_id, info.id, SessionRowId(ws_index, extra));
         extra++;
     }
 }
@@ -453,6 +484,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
     int i;
     int j;
+    int extras;
     bool add_hover;
     if (!s)
     {
@@ -491,12 +523,13 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 {
                     continue;
                 }
+                RenderLiveExtras(host, ws, i);
+                extras = CountLiveExtras(host, ws);
                 for (j = 0; j < ws->session_count; j++)
                 {
-                    RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id,
-                                     SessionRowId(i, j));
+                    RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id, 0,
+                                     SessionRowId(i, extras + j));
                 }
-                RenderLiveExtras(host, ws, i);
             }
         }
     }
@@ -582,11 +615,22 @@ static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, i
     return 0;
 }
 
+static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws)
+{
+    int extra = 0;
+    while (LiveExtraAt(host, ws, extra))
+    {
+        extra++;
+    }
+    return extra;
+}
+
 static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
 {
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
     int i;
     int j;
+    int extras;
     (void)event;
     if (!s)
     {
@@ -615,7 +659,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         PicoCatalogWorkspace *ws = &s->workspaces[i];
         if (Clay_PointerOver(CLAY_IDI("SidebarPlus", i)))
         {
-            NewSessionInWorkspace(host, s, ws->path);
+            NewSessionInWorkspace(host, s, i);
             return;
         }
         if (Clay_PointerOver(CLAY_IDI("SidebarWs", i)))
@@ -627,24 +671,21 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         {
             continue;
         }
-        for (j = 0; j < ws->session_count; j++)
+        extras = CountLiveExtras(host, ws);
+        for (j = 0; j < extras; j++)
         {
+            PicoAgentId extra = LiveExtraAt(host, ws, j);
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, j))))
             {
-                OpenCatalogSession(host, s, ws->path, ws->sessions[j].id);
+                SelectAgent(host, extra);
                 return;
             }
         }
-        for (j = 0; j < PICO_MAX_AGENTS; j++)
+        for (j = 0; j < ws->session_count; j++)
         {
-            PicoAgentId extra = LiveExtraAt(host, ws, j);
-            if (!extra)
+            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, extras + j))))
             {
-                break;
-            }
-            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, ws->session_count + j))))
-            {
-                SelectAgent(host, extra);
+                OpenCatalogSession(host, s, ws->path, ws->sessions[j].id);
                 return;
             }
         }

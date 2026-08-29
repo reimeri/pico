@@ -81,8 +81,8 @@ A child is advertised as resumable only after its session header and delegated t
 
 ## Reload and errors
 
-Profiles load at startup and on F5 or `/reload`, after extensions have registered tools. Reload is queued until all live and retired workers, asks, offered tool catalogs, provider/tool events, and delegation jobs are quiescent. While queued, Pico refuses new turns and delegations but keeps pumping current work, cancellation, and ask UI.
+Profiles load at startup and on F5 or `/reload`, after extensions have registered tools. Workspace reload is queued until that workspace's live and retired workers, asks, offered tool catalogs, provider/tool events, and delegation jobs are quiescent. While queued, that workspace refuses new turns and delegations but keeps pumping current work, cancellation, and ask UI. Other workspaces are not blocked.
 
 After reload, Pico validates profiles against the new model/tool registries. A profile that names a missing tool or model is unavailable until the configuration or registration returns. Existing restricted agents are also revalidated. Errors appear in the warning overlay with the profile path and reason.
 
-Workspace changes use the same barrier. They finish current work first, then replace the old agent set and revalidate the user-global profiles against the new workspace registrations and model catalog.
+`/cd` opens or selects a workspace and leaves the previous workspace running. Profiles for the target workspace load with that workspace.

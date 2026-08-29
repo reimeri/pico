@@ -9,7 +9,7 @@ Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext(
 
 Subfolders are fine. Only `.c` files are loaded (depth 8). Skip with `pico --safe`.
 
-After writing a file, reload happens automatically once every live and retired runtime is quiescent. F5 or `/reload` use the same barrier. While reload is queued, new turns and delegations are refused, but current work, cancellation, and ask UI keep pumping.
+After writing a file, each workspace reloads independently once its live and retired runtimes are quiescent. F5 and `/reload` reload host extensions (user-global / config sources only) and the selected workspace; other workspaces keep accepting work. A workspace-local compile failure does not block host-extension replacement. While a workspace reload is queued, new turns and delegations are refused only in that workspace, but current work, cancellation, and ask UI keep pumping.
 
 Compile errors and failed tool registrations appear in the overlay. `/docs [topic]` prints these pages into chat.
 

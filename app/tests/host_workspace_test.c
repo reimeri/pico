@@ -624,7 +624,7 @@ static int TestWorkspaceChangeSeesOwningWorkspace(void)
         FinishLifecycleHost(host, cfg, cache, ws);
         return 1;
     }
-    if (!PicoHost_ChangeWorkspace(host, ws2))
+    if (!PicoHost_ChangeWorkspace(host, PicoHost_PrimaryWorkspace(host), ws2))
     {
         Fail("request change workspace");
         FinishLifecycleHost(host, cfg, cache, ws);
@@ -633,9 +633,16 @@ static int TestWorkspaceChangeSeesOwningWorkspace(void)
     }
     pico_host_pump(host);
     ReadFileStr(life, log, sizeof(log));
-    if (log[0] != 'Y')
+    if (log[0] != '\0')
     {
-        Fail("workspace change must call workspace_shutdown on the old valid workspace");
+        Fail("cd must not shut down the previous workspace");
+        FinishLifecycleHost(host, cfg, cache, ws);
+        RmRf(ws2);
+        return 1;
+    }
+    if (pico_workspace_count(host) != 2)
+    {
+        Fail("cd must leave both workspaces open");
         FinishLifecycleHost(host, cfg, cache, ws);
         RmRf(ws2);
         return 1;
@@ -645,12 +652,576 @@ static int TestWorkspaceChangeSeesOwningWorkspace(void)
     ReadFileStr(life, log, sizeof(log));
     FinishLifecycleHost(NULL, cfg, cache, ws);
     RmRf(ws2);
-    if (strcmp(log, "YHYH") != 0)
+    if (strcmp(log, "YYH") != 0)
     {
         fprintf(stderr, "actual log: %s\n", log);
         Fail("workspace shutdown must run cleanly for both workspaces without use-after-free");
         return 1;
     }
+    return 0;
+}
+
+static int TestCdOpensSelectsAndReusesWorkspace(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-cd-A-XXXXXX";
+    char dirB[] = "/tmp/pico-cd-B-XXXXXX";
+    PicoWorkspaceId idA = 0;
+    PicoWorkspaceId idB = 0;
+    PicoWorkspaceId reused = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId agentA = 0;
+    PicoAgent *selected;
+    PicoWorkspace *wsA;
+    PicoWorkspace *wsB;
+
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp cd open/select");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init cd open/select");
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK)
+    {
+        Fail("open A for cd");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, idA, &opt, &agentA) != PICO_OK)
+    {
+        Fail("create main agent A for cd");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    host->chat_sel.msg = 9;
+    host->chat_follow_bottom = false;
+    host->hovered_tool = true;
+    if (!PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, idA), dirB))
+    {
+        Fail("cd to B");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    wsA = PicoHost_FindWorkspace(host, idA);
+    selected = PicoHost_SelectedAgent(host);
+    wsB = selected ? selected->workspace : NULL;
+    if (!wsA || !wsB || wsA == wsB || pico_workspace_count(host) != 2 ||
+        wsA->state != PICO_WORKSPACE_OPEN || !PicoWorkspace_AcceptsNewWork(wsA) ||
+        !PicoHost_FindAgent(host, agentA) || selected->id == agentA)
+    {
+        Fail("cd must open B, select a main agent there, and leave A running");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (host->chat_sel.msg != -1 || !host->chat_follow_bottom || host->hovered_tool)
+    {
+        Fail("cd onto a newly created agent must reset transcript UI state");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    idB = wsB->id;
+    if (!PicoHost_ChangeWorkspace(host, wsB, dirA) || pico_workspace_count(host) != 2 ||
+        pico_workspace_open(host, dirA, &reused) != PICO_ALREADY_OPEN || reused != idA ||
+        PicoHost_SelectedWorkspace(host) != wsA || pico_agent_active(host) != agentA ||
+        PicoHost_FindWorkspace(host, idB) != wsB)
+    {
+        Fail("cd back to A must reuse the open workspace");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestReloadTargetsSelectedWorkspace(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-rl-A-XXXXXX";
+    char dirB[] = "/tmp/pico-rl-B-XXXXXX";
+    PicoWorkspaceId idA = 0;
+    PicoWorkspaceId idB = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId agentA = 0;
+    PicoAgentId agentB = 0;
+    PicoWorkspace *wsA;
+    PicoWorkspace *wsB;
+
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp reload selected");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init reload selected");
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK || pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces for reload selected");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, idA, &opt, &agentA) != PICO_OK)
+    {
+        Fail("create agent A for reload selected");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, idB, &opt, &agentB) != PICO_OK)
+    {
+        Fail("create agent B for reload selected");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (!pico_agent_select(host, agentA))
+    {
+        Fail("select agent A for reload");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    PicoHost_RequestReload(host);
+    wsA = PicoHost_FindWorkspace(host, idA);
+    wsB = PicoHost_FindWorkspace(host, idB);
+    if (!wsA || !wsB || wsA->state != PICO_WORKSPACE_RELOADING || PicoWorkspace_AcceptsNewWork(wsA) ||
+        wsB->state != PICO_WORKSPACE_OPEN || !PicoWorkspace_AcceptsNewWork(wsB) || !host->reload_queued)
+    {
+        Fail("reload must target the selected workspace without pausing others");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    pico_host_pump(host);
+    if (host->reload_queued || wsA->state != PICO_WORKSPACE_OPEN || !PicoWorkspace_AcceptsNewWork(wsA) ||
+        wsB->state != PICO_WORKSPACE_OPEN || !PicoWorkspace_AcceptsNewWork(wsB))
+    {
+        Fail("selected workspace reload must not block the other workspace");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static PicoAgentId g_cd_other_agent;
+
+static void SelectOtherBeforeCd(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    PicoHost *host = workspace ? workspace->host : NULL;
+    (void)event;
+    (void)state;
+    if (host && g_cd_other_agent)
+    {
+        pico_agent_select(host, g_cd_other_agent);
+    }
+}
+
+static bool PrependWorkspaceSubmitHook(PicoWorkspace *ws, PicoWorkspaceHookFn fn)
+{
+    PicoRegistrationGeneration *reg = ws ? ws->active_registration : NULL;
+    if (!reg || reg->hook_count >= PICO_MAX_HOOKS)
+    {
+        return false;
+    }
+    memmove(&reg->hooks[1], &reg->hooks[0], (size_t)reg->hook_count * sizeof(reg->hooks[0]));
+    memset(&reg->hooks[0], 0, sizeof(reg->hooks[0]));
+    reg->hooks[0].hook = PICO_HOOK_BEFORE_SUBMIT;
+    reg->hooks[0].workspace_fn = fn;
+    reg->hooks[0].workspace = ws;
+    reg->hook_count++;
+    return true;
+}
+
+static int TestHostReloadIgnoresWorkspaceLocalCompileFailure(void)
+{
+    char cfg[256];
+    char cache[256];
+    char dirA[] = "/tmp/pico-hrl-A-XXXXXX";
+    char dirB[] = "/tmp/pico-hrl-B-XXXXXX";
+    char ext_dir[1024];
+    char src[2048];
+    PicoHost *host = NULL;
+    PicoWorkspaceId idA = 0;
+    PicoWorkspaceId idB = 0;
+
+    snprintf(cfg, sizeof(cfg), "/tmp/pico-cfg-XXXXXX");
+    snprintf(cache, sizeof(cache), "/tmp/pico-cache-XXXXXX");
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp host reload isolation");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, false) != PICO_OK || !host)
+    {
+        Fail("host init host reload isolation");
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK || pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces host reload isolation");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    snprintf(ext_dir, sizeof(ext_dir), "%s/.pico/extensions", dirB);
+    snprintf(src, sizeof(src), "%s/broken_ws.c", ext_dir);
+    if (MkdirParents(ext_dir) != 0 || WriteFile(src, "this is not valid C {\n") != 0)
+    {
+        Fail("write broken workspace-local extension");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        RmRf(dirA);
+        RmRf(dirB);
+        return 1;
+    }
+    if (!PicoPlugins_ReloadHost(host))
+    {
+        Fail("host reload must succeed when another workspace's local extension fails to compile");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        RmRf(dirA);
+        RmRf(dirB);
+        return 1;
+    }
+    if (host->status_warn && strstr(host->status_warn, "broken_ws.c"))
+    {
+        Fail("host reload must not compile workspace-local sources");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        unsetenv("XDG_CACHE_HOME");
+        RmRf(cfg);
+        RmRf(cache);
+        RmRf(dirA);
+        RmRf(dirB);
+        return 1;
+    }
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(dirA);
+    RmRf(dirB);
+    return 0;
+}
+
+static int TestCdResolvesAgainstCommandWorkspace(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-cdrel-A-XXXXXX";
+    char dirB[] = "/tmp/pico-cdrel-B-XXXXXX";
+    char childA[4096];
+    char childB[4096];
+    PicoWorkspaceId idA = 0;
+    PicoWorkspaceId idB = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId agentA = 0;
+    PicoAgentId agentB = 0;
+    PicoWorkspace *wsA;
+    PicoAgent *selected;
+    const char *selected_path;
+
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp cd relative");
+        return 1;
+    }
+    snprintf(childA, sizeof(childA), "%s/child", dirA);
+    snprintf(childB, sizeof(childB), "%s/child", dirB);
+    if (mkdir(childA, 0700) != 0 || mkdir(childB, 0700) != 0)
+    {
+        Fail("mkdir cd relative children");
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init cd relative");
+        rmdir(childA);
+        rmdir(childB);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK || pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces cd relative");
+        pico_host_free(host);
+        rmdir(childA);
+        rmdir(childB);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, idA, &opt, &agentA) != PICO_OK)
+    {
+        Fail("create agent A cd relative");
+        pico_host_free(host);
+        rmdir(childA);
+        rmdir(childB);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, idB, &opt, &agentB) != PICO_OK || !pico_agent_select(host, agentA))
+    {
+        Fail("create agent B cd relative");
+        pico_host_free(host);
+        rmdir(childA);
+        rmdir(childB);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    wsA = PicoHost_FindWorkspace(host, idA);
+    g_cd_other_agent = agentB;
+    if (!wsA || !PrependWorkspaceSubmitHook(wsA, SelectOtherBeforeCd))
+    {
+        Fail("prepend cd submit hook");
+        pico_host_free(host);
+        rmdir(childA);
+        rmdir(childB);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    PicoComposer_SetText(host, "/cd child");
+    PicoHost_Submit(host);
+    selected = PicoHost_SelectedAgent(host);
+    selected_path = PicoWorkspace_Path(selected ? selected->workspace : NULL);
+    if (!selected || strcmp(selected_path, childA) != 0)
+    {
+        Fail("/cd relative path must resolve against the command workspace after a selection change");
+        pico_host_free(host);
+        rmdir(childA);
+        rmdir(childB);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    pico_host_free(host);
+    rmdir(childA);
+    rmdir(childB);
+    rmdir(dirA);
+    rmdir(dirB);
+    return 0;
+}
+
+static int TestCdRollsBackNewWorkspaceOnAgentLimit(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-cdlim-A-XXXXXX";
+    char dirB[] = "/tmp/pico-cdlim-B-XXXXXX";
+    char dirC[] = "/tmp/pico-cdlim-C-XXXXXX";
+    PicoWorkspaceId idA = 0;
+    PicoWorkspaceId idB = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId idsA[PICO_MAX_AGENTS];
+    PicoAgentId idsB[PICO_MAX_AGENTS];
+    int i;
+    int count_before;
+
+    if (!mkdtemp(dirA) || !mkdtemp(dirB) || !mkdtemp(dirC))
+    {
+        Fail("mkdtemp cd rollback");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init cd rollback");
+        rmdir(dirA);
+        rmdir(dirB);
+        rmdir(dirC);
+        return 1;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK || pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces cd rollback");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        rmdir(dirC);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    for (i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        if (pico_main_agent_create(host, idA, &opt, &idsA[i]) != PICO_OK ||
+            pico_main_agent_create(host, idB, &opt, &idsB[i]) != PICO_OK)
+        {
+            Fail("fill agents for cd rollback");
+            pico_host_free(host);
+            rmdir(dirA);
+            rmdir(dirB);
+            rmdir(dirC);
+            return 1;
+        }
+    }
+    count_before = pico_workspace_count(host);
+    if (PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, idA), dirC) ||
+        pico_workspace_count(host) != count_before)
+    {
+        Fail("cd must roll back a newly opened workspace when agent creation fails");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        rmdir(dirC);
+        return 1;
+    }
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    rmdir(dirC);
+    return 0;
+}
+
+static int TestCdRejectsClosingWorkspace(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-cdcls-A-XXXXXX";
+    char dirB[] = "/tmp/pico-cdcls-B-XXXXXX";
+    PicoWorkspaceId idA = 0;
+    PicoWorkspaceId idB = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId agentA = 0;
+    PicoAgentId agentB = 0;
+    PicoWorkspace *wsB;
+    PicoAgentId selected_before;
+
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp cd closing");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init cd closing");
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK || pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces cd closing");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, idA, &opt, &agentA) != PICO_OK)
+    {
+        Fail("create agent A cd closing");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, idB, &opt, &agentB) != PICO_OK)
+    {
+        Fail("create agent B cd closing");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    wsB = PicoHost_FindWorkspace(host, idB);
+    if (!wsB || pico_workspace_request_close(host, idB) != PICO_OK || wsB->state != PICO_WORKSPACE_CLOSING)
+    {
+        Fail("close B for cd closing");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    selected_before = pico_agent_active(host);
+    if (PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, idA), dirB) ||
+        pico_agent_active(host) != selected_before || pico_workspace_count(host) != 2)
+    {
+        Fail("cd must not select an agent in a closing workspace");
+        pico_host_free(host);
+        rmdir(dirA);
+        rmdir(dirB);
+        return 1;
+    }
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
     return 0;
 }
 
@@ -2457,6 +3028,30 @@ int main(void)
         return 1;
     }
     if (TestWorkspaceChangeSeesOwningWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestCdOpensSelectsAndReusesWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestReloadTargetsSelectedWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestHostReloadIgnoresWorkspaceLocalCompileFailure() != 0)
+    {
+        return 1;
+    }
+    if (TestCdResolvesAgainstCommandWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestCdRollsBackNewWorkspaceOnAgentLimit() != 0)
+    {
+        return 1;
+    }
+    if (TestCdRejectsClosingWorkspace() != 0)
     {
         return 1;
     }

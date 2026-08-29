@@ -1224,14 +1224,16 @@ void PicoPlugins_Load(PicoHost *app)
     }
 }
 
+bool PicoPlugins_ReloadHost(PicoHost *app)
+{
+    (void)app;
+    g_plugin_reloads++;
+    return true;
+}
+
 void PicoPlugins_Reload(PicoHost *app)
 {
-    g_plugin_reloads++;
-    if (app)
-    {
-        app->reload_queued = false;
-        PicoWorkspace_SetAcceptingWork(PicoHost_PrimaryWorkspace(app), true);
-    }
+    PicoPlugins_ReloadHost(app);
 }
 
 void PicoPlugins_Shutdown(PicoHost *app)
@@ -1240,10 +1242,22 @@ void PicoPlugins_Shutdown(PicoHost *app)
     g_plugin_shutdowns++;
 }
 
-void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
+void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
 {
     (void)host;
     (void)workspace;
+}
+
+void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
+{
+    if (!host || !workspace || workspace->provider_count != 0)
+    {
+        return;
+    }
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
+    pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL);
+    PicoHost_PublishRegistration(host, NULL);
 }
 
 void PicoOverlay_Notify(PicoHost *app, const char *message)
@@ -1922,6 +1936,7 @@ static int TestReloadQuiescence(void)
     g_plugin_reloads = 0;
     PicoHost app;
     InitApp(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForBlock(&app))
     {
@@ -1929,7 +1944,8 @@ static int TestReloadQuiescence(void)
     }
 
     PicoHost_RequestReload(&app);
-    if (!app.reload_queued || PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)) || g_plugin_reloads != 0)
+    if (!app.reload_queued || !ws || ws->state != PICO_WORKSPACE_RELOADING ||
+        PicoWorkspace_AcceptsNewWork(ws) || g_plugin_reloads != 0)
     {
         return Fail(name, "reload did not queue behind live extension work");
     }
@@ -1949,7 +1965,7 @@ static int TestReloadQuiescence(void)
         return Fail(name, "a new turn started while reload was queued");
     }
     pico_host_pump(&app);
-    bool ok = !app.reload_queued && PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)) &&
+    bool ok = !app.reload_queued && ws->state == PICO_WORKSPACE_OPEN && PicoWorkspace_AcceptsNewWork(ws) &&
               g_plugin_reloads == 1;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "reload did not run exactly once after quiescence");
@@ -1957,11 +1973,16 @@ static int TestReloadQuiescence(void)
 
 static int TestDeferredWorkspaceChange(void)
 {
-    const char *name = "deferred workspace change";
+    const char *name = "cd opens or selects without replacing";
     char old_template[] = "/tmp/pico-workspace-old-XXXXXX";
     char new_template[] = "/tmp/pico-workspace-new-XXXXXX";
     char *old_dir = mkdtemp(old_template);
     char *new_dir = mkdtemp(new_template);
+    PicoWorkspace *old_ws;
+    PicoWorkspace *new_ws;
+    PicoWorkspaceId old_ws_id;
+    PicoAgent *old_agent;
+    int i;
     if (!old_dir || !new_dir)
     {
         return Fail(name, "could not create workspaces");
@@ -1973,45 +1994,58 @@ static int TestDeferredWorkspaceChange(void)
     InitApp(&app);
     snprintf(PicoHost_PrimaryWorkspace(&app)->path, sizeof(PicoHost_PrimaryWorkspace(&app)->path), "%s", old_dir);
     PicoAgentId old_id = pico_agent_active(&app);
+    old_ws = PicoHost_PrimaryWorkspace(&app);
+    old_ws_id = old_ws->id;
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
-    if (!WaitForBlock(&app) || !PicoHost_ChangeWorkspace(&app, new_dir))
+    if (!WaitForBlock(&app) || !PicoHost_ChangeWorkspace(&app, old_ws, new_dir))
     {
+        PicoHost_Shutdown(&app);
+        rmdir(old_dir);
+        rmdir(new_dir);
         return Fail(name, "workspace request was not accepted while busy");
     }
-    if (!app.workspace_change_queued || strcmp(PicoHost_PrimaryWorkspace(&app)->path, old_dir) != 0 ||
-        PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)))
+    old_agent = PicoHost_FindAgent(&app, old_id);
+    new_ws = PicoHost_SelectedWorkspace(&app);
+    if (!old_agent || !old_ws || !new_ws || old_ws == new_ws || pico_workspace_count(&app) != 2 ||
+        old_ws->id != old_ws_id || strcmp(old_ws->path, old_dir) != 0 ||
+        old_ws->state != PICO_WORKSPACE_OPEN || !PicoWorkspace_AcceptsNewWork(old_ws) ||
+        !PicoAgent_IsBusy(old_agent) || pico_agent_active(&app) == old_id)
     {
-        return Fail(name, "workspace mutated before the quiescence barrier");
+        PicoHost_Shutdown(&app);
+        rmdir(old_dir);
+        rmdir(new_dir);
+        return Fail(name, "cd destroyed or paused the old workspace");
     }
 
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    if (!WaitForIdle(&app))
+    for (i = 0; i < 3000 && PicoAgent_IsBusy(old_agent); i++)
     {
-        return Fail(name, "old workspace did not drain");
+        pico_host_pump(&app);
+        SleepOneMs();
     }
-    pico_host_pump(&app);
-    g_expected_context_workspace = PicoHost_PrimaryWorkspace(&app);
-    PicoAgent_StartTurn(&app, TestAgent(&app), "verify rebound workspace");
-    if (!WaitForIdle(&app))
+    if (PicoAgent_IsBusy(old_agent) || pico_agent_count(&app) != 2 ||
+        PicoHost_FindAgent(&app, old_id) != old_agent)
     {
-        return Fail(name, "replacement agent did not run");
+        PicoHost_Shutdown(&app);
+        rmdir(old_dir);
+        rmdir(new_dir);
+        return Fail(name, "old workspace work did not continue after selection moved");
     }
-    pthread_mutex_lock(&g_test.mu);
-    bool rebound = g_test.context_workspace_matches && strcmp(g_test.context_workspace, new_dir) == 0;
-    pthread_mutex_unlock(&g_test.mu);
-    g_expected_context_workspace = NULL;
-    PicoAgentInfo ignored;
-    bool ok = !app.workspace_change_queued && strcmp(PicoHost_PrimaryWorkspace(&app)->path, new_dir) == 0 &&
-              pico_agent_count(&app) == 1 && pico_agent_active(&app) != old_id &&
-              !pico_agent_find(&app, old_id, &ignored) && rebound &&
-              PicoWorkspace_AcceptsNewWork(PicoHost_PrimaryWorkspace(&app)) && g_plugin_reloads == 1;
+    if (!PicoHost_ChangeWorkspace(&app, new_ws, old_dir) || pico_workspace_count(&app) != 2 ||
+        PicoHost_SelectedWorkspace(&app) != old_ws || pico_agent_active(&app) != old_id)
+    {
+        PicoHost_Shutdown(&app);
+        rmdir(old_dir);
+        rmdir(new_dir);
+        return Fail(name, "returning to an open path did not reuse its workspace");
+    }
     PicoHost_Shutdown(&app);
     rmdir(old_dir);
     rmdir(new_dir);
-    return ok ? 0 : Fail(name, "workspace transition was partial or did not create a fresh agent");
+    return 0;
 }
 
 static PicoAgentId g_submit_retarget_id;

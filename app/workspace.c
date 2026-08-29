@@ -486,29 +486,6 @@ static void PublishAgent(PicoWorkspace *workspace, PicoAgent *agent, bool select
     }
 }
 
-bool PicoWorkspace_AdoptInitial(PicoWorkspace *workspace, PicoAgent *agent)
-{
-    if (!workspace || !agent || workspace->count != 0 || PicoAgent_IsBusy(agent))
-    {
-        return false;
-    }
-    PicoAgent_RebindHost(workspace->host, agent, workspace);
-    if (agent->workspace != workspace)
-    {
-        return false;
-    }
-    agent->kind = PICO_AGENT_MAIN;
-    agent->parent_id = 0;
-    agent->depth = 0;
-    agent->profile[0] = '\0';
-    agent->purpose[0] = '\0';
-    agent->parent_session_id[0] = '\0';
-    agent->persistence = PICO_SESSION_DURABLE;
-    agent->tool_policy_valid = true;
-    PublishAgent(workspace, agent, true);
-    return true;
-}
-
 PicoAgentResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
                                           PicoAgentId *out)
 {

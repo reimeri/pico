@@ -459,9 +459,14 @@ static void CmdLogout(PicoHost *app, PicoAgentId agent_id, const char *args, voi
 
 static void CmdReload(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)
 {
+    PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
     (void)state;
     (void)args;
-    PicoHost_RequestReload(app);
+    PicoHost_RequestHostReload(app);
+    if (agent && agent->workspace)
+    {
+        pico_workspace_request_reload(app, agent->workspace->id);
+    }
     Note(app, agent_id, "Reloading extensions…");
     ClearComposer(app);
     app->submit_cancel = true;
@@ -566,7 +571,7 @@ static void CmdCd(PicoWorkspace *workspace, PicoAgentId agent_id, const char *ar
 
     if (app)
     {
-        PicoHost_ChangeWorkspace(app, args);
+        PicoHost_ChangeWorkspace(app, workspace, args);
         ClearComposer(app);
         app->submit_cancel = true;
     }
@@ -678,7 +683,7 @@ static int CdQuery(PicoHost *app, const char *rest, PicoCompleteItem *out, int m
     return n;
 }
 
-static const PicoCommand *FindCommand(PicoHost *app, const char *name)
+static const PicoCommand *FindCommand(PicoHost *app, PicoWorkspace *workspace, const char *name)
 {
     for (int i = 0; i < app->command_count; i++)
     {
@@ -687,14 +692,13 @@ static const PicoCommand *FindCommand(PicoHost *app, const char *name)
             return &app->commands[i];
         }
     }
-    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
-    if (ws)
+    if (workspace)
     {
-        for (int i = 0; i < ws->command_count; i++)
+        for (int i = 0; i < workspace->command_count; i++)
         {
-            if (FoldEq(ws->commands[i].name, name))
+            if (FoldEq(workspace->commands[i].name, name))
             {
-                return &ws->commands[i];
+                return &workspace->commands[i];
             }
         }
     }
@@ -1002,7 +1006,7 @@ static void CommandsBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *
     char cmd[64];
     const char *rest = "";
     SplitPrefix(s + 1, cmd, sizeof(cmd), &rest);
-    const PicoCommand *found = FindCommand(app, cmd);
+    const PicoCommand *found = FindCommand(app, workspace, cmd);
     if (!found)
     {
         return;
@@ -1025,7 +1029,7 @@ static int CommandsHostInit(PicoHost *app, void **state_out)
     pico_host_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_host_add_command(app, "help", "List commands", CmdHelp);
     pico_host_add_command(app, "docs", "Show extension docs", CmdDocs);
-    pico_host_add_command(app, "reload", "Reload extensions", CmdReload);
+    pico_host_add_command(app, "reload", "Reload host extensions and the selected workspace", CmdReload);
     pico_host_add_completer(app, '/', true, CommandQuery, NULL);
     return 0;
 }
@@ -1037,7 +1041,7 @@ static int CommandsWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     pico_workspace_add_command(workspace, "effort", "Set reasoning effort for this model", CmdEffort);
     pico_workspace_add_command(workspace, "new", "Start a new session", CmdNew);
     pico_workspace_add_command(workspace, "resume", "Resume a previous session", CmdResume);
-    pico_workspace_add_command(workspace, "cd", "Change workspace directory", CmdCd);
+    pico_workspace_add_command(workspace, "cd", "Open or select a workspace", CmdCd);
     pico_workspace_add_command(workspace, "compact", "Compact the current session", CmdCompact);
     pico_workspace_add_hook(workspace, PICO_HOOK_BEFORE_SUBMIT, CommandsBeforeSubmit);
     return 0;

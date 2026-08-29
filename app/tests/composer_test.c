@@ -40,6 +40,12 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
     (void)workspace;
 }
 
+void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    (void)workspace;
+}
+
 static void Check(bool ok, const char *message)
 {
     if (!ok)

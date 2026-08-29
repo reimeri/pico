@@ -2217,21 +2217,27 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
     }
 }
 
-void PicoHost_RequestReload(PicoHost *app)
+void PicoHost_RequestHostReload(PicoHost *host)
 {
-    if (!app || app->terminal_shutdown || g_pico_process_retired)
+    if (!host || host->terminal_shutdown || g_pico_process_retired)
     {
         return;
     }
-    app->reload_queued = true;
-    PicoWorkspace *primary = PicoHost_PrimaryWorkspace(app);
-    if (primary)
+    host->reload_queued = true;
+}
+
+void PicoHost_RequestReload(PicoHost *host)
+{
+    PicoAgent *agent;
+    if (!host || host->terminal_shutdown || g_pico_process_retired)
     {
-        PicoWorkspace_SetAcceptingWork(primary, false);
+        return;
     }
-    if (!app->workspace_change_queued && primary && !PicoWorkspace_BlocksReload(primary))
+    PicoHost_RequestHostReload(host);
+    agent = PicoHost_SelectedAgent(host);
+    if (agent && agent->workspace)
     {
-        PicoPlugins_Reload(app);
+        pico_workspace_request_reload(host, agent->workspace->id);
     }
 }
 
@@ -2322,9 +2328,40 @@ static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out
     return 0;
 }
 
-bool PicoHost_ChangeWorkspace(PicoHost *app, const char *path)
+static PicoAgent *FirstMainAgent(PicoWorkspace *workspace)
 {
-    if (!app || app->terminal_shutdown || g_pico_process_retired)
+    int i;
+    if (!workspace)
+    {
+        return NULL;
+    }
+    for (i = 0; i < workspace->count; i++)
+    {
+        if (workspace->agents[i] && workspace->agents[i]->kind == PICO_AGENT_MAIN)
+        {
+            return workspace->agents[i];
+        }
+    }
+    return NULL;
+}
+
+bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const char *path)
+{
+    PicoWorkspace *target;
+    PicoAgent *main_agent;
+    PicoAgent *selected;
+    PicoWorkspaceId id = 0;
+    PicoResult opened;
+    PicoAgentCreateOptions options;
+    PicoAgentId agent_id = 0;
+    char trimmed[4096];
+    char resolved[4096];
+    char pretty[400];
+    char line[512];
+    size_t tlen;
+    const char *ws;
+
+    if (!host || host->terminal_shutdown || g_pico_process_retired)
     {
         return false;
     }
@@ -2338,168 +2375,92 @@ bool PicoHost_ChangeWorkspace(PicoHost *app, const char *path)
         return false;
     }
 
-    char trimmed[4096];
     snprintf(trimmed, sizeof(trimmed), "%s", path);
-    size_t tlen = strlen(trimmed);
+    tlen = strlen(trimmed);
     while (tlen > 0 && isspace((unsigned char)trimmed[tlen - 1]))
     {
         trimmed[--tlen] = '\0';
     }
 
-    char resolved[4096];
-    const char *ws = PicoWorkspace_Path(PicoHost_PrimaryWorkspaceConst(app));
+    ws = PicoWorkspace_Path(from);
     if (ResolveWorkspaceDir(ws[0] ? ws : ".", trimmed, resolved, sizeof(resolved)) != 0)
     {
         char shown[400];
         snprintf(shown, sizeof(shown), "%s", trimmed);
-        char line[512];
         snprintf(line, sizeof(line), "Not a directory `%s`.", shown);
-        PicoOverlay_Notify(app, line);
+        PicoOverlay_Notify(host, line);
         return false;
     }
 
-    char current[4096];
-    if (realpath(ws, current) && strcmp(current, resolved) == 0)
+    opened = pico_workspace_open(host, resolved, &id);
+    if (opened != PICO_OK && opened != PICO_ALREADY_OPEN)
     {
-        char pretty[400];
-        FormatHomePath(resolved, pretty, sizeof(pretty));
-        char line[512];
-        snprintf(line, sizeof(line), "Already in `%s`.", pretty);
-        PicoOverlay_Notify(app, line);
-        return false;
-    }
-
-    snprintf(app->pending_workspace, sizeof(app->pending_workspace), "%s", resolved);
-    app->workspace_change_queued = true;
-    PicoWorkspace *primary = PicoHost_PrimaryWorkspace(app);
-    if (primary)
-    {
-        PicoWorkspace_SetAcceptingWork(primary, false);
-    }
-
-    char pretty[400];
-    FormatHomePath(resolved, pretty, sizeof(pretty));
-    char line[512];
-    if (primary && PicoWorkspace_BlocksReload(primary))
-    {
-        snprintf(line, sizeof(line), "Workspace change to `%s` queued until all agents are quiescent.", pretty);
-    }
-    else
-    {
-        snprintf(line, sizeof(line), "Changing workspace to `%s`…", pretty);
-    }
-    PicoOverlay_Notify(app, line);
-    return true;
-}
-
-static void WorkspacePreflightFailed(PicoHost *app, const char *message)
-{
-    app->pending_workspace[0] = '\0';
-    app->workspace_change_queued = false;
-    PicoWorkspace *primary = PicoHost_PrimaryWorkspace(app);
-    if (primary)
-    {
-        PicoWorkspace_SetAcceptingWork(primary, !app->reload_queued);
-    }
-    pico_status_warn(app, message);
-}
-
-static void ApplyWorkspaceChange(PicoHost *host)
-{
-    char target[4096];
-    PicoWorkspace *replacement;
-    PicoWorkspace *old_ws;
-    PicoAgent *initial;
-    float prev_font_scale;
-    char pretty[400];
-    char line[512];
-
-    snprintf(target, sizeof(target), "%s", host->pending_workspace);
-    if (!target[0])
-    {
-        host->workspace_change_queued = false;
-        PicoWorkspace *primary_ws = PicoHost_PrimaryWorkspace(host);
-        if (primary_ws)
+        if (opened == PICO_LIMIT)
         {
-            PicoWorkspace_SetAcceptingWork(primary_ws, !host->reload_queued);
+            PicoOverlay_Notify(host, "Too many workspaces are open.");
         }
-        return;
+        else if (opened == PICO_BUSY)
+        {
+            PicoOverlay_Notify(host, "That workspace is closing.");
+        }
+        else
+        {
+            PicoOverlay_Notify(host, "Could not open that workspace.");
+        }
+        return false;
     }
 
-    replacement = (PicoWorkspace *)calloc(1, sizeof(PicoWorkspace));
-    if (!replacement)
+    target = PicoHost_FindWorkspace(host, id);
+    if (!target)
     {
-        WorkspacePreflightFailed(host, "Could not prepare a workspace for the new directory.");
-        return;
+        PicoOverlay_Notify(host, "Could not open that workspace.");
+        return false;
     }
-    replacement->host = host;
-    replacement->id = host->next_workspace_id++;
-    snprintf(replacement->path, sizeof(replacement->path), "%s", target);
-    replacement->state = PICO_WORKSPACE_OPEN;
-    pthread_mutex_init(&replacement->settings_mu, NULL);
-    pthread_mutex_init(&replacement->delegation_mu, NULL);
-    pthread_mutex_init(&replacement->lifecycle_mu, NULL);
-    pthread_mutex_init(&replacement->ui_post_mu, NULL);
-    replacement->accepting_work = true;
-
-    initial = PicoAgent_Create(host, replacement);
-    if (!initial)
+    if (target->state == PICO_WORKSPACE_CLOSING || target->state == PICO_WORKSPACE_CLOSED)
     {
-        (void)PicoWorkspace_Destroy(replacement);
-        WorkspacePreflightFailed(host, "Could not prepare an agent for the new workspace.");
-        return;
+        PicoOverlay_Notify(host, "That workspace is closing.");
+        return false;
     }
-    PicoAgent_PrepareReload(initial);
 
-    old_ws = PicoHost_PrimaryWorkspace(host);
+    selected = PicoHost_SelectedAgent(host);
+    if (selected && selected->workspace == target)
+    {
+        FormatHomePath(resolved, pretty, sizeof(pretty));
+        snprintf(line, sizeof(line), "Already in `%s`.", pretty);
+        PicoOverlay_Notify(host, line);
+        return true;
+    }
+
     PicoChat_InspectClose();
-    if (!PicoWorkspace_Quiesce(old_ws))
+    main_agent = FirstMainAgent(target);
+    if (!main_agent)
     {
-        (void)PicoAgent_Destroy(initial);
-        (void)PicoWorkspace_Destroy(replacement);
-        host->terminal_shutdown = true;
-        g_pico_process_retired = true;
-        PicoOverlay_Notify(host, "A worker detached during workspace transition; Pico must now exit.");
-        return;
+        memset(&options, 0, sizeof(options));
+        options.kind = PICO_AGENT_MAIN;
+        options.session_start = PICO_SESSION_NEW;
+        options.select = false;
+        if (pico_main_agent_create(host, id, &options, &agent_id) != PICO_OK)
+        {
+            if (opened == PICO_OK)
+            {
+                pico_workspace_request_close(host, id);
+                pico_host_pump(host);
+            }
+            PicoOverlay_Notify(host, "Could not create an agent in that workspace.");
+            return false;
+        }
+        main_agent = PicoHost_FindAgent(host, agent_id);
+    }
+    if (!main_agent || !pico_agent_select(host, main_agent->id))
+    {
+        PicoOverlay_Notify(host, "Could not select an agent in that workspace.");
+        return false;
     }
 
-    PicoPlugins_Shutdown(host);
-    PicoWorkspace_Free(old_ws);
-    host->workspaces[0] = replacement;
-    host->workspace_count = 1;
-    host->pending_workspace[0] = '\0';
-    host->workspace_change_queued = false;
-    host->reload_queued = true;
-    prev_font_scale = Pico_FontScale();
-    PicoHostPreferences_Load(host);
-    PicoWorkspaceSettings_Load(replacement);
-    if (Pico_FontScale() != prev_font_scale)
-    {
-        Clay_ResetMeasureTextCache();
-    }
-    PicoSettings_InitAgent(initial);
-    if (!PicoWorkspace_AdoptInitial(replacement, initial))
-    {
-        (void)PicoAgent_Destroy(initial);
-        host->terminal_shutdown = true;
-        pico_status_warn(host, "Workspace replacement could not publish its prepared agent; Pico must exit.");
-        return;
-    }
-    PicoPlugins_Load(host);
-    PicoWorkspace_LoadProfiles(replacement);
-    PicoWorkspace_RevalidateToolPolicies(replacement);
-    PicoWorkspace_NotifySessions(replacement);
-    PicoWorkspace_ReplayToolDetails(replacement);
-    host->reload_queued = false;
-    PicoWorkspace_SetAcceptingWork(replacement, true);
-    PicoChatSel_Clear(host);
-    memset(&host->chat_scrollbar, 0, sizeof(host->chat_scrollbar));
-    host->chat_follow_bottom = true;
-    host->chat_overflow = true;
-
-    FormatHomePath(target, pretty, sizeof(pretty));
+    FormatHomePath(resolved, pretty, sizeof(pretty));
     snprintf(line, sizeof(line), "Workspace `%s`.", pretty);
     PicoOverlay_Notify(host, line);
+    return true;
 }
 
 static void PicoHost_PumpLifecycle(PicoHost *host)
@@ -2507,6 +2468,11 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
     if (!host || host->terminal_shutdown || g_pico_process_retired)
     {
         return;
+    }
+    if (host->reload_queued)
+    {
+        host->reload_queued = false;
+        PicoPlugins_ReloadHost(host);
     }
     int count = host->workspace_count;
     if (count > 0)
@@ -2594,20 +2560,6 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
             }
             i++;
         }
-    }
-    if (host->workspace_change_queued)
-    {
-        PicoWorkspace *primary = PicoHost_PrimaryWorkspace(host);
-        if (!primary || !PicoWorkspace_BlocksReload(primary))
-        {
-            ApplyWorkspaceChange(host);
-        }
-        return;
-    }
-    PicoWorkspace *primary = PicoHost_PrimaryWorkspace(host);
-    if (host->reload_queued && primary && !PicoWorkspace_BlocksReload(primary))
-    {
-        PicoPlugins_Reload(host);
     }
 }
 

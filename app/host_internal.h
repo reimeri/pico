@@ -116,12 +116,10 @@ struct PicoHost {
     bool debug_enabled;
     bool safe_mode;
     bool reload_queued;
-    bool workspace_change_queued;
     bool terminal_shutdown;
     const char *hovered_link;
     bool hovered_tool;
     bool hovered_clickable;
-    char pending_workspace[4096];
     char *status_warn;
 
     uint64_t next_workspace_id;
@@ -218,6 +216,8 @@ const PicoAgent *PicoHost_FindAgentConst(const PicoHost *host, PicoAgentId id);
 /* UI-only. Backend code must take an explicit agent ID or pointer. */
 PicoAgent *PicoHost_SelectedAgent(PicoHost *host);
 const PicoAgent *PicoHost_SelectedAgentConst(const PicoHost *host);
+/* Host-extension replacement only. Does not pause or reload workspaces. */
+void PicoHost_RequestHostReload(PicoHost *host);
 
 /* UI adapters: selected agent's workspace, else the host's primary workspace. */
 static inline PicoWorkspace *PicoHost_SelectedWorkspace(PicoHost *host)

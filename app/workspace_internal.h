@@ -193,6 +193,7 @@ void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt);
 void *PicoWorkspaceExtensions_State(const PicoWorkspace *workspace, const char *name);
 void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId agent_id);
 bool PicoWorkspace_Reload(PicoWorkspace *workspace);
+void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace);
 bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name);
 
 /* False means a detached worker retained the execution host. */
@@ -211,8 +212,6 @@ void PicoWorkspace_RevalidateToolPolicies(PicoWorkspace *workspace);
 void PicoWorkspace_NotifySessions(PicoWorkspace *workspace);
 PicoAgent *PicoWorkspace_FindAgent(PicoWorkspace *workspace, PicoAgentId id);
 const PicoAgent *PicoWorkspace_FindAgentConst(const PicoWorkspace *workspace, PicoAgentId id);
-/* Adopt one unpublished, idle agent during an atomic workspace replacement. */
-bool PicoWorkspace_AdoptInitial(PicoWorkspace *workspace, PicoAgent *agent);
 
 bool PicoWorkspace_ReserveSession(PicoWorkspace *workspace, PicoAgentId owner,
                                   const char *path);

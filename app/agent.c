@@ -2954,16 +2954,6 @@ PicoRegistrationGeneration *PicoAgent_Registration(PicoAgent *agent)
     return agent && agent->runtime ? agent->runtime->registration : NULL;
 }
 
-void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoWorkspace *workspace)
-{
-    if (!app || !agent || !agent->runtime || PicoAgent_BlocksReload(agent))
-    {
-        return;
-    }
-    agent->workspace = workspace;
-    RefreshWorkerContext(agent->runtime, app, agent);
-}
-
 PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace)
 {
     PicoAgent *agent = (PicoAgent *)calloc(1, sizeof(PicoAgent));

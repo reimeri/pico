@@ -98,7 +98,7 @@ static int CustomEmptyInit(PicoWorkspace *workspace, void **state_out)
 - `PicoUi_ModalOpen` is true while the named modal stack is non-empty or a tool ask is showing. Builtin composer, chat, and footer skip input then. Core does not close your overlay on Esc during normal frames; it only suppresses turn-cancel while a claim is already on the stack at the start of the frame. Check `pico_ui_modal_is_top(app, name)` before consuming input, then close the top claim with `pico_ui_modal_pop`. A custom ask overlay still receives pointer hits; it may consume `GetCharPressed()` from `on_frame` after the composer has skipped.
 - Answer a pending ask with `pico_tool_answer(app, ask.id, json)` from the main thread. `PicoToolAsk` also identifies `agent_id`, `profile`, and `purpose`; show these when the target may not be the visible agent. Bind buttons to the globally unique ask ID. The request string stays valid through Clay render of this frame even if you answer in `AFTER_LAYOUT`.
 - The builtin `ask_user` overlay owns custom requests with `{"type":"questionnaire","ui":"custom",…}`. Use a different `type` for an extension-defined ask UI.
-- A queued reload or workspace change keeps ask/cancel UI responsive while blocking new submits. Do not cache active-agent transcript indices or workspace-derived UI snapshots across workspace replacement; IDs and borrowed messages become stale.
+- A queued workspace reload keeps ask/cancel UI responsive while blocking new submits in that workspace. Do not cache selected-agent transcript indices or workspace-derived UI snapshots across selection or workspace close; IDs and borrowed messages become stale.
 
 ## Named modals
 

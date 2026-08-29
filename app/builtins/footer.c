@@ -823,12 +823,6 @@ static void FooterOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
-    if (PicoAgent_IsBusy(PicoHost_SelectedAgent(app)))
-    {
-        ClearFolderRequest();
-        PicoOverlay_Notify(app, "Wait until the agent is idle before changing directory.");
-        return;
-    }
     if (!FolderDialogGraphic())
     {
         ClearFolderRequest();
@@ -848,7 +842,7 @@ static void FooterOnFrame(PicoHost *app, void *state, float dt)
     ClearFolderRequest();
     if (path && path[0])
     {
-        PicoHost_ChangeWorkspace(app, path);
+        PicoHost_ChangeWorkspace(app, PicoHost_SelectedWorkspace(app), path);
     }
 }
 

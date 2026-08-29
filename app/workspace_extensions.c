@@ -426,6 +426,8 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     workspace->reload_queued = false;
     PicoWorkspace_SetAcceptingWork(workspace, false);
 
+    PicoPlugins_LoadWorkspaceSources(host, workspace);
+
     PicoWorkspace candidate;
     memset(&candidate, 0, sizeof(candidate));
     candidate.host = host;

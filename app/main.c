@@ -61,7 +61,7 @@ static void PrintUsage(const char *argv0)
             "  ~/.config/pico/sessions/          JSONL transcripts (Pi-style path encoding)\n"
             "  ~/.config/pico/subagents/         named JSONC subagent profiles (see /docs subagents)\n"
             "  F2                                 open the extension manager\n"
-            "  F5 or /reload                     reload extensions and profiles after quiescence\n",
+            "  F5 or /reload                     reload host extensions and the selected workspace\n",
             argv0);
 }
 

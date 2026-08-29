@@ -586,7 +586,9 @@ void PicoHost_Cancel(PicoHost *host);
 void PicoHost_RequestSubmitCancel(PicoHost *host);
 void PicoHost_Frame(PicoHost *host);
 void PicoHost_RequestReload(PicoHost *host);
-bool PicoHost_ChangeWorkspace(PicoHost *host, const char *path);
+/* Open or select `path`. Relative paths resolve against `from`, never UI selection.
+   `from` may be NULL; relative paths then resolve against ".". */
+bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const char *path);
 
 typedef enum PicoExtensionScope {
     PICO_EXTENSION_HOST = 0,
@@ -609,6 +611,9 @@ typedef struct PicoExtInfo {
 
 void PicoPlugins_Load(PicoHost *host);
 void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace);
+/* Compile and swap user-global (config) modules only. Workspace-local sources
+   are refreshed by that workspace's reload. */
+bool PicoPlugins_ReloadHost(PicoHost *host);
 void PicoPlugins_Reload(PicoHost *host);
 void PicoPlugins_Poll(PicoHost *host);
 void PicoPlugins_OnFrame(PicoHost *host, float dt);

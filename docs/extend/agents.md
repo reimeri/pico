@@ -106,6 +106,6 @@ Agent/session changes produced by worker code must travel through callback resul
 
 ## Reload, workspace, and shutdown
 
-Reload and workspace replacement stop accepting external turns/delegations, keep pumping current work and asks, and commit only after a full workspace quiescence check. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn.
+Reload of a workspace stops accepting external turns/delegations in that workspace, keeps pumping current work and asks, and commits only after that workspace is quiescent. Other workspaces keep accepting work. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn.
 
 `pico_host_free` returns `PICO_HOST_SHUTDOWN_CLEAN` or `PICO_HOST_SHUTDOWN_RETAINED`. Retained means one shared shutdown deadline expired and a callback was detached. Pico keeps every service and `.so` that callback can reach, permanently retires Pico in the process, and rejects later host/plugin initialization. The caller must proceed to process exit.

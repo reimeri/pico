@@ -50,9 +50,12 @@ static int ModuleCapacity(const PicoHost *host)
 
 static bool ValidateUserSources(PicoHost *app);
 static int CollectSources(const PicoHost *app, char paths[][4096], time_t *mtimes,
-                          uint64_t *hashes, int cap);
+                          uint64_t *hashes, int cap, bool include_workspaces);
+static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][4096],
+                                   time_t *mtimes, uint64_t *hashes, int cap);
 static bool ConfigExtDir(char *out, size_t cap);
 static bool WorkspaceExtDir(const PicoWorkspace *workspace, char *out, size_t cap);
+static bool IsWorkspaceLocalSource(const char *src);
 
 static PicoExt (*kBuiltins[])(void) = {
     pico_ext_chat,
@@ -195,6 +198,11 @@ static bool WorkspaceExtDir(const PicoWorkspace *workspace, char *out, size_t ca
         return false;
     }
     return PicoPath_Format(out, cap, "%s/.pico/extensions", root);
+}
+
+static bool IsWorkspaceLocalSource(const char *src)
+{
+    return src && strstr(src, "/.pico/extensions/") != NULL;
 }
 
 static unsigned PathHash(const char *s)
@@ -733,7 +741,7 @@ static bool LoadCandidateUsers(PicoHost *app)
     char paths[PICO_MAX_USER_PLUGINS][4096];
     time_t mtimes[PICO_MAX_USER_PLUGINS];
     uint64_t hashes[PICO_MAX_USER_PLUGINS];
-    int n = CollectSources(app, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS);
+    int n = CollectSources(app, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS, false);
     (void)mtimes;
     (void)hashes;
     for (int i = 0; i < n; i++)
@@ -807,16 +815,74 @@ void PicoPlugins_InitWorkspace(PicoHost *app, PicoWorkspace *workspace)
     PicoWorkspace_LoadProfiles(workspace);
 }
 
-void PicoPlugins_Reload(PicoHost *app)
+void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
 {
-    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
+    char paths[PICO_MAX_USER_PLUGINS][4096];
+    time_t mtimes[PICO_MAX_USER_PLUGINS];
+    uint64_t hashes[PICO_MAX_USER_PLUGINS];
+    char ws_ext_dir[4096];
+    int old_module_count;
+    int n;
+    int i;
+    bool ok = true;
+
+    if (!app || !workspace || app->safe_mode || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return;
     }
 
-    if (!ValidateUserSources(app))
+    n = CollectWorkspaceSources(workspace, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS);
+    (void)mtimes;
+    (void)hashes;
+    old_module_count = app->module_count;
+    for (i = 0; i < n && ok; i++)
+    {
+        if (LoadUserCandidate(app, paths[i]) != 0)
+        {
+            ok = false;
+        }
+    }
+    if (!ok)
+    {
+        for (i = app->module_count - 1; i >= old_module_count; i--)
+        {
+            if (app->modules[i].desired)
+            {
+                app->modules[i].desired = false;
+                PicoModule_Release(&app->modules[i]);
+            }
+        }
+        app->module_count = old_module_count;
+        return;
+    }
+    if (!WorkspaceExtDir(workspace, ws_ext_dir, sizeof(ws_ext_dir)))
     {
         return;
+    }
+    {
+        size_t prefix = strlen(ws_ext_dir);
+        for (i = 0; i < old_module_count; i++)
+        {
+            LoadedPlugin *p = &app->modules[i];
+            if (p->desired && !p->builtin && strncmp(p->source, ws_ext_dir, prefix) == 0)
+            {
+                p->desired = false;
+                PicoModule_Release(p);
+            }
+        }
+    }
+}
+
+bool PicoPlugins_ReloadHost(PicoHost *app)
+{
+    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
+    {
+        return false;
+    }
+
+    if (!ValidateUserSources(app))
+    {
+        return false;
     }
 
     int old_module_count = app->module_count;
@@ -843,12 +909,12 @@ void PicoPlugins_Reload(PicoHost *app)
             }
         }
         app->module_count = old_module_count;
-        return;
+        return false;
     }
 
     for (int i = 0; i < old_module_count; i++)
     {
-        if (app->modules[i].desired)
+        if (app->modules[i].desired && !IsWorkspaceLocalSource(app->modules[i].source))
         {
             app->modules[i].desired = false;
             PicoModule_Release(&app->modules[i]);
@@ -856,8 +922,17 @@ void PicoPlugins_Reload(PicoHost *app)
     }
 
     PicoHostExtensions_Reload(app);
+    return true;
+}
 
-    for (int i = 0; i < app->workspace_count; i++)
+void PicoPlugins_Reload(PicoHost *app)
+{
+    int i;
+    if (!PicoPlugins_ReloadHost(app))
+    {
+        return;
+    }
+    for (i = 0; i < app->workspace_count; i++)
     {
         if (app->workspaces[i])
         {
@@ -919,7 +994,7 @@ static void CollectWalk(void *ctx, const char *path, time_t mtime)
 }
 
 static int CollectSources(const PicoHost *app, char paths[][4096], time_t *mtimes,
-                          uint64_t *hashes, int cap)
+                          uint64_t *hashes, int cap, bool include_workspaces)
 {
     CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .hashes = hashes, .n = 0, .cap = cap};
     char dir[4096];
@@ -927,7 +1002,7 @@ static int CollectSources(const PicoHost *app, char paths[][4096], time_t *mtime
     {
         WalkExtTree(dir, 0, &ctx.n, cap, CollectWalk, &ctx);
     }
-    if (app)
+    if (include_workspaces && app)
     {
         for (int w = 0; w < app->workspace_count; w++)
         {
@@ -940,12 +1015,24 @@ static int CollectSources(const PicoHost *app, char paths[][4096], time_t *mtime
     return ctx.n;
 }
 
+static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][4096],
+                                   time_t *mtimes, uint64_t *hashes, int cap)
+{
+    CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .hashes = hashes, .n = 0, .cap = cap};
+    char dir[4096];
+    if (workspace && WorkspaceExtDir(workspace, dir, sizeof(dir)))
+    {
+        WalkExtTree(dir, 0, &ctx.n, cap, CollectWalk, &ctx);
+    }
+    return ctx.n;
+}
+
 static bool ValidateUserSources(PicoHost *app)
 {
     char paths[PICO_MAX_USER_PLUGINS][4096];
     time_t mtimes[PICO_MAX_USER_PLUGINS];
     uint64_t hashes[PICO_MAX_USER_PLUGINS];
-    int n = CollectSources(app, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS);
+    int n = CollectSources(app, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS, false);
     for (int i = 0; i < n; i++)
     {
         char so[4096];
@@ -1010,8 +1097,7 @@ static bool ValidateUserSources(PicoHost *app)
 
 void PicoPlugins_Poll(PicoHost *app)
 {
-    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired() || app->reload_queued ||
-        app->workspace_change_queued)
+    if (!app || app->terminal_shutdown || PicoHost_ProcessRetired() || app->reload_queued)
     {
         return;
     }
@@ -1029,7 +1115,7 @@ void PicoPlugins_Poll(PicoHost *app)
     char paths[PICO_MAX_USER_PLUGINS][4096];
     time_t mtimes[PICO_MAX_USER_PLUGINS];
     uint64_t hashes[PICO_MAX_USER_PLUGINS];
-    int n = CollectSources(app, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS);
+    int n = CollectSources(app, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS, true);
 
     int user_count = 0;
     for (int i = 0; i < app->module_count; i++)
@@ -1285,8 +1371,7 @@ bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
         ok = PicoHost_SetExtensionDisabled(app, info.name, !enabled);
         if (ok)
         {
-            app->reload_queued = true;
-            PicoPlugins_Reload(app);
+            PicoHost_RequestHostReload(app);
         }
     }
     else

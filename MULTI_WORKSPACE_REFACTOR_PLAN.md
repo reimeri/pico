@@ -1,6 +1,6 @@
 # Multi-workspace main-agent refactor plan
 
-Status: Phase 7 implemented
+Status: Phase 8 implemented
 Audience: implementation team and reviewers  
 Scope owner: the developer integrating each phase
 
@@ -823,6 +823,8 @@ nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/buil
 
 ### Phase 8 — Remove obsolete workspace-switch behavior
 
+Status: complete (2026-08-29).
+
 Owner files:
 
 - `app/app.c`, `app/builtins/commands.c`, `app/main.c`
@@ -841,6 +843,15 @@ Acceptance:
 - `/cd` never destroys or pauses the old workspace.
 - Returning to an already-open canonical path reuses its workspace.
 - Existing work continues after selection moves elsewhere.
+
+Verification:
+
+```bash
+nix develop -c bash -lc 'cmake -S app --preset debug && cmake --build app/build/debug && ctest --test-dir app/build/debug --output-on-failure'
+nix develop -c bash -lc 'cmake -S app --preset release && cmake --build app/build/release && ctest --test-dir app/build/release --output-on-failure'
+```
+
+25/25 tests passed in Debug and Release presets. Whole-app workspace replacement is gone: `pending_workspace`, `workspace_change_queued`, `ApplyWorkspaceChange`, and `PicoWorkspace_AdoptInitial` are deleted. `/cd` and the folder picker call `PicoHost_ChangeWorkspace`, which canonicalizes, opens or reuses the target (`pico_workspace_open`), creates a main agent only if that workspace has none, selects a main agent there, and leaves the previous workspace open and accepting work. `/reload` and F5 call `PicoHost_RequestHostReload` (queued host-extension replacement applied on the next pump with no workspace quiescence wait) plus `pico_workspace_request_reload` on the command/selected agent's workspace only. Source-change `PicoPlugins_Reload` still compiles once, reloads host extensions, and independently rolls out each workspace. Closing a workspace remains backend-only via `pico_workspace_request_close`.
 
 ### Phase 9 — Documentation and cleanup
 

@@ -13,8 +13,6 @@ typedef enum PicoToolCallProgress {
 } PicoToolCallProgress;
 
 PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace);
-/* Rebind an unpublished idle agent after a staged workspace replacement. */
-void PicoAgent_RebindHost(PicoHost *app, PicoAgent *agent, PicoWorkspace *workspace);
 /* False when a worker was still running and had to be detached. */
 bool PicoAgent_Destroy(PicoAgent *agent);
 bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline);

@@ -67,4 +67,4 @@ The cwd is the workspace. `pico -h` lists flags. Sign in with `/login openai` / 
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 
-F5 and `/reload` reload extensions and profiles after all agent work is quiescent. Workspace changes use the same deferred barrier. Extension API: [`docs/extend/`](docs/extend/README.md).
+F5 and `/reload` reload host extensions and the selected workspace. `/cd` opens or selects a workspace without replacing the others. Extension API: [`docs/extend/`](docs/extend/README.md).

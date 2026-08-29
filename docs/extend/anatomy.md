@@ -62,8 +62,8 @@ The source directory is on the include path, so local headers next to the `.c` f
 
 ## Reload
 
-F5, `/reload`, toggling an extension in `/extensions`, or a `.c` content change (polled ~0.5s). Reload is **deferred** until every live/retired runtime, pending ask, offered catalog, event, and delegation job is quiescent. A queued reload prevents new turns and delegations. Each accepted turn retains one immutable registration generation; do not cache registration pointers beyond their documented callback lifetime.
+F5, `/reload`, toggling an extension in `/extensions`, or a `.c` content change (polled ~0.5s). Host-extension replacement compiles user-global (config) sources only; workspace-local `.c` files reload with that workspace. A compile failure in one workspace does not block host reload or another workspace. Workspace reload is **deferred** until that workspace's live/retired runtimes, pending asks, offered catalogs, events, and delegation jobs are quiescent. A queued workspace reload prevents new turns and delegations only in that workspace. Host-extension replacement happens between frames and does not wait for workspace workers. Each accepted turn retains one immutable registration generation; do not cache registration pointers beyond their documented callback lifetime.
 
-`/cd` queues a workspace transition behind the same barrier; the live workspace path is immutable and changes only when the old agent set can be replaced as one main-thread transition.
+`/cd` opens or selects a workspace. Relative paths resolve against the command agent's workspace. The previous workspace stays open; returning to an already-open canonical path reuses it. The workspace path is immutable after open.
 
 Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `prompt`, `diff`. `/extensions` or F2 lists them.

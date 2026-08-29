@@ -405,10 +405,7 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        CLAY_AUTO_ID({.layout = {.padding = {10, 0, 0, 0}}})
-        {
-            RenderGlyph("o", COLOR_MUTED);
-        }
+        RenderGlyph("o", COLOR_MUTED);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {

@@ -2845,10 +2845,12 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
                      .childGap = 6},
           .backgroundColor = COLOR_BG})
     {
+        /* Viewport panes take their parent's exact inner height. Vertical GROW
+         * can retain Clay's compression residue and feed it back while pinned. */
         CLAY(CLAY_ID("Body"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = 12,
-                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)}}})
         {
             if (app->view_count[PICO_SLOT_SIDEBAR] > 0)
             {
@@ -2856,7 +2858,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
                                  .padding = {8, 8, 8, 8},
-                                 .sizing = {.width = CLAY_SIZING_FIXED(200), .height = CLAY_SIZING_GROW(0)}},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(200), .height = CLAY_SIZING_PERCENT(1)}},
                       .backgroundColor = COLOR_CONTENT_BG,
                       .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {
@@ -2865,7 +2867,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
             }
             CLAY(CLAY_ID("RightColumn"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)},
                              .childGap = 6}})
             {
                 CLAY(CLAY_ID("MainColumn"),

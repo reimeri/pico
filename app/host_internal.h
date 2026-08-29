@@ -139,6 +139,7 @@ struct PicoHost {
 
     int reg_scope;
     PicoWorkspace *reg_workspace;
+    PicoWorkspace *reg_workspace_target;
     void *reg_state;
     PicoHostStaging staging;
 };
@@ -258,6 +259,8 @@ void PicoModule_Retain(PicoModuleGeneration *module);
 void PicoModule_Release(PicoModuleGeneration *module);
 
 void PicoHost_BeginRegistration(PicoHost *host, int scope, PicoWorkspace *workspace);
+void PicoHost_BeginWorkspaceRegistration(PicoHost *host, PicoWorkspace *workspace,
+                                         PicoWorkspace *target);
 void PicoHost_PublishRegistration(PicoHost *host, void *state);
 void PicoHost_DiscardRegistration(PicoHost *host);
 

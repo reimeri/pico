@@ -1643,6 +1643,256 @@ static int TestStagingRollbackOnFailedInit(void)
     return 0;
 }
 
+typedef struct ReloadOwnerState {
+    PicoWorkspace *workspace;
+} ReloadOwnerState;
+
+static int g_host_old_shutdowns;
+static int g_host_candidate_shutdowns;
+static int g_workspace_reload_inits;
+static int g_workspace_reload_shutdowns;
+static bool g_workspace_reload_command_ok;
+static bool g_workspace_reload_staging_isolated;
+static PicoWorkspace *g_expected_reload_workspace;
+static PicoRegistrationGeneration *g_expected_old_registration;
+
+static void ReloadHostCommand(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
+{
+    (void)host;
+    (void)agent_id;
+    (void)args;
+    (void)state;
+}
+
+static void OldHostShutdown(PicoHost *host, void *state)
+{
+    (void)host;
+    (void)state;
+    g_host_old_shutdowns++;
+}
+
+static int CandidateHostInit(PicoHost *host, void **state_out)
+{
+    int *state = (int *)malloc(sizeof(*state));
+    if (!state)
+    {
+        return -1;
+    }
+    *state = 42;
+    *state_out = state;
+    pico_host_add_command(host, "candidate_host_command", "candidate", ReloadHostCommand);
+    return 0;
+}
+
+static void CandidateHostShutdown(PicoHost *host, void *state)
+{
+    (void)host;
+    g_host_candidate_shutdowns++;
+    free(state);
+}
+
+static int FailingHostReloadInit(PicoHost *host, void **state_out)
+{
+    (void)host;
+    (void)state_out;
+    return -1;
+}
+
+static int TestFailedHostReloadPreservesLiveInstances(void)
+{
+    PicoHost host;
+    PicoModuleGeneration old_module;
+    PicoModuleGeneration candidates[2];
+    int old_state = 7;
+
+    memset(&host, 0, sizeof(host));
+    memset(&old_module, 0, sizeof(old_module));
+    memset(candidates, 0, sizeof(candidates));
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(&host);
+
+    old_module.ext.name = "old_host_extension";
+    old_module.ext.host_shutdown = OldHostShutdown;
+    old_module.ref_count = 1; /* active instance */
+    snprintf(host.host_plugins[0].name, sizeof(host.host_plugins[0].name), "%s",
+             old_module.ext.name);
+    host.host_plugins[0].state = &old_state;
+    host.host_plugins[0].module = &old_module;
+    host.host_plugins[0].initialized = true;
+    host.host_plugin_count = 1;
+    host.commands[0] = (PicoCommand){
+        .name = "old_host_command",
+        .host_run = ReloadHostCommand,
+        .state = &old_state,
+    };
+    host.command_count = 1;
+
+    /* Host-only reload must not clear workspace registrations either. */
+    workspace->commands[0] = (PicoCommand){.name = "workspace_sentinel"};
+    workspace->command_count = 1;
+
+    candidates[0].ext.name = "candidate_host_extension";
+    candidates[0].ext.host_init = CandidateHostInit;
+    candidates[0].ext.host_shutdown = CandidateHostShutdown;
+    candidates[0].desired = true;
+    candidates[0].ref_count = 1; /* module store */
+    candidates[1].ext.name = "failing_host_extension";
+    candidates[1].ext.host_init = FailingHostReloadInit;
+    candidates[1].desired = true;
+    candidates[1].ref_count = 1; /* module store */
+    host.modules = candidates;
+    host.module_count = 2;
+    host.module_capacity = 2;
+
+    g_host_old_shutdowns = 0;
+    g_host_candidate_shutdowns = 0;
+    bool reloaded = PicoHostExtensions_Reload(&host);
+    bool preserved = !reloaded && g_host_old_shutdowns == 0 &&
+                     g_host_candidate_shutdowns == 1 && host.host_plugin_count == 1 &&
+                     host.host_plugins[0].initialized &&
+                     host.host_plugins[0].module == &old_module &&
+                     host.host_plugins[0].state == &old_state && host.command_count == 1 &&
+                     host.commands[0].state == &old_state && workspace->command_count == 1 &&
+                     strcmp(workspace->commands[0].name, "workspace_sentinel") == 0;
+
+    PicoHostExtensions_Shutdown(&host);
+    for (int i = 0; i < 2; i++)
+    {
+        candidates[i].desired = false;
+        PicoModule_Release(&candidates[i]);
+    }
+    host.workspaces[0] = NULL;
+    host.workspace_count = 0;
+    PicoWorkspace_Free(workspace);
+
+    if (!preserved)
+    {
+        Fail("failed host reload must shut down only staged instances and restore live state");
+        return 1;
+    }
+    return 0;
+}
+
+static void ReloadWorkspaceCommand(PicoWorkspace *workspace, PicoAgentId agent_id,
+                                   const char *args, void *state)
+{
+    (void)agent_id;
+    (void)args;
+    ReloadOwnerState *owner = (ReloadOwnerState *)state;
+    g_workspace_reload_command_ok = workspace == g_expected_reload_workspace && owner &&
+                                    owner->workspace == g_expected_reload_workspace;
+}
+
+static int LiveWorkspaceReloadInit(PicoWorkspace *workspace, void **state_out)
+{
+    if (workspace != g_expected_reload_workspace)
+    {
+        return -1;
+    }
+    ReloadOwnerState *state = (ReloadOwnerState *)calloc(1, sizeof(*state));
+    if (!state)
+    {
+        return -1;
+    }
+    state->workspace = workspace;
+    *state_out = state;
+    g_workspace_reload_inits++;
+    bool old_visible = workspace->command_count == 1 &&
+                       workspace->commands[0].name &&
+                       strcmp(workspace->commands[0].name, "old_workspace_command") == 0 &&
+                       workspace->active_registration == g_expected_old_registration;
+    pico_workspace_add_command(workspace, "live_reload_command", "live owner",
+                               ReloadWorkspaceCommand);
+    g_workspace_reload_staging_isolated = old_visible && workspace->command_count == 1 &&
+                                          workspace->active_registration ==
+                                              g_expected_old_registration;
+    return 0;
+}
+
+static void LiveWorkspaceReloadShutdown(PicoWorkspace *workspace, void *state)
+{
+    ReloadOwnerState *owner = (ReloadOwnerState *)state;
+    if (workspace == g_expected_reload_workspace && owner && owner->workspace == workspace)
+    {
+        g_workspace_reload_shutdowns++;
+    }
+    free(owner);
+}
+
+static int TestWorkspaceReloadUsesLiveOwnerAndSettings(void)
+{
+    PicoHost host;
+    PicoModuleGeneration module;
+
+    memset(&host, 0, sizeof(host));
+    memset(&module, 0, sizeof(module));
+    PicoHost_SetPath(&host, ".");
+    host.safe_mode = true;
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(&host);
+    g_expected_reload_workspace = workspace;
+    g_workspace_reload_inits = 0;
+    g_workspace_reload_shutdowns = 0;
+    g_workspace_reload_command_ok = false;
+    g_workspace_reload_staging_isolated = false;
+
+    workspace->commands[0] = (PicoCommand){.name = "old_workspace_command"};
+    workspace->command_count = 1;
+    if (!PicoWorkspace_PublishRegistrationGeneration(workspace))
+    {
+        Fail("publish old workspace registration for reload staging test");
+        host.workspaces[0] = NULL;
+        host.workspace_count = 0;
+        PicoWorkspace_Free(workspace);
+        return 1;
+    }
+    g_expected_old_registration = workspace->active_registration;
+
+    module.ext.name = "live_reload_extension";
+    module.ext.workspace_init = LiveWorkspaceReloadInit;
+    module.ext.workspace_shutdown = LiveWorkspaceReloadShutdown;
+    module.desired = true;
+    module.ref_count = 1; /* module store */
+    host.modules = &module;
+    host.module_count = 1;
+    host.module_capacity = 1;
+
+    bool first = PicoWorkspace_Reload(workspace);
+    if (first && workspace->command_count == 1)
+    {
+        workspace->commands[0].workspace_run(workspace, 0, "",
+                                              workspace->commands[0].state);
+    }
+    bool live_owner = first && g_workspace_reload_inits == 1 &&
+                      g_workspace_reload_command_ok && g_workspace_reload_staging_isolated &&
+                      workspace->command_count == 1 &&
+                      workspace->commands[0].workspace == workspace;
+
+    snprintf(workspace->settings.disabled_extensions[0],
+             sizeof(workspace->settings.disabled_extensions[0]), "%s", module.ext.name);
+    workspace->settings.disabled_extension_count = 1;
+    bool second = PicoWorkspace_Reload(workspace);
+    bool disabled = second && g_workspace_reload_inits == 1 &&
+                    g_workspace_reload_shutdowns == 1 && workspace->command_count == 0 &&
+                    workspace->workspace_plugin_count == 1 &&
+                    !workspace->workspace_plugins[0].initialized;
+
+    PicoWorkspaceExtensions_Shutdown(workspace);
+    module.desired = false;
+    PicoModule_Release(&module);
+    host.workspaces[0] = NULL;
+    host.workspace_count = 0;
+    PicoWorkspace_Free(workspace);
+    g_expected_reload_workspace = NULL;
+    g_expected_old_registration = NULL;
+
+    if (!live_owner || !disabled)
+    {
+        Fail("workspace reload must initialize against the live owner and honor its disable settings");
+        return 1;
+    }
+    return 0;
+}
+
 static const char *kWorkspaceLocalWithHostExt =
     "#include \"pico/plugin.h\"\n"
     "#include <stdlib.h>\n"
@@ -3076,6 +3326,14 @@ int main(void)
         return 1;
     }
     if (TestStagingRollbackOnFailedInit() != 0)
+    {
+        return 1;
+    }
+    if (TestFailedHostReloadPreservesLiveInstances() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspaceReloadUsesLiveOwnerAndSettings() != 0)
     {
         return 1;
     }

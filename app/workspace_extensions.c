@@ -183,9 +183,10 @@ bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char 
     return false;
 }
 
-bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGeneration *module)
+static bool ActivateWorkspaceModule(PicoWorkspace *workspace, PicoWorkspace *target,
+                                    PicoModuleGeneration *module)
 {
-    if (!workspace || !module)
+    if (!workspace || !target || !module)
     {
         return false;
     }
@@ -195,17 +196,17 @@ bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGenera
     }
 
     PicoPluginSlot *slot = NULL;
-    for (int i = 0; i < workspace->workspace_plugin_count; i++)
+    for (int i = 0; i < target->workspace_plugin_count; i++)
     {
-        if (strcmp(workspace->workspace_plugins[i].name, module->ext.name) == 0)
+        if (strcmp(target->workspace_plugins[i].name, module->ext.name) == 0)
         {
-            slot = &workspace->workspace_plugins[i];
+            slot = &target->workspace_plugins[i];
             break;
         }
     }
-    if (!slot && workspace->workspace_plugin_count < PICO_MAX_EXTENSION_SLOTS)
+    if (!slot && target->workspace_plugin_count < PICO_MAX_EXTENSION_SLOTS)
     {
-        slot = &workspace->workspace_plugins[workspace->workspace_plugin_count++];
+        slot = &target->workspace_plugins[target->workspace_plugin_count++];
         memset(slot, 0, sizeof(*slot));
         snprintf(slot->name, sizeof(slot->name), "%s", module->ext.name);
     }
@@ -232,7 +233,7 @@ bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGenera
 
     void *state = NULL;
     PicoHost *host = workspace->host;
-    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    PicoHost_BeginWorkspaceRegistration(host, workspace, target);
     int rc = module->ext.workspace_init(workspace, &state);
     if (rc != 0)
     {
@@ -261,6 +262,11 @@ bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGenera
     PicoModule_Retain(module);
     PicoHost_PublishRegistration(host, state);
     return true;
+}
+
+bool PicoWorkspaceExtensions_Activate(PicoWorkspace *workspace, PicoModuleGeneration *module)
+{
+    return ActivateWorkspaceModule(workspace, workspace, module);
 }
 
 void PicoWorkspaceExtensions_ShutdownModule(PicoWorkspace *workspace, PicoModuleGeneration *module)
@@ -397,6 +403,123 @@ void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId
     }
 }
 
+typedef struct PicoWorkspaceExtensionSet {
+    uint64_t registration_generation;
+    PicoRegistrationGeneration *active_registration;
+    PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int view_count[PICO_SLOT_COUNT];
+    PicoEmptyView empty_views[PICO_MAX_EMPTY_VIEWS];
+    int empty_view_count;
+    PicoHookEntry hooks[PICO_MAX_HOOKS];
+    int hook_count;
+    PicoToolBeforeEntry tool_before_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_before_hook_count;
+    PicoToolAfterEntry tool_after_hooks[PICO_MAX_TOOL_HOOKS];
+    int tool_after_hook_count;
+    PicoLlmHookEntry llm_hooks[PICO_MAX_LLM_HOOKS];
+    int llm_hook_count;
+    PicoContextHookEntry context_hooks[PICO_MAX_CONTEXT_HOOKS];
+    int context_hook_count;
+    PicoToolRowEntry tool_row_hooks[PICO_MAX_TOOL_ROW_HOOKS];
+    int tool_row_hook_count;
+    PicoTool tools[PICO_MAX_TOOLS];
+    int tool_count;
+    PicoCommand commands[PICO_MAX_COMMANDS];
+    int command_count;
+    PicoCompleter completers[PICO_MAX_COMPLETERS];
+    int completer_count;
+    PicoProvider providers[PICO_MAX_PROVIDERS];
+    int provider_count;
+    PicoPluginSlot plugins[PICO_MAX_EXTENSION_SLOTS];
+    int plugin_count;
+} PicoWorkspaceExtensionSet;
+
+static void CaptureWorkspaceExtensionSet(const PicoWorkspace *workspace,
+                                         PicoWorkspaceExtensionSet *set)
+{
+    memset(set, 0, sizeof(*set));
+    set->registration_generation = workspace->registration_generation;
+    set->active_registration = workspace->active_registration;
+    memcpy(set->views, workspace->views, sizeof(set->views));
+    memcpy(set->view_count, workspace->view_count, sizeof(set->view_count));
+    memcpy(set->empty_views, workspace->empty_views, sizeof(set->empty_views));
+    set->empty_view_count = workspace->empty_view_count;
+    memcpy(set->hooks, workspace->hooks, sizeof(set->hooks));
+    set->hook_count = workspace->hook_count;
+    memcpy(set->tool_before_hooks, workspace->tool_before_hooks, sizeof(set->tool_before_hooks));
+    set->tool_before_hook_count = workspace->tool_before_hook_count;
+    memcpy(set->tool_after_hooks, workspace->tool_after_hooks, sizeof(set->tool_after_hooks));
+    set->tool_after_hook_count = workspace->tool_after_hook_count;
+    memcpy(set->llm_hooks, workspace->llm_hooks, sizeof(set->llm_hooks));
+    set->llm_hook_count = workspace->llm_hook_count;
+    memcpy(set->context_hooks, workspace->context_hooks, sizeof(set->context_hooks));
+    set->context_hook_count = workspace->context_hook_count;
+    memcpy(set->tool_row_hooks, workspace->tool_row_hooks, sizeof(set->tool_row_hooks));
+    set->tool_row_hook_count = workspace->tool_row_hook_count;
+    memcpy(set->tools, workspace->tools, sizeof(set->tools));
+    set->tool_count = workspace->tool_count;
+    memcpy(set->commands, workspace->commands, sizeof(set->commands));
+    set->command_count = workspace->command_count;
+    memcpy(set->completers, workspace->completers, sizeof(set->completers));
+    set->completer_count = workspace->completer_count;
+    memcpy(set->providers, workspace->providers, sizeof(set->providers));
+    set->provider_count = workspace->provider_count;
+    memcpy(set->plugins, workspace->workspace_plugins, sizeof(set->plugins));
+    set->plugin_count = workspace->workspace_plugin_count;
+}
+
+static void InstallWorkspaceExtensionSet(PicoWorkspace *workspace,
+                                         const PicoWorkspaceExtensionSet *set)
+{
+    memcpy(workspace->views, set->views, sizeof(workspace->views));
+    memcpy(workspace->view_count, set->view_count, sizeof(workspace->view_count));
+    memcpy(workspace->empty_views, set->empty_views, sizeof(workspace->empty_views));
+    workspace->empty_view_count = set->empty_view_count;
+    memcpy(workspace->hooks, set->hooks, sizeof(workspace->hooks));
+    workspace->hook_count = set->hook_count;
+    memcpy(workspace->tool_before_hooks, set->tool_before_hooks, sizeof(workspace->tool_before_hooks));
+    workspace->tool_before_hook_count = set->tool_before_hook_count;
+    memcpy(workspace->tool_after_hooks, set->tool_after_hooks, sizeof(workspace->tool_after_hooks));
+    workspace->tool_after_hook_count = set->tool_after_hook_count;
+    memcpy(workspace->llm_hooks, set->llm_hooks, sizeof(workspace->llm_hooks));
+    workspace->llm_hook_count = set->llm_hook_count;
+    memcpy(workspace->context_hooks, set->context_hooks, sizeof(workspace->context_hooks));
+    workspace->context_hook_count = set->context_hook_count;
+    memcpy(workspace->tool_row_hooks, set->tool_row_hooks, sizeof(workspace->tool_row_hooks));
+    workspace->tool_row_hook_count = set->tool_row_hook_count;
+    memcpy(workspace->tools, set->tools, sizeof(workspace->tools));
+    workspace->tool_count = set->tool_count;
+    memcpy(workspace->commands, set->commands, sizeof(workspace->commands));
+    workspace->command_count = set->command_count;
+    memcpy(workspace->completers, set->completers, sizeof(workspace->completers));
+    workspace->completer_count = set->completer_count;
+    memcpy(workspace->providers, set->providers, sizeof(workspace->providers));
+    workspace->provider_count = set->provider_count;
+    memcpy(workspace->workspace_plugins, set->plugins, sizeof(workspace->workspace_plugins));
+    workspace->workspace_plugin_count = set->plugin_count;
+    workspace->registration_generation = set->registration_generation;
+    workspace->active_registration = set->active_registration;
+}
+
+static void ShutdownWorkspaceSlots(PicoWorkspace *workspace, PicoPluginSlot *slots, int count)
+{
+    for (int i = count - 1; i >= 0; i--)
+    {
+        PicoPluginSlot *slot = &slots[i];
+        if (slot->initialized && slot->module)
+        {
+            if (slot->module->ext.workspace_shutdown)
+            {
+                slot->module->ext.workspace_shutdown(workspace, slot->state);
+            }
+            PicoModule_Release(slot->module);
+            slot->state = NULL;
+            slot->initialized = false;
+            slot->module = NULL;
+        }
+    }
+}
+
 bool PicoWorkspace_Reload(PicoWorkspace *workspace)
 {
     if (!workspace || (workspace->host && workspace->host->terminal_shutdown) ||
@@ -428,16 +551,22 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
 
     PicoPlugins_LoadWorkspaceSources(host, workspace);
 
+    PicoWorkspaceExtensionSet old;
+    CaptureWorkspaceExtensionSet(workspace, &old);
+
+    /* Registrations and instances are built in separate storage, while every
+     * init and shutdown callback receives the live owning workspace. */
     PicoWorkspace candidate;
     memset(&candidate, 0, sizeof(candidate));
     candidate.host = host;
     candidate.id = workspace->id;
-    snprintf(candidate.path, sizeof(candidate.path), "%s", workspace->path);
     candidate.state = workspace->state;
-
     candidate.registration_generation = workspace->registration_generation;
 
     bool staging_ok = true;
+    const char *failed_name = NULL;
+    uint64_t failed_generation = 0;
+    char failed_error[1024] = {0};
     for (int m = 0; m < host->module_count; m++)
     {
         if (workspace->state == PICO_WORKSPACE_CLOSING || workspace->state == PICO_WORKSPACE_CLOSED)
@@ -450,7 +579,6 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         {
             continue;
         }
-        /* Check if module is workspace-local to a different workspace */
         if (!mod->builtin && strstr(mod->source, "/.pico/extensions/"))
         {
             char ws_ext_dir[8192];
@@ -460,21 +588,17 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
                 continue;
             }
         }
-        if (!PicoWorkspaceExtensions_Activate(&candidate, mod))
+        if (!ActivateWorkspaceModule(workspace, &candidate, mod))
         {
             staging_ok = false;
-            /* Record error in workspace's plugin slot */
-            for (int i = 0; i < workspace->workspace_plugin_count; i++)
+            failed_name = mod->ext.name;
+            failed_generation = mod->generation;
+            for (int i = 0; i < candidate.workspace_plugin_count; i++)
             {
-                if (strcmp(workspace->workspace_plugins[i].name, mod->ext.name) == 0)
+                if (strcmp(candidate.workspace_plugins[i].name, mod->ext.name) == 0)
                 {
-                    workspace->workspace_plugins[i].desired_generation = mod->generation;
-                    if (candidate.workspace_plugin_count > 0)
-                    {
-                        snprintf(workspace->workspace_plugins[i].last_error,
-                                 sizeof(workspace->workspace_plugins[i].last_error),
-                                 "%s", candidate.workspace_plugins[candidate.workspace_plugin_count - 1].last_error);
-                    }
+                    snprintf(failed_error, sizeof(failed_error), "%s",
+                             candidate.workspace_plugins[i].last_error);
                     break;
                 }
             }
@@ -486,74 +610,20 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     {
         staging_ok = false;
     }
+    if (staging_ok && !candidate.active_registration)
+    {
+        staging_ok = PicoWorkspace_PublishRegistrationGeneration(&candidate);
+    }
 
     if (staging_ok)
     {
-        if (!candidate.active_registration)
-        {
-            PicoWorkspace_PublishRegistrationGeneration(&candidate);
-        }
-
-        if (workspace->state == PICO_WORKSPACE_CLOSING || workspace->state == PICO_WORKSPACE_CLOSED)
-        {
-            PicoWorkspaceExtensions_Shutdown(&candidate);
-            PicoWorkspace_RegistrationRelease(candidate.active_registration);
-            candidate.active_registration = NULL;
-            return false;
-        }
-
-        /* Publication succeeded! Atomically apply candidate to workspace */
-        PicoPluginSlot old_slots[PICO_MAX_EXTENSION_SLOTS];
-        int old_slot_count = workspace->workspace_plugin_count;
-        memcpy(old_slots, workspace->workspace_plugins, sizeof(old_slots));
-
-        /* Copy registrations into workspace */
-        memcpy(workspace->views, candidate.views, sizeof(workspace->views));
-        memcpy(workspace->view_count, candidate.view_count, sizeof(workspace->view_count));
-        memcpy(workspace->empty_views, candidate.empty_views, sizeof(workspace->empty_views));
-        workspace->empty_view_count = candidate.empty_view_count;
-        memcpy(workspace->hooks, candidate.hooks, sizeof(workspace->hooks));
-        workspace->hook_count = candidate.hook_count;
-        memcpy(workspace->tool_before_hooks, candidate.tool_before_hooks, sizeof(workspace->tool_before_hooks));
-        workspace->tool_before_hook_count = candidate.tool_before_hook_count;
-        memcpy(workspace->tool_after_hooks, candidate.tool_after_hooks, sizeof(workspace->tool_after_hooks));
-        workspace->tool_after_hook_count = candidate.tool_after_hook_count;
-        memcpy(workspace->llm_hooks, candidate.llm_hooks, sizeof(workspace->llm_hooks));
-        workspace->llm_hook_count = candidate.llm_hook_count;
-        memcpy(workspace->context_hooks, candidate.context_hooks, sizeof(workspace->context_hooks));
-        workspace->context_hook_count = candidate.context_hook_count;
-        memcpy(workspace->tool_row_hooks, candidate.tool_row_hooks, sizeof(workspace->tool_row_hooks));
-        workspace->tool_row_hook_count = candidate.tool_row_hook_count;
-        memcpy(workspace->tools, candidate.tools, sizeof(workspace->tools));
-        workspace->tool_count = candidate.tool_count;
-        memcpy(workspace->commands, candidate.commands, sizeof(workspace->commands));
-        workspace->command_count = candidate.command_count;
-        memcpy(workspace->completers, candidate.completers, sizeof(workspace->completers));
-        workspace->completer_count = candidate.completer_count;
-        memcpy(workspace->providers, candidate.providers, sizeof(workspace->providers));
-        workspace->provider_count = candidate.provider_count;
-        memcpy(workspace->workspace_plugins, candidate.workspace_plugins, sizeof(workspace->workspace_plugins));
-        workspace->workspace_plugin_count = candidate.workspace_plugin_count;
-
-        PicoRegistrationGeneration *old_reg = workspace->active_registration;
-        workspace->active_registration = candidate.active_registration;
+        PicoWorkspaceExtensionSet next;
+        CaptureWorkspaceExtensionSet(&candidate, &next);
+        InstallWorkspaceExtensionSet(workspace, &next);
         candidate.active_registration = NULL;
-        workspace->registration_generation = workspace->active_registration ? workspace->active_registration->id : candidate.registration_generation;
-        PicoWorkspace_RegistrationRelease(old_reg);
 
-        /* Shutdown old instances in reverse order */
-        for (int i = old_slot_count - 1; i >= 0; i--)
-        {
-            PicoPluginSlot *slot = &old_slots[i];
-            if (slot->initialized && slot->module)
-            {
-                if (slot->module->ext.workspace_shutdown)
-                {
-                    slot->module->ext.workspace_shutdown(workspace, slot->state);
-                }
-                PicoModule_Release(slot->module);
-            }
-        }
+        ShutdownWorkspaceSlots(workspace, old.plugins, old.plugin_count);
+        PicoWorkspace_RegistrationRelease(old.active_registration);
 
         PicoWorkspace_LoadProfiles(workspace);
         PicoWorkspace_RevalidateToolPolicies(workspace);
@@ -566,20 +636,34 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         return true;
     }
 
-    /* Staging failed: rollback candidate instances in reverse order */
-    for (int i = candidate.workspace_plugin_count - 1; i >= 0; i--)
+    ShutdownWorkspaceSlots(workspace, candidate.workspace_plugins,
+                           candidate.workspace_plugin_count);
+    PicoWorkspace_RegistrationClear(&candidate);
+
+    if (failed_name)
     {
-        PicoPluginSlot *slot = &candidate.workspace_plugins[i];
-        if (slot->initialized && slot->module)
+        PicoPluginSlot *slot = NULL;
+        for (int i = 0; i < workspace->workspace_plugin_count; i++)
         {
-            if (slot->module->ext.workspace_shutdown)
+            if (strcmp(workspace->workspace_plugins[i].name, failed_name) == 0)
             {
-                slot->module->ext.workspace_shutdown(&candidate, slot->state);
+                slot = &workspace->workspace_plugins[i];
+                break;
             }
-            PicoModule_Release(slot->module);
+        }
+        if (!slot && workspace->workspace_plugin_count < PICO_MAX_EXTENSION_SLOTS)
+        {
+            slot = &workspace->workspace_plugins[workspace->workspace_plugin_count++];
+            memset(slot, 0, sizeof(*slot));
+            snprintf(slot->name, sizeof(slot->name), "%s", failed_name);
+        }
+        if (slot)
+        {
+            slot->desired_generation = failed_generation;
+            snprintf(slot->last_error, sizeof(slot->last_error), "%s", failed_error);
         }
     }
-    PicoWorkspace_RegistrationClear(&candidate);
+
     PicoWorkspace_SetAcceptingWork(workspace, true);
     return false;
 }

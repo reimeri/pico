@@ -207,33 +207,87 @@ void *PicoHostExtensions_State(const PicoHost *host, const char *name)
     return NULL;
 }
 
-static void SaveHostRegistrations(const PicoHost *host, PicoHostStaging *saved)
+typedef struct PicoHostExtensionSet {
+    PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
+    int view_count[PICO_SLOT_COUNT];
+    PicoHookEntry hooks[PICO_MAX_HOOKS];
+    int hook_count;
+    PicoCommand commands[PICO_MAX_COMMANDS];
+    int command_count;
+    PicoCompleter completers[PICO_MAX_COMPLETERS];
+    int completer_count;
+    PicoAuth auths[PICO_MAX_AUTH];
+    int auth_count;
+    PicoPluginSlot plugins[PICO_MAX_EXTENSION_SLOTS];
+    int plugin_count;
+} PicoHostExtensionSet;
+
+static void CaptureHostExtensionSet(const PicoHost *host, PicoHostExtensionSet *set)
 {
-    memset(saved, 0, sizeof(*saved));
-    memcpy(saved->host_views, host->views, sizeof(saved->host_views));
-    memcpy(saved->host_view_count, host->view_count, sizeof(saved->host_view_count));
-    memcpy(saved->host_hooks, host->hooks, sizeof(saved->host_hooks));
-    saved->host_hook_count = host->hook_count;
-    memcpy(saved->host_commands, host->commands, sizeof(saved->host_commands));
-    saved->host_command_count = host->command_count;
-    memcpy(saved->host_completers, host->completers, sizeof(saved->host_completers));
-    saved->host_completer_count = host->completer_count;
-    memcpy(saved->host_auths, host->auths, sizeof(saved->host_auths));
-    saved->host_auth_count = host->auth_count;
+    memset(set, 0, sizeof(*set));
+    memcpy(set->views, host->views, sizeof(set->views));
+    memcpy(set->view_count, host->view_count, sizeof(set->view_count));
+    memcpy(set->hooks, host->hooks, sizeof(set->hooks));
+    set->hook_count = host->hook_count;
+    memcpy(set->commands, host->commands, sizeof(set->commands));
+    set->command_count = host->command_count;
+    memcpy(set->completers, host->completers, sizeof(set->completers));
+    set->completer_count = host->completer_count;
+    memcpy(set->auths, host->auths, sizeof(set->auths));
+    set->auth_count = host->auth_count;
+    memcpy(set->plugins, host->host_plugins, sizeof(set->plugins));
+    set->plugin_count = host->host_plugin_count;
 }
 
-static void RestoreHostRegistrations(PicoHost *host, const PicoHostStaging *saved)
+static void InstallHostExtensionSet(PicoHost *host, const PicoHostExtensionSet *set)
 {
-    memcpy(host->views, saved->host_views, sizeof(host->views));
-    memcpy(host->view_count, saved->host_view_count, sizeof(host->view_count));
-    memcpy(host->hooks, saved->host_hooks, sizeof(host->hooks));
-    host->hook_count = saved->host_hook_count;
-    memcpy(host->commands, saved->host_commands, sizeof(host->commands));
-    host->command_count = saved->host_command_count;
-    memcpy(host->completers, saved->host_completers, sizeof(host->completers));
-    host->completer_count = saved->host_completer_count;
-    memcpy(host->auths, saved->host_auths, sizeof(host->auths));
-    host->auth_count = saved->host_auth_count;
+    memcpy(host->views, set->views, sizeof(host->views));
+    memcpy(host->view_count, set->view_count, sizeof(host->view_count));
+    memcpy(host->hooks, set->hooks, sizeof(host->hooks));
+    host->hook_count = set->hook_count;
+    memcpy(host->commands, set->commands, sizeof(host->commands));
+    host->command_count = set->command_count;
+    memcpy(host->completers, set->completers, sizeof(host->completers));
+    host->completer_count = set->completer_count;
+    memcpy(host->auths, set->auths, sizeof(host->auths));
+    host->auth_count = set->auth_count;
+    memcpy(host->host_plugins, set->plugins, sizeof(host->host_plugins));
+    host->host_plugin_count = set->plugin_count;
+}
+
+static void ClearHostExtensionSet(PicoHost *host)
+{
+    memset(host->views, 0, sizeof(host->views));
+    memset(host->view_count, 0, sizeof(host->view_count));
+    memset(host->hooks, 0, sizeof(host->hooks));
+    host->hook_count = 0;
+    memset(host->commands, 0, sizeof(host->commands));
+    host->command_count = 0;
+    memset(host->completers, 0, sizeof(host->completers));
+    host->completer_count = 0;
+    memset(host->auths, 0, sizeof(host->auths));
+    host->auth_count = 0;
+    memset(host->host_plugins, 0, sizeof(host->host_plugins));
+    host->host_plugin_count = 0;
+}
+
+static void ShutdownHostSlots(PicoHost *host, PicoPluginSlot *slots, int count)
+{
+    for (int i = count - 1; i >= 0; i--)
+    {
+        PicoPluginSlot *slot = &slots[i];
+        if (slot->initialized && slot->module)
+        {
+            if (slot->module->ext.host_shutdown)
+            {
+                slot->module->ext.host_shutdown(host, slot->state);
+            }
+            PicoModule_Release(slot->module);
+            slot->state = NULL;
+            slot->initialized = false;
+            slot->module = NULL;
+        }
+    }
 }
 
 bool PicoHostExtensions_Reload(PicoHost *host)
@@ -242,13 +296,10 @@ bool PicoHostExtensions_Reload(PicoHost *host)
     {
         return false;
     }
-    PicoHostStaging saved;
-    SaveHostRegistrations(host, &saved);
-    PicoPluginSlot old_slots[PICO_MAX_EXTENSION_SLOTS];
-    int old_slot_count = host->host_plugin_count;
-    memcpy(old_slots, host->host_plugins, sizeof(old_slots));
 
-    pico_clear_registrations(host);
+    PicoHostExtensionSet old;
+    CaptureHostExtensionSet(host, &old);
+    ClearHostExtensionSet(host);
 
     bool ok = true;
     for (int m = 0; m < host->module_count; m++)
@@ -267,36 +318,15 @@ bool PicoHostExtensions_Reload(PicoHost *host)
 
     if (ok)
     {
-        for (int i = old_slot_count - 1; i >= 0; i--)
-        {
-            PicoPluginSlot *slot = &old_slots[i];
-            if (slot->initialized && slot->module)
-            {
-                if (slot->module->ext.host_shutdown)
-                {
-                    slot->module->ext.host_shutdown(host, slot->state);
-                }
-                PicoModule_Release(slot->module);
-            }
-        }
+        ShutdownHostSlots(host, old.plugins, old.plugin_count);
         return true;
     }
 
-    /* Rollback */
-    for (int i = host->host_plugin_count - 1; i >= 0; i--)
-    {
-        PicoPluginSlot *slot = &host->host_plugins[i];
-        if (slot->initialized && slot->module)
-        {
-            if (slot->module->ext.host_shutdown)
-            {
-                slot->module->ext.host_shutdown(host, slot->state);
-            }
-            PicoModule_Release(slot->module);
-        }
-    }
-    RestoreHostRegistrations(host, &saved);
-    memcpy(host->host_plugins, old_slots, sizeof(host->host_plugins));
-    host->host_plugin_count = old_slot_count;
+    /* Candidate instances are isolated in the cleared live slots. Roll back only
+     * those instances, then restore the untouched active set. */
+    ShutdownHostSlots(host, host->host_plugins, host->host_plugin_count);
+    ClearHostExtensionSet(host);
+    InstallHostExtensionSet(host, &old);
+    PicoHost_DiscardRegistration(host);
     return false;
 }

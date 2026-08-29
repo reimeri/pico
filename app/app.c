@@ -2841,7 +2841,7 @@ static Clay_RenderCommandArray CreateShellLayout(PicoHost *app, float delta_time
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                 .height = CLAY_SIZING_FIXED((float)GetScreenHeight())},
-                     .padding = {CONTENT_PADDING, 12, 16, 12},
+                     .padding = {12, 12, 12, 12},
                      .childGap = 6},
           .backgroundColor = COLOR_BG})
     {

@@ -533,6 +533,86 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
 static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index);
 static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws);
 
+typedef struct SidebarPin {
+    bool found;
+    PicoAgentId live_id;
+    int row_id;
+    const char *title;
+    const char *session_id;
+} SidebarPin;
+
+static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
+{
+    SidebarPin pin = {0};
+    PicoAgentInfo info;
+    int extras;
+    int j;
+    if (!host || !ws)
+    {
+        return pin;
+    }
+    extras = CountLiveExtras(host, ws);
+    for (j = 0; j < extras; j++)
+    {
+        PicoAgentId extra = LiveExtraAt(host, ws, j);
+        if (!pico_agent_find(host, extra, &info))
+        {
+            continue;
+        }
+        if (!SessionIsSelected(host, ws->path, info.session_id, extra))
+        {
+            continue;
+        }
+        pin.found = true;
+        pin.live_id = extra;
+        pin.row_id = SessionRowId(ws_index, j);
+        pin.title = info.session_id[0] ? "Untitled" : "New session";
+        pin.session_id = "";
+        return pin;
+    }
+    for (j = 0; j < ws->session_count; j++)
+    {
+        if (!SessionIsSelected(host, ws->path, ws->sessions[j].id, 0))
+        {
+            continue;
+        }
+        pin.found = true;
+        pin.live_id = 0;
+        pin.row_id = SessionRowId(ws_index, extras + j);
+        pin.title = ws->sessions[j].title;
+        pin.session_id = ws->sessions[j].id;
+        return pin;
+    }
+    return pin;
+}
+
+static void RenderPinnedSelected(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
+{
+    SidebarPin pin = FindSelectedSidebarRow(host, ws, ws_index);
+    if (!pin.found)
+    {
+        return;
+    }
+    RenderSessionRow(host, ws->path, pin.title, pin.session_id, pin.live_id, pin.row_id);
+}
+
+static bool OpenPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
+                               int ws_index)
+{
+    SidebarPin pin = FindSelectedSidebarRow(host, ws, ws_index);
+    if (!pin.found || !Clay_PointerOver(CLAY_IDI("SidebarSess", pin.row_id)))
+    {
+        return false;
+    }
+    if (pin.live_id)
+    {
+        SelectAgent(host, pin.live_id);
+        return true;
+    }
+    OpenCatalogSession(host, s, ws->path, pin.session_id);
+    return true;
+}
+
 static void RenderMoreLessLabel(Clay_ElementId id, Clay_String label)
 {
     bool hovered = Clay_PointerOver(id);
@@ -652,6 +732,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 RenderWorkspaceRow(host, ws, i);
                 if (ws->collapsed)
                 {
+                    RenderPinnedSelected(host, ws, i);
                     continue;
                 }
                 extras = CountLiveExtras(host, ws);
@@ -805,6 +886,10 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         }
         if (ws->collapsed)
         {
+            if (OpenPinnedSelected(host, s, ws, i))
+            {
+                return;
+            }
             continue;
         }
         extras = CountLiveExtras(host, ws);

@@ -13,6 +13,12 @@ repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 appdir="$build_dir/AppDir"
 linuxdeploy=${LINUXDEPLOY:-linuxdeploy-x86_64.AppImage}
 output="$output_dir/pico-${version}-linux-x86_64.AppImage"
+wayland_prefix=${PICO_APPIMAGE_WAYLAND_PREFIX:-}
+
+if [[ -n $wayland_prefix ]]; then
+    wayland_prefix=$(realpath "$wayland_prefix")
+    export PKG_CONFIG_PATH="$wayland_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
 
 if ! command -v "$linuxdeploy" >/dev/null 2>&1 && [[ ! -x "$linuxdeploy" ]]; then
     echo "linuxdeploy is unavailable: $linuxdeploy" >&2
@@ -65,6 +71,12 @@ for index in "${!required_modules[@]}"; do
         echo "could not read the $module runtime library SONAME" >&2
         exit 1
     fi
+    if [[ $module == wayland-client ]] &&
+        ! readelf --dyn-syms --wide "$library" | grep -w wl_fixes_interface >/dev/null; then
+        echo "Wayland 1.24 or newer is required for the AppImage runtime" >&2
+        echo "build it with packaging/appimage/build-wayland-runtime.sh and set PICO_APPIMAGE_WAYLAND_PREFIX" >&2
+        exit 1
+    fi
     target="$appdir/usr/lib/$soname"
     cp -L "$library" "$target"
     chmod u+w "$target"
@@ -74,15 +86,18 @@ done
 
 decor_libdir=$(pkg-config --variable=libdir libdecor-0)
 decor_plugins="$decor_libdir/libdecor/plugins-1"
-if [[ -d $decor_plugins ]]; then
-    install -d "$appdir/usr/lib/libdecor/plugins-1"
-    while IFS= read -r plugin; do
-        target="$appdir/usr/lib/libdecor/plugins-1/$(basename "$plugin")"
-        cp -L "$plugin" "$target"
-        chmod u+w "$target"
-        dependency_args+=(--deploy-deps-only "$target")
-    done < <(find "$decor_plugins" -maxdepth 1 -type f -name '*.so' -print | sort)
+mapfile -t decor_plugin_files < <(find "$decor_plugins" -maxdepth 1 -type f -name '*.so' -print 2>/dev/null | sort)
+if [[ ${#decor_plugin_files[@]} -eq 0 ]]; then
+    echo "could not locate a libdecor runtime plugin in $decor_plugins" >&2
+    exit 1
 fi
+install -d "$appdir/usr/lib/libdecor/plugins-1"
+for plugin in "${decor_plugin_files[@]}"; do
+    target="$appdir/usr/lib/libdecor/plugins-1/$(basename "$plugin")"
+    cp -L "$plugin" "$target"
+    chmod u+w "$target"
+    dependency_args+=(--deploy-deps-only "$target")
+done
 
 rm -f "$output"
 ARCH=x86_64 LDAI_OUTPUT="$output" LDAI_NO_APPSTREAM=1 \
@@ -100,6 +115,14 @@ for soname in "${required_sonames[@]}"; do
         exit 1
     fi
 done
+if ! readelf --dyn-syms --wide "$appdir/usr/lib/${required_sonames[0]}" | grep -w wl_fixes_interface >/dev/null; then
+    echo "AppImage Wayland runtime is older than 1.24" >&2
+    exit 1
+fi
+if ! find "$appdir/usr/lib/libdecor/plugins-1" -maxdepth 1 -type f -name '*.so' -print -quit | grep -q .; then
+    echo "AppImage is missing its libdecor runtime plugin" >&2
+    exit 1
+fi
 
 test -x "$output"
 APPIMAGE_EXTRACT_AND_RUN=1 "$output" --help >/dev/null 2>&1

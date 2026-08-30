@@ -27,13 +27,13 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential ninja-build pkg-config git curl patchelf file imagemagick \
+            build-essential ninja-build meson pkg-config git curl patchelf file imagemagick \
             appstream desktop-file-utils libfuse2 \
             libcurl4-openssl-dev libgl1-mesa-dev \
             libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev libxext-dev \
             libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
-            libxkbcommon-dev libwayland-dev wayland-protocols libffi-dev \
-            libdecor-0-dev libasound2-dev libpulse-dev
+            libxkbcommon-dev libwayland-dev wayland-protocols libffi-dev libexpat1-dev \
+            libdecor-0-dev libdecor-0-plugin-1-cairo libasound2-dev libpulse-dev
           python3 -m pip install --user --disable-pip-version-check "cmake==3.31.6"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -74,6 +74,13 @@ jobs:
           echo "$LINUXDEPLOY_SHA256  $RUNNER_TEMP/$asset" | sha256sum --check --strict -
           chmod +x "$RUNNER_TEMP/$asset"
           echo "LINUXDEPLOY=$RUNNER_TEMP/$asset" >> "$GITHUB_ENV"
+
+      - name: Build pinned Wayland runtime
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/pico-appimage-wayland"
+          packaging/appimage/build-wayland-runtime.sh "$runtime"
+          echo "PICO_APPIMAGE_WAYLAND_PREFIX=$runtime" >> "$GITHUB_ENV"
 
       - name: Build and smoke-test AppImage
         run: |

@@ -20,7 +20,7 @@ under `app/build/release/`.
 install under an AppDir and invokes `linuxdeploy`. It requires ImageMagick,
 `desktop-file-validate`, and an x86-64 linuxdeploy executable. Set
 `LINUXDEPLOY` when the executable is not named `linuxdeploy-x86_64.AppImage`.
-The script derives the 512x512 AppImage icon from `app/resources/logo.png` and explicitly bundles GLFW's dlopen-only Wayland, Xcursor, XKB, and libdecor dependencies.
+The script derives the 512x512 AppImage icon from `app/resources/logo.png` and explicitly bundles GLFW's dlopen-only Wayland, Xcursor, XKB, and libdecor dependencies. Build a pinned Wayland 1.24 runtime with `packaging/appimage/build-wayland-runtime.sh OUTPUT_DIR` and pass that new, non-existing directory as `PICO_APPIMAGE_WAYLAND_PREFIX`; this prevents an older bundled `libwayland-client` from breaking newer host EGL/Mesa drivers. The helper requires curl, Meson, Ninja, a C toolchain, pkg-config, libffi and Expat development files, binutils, tar, and sha256sum. A libdecor runtime plugin must also be installed on the packaging host.
 
 ## GitHub release
 

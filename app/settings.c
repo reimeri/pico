@@ -494,13 +494,6 @@ static bool SettingsFileExists(const char *path)
     return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static bool UserPreferencesPath(char *out, size_t cap)
-{
-    char dir[4096];
-    return Pico_ConfigDir(dir, sizeof(dir)) &&
-           PicoPath_Format(out, cap, "%s/host_preferences.json", dir);
-}
-
 static bool UserSettingsPath(char *out, size_t cap)
 {
     char dir[4096];
@@ -667,7 +660,7 @@ void PicoHostPreferences_Load(PicoHost *host)
     }
 
     char path[4096];
-    if (UserPreferencesPath(path, sizeof(path)))
+    if (UserSettingsPath(path, sizeof(path)))
     {
         size_t len = 0;
         char *src = Pico_ReadFile(path, &len);
@@ -1041,11 +1034,7 @@ static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode
     {
         return false;
     }
-    if (mode != 0600)
-    {
-        (void)fchmod(fd, mode);
-    }
-    bool ok = true;
+    bool ok = fchmod(fd, mode) == 0;
     for (size_t off = 0; ok && off < len;)
     {
         ssize_t n = write(fd, data + off, len - off);
@@ -1088,7 +1077,50 @@ static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode
 
 static bool WriteFile(const char *path, const char *data, size_t len)
 {
-    return AtomicWriteFile(path, data, len, 0666);
+    mode_t mode = 0600;
+    struct stat st;
+    if (path && stat(path, &st) == 0 && S_ISREG(st.st_mode))
+    {
+        mode = st.st_mode & 0777;
+    }
+    return AtomicWriteFile(path, data, len, mode);
+}
+
+static int SettingsLockAcquire(const char *settings_path)
+{
+    char lock_path[4102];
+    if (!settings_path ||
+        (size_t)snprintf(lock_path, sizeof(lock_path), "%s.lock", settings_path) >= sizeof(lock_path))
+    {
+        return -1;
+    }
+    int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    while (fcntl(fd, F_SETLKW, &lock) != 0)
+    {
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void SettingsLockRelease(int fd)
+{
+    if (fd >= 0)
+    {
+        close(fd);
+    }
 }
 
 static char *JsonQuoted(const char *s)
@@ -1215,7 +1247,7 @@ static bool InsertObjectKey(char **src, size_t *len, const JsonDoc *doc, int obj
     return true;
 }
 
-static bool PatchRootString(const char *path, const char *key, const char *value)
+static bool PatchRootStringUnlocked(const char *path, const char *key, const char *value)
 {
     size_t len = 0;
     char *src = Pico_ReadFile(path, &len);
@@ -1270,6 +1302,18 @@ static bool PatchRootString(const char *path, const char *key, const char *value
     return ok;
 }
 
+static bool PatchRootString(const char *path, const char *key, const char *value)
+{
+    int lock_fd = SettingsLockAcquire(path);
+    if (lock_fd < 0)
+    {
+        return false;
+    }
+    bool ok = PatchRootStringUnlocked(path, key, value);
+    SettingsLockRelease(lock_fd);
+    return ok;
+}
+
 static bool PatchTokSpan(char **src, size_t *len, const JsonDoc *doc, int tok, const char *json_value)
 {
     int start = JsonTokStart(doc, tok);
@@ -1289,7 +1333,7 @@ static bool PatchTokSpan(char **src, size_t *len, const JsonDoc *doc, int tok, c
     return true;
 }
 
-static bool PatchRootJson(const char *path, const char *key, const char *json_value)
+static bool PatchRootJsonUnlocked(const char *path, const char *key, const char *json_value)
 {
     if (!path || !key || !json_value)
     {
@@ -1346,6 +1390,18 @@ static bool PatchRootJson(const char *path, const char *key, const char *json_va
     return ok;
 }
 
+static bool PatchRootJson(const char *path, const char *key, const char *json_value)
+{
+    int lock_fd = SettingsLockAcquire(path);
+    if (lock_fd < 0)
+    {
+        return false;
+    }
+    bool ok = PatchRootJsonUnlocked(path, key, json_value);
+    SettingsLockRelease(lock_fd);
+    return ok;
+}
+
 static char *DisabledHostExtensionsJson(const PicoHostPreferences *p)
 {
     JsonBuf b;
@@ -1366,7 +1422,7 @@ static char *DisabledHostExtensionsJson(const PicoHostPreferences *p)
 static bool SaveDisabledHostExtensions(PicoHost *host)
 {
     char path[4096];
-    if (!UserPreferencesPath(path, sizeof(path)))
+    if (!UserSettingsPath(path, sizeof(path)))
     {
         return false;
     }
@@ -1545,7 +1601,7 @@ static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected
     JsonBuf_Putc(b, '}');
 }
 
-static bool PatchSelectedEffort(const char *path, PicoWorkspace *workspace, const PicoAgent *agent)
+static bool PatchSelectedEffortUnlocked(const char *path, PicoWorkspace *workspace, const PicoAgent *agent)
 {
     PicoModel *active = PicoSettings_ActiveModel(agent);
     if (!active)
@@ -1642,6 +1698,18 @@ static bool PatchSelectedEffort(const char *path, PicoWorkspace *workspace, cons
         ok = WriteFile(path, src, len);
     }
     free(src);
+    return ok;
+}
+
+static bool PatchSelectedEffort(const char *path, PicoWorkspace *workspace, const PicoAgent *agent)
+{
+    int lock_fd = SettingsLockAcquire(path);
+    if (lock_fd < 0)
+    {
+        return false;
+    }
+    bool ok = PatchSelectedEffortUnlocked(path, workspace, agent);
+    SettingsLockRelease(lock_fd);
     return ok;
 }
 

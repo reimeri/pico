@@ -57,7 +57,7 @@ static int TestScaleHelpers(void)
     return 0;
 }
 
-static int TestNonFiniteSetting(void)
+static int TestSettingsAndEnvironment(void)
 {
     char temp[] = "/tmp/pico-font-scale-XXXXXX";
     if (!mkdtemp(temp))
@@ -65,34 +65,56 @@ static int TestNonFiniteSetting(void)
         return Fail("could not create isolated settings directory");
     }
 
+    char config_dir[4096];
+    char settings_path[4096];
+    snprintf(config_dir, sizeof(config_dir), "%s/pico", temp);
+    snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(config_dir);
+    FILE *settings = fopen(settings_path, "w");
+    if (!settings)
+    {
+        rmdir(config_dir);
+        rmdir(temp);
+        return Fail("could not write settings.json");
+    }
+    fputs("{ \"font_scale\": 1.5 }\n", settings);
+    fclose(settings);
+
     PicoHost app;
     memset(&app, 0, sizeof(app));
     PicoHost_SetPath(&app, temp);
     setenv("XDG_CONFIG_HOME", temp, 1);
+    unsetenv("PICO_FONT_SCALE");
+    PicoHostPreferences_Load(&app);
+    int file_failed = app.preferences.font_scale != 1.5 || Pico_FontScale() != 1.5f;
+
     setenv("PICO_FONT_SCALE", "2.0", 1);
     PicoHostPreferences_Load(&app);
     int valid_failed = app.preferences.font_scale != 2.0 || Pico_FontScale() != 2.0f;
 
     setenv("PICO_FONT_SCALE", "nan", 1);
     PicoHostPreferences_Load(&app);
-    int non_finite_failed = app.preferences.font_scale != 1.0 || Pico_FontScale() != 1.0f;
+    int non_finite_failed = app.preferences.font_scale != 1.5 || Pico_FontScale() != 1.5f;
 
     unsetenv("PICO_FONT_SCALE");
     unsetenv("XDG_CONFIG_HOME");
-    char config_dir[4096];
-    snprintf(config_dir, sizeof(config_dir), "%s/pico", temp);
+    unlink(settings_path);
     rmdir(config_dir);
     rmdir(temp);
 
+    if (file_failed)
+    {
+        return Fail("settings.json font_scale was not applied");
+    }
     if (valid_failed)
     {
-        return Fail("valid setting was not applied");
+        return Fail("valid environment override was not applied");
     }
-    return non_finite_failed ? Fail("non-finite setting preserved the previous scale") : 0;
+    return non_finite_failed ? Fail("non-finite override did not keep the file setting") : 0;
 }
 
 int main(void)
 {
     int rc = TestScaleHelpers();
-    return rc != 0 ? rc : TestNonFiniteSetting();
+    return rc != 0 ? rc : TestSettingsAndEnvironment();
 }

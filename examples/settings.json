@@ -49,15 +49,19 @@
   // Overridden by PICO_RESUME_LAST.
   "resume_last": false,
 
-  // Multiplier for all UI text. 1.0 is current sizes. Restart to apply.
-  // Overridden by PICO_FONT_SCALE. Range 0.5-3.0.
+  // User-global only: multiplier for all UI text. 1.0 is current sizes.
+  // Overridden by PICO_FONT_SCALE. Range 0.5-3.0. Restart to apply.
   "font_scale": 1.0,
 
-  // Max chat/composer column width in characters (CSS ch, body font). Default 75.
-  // 0 = no cap. Range 40-200. Restart to apply.
-  "chat_width": 75,
+  // User-global only: max chat/composer column width in characters (CSS ch,
+  // body font). Default 90. 0 = no cap. Range 40-200. Restart to apply.
+  "chat_width": 90,
 
-  // Extension names for disabled extensions; `/extensions` or F2 toggles this.
+  // Host extension names disabled globally; `/extensions` or F2 updates this.
+  // Ignored in workspace .pico/settings.json.
+  // "disabled_host_extensions": ["footer"],
+
+  // Workspace extension names to disable; `/extensions` or F2 updates this.
   // The builtin "extensions" manager cannot be disabled.
   // "disabled_extensions": ["todos"]
 }

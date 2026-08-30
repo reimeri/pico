@@ -1652,8 +1652,11 @@ static int TestHostPluginIsolation(void)
     return 0;
 }
 
-static int TestHostPreferencesPersistence(void)
+static int TestHostSettingsPersistence(void)
 {
+    static const char legacy_settings[] =
+        "{\n  \"font_scale\": 2.0,\n  \"chat_width\": 100,\n"
+        "  \"disabled_host_extensions\": [\"footer\"]\n}\n";
     char cfg[] = "/tmp/pico-pref-cfg-XXXXXX";
     char cache[] = "/tmp/pico-pref-cache-XXXXXX";
     char ws_dir[] = "/tmp/pico-pref-ws-XXXXXX";
@@ -1665,11 +1668,34 @@ static int TestHostPreferencesPersistence(void)
     setenv("XDG_CONFIG_HOME", cfg, 1);
     setenv("XDG_CACHE_HOME", cache, 1);
 
+    char config_dir[512];
+    char settings_path[512];
+    char legacy_path[512];
+    snprintf(config_dir, sizeof(config_dir), "%s/pico", cfg);
+    snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", cfg);
+    snprintf(legacy_path, sizeof(legacy_path), "%s/pico/host_preferences.json", cfg);
+    Pico_MkdirP(config_dir);
+    if (WriteFile(settings_path, "{\n  \"model\": \"keep-me\"\n}\n") != 0 ||
+        WriteFile(legacy_path, legacy_settings) != 0 || chmod(settings_path, 0640) != 0)
+    {
+        Fail("write unified settings fixtures");
+        return 1;
+    }
+    unsetenv("PICO_FONT_SCALE");
+    unsetenv("PICO_CHAT_WIDTH");
+
     PicoHost *host = NULL;
     PicoWorkspaceId id = 0;
     if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
     {
         Fail("pref host init");
+        return 1;
+    }
+    if (host->preferences.font_scale != 1.0 || host->preferences.chat_width != 90 ||
+        host->preferences.disabled_host_extension_count != 0)
+    {
+        Fail("host_preferences.json must not be read");
+        pico_host_free(host);
         return 1;
     }
     if (pico_workspace_open(host, ws_dir, &id) != PICO_OK)
@@ -1705,11 +1731,23 @@ static int TestHostPreferencesPersistence(void)
         return 1;
     }
 
-    char pref_path[512];
-    snprintf(pref_path, sizeof(pref_path), "%s/pico/host_preferences.json", cfg);
-    if (access(pref_path, F_OK) != 0)
+    char settings_content[8192];
+    ReadFileStr(settings_path, settings_content, sizeof(settings_content));
+    struct stat settings_stat;
+    if (!strstr(settings_content, "disabled_host_extensions") || !strstr(settings_content, "footer") ||
+        !strstr(settings_content, "keep-me") || stat(settings_path, &settings_stat) != 0 ||
+        (settings_stat.st_mode & 0777) != 0640)
     {
-        Fail("disabling host plugin must write to host_preferences.json");
+        Fail("host plugin persistence must preserve unified settings content and mode");
+        pico_host_free(host);
+        return 1;
+    }
+
+    char legacy_content[1024];
+    ReadFileStr(legacy_path, legacy_content, sizeof(legacy_content));
+    if (strcmp(legacy_content, legacy_settings) != 0)
+    {
+        Fail("host_preferences.json must not be written");
         pico_host_free(host);
         return 1;
     }
@@ -4947,7 +4985,7 @@ int main(void)
     {
         return 1;
     }
-    if (TestHostPreferencesPersistence() != 0)
+    if (TestHostSettingsPersistence() != 0)
     {
         return 1;
     }

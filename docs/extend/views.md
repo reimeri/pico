@@ -59,7 +59,7 @@ Kinds:
 
 `z` sorts within a kind the same way as slots. Max 16 empty views total (`PICO_MAX_EMPTY_VIEWS`). Invalid kind is a silent no-op.
 
-ABOVE/BELOW sit in the same `chat_width` column as the cards (`host_preferences.json`, default 75 characters). REPLACE callbacks are children of `ChatContent` (that same column); you own the layout.
+ABOVE/BELOW sit in the same `chat_width` column as the cards (user-global `settings.json`, default 90 characters). REPLACE callbacks are children of `ChatContent` (that same column); you own the layout.
 
 Full file for a banner: [`../../examples/empty_banner.c`](../../examples/empty_banner.c).
 
@@ -91,7 +91,7 @@ static int CustomEmptyInit(PicoWorkspace *workspace, void **state_out)
 
 ## Contract
 
-- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`). `fontSize` values are design pixels; Pico multiplies them by `font_scale` from host preferences (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16`.
+- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`). `fontSize` values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16`.
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`). Those hooks are host-scoped.
 - Do not call Clay from a tool, provider, or workspace `on_frame` callback. Workspace `on_frame` runs for every `OPEN` or `RELOADING` workspace and must not draw.

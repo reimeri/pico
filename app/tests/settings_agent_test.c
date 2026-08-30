@@ -5,11 +5,13 @@
 #include "settings.h"
 #include "host_internal.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int Fail(const char *message)
@@ -134,13 +136,13 @@ static int TestDisabledExtensionsFromUserSettings(void)
     snprintf(dir, sizeof(dir), "%s/pico", temp);
     Pico_MkdirP(dir);
     char path[sizeof(temp) + 32];
-    snprintf(path, sizeof(path), "%s/pico/host_preferences.json", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
     FILE *f = fopen(path, "w");
     if (!f)
     {
         rmdir(dir);
         rmdir(temp);
-        return Fail("could not write isolated host_preferences.json");
+        return Fail("could not write isolated settings.json");
     }
     fputs("{\n  \"disabled_host_extensions\": [\"composer\"]\n}\n", f);
     fclose(f);
@@ -170,6 +172,103 @@ static int WriteFile(const char *path, const char *contents)
     fputs(contents, f);
     fclose(f);
     return 0;
+}
+
+static int TestConcurrentHostSettingsWritePreservesUpdate(void)
+{
+    char temp[] = "/tmp/pico-settings-lock-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create settings lock directory");
+    }
+    char dir[sizeof(temp) + 8];
+    char settings_path[sizeof(temp) + 32];
+    char lock_path[sizeof(temp) + 40];
+    snprintf(dir, sizeof(dir), "%s/pico", temp);
+    snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", temp);
+    snprintf(lock_path, sizeof(lock_path), "%s/pico/settings.json.lock", temp);
+    Pico_MkdirP(dir);
+    if (WriteFile(settings_path, "{\n  \"model\": \"before\"\n}\n"))
+    {
+        return Fail("could not write settings lock fixture");
+    }
+
+    int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    if (lock_fd < 0 || fcntl(lock_fd, F_SETLK, &lock) != 0)
+    {
+        if (lock_fd >= 0)
+        {
+            close(lock_fd);
+        }
+        return Fail("could not hold settings lock fixture");
+    }
+
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    int ready[2];
+    if (pipe(ready) != 0)
+    {
+        close(lock_fd);
+        return Fail("could not create settings lock gate");
+    }
+    pid_t child = fork();
+    if (child == 0)
+    {
+        close(ready[0]);
+        close(lock_fd);
+        PicoHost host;
+        memset(&host, 0, sizeof(host));
+        pthread_mutex_init(&host.settings_mu, NULL);
+        if (write(ready[1], "x", 1) != 1)
+        {
+            _exit(2);
+        }
+        close(ready[1]);
+        bool ok = PicoHost_SetExtensionDisabled(&host, "footer", true);
+        pthread_mutex_destroy(&host.settings_mu);
+        _exit(ok ? 0 : 3);
+    }
+    close(ready[1]);
+    char token = '\0';
+    int failed = child < 0 || read(ready[0], &token, 1) != 1;
+    close(ready[0]);
+    struct timespec delay = {.tv_sec = 0, .tv_nsec = 200000000L};
+    nanosleep(&delay, NULL);
+    int status = 0;
+    pid_t early = child > 0 ? waitpid(child, &status, WNOHANG) : -1;
+    if (early != 0)
+    {
+        failed = 1;
+    }
+    if (WriteFile(settings_path, "{\n  \"model\": \"after\"\n}\n"))
+    {
+        failed = 1;
+    }
+    close(lock_fd);
+    if (child > 0 && early == 0 &&
+        (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0))
+    {
+        failed = 1;
+    }
+
+    size_t len = 0;
+    char *saved = Pico_ReadFile(settings_path, &len);
+    if (!saved || !strstr(saved, "after") || !strstr(saved, "disabled_host_extensions") ||
+        !strstr(saved, "footer"))
+    {
+        failed = 1;
+    }
+    free(saved);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(lock_path);
+    unlink(settings_path);
+    rmdir(dir);
+    rmdir(temp);
+    return failed ? Fail("concurrent settings write lost an unrelated update") : 0;
 }
 
 static int TestCreatesUserSettingsFromBundledExample(void)
@@ -603,6 +702,11 @@ int main(void)
         return rc;
     }
     rc = TestDisabledExtensionsFromUserSettings();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestConcurrentHostSettingsWritePreservesUpdate();
     if (rc)
     {
         return rc;

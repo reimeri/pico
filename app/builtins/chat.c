@@ -643,6 +643,22 @@ static void RenderToolOutput(const TranscriptView *view, const char *output, flo
     }
 }
 
+static void RenderTitledToolBlock(const TranscriptView *view, const char *title, const char *body,
+                                  float available_width)
+{
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 2,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY_TEXT(ViewCStr(title),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                    .fontSize = PICO_FONT_CAPTION,
+                                    .textColor = COLOR_MUTED,
+                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        RenderToolOutput(view, body, available_width);
+    }
+}
+
 static void RenderThinkMarkdown(const TranscriptView *view, const char *text, float available_width)
 {
     if (!text || !text[0])
@@ -935,7 +951,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
                 /* Clay draws text after the layout pass, so the string must
                    outlive the frame; copy it into the per-frame label arena. */
-                RenderToolOutput(view, ThinkLabelDup(command), available_width);
+                RenderTitledToolBlock(view, "Command", ThinkLabelDup(command), available_width);
                 free(command);
             }
             const char *output = line->tool_output;
@@ -943,7 +959,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
                 output = ToolPendingLabel(view, line);
             }
-            RenderToolOutput(view, output, available_width);
+            RenderTitledToolBlock(view, "Output", output, available_width);
         }
     }
     ViewBreak(view);

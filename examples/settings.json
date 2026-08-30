@@ -8,44 +8,34 @@
   // Catalog used by /model and /effort. Workspace settings replace this array if present.
   // provider names a loaded LLM extension. base_url is optional; omit for the extension default.
   "models": [
-    {
-      "name": "Sol",
-      "id": "gpt-5.6-sol",
-      "provider": "openai",
-      "context_limit": 1000000,
-      // Enable @ image/audio attachments only when the model accepts multimodal input.
-      "vision": true,
-      "effort": ["none", "low", "medium", "high"],
-      "selected_effort": "medium"
-    },
+    // {
+    //   "name": "Sol",
+    //   "id": "gpt-5.6-sol",
+    //   "provider": "openai",
+    //   "context_limit": 1000000,
+    //   "vision": true,
+    //   "effort": ["none", "low", "medium", "high"],
+    //   "selected_effort": "medium"
+    // },
     // Charm Hyper examples. Authenticate with HYPER_API_KEY or `/login hyper`.
-    // Effort lists follow Hyper's /v1/models catalog; `none` omits reasoning.
-    {
-      "name": "DeepSeek V4 Pro",
-      "id": "deepseek-v4-pro",
-      "provider": "hyper",
-      "context_limit": 1000000,
-      "effort": ["none", "high", "xhigh"],
-      "selected_effort": "high"
-    },
-    {
-      "name": "GLM 5.1",
-      "id": "glm-5.1",
-      "provider": "hyper",
-      "context_limit": 200000,
-      "effort": ["none", "high"],
-      "selected_effort": "high"
-    },
+    // {
+    //   "name": "DeepSeek V4 Pro",
+    //   "id": "deepseek-v4-pro",
+    //   "provider": "hyper",
+    //   "context_limit": 1000000,
+    //   "effort": ["none", "high", "xhigh"],
+    //   "selected_effort": "high"
+    // },
     // xAI. Authenticate with XAI_API_KEY or `/login xai`.
-    {
-      "name": "Grok 4.6",
-      "id": "grok-4.6",
-      "provider": "xai",
-      "context_limit": 500000,
-      "effort": ["low", "medium", "high", "xhigh"],
-      "selected_effort": "high",
-      "vision": true
-    }
+    // {
+    //   "name": "Grok 4.6",
+    //   "id": "grok-4.6",
+    //   "provider": "xai",
+    //   "context_limit": 500000,
+    //   "effort": ["low", "medium", "high", "xhigh"],
+    //   "selected_effort": "high",
+    //   "vision": true
+    // }
   ],
 
   // Fallback when the selected model has no context_limit. Also set by PICO_CONTEXT_LIMIT.
@@ -67,7 +57,7 @@
   // 0 = no cap. Range 40-200. Restart to apply.
   "chat_width": 75
 
-  // Extension names to skip init/on_frame for. User settings only; `/extensions` or F2 toggles this.
+  // Extension names for disabled extensions; `/extensions` or F2 toggles this.
   // The builtin "extensions" manager cannot be disabled.
   // "disabled_extensions": ["todos"]
 }

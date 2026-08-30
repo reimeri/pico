@@ -20,10 +20,6 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 - Hot-reloadable C99 extensions (views, tools, commands, providers). Just ask the agent to build one
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 
-## Stack
-
-C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl. Build: CMake 3.27+, Ninja.
-
 ## Getting started
 
 ### 1. Install Pico
@@ -172,3 +168,7 @@ The process starts in the current directory as the first workspace. `/cd` opens 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 
 F5 and `/reload` reload host extensions and the selected workspace. `/cd` opens or selects a workspace without replacing the others. Extension API: [`docs/extend/`](docs/extend/README.md).
+
+## Stack
+
+C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl. Build: CMake 3.27+, Ninja.

@@ -34,9 +34,6 @@
 #define TRANSCRIPT_MESSAGE_GAP 8.0f
 #define TRANSCRIPT_OVERSCAN_VIEWPORTS 0.75f
 
-static const float kThinkBriefMaxSec = 10.0f;
-static const float kThinkDeepMaxSec = 60.0f;
-
 typedef struct ThinkLabelBlock {
     struct ThinkLabelBlock *next;
     size_t len;
@@ -515,16 +512,10 @@ static const char *ThoughtLabel(int think_ms)
     {
         return "Thought";
     }
-    float sec = (float)think_ms / 1000.0f;
-    if (sec < kThinkBriefMaxSec)
-    {
-        return "Thought briefly";
-    }
-    if (sec < kThinkDeepMaxSec)
-    {
-        return "Thought deeply";
-    }
-    return "Thought very deeply";
+    long sec = (think_ms + 500) / 1000;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Thought %lds", sec);
+    return ThinkLabelDup(buf);
 }
 
 static void FlattenSummary(const char *md, char *out, size_t cap)

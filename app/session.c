@@ -2705,7 +2705,13 @@ static void PathBasename(const char *path, char *out, size_t cap)
         snprintf(out, cap, "workspace");
         return;
     }
-    snprintf(out, cap, "%s", name);
+    size_t len = strlen(name);
+    if (len >= cap)
+    {
+        len = cap - 1;
+    }
+    memcpy(out, name, len);
+    out[len] = '\0';
 }
 
 static bool CanonicalWorkspacePath(const char *path, char *out, size_t cap)

@@ -9,19 +9,20 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 ## Features
 
 - Markdown chat UI, composer, and footer
-- Git working-tree indicator in the footer (`+adds -dels`) with a unified diff modal (Myers line diff; untracked files shown as fully added)
-- OpenAI-compatible models (API key or ChatGPT `/login openai`)
-- Charm Hyper (`HYPER_API_KEY` or `/login hyper`)
-- xAI (`XAI_API_KEY` or `/login xai`)
-- Workspace tools (`sh`), structured `ask_user` questionnaires, built-in agent TODO tracking, sessions, compaction
-- Concurrent main agents across multiple workspaces in one window; `/cd` opens or selects without replacing the others
-- Synchronous named-profile subagent delegation with exact session continuation
-- Hot-reloadable C99 extensions (views, tools, commands, providers)
+- Diff viewer
+- Native model support (api key or `/login {provider}`)
+  - OpenAI
+  - Charm Hyper
+  - xAI
+- By default agent gets just `sh` tool for reading, writing, and editing
+- Includes built-in extensions for questionnaires, TODO tracking, and subagents
+- Concurrent agents across multiple workspaces in one window
+- Hot-reloadable C99 extensions (views, tools, commands, providers). Just ask the agent to build one
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 
 ## Stack
 
-C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), libcurl. Build: CMake 3.27+, Ninja.
+C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl. Build: CMake 3.27+, Ninja.
 
 ## Install
 

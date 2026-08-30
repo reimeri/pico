@@ -508,6 +508,113 @@ static bool UserSettingsPath(char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/settings.json", dir);
 }
 
+static bool CreateFileIfAbsent(const char *path, const char *data, size_t len)
+{
+    struct stat st;
+    if (!path || !path[0] || !data)
+    {
+        return false;
+    }
+    if (lstat(path, &st) == 0)
+    {
+        return true;
+    }
+    if (errno != ENOENT)
+    {
+        return false;
+    }
+
+    char tmp[4096];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp))
+    {
+        return false;
+    }
+    int fd = mkstemp(tmp);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    bool ok = true;
+    for (size_t off = 0; ok && off < len;)
+    {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n <= 0)
+        {
+            ok = false;
+            break;
+        }
+        off += (size_t)n;
+    }
+    if (ok && fsync(fd) != 0)
+    {
+        ok = false;
+    }
+    if (close(fd) != 0)
+    {
+        ok = false;
+    }
+    if (!ok)
+    {
+        unlink(tmp);
+        return false;
+    }
+
+    if (link(tmp, path) != 0)
+    {
+        int saved_errno = errno;
+        unlink(tmp);
+        return saved_errno == EEXIST;
+    }
+    bool removed = unlink(tmp) == 0;
+
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash)
+    {
+        *slash = '\0';
+    }
+    else
+    {
+        snprintf(dir, sizeof(dir), ".");
+    }
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0)
+    {
+        return false;
+    }
+    bool synced = fsync(dfd) == 0;
+    if (close(dfd) != 0)
+    {
+        synced = false;
+    }
+    return removed && synced;
+}
+
+static void EnsureUserSettingsFile(void)
+{
+    char source[4096];
+    char destination[4096];
+    if (!Pico_DataPath("examples/settings.json", source, sizeof(source)) ||
+        !UserSettingsPath(destination, sizeof(destination)))
+    {
+        return;
+    }
+    size_t len = 0;
+    char *data = Pico_ReadFile(source, &len);
+    if (!data)
+    {
+        return;
+    }
+    (void)CreateFileIfAbsent(destination, data, len);
+    free(data);
+}
+
 static bool WorkspaceSettingsPath(const PicoWorkspace *workspace, char *out, size_t cap)
 {
     if (workspace && workspace->path[0])
@@ -556,6 +663,7 @@ void PicoHostPreferences_Load(PicoHost *host)
     if (Pico_ConfigDir(dir, sizeof(dir)))
     {
         Pico_MkdirP(dir);
+        EnsureUserSettingsFile();
     }
 
     char path[4096];

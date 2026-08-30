@@ -65,7 +65,7 @@ Submit, cancel, model, effort, session, and compaction APIs take an explicit age
 
 ## Settings and files
 
-Each workspace loads a resolved model catalog and execution defaults from user-global `~/.config/pico/settings.json` plus `<workspace>/.pico/settings.json`. Workspace settings (`PicoWorkspaceSettings`) are defaults for newly created main agents: default model, compact ratio, `resume_last`, `disabled_extensions`, and `context_limit_fallback`. Changing workspace defaults does not mutate an existing agent's model or effort.
+Each workspace loads a resolved model catalog and execution defaults from user-global `$XDG_CONFIG_HOME/pico/settings.json` (or `~/.config/pico/settings.json`) plus `<workspace>/.pico/settings.json`. On startup, Pico creates the user-global file from its bundled `examples/settings.json` only if the path is absent and leaves any existing file, symlink, or directory untouched. Workspace settings (`PicoWorkspaceSettings`) are defaults for newly created main agents: default model, compact ratio, `resume_last`, `disabled_extensions`, and `context_limit_fallback`. Changing workspace defaults does not mutate an existing agent's model or effort.
 
 `disabled_extensions` controls only workspace instances in that workspace. It never disables the module's host instance or its instances in another workspace.
 

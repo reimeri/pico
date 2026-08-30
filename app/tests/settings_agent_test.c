@@ -1,12 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "docs_path.h"
+#include "json.h"
 #include "settings.h"
 #include "host_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int Fail(const char *message)
@@ -169,6 +172,294 @@ static int WriteFile(const char *path, const char *contents)
     return 0;
 }
 
+static int TestCreatesUserSettingsFromBundledExample(void)
+{
+    static const char example[] = "{\n  // generated example\n  \"models\": []\n}\n";
+    char temp[] = "/tmp/pico-settings-create-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create settings bootstrap directory");
+    }
+
+    char data[sizeof(temp) + 8];
+    char examples[sizeof(temp) + 24];
+    char source[sizeof(temp) + 48];
+    char destination[sizeof(temp) + 48];
+    snprintf(data, sizeof(data), "%s/data", temp);
+    snprintf(examples, sizeof(examples), "%s/data/examples", temp);
+    snprintf(source, sizeof(source), "%s/data/examples/settings.json", temp);
+    snprintf(destination, sizeof(destination), "%s/config/pico/settings.json", temp);
+    Pico_MkdirP(examples);
+    if (WriteFile(source, example))
+    {
+        return Fail("could not write bundled settings fixture");
+    }
+
+    char config[sizeof(temp) + 16];
+    snprintf(config, sizeof(config), "%s/config", temp);
+    PicoHost app;
+    memset(&app, 0, sizeof(app));
+    setenv("XDG_CONFIG_HOME", config, 1);
+    Pico_DocsSetAppDir(data);
+    PicoHostPreferences_Load(&app);
+
+    size_t len = 0;
+    char *created = Pico_ReadFile(destination, &len);
+    int failed = !created || len != strlen(example) || memcmp(created, example, strlen(example)) != 0;
+    free(created);
+
+    Pico_DocsSetAppDir(NULL);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(destination);
+    unlink(source);
+    char config_pico[sizeof(temp) + 24];
+    snprintf(config_pico, sizeof(config_pico), "%s/config/pico", temp);
+    rmdir(config_pico);
+    rmdir(config);
+    rmdir(examples);
+    rmdir(data);
+    rmdir(temp);
+    return failed ? Fail("first startup did not copy the bundled settings example") : 0;
+}
+
+static int TestPreservesExistingUserSettings(void)
+{
+    static const char custom[] = "{\n  \"model\": \"keep-me\"\n}\n";
+    char temp[] = "/tmp/pico-settings-preserve-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create settings preservation directory");
+    }
+
+    char data[sizeof(temp) + 8];
+    char examples[sizeof(temp) + 24];
+    char source[sizeof(temp) + 48];
+    char config[sizeof(temp) + 16];
+    char config_pico[sizeof(temp) + 24];
+    char destination[sizeof(temp) + 48];
+    snprintf(data, sizeof(data), "%s/data", temp);
+    snprintf(examples, sizeof(examples), "%s/data/examples", temp);
+    snprintf(source, sizeof(source), "%s/data/examples/settings.json", temp);
+    snprintf(config, sizeof(config), "%s/config", temp);
+    snprintf(config_pico, sizeof(config_pico), "%s/config/pico", temp);
+    snprintf(destination, sizeof(destination), "%s/config/pico/settings.json", temp);
+    Pico_MkdirP(examples);
+    Pico_MkdirP(config_pico);
+    if (WriteFile(source, "{\n  \"models\": []\n}\n") || WriteFile(destination, custom))
+    {
+        return Fail("could not write settings preservation fixtures");
+    }
+
+    PicoHost app;
+    memset(&app, 0, sizeof(app));
+    setenv("XDG_CONFIG_HOME", config, 1);
+    Pico_DocsSetAppDir(data);
+    PicoHostPreferences_Load(&app);
+
+    size_t len = 0;
+    char *preserved = Pico_ReadFile(destination, &len);
+    int failed = !preserved || len != strlen(custom) || memcmp(preserved, custom, strlen(custom)) != 0;
+    free(preserved);
+
+    unlink(destination);
+    if (mkdir(destination, 0700) != 0)
+    {
+        return Fail("could not create existing settings directory fixture");
+    }
+    PicoHostPreferences_Load(&app);
+    struct stat st;
+    if (lstat(destination, &st) != 0 || !S_ISDIR(st.st_mode))
+    {
+        failed = 1;
+    }
+    rmdir(destination);
+
+    char target[sizeof(temp) + 48];
+    snprintf(target, sizeof(target), "%s/config/pico/custom.json", temp);
+    if (WriteFile(target, custom) || symlink(target, destination) != 0)
+    {
+        return Fail("could not create existing settings symlink fixture");
+    }
+    PicoHostPreferences_Load(&app);
+    preserved = Pico_ReadFile(target, &len);
+    if (lstat(destination, &st) != 0 || !S_ISLNK(st.st_mode) || !preserved ||
+        len != strlen(custom) || memcmp(preserved, custom, strlen(custom)) != 0)
+    {
+        failed = 1;
+    }
+    free(preserved);
+
+    Pico_DocsSetAppDir(NULL);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(destination);
+    unlink(target);
+    unlink(source);
+    rmdir(config_pico);
+    rmdir(config);
+    rmdir(examples);
+    rmdir(data);
+    rmdir(temp);
+    return failed ? Fail("startup replaced an existing user settings file") : 0;
+}
+
+static int TestMissingBundledSettingsIsNonFatal(void)
+{
+    char temp[] = "/tmp/pico-settings-missing-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create missing settings template directory");
+    }
+    char config[sizeof(temp) + 16];
+    char destination[sizeof(temp) + 48];
+    snprintf(config, sizeof(config), "%s/config", temp);
+    snprintf(destination, sizeof(destination), "%s/config/pico/settings.json", temp);
+
+    PicoHost app;
+    memset(&app, 0, sizeof(app));
+    setenv("XDG_CONFIG_HOME", config, 1);
+    Pico_DocsSetAppDir(temp);
+    PicoHostPreferences_Load(&app);
+
+    struct stat st;
+    int failed = lstat(destination, &st) == 0;
+    Pico_DocsSetAppDir(NULL);
+    unsetenv("XDG_CONFIG_HOME");
+    char config_pico[sizeof(temp) + 24];
+    snprintf(config_pico, sizeof(config_pico), "%s/config/pico", temp);
+    rmdir(config_pico);
+    rmdir(config);
+    rmdir(temp);
+    return failed ? Fail("missing bundled template created an invalid user settings file") : 0;
+}
+
+static void CreateSettingsInChild(int gate, const char *data)
+{
+    char token;
+    if (read(gate, &token, 1) != 1)
+    {
+        _exit(1);
+    }
+    close(gate);
+    Pico_DocsSetAppDir(data);
+    PicoHost app;
+    memset(&app, 0, sizeof(app));
+    PicoHostPreferences_Load(&app);
+    _exit(0);
+}
+
+static int TestConcurrentSettingsCreationPublishesOneCompleteTemplate(void)
+{
+    static const char first[] = "{\n  \"winner\": \"first\",\n  \"models\": []\n}\n";
+    static const char second[] = "{\n  \"winner\": \"second\",\n  \"models\": []\n}\n";
+    char temp[] = "/tmp/pico-settings-concurrent-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create concurrent settings directory");
+    }
+
+    char first_data[sizeof(temp) + 16];
+    char second_data[sizeof(temp) + 16];
+    char first_examples[sizeof(temp) + 32];
+    char second_examples[sizeof(temp) + 32];
+    char first_source[sizeof(temp) + 56];
+    char second_source[sizeof(temp) + 56];
+    char config[sizeof(temp) + 16];
+    char destination[sizeof(temp) + 48];
+    snprintf(first_data, sizeof(first_data), "%s/first", temp);
+    snprintf(second_data, sizeof(second_data), "%s/second", temp);
+    snprintf(first_examples, sizeof(first_examples), "%s/first/examples", temp);
+    snprintf(second_examples, sizeof(second_examples), "%s/second/examples", temp);
+    snprintf(first_source, sizeof(first_source), "%s/first/examples/settings.json", temp);
+    snprintf(second_source, sizeof(second_source), "%s/second/examples/settings.json", temp);
+    snprintf(config, sizeof(config), "%s/config", temp);
+    snprintf(destination, sizeof(destination), "%s/config/pico/settings.json", temp);
+    Pico_MkdirP(first_examples);
+    Pico_MkdirP(second_examples);
+    if (WriteFile(first_source, first) || WriteFile(second_source, second))
+    {
+        return Fail("could not write concurrent settings fixtures");
+    }
+
+    setenv("XDG_CONFIG_HOME", config, 1);
+    int gate[2];
+    if (pipe(gate) != 0)
+    {
+        return Fail("could not create concurrent settings gate");
+    }
+    pid_t a = fork();
+    if (a == 0)
+    {
+        close(gate[1]);
+        CreateSettingsInChild(gate[0], first_data);
+    }
+    pid_t b = fork();
+    if (b == 0)
+    {
+        close(gate[1]);
+        CreateSettingsInChild(gate[0], second_data);
+    }
+    close(gate[0]);
+    int failed = a < 0 || b < 0 || write(gate[1], "go", 2) != 2;
+    close(gate[1]);
+    int a_status = 0;
+    int b_status = 0;
+    if (a > 0 && (waitpid(a, &a_status, 0) != a || !WIFEXITED(a_status) || WEXITSTATUS(a_status) != 0))
+    {
+        failed = 1;
+    }
+    if (b > 0 && (waitpid(b, &b_status, 0) != b || !WIFEXITED(b_status) || WEXITSTATUS(b_status) != 0))
+    {
+        failed = 1;
+    }
+
+    size_t len = 0;
+    char *published = Pico_ReadFile(destination, &len);
+    bool is_first = published && len == strlen(first) && memcmp(published, first, len) == 0;
+    bool is_second = published && len == strlen(second) && memcmp(published, second, len) == 0;
+    if (!is_first && !is_second)
+    {
+        failed = 1;
+    }
+    free(published);
+
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(destination);
+    unlink(first_source);
+    unlink(second_source);
+    char config_pico[sizeof(temp) + 24];
+    snprintf(config_pico, sizeof(config_pico), "%s/config/pico", temp);
+    rmdir(config_pico);
+    rmdir(config);
+    rmdir(first_examples);
+    rmdir(second_examples);
+    rmdir(first_data);
+    rmdir(second_data);
+    rmdir(temp);
+    return failed ? Fail("concurrent startup did not publish one complete settings template") : 0;
+}
+
+static int TestBundledSettingsTemplateIsValid(void)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/examples/settings.json", PICO_SOURCE_ROOT);
+    size_t len = 0;
+    char *source = Pico_ReadFile(path, &len);
+    if (!source)
+    {
+        return Fail("could not read bundled settings template");
+    }
+    JsonStripComments(source, len);
+    JsonDoc doc;
+    int parsed = JsonParse(&doc, source, len);
+    bool valid = parsed == 0 && JsonIsArray(&doc, JsonObjGet(&doc, 0, "models"));
+    if (parsed == 0)
+    {
+        JsonFree(&doc);
+    }
+    free(source);
+    return valid ? 0 : Fail("bundled settings template is not valid JSONC with a models array");
+}
+
 static int ExpectSpan(const PicoPromptSpan *span, PicoPromptSource source, const char *text,
                       const char *want)
 {
@@ -312,6 +603,31 @@ int main(void)
         return rc;
     }
     rc = TestDisabledExtensionsFromUserSettings();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestCreatesUserSettingsFromBundledExample();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestPreservesExistingUserSettings();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestMissingBundledSettingsIsNonFatal();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestConcurrentSettingsCreationPublishesOneCompleteTemplate();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestBundledSettingsTemplateIsValid();
     if (rc)
     {
         return rc;

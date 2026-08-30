@@ -24,33 +24,117 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 
 C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl. Build: CMake 3.27+, Ninja.
 
-## Install
+## Getting started
 
-Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, and Raylib’s native deps (OpenGL, X11/Wayland, audio).
+### 1. Install Pico
 
-Debian/Ubuntu:
-
-```bash
-sudo apt install build-essential cmake ninja-build pkg-config git \
-  libcurl4-openssl-dev libgl1-mesa-dev libx11-dev libxcursor-dev \
-  libxinerama-dev libxi-dev libxrandr-dev libxkbcommon-dev \
-  libwayland-dev libasound2-dev
-```
-
-With Nix: `nix run github:reimeri/pico` installs and runs the packaged app. For development, use `nix develop` (or [direnv](https://direnv.net/) via `.envrc`). The flake exports `packages`, `apps`, and `checks` for `x86_64-linux` and `aarch64-linux`; the packaged app puts GCC on `PATH` so C extensions compile out of the box.
-
-Tagged releases provide an x86-64 AppImage and portable tar archive. The AppImage can be run directly:
+On x86-64 Linux, the easiest option is to download the AppImage from the **[latest GitHub release](https://github.com/reimeri/pico/releases/latest)**. Then run it from your download directory:
 
 ```bash
 chmod +x pico-*-linux-x86_64.AppImage
 ./pico-*-linux-x86_64.AppImage
 ```
 
-The tar archive uses a standard `bin/` + `share/` prefix. Extract it and run `bin/pico`, or install that tree under a prefix. Both release formats require a host `cc` compiler to build hot-reloadable C extensions.
+The release page also provides a portable `.tar.gz` archive. Extract it anywhere and run Pico from the extracted directory:
 
-## Build
+```bash
+tar -xzf pico-*-linux-x86_64.tar.gz
+cd pico-*-linux-x86_64
+./bin/pico
+```
 
-From the repo root. First configure fetches Raylib unless `FETCHCONTENT_SOURCE_DIR_RAYLIB` is set (Nix does this).
+A host C compiler (`cc`) is only needed if you want Pico to compile hot-reloadable C extensions. The release downloads do not bundle one.
+
+#### NixOS / Nix
+
+For a quick flake-based install into your user profile:
+
+```bash
+nix profile install github:reimeri/pico
+pico
+```
+
+Or try Pico without installing it:
+
+```bash
+nix run github:reimeri/pico
+```
+
+For a declarative NixOS install, add Pico as an input and package in your system flake (replace `hostname` with your configuration name):
+
+```nix
+{
+  inputs.pico.url = "github:reimeri/pico";
+
+  outputs = { nixpkgs, pico, ... }: {
+    nixosConfigurations.hostname = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        ({ pkgs, ... }: {
+          environment.systemPackages = [
+            pico.packages.${pkgs.system}.default
+          ];
+        })
+      ];
+    };
+  };
+}
+```
+
+Then apply the configuration:
+
+```bash
+sudo nixos-rebuild switch --flake .#hostname
+```
+
+The flake supports `x86_64-linux` and `aarch64-linux`. Its package includes GCC on `PATH`, so C extensions compile out of the box.
+
+### 2. Start Pico
+
+Run Pico from the project you want it to work on. Use the executable from the installation method you chose:
+
+```bash
+cd /path/to/your/project
+
+# Nix profile install
+pico
+
+# AppImage download
+/path/to/pico-*-linux-x86_64.AppImage
+
+# Portable archive
+/path/to/pico-*-linux-x86_64/bin/pico
+```
+
+On first launch, Pico automatically copies its bundled example to `~/.config/pico/settings.json` (or `$XDG_CONFIG_HOME/pico/settings.json`). It never replaces an existing settings file.
+
+Authenticate in Pico with `/login openai`, `/login hyper`, or `/login xai`. You can also provide `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY` in the environment.
+
+### 3. Add or customize models
+
+Open `~/.config/pico/settings.json`, add or uncomment the models you want to use, and set the top-level `model` value to one of their IDs. The generated example includes entries for OpenAI, Charm Hyper, and xAI. Restart Pico after editing so new workspaces load the updated model catalog.
+
+## Build from source
+
+Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
+
+Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential ninja-build meson pkg-config git curl python3-venv \
+  libcurl4-openssl-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
+  libxcb1-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
+  libxinerama-dev libxrandr-dev libxrender-dev libxkbcommon-dev \
+  libwayland-dev wayland-protocols libffi-dev libexpat1-dev \
+  libdecor-0-dev libasound2-dev libpulse-dev
+python3 -m venv "$HOME/.local/share/pico-build-tools"
+"$HOME/.local/share/pico-build-tools/bin/pip" install 'cmake>=3.27'
+export PATH="$HOME/.local/share/pico-build-tools/bin:$PATH"
+cmake --version
+```
+
+Ubuntu 22.04's repository CMake is too old, so the commands above install a current version in an isolated virtual environment. From the repo root, the first configure fetches Raylib unless `FETCHCONTENT_SOURCE_DIR_RAYLIB` is set. Nix users can enter the development environment with `nix develop` (or [direnv](https://direnv.net/) via `.envrc`).
 
 ```bash
 cmake -S app --preset debug && cmake --build app/build/debug
@@ -83,7 +167,7 @@ Development builds keep `pico`, `resources/`, `docs/`, `examples/`, `builtins/`,
 
 User extensions are compiled with `${PICO_CC:-cc}` against the packaged `sdk/include` tree and their own source directory. Release archives and AppImages intentionally do not bundle a compiler.
 
-The process starts in the current directory as the first workspace. `/cd` opens or selects another workspace without replacing the others. `pico -h` lists flags. Sign in with `/login openai` / `/login hyper` / `/login xai`, or `PICO_API_KEY` / `OPENAI_API_KEY` / `HYPER_API_KEY` / `XAI_API_KEY`.
+The process starts in the current directory as the first workspace. `/cd` opens or selects another workspace without replacing the others. `pico -h` lists flags.
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 

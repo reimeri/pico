@@ -55,7 +55,7 @@
 
   // Max chat/composer column width in characters (CSS ch, body font). Default 75.
   // 0 = no cap. Range 40-200. Restart to apply.
-  "chat_width": 75
+  "chat_width": 75,
 
   // Extension names for disabled extensions; `/extensions` or F2 toggles this.
   // The builtin "extensions" manager cannot be disabled.

@@ -466,6 +466,8 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src)
     pico_warnings_are_errors(pico_settings_agent_tests)
+    target_compile_definitions(pico_settings_agent_tests PRIVATE
+        PICO_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
     target_compile_options(pico_settings_agent_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_settings_agent_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_settings_agent_tests COMMAND pico_settings_agent_tests)

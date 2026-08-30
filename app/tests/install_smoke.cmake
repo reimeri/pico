@@ -30,6 +30,7 @@ foreach(required
         "${pico_exe}"
         "${data_dir}/resources/Roboto-Regular.ttf"
         "${data_dir}/docs/extend/README.md"
+        "${data_dir}/examples/settings.json"
         "${data_dir}/examples/hello.c"
         "${data_dir}/builtins/shell.c"
         "${sdk_dir}/pico/plugin.h"

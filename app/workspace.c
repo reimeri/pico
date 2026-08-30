@@ -87,7 +87,7 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     agent = PicoHost_FindAgent(host, id);
     if (agent)
     {
-        agent->unseen_complete = false;
+        PicoSession_SetUnseenComplete(host, agent, false);
     }
 }
 
@@ -657,7 +657,7 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
     {
         return false;
     }
-    agent->unseen_complete = false;
+    PicoSession_SetUnseenComplete(app, agent, false);
     if (app->selected_agent_id == id)
     {
         return true;

@@ -3,6 +3,7 @@
 
 #include "agent_internal.h"
 
+#include <stdint.h>
 #include <time.h>
 
 #define PICO_SESSION_TITLE_MAX_BYTES (72 * 4)
@@ -16,6 +17,12 @@ typedef struct PicoSessionInfo {
     char effort[PICO_EFFORT_LEN];
     PicoAgentKind kind;
     time_t mtime;
+    long mtime_nsec;
+    time_t ctime;
+    long ctime_nsec;
+    uint64_t inode;
+    uint64_t size;
+    bool unseen_complete;
 } PicoSessionInfo;
 
 #define PICO_CATALOG_NAME_MAX 128
@@ -28,6 +35,13 @@ typedef struct PicoCatalogSession {
     char model[128];
     char effort[PICO_EFFORT_LEN];
     time_t mtime;
+    long mtime_nsec;
+    time_t ctime;
+    long ctime_nsec;
+    uint64_t inode;
+    uint64_t size;
+    bool unseen_complete;
+    PicoAgentKind kind;
 } PicoCatalogSession;
 
 typedef struct PicoCatalogWorkspace {
@@ -43,7 +57,9 @@ typedef struct PicoCatalogWorkspace {
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
 /* Scan ~/.config/pico/sessions. jsonl files are authoritative for sessions.
  * Recovers missing .workspace.json from jsonl cwd. Omits entries whose path is
- * not an existing directory. Caller frees with PicoCatalog_Free. */
+ * not an existing directory. .workspace.json caches listing rows keyed by
+ * id plus the JSONL stat generation so unchanged jsonl is not re-parsed. Caller frees with
+ * PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
 int PicoCatalog_Ensure(const char *workspace_path);
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
@@ -107,5 +123,8 @@ PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agen
 PicoSessionWriteResult PicoSession_LogCustom(PicoHost *app, PicoAgent *agent,
                                              const char *ext, const char *data_json);
 PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title);
+PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent,
+                                                     bool complete);
+void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete);
 
 #endif

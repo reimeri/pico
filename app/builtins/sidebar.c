@@ -540,7 +540,7 @@ typedef enum SidebarDotKind {
 } SidebarDotKind;
 
 static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const char *session_id,
-                                     PicoAgentId live_id)
+                                     PicoAgentId live_id, bool catalog_unseen)
 {
     PicoAgent *agent;
     if (!live_id)
@@ -549,12 +549,12 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
     if (!live_id)
     {
-        return SIDEBAR_DOT_IDLE;
+        return catalog_unseen ? SIDEBAR_DOT_DONE : SIDEBAR_DOT_IDLE;
     }
     agent = PicoHost_FindAgent(host, live_id);
     if (!agent)
     {
-        return SIDEBAR_DOT_IDLE;
+        return catalog_unseen ? SIDEBAR_DOT_DONE : SIDEBAR_DOT_IDLE;
     }
     switch (agent->state)
     {
@@ -679,7 +679,8 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
 }
 
 static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *title,
-                             const char *session_id, PicoAgentId live_id, int row_id)
+                             const char *session_id, PicoAgentId live_id, int row_id,
+                             bool catalog_unseen)
 {
     bool selected = SessionIsSelected(host, ws_path, session_id, live_id);
     Clay_ElementId id = CLAY_IDI("SidebarSess", row_id);
@@ -692,7 +693,7 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderSessionDot(SessionDotKind(host, ws_path, session_id, live_id));
+        RenderSessionDot(SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen));
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {
@@ -714,6 +715,7 @@ typedef struct SidebarPin {
     int row_id;
     const char *title;
     const char *session_id;
+    bool unseen_complete;
 } SidebarPin;
 
 static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
@@ -743,6 +745,7 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
         pin.row_id = SessionRowId(ws_index, j);
         pin.title = info.session_id[0] ? "Untitled" : "New session";
         pin.session_id = "";
+        pin.unseen_complete = false;
         return pin;
     }
     for (j = 0; j < ws->session_count; j++)
@@ -756,6 +759,7 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
         pin.row_id = SessionRowId(ws_index, extras + j);
         pin.title = ws->sessions[j].title;
         pin.session_id = ws->sessions[j].id;
+        pin.unseen_complete = ws->sessions[j].unseen_complete;
         return pin;
     }
     return pin;
@@ -768,7 +772,8 @@ static void RenderPinnedSelected(PicoHost *host, const PicoCatalogWorkspace *ws,
     {
         return;
     }
-    RenderSessionRow(host, ws->path, pin.title, pin.session_id, pin.live_id, pin.row_id);
+    RenderSessionRow(host, ws->path, pin.title, pin.session_id, pin.live_id, pin.row_id,
+                     pin.unseen_complete);
 }
 
 static bool OpenPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
@@ -861,7 +866,7 @@ static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int
             break;
         }
         RenderSessionRow(host, ws->path, info.session_id[0] ? "Untitled" : "New session",
-                         info.session_id, info.id, SessionRowId(ws_index, extra));
+                         info.session_id, info.id, SessionRowId(ws_index, extra), false);
         extra++;
     }
 }
@@ -921,7 +926,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 for (j = 0; j < shown - extras && j < ws->session_count; j++)
                 {
                     RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id, 0,
-                                     SessionRowId(i, extras + j));
+                                     SessionRowId(i, extras + j), ws->sessions[j].unseen_complete);
                 }
                 RenderMoreLessRow(i, shown, total);
             }

@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utime.h>
 
 static char g_config_dir[4096];
 static int g_restored_value;
@@ -30,7 +31,13 @@ static char g_last_assistant_parts[4096];
 static const char *g_session_fail_stage;
 static int g_title_ready_fd = -1;
 static int g_title_continue_fd = -1;
+static int g_catalog_ready_fd = -1;
+static int g_catalog_continue_fd = -1;
 static int g_lock_attempt_fd = -1;
+static int g_scan_session_calls;
+
+static const PicoCatalogWorkspace *FindCatalogPath(PicoCatalogWorkspace *list, int n,
+                                                    const char *path);
 
 static bool TransferByte(int fd, bool write_byte)
 {
@@ -45,10 +52,22 @@ static bool TransferByte(int fd, bool write_byte)
 
 bool PicoSession_TestHook(const char *stage)
 {
+    if (stage && strcmp(stage, "scan_session_file") == 0)
+    {
+        g_scan_session_calls++;
+    }
     if (stage && strcmp(stage, "title_after_copy") == 0 &&
         g_title_ready_fd >= 0 && g_title_continue_fd >= 0)
     {
         if (!TransferByte(g_title_ready_fd, true) || !TransferByte(g_title_continue_fd, false))
+        {
+            return true;
+        }
+    }
+    if (stage && strcmp(stage, "catalog_before_upsert") == 0 &&
+        g_catalog_ready_fd >= 0 && g_catalog_continue_fd >= 0)
+    {
+        if (!TransferByte(g_catalog_ready_fd, true) || !TransferByte(g_catalog_continue_fd, false))
         {
             return true;
         }
@@ -978,6 +997,88 @@ static int TestConcurrentAppendDuringTitle(void)
     return ok ? 0 : Fail("title rewrite lost or corrupted a concurrent append");
 }
 
+static int TestConcurrentDoneCatalog(void)
+{
+    char ws[] = "/tmp/pico-done-race-XXXXXX";
+    PicoHost app;
+    PicoAgent agent;
+    PicoCatalogWorkspace *catalog = NULL;
+    const PicoCatalogWorkspace *found;
+    int catalog_n;
+    int ready[2];
+    int attempted[2];
+    int status = 0;
+    bool found_row = false;
+    bool catalog_done = false;
+    if (!mkdtemp(ws))
+    {
+        return Fail("done race workspace");
+    }
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    PicoHost_SetPath(&app, ws);
+    if (PicoSession_LogUser(&app, &agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
+        pipe(ready) != 0 || pipe(attempted) != 0)
+    {
+        unlink(agent.session_path);
+        return Fail("done race setup");
+    }
+    pid_t child = fork();
+    if (child < 0)
+    {
+        close(ready[0]); close(ready[1]); close(attempted[0]); close(attempted[1]);
+        unlink(agent.session_path);
+        return Fail("done race fork");
+    }
+    if (child == 0)
+    {
+        close(ready[1]);
+        close(attempted[0]);
+        if (!TransferByte(ready[0], false))
+        {
+            _exit(2);
+        }
+        close(ready[0]);
+        g_lock_attempt_fd = attempted[1];
+        PicoSessionWriteResult result = PicoSession_LogAssistant(
+            &app, &agent, 1, "concurrent ordinary append", NULL, NULL, NULL, NULL, 0);
+        close(attempted[1]);
+        _exit(result == PICO_SESSION_WRITE_OK ? 0 : 3);
+    }
+    close(ready[0]);
+    close(attempted[1]);
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = attempted[0];
+    PicoSessionWriteResult parent_result = PicoSession_LogUnseenComplete(&app, &agent, true);
+    g_catalog_ready_fd = -1;
+    g_catalog_continue_fd = -1;
+    close(ready[1]);
+    close(attempted[0]);
+    waitpid(child, &status, 0);
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (found)
+    {
+        for (int i = 0; i < found->session_count; i++)
+        {
+            if (strcmp(found->sessions[i].id, agent.session_id) == 0)
+            {
+                found_row = true;
+                catalog_done = found->sessions[i].unseen_complete;
+                break;
+            }
+        }
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    unlink(agent.session_path);
+    return parent_result == PICO_SESSION_WRITE_OK && WIFEXITED(status) &&
+                   WEXITSTATUS(status) == 0 && found_row && catalog_done
+               ? 0
+               : Fail("ordinary concurrent append overwrote the authoritative done state");
+}
+
 static bool HasRestoredThinkSummary(const PicoMessage *messages, int count, int think_ms)
 {
     for (int i = 0; i < count; i++)
@@ -1419,12 +1520,386 @@ static int TestCatalog(void)
     n = PicoCatalog_Scan(&list);
     found = FindCatalogPath(list, n, ws);
     if (!found || found->session_count < 1 || strcmp(found->sessions[0].id, "catalogsess") != 0 ||
-        strcmp(found->sessions[0].model, "changed-model") != 0)
+        strcmp(found->sessions[0].model, "overlay-model") != 0)
     {
         PicoCatalog_Free(list, n);
-        return Fail("jsonl model_change must win over overlay on scan");
+        return Fail("listing cache must trust overlay when the jsonl stat generation matches");
     }
     PicoCatalog_Free(list, n);
+    return 0;
+}
+
+static int TestCatalogListingCache(void)
+{
+    char ws[] = "/tmp/pico-catalog-cache-XXXXXX";
+    PicoCatalogWorkspace *list = NULL;
+    int n = 0;
+    const PicoCatalogWorkspace *found;
+    char key[4096];
+    char meta[4096];
+    char jsonl[4096];
+    char *raw = NULL;
+    size_t raw_len = 0;
+    struct stat st;
+    struct utimbuf times;
+    char *garbage = NULL;
+    const char *slash;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("catalog cache mkdtemp");
+    }
+    if (PicoCatalog_Ensure(ws) != 0)
+    {
+        return Fail("catalog cache ensure");
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("catalog cache scan missing workspace");
+    }
+    snprintf(key, sizeof(key), "%s", found->key);
+    PicoCatalog_Free(list, n);
+    if (!PicoPath_Format(meta, sizeof(meta), "%s/sessions/%s/.workspace.json", g_config_dir, key) ||
+        !PicoPath_Format(jsonl, sizeof(jsonl), "%s/sessions/%s/2026-01-01T00-00-00Z_cachesess.jsonl",
+                         g_config_dir, key))
+    {
+        return Fail("catalog cache paths");
+    }
+    {
+        FILE *f = fopen(jsonl, "wb");
+        if (!f)
+        {
+            return Fail("catalog cache jsonl write");
+        }
+        fprintf(f,
+                "{\"type\":\"session\",\"version\":4,\"id\":\"cachesess\","
+                "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n",
+                ws);
+        fclose(f);
+    }
+    if (!AppendRaw(jsonl, "{\"type\":\"message\",\"role\":\"user\",\"content\":\"cached title source\"}"))
+    {
+        return Fail("catalog cache jsonl message");
+    }
+
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    raw = Pico_ReadFile(meta, &raw_len);
+    if (!found || found->session_count != 1 || strcmp(found->sessions[0].id, "cachesess") != 0 ||
+        !strstr(found->sessions[0].title, "cached title source") || !raw ||
+        !strstr(raw, "cached title source") || !strstr(raw, "\"mtime_nsec\":") ||
+        !strstr(raw, "\"ctime_nsec\":") || !strstr(raw, "\"inode\":") ||
+        !strstr(raw, "\"size\":"))
+    {
+        free(raw);
+        PicoCatalog_Free(list, n);
+        return Fail("first scan must cache title and size in workspace.json");
+    }
+    free(raw);
+    PicoCatalog_Free(list, n);
+
+    g_scan_session_calls = 0;
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        !strstr(found->sessions[0].title, "cached title source") || g_scan_session_calls != 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("unchanged jsonl must use the listing cache without parsing");
+    }
+    PicoCatalog_Free(list, n);
+
+    if (stat(jsonl, &st) != 0)
+    {
+        return Fail("catalog cache stat");
+    }
+    garbage = (char *)malloc((size_t)st.st_size);
+    if (!garbage)
+    {
+        return Fail("catalog cache garbage alloc");
+    }
+    memset(garbage, 'x', (size_t)st.st_size);
+    if (st.st_size > 0)
+    {
+        garbage[st.st_size - 1] = '\n';
+    }
+    {
+        FILE *f = fopen(jsonl, "wb");
+        if (!f)
+        {
+            free(garbage);
+            return Fail("catalog cache rewrite");
+        }
+        if (fwrite(garbage, 1, (size_t)st.st_size, f) != (size_t)st.st_size)
+        {
+            fclose(f);
+            free(garbage);
+            return Fail("catalog cache rewrite bytes");
+        }
+        fclose(f);
+    }
+    free(garbage);
+    times.actime = st.st_atime;
+    times.modtime = st.st_mtime;
+    if (utime(jsonl, &times) != 0)
+    {
+        return Fail("catalog cache utime");
+    }
+
+    g_scan_session_calls = 0;
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        strstr(found->sessions[0].title, "cached title source") || g_scan_session_calls == 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("same-size rewrite with restored mtime must invalidate the listing cache");
+    }
+    PicoCatalog_Free(list, n);
+
+    if (!AppendRaw(jsonl, "x"))
+    {
+        return Fail("catalog cache size bump");
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        strstr(found->sessions[0].title, "cached title source"))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("size change must invalidate the listing cache");
+    }
+    PicoCatalog_Free(list, n);
+
+    {
+        FILE *f = fopen(jsonl, "wb");
+        if (!f)
+        {
+            return Fail("catalog cache subagent rewrite");
+        }
+        fprintf(f,
+                "{\"type\":\"session\",\"version\":4,\"id\":\"childsess\","
+                "\"kind\":\"subagent\",\"profile\":\"p\",\"initial_purpose\":\"t\","
+                "\"cwd\":\"%s\"}\n",
+                ws);
+        fclose(f);
+    }
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("subagent jsonl must stay omitted from parent listing");
+    }
+    PicoCatalog_Free(list, n);
+    slash = strrchr(ws, '/');
+    (void)slash;
+    return 0;
+}
+
+static int TestSessionListCompleteness(void)
+{
+    char ws[] = "/tmp/pico-list-complete-XXXXXX";
+    char key[4096];
+    char sessions_dir[4096];
+    PicoCatalogWorkspace *catalog = NULL;
+    const PicoCatalogWorkspace *found;
+    PicoSessionInfo *list = NULL;
+    PicoWorkspace workspace;
+    int catalog_n;
+    int listed_n;
+    bool found_child = false;
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0)
+    {
+        return Fail("complete listing setup");
+    }
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (!found)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("complete listing catalog workspace");
+    }
+    snprintf(key, sizeof(key), "%s", found->key);
+    PicoCatalog_Free(catalog, catalog_n);
+    if (!PicoPath_Format(sessions_dir, sizeof(sessions_dir), "%s/sessions/%s", g_config_dir, key))
+    {
+        return Fail("complete listing session directory");
+    }
+    for (int i = 0; i < PICO_MAX_CATALOG_SESSIONS + 4; i++)
+    {
+        char path[4096];
+        FILE *f;
+        if (!PicoPath_Format(path, sizeof(path), "%s/2026-01-01T00-00-%03dZ_list%03d.jsonl",
+                             sessions_dir, i, i))
+        {
+            return Fail("complete listing path");
+        }
+        f = fopen(path, "wb");
+        if (!f)
+        {
+            return Fail("complete listing file");
+        }
+        fprintf(f,
+                "{\"type\":\"session\",\"version\":4,\"id\":\"list%03d\","
+                "\"kind\":\"%s\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n",
+                i, i == PICO_MAX_CATALOG_SESSIONS + 3 ? "subagent" : "normal", ws);
+        fprintf(f,
+                "{\"type\":\"message\",\"role\":\"user\",\"content\":\"title-%03d\"}\n",
+                i);
+        if (i == PICO_MAX_CATALOG_SESSIONS + 3)
+        {
+            fprintf(f,
+                    "{\"type\":\"model_change\",\"model\":\"child-model\","
+                    "\"effort\":\"high\"}\n"
+                    "{\"type\":\"unseen_complete\",\"complete\":true}\n");
+        }
+        fclose(f);
+    }
+    memset(&workspace, 0, sizeof(workspace));
+    snprintf(workspace.path, sizeof(workspace.path), "%s", ws);
+    listed_n = PicoSession_List(&workspace, &list, false);
+    if (listed_n != PICO_MAX_CATALOG_SESSIONS + 4)
+    {
+        free(list);
+        return Fail("complete listing must return every session");
+    }
+    for (int i = 0; i < listed_n; i++)
+    {
+        if (!strstr(list[i].title, "title-"))
+        {
+            free(list);
+            return Fail("complete listing must derive every uncached title");
+        }
+        if (strcmp(list[i].id, "list259") == 0)
+        {
+            found_child = list[i].kind == PICO_AGENT_SUBAGENT &&
+                          strcmp(list[i].model, "child-model") == 0 &&
+                          strcmp(list[i].effort, "high") == 0 && list[i].unseen_complete;
+        }
+    }
+    free(list);
+    if (!found_child)
+    {
+        return Fail("complete listing must fully parse subagent events");
+    }
+    return 0;
+}
+
+static int TestUnseenCompleteRoundTrip(void)
+{
+    char wsdir[] = "/tmp/pico-unseen-ws-XXXXXX";
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    PicoAgent resumed;
+    PicoAgent ephemeral;
+    PicoSessionInfo *listed = NULL;
+    int listed_n;
+    PicoCatalogWorkspace *catalog = NULL;
+    int catalog_n;
+    const PicoCatalogWorkspace *found;
+    bool listed_done = false;
+    int i;
+
+    if (!mkdtemp(wsdir))
+    {
+        return Fail("unseen complete mkdtemp");
+    }
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    memset(&resumed, 0, sizeof(resumed));
+    memset(&ephemeral, 0, sizeof(ephemeral));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "%s", wsdir);
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
+    ephemeral.persistence = PICO_SESSION_EPHEMERAL;
+    if (PicoSession_LogUnseenComplete(&writer, &ephemeral, true) != PICO_SESSION_WRITE_SKIPPED)
+    {
+        return Fail("ephemeral unseen complete was not skipped");
+    }
+    if (PicoSession_LogUser(&writer, &writer_agent, "task", "task", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUnseenComplete(&writer, &writer_agent, true) != PICO_SESSION_WRITE_OK)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("unseen complete jsonl write");
+    }
+    listed_n = PicoSession_List(&writer_ws, &listed, true);
+    for (i = 0; i < listed_n; i++)
+    {
+        if (strcmp(listed[i].id, writer_agent.session_id) == 0)
+        {
+            listed_done = listed[i].unseen_complete;
+            break;
+        }
+    }
+    free(listed);
+    if (!listed_done)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("listing did not surface unseen complete");
+    }
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, wsdir);
+    if (!found || found->session_count < 1 || !found->sessions[0].unseen_complete)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        unlink(writer_agent.session_path);
+        return Fail("catalog scan did not surface unseen complete");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+
+    resumed.workspace = &writer_ws;
+    resumed.kind = PICO_AGENT_MAIN;
+    if (PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        !resumed.unseen_complete)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("replay must restore unseen complete");
+    }
+    PicoSession_Reset(&writer, &resumed);
+    if (resumed.unseen_complete)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("reset must clear unseen complete");
+    }
+    if (PicoSession_LogUnseenComplete(&writer, &writer_agent, false) != PICO_SESSION_WRITE_OK)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("unseen complete clear write");
+    }
+    memset(&resumed, 0, sizeof(resumed));
+    resumed.workspace = &writer_ws;
+    resumed.kind = PICO_AGENT_MAIN;
+    listed = NULL;
+    listed_done = false;
+    listed_n = PicoSession_List(&writer_ws, &listed, true);
+    for (i = 0; i < listed_n; i++)
+    {
+        if (strcmp(listed[i].id, writer_agent.session_id) == 0)
+        {
+            listed_done = listed[i].unseen_complete;
+            break;
+        }
+    }
+    free(listed);
+    if (listed_done || PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        resumed.unseen_complete)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("last unseen complete event must win");
+    }
+    unlink(writer_agent.session_path);
+    rmdir(wsdir);
     return 0;
 }
 
@@ -1849,7 +2324,10 @@ int main(void)
     if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
         TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
-        TestConcurrentAppendDuringTitle() != 0 || TestCatalog() != 0 ||
+        TestConcurrentAppendDuringTitle() != 0 || TestConcurrentDoneCatalog() != 0 ||
+        TestCatalog() != 0 ||
+        TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
+        TestUnseenCompleteRoundTrip() != 0 ||
         TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0)
     {
         return 1;

@@ -4698,6 +4698,185 @@ static int TestSelectClearsUnseenComplete(void)
     return 0;
 }
 
+static int TestUnseenCompletePersistsAcrossRestart(void)
+{
+    char dir[] = "/tmp/pico-ws-done-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-done-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId background = 0;
+    PicoAgentId resumed = 0;
+    PicoAgent *agent;
+    PicoCatalogWorkspace *catalog = NULL;
+    int catalog_n = 0;
+    const PicoCatalogWorkspace *found;
+    char session_id[40];
+    bool catalog_done = false;
+    int i;
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp persist done");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init persist done");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("create selected agent persist done");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, ws, &opt, &background) != PICO_OK || background == 0)
+    {
+        Fail("create background agent persist done");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    agent = PicoHost_FindAgent(host, background);
+    if (!agent || PicoSession_LogUser(host, agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_OK)
+    {
+        Fail("background persist write");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    snprintf(session_id, sizeof(session_id), "%s", agent->session_id);
+    PicoSession_SetUnseenComplete(host, agent, true);
+    pico_host_free(host);
+    host = NULL;
+
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = NULL;
+    for (i = 0; i < catalog_n; i++)
+    {
+        if (strcmp(catalog[i].path, dir) == 0)
+        {
+            found = &catalog[i];
+            break;
+        }
+    }
+    if (found)
+    {
+        for (i = 0; i < found->session_count; i++)
+        {
+            if (strcmp(found->sessions[i].id, session_id) == 0)
+            {
+                catalog_done = found->sessions[i].unseen_complete;
+                break;
+            }
+        }
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    if (!catalog_done)
+    {
+        Fail("catalog must show unseen complete after restart");
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("reinit persist done");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("placeholder selected agent persist done");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_RESUME;
+    opt.session_id = session_id;
+    opt.select = false;
+    if (pico_main_agent_create(host, ws, &opt, &resumed) != PICO_OK)
+    {
+        Fail("resume unseen complete");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    agent = PicoHost_FindAgent(host, resumed);
+    if (!agent || !agent->unseen_complete)
+    {
+        Fail("resume must restore unseen complete");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    if (!pico_agent_select(host, resumed) || agent->unseen_complete)
+    {
+        Fail("selecting a resumed session must clear unseen complete");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    pico_host_free(host);
+    catalog = NULL;
+    catalog_done = false;
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = NULL;
+    for (i = 0; i < catalog_n; i++)
+    {
+        if (strcmp(catalog[i].path, dir) == 0)
+        {
+            found = &catalog[i];
+            break;
+        }
+    }
+    if (found)
+    {
+        for (i = 0; i < found->session_count; i++)
+        {
+            if (strcmp(found->sessions[i].id, session_id) == 0)
+            {
+                catalog_done = found->sessions[i].unseen_complete;
+                break;
+            }
+        }
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    if (catalog_done)
+    {
+        Fail("cleared unseen complete must not remain after select");
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (TestBottomFollowShellGeometryStable() != 0)
@@ -4913,6 +5092,10 @@ int main(void)
         return 1;
     }
     if (TestSelectClearsUnseenComplete() != 0)
+    {
+        return 1;
+    }
+    if (TestUnseenCompletePersistsAcrossRestart() != 0)
     {
         return 1;
     }

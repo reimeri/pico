@@ -1205,6 +1205,25 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
     return PICO_SESSION_WRITE_OK;
 }
 
+PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
+{
+    (void)app;
+    if (agent)
+    {
+        agent->unseen_complete = complete;
+    }
+    return PICO_SESSION_WRITE_OK;
+}
+
+void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
+{
+    (void)app;
+    if (agent)
+    {
+        agent->unseen_complete = complete;
+    }
+}
+
 void PicoPlugins_Load(PicoHost *app)
 {
     if (app)

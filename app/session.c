@@ -15,12 +15,27 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+static bool CatalogMetaPath(const char *dir, char *out, size_t cap);
+static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out);
+static void CatalogClearSessions(PicoCatalogWorkspace *ws);
+static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
+                                                    const char *id);
+static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
+                                const char *title_override, const char *event_json,
+                                const struct stat *previous_stat);
+#ifdef PICO_SESSION_TEST_HOOKS
+extern bool PicoSession_TestHook(const char *stage);
+#endif
 
 static int EncodeCwd(const char *cwd, char *out, size_t cap)
 {
@@ -200,8 +215,11 @@ static void MakeTitle(char *out, size_t cap, const char *src)
     }
 }
 
-static void ScanSessionFile(const char *path, PicoSessionInfo *info)
+static void ScanSessionFile(const char *path, PicoSessionInfo *info, bool header_only)
 {
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("scan_session_file");
+#endif
     if (!info)
     {
         return;
@@ -211,6 +229,7 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info)
     info->model[0] = '\0';
     info->effort[0] = '\0';
     info->kind = PICO_AGENT_MAIN;
+    info->unseen_complete = false;
     FILE *f = fopen(path, "rb");
     if (!f)
     {
@@ -270,8 +289,14 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info)
                 snprintf(info->model, sizeof(info->model), "%s", model);
             }
             free(model);
+            if (header_only)
+            {
+                free(type);
+                JsonFree(&doc);
+                break;
+            }
         }
-        else if (type && strcmp(type, "message") == 0 && !got_title)
+        else if (!header_only && type && strcmp(type, "message") == 0 && !got_title)
         {
             char *role = JsonObjStr(&doc, 0, "role");
             if (role && strcmp(role, "user") == 0)
@@ -286,7 +311,7 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info)
             }
             free(role);
         }
-        else if (type && strcmp(type, "model_change") == 0)
+        else if (!header_only && type && strcmp(type, "model_change") == 0)
         {
             char *model = JsonObjStr(&doc, 0, "model");
             char *effort = JsonObjStr(&doc, 0, "effort");
@@ -301,6 +326,11 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info)
             free(model);
             free(effort);
         }
+        else if (!header_only && type && strcmp(type, "unseen_complete") == 0)
+        {
+            int tok = JsonObjGet(&doc, 0, "complete");
+            info->unseen_complete = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
+        }
         free(type);
         JsonFree(&doc);
     }
@@ -312,23 +342,110 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info)
     }
 }
 
-static int CmpMtimeDesc(const void *a, const void *b)
+typedef struct SessionListingRow {
+    PicoSessionInfo info;
+    bool cache_hit;
+} SessionListingRow;
+
+static long StatMtimeNsec(const struct stat *st)
 {
-    const PicoSessionInfo *x = (const PicoSessionInfo *)a;
-    const PicoSessionInfo *y = (const PicoSessionInfo *)b;
-    if (x->mtime > y->mtime)
+#if defined(__APPLE__)
+    return st ? st->st_mtimespec.tv_nsec : 0;
+#else
+    return st ? st->st_mtim.tv_nsec : 0;
+#endif
+}
+
+static long StatCtimeNsec(const struct stat *st)
+{
+#if defined(__APPLE__)
+    return st ? st->st_ctimespec.tv_nsec : 0;
+#else
+    return st ? st->st_ctim.tv_nsec : 0;
+#endif
+}
+
+static void CopyStatToInfo(PicoSessionInfo *info, const struct stat *st)
+{
+    if (!info || !st)
+    {
+        return;
+    }
+    info->mtime = st->st_mtime;
+    info->mtime_nsec = StatMtimeNsec(st);
+    info->ctime = st->st_ctime;
+    info->ctime_nsec = StatCtimeNsec(st);
+    info->inode = (uint64_t)st->st_ino;
+    info->size = (uint64_t)st->st_size;
+}
+
+static void CopyStatToCatalog(PicoCatalogSession *session, const struct stat *st)
+{
+    if (!session || !st)
+    {
+        return;
+    }
+    session->mtime = st->st_mtime;
+    session->mtime_nsec = StatMtimeNsec(st);
+    session->ctime = st->st_ctime;
+    session->ctime_nsec = StatCtimeNsec(st);
+    session->inode = (uint64_t)st->st_ino;
+    session->size = (uint64_t)st->st_size;
+}
+
+static bool CatalogGenerationMatches(const PicoCatalogSession *cached, const struct stat *st)
+{
+    return cached && st && cached->mtime == st->st_mtime &&
+           cached->mtime_nsec == StatMtimeNsec(st) && cached->ctime == st->st_ctime &&
+           cached->ctime_nsec == StatCtimeNsec(st) && cached->inode == (uint64_t)st->st_ino &&
+           cached->size == (uint64_t)st->st_size;
+}
+
+static int CmpListingMtimeDesc(const void *a, const void *b)
+{
+    const SessionListingRow *x = (const SessionListingRow *)a;
+    const SessionListingRow *y = (const SessionListingRow *)b;
+    if (x->info.mtime > y->info.mtime)
     {
         return -1;
     }
-    if (x->mtime < y->mtime)
+    if (x->info.mtime < y->info.mtime)
     {
         return 1;
     }
-    return strcmp(y->path, x->path);
+    if (x->info.mtime_nsec > y->info.mtime_nsec)
+    {
+        return -1;
+    }
+    if (x->info.mtime_nsec < y->info.mtime_nsec)
+    {
+        return 1;
+    }
+    return strcmp(y->info.path, x->info.path);
 }
 
-static int ListSessionsInDir(const char *dir, PicoSessionInfo **out, bool parents_only)
+static void CopyCacheToInfo(PicoSessionInfo *info, const PicoCatalogSession *cached,
+                            const struct stat *st)
 {
+    snprintf(info->id, sizeof(info->id), "%s", cached->id);
+    snprintf(info->title, sizeof(info->title), "%s", cached->title);
+    snprintf(info->model, sizeof(info->model), "%s", cached->model);
+    snprintf(info->effort, sizeof(info->effort), "%s", cached->effort);
+    info->kind = cached->kind;
+    CopyStatToInfo(info, st);
+    info->unseen_complete = cached->unseen_complete;
+}
+
+static int ListSessionsInDir(const char *dir, PicoSessionInfo **out, bool parents_only,
+                             const PicoCatalogWorkspace *cache, int max_results)
+{
+    SessionListingRow *rows = NULL;
+    PicoSessionInfo *list = NULL;
+    int n = 0;
+    int cap = 0;
+    int result_n;
+    struct dirent *ent;
+    DIR *d;
     if (out)
     {
         *out = NULL;
@@ -337,17 +454,16 @@ static int ListSessionsInDir(const char *dir, PicoSessionInfo **out, bool parent
     {
         return 0;
     }
-    DIR *d = opendir(dir);
+    d = opendir(dir);
     if (!d)
     {
         return 0;
     }
-    PicoSessionInfo *list = NULL;
-    int n = 0;
-    int cap = 0;
-    struct dirent *ent;
     while ((ent = readdir(d)))
     {
+        SessionListingRow *row;
+        const PicoCatalogSession *cached;
+        struct stat st;
         if (!IsSessionJsonl(ent->d_name))
         {
             continue;
@@ -355,29 +471,37 @@ static int ListSessionsInDir(const char *dir, PicoSessionInfo **out, bool parent
         if (n >= cap)
         {
             int next_cap = cap == 0 ? 8 : cap * 2;
-            PicoSessionInfo *next = (PicoSessionInfo *)realloc(list, (size_t)next_cap * sizeof(*list));
+            SessionListingRow *next =
+                (SessionListingRow *)realloc(rows, (size_t)next_cap * sizeof(*next));
             if (!next)
             {
                 break;
             }
-            list = next;
+            rows = next;
             cap = next_cap;
         }
-        PicoSessionInfo *s = &list[n];
-        memset(s, 0, sizeof(*s));
-        if (!PicoPath_Format(s->path, sizeof(s->path), "%s/%s", dir, ent->d_name))
+        row = &rows[n];
+        memset(row, 0, sizeof(*row));
+        if (!PicoPath_Format(row->info.path, sizeof(row->info.path), "%s/%s", dir, ent->d_name) ||
+            stat(row->info.path, &st) != 0 || !S_ISREG(st.st_mode))
         {
             continue;
         }
-        struct stat st;
-        if (stat(s->path, &st) != 0 || !S_ISREG(st.st_mode))
+        CopyStatToInfo(&row->info, &st);
+        IdFromName(ent->d_name, row->info.id, sizeof(row->info.id));
+        cached = CatalogFindSession(cache, row->info.id);
+        if (CatalogGenerationMatches(cached, &st))
         {
-            continue;
+            CopyCacheToInfo(&row->info, cached, &st);
+            row->cache_hit = true;
         }
-        s->mtime = st.st_mtime;
-        IdFromName(ent->d_name, s->id, sizeof(s->id));
-        ScanSessionFile(s->path, s);
-        if (!s->id[0] || (parents_only && s->kind == PICO_AGENT_SUBAGENT))
+        else
+        {
+            ScanSessionFile(row->info.path, &row->info, true);
+            CopyStatToInfo(&row->info, &st);
+        }
+        if (!row->info.id[0] ||
+            (parents_only && row->info.kind == PICO_AGENT_SUBAGENT))
         {
             continue;
         }
@@ -386,14 +510,52 @@ static int ListSessionsInDir(const char *dir, PicoSessionInfo **out, bool parent
     closedir(d);
     if (n > 1)
     {
-        qsort(list, (size_t)n, sizeof(*list), CmpMtimeDesc);
+        qsort(rows, (size_t)n, sizeof(*rows), CmpListingMtimeDesc);
     }
+    result_n = max_results > 0 && n > max_results ? max_results : n;
+    if (result_n > 0)
+    {
+        list = (PicoSessionInfo *)malloc((size_t)result_n * sizeof(*list));
+        if (!list)
+        {
+            free(rows);
+            return 0;
+        }
+    }
+    for (int i = 0; i < result_n; i++)
+    {
+        list[i] = rows[i].info;
+        if (!rows[i].cache_hit)
+        {
+            PicoSessionInfo parsed;
+            memset(&parsed, 0, sizeof(parsed));
+            snprintf(parsed.path, sizeof(parsed.path), "%s", rows[i].info.path);
+            snprintf(parsed.id, sizeof(parsed.id), "%s", rows[i].info.id);
+            ScanSessionFile(rows[i].info.path, &parsed, false);
+            parsed.mtime = rows[i].info.mtime;
+            parsed.mtime_nsec = rows[i].info.mtime_nsec;
+            parsed.ctime = rows[i].info.ctime;
+            parsed.ctime_nsec = rows[i].info.ctime_nsec;
+            parsed.inode = rows[i].info.inode;
+            parsed.size = rows[i].info.size;
+            if (!parsed.id[0])
+            {
+                snprintf(parsed.id, sizeof(parsed.id), "%s", rows[i].info.id);
+            }
+            list[i] = parsed;
+        }
+    }
+    free(rows);
     *out = list;
-    return n;
+    return result_n;
 }
 
 int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only)
 {
+    PicoCatalogWorkspace cache;
+    char dir[4096];
+    char meta[4096];
+    int n;
     if (out)
     {
         *out = NULL;
@@ -402,12 +564,18 @@ int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool
     {
         return 0;
     }
-    char dir[4096];
     if (!SessionDir(workspace, dir, sizeof(dir)))
     {
         return 0;
     }
-    return ListSessionsInDir(dir, out, parents_only);
+    memset(&cache, 0, sizeof(cache));
+    if (CatalogMetaPath(dir, meta, sizeof(meta)))
+    {
+        (void)CatalogLoadMeta(meta, &cache);
+    }
+    n = ListSessionsInDir(dir, out, parents_only, &cache, 0);
+    CatalogClearSessions(&cache);
+    return n;
 }
 
 static bool WriteAll(int fd, const char *data, size_t len)
@@ -431,8 +599,6 @@ static bool WriteAll(int fd, const char *data, size_t len)
 }
 
 #ifdef PICO_SESSION_TEST_HOOKS
-extern bool PicoSession_TestHook(const char *stage);
-
 static bool SessionTestFail(const char *stage)
 {
     if (PicoSession_TestHook(stage))
@@ -550,9 +716,12 @@ static bool SyncParentDir(const char *path)
     return ok;
 }
 
-static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t error_cap)
+static bool WriteLine(PicoHost *app, PicoAgent *agent, const char *json, bool write_catalog,
+                      char *error, size_t error_cap)
 {
     int failure = 0;
+    struct stat previous_stat;
+    bool have_previous_stat = false;
     int lock_fd = SessionLockAcquire(agent->session_path, error, error_cap);
     if (lock_fd < 0)
     {
@@ -567,6 +736,7 @@ static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t er
     else
     {
         original_size = lseek(fd, 0, SEEK_END);
+        have_previous_stat = fstat(fd, &previous_stat) == 0;
         size_t len = strlen(json);
         if (SessionTestFail("append_write") || !WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) ||
             fsync(fd) != 0)
@@ -582,6 +752,11 @@ static bool WriteLine(PicoAgent *agent, const char *json, char *error, size_t er
         {
             failure = errno ? errno : EIO;
         }
+    }
+    if (failure == 0 && write_catalog)
+    {
+        CatalogWriteThrough(app, agent, NULL, json,
+                            have_previous_stat ? &previous_stat : NULL);
     }
     SessionLockRelease(lock_fd);
     if (failure != 0 && error && error_cap > 0)
@@ -695,7 +870,7 @@ static int CreateNew(PicoHost *app, PicoAgent *agent)
         return -1;
     }
     char error[256] = {0};
-    bool wrote = WriteLine(agent, line, error, sizeof(error));
+    bool wrote = WriteLine(app, agent, line, false, error, sizeof(error));
     free(line);
     if (!wrote)
     {
@@ -729,7 +904,7 @@ static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const 
         return PICO_SESSION_WRITE_FAILED;
     }
     char error[256] = {0};
-    if (!WriteLine(agent, json, error, sizeof(error)))
+    if (!WriteLine(app, agent, json, true, error, sizeof(error)))
     {
         PersistenceFailed(app, agent, error);
         return PICO_SESSION_WRITE_FAILED;
@@ -1047,6 +1222,11 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         PicoSettings_SyncAgent(agent);
         free(model);
         free(effort);
+    }
+    else if (strcmp(type, "unseen_complete") == 0)
+    {
+        int tok = JsonObjGet(doc, obj, "complete");
+        agent->unseen_complete = JsonEq(doc, tok, "true") || JsonEq(doc, tok, "1");
     }
     free(type);
 }
@@ -1932,6 +2112,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     }
     agent->session_id[0] = '\0';
     agent->session_path[0] = '\0';
+    agent->unseen_complete = false;
 }
 
 PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent,
@@ -2341,6 +2522,8 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
     }
 
     int failure = 0;
+    struct stat previous_stat;
+    bool have_previous_stat = stat(agent->session_path, &previous_stat) == 0;
     bool renamed = false;
     FILE *src = NULL;
     char *header = NULL;
@@ -2448,6 +2631,11 @@ done:
     {
         unlink(tmp_path);
     }
+    if (failure == 0)
+    {
+        CatalogWriteThrough(app, agent, title, NULL,
+                            have_previous_stat ? &previous_stat : NULL);
+    }
     SessionLockRelease(lock_fd);
     if (failure != 0)
     {
@@ -2455,6 +2643,39 @@ done:
         return PICO_SESSION_WRITE_FAILED;
     }
     return PICO_SESSION_WRITE_OK;
+}
+
+PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
+{
+    char *pre;
+    JsonBuf b;
+    char *line;
+    PicoSessionWriteResult result;
+    if (agent)
+    {
+        agent->unseen_complete = complete;
+    }
+    pre = EventPrefix("unseen_complete");
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    JsonBuf_Puts(&b, ",\"complete\":");
+    JsonBuf_Bool(&b, complete);
+    JsonBuf_Putc(&b, '}');
+    line = JsonBuf_Steal(&b);
+    result = AppendLine(app, agent, line);
+    free(line);
+    free(pre);
+    return result;
+}
+
+void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
+{
+    if (!agent || agent->unseen_complete == complete)
+    {
+        return;
+    }
+    agent->unseen_complete = complete;
+    (void)PicoSession_LogUnseenComplete(app, agent, complete);
 }
 
 static bool SessionsRoot(char *out, size_t cap)
@@ -2533,6 +2754,31 @@ static bool CatalogDirForPath(const char *workspace_path, char *out, size_t cap)
 static bool CatalogMetaPath(const char *dir, char *out, size_t cap)
 {
     return PicoPath_Format(out, cap, "%s/.workspace.json", dir);
+}
+
+static pthread_mutex_t g_catalog_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int CatalogLockAcquire(const char *dir)
+{
+    char meta[4096];
+    char error[256];
+    int fd;
+    if (!CatalogMetaPath(dir, meta, sizeof(meta)) || pthread_mutex_lock(&g_catalog_mutex) != 0)
+    {
+        return -1;
+    }
+    fd = SessionLockAcquire(meta, error, sizeof(error));
+    if (fd < 0)
+    {
+        pthread_mutex_unlock(&g_catalog_mutex);
+    }
+    return fd;
+}
+
+static void CatalogLockRelease(int fd)
+{
+    SessionLockRelease(fd);
+    pthread_mutex_unlock(&g_catalog_mutex);
 }
 
 static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
@@ -2627,20 +2873,41 @@ static char *CatalogSerialize(const PicoCatalogWorkspace *ws)
     for (i = 0; i < ws->session_count; i++)
     {
         const PicoCatalogSession *s = &ws->sessions[i];
-        char mtime[32];
+        char number[32];
         if (i > 0)
         {
             JsonBuf_Putc(&b, ',');
         }
         JsonBuf_Puts(&b, "{\"id\":");
         JsonBuf_String(&b, s->id);
+        JsonBuf_Puts(&b, ",\"title\":");
+        JsonBuf_String(&b, s->title);
         JsonBuf_Puts(&b, ",\"model\":");
         JsonBuf_String(&b, s->model);
         JsonBuf_Puts(&b, ",\"effort\":");
         JsonBuf_String(&b, s->effort);
+        JsonBuf_Puts(&b, ",\"kind\":");
+        JsonBuf_String(&b, s->kind == PICO_AGENT_SUBAGENT ? "subagent" : "normal");
         JsonBuf_Puts(&b, ",\"mtime\":");
-        snprintf(mtime, sizeof(mtime), "%lld", (long long)s->mtime);
-        JsonBuf_Puts(&b, mtime);
+        snprintf(number, sizeof(number), "%lld", (long long)s->mtime);
+        JsonBuf_Puts(&b, number);
+        JsonBuf_Puts(&b, ",\"mtime_nsec\":");
+        snprintf(number, sizeof(number), "%ld", s->mtime_nsec);
+        JsonBuf_Puts(&b, number);
+        JsonBuf_Puts(&b, ",\"ctime\":");
+        snprintf(number, sizeof(number), "%lld", (long long)s->ctime);
+        JsonBuf_Puts(&b, number);
+        JsonBuf_Puts(&b, ",\"ctime_nsec\":");
+        snprintf(number, sizeof(number), "%ld", s->ctime_nsec);
+        JsonBuf_Puts(&b, number);
+        JsonBuf_Puts(&b, ",\"inode\":");
+        snprintf(number, sizeof(number), "%llu", (unsigned long long)s->inode);
+        JsonBuf_Puts(&b, number);
+        JsonBuf_Puts(&b, ",\"size\":");
+        snprintf(number, sizeof(number), "%llu", (unsigned long long)s->size);
+        JsonBuf_Puts(&b, number);
+        JsonBuf_Puts(&b, ",\"unseen_complete\":");
+        JsonBuf_Bool(&b, s->unseen_complete);
         JsonBuf_Putc(&b, '}');
     }
     JsonBuf_Puts(&b, "]}");
@@ -2693,6 +2960,50 @@ static bool CatalogCopySession(PicoCatalogWorkspace *ws, const PicoCatalogSessio
     ws->sessions = next;
     ws->sessions[ws->session_count] = *src;
     ws->session_count++;
+    return true;
+}
+
+static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
+                                                    const char *id)
+{
+    int i;
+    if (!ws || !id || !id[0])
+    {
+        return NULL;
+    }
+    for (i = 0; i < ws->session_count; i++)
+    {
+        if (strcmp(ws->sessions[i].id, id) == 0)
+        {
+            return &ws->sessions[i];
+        }
+    }
+    return NULL;
+}
+
+static bool CatalogSessionEqual(const PicoCatalogSession *a, const PicoCatalogSession *b)
+{
+    return a && b && strcmp(a->id, b->id) == 0 && strcmp(a->title, b->title) == 0 &&
+           strcmp(a->model, b->model) == 0 && strcmp(a->effort, b->effort) == 0 &&
+           a->mtime == b->mtime && a->mtime_nsec == b->mtime_nsec && a->ctime == b->ctime &&
+           a->ctime_nsec == b->ctime_nsec && a->inode == b->inode && a->size == b->size &&
+           a->unseen_complete == b->unseen_complete && a->kind == b->kind;
+}
+
+static bool CatalogSessionsMatch(const PicoCatalogWorkspace *a, const PicoCatalogWorkspace *b)
+{
+    int i;
+    if (!a || !b || a->session_count != b->session_count)
+    {
+        return false;
+    }
+    for (i = 0; i < a->session_count; i++)
+    {
+        if (!CatalogSessionEqual(&a->sessions[i], &b->sessions[i]))
+        {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -2756,6 +3067,8 @@ static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out)
             char *id;
             char *model;
             char *effort;
+            char *title;
+            char *kind;
             if (!JsonIsObject(&doc, item))
             {
                 continue;
@@ -2764,9 +3077,15 @@ static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out)
             id = JsonObjStr(&doc, item, "id");
             model = JsonObjStr(&doc, item, "model");
             effort = JsonObjStr(&doc, item, "effort");
+            title = JsonObjStr(&doc, item, "title");
+            kind = JsonObjStr(&doc, item, "kind");
             if (id)
             {
                 snprintf(s.id, sizeof(s.id), "%s", id);
+            }
+            if (title)
+            {
+                snprintf(s.title, sizeof(s.title), "%s", title);
             }
             if (model)
             {
@@ -2776,10 +3095,57 @@ static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out)
             {
                 snprintf(s.effort, sizeof(s.effort), "%s", effort);
             }
-            s.mtime = (time_t)JsonObjInt(&doc, item, "mtime", 0);
+            if (kind && strcmp(kind, "subagent") == 0)
+            {
+                s.kind = PICO_AGENT_SUBAGENT;
+            }
+            {
+                char *raw_number = JsonObjRaw(&doc, item, "mtime");
+                if (raw_number)
+                {
+                    s.mtime = (time_t)strtoll(raw_number, NULL, 10);
+                }
+                free(raw_number);
+                raw_number = JsonObjRaw(&doc, item, "mtime_nsec");
+                if (raw_number)
+                {
+                    s.mtime_nsec = strtol(raw_number, NULL, 10);
+                }
+                free(raw_number);
+                raw_number = JsonObjRaw(&doc, item, "ctime");
+                if (raw_number)
+                {
+                    s.ctime = (time_t)strtoll(raw_number, NULL, 10);
+                }
+                free(raw_number);
+                raw_number = JsonObjRaw(&doc, item, "ctime_nsec");
+                if (raw_number)
+                {
+                    s.ctime_nsec = strtol(raw_number, NULL, 10);
+                }
+                free(raw_number);
+                raw_number = JsonObjRaw(&doc, item, "inode");
+                if (raw_number)
+                {
+                    s.inode = (uint64_t)strtoull(raw_number, NULL, 10);
+                }
+                free(raw_number);
+                raw_number = JsonObjRaw(&doc, item, "size");
+                if (raw_number)
+                {
+                    s.size = (uint64_t)strtoull(raw_number, NULL, 10);
+                }
+                free(raw_number);
+            }
+            {
+                int tok = JsonObjGet(&doc, item, "unseen_complete");
+                s.unseen_complete = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
+            }
             free(id);
             free(model);
             free(effort);
+            free(title);
+            free(kind);
             if (s.id[0])
             {
                 (void)CatalogCopySession(out, &s);
@@ -2864,6 +3230,8 @@ int PicoCatalog_Ensure(const char *workspace_path)
     char key[4096];
     PicoCatalogWorkspace loaded;
     PicoCatalogWorkspace fresh;
+    int lock_fd;
+    int result = -1;
     if (!CanonicalWorkspacePath(workspace_path, canonical, sizeof(canonical)) ||
         !SessionsRoot(root, sizeof(root)) || !CatalogKeyFromPath(canonical, key, sizeof(key)) ||
         !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, key))
@@ -2871,7 +3239,7 @@ int PicoCatalog_Ensure(const char *workspace_path)
         return -1;
     }
     Pico_MkdirP(dir);
-    if (!CatalogMetaPath(dir, meta, sizeof(meta)))
+    if (!CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
     {
         return -1;
     }
@@ -2885,8 +3253,8 @@ int PicoCatalog_Ensure(const char *workspace_path)
         bool same_path = strcmp(loaded.path, canonical) == 0;
         if (same_path && loaded.name[0])
         {
-            CatalogClearSessions(&loaded);
-            return 0;
+            result = 0;
+            goto done;
         }
         snprintf(fresh.key, sizeof(fresh.key), "%s", loaded.key[0] ? loaded.key : key);
         snprintf(fresh.name, sizeof(fresh.name), "%s", loaded.name[0] ? loaded.name : fresh.name);
@@ -2896,25 +3264,21 @@ int PicoCatalog_Ensure(const char *workspace_path)
         fresh.session_count = loaded.session_count;
         loaded.sessions = NULL;
         loaded.session_count = 0;
-        if (!CatalogWrite(&fresh, dir))
-        {
-            CatalogClearSessions(&fresh);
-            return -1;
-        }
-        CatalogClearSessions(&fresh);
-        return 0;
+        result = CatalogWrite(&fresh, dir) ? 0 : -1;
+        goto done;
     }
-    CatalogClearSessions(&loaded);
     fresh.order = CountSessionDirs(root) - 1;
     if (fresh.order < 0)
     {
         fresh.order = 0;
     }
-    if (!CatalogWrite(&fresh, dir))
-    {
-        return -1;
-    }
-    return 0;
+    result = CatalogWrite(&fresh, dir) ? 0 : -1;
+
+done:
+    CatalogClearSessions(&loaded);
+    CatalogClearSessions(&fresh);
+    CatalogLockRelease(lock_fd);
+    return result;
 }
 
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed)
@@ -2922,25 +3286,22 @@ int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed)
     char dir[4096];
     char meta[4096];
     PicoCatalogWorkspace ws;
+    int lock_fd;
+    int result = -1;
     if (PicoCatalog_Ensure(workspace_path) != 0 || !CatalogDirForPath(workspace_path, dir, sizeof(dir)) ||
-        !CatalogMetaPath(dir, meta, sizeof(meta)))
+        !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
     {
         return -1;
     }
     memset(&ws, 0, sizeof(ws));
-    if (!CatalogLoadMeta(meta, &ws))
+    if (CatalogLoadMeta(meta, &ws))
     {
-        CatalogClearSessions(&ws);
-        return -1;
-    }
-    ws.collapsed = collapsed;
-    if (!CatalogWrite(&ws, dir))
-    {
-        CatalogClearSessions(&ws);
-        return -1;
+        ws.collapsed = collapsed;
+        result = CatalogWrite(&ws, dir) ? 0 : -1;
     }
     CatalogClearSessions(&ws);
-    return 0;
+    CatalogLockRelease(lock_fd);
+    return result;
 }
 
 int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_id,
@@ -2950,18 +3311,19 @@ int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_
     char meta[4096];
     PicoCatalogWorkspace ws;
     int i;
+    int lock_fd;
+    int result = -1;
     bool found = false;
     if (!session_id || !session_id[0] || PicoCatalog_Ensure(workspace_path) != 0 ||
         !CatalogDirForPath(workspace_path, dir, sizeof(dir)) ||
-        !CatalogMetaPath(dir, meta, sizeof(meta)))
+        !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
     {
         return -1;
     }
     memset(&ws, 0, sizeof(ws));
     if (!CatalogLoadMeta(meta, &ws))
     {
-        CatalogClearSessions(&ws);
-        return -1;
+        goto done;
     }
     for (i = 0; i < ws.session_count; i++)
     {
@@ -2982,17 +3344,248 @@ int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_
         snprintf(s.effort, sizeof(s.effort), "%s", effort ? effort : "");
         if (!CatalogCopySession(&ws, &s))
         {
-            CatalogClearSessions(&ws);
-            return -1;
+            goto done;
         }
     }
-    if (!CatalogWrite(&ws, dir))
-    {
-        CatalogClearSessions(&ws);
-        return -1;
-    }
+    result = CatalogWrite(&ws, dir) ? 0 : -1;
+
+done:
     CatalogClearSessions(&ws);
-    return 0;
+    CatalogLockRelease(lock_fd);
+    return result;
+}
+
+static bool CatalogApplyEvent(PicoCatalogSession *row, const char *event_json)
+{
+    JsonDoc doc;
+    char *type;
+    bool ok = true;
+    if (!row || !event_json || JsonParse(&doc, event_json, strlen(event_json)) != 0 ||
+        !JsonIsObject(&doc, 0))
+    {
+        return false;
+    }
+    type = JsonObjStr(&doc, 0, "type");
+    if (!type)
+    {
+        ok = false;
+    }
+    else if (strcmp(type, "message") == 0)
+    {
+        char *role = JsonObjStr(&doc, 0, "role");
+        if (role && strcmp(role, "user") == 0 &&
+            (!row->title[0] || strcmp(row->title, "Untitled") == 0))
+        {
+            /* The cache does not retain whether "Untitled" came from an explicit header title. */
+            ok = false;
+        }
+        free(role);
+    }
+    else if (strcmp(type, "model_change") == 0)
+    {
+        char *model = JsonObjStr(&doc, 0, "model");
+        char *effort = JsonObjStr(&doc, 0, "effort");
+        if (model && model[0])
+        {
+            snprintf(row->model, sizeof(row->model), "%s", model);
+        }
+        if (effort && effort[0])
+        {
+            snprintf(row->effort, sizeof(row->effort), "%s", effort);
+        }
+        free(model);
+        free(effort);
+    }
+    else if (strcmp(type, "unseen_complete") == 0)
+    {
+        int tok = JsonObjGet(&doc, 0, "complete");
+        row->unseen_complete = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
+    }
+    free(type);
+    JsonFree(&doc);
+    return ok;
+}
+
+static void CatalogRowFromFile(const char *path, PicoCatalogSession *row)
+{
+    PicoSessionInfo info;
+    if (!path || !row)
+    {
+        return;
+    }
+    memset(&info, 0, sizeof(info));
+    ScanSessionFile(path, &info, false);
+    snprintf(row->id, sizeof(row->id), "%s", info.id);
+    snprintf(row->title, sizeof(row->title), "%s", info.title);
+    snprintf(row->model, sizeof(row->model), "%s", info.model);
+    snprintf(row->effort, sizeof(row->effort), "%s", info.effort);
+    row->unseen_complete = info.unseen_complete;
+    row->kind = info.kind;
+}
+
+static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
+                                const char *title_override, const char *event_json,
+                                const struct stat *previous_stat)
+{
+    const char *ws_path;
+    char dir[4096];
+    char meta[4096];
+    PicoCatalogWorkspace ws;
+    PicoCatalogSession row;
+    const PicoCatalogSession *previous;
+    struct stat current_stat;
+    int lock_fd;
+    int index = -1;
+    bool row_ready = false;
+    if (!app || !agent || agent->kind != PICO_AGENT_MAIN ||
+        agent->persistence != PICO_SESSION_DURABLE || !agent->session_id[0] ||
+        !agent->session_path[0])
+    {
+        return;
+    }
+    ws_path = PicoWorkspace_Path(SessionWorkspace(app, agent));
+    if (!ws_path || !ws_path[0] || stat(agent->session_path, &current_stat) != 0 ||
+        !S_ISREG(current_stat.st_mode) || PicoCatalog_Ensure(ws_path) != 0 ||
+        !CatalogDirForPath(ws_path, dir, sizeof(dir)) ||
+        !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
+    {
+        return;
+    }
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_before_upsert");
+#endif
+    memset(&ws, 0, sizeof(ws));
+    memset(&row, 0, sizeof(row));
+    if (!CatalogLoadMeta(meta, &ws))
+    {
+        goto done;
+    }
+    previous = CatalogFindSession(&ws, agent->session_id);
+    if (previous && previous_stat && CatalogGenerationMatches(previous, previous_stat))
+    {
+        row = *previous;
+        row_ready = title_override && title_override[0];
+        if (row_ready)
+        {
+            snprintf(row.title, sizeof(row.title), "%s", title_override);
+        }
+        else
+        {
+            row_ready = CatalogApplyEvent(&row, event_json);
+        }
+    }
+    if (!row_ready)
+    {
+        CatalogRowFromFile(agent->session_path, &row);
+    }
+    if (!row.id[0])
+    {
+        snprintf(row.id, sizeof(row.id), "%s", agent->session_id);
+    }
+    row.kind = agent->kind;
+    CopyStatToCatalog(&row, &current_stat);
+    for (int i = 0; i < ws.session_count; i++)
+    {
+        if (strcmp(ws.sessions[i].id, row.id) == 0)
+        {
+            index = i;
+            break;
+        }
+    }
+    if (index >= 0)
+    {
+        ws.sessions[index] = row;
+    }
+    else if (!CatalogCopySession(&ws, &row))
+    {
+        goto done;
+    }
+    (void)CatalogWrite(&ws, dir);
+
+done:
+    CatalogClearSessions(&ws);
+    CatalogLockRelease(lock_fd);
+}
+
+static bool CatalogScanDir(const char *dir, const char *key, PicoCatalogWorkspace *out)
+{
+    char meta[4096];
+    char canonical[4096];
+    PicoCatalogWorkspace ws;
+    PicoCatalogWorkspace loaded;
+    PicoSessionInfo *files = NULL;
+    int lock_fd;
+    int file_n;
+    bool recovered = false;
+    bool had_meta;
+    bool result = false;
+    if (!dir || !key || !out || (lock_fd = CatalogLockAcquire(dir)) < 0)
+    {
+        return false;
+    }
+    memset(&ws, 0, sizeof(ws));
+    memset(&loaded, 0, sizeof(loaded));
+    snprintf(ws.key, sizeof(ws.key), "%s", key);
+    had_meta = CatalogMetaPath(dir, meta, sizeof(meta)) && CatalogLoadMeta(meta, &loaded);
+    if (had_meta)
+    {
+        snprintf(ws.path, sizeof(ws.path), "%s", loaded.path);
+        snprintf(ws.name, sizeof(ws.name), "%s", loaded.name);
+        ws.order = loaded.order;
+        ws.collapsed = loaded.collapsed;
+        if (loaded.key[0])
+        {
+            snprintf(ws.key, sizeof(ws.key), "%s", loaded.key);
+        }
+    }
+    file_n = ListSessionsInDir(dir, &files, true, had_meta ? &loaded : NULL,
+                               PICO_MAX_CATALOG_SESSIONS);
+    for (int i = 0; i < file_n; i++)
+    {
+        PicoCatalogSession s;
+        memset(&s, 0, sizeof(s));
+        snprintf(s.id, sizeof(s.id), "%s", files[i].id);
+        snprintf(s.title, sizeof(s.title), "%s", files[i].title);
+        snprintf(s.model, sizeof(s.model), "%s", files[i].model);
+        snprintf(s.effort, sizeof(s.effort), "%s", files[i].effort);
+        s.mtime = files[i].mtime;
+        s.mtime_nsec = files[i].mtime_nsec;
+        s.ctime = files[i].ctime;
+        s.ctime_nsec = files[i].ctime_nsec;
+        s.inode = files[i].inode;
+        s.size = files[i].size;
+        s.unseen_complete = files[i].unseen_complete;
+        s.kind = files[i].kind;
+        if (!ws.path[0] && files[i].cwd[0])
+        {
+            snprintf(ws.path, sizeof(ws.path), "%s", files[i].cwd);
+            recovered = true;
+        }
+        (void)CatalogCopySession(&ws, &s);
+    }
+    free(files);
+    if (!ws.path[0] || !CanonicalWorkspacePath(ws.path, canonical, sizeof(canonical)))
+    {
+        goto done;
+    }
+    if (!ws.name[0])
+    {
+        PathBasename(ws.path, ws.name, sizeof(ws.name));
+    }
+    if (!had_meta || recovered || !CatalogSessionsMatch(&ws, &loaded))
+    {
+        (void)CatalogWrite(&ws, dir);
+    }
+    *out = ws;
+    ws.sessions = NULL;
+    ws.session_count = 0;
+    result = true;
+
+done:
+    CatalogClearSessions(&ws);
+    CatalogClearSessions(&loaded);
+    CatalogLockRelease(lock_fd);
+    return result;
 }
 
 int PicoCatalog_Scan(PicoCatalogWorkspace **out)
@@ -3018,97 +3611,24 @@ int PicoCatalog_Scan(PicoCatalogWorkspace **out)
     while ((ent = readdir(d)) && n < PICO_MAX_CATALOG_WORKSPACES)
     {
         char dir[4096];
-        char meta[4096];
         struct stat st;
         PicoCatalogWorkspace ws;
-        PicoCatalogWorkspace loaded;
-        PicoSessionInfo *files = NULL;
-        int file_n;
-        int i;
-        bool recovered = false;
-        bool had_meta;
-        if (!ent->d_name[0] || ent->d_name[0] == '.')
+        PicoCatalogWorkspace *next;
+        if (!ent->d_name[0] || ent->d_name[0] == '.' ||
+            !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, ent->d_name) ||
+            stat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+            !CatalogScanDir(dir, ent->d_name, &ws))
         {
             continue;
         }
-        if (!PicoPath_Format(dir, sizeof(dir), "%s/%s", root, ent->d_name))
-        {
-            continue;
-        }
-        if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
-        {
-            continue;
-        }
-        memset(&ws, 0, sizeof(ws));
-        memset(&loaded, 0, sizeof(loaded));
-        snprintf(ws.key, sizeof(ws.key), "%s", ent->d_name);
-        had_meta = CatalogMetaPath(dir, meta, sizeof(meta)) && CatalogLoadMeta(meta, &loaded);
-        if (had_meta)
-        {
-            snprintf(ws.path, sizeof(ws.path), "%s", loaded.path);
-            snprintf(ws.name, sizeof(ws.name), "%s", loaded.name);
-            ws.order = loaded.order;
-            ws.collapsed = loaded.collapsed;
-            if (loaded.key[0])
-            {
-                snprintf(ws.key, sizeof(ws.key), "%s", loaded.key);
-            }
-        }
-        file_n = ListSessionsInDir(dir, &files, true);
-        CatalogClearSessions(&ws);
-        for (i = 0; i < file_n; i++)
-        {
-            PicoCatalogSession s;
-            memset(&s, 0, sizeof(s));
-            snprintf(s.id, sizeof(s.id), "%s", files[i].id);
-            snprintf(s.title, sizeof(s.title), "%s", files[i].title);
-            snprintf(s.model, sizeof(s.model), "%s", files[i].model);
-            snprintf(s.effort, sizeof(s.effort), "%s", files[i].effort);
-            s.mtime = files[i].mtime;
-            if (!ws.path[0] && files[i].cwd[0])
-            {
-                snprintf(ws.path, sizeof(ws.path), "%s", files[i].cwd);
-                recovered = true;
-            }
-            (void)CatalogCopySession(&ws, &s);
-        }
-        free(files);
-        if (!ws.path[0])
+        next = (PicoCatalogWorkspace *)realloc(list, (size_t)(n + 1) * sizeof(*next));
+        if (!next)
         {
             CatalogClearSessions(&ws);
-            CatalogClearSessions(&loaded);
-            continue;
+            break;
         }
-        {
-            char canonical[4096];
-            if (!CanonicalWorkspacePath(ws.path, canonical, sizeof(canonical)))
-            {
-                CatalogClearSessions(&ws);
-                CatalogClearSessions(&loaded);
-                continue;
-            }
-        }
-        if (!ws.name[0])
-        {
-            PathBasename(ws.path, ws.name, sizeof(ws.name));
-        }
-        if (!had_meta || recovered)
-        {
-            (void)CatalogWrite(&ws, dir);
-        }
-        CatalogClearSessions(&loaded);
-        {
-            PicoCatalogWorkspace *next =
-                (PicoCatalogWorkspace *)realloc(list, (size_t)(n + 1) * sizeof(*next));
-            if (!next)
-            {
-                CatalogClearSessions(&ws);
-                break;
-            }
-            list = next;
-            list[n] = ws;
-            n++;
-        }
+        list = next;
+        list[n++] = ws;
     }
     closedir(d);
     if (n > 1)

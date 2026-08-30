@@ -206,6 +206,24 @@ if(BUILD_TESTING)
     target_link_libraries(pico_markdown_tests PRIVATE md4c)
     add_test(NAME pico_markdown_tests COMMAND pico_markdown_tests)
 
+    add_executable(pico_md_scroll_layout_tests
+        tests/md_scroll_layout_test.c
+        tests/clay_impl.c
+        markdown.c
+        md_view.c
+        richtext.c
+        chat_sel.c)
+    target_include_directories(pico_md_scroll_layout_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_md_scroll_layout_tests)
+    target_compile_options(pico_md_scroll_layout_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_md_scroll_layout_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_md_scroll_layout_tests PRIVATE raylib md4c)
+    add_test(NAME pico_md_scroll_layout_tests COMMAND pico_md_scroll_layout_tests)
+
     add_executable(pico_diff_lines_tests
         tests/diff_lines_test.c
         diff_lines.c)

@@ -1234,8 +1234,9 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
         }
         if (has_source)
         {
-            MdView_RenderDocument(&msg->doc, (view->id_ns + 1) * 100000 + (i + 1) * 4096,
-                                  available_width);
+            uint64_t markdown_identity = RevisionMix(view->virtual_identity, (uint64_t)(i + 1));
+            int markdown_id_base = (int)(uint32_t)(markdown_identity ^ (markdown_identity >> 32));
+            MdView_RenderDocument(&msg->doc, markdown_id_base, available_width);
         }
         if (view->selectable)
         {
@@ -1502,6 +1503,20 @@ static TranscriptView MainTranscriptView(PicoHost *app)
 bool PicoChat_InspectIsOpen(void)
 {
     return g_inspect_n > 0;
+}
+
+void PicoChat_UpdateInspectFollowFromUserScroll(PicoHost *app, float wheel_y)
+{
+    if (!app || wheel_y == 0.0f || !pico_ui_modal_is_top(app, "inspect"))
+    {
+        return;
+    }
+    ChatState *state = (ChatState *)PicoPlugins_HostState(app, "chat");
+    if (state && state->inspect_n > 0 &&
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatRow"))))
+    {
+        state->inspect_follow = false;
+    }
 }
 
 static bool InspectIsTopModal(PicoHost *app)
@@ -1962,11 +1977,6 @@ static void InspectHandlePointer(PicoHost *app)
         return;
     }
     g_inspect_overflow = PicoScrollbar_Overflows(CLAY_STRING("SubagentChatScroll"));
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatRow"))) &&
-        GetMouseWheelMove() != 0.0f)
-    {
-        g_inspect_follow = false;
-    }
     bool over_dim = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentModalDim")));
     bool over_card = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentModalCard")));
     bool over_back = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentBack")));

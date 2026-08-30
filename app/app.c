@@ -12,6 +12,7 @@
 #include "json.h"
 #include "overlay.h"
 #include "scrollbar.h"
+#include "md_view_internal.h"
 #include "builtins/chat.h"
 #include "builtins/todo.h"
 #include "host_internal.h"
@@ -3051,6 +3052,18 @@ void PicoHost_Frame(PicoHost *app)
     bool pane_wheel = over_inspect || (over_chat && !modal_open);
     bool sidebar_wheel = over_sidebar && !modal_open && !over_inspect;
     Clay_Vector2 wheel = {.x = mouse_delta.x, .y = mouse_delta.y};
+    bool shift_wheel = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) &&
+                       wheel.x == 0.0f && wheel.y != 0.0f;
+    float markdown_x = wheel.x + (shift_wheel ? wheel.y : 0.0f);
+    if (pane_wheel && MdView_ScrollHoveredHorizontal(markdown_x))
+    {
+        wheel.x = 0.0f;
+        if (shift_wheel)
+        {
+            wheel.y = 0.0f;
+        }
+    }
+    PicoChat_UpdateInspectFollowFromUserScroll(app, over_inspect ? wheel.y : 0.0f);
     Clay_UpdateScrollContainers(
         !bar_drag && (modal_open ||
                       (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
@@ -3064,7 +3077,7 @@ void PicoHost_Frame(PicoHost *app)
     {
         ApplyPaneWheel(CLAY_STRING("SidebarScroll"), (Clay_Vector2){.x = 0, .y = wheel.y});
     }
-    UpdateChatFollowFromUserScroll(app, over_chat, modal_open, mouse_delta.y);
+    UpdateChatFollowFromUserScroll(app, over_chat, modal_open, wheel.y);
 
     Clay_RenderCommandArray render_commands =
         RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), GetFrameTime()));

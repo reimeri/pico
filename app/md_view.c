@@ -3,6 +3,7 @@
 #include "pico/theme.h"
 #include "richtext.h"
 #include "chat_sel.h"
+#include "md_view_internal.h"
 
 #include "raylib.h"
 
@@ -32,6 +33,70 @@ static RichTextStyle BaseStyle = {
 
 static const char *hovered_link = NULL;
 static char image_base_dir[4096] = ".";
+static Clay_ElementId *horizontal_scroll_ids;
+static int horizontal_scroll_count;
+static int horizontal_scroll_capacity;
+
+static Clay_ElementId HorizontalScrollId(int id_base, int block_index)
+{
+    return Clay_GetElementIdWithIndex(CLAY_STRING("MdHorizontalScroll"),
+                                      (uint32_t)id_base + (uint32_t)block_index);
+}
+
+static void TrackHorizontalScroller(Clay_ElementId id)
+{
+    if (horizontal_scroll_count >= horizontal_scroll_capacity)
+    {
+        int capacity = horizontal_scroll_capacity == 0 ? 64 : horizontal_scroll_capacity * 2;
+        Clay_ElementId *ids = (Clay_ElementId *)realloc(horizontal_scroll_ids,
+                                                         (size_t)capacity * sizeof(Clay_ElementId));
+        if (!ids)
+        {
+            return;
+        }
+        horizontal_scroll_ids = ids;
+        horizontal_scroll_capacity = capacity;
+    }
+    horizontal_scroll_ids[horizontal_scroll_count++] = id;
+}
+
+bool MdView_ScrollHoveredHorizontal(float delta_x)
+{
+    if (delta_x == 0.0f)
+    {
+        return false;
+    }
+    for (int i = horizontal_scroll_count - 1; i >= 0; i--)
+    {
+        Clay_ElementId id = horizontal_scroll_ids[i];
+        if (!Clay_PointerOver(id))
+        {
+            continue;
+        }
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(id);
+        if (!data.found || !data.scrollPosition || !data.config.horizontal)
+        {
+            continue;
+        }
+        float overflow = data.contentDimensions.width - data.scrollContainerDimensions.width;
+        if (overflow <= 0.5f)
+        {
+            continue;
+        }
+        float x = data.scrollPosition->x + delta_x * 10.0f;
+        if (x > 0.0f)
+        {
+            x = 0.0f;
+        }
+        else if (x < -overflow)
+        {
+            x = -overflow;
+        }
+        data.scrollPosition->x = x;
+        return true;
+    }
+    return false;
+}
 
 typedef struct {
     char path[8192];
@@ -157,6 +222,7 @@ void MdView_BeginFrame(void)
 {
     RichText_BeginLayout();
     hovered_link = NULL;
+    horizontal_scroll_count = 0;
 }
 
 const char *MdView_HoveredLink(void)
@@ -170,6 +236,7 @@ const char *MdView_HoveredLink(void)
 
 typedef struct {
     float available_width;
+    float content_width;
     uint16_t font_size;
     float font_scale;
     int col_count;
@@ -190,13 +257,14 @@ static Clay_LayoutAlignmentX CellAlignX(MdCellAlign align)
 }
 
 static float *TableColWidths(MdBlock *block, MdArena *arena, float available_width,
-                             const RichTextStyle *base_style)
+                             const RichTextStyle *base_style, float *content_width)
 {
     MdTable *table = &block->table;
     MdTableWrapCache *cache = (MdTableWrapCache *)block->wrap_cache;
     if (cache && cache->available_width == available_width && cache->font_size == base_style->font_size &&
         cache->font_scale == Pico_FontScale() && cache->col_count == table->col_count)
     {
+        *content_width = cache->content_width;
         return cache->col_widths;
     }
 
@@ -285,14 +353,10 @@ static float *TableColWidths(MdBlock *block, MdArena *arena, float available_wid
     }
     else if (sum_min >= budget)
     {
-        float scale = budget / sum_min;
-        float used = 0;
         for (int c = 0; c < cols; c++)
         {
-            widths[c] = minw[c] * scale;
-            used += widths[c];
+            widths[c] = minw[c];
         }
-        widths[cols - 1] += budget - used;
     }
     else
     {
@@ -308,20 +372,29 @@ static float *TableColWidths(MdBlock *block, MdArena *arena, float available_wid
         widths[cols - 1] += budget - used;
     }
 
+    float width = borders + padding;
+    for (int c = 0; c < cols; c++)
+    {
+        width += widths[c];
+    }
+
     free(preferred);
     free(minw);
 
     cache = (MdTableWrapCache *)MdArena_Alloc(arena, sizeof(MdTableWrapCache), 8);
     cache->available_width = available_width;
+    cache->content_width = width;
     cache->font_size = base_style->font_size;
     cache->font_scale = Pico_FontScale();
     cache->col_count = cols;
     cache->col_widths = widths;
     block->wrap_cache = cache;
+    *content_width = width;
     return widths;
 }
 
-static void RenderTable(MdDocument *doc, MdBlock *block, float available_width, RichTextEmitState *emit)
+static void RenderTable(MdDocument *doc, MdBlock *block, Clay_ElementId scroll_id,
+                        float available_width, RichTextEmitState *emit)
 {
     MdTable *table = &block->table;
     if (!table->cells || table->col_count <= 0 || table->row_count <= 0)
@@ -341,7 +414,8 @@ static void RenderTable(MdDocument *doc, MdBlock *block, float available_width, 
         inner_width = 32.0f;
     }
 
-    float *col_widths = TableColWidths(block, &doc->arena, inner_width, &BaseStyle);
+    float content_width = 0.0f;
+    float *col_widths = TableColWidths(block, &doc->arena, inner_width, &BaseStyle, &content_width);
     if (!col_widths)
     {
         return;
@@ -354,60 +428,68 @@ static void RenderTable(MdDocument *doc, MdBlock *block, float available_width, 
                              .padding = {.left = (uint16_t)(indent * 24)},
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
-        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                      .border = {.color = COLOR_TABLE_BORDER,
-                                 .width = {.left = TABLE_BORDER,
-                                           .right = TABLE_BORDER,
-                                           .top = TABLE_BORDER,
-                                           .bottom = TABLE_BORDER,
-                                           .betweenChildren = TABLE_BORDER}}})
+        TrackHorizontalScroller(scroll_id);
+        CLAY(scroll_id,
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+              .clip = {.horizontal = true, .childOffset = Clay_GetScrollOffset()}})
         {
-            for (int r = 0; r < rows; r++)
+            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .sizing = {.width = CLAY_SIZING_FIXED(content_width)}},
+                          .border = {.color = COLOR_TABLE_BORDER,
+                                     .width = {.left = TABLE_BORDER,
+                                               .right = TABLE_BORDER,
+                                               .top = TABLE_BORDER,
+                                               .bottom = TABLE_BORDER,
+                                               .betweenChildren = TABLE_BORDER}}})
             {
-                bool header_row = r < table->header_row_count;
-                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                              .backgroundColor = header_row ? COLOR_TABLE_HEADER : (Clay_Color){0, 0, 0, 0},
-                              .border = {.color = COLOR_TABLE_BORDER,
-                                         .width = {.betweenChildren = TABLE_BORDER}}})
+                for (int r = 0; r < rows; r++)
                 {
-                    for (int c = 0; c < cols; c++)
+                    bool header_row = r < table->header_row_count;
+                    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                                  .backgroundColor = header_row ? COLOR_TABLE_HEADER : (Clay_Color){0, 0, 0, 0},
+                                  .border = {.color = COLOR_TABLE_BORDER,
+                                             .width = {.betweenChildren = TABLE_BORDER}}})
                     {
-                        MdTableCell *cell = &table->cells[r * cols + c];
-                        float cw = col_widths[c];
-                        Clay_LayoutAlignmentX ax = CellAlignX(cell->align);
-                        CLAY_AUTO_ID({.layout = {
-                                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                          .padding = {TABLE_CELL_PAD_X, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y,
-                                                      TABLE_CELL_PAD_Y},
-                                          .sizing = {.width = CLAY_SIZING_FIXED(cw + 2.0f * TABLE_CELL_PAD_X)},
-                                          .childAlignment = {.x = ax}}})
+                        for (int c = 0; c < cols; c++)
                         {
-                            MdBlock view = {0};
-                            view.type = MDB_PARAGRAPH;
-                            view.chunks = cell->chunks;
-                            view.chunk_count = cell->chunk_count;
-                            view.wrap_cache = cell->wrap_cache;
-                            RichTextStyle style = BaseStyle;
-                            style.force_bold = cell->header || header_row;
-                            style.text_align = ax;
-                            RichText_RenderParagraph(&view, &doc->arena, cw, &style, emit);
-                            cell->wrap_cache = view.wrap_cache;
-                        }
-                        if (c + 1 < cols)
-                        {
-                            PicoChatSel_Glue("\t");
+                            MdTableCell *cell = &table->cells[r * cols + c];
+                            float cw = col_widths[c];
+                            Clay_LayoutAlignmentX ax = CellAlignX(cell->align);
+                            CLAY_AUTO_ID({.layout = {
+                                              .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                              .padding = {TABLE_CELL_PAD_X, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y,
+                                                          TABLE_CELL_PAD_Y},
+                                              .sizing = {.width = CLAY_SIZING_FIXED(cw + 2.0f * TABLE_CELL_PAD_X)},
+                                              .childAlignment = {.x = ax}}})
+                            {
+                                MdBlock view = {0};
+                                view.type = MDB_PARAGRAPH;
+                                view.chunks = cell->chunks;
+                                view.chunk_count = cell->chunk_count;
+                                view.wrap_cache = cell->wrap_cache;
+                                RichTextStyle style = BaseStyle;
+                                style.force_bold = cell->header || header_row;
+                                style.text_align = ax;
+                                RichText_RenderParagraph(&view, &doc->arena, cw, &style, emit);
+                                cell->wrap_cache = view.wrap_cache;
+                            }
+                            if (c + 1 < cols)
+                            {
+                                PicoChatSel_Glue("\t");
+                            }
                         }
                     }
+                    PicoChatSel_Break();
                 }
-                PicoChatSel_Break();
             }
         }
     }
 }
 
-static void RenderBlock(MdDocument *doc, int index, float available_width, RichTextEmitState *emit)
+static void RenderBlock(MdDocument *doc, int index, int id_base, float available_width,
+                        RichTextEmitState *emit)
 {
     MdBlock *block = &doc->blocks[index];
     switch (block->type)
@@ -496,42 +578,50 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
         case MDB_CODE:
         case MDB_HTML:
         {
-            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                     .padding = {14, 14, 12, 12},
-                                     .childGap = 2,
-                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                          .backgroundColor = COLOR_CODE_BG,
-                          .cornerRadius = CLAY_CORNER_RADIUS(6)})
+            Clay_ElementId scroll_id = HorizontalScrollId(id_base, index);
+            TrackHorizontalScroller(scroll_id);
+            CLAY(scroll_id,
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                  .clip = {.horizontal = true, .childOffset = Clay_GetScrollOffset()}})
             {
-                char *line = block->raw_text;
-                int line_count = 0;
-                if (strlen(block->raw_text) == 0)
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                         .padding = {14, 14, 12, 12},
+                                         .childGap = 2,
+                                         .sizing = {.width = CLAY_SIZING_FIT(available_width)}},
+                              .backgroundColor = COLOR_CODE_BG,
+                              .cornerRadius = CLAY_CORNER_RADIUS(6)})
                 {
-                    line = NULL;
-                }
-                while (line)
-                {
-                    char *newline = strchr(line, '\n');
-                    int length = newline ? (int)(newline - line) : (int)strlen(line);
-                    Clay_String text = {.length = length, .chars = line};
-                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    char *line = block->raw_text;
+                    int line_count = 0;
+                    if (strlen(block->raw_text) == 0)
                     {
-                        PicoChatSel_Text(text, (Clay_TextElementConfig){.fontId = FONT_MONO,
-                                                                       .fontSize = 16,
-                                                                       .lineHeight = Pico_FontPxU16(20),
-                                                                       .textColor = COLOR_CODE_TEXT,
-                                                                       .wrapMode = CLAY_TEXT_WRAP_NONE});
+                        line = NULL;
                     }
-                    PicoChatSel_Break();
-                    line = newline ? newline + 1 : NULL;
-                    line_count++;
-                }
-                if (line_count == 0)
-                {
-                    PicoChatSel_Text(CLAY_STRING(" "), (Clay_TextElementConfig){.fontId = FONT_MONO,
-                                                                               .fontSize = 16,
-                                                                               .textColor = COLOR_CODE_TEXT,
-                                                                               .wrapMode = CLAY_TEXT_WRAP_NONE});
+                    while (line)
+                    {
+                        char *newline = strchr(line, '\n');
+                        int length = newline ? (int)(newline - line) : (int)strlen(line);
+                        Clay_String text = {.length = length, .chars = line};
+                        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT()}}})
+                        {
+                            PicoChatSel_Text(text, (Clay_TextElementConfig){.fontId = FONT_MONO,
+                                                                           .fontSize = 16,
+                                                                           .lineHeight = Pico_FontPxU16(20),
+                                                                           .textColor = COLOR_CODE_TEXT,
+                                                                           .wrapMode = CLAY_TEXT_WRAP_NONE});
+                        }
+                        PicoChatSel_Break();
+                        line = newline ? newline + 1 : NULL;
+                        line_count++;
+                    }
+                    if (line_count == 0)
+                    {
+                        PicoChatSel_Text(CLAY_STRING(" "), (Clay_TextElementConfig){.fontId = FONT_MONO,
+                                                                                   .fontSize = 16,
+                                                                                   .textColor = COLOR_CODE_TEXT,
+                                                                                   .wrapMode = CLAY_TEXT_WRAP_NONE});
+                    }
                 }
             }
             break;
@@ -594,7 +684,8 @@ static void RenderBlock(MdDocument *doc, int index, float available_width, RichT
         }
         case MDB_TABLE:
         {
-            RenderTable(doc, block, available_width, emit);
+            Clay_ElementId scroll_id = HorizontalScrollId(id_base, index);
+            RenderTable(doc, block, scroll_id, available_width, emit);
             break;
         }
     }
@@ -657,14 +748,14 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
             {
                 for (int j = start; j < end; j++)
                 {
-                    RenderBlock(doc, j, available_width, &emit);
+                    RenderBlock(doc, j, id_base, available_width, &emit);
                 }
             }
             i = end;
             continue;
         }
 
-        RenderBlock(doc, i, available_width, &emit);
+        RenderBlock(doc, i, id_base, available_width, &emit);
         i++;
     }
     if (emit.hovered_link)

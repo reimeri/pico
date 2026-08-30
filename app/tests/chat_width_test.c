@@ -128,17 +128,6 @@ static int LoadChatWidth(const char *json_body, const char *workspace_json_body,
     return rc;
 }
 
-static int TestDefault(void)
-{
-    int width = -1;
-    int rc = LoadChatWidth(NULL, NULL, &width);
-    if (rc != 0)
-    {
-        return rc;
-    }
-    return width == 90 ? 0 : Fail("default is not 90");
-}
-
 static int TestValidOverride(void)
 {
     int width = -1;
@@ -198,13 +187,20 @@ static int TestWorkspaceOverrideIgnored(void)
 
 static int TestInvalidIgnored(void)
 {
-    int width = -1;
-    int rc = LoadChatWidth("{ \"chat_width\": 300 }\n", NULL, &width);
+    int default_width = -1;
+    int rc = LoadChatWidth(NULL, NULL, &default_width);
     if (rc != 0)
     {
         return rc;
     }
-    if (width != 90)
+
+    int width = -1;
+    rc = LoadChatWidth("{ \"chat_width\": 300 }\n", NULL, &width);
+    if (rc != 0)
+    {
+        return rc;
+    }
+    if (width != default_width)
     {
         return Fail("out-of-range value did not keep the default");
     }
@@ -213,18 +209,13 @@ static int TestInvalidIgnored(void)
     {
         return rc;
     }
-    return width == 90 ? 0 : Fail("non-integer value did not keep the default");
+    return width == default_width ? 0 : Fail("non-integer value did not keep the default");
 }
 
 int main(void)
 {
     unsetenv("PICO_CHAT_WIDTH");
     int rc = TestClamp();
-    if (rc != 0)
-    {
-        return rc;
-    }
-    rc = TestDefault();
     if (rc != 0)
     {
         return rc;

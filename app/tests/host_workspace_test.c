@@ -1670,7 +1670,7 @@ static int TestHostSettingsPersistence(void)
     snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", cfg);
     snprintf(legacy_path, sizeof(legacy_path), "%s/pico/host_preferences.json", cfg);
     Pico_MkdirP(config_dir);
-    if (WriteFile(settings_path, "{\n  \"model\": \"keep-me\"\n}\n") != 0 ||
+    if (WriteFile(settings_path, "{\n  \"model\": \"keep-me\",\n  \"chat_width\": 110\n}\n") != 0 ||
         WriteFile(legacy_path, legacy_settings) != 0 || chmod(settings_path, 0640) != 0)
     {
         Fail("write unified settings fixtures");
@@ -1686,7 +1686,7 @@ static int TestHostSettingsPersistence(void)
         Fail("pref host init");
         return 1;
     }
-    if (host->preferences.font_scale != 1.0 || host->preferences.chat_width != 90 ||
+    if (host->preferences.font_scale != 1.0 || host->preferences.chat_width != 110 ||
         host->preferences.disabled_host_extension_count != 0)
     {
         Fail("host_preferences.json must not be read");

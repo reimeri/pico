@@ -52,7 +52,7 @@ Creation returns `PICO_LIMIT` when either agent cap is reached. Zero is invalid 
 Host-only window settings live in `PicoHostPreferences` and are stored with the other user-global configuration in `~/.config/pico/settings.json` (or `$XDG_CONFIG_HOME/pico/settings.json`):
 
 - `font_scale` (default 1.0; `PICO_FONT_SCALE` overrides)
-- `chat_width` (default 90 characters; `PICO_CHAT_WIDTH` overrides)
+- `chat_width` (default 75 characters; `PICO_CHAT_WIDTH` overrides)
 - `disabled_host_extensions` — disables host instances only
 
 These fields never come from a workspace `.pico/settings.json`. Disabling a host instance does not disable that module's workspace instances, and the reverse is also true. Settings updates preserve the existing file mode and use an inter-process lock around read-modify-write, a unique temporary file, `fsync`, atomic rename, and containing-directory `fsync`.

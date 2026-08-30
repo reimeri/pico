@@ -59,7 +59,7 @@ Kinds:
 
 `z` sorts within a kind the same way as slots. Max 16 empty views total (`PICO_MAX_EMPTY_VIEWS`). Invalid kind is a silent no-op.
 
-ABOVE/BELOW sit in the same `chat_width` column as the cards (user-global `settings.json`, default 90 characters). REPLACE callbacks are children of `ChatContent` (that same column); you own the layout.
+ABOVE/BELOW sit in the same `chat_width` column as the cards (user-global `settings.json`, default 75 characters). REPLACE callbacks are children of `ChatContent` (that same column); you own the layout.
 
 Full file for a banner: [`../../examples/empty_banner.c`](../../examples/empty_banner.c).
 

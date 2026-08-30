@@ -43,8 +43,15 @@ jobs:
         run: |
           set -euo pipefail
           version=$(sed -n 's/^project(pico VERSION \([^ ]*\) LANGUAGES C)$/\1/p' app/CMakeLists.txt)
-          test -n "$version"
-          test "${GITHUB_REF_NAME#v}" = "$version"
+          if [[ -z $version ]]; then
+            echo "::error file=app/CMakeLists.txt::Could not read the project version"
+            exit 1
+          fi
+          tag_version=${GITHUB_REF_NAME#v}
+          if [[ $tag_version != "$version" ]]; then
+            echo "::error file=app/CMakeLists.txt::Release tag $GITHUB_REF_NAME does not match project version $version"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Configure, build, and test

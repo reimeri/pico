@@ -20,9 +20,9 @@ static void BannerRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4}})
     {
         CLAY_TEXT(CLAY_STRING("Start a conversation"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 16, .textColor = COLOR_TEXT}));
+                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
         CLAY_TEXT(CLAY_STRING("from a .c extension"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13, .textColor = COLOR_MUTED}));
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED}));
     }
 }
 

@@ -51,10 +51,10 @@ static void ModalRender(PicoHost *host, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("Example modal"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 16, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             CLAY_TEXT(CLAY_STRING("Esc or click outside closes. Composer input is skipped while open."),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 14,
+                                        .fontSize = PICO_FONT_UI,
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             (void)host;

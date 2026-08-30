@@ -14,7 +14,7 @@
 #define CHAT_IMAGE_MAX_WIDTH 360.0f
 #define CHAT_IMAGE_MAX_HEIGHT 240.0f
 
-static uint16_t HeadingSizes[7] = {0, 32, 27, 23, 20, 17, 15};
+static uint16_t HeadingSizes[7] = {0, 32, 28, 24, PICO_FONT_TITLE, PICO_FONT_BODY, PICO_FONT_BODY};
 
 static RichTextStyle BaseStyle = {
     .font_regular = FONT_REGULAR,
@@ -23,7 +23,7 @@ static RichTextStyle BaseStyle = {
     .font_bold_italic = FONT_BOLD_ITALIC,
     .font_mono = FONT_MONO,
     .font_size = CHAT_BODY_FONT_SIZE,
-    .line_height = 22,
+    .line_height = PICO_FONT_BODY_LINE,
     .text_color = COLOR_TEXT,
     .code_text_color = COLOR_CODE_TEXT,
     .code_bg_color = COLOR_CODE_BG,
@@ -606,8 +606,8 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT()}}})
                         {
                             PicoChatSel_Text(text, (Clay_TextElementConfig){.fontId = FONT_MONO,
-                                                                           .fontSize = 16,
-                                                                           .lineHeight = Pico_FontPxU16(20),
+                                                                           .fontSize = PICO_FONT_UI,
+                                                                           .lineHeight = Pico_FontPxU16(PICO_FONT_UI_LINE),
                                                                            .textColor = COLOR_CODE_TEXT,
                                                                            .wrapMode = CLAY_TEXT_WRAP_NONE});
                         }
@@ -618,7 +618,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     if (line_count == 0)
                     {
                         PicoChatSel_Text(CLAY_STRING(" "), (Clay_TextElementConfig){.fontId = FONT_MONO,
-                                                                                   .fontSize = 16,
+                                                                                   .fontSize = PICO_FONT_UI,
                                                                                    .textColor = COLOR_CODE_TEXT,
                                                                                    .wrapMode = CLAY_TEXT_WRAP_NONE});
                     }
@@ -668,7 +668,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     }
                     Clay_String message_string = {.length = (int32_t)strlen(message), .chars = message};
                     PicoChatSel_Text(message_string, (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                                                             .fontSize = 15,
+                                                                             .fontSize = PICO_FONT_UI,
                                                                              .textColor = COLOR_MUTED});
                 }
             }
@@ -707,11 +707,11 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
             PicoChatSel_Text(CLAY_STRING("Could not display this markdown."),
-                             (Clay_TextElementConfig){.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT});
+                             (Clay_TextElementConfig){.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT});
             PicoChatSel_Break();
             Clay_String error_string = {.length = (int32_t)strlen(doc->load_error), .chars = doc->load_error};
             PicoChatSel_Text(error_string,
-                             (Clay_TextElementConfig){.fontId = FONT_REGULAR, .fontSize = 16, .textColor = COLOR_MUTED});
+                             (Clay_TextElementConfig){.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED});
         }
         if (emit.hovered_link)
         {

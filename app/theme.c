@@ -185,7 +185,7 @@ void Pico_LoadFonts(Font *fonts)
     }
     for (int i = 0; i < FONT_COUNT; i++)
     {
-        fonts[i] = Pico_FontAt((uint16_t)i, 16);
+        fonts[i] = Pico_FontAt((uint16_t)i, PICO_FONT_UI);
     }
 }
 

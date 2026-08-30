@@ -220,7 +220,7 @@ static bool Over(const char *id)
 static void MutedText(const char *s)
 {
     CLAY_TEXT(CStr(s), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 13,
+                                        .fontSize = PICO_FONT_CAPTION,
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
@@ -432,10 +432,10 @@ static void RenderFolderModal(PicoHost *app, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("Select a workspace folder"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             CLAY_TEXT(CLAY_STRING("To continue choose a workspace folder in the opened file dialog."),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 14,
+                                        .fontSize = PICO_FONT_UI,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }
@@ -451,7 +451,7 @@ static void RenderMenu(PicoHost *app)
         return;
     }
     SelectHovered(app);
-    float row_h = 26.0f;
+    float row_h = 30.0f;
     float content_h = 12.0f + (float)n * row_h;
     bool scroll = content_h > 240.0f;
     float h = scroll ? 240.0f : content_h;
@@ -510,14 +510,14 @@ static void RenderMenu(PicoHost *app)
                           .cornerRadius = CLAY_CORNER_RADIUS(4)})
                     {
                         CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                                .fontSize = 14,
+                                                                .fontSize = PICO_FONT_UI,
                                                                 .textColor = COLOR_TEXT,
                                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
                         if (detail[0])
                         {
                             CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                             CLAY_TEXT(CStr(detail), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                     .fontSize = 13,
+                                                                     .fontSize = PICO_FONT_CAPTION,
                                                                      .textColor = COLOR_MUTED,
                                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
                         }
@@ -540,7 +540,7 @@ static void Chip(Clay_ElementId id, const char *text, bool open, bool with_menu,
     CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
         CLAY_TEXT(CStr(text), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                               .fontSize = 13,
+                                               .fontSize = PICO_FONT_CAPTION,
                                                .textColor = color,
                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
         if (with_menu && open)
@@ -604,7 +604,7 @@ static void RenderStatus(PicoHost *app)
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
                 CLAY_TEXT(CStr(g_state), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                          .fontSize = 13,
+                                                          .fontSize = PICO_FONT_CAPTION,
                                                           .textColor = COLOR_TEXT,
                                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
             }

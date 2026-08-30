@@ -639,8 +639,8 @@ static void RenderToolOutput(const TranscriptView *view, const char *output, flo
             int length = newline ? (int)(newline - line) : (int)strlen(line);
             Clay_String s = {.length = length > 0 ? length : 1, .chars = length > 0 ? line : " "};
             ViewWrappedText(view, s, (Clay_TextElementConfig){.fontId = FONT_MONO,
-                                                              .fontSize = 14,
-                                                              .lineHeight = Pico_FontPxU16(18),
+                                                              .fontSize = PICO_FONT_UI,
+                                                              .lineHeight = Pico_FontPxU16(PICO_FONT_UI_LINE),
                                                               .textColor = COLOR_CODE_TEXT},
                             inner_w);
             line = newline ? newline + 1 : NULL;
@@ -649,7 +649,7 @@ static void RenderToolOutput(const TranscriptView *view, const char *output, flo
         if (line)
         {
             CLAY_TEXT(CLAY_STRING("…"), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                         .fontSize = 14,
+                                                         .fontSize = PICO_FONT_UI,
                                                          .textColor = COLOR_MUTED,
                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -673,8 +673,8 @@ static void RenderThinkMarkdown(const TranscriptView *view, const char *text, fl
         .font_italic = FONT_ITALIC,
         .font_bold_italic = FONT_BOLD_ITALIC,
         .font_mono = FONT_MONO,
-        .font_size = 15,
-        .line_height = 18,
+        .font_size = PICO_FONT_UI,
+        .line_height = PICO_FONT_UI_LINE,
         .text_color = COLOR_MUTED,
         .code_text_color = COLOR_MUTED,
         .code_bg_color = COLOR_CODE_BG,
@@ -714,7 +714,7 @@ static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, flo
         {
             ViewText(view, ViewCStr(line->text),
                      (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                              .fontSize = 15,
+                                              .fontSize = PICO_FONT_UI,
                                               .textColor = COLOR_MUTED,
                                               .wrapMode = CLAY_TEXT_WRAP_WORDS});
             ViewBreak(view);
@@ -768,7 +768,7 @@ static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int
             {
                 ViewText(view, ViewCStr(label),
                          (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                                  .fontSize = 15,
+                                                  .fontSize = PICO_FONT_UI,
                                                   .textColor = color,
                                                   .wrapMode = CLAY_TEXT_WRAP_NONE});
             }
@@ -793,7 +793,7 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
     {
         CLAY_TEXT(CLAY_STRING("Thinking…"),
                   CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
-                                    .fontSize = 15,
+                                    .fontSize = PICO_FONT_UI,
                                     .textColor = COLOR_MUTED,
                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
@@ -885,10 +885,10 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
     Clay_String args = ViewCStr(line->tool_args);
     bool subagent = IsSubagentTool(line);
     Clay_TextElementConfig name_cfg = {.fontId = FONT_REGULAR,
-                                       .fontSize = 15,
+                                       .fontSize = PICO_FONT_UI,
                                        .textColor = name_color,
                                        .wrapMode = CLAY_TEXT_WRAP_NONE};
-    Clay_TextElementConfig args_cfg = {.fontId = FONT_REGULAR, .fontSize = 15, .textColor = args_color};
+    Clay_TextElementConfig args_cfg = {.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = args_color};
     float args_w = available_width - TOOL_ROW_FIXED_CHROME - MeasureCfg(&name_cfg, name.chars, name.length);
     if (args_w < 40.0f)
     {
@@ -937,7 +937,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
                                        : SubagentActivity(view->app, line);
             ViewWrappedText(view, ViewCStr(activity),
                             (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                                     .fontSize = 14,
+                                                     .fontSize = PICO_FONT_UI,
                                                      .textColor = COLOR_MUTED},
                             available_width);
         }
@@ -973,11 +973,11 @@ static void RenderEmptyCard(int id, Clay_String title, const char **items, int n
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 15, .textColor = COLOR_TEXT}));
+        CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
         if (n <= 0)
         {
             CLAY_TEXT(CLAY_STRING("None"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                             .fontSize = 13,
+                                                             .fontSize = PICO_FONT_CAPTION,
                                                              .textColor = COLOR_MUTED,
                                                              .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -986,7 +986,7 @@ static void RenderEmptyCard(int id, Clay_String title, const char **items, int n
             for (int i = 0; i < n; i++)
             {
                 CLAY_TEXT(EmptyCStr(items[i]), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                 .fontSize = 13,
+                                                                 .fontSize = PICO_FONT_CAPTION,
                                                                  .textColor = COLOR_TEXT,
                                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
@@ -1841,7 +1841,7 @@ static void InspectRender(PicoHost *app, void *state)
                           .cornerRadius = CLAY_CORNER_RADIUS(6)})
                     {
                         CLAY_TEXT(CLAY_STRING("Back"),
-                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 13, .textColor = COLOR_TEXT}));
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_TEXT}));
                     }
                 }
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -1850,14 +1850,14 @@ static void InspectRender(PicoHost *app, void *state)
                 {
                     CLAY_TEXT(ViewCStr(title),
                               CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                .fontSize = 16,
+                                                .fontSize = PICO_FONT_BODY,
                                                 .textColor = COLOR_TEXT,
                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                     if (meta[0])
                     {
                         CLAY_TEXT(ViewCStr(meta),
                                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                    .fontSize = 13,
+                                                    .fontSize = PICO_FONT_CAPTION,
                                                     .textColor = COLOR_MUTED,
                                                     .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                     }
@@ -1872,14 +1872,14 @@ static void InspectRender(PicoHost *app, void *state)
             {
                 scroll_w = 50.0f;
             }
-            float header_h = Pico_FontPx(22);
+            float header_h = Pico_FontPx(PICO_FONT_BODY_LINE);
             if (meta[0])
             {
-                header_h += Pico_FontPx(16) + 2.0f;
+                header_h += Pico_FontPx(PICO_FONT_CAPTION_LINE) + 2.0f;
             }
             if (g_inspect_n > 1)
             {
-                float back_h = Pico_FontPx(13) + 12.0f;
+                float back_h = Pico_FontPx(PICO_FONT_CAPTION) + 12.0f;
                 if (back_h > header_h)
                 {
                     header_h = back_h;
@@ -1939,7 +1939,7 @@ static void InspectRender(PicoHost *app, void *state)
                     else
                     {
                         CLAY_TEXT(CLAY_STRING("No transcript"),
-                                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC, .fontSize = 14, .textColor = COLOR_MUTED}));
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC, .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED}));
                     }
                 }
                 if (g_inspect_overflow)
@@ -2328,9 +2328,9 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
         return;
     }
     BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
-    Font font = Pico_FontAt(FONT_REGULAR, 15);
+    Font font = Pico_FontAt(FONT_REGULAR, PICO_FONT_UI);
     const char *glyph = "\xE2\x80\xBA";
-    float glyph_px = Pico_FontPx(15);
+    float glyph_px = Pico_FontPx(PICO_FONT_UI);
     Vector2 size = MeasureTextEx(font, glyph, glyph_px, 0.0f);
     for (int i = 0; i < view->message_count; i++)
     {
@@ -2455,8 +2455,8 @@ static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, 
     {
         return;
     }
-    Font font = Pico_FontAt(FONT_ITALIC, 15);
-    float px = Pico_FontPx(15);
+    Font font = Pico_FontAt(FONT_ITALIC, PICO_FONT_UI);
+    float px = Pico_FontPx(PICO_FONT_UI);
     Vector2 text_pos = {roundf(box.x), roundf(box.y)};
     for (int i = 0; i < piece_count; i++)
     {

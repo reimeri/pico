@@ -19,7 +19,7 @@ static void HelloRender(PicoHost *host, void *state)
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 6}})
     {
         CLAY_TEXT(CLAY_STRING("hello"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 16, .textColor = COLOR_TEXT}));
+                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
     }
 }
 
@@ -77,7 +77,7 @@ static void CustomEmpty(PicoWorkspace *workspace, PicoAgentId selected_agent_id,
                      .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
         CLAY_TEXT(CLAY_STRING("Ready when you are"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
     }
 }
 
@@ -91,7 +91,7 @@ static int CustomEmptyInit(PicoWorkspace *workspace, void **state_out)
 
 ## Contract
 
-- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`). `fontSize` values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16`.
+- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`, and the type scale `PICO_FONT_CAPTION` 15 / `PICO_FONT_UI` 16 / `PICO_FONT_BODY` 18 / `PICO_FONT_TITLE` 20). Do not set `fontSize` below 14. Those values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16` (`PICO_FONT_CAPTION_LINE` 20 / `PICO_FONT_UI_LINE` 22 / `PICO_FONT_BODY_LINE` 26).
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`). Those hooks are host-scoped.
 - Do not call Clay from a tool, provider, or workspace `on_frame` callback. Workspace `on_frame` runs for every `OPEN` or `RELOADING` workspace and must not draw.

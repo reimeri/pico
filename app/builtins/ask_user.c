@@ -21,7 +21,7 @@
 #define ASK_USER_MAX_OPTIONS 20
 #define ASK_USER_MAX_TEXT 16384
 #define ASK_USER_MAX_LINES 512
-#define ASK_USER_TEXT_FONT 15
+#define ASK_USER_TEXT_FONT PICO_FONT_UI
 #define ASK_USER_TEXT_PAD_X 12
 #define ASK_USER_TEXT_PAD_Y 10
 #define ASK_USER_CARET_BLINK_HZ 2.0
@@ -1313,7 +1313,7 @@ static void RenderButton(Clay_String id, const char *label, bool enabled, bool p
     CLAY(eid, {.layout = {.padding = {14, 14, 9, 9}}, .backgroundColor = bg,
                .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = text,
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = text,
                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
 }
@@ -1349,10 +1349,10 @@ static void RenderSelectQuestion(const AskQuestion *q)
             {
                 CLAY_TEXT(CStr(g_ui.option_nums[i]),
                           CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                            .fontSize = 14,
+                                            .fontSize = PICO_FONT_UI,
                                             .textColor = selected ? COLOR_LINK : COLOR_MUTED}));
                 CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                         .fontSize = 14,
+                                                         .fontSize = PICO_FONT_UI,
                                                          .textColor = COLOR_TEXT,
                                                          .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
@@ -1365,7 +1365,7 @@ static void RenderSelectQuestion(const AskQuestion *q)
     else
     {
         CLAY_TEXT(CLAY_STRING("Up/Down or 1-N select  •  Enter next"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED,
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED,
                                     .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
 }
@@ -1434,7 +1434,7 @@ static void RenderTextQuestion(const AskQuestion *q)
         }
     }
     CLAY_TEXT(CLAY_STRING("Enter next  •  Shift+Enter newline  •  Shift+Tab back"),
-              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED,
+              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED,
                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 }
 
@@ -1512,11 +1512,11 @@ static void AskUserRender(PicoHost *app, void *state)
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
                 CLAY_TEXT(CLAY_STRING("Clarifying questions"),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT,
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                 CLAY_TEXT(CStr(g_ui.progress),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13, .textColor = COLOR_MUTED,
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
 
@@ -1532,7 +1532,7 @@ static void AskUserRender(PicoHost *app, void *state)
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
                     CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                 .fontSize = 16,
+                                                                 .fontSize = PICO_FONT_BODY,
                                                                  .textColor = COLOR_TEXT,
                                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                     if (q->kind == ASK_QUESTION_SELECT)
@@ -1554,7 +1554,7 @@ static void AskUserRender(PicoHost *app, void *state)
             if (g_ui.validation[0])
             {
                 CLAY_TEXT(CStr(g_ui.validation),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 13,
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
                                             .textColor = (Clay_Color){235, 140, 140, 255},
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }

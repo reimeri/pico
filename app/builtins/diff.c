@@ -740,7 +740,7 @@ void PicoDiff_RenderChip(PicoHost *app)
     bool hovered = Clay_PointerOver(CLAY_ID("FooterDiff"));
 
     CLAY_TEXT(CLAY_STRING("  ·  "), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = 13,
+                                                        .fontSize = PICO_FONT_CAPTION,
                                                         .textColor = COLOR_MUTED,
                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
     CLAY(CLAY_ID("FooterDiff"),
@@ -749,12 +749,12 @@ void PicoDiff_RenderChip(PicoHost *app)
                      .sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
         CLAY_TEXT(CStr(s->chip_adds), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = 13,
+                                                        .fontSize = PICO_FONT_CAPTION,
                                                         .textColor = hovered ? COLOR_DIFF_ADD_TEXT
                                                                              : COLOR_DIFF_ADD,
                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         CLAY_TEXT(CStr(s->chip_dels), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = 13,
+                                                        .fontSize = PICO_FONT_CAPTION,
                                                         .textColor = hovered ? COLOR_DIFF_DEL_TEXT
                                                                              : COLOR_DIFF_DEL,
                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
@@ -848,19 +848,19 @@ static void RenderRow(int index, const DiffRow *row)
         {
             CLAY_TEXT(Slice(row->text, row->len),
                        CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                         .fontSize = 13,
+                                         .fontSize = PICO_FONT_UI,
                                          .textColor = RowFg(row->kind),
                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
         else
         {
             CLAY_TEXT(CStr(sign), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                    .fontSize = 13,
+                                                    .fontSize = PICO_FONT_UI,
                                                     .textColor = RowFg(row->kind),
                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
             CLAY_TEXT(Slice(row->text, row->len),
                        CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                         .fontSize = 13,
+                                         .fontSize = PICO_FONT_UI,
                                          .textColor = RowFg(row->kind),
                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -927,7 +927,7 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CStr(s->title),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
 
             CLAY(CLAY_ID("DiffScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -948,7 +948,7 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
                     {
                         CLAY_TEXT(CLAY_STRING("No changes"),
                                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                    .fontSize = 14,
+                                                    .fontSize = PICO_FONT_UI,
                                                     .textColor = COLOR_MUTED,
                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
                     }

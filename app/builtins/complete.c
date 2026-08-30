@@ -496,7 +496,7 @@ void PicoComplete_Render(PicoHost *app)
                               .clip = {.horizontal = true}})
                 {
                     CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                       .fontSize = 14,
+                                                       .fontSize = PICO_FONT_UI,
                                                        .textColor = COLOR_TEXT,
                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 }
@@ -505,7 +505,7 @@ void PicoComplete_Render(PicoHost *app)
                     Clay_String detail = {.length = (int32_t)strlen(g_complete.items[i].detail),
                                           .chars = g_complete.items[i].detail};
                     CLAY_TEXT(detail, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = 13,
+                                                        .fontSize = PICO_FONT_CAPTION,
                                                         .textColor = COLOR_MUTED,
                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 }

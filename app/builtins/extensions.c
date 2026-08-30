@@ -171,7 +171,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
                                      .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
                 CLAY_TEXT(CStr(name), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                        .fontSize = 15,
+                                                        .fontSize = PICO_FONT_UI,
                                                         .textColor = COLOR_TEXT,
                                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 if (info->builtin)
@@ -179,7 +179,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
                     const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "built-in host" : "built-in workspace";
                     CLAY_TEXT(CStr(badge),
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = 12,
+                                                .fontSize = PICO_FONT_CAPTION,
                                                 .textColor = COLOR_MUTED,
                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 }
@@ -188,7 +188,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
                     const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "host" : "workspace";
                     CLAY_TEXT(CStr(badge),
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = 12,
+                                                .fontSize = PICO_FONT_CAPTION,
                                                 .textColor = COLOR_MUTED,
                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 }
@@ -203,7 +203,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
             if (desc)
             {
                 CLAY_TEXT(CStr(desc), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = 13,
+                                                        .fontSize = PICO_FONT_CAPTION,
                                                         .textColor = COLOR_MUTED,
                                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
@@ -214,7 +214,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
 static void RenderSection(PicoHost *app, bool builtin, Clay_String title)
 {
     CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                       .fontSize = 12,
+                                       .fontSize = PICO_FONT_CAPTION,
                                        .textColor = COLOR_MUTED,
                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
 
@@ -233,7 +233,7 @@ static void RenderSection(PicoHost *app, bool builtin, Clay_String title)
     if (shown == 0)
     {
         CLAY_TEXT(CLAY_STRING("None"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                         .fontSize = 13,
+                                                         .fontSize = PICO_FONT_CAPTION,
                                                          .textColor = COLOR_MUTED,
                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
@@ -283,7 +283,7 @@ static void ExtsRender(PicoHost *app, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("Extensions"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
 
             CLAY(CLAY_ID("ExtModalScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,

@@ -30,9 +30,9 @@
 #define PASTE_TEMP_THRESHOLD 4096
 #define COMPOSER_PAD_X 14
 #define COMPOSER_PAD_Y 10
-#define COMPOSER_FONT_SIZE 16
+#define COMPOSER_FONT_SIZE PICO_FONT_BODY
 #define COMPOSER_MAX_LINES 256
-#define COMPOSER_MIN_HEIGHT 56
+#define COMPOSER_MIN_HEIGHT 60
 #define COMPOSER_MAX_GROW_LINES 10
 #define COMPOSER_MAX_ATTACH 32
 #define ATTACH_THUMB 56
@@ -2169,7 +2169,7 @@ static void ComposerAttachRender(PicoHost *app, void *state)
                         {
                             CLAY_TEXT(CLAY_STRING("×"),
                                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                        .fontSize = 12,
+                                                        .fontSize = PICO_FONT_CAPTION,
                                                         .textColor = COLOR_TEXT}));
                         }
                     }
@@ -2180,7 +2180,7 @@ static void ComposerAttachRender(PicoHost *app, void *state)
         {
             CLAY_TEXT(CLAY_STRING("This model doesn't accept images"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 12,
+                                        .fontSize = PICO_FONT_CAPTION,
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }

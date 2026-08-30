@@ -91,18 +91,18 @@ static void StreamRender(PicoHost *host, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("Stream mailbox"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 16, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             if (s->status[0])
             {
                 CLAY_TEXT(CStr(s->status),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                            .fontSize = 14,
+                                            .fontSize = PICO_FONT_UI,
                                             .textColor = COLOR_MUTED,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             }
             CLAY_TEXT(s->text[0] ? CStr(s->text) : CLAY_STRING("Waiting for worker posts…"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 14,
+                                        .fontSize = PICO_FONT_UI,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             (void)host;

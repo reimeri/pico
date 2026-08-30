@@ -161,8 +161,8 @@ static void RenderPromptText(void)
         Clay_String s = {.length = length > 0 ? length : 1, .chars = length > 0 ? line : " "};
         Clay_Color color = empty ? COLOR_MUTED : ColorAt(offset);
         CLAY_TEXT(s, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                      .fontSize = 13,
-                                      .lineHeight = Pico_FontPxU16(18),
+                                      .fontSize = PICO_FONT_CAPTION,
+                                      .lineHeight = Pico_FontPxU16(PICO_FONT_CAPTION_LINE),
                                       .textColor = color,
                                       .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         if (newline)
@@ -194,7 +194,7 @@ static void RenderLegendItem(PicoPromptSource source)
         }
         CLAY_TEXT(CStr(PromptSourceLabel(source)),
                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                    .fontSize = 11,
+                                    .fontSize = PICO_FONT_CAPTION,
                                     .textColor = COLOR_MUTED,
                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
@@ -262,10 +262,10 @@ static void PromptRender(PicoHost *app, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("System prompt"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             CLAY_TEXT(CLAY_STRING("What the next turn sends, including extra instructions from extensions."),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 12,
+                                        .fontSize = PICO_FONT_CAPTION,
                                         .textColor = COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 

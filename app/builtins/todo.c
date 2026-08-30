@@ -15,7 +15,7 @@
 #include <string.h>
 
 #define TODO_COLLAPSED_WIDTH 112.0f
-#define TODO_COLLAPSED_HEIGHT 36.0f
+#define TODO_COLLAPSED_HEIGHT 42.0f
 #define TODO_EXPANDED_WIDTH 520.0f
 #define TODO_EXPANDED_HEIGHT 420.0f
 #define TODO_GAP 8.0f
@@ -299,15 +299,15 @@ static void RenderTodoRows(TodoAgentState *state)
             {
                 CLAY_TEXT(CStr(StatusLabel(todo->status)),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                            .fontSize = 12,
+                                            .fontSize = PICO_FONT_CAPTION,
                                             .textColor = StatusColor(todo->status)}));
                 CLAY_TEXT(CStr(todo->id),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_MONO, .fontSize = 12, .textColor = COLOR_LINK}));
+                          CLAY_TEXT_CONFIG({.fontId = FONT_MONO, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_LINK}));
             }
             CLAY_TEXT(CStr(todo->text),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 14,
-                                        .lineHeight = Pico_FontPxU16(19),
+                                        .fontSize = PICO_FONT_UI,
+                                        .lineHeight = Pico_FontPxU16(PICO_FONT_UI_LINE),
                                         .textColor = todo->status == PICO_TODO_COMPLETED ? COLOR_MUTED : COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }
@@ -395,22 +395,22 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
             {
                 CLAY_TEXT(CStr(title),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                            .fontSize = 14,
+                                            .fontSize = PICO_FONT_UI,
                                             .textColor = COLOR_TEXT,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 CLAY_TEXT(CStr(s->header),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 12, .textColor = COLOR_MUTED}));
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED}));
             }
             else
             {
                 CLAY_TEXT(CStr(title),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                            .fontSize = 14,
+                                            .fontSize = PICO_FONT_UI,
                                             .textColor = COLOR_TEXT,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 CLAY_TEXT(CStr(s->header),
                           CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                            .fontSize = 14,
+                                            .fontSize = PICO_FONT_UI,
                                             .textColor = COLOR_TEXT,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
             }

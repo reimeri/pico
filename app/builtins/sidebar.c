@@ -506,7 +506,7 @@ static void UnloadFolderIcons(SidebarState *s)
 static void RenderGlyph(const char *glyph, Clay_Color color)
 {
     CLAY_TEXT(CStr(glyph), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                            .fontSize = 16,
+                                            .fontSize = PICO_FONT_UI,
                                             .textColor = color,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
@@ -658,7 +658,7 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
         {
             CLAY_TEXT(CStr(ws->name),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 16,
+                                        .fontSize = PICO_FONT_UI,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -694,7 +694,7 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
         {
             CLAY_TEXT(CStr(title && title[0] ? title : "Untitled"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 16,
+                                        .fontSize = PICO_FONT_UI,
                                         .textColor = selected ? COLOR_TEXT : COLOR_MUTED,
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
@@ -796,7 +796,7 @@ static void RenderMoreLessLabel(Clay_ElementId id, Clay_String label)
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                          .fontSize = 14,
+                                          .fontSize = PICO_FONT_CAPTION,
                                           .textColor = COLOR_MUTED,
                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
@@ -896,7 +896,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
             CLAY_TEXT(CLAY_STRING("Add workspace"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = 16, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
         }
 
         CLAY(CLAY_ID("SidebarScroll"),
@@ -965,10 +965,10 @@ static void RenderFolderModal(PicoHost *host, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("Select a workspace folder"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             CLAY_TEXT(CLAY_STRING("To continue choose a workspace folder in the opened file dialog."),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = 14,
+                                        .fontSize = PICO_FONT_UI,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }

@@ -143,7 +143,7 @@ static void AskButton(Clay_String id, const char *label)
                .backgroundColor = hover ? COLOR_CODE_BG : COLOR_FOOTER_BG,
                .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
     }
 }
 
@@ -190,7 +190,7 @@ static void RenderAsk(PicoHost *app)
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY_TEXT(CLAY_STRING("Confirm"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 18, .textColor = COLOR_TEXT}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             CLAY(CLAY_ID("AskModalScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childGap = SCROLLBAR_GAP,
@@ -204,7 +204,7 @@ static void RenderAsk(PicoHost *app)
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
                     CLAY_TEXT(CStr(g_ask_msg), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                 .fontSize = 14,
+                                                                 .fontSize = PICO_FONT_UI,
                                                                  .textColor = COLOR_TEXT,
                                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 }
@@ -254,9 +254,9 @@ static void RenderError(PicoHost *app)
           .backgroundColor = COLOR_ERROR_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
-        CLAY_TEXT(title_s, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = 14, .textColor = COLOR_TEXT}));
+        CLAY_TEXT(title_s, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
         CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                          .fontSize = 13,
+                                          .fontSize = PICO_FONT_CAPTION,
                                           .textColor = COLOR_MUTED,
                                           .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
@@ -305,7 +305,7 @@ static void RenderToast(PicoHost *app)
                          .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                              .fontSize = 14,
+                                              .fontSize = PICO_FONT_UI,
                                               .textColor = COLOR_TEXT,
                                               .wrapMode = CLAY_TEXT_WRAP_WORDS}));
         }

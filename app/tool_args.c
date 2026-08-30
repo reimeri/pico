@@ -103,3 +103,24 @@ char *PicoAgent_FormatToolArgs(const char *name, const char *args_json)
     JsonFree(&doc);
     return JsonBuf_Steal(&b);
 }
+
+char *PicoAgent_FormatToolCommand(const char *name, const char *args_json)
+{
+    if (!name || strcmp(name, "sh") != 0 || !args_json || !args_json[0])
+    {
+        return NULL;
+    }
+    JsonDoc doc;
+    if (JsonParse(&doc, args_json, strlen(args_json)) != 0)
+    {
+        return NULL;
+    }
+    char *command = JsonObjStr(&doc, 0, "command");
+    JsonFree(&doc);
+    if (command && !command[0])
+    {
+        free(command);
+        return NULL;
+    }
+    return command;
+}

@@ -3406,6 +3406,31 @@ static int TestShToolCallDescriptionArgs(void)
     return ok ? 0 : Fail(name, "sh tool row did not show description");
 }
 
+static int TestShToolCallCommandExtraction(void)
+{
+    const char *name = "sh expanded row recovers exact command";
+    PicoHost app;
+    InitApp(&app);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "sh",
+                         "{\"description\":\"listing all folders in /tmp\","
+                         "\"command\":\"ls -la /tmp\"}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    char *command = line ? PicoAgent_FormatToolCommand(line->tool_name, line->tool_args_json)
+                         : NULL;
+    bool ok = command && strcmp(command, "ls -la /tmp") == 0;
+    free(command);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "sh", "{\"description\":\"no command\"}");
+    line = LastToolTrace(&app);
+    command = line ? PicoAgent_FormatToolCommand(line->tool_name, line->tool_args_json) : NULL;
+    ok = ok && !command;
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "read_file", "{\"path\":\"/tmp/x\"}");
+    line = LastToolTrace(&app);
+    command = line ? PicoAgent_FormatToolCommand(line->tool_name, line->tool_args_json) : NULL;
+    ok = ok && !command;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "exact command was not recovered from sh args");
+}
+
 static int TestToolActivityDescriptionScope(void)
 {
     const char *name = "tool activity description is sh-only";
@@ -4029,6 +4054,7 @@ int main(void)
     failed |= TestAskUserToolCancellation();
     failed |= TestResumedToolCallArgs();
     failed |= TestShToolCallDescriptionArgs();
+    failed |= TestShToolCallCommandExtraction();
     failed |= TestToolActivityDescriptionScope();
     failed |= TestToolCallListArgs();
     failed |= TestManagerProfileRegistry();

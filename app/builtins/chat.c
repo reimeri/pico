@@ -930,6 +930,14 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
         }
         else if (!subagent && line->expanded)
         {
+            char *command = PicoAgent_FormatToolCommand(line->tool_name, line->tool_args_json);
+            if (command)
+            {
+                /* Clay draws text after the layout pass, so the string must
+                   outlive the frame; copy it into the per-frame label arena. */
+                RenderToolOutput(view, ThinkLabelDup(command), available_width);
+                free(command);
+            }
             const char *output = line->tool_output;
             if (!output)
             {

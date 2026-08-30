@@ -73,8 +73,7 @@ static void ShellTestChat(PicoHost *host, void *state)
     (void)host;
     (void)state;
     CLAY(CLAY_ID("ChatRow"),
-         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                     .childGap = 8,
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
     {
         CLAY(CLAY_ID("ChatScroll"),
@@ -86,10 +85,6 @@ static void ShellTestChat(PicoHost *host, void *state)
                                                 .height = CLAY_SIZING_FIXED(4803)}}})
             {
             }
-        }
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(6),
-                                            .height = CLAY_SIZING_GROW(0)}}})
-        {
         }
     }
     /* Host and workspace views are extension points. Oversized content must not

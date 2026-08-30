@@ -2803,8 +2803,8 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
 
 static void UpdateChatScrollbarDrag(PicoHost *app)
 {
-    PicoScrollbar_UpdateDrag(&app->chat_scrollbar, CLAY_STRING("ChatScroll"),
-                             CLAY_STRING("ChatScrollBarHandle"));
+    PicoScrollbar_UpdateDragOverlay(&app->chat_scrollbar, CLAY_STRING("ChatScroll"),
+                                   CLAY_STRING("ChatScrollBarHandle"));
 }
 
 #define CHAT_FOLLOW_SLACK 8.0f

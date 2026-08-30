@@ -339,10 +339,6 @@ static void ViewWrappedToolArgs(const TranscriptView *view, Clay_String text,
 static float ChatWidth(PicoHost *app)
 {
     float width = (float)GetScreenWidth() - CONTENT_PADDING - 12;
-    if (app->chat_overflow)
-    {
-        width -= (float)(SCROLLBAR_WIDTH + SCROLLBAR_GAP);
-    }
     width -= CHAT_WRAP_CHROME;
     width = Pico_ClampChatWidth(width, Pico_ChatTextMaxPx(app));
     if (width < 50)
@@ -1424,8 +1420,7 @@ void PicoChat_Render(PicoHost *app, void *state)
     ThinkFrameReset();
     PicoChatSel_BeginFrame(PicoHost_SelectedAgent(app)->message_count);
     CLAY(CLAY_ID("ChatRow"),
-         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                     .childGap = SCROLLBAR_GAP,
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
     {
         CLAY(CLAY_ID("ChatScroll"),
@@ -1474,8 +1469,8 @@ void PicoChat_Render(PicoHost *app, void *state)
 
         if (app->chat_overflow)
         {
-            PicoScrollbar_Render(CLAY_STRING("ChatScroll"), CLAY_STRING("ChatScrollTrack"),
-                                 CLAY_STRING("ChatScrollBarHandle"));
+            PicoScrollbar_RenderOverlay(CLAY_STRING("ChatScroll"), CLAY_STRING("ChatScrollTrack"),
+                                        CLAY_STRING("ChatScrollBarHandle"));
         }
     }
 }

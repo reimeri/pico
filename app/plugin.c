@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "agent.h"
+#include "docs_path.h"
 #include "workspace_internal.h"
 #include "path.h"
 #include "session.h"
@@ -20,22 +21,10 @@
 #include <unistd.h>
 
 #ifndef PICO_CC
-#define PICO_CC "gcc"
+#define PICO_CC "cc"
 #endif
 #ifndef PICO_VERSION
 #define PICO_VERSION "0.1.0"
-#endif
-#ifndef PICO_INCLUDE_APP
-#define PICO_INCLUDE_APP "."
-#endif
-#ifndef PICO_INCLUDE_HEADERS
-#define PICO_INCLUDE_HEADERS "./include"
-#endif
-#ifndef PICO_INCLUDE_CLAY
-#define PICO_INCLUDE_CLAY ".."
-#endif
-#ifndef PICO_INCLUDE_RAYLIB
-#define PICO_INCLUDE_RAYLIB "."
 #endif
 
 #define PICO_MAX_USER_PLUGINS 32
@@ -285,6 +274,18 @@ static int CompileExt(const char *src, const char *so, char *err, size_t err_cap
 {
     char cache[4096];
     char tmp[4096];
+    char sdk_include[4096];
+    const char *compiler = getenv("PICO_CC");
+    if (!compiler || !compiler[0])
+    {
+        compiler = PICO_CC;
+    }
+    if (!Pico_SdkIncludeDir(sdk_include, sizeof(sdk_include)) ||
+        access(sdk_include, R_OK) != 0)
+    {
+        snprintf(err, err_cap, "%s: Pico extension SDK is unavailable", src);
+        return -1;
+    }
     if (!CacheDir(cache, sizeof(cache)) || MkdirP(cache) != 0)
     {
         snprintf(err, err_cap, "%s: extension cache path is unavailable", src);
@@ -333,26 +334,25 @@ static int CompileExt(const char *src, const char *so, char *err, size_t err_cap
             }
             snprintf(srcdir_flag, sizeof(srcdir_flag), "-I%s", dir);
         }
-        char *args[] = {(char *)PICO_CC,
+        char sdk_flag[4112];
+        snprintf(sdk_flag, sizeof(sdk_flag), "-I%s", sdk_include);
+        char *args[] = {(char *)compiler,
                         "-shared",
                         "-fPIC",
                         "-std=c99",
-                        "-I" PICO_INCLUDE_HEADERS,
-                        "-I" PICO_INCLUDE_APP,
-                        "-I" PICO_INCLUDE_CLAY,
-                        "-I" PICO_INCLUDE_RAYLIB,
+                        sdk_flag,
                         srcdir_flag,
                         "-o",
                         tmp,
                         (char *)src,
                         NULL};
-        if (strchr(PICO_CC, '/'))
+        if (strchr(compiler, '/'))
         {
-            execv(PICO_CC, args);
+            execv(compiler, args);
         }
         else
         {
-            execvp(PICO_CC, args);
+            execvp(compiler, args);
         }
         _exit(127);
     }
@@ -394,7 +394,7 @@ static int CompileExt(const char *src, const char *so, char *err, size_t err_cap
     unlink(tmp);
     if (WIFEXITED(status) && WEXITSTATUS(status) == 127 && n == 0)
     {
-        snprintf(err, err_cap, "%s: compiler not found (%s)", src, PICO_CC);
+        snprintf(err, err_cap, "%s: compiler not found (%s)", src, compiler);
     }
     else if (n == 0)
     {

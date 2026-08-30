@@ -37,7 +37,16 @@ sudo apt install build-essential cmake ninja-build pkg-config git \
   libwayland-dev libasound2-dev
 ```
 
-With Nix: `nix develop` (or [direnv](https://direnv.net/) via `.envrc`). The flake supplies the toolchain and pinned Raylib sources.
+With Nix: `nix run github:reimeri/pico` installs and runs the packaged app. For development, use `nix develop` (or [direnv](https://direnv.net/) via `.envrc`). The flake exports `packages`, `apps`, and `checks` for `x86_64-linux` and `aarch64-linux`; the packaged app puts GCC on `PATH` so C extensions compile out of the box.
+
+Tagged releases provide an x86-64 AppImage and portable tar archive. The AppImage can be run directly:
+
+```bash
+chmod +x pico-*-linux-x86_64.AppImage
+./pico-*-linux-x86_64.AppImage
+```
+
+The tar archive uses a standard `bin/` + `share/` prefix. Extract it and run `bin/pico`, or install that tree under a prefix. Both release formats require a host `cc` compiler to build hot-reloadable C extensions.
 
 ## Build
 
@@ -55,7 +64,14 @@ cmake -S app --preset release && cmake --build app/build/release
 ./app/build/release/pico
 ```
 
-Tests: `ctest --test-dir app/build/debug --output-on-failure`
+Install into a prefix or build the portable archive:
+
+```bash
+cmake --install app/build/release --prefix "$HOME/.local"
+cmake --build app/build/release --target package
+```
+
+The install includes the desktop entry and `app/resources/logo.png` as its icon. Tests: `ctest --test-dir app/build/debug --output-on-failure`
 
 Debug builds save each raw SSE response under
 `$XDG_CONFIG_HOME/pico/debug/sse/` (or `~/.config/pico/debug/sse/`) as a private
@@ -63,7 +79,9 @@ Debug builds save each raw SSE response under
 pairs are retained. These files can contain prompts, reasoning, tool arguments, and
 outputs; handle them as sensitive data. Release builds do not capture responses.
 
-A relocatable copy of the build output needs `pico`, `resources/` (fonts), `docs/` (markdown for `/docs` and the agent hint), `examples/` (templates the docs link to), and `builtins/` (reference sources for `sh`, OpenAI, Hyper, and xAI).
+Development builds keep `pico`, `resources/`, `docs/`, `examples/`, `builtins/`, and `sdk/` together in the build directory. Installed builds use `bin/pico` and `share/pico/{resources,docs,examples,builtins,sdk}`. Pico discovers either layout relative to its executable; `PICO_DATA_DIR` can override the data root.
+
+User extensions are compiled with `${PICO_CC:-cc}` against the packaged `sdk/include` tree and their own source directory. Release archives and AppImages intentionally do not bundle a compiler.
 
 The process starts in the current directory as the first workspace. `/cd` opens or selects another workspace without replacing the others. `pico -h` lists flags. Sign in with `/login openai` / `/login hyper` / `/login xai`, or `PICO_API_KEY` / `OPENAI_API_KEY` / `HYPER_API_KEY` / `XAI_API_KEY`.
 

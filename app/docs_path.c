@@ -3,9 +3,73 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+#ifndef PICO_INSTALL_DATADIR
+#define PICO_INSTALL_DATADIR ""
+#endif
 
 static char g_app_dir[4096];
+
+static bool IsDirectory(const char *path)
+{
+    struct stat st;
+    return path && path[0] && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool HasRuntimeData(const char *dir)
+{
+    char path[4096];
+    return dir && dir[0] &&
+           PicoPath_Format(path, sizeof(path), "%s/resources", dir) &&
+           IsDirectory(path);
+}
+
+static void SetDataDir(const char *dir)
+{
+    if (!dir || !dir[0])
+    {
+        g_app_dir[0] = '\0';
+        return;
+    }
+    snprintf(g_app_dir, sizeof(g_app_dir), "%s", dir);
+    size_t n = strlen(g_app_dir);
+    while (n > 1 && g_app_dir[n - 1] == '/')
+    {
+        g_app_dir[--n] = '\0';
+    }
+}
+
+void Pico_PathsInit(const char *application_dir)
+{
+    char candidate[4096];
+    const char *override = getenv("PICO_DATA_DIR");
+    if (override && override[0])
+    {
+        SetDataDir(override);
+        return;
+    }
+    if (HasRuntimeData(application_dir))
+    {
+        SetDataDir(application_dir);
+        return;
+    }
+    if (application_dir && application_dir[0] &&
+        PicoPath_Format(candidate, sizeof(candidate), "%s/../share/pico", application_dir) &&
+        HasRuntimeData(candidate))
+    {
+        SetDataDir(candidate);
+        return;
+    }
+    if (HasRuntimeData(PICO_INSTALL_DATADIR))
+    {
+        SetDataDir(PICO_INSTALL_DATADIR);
+        return;
+    }
+    SetDataDir(application_dir);
+}
 
 static int Fold(int c)
 {
@@ -32,12 +96,7 @@ static bool FoldEq(const char *a, const char *b)
 
 void Pico_DocsSetAppDir(const char *dir)
 {
-    if (!dir || !dir[0])
-    {
-        g_app_dir[0] = '\0';
-        return;
-    }
-    snprintf(g_app_dir, sizeof(g_app_dir), "%s", dir);
+    SetDataDir(dir);
 }
 
 const char *Pico_DocsAppDir(void)
@@ -122,6 +181,16 @@ bool Pico_DocsJoin(const char *app_dir, const char *rel, char *out, size_t cap)
     return PicoPath_Format(out, cap, "%s/%s", base, rel);
 }
 
+bool Pico_DataPath(const char *relative, char *out, size_t cap)
+{
+    return Pico_DocsJoin(g_app_dir, relative, out, cap);
+}
+
+bool Pico_SdkIncludeDir(char *out, size_t cap)
+{
+    return Pico_DataPath("sdk/include", out, cap);
+}
+
 bool Pico_DocsFile(const char *topic, char *out, size_t cap)
 {
     char rel[256];
@@ -129,5 +198,5 @@ bool Pico_DocsFile(const char *topic, char *out, size_t cap)
     {
         return false;
     }
-    return Pico_DocsJoin(g_app_dir, rel, out, cap);
+    return Pico_DataPath(rel, out, cap);
 }

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Pico
+Comment=Native AI agent harness
+Exec=pico
+Icon=pico
+Terminal=false
+Categories=Development;
+Keywords=AI;Agent;Developer;
+StartupNotify=true

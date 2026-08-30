@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ -z "${APPDIR:-}" ]; then
+    APPDIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+fi
+PICO_DATA_DIR=${PICO_DATA_DIR:-"$APPDIR/usr/share/pico"}
+export PICO_DATA_DIR
+if [ -d "$APPDIR/usr/lib/libdecor/plugins-1" ]; then
+    LIBDECOR_PLUGIN_DIR=${LIBDECOR_PLUGIN_DIR:-"$APPDIR/usr/lib/libdecor/plugins-1"}
+    export LIBDECOR_PLUGIN_DIR
+fi
+exec "$APPDIR/usr/bin/pico" "$@"

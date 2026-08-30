@@ -7,6 +7,7 @@
 #include "pico/plugin.h"
 #include "agent.h"
 #include "builtins/chat.h"
+#include "docs_path.h"
 #include "overlay.h"
 #include "session.h"
 #include "tinyfiledialogs.h"
@@ -444,13 +445,7 @@ static Clay_Color RowFill(bool selected, bool hovered)
 
 static void ResourcePath(const char *relative, char *out, size_t cap)
 {
-    const char *directory = GetApplicationDirectory();
-    size_t length = directory ? strlen(directory) : 0;
-    if (length > 0)
-    {
-        snprintf(out, cap, "%s%s%s", directory, directory[length - 1] == '/' ? "" : "/", relative);
-    }
-    else
+    if (!Pico_DataPath(relative, out, cap))
     {
         snprintf(out, cap, "%s", relative);
     }

@@ -1868,7 +1868,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
     {
         return PICO_NO_MEMORY;
     }
-    Pico_DocsSetAppDir(GetApplicationDirectory());
+    Pico_PathsInit(GetApplicationDirectory());
     PicoHost_InitFields(host, fonts, safe_mode);
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
     {
@@ -2115,7 +2115,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
     }
     if (!host->ask_id_mu_ready)
     {
-        Pico_DocsSetAppDir(GetApplicationDirectory());
+        Pico_PathsInit(GetApplicationDirectory());
         PicoHost_InitFields(host, fonts, safe_mode);
         if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
         {

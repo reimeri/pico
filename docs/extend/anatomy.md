@@ -100,13 +100,15 @@ Click a row to toggle it off or on. Disabled extensions stay in the registry (co
 
 ## Compile
 
-Pico runs the configured C compiler (`gcc` unless CMake set `PICO_CC`) as:
+Pico runs `${PICO_CC:-cc}` as:
 
 ```text
-cc -shared -fPIC -std=c99 -I<pico headers> -I<app> -I<clay> -I<raylib> -I<source dir> -o <cache>.so <file.c>
+cc -shared -fPIC -std=c99 -I<pico SDK>/include -I<source dir> -o <cache>.so <file.c>
 ```
 
-The source directory is on the include path, so local headers next to the `.c` file work. Compile failures and failed `pico_add_tool` registrations show in the overlay; the previous working module generation remains active when a replacement fails.
+The packaged SDK is `share/pico/sdk/include` relative to Pico's install prefix and contains the public `pico/` headers plus the Clay, Raylib, JSON, markdown, and text-range headers those contracts expose. Development builds create the same `sdk/include` layout beside the executable. `PICO_DATA_DIR` can override the runtime data root when testing a staged package.
+
+The source directory is also on the include path, so local headers next to the `.c` file work. Packaged archives and AppImages require a host C99 compiler; the Nix package supplies GCC. Compile failures, a missing compiler/SDK, and failed `pico_add_tool` registrations show in the overlay; the previous working module generation remains active when a replacement fails.
 
 ## Reload
 

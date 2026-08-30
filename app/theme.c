@@ -1,4 +1,5 @@
 #include "theme_internal.h"
+#include "docs_path.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -84,15 +85,8 @@ float Pico_FontScale(void)
 
 static void FontPath(uint16_t fontId, char *out, size_t cap)
 {
-    const char *directory = GetApplicationDirectory();
     const char *relative = kFontPaths[fontId];
-    size_t length = directory ? strlen(directory) : 0;
-    if (length > 0)
-    {
-        snprintf(out, cap, "%s%s%s", directory,
-                 directory[length - 1] == '/' ? "" : "/", relative);
-    }
-    else
+    if (!Pico_DataPath(relative, out, cap))
     {
         snprintf(out, cap, "%s", relative);
     }

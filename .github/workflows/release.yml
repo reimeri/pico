@@ -1,0 +1,132 @@
+name: Linux release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x86_64:
+    name: Build Linux x86_64 artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install build and packaging dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential ninja-build pkg-config git curl patchelf file imagemagick \
+            appstream desktop-file-utils libfuse2 \
+            libcurl4-openssl-dev libgl1-mesa-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev libxext-dev \
+            libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libffi-dev \
+            libdecor-0-dev libasound2-dev libpulse-dev
+          python3 -m pip install --user --disable-pip-version-check "cmake==3.31.6"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate tag version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^project(pico VERSION \([^ ]*\) LANGUAGES C)$/\1/p' app/CMakeLists.txt)
+          test -n "$version"
+          test "${GITHUB_REF_NAME#v}" = "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Configure, build, and test
+        run: |
+          set -euo pipefail
+          cmake -S app --preset release
+          cmake --build app/build/release --parallel 2
+          ctest --test-dir app/build/release --output-on-failure --parallel 2
+          desktop-file-validate packaging/linux/io.github.reimeri.pico.desktop
+          appstreamcli validate --no-net packaging/linux/io.github.reimeri.pico.appdata.xml
+
+      - name: Build portable archive
+        run: |
+          set -euo pipefail
+          cmake --build app/build/release --target package --parallel 2
+          mkdir -p dist
+          cp "app/build/release/pico-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" dist/
+
+      - name: Download pinned linuxdeploy
+        env:
+          LINUXDEPLOY_SHA256: 421ca71d5c69ea97c6309276232990d43df1dcece0edfaa26bbf926ff96ed12e
+        run: |
+          set -euo pipefail
+          asset=linuxdeploy-x86_64.AppImage
+          url=https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/$asset
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/$asset" "$url"
+          echo "$LINUXDEPLOY_SHA256  $RUNNER_TEMP/$asset" | sha256sum --check --strict -
+          chmod +x "$RUNNER_TEMP/$asset"
+          echo "LINUXDEPLOY=$RUNNER_TEMP/$asset" >> "$GITHUB_ENV"
+
+      - name: Build and smoke-test AppImage
+        run: |
+          packaging/appimage/build.sh \
+            app/build/release \
+            "${{ steps.version.outputs.version }}" \
+            dist
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum ./*.tar.gz ./*.AppImage > SHA256SUMS
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pico-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    name: Create draft GitHub release
+    needs: build-linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pico-linux-x86_64
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$GITHUB_REF_NAME
+          version=${tag#v}
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/* \
+              --draft \
+              --generate-notes \
+              --title "Pico $version" \
+              --verify-tag \
+              --repo "$GITHUB_REPOSITORY"
+          fi

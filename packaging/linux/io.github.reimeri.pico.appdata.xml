@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.reimeri.pico</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Pico</name>
+  <developer id="io.github.reimeri">
+    <name>Reimeri</name>
+  </developer>
+  <summary>Native AI agent harness</summary>
+  <description>
+    <p>
+      Pico is a small C99 AI agent harness with a native chat interface,
+      concurrent workspaces, and hot-reloadable C extensions.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.reimeri.pico.desktop</launchable>
+  <provides>
+    <binary>pico</binary>
+  </provides>
+  <url type="homepage">https://github.com/reimeri/pico</url>
+  <content_rating type="oars-1.1"/>
+</component>

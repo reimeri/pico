@@ -3,6 +3,7 @@ project(pico VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 
 include(FetchContent)
+include(GNUInstallDirs)
 set(FETCHCONTENT_QUIET FALSE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
@@ -25,6 +26,9 @@ if(DEFINED CMAKE_POLICY_VERSION_MINIMUM)
 endif()
 set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 FetchContent_MakeAvailable(raylib)
+# Raylib is an internal static dependency. Keep its development files out of
+# Pico's install tree and CPack archive.
+set_property(DIRECTORY "${raylib_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 if(_pico_policy_version_minimum_defined)
     set(CMAKE_POLICY_VERSION_MINIMUM "${_pico_policy_version_minimum}")
 else()
@@ -134,11 +138,8 @@ target_compile_definitions(pico PRIVATE
     $<$<CONFIG:Debug>:PICO_DEBUG_SSE_CAPTURE=1>
     $<$<CONFIG:Debug>:PICO_CLAY_DEBUG=1>
     "PICO_VERSION=\"${PROJECT_VERSION}\""
-    "PICO_CC=\"${CMAKE_C_COMPILER}\""
-    "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
-    "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
-    "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
-    "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
+    "PICO_CC=\"cc\""
+    "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
 target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
@@ -472,7 +473,8 @@ if(BUILD_TESTING)
     add_executable(pico_clay_capacity_tests
         tests/clay_capacity_test.c
         tests/clay_impl.c
-        theme.c)
+        theme.c
+        docs_path.c)
     target_include_directories(pico_clay_capacity_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -600,55 +602,120 @@ if(BUILD_TESTING)
     target_link_options(pico_host_workspace_tests PRIVATE -Wl,--gc-sections -rdynamic)
     target_compile_definitions(pico_host_workspace_tests PRIVATE
         "PICO_VERSION=\"${PROJECT_VERSION}\""
-        "PICO_CC=\"${CMAKE_C_COMPILER}\""
-        "PICO_INCLUDE_APP=\"${CMAKE_CURRENT_SOURCE_DIR}\""
-        "PICO_INCLUDE_HEADERS=\"${CMAKE_CURRENT_SOURCE_DIR}/include\""
-        "PICO_INCLUDE_CLAY=\"${CMAKE_CURRENT_SOURCE_DIR}/..\""
-        "PICO_INCLUDE_RAYLIB=\"${raylib_SOURCE_DIR}/src\"")
+        "PICO_CC=\"cc\""
+        "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
     target_link_libraries(pico_host_workspace_tests PRIVATE raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()
 
-add_custom_command(
-        TARGET pico POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/resources
-        ${CMAKE_CURRENT_BINARY_DIR}/resources)
-
-add_custom_command(
-        TARGET pico POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/../docs
-        ${CMAKE_CURRENT_BINARY_DIR}/docs)
-
-add_custom_command(
-        TARGET pico POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/../examples
-        ${CMAKE_CURRENT_BINARY_DIR}/examples)
-
 set(_pico_ref_builtins
-    shell.c openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h completions.c completions.h hyper_auth.c hyper_auth.h)
+    shell.c openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    completions.c completions.h hyper_auth.c hyper_auth.h)
+set(_pico_runtime_commands
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources ${CMAKE_CURRENT_BINARY_DIR}/resources
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../docs ${CMAKE_CURRENT_BINARY_DIR}/docs
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/../examples ${CMAKE_CURRENT_BINARY_DIR}/examples
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${CMAKE_CURRENT_BINARY_DIR}/builtins
+        ${CMAKE_CURRENT_BINARY_DIR}/sdk/include/pico
+        ${CMAKE_CURRENT_BINARY_DIR}/sdk/include/clay
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/pico ${CMAKE_CURRENT_BINARY_DIR}/sdk/include/pico
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/json.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/markdown.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/text_range.h
+        ${raylib_SOURCE_DIR}/src/raylib.h
+        ${raylib_SOURCE_DIR}/src/raymath.h
+        ${raylib_SOURCE_DIR}/src/rlgl.h
+        ${CMAKE_CURRENT_BINARY_DIR}/sdk/include
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/../clay/clay.h
+        ${CMAKE_CURRENT_BINARY_DIR}/sdk/include/clay)
+set(_pico_ref_builtin_paths)
 foreach(_f IN LISTS _pico_ref_builtins)
-    add_custom_command(
-            TARGET pico POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/builtins
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    list(APPEND _pico_ref_builtin_paths ${CMAKE_CURRENT_SOURCE_DIR}/builtins/${_f})
+    list(APPEND _pico_runtime_commands
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/builtins/${_f}
             ${CMAKE_CURRENT_BINARY_DIR}/builtins/${_f})
 endforeach()
-unset(_pico_ref_builtins)
-unset(_f)
+add_custom_target(pico_runtime_files ALL ${_pico_runtime_commands})
+add_dependencies(pico pico_runtime_files)
+if(TARGET pico_host_workspace_tests)
+    add_dependencies(pico_host_workspace_tests pico_runtime_files)
+endif()
+unset(_pico_runtime_commands)
 
 foreach(ext hello empty_banner echo_tool ask_tool permit_tool extra_instructions ephemeral_context time_cmd modal stream_modal counter_tool)
     add_custom_command(
-            TARGET pico POST_BUILD
-            COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99 ${PICO_WARNINGS_AS_ERRORS_OPTION}
-                -I${CMAKE_CURRENT_SOURCE_DIR}/include
-                -I${CMAKE_CURRENT_SOURCE_DIR}
-                -I${CMAKE_CURRENT_SOURCE_DIR}/..
-                -I${raylib_SOURCE_DIR}/src
-                -o ${CMAKE_CURRENT_BINARY_DIR}/${ext}_ext.so
-                ${CMAKE_CURRENT_SOURCE_DIR}/../examples/${ext}.c
-            COMMENT "Compile examples/${ext}.c as a plugin smoke test")
+        TARGET pico POST_BUILD
+        COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -std=c99 ${PICO_WARNINGS_AS_ERRORS_OPTION}
+            -I${CMAKE_CURRENT_BINARY_DIR}/sdk/include
+            -o ${CMAKE_CURRENT_BINARY_DIR}/${ext}_ext.so
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/${ext}.c
+        COMMENT "Compile examples/${ext}.c against the packaged SDK")
 endforeach()
+
+install(TARGETS pico RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/resources
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../docs
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../examples
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico)
+install(FILES ${_pico_ref_builtin_paths}
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico/builtins)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/pico
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico/sdk/include)
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/json.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/markdown.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/text_range.h
+    ${raylib_SOURCE_DIR}/src/raylib.h
+    ${raylib_SOURCE_DIR}/src/raymath.h
+    ${raylib_SOURCE_DIR}/src/rlgl.h
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico/sdk/include)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../clay/clay.h
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pico/sdk/include/clay)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/linux/io.github.reimeri.pico.desktop
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/linux/io.github.reimeri.pico.appdata.xml
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/resources/logo.png
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/pixmaps
+    RENAME pico.png)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE.md
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/pico)
+
+if(BUILD_TESTING AND UNIX AND NOT APPLE)
+    add_test(NAME pico_install_smoke_tests
+        COMMAND ${CMAKE_COMMAND}
+            -DPICO_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DPICO_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DPICO_STAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/install-smoke
+            -DPICO_CC=${CMAKE_C_COMPILER}
+            -DPICO_NM=${CMAKE_NM}
+            -DPICO_PREFIX=${CMAKE_INSTALL_PREFIX}
+            -DPICO_BINDIR=${CMAKE_INSTALL_BINDIR}
+            -DPICO_DATADIR=${CMAKE_INSTALL_DATADIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_smoke.cmake)
+endif()
+
+set(CPACK_GENERATOR TGZ)
+set(CPACK_PACKAGE_NAME pico)
+set(CPACK_PACKAGE_VENDOR Reimeri)
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native AI agent harness")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE.md)
+set(CPACK_PACKAGE_FILE_NAME "pico-${PROJECT_VERSION}-linux-${CMAKE_SYSTEM_PROCESSOR}")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_PACKAGE_CHECKSUM SHA256)
+include(CPack)
+
+unset(_pico_ref_builtin_paths)
+unset(_pico_ref_builtins)
+unset(_f)

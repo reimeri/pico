@@ -7,6 +7,7 @@
 
 #include "pico/app.h"
 #include "agent_internal.h"
+#include "docs_path.h"
 #include "richtext.h"
 
 #include <stdio.h>
@@ -108,6 +109,8 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+
+    Pico_PathsInit(GetApplicationDirectory());
 
     uint64_t total_memory_size = Clay_MinMemorySize();
     Clay_Arena clay_memory = Clay_CreateArenaWithCapacityAndMemory(total_memory_size, malloc(total_memory_size));

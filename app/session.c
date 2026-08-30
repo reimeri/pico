@@ -6,6 +6,7 @@
 #include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
+#include "posix_io.h"
 #include "settings.h"
 #include "usage.h"
 #include "host_internal.h"
@@ -578,26 +579,6 @@ int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool
     return n;
 }
 
-static bool WriteAll(int fd, const char *data, size_t len)
-{
-    size_t offset = 0;
-    while (offset < len)
-    {
-        ssize_t wrote = write(fd, data + offset, len - offset);
-        if (wrote > 0)
-        {
-            offset += (size_t)wrote;
-            continue;
-        }
-        if (wrote < 0 && errno == EINTR)
-        {
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
 #ifdef PICO_SESSION_TEST_HOOKS
 static bool SessionTestFail(const char *stage)
 {
@@ -738,8 +719,8 @@ static bool WriteLine(PicoHost *app, PicoAgent *agent, const char *json, bool wr
         original_size = lseek(fd, 0, SEEK_END);
         have_previous_stat = fstat(fd, &previous_stat) == 0;
         size_t len = strlen(json);
-        if (SessionTestFail("append_write") || !WriteAll(fd, json, len) || !WriteAll(fd, "\n", 1) ||
-            fsync(fd) != 0)
+        if (SessionTestFail("append_write") || !PicoIO_WriteAll(fd, json, len) ||
+            !PicoIO_WriteAll(fd, "\n", 1) || fsync(fd) != 0)
         {
             failure = errno ? errno : EIO;
             if (original_size >= 0)
@@ -2478,7 +2459,7 @@ static bool CopyRemainder(FILE *src, int fd)
     for (;;)
     {
         size_t n = fread(buf, 1, sizeof(buf), src);
-        if (n > 0 && !WriteAll(fd, buf, n))
+        if (n > 0 && !PicoIO_WriteAll(fd, buf, n))
         {
             return false;
         }
@@ -2589,10 +2570,10 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
         failure = errno ? errno : EIO;
         goto done;
     }
-    if (!WriteAll(fd, header, strlen(header)) || !WriteAll(fd, "\n", 1) ||
+    if (!PicoIO_WriteAll(fd, header, strlen(header)) || !PicoIO_WriteAll(fd, "\n", 1) ||
         !CopyRemainder(src, fd) || SessionTestFail("title_after_copy") ||
-        !WriteAll(fd, event_line, strlen(event_line)) || !WriteAll(fd, "\n", 1) ||
-        SessionTestFail("title_fsync") || fsync(fd) != 0)
+        !PicoIO_WriteAll(fd, event_line, strlen(event_line)) ||
+        !PicoIO_WriteAll(fd, "\n", 1) || SessionTestFail("title_fsync") || fsync(fd) != 0)
     {
         failure = errno ? errno : EIO;
         goto done;
@@ -2819,17 +2800,7 @@ static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
         return false;
     }
     (void)fchmod(fd, 0600);
-    ok = true;
-    for (off = 0; ok && off < len;)
-    {
-        ssize_t n = write(fd, data + off, len - off);
-        if (n <= 0)
-        {
-            ok = false;
-            break;
-        }
-        off += (size_t)n;
-    }
+    ok = PicoIO_WriteAll(fd, data, len);
     if (ok && fsync(fd) != 0)
     {
         ok = false;

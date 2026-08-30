@@ -5,6 +5,7 @@
 #include "json.h"
 #include "overlay.h"
 #include "path.h"
+#include "posix_io.h"
 #include "session.h"
 #include "theme_internal.h"
 #include "host_internal.h"
@@ -528,21 +529,7 @@ static bool CreateFileIfAbsent(const char *path, const char *data, size_t len)
         return false;
     }
 
-    bool ok = true;
-    for (size_t off = 0; ok && off < len;)
-    {
-        ssize_t n = write(fd, data + off, len - off);
-        if (n < 0 && errno == EINTR)
-        {
-            continue;
-        }
-        if (n <= 0)
-        {
-            ok = false;
-            break;
-        }
-        off += (size_t)n;
-    }
+    bool ok = PicoIO_WriteAll(fd, data, len);
     if (ok && fsync(fd) != 0)
     {
         ok = false;
@@ -1034,17 +1021,7 @@ static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode
     {
         return false;
     }
-    bool ok = fchmod(fd, mode) == 0;
-    for (size_t off = 0; ok && off < len;)
-    {
-        ssize_t n = write(fd, data + off, len - off);
-        if (n <= 0)
-        {
-            ok = false;
-            break;
-        }
-        off += (size_t)n;
-    }
+    bool ok = fchmod(fd, mode) == 0 && PicoIO_WriteAll(fd, data, len);
     if (ok && fsync(fd) != 0)
     {
         ok = false;

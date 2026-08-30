@@ -175,6 +175,18 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_json_tests)
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
 
+    add_executable(pico_shell_tests
+        tests/shell_test.c
+        builtins/shell.c
+        json.c)
+    target_include_directories(pico_shell_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_shell_tests)
+    add_test(NAME pico_shell_tests COMMAND pico_shell_tests)
+
     add_executable(pico_http_capture_tests
         tests/http_capture_test.c
         http_capture.c

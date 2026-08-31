@@ -5,6 +5,7 @@
 #include "settings.h"
 
 #include "clay/clay.h"
+#include "docs_path.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,9 @@ typedef struct SettingsState {
     int focus_kind;
     int focus_model;
     bool model_dropdown;
+    Texture2D trash_icon;
+    Texture2D trash_icon_disabled;
+    bool trash_icon_tried;
 } SettingsState;
 
 static __thread SettingsState *s_active_settings_state = NULL;
@@ -731,6 +735,77 @@ static void RenderButton(Clay_ElementId id, const char *label, bool enabled, boo
     }
 }
 
+static void EnsureTrashIcon(SettingsState *s)
+{
+    char path[4096];
+    Image image;
+    Image disabled_image;
+    if (!s || s->trash_icon_tried || !IsWindowReady())
+    {
+        return;
+    }
+    s->trash_icon_tried = true;
+    if (!Pico_DataPath("resources/trash.png", path, sizeof(path)))
+    {
+        snprintf(path, sizeof(path), "%s", "resources/trash.png");
+    }
+    image = LoadImage(path);
+    if (!image.data)
+    {
+        return;
+    }
+    disabled_image = ImageCopy(image);
+    ImageColorTint(&image, (Color){(unsigned char)COLOR_TEXT.r, (unsigned char)COLOR_TEXT.g,
+                                   (unsigned char)COLOR_TEXT.b, (unsigned char)COLOR_TEXT.a});
+    s->trash_icon = LoadTextureFromImage(image);
+    UnloadImage(image);
+    if (disabled_image.data)
+    {
+        ImageColorTint(&disabled_image, (Color){(unsigned char)COLOR_MUTED.r, (unsigned char)COLOR_MUTED.g,
+                                                (unsigned char)COLOR_MUTED.b, (unsigned char)COLOR_MUTED.a});
+        s->trash_icon_disabled = LoadTextureFromImage(disabled_image);
+        UnloadImage(disabled_image);
+    }
+    if (s->trash_icon.id != 0)
+    {
+        SetTextureFilter(s->trash_icon, TEXTURE_FILTER_BILINEAR);
+    }
+    if (s->trash_icon_disabled.id != 0)
+    {
+        SetTextureFilter(s->trash_icon_disabled, TEXTURE_FILTER_BILINEAR);
+    }
+}
+
+static void RenderTrashButton(SettingsState *s, Clay_ElementId id, bool enabled)
+{
+    float icon_size = Pico_FontPx(18);
+    float button_size = icon_size + 12.0f;
+    bool hover = enabled && Clay_PointerOver(id);
+    Texture2D *icon = s ? (enabled ? &s->trash_icon : &s->trash_icon_disabled) : NULL;
+    CLAY(id, {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                         .sizing = {.width = CLAY_SIZING_FIXED(button_size),
+                                    .height = CLAY_SIZING_FIXED(button_size)}},
+              .backgroundColor = hover ? COLOR_CODE_BG : (Clay_Color){0, 0, 0, 0},
+              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        if (icon && icon->id != 0)
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(icon_size),
+                                                .height = CLAY_SIZING_FIXED(icon_size)}},
+                          .image = {.imageData = icon}})
+            {
+            }
+        }
+        else
+        {
+            CLAY_TEXT(CLAY_STRING("x"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                          .fontSize = PICO_FONT_UI,
+                                                          .textColor = enabled ? COLOR_TEXT : COLOR_MUTED,
+                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
+    }
+}
+
 static void RenderChip(Clay_ElementId id, const char *label, bool on)
 {
     bool hover = Clay_PointerOver(id);
@@ -980,7 +1055,7 @@ static void RenderModelRow(SettingsState *s, int index)
                                                            .textColor = COLOR_MUTED,
                                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
             }
-            RenderButton(CLAY_IDI("SettingsModelRemove", index), "Remove", s->draft.model_count > 1, false);
+            RenderTrashButton(s, CLAY_IDI("SettingsModelRemove", index), s->draft.model_count > 1);
         }
         if (expanded)
         {
@@ -1002,6 +1077,7 @@ static void SettingsRender(PicoHost *app, void *state)
     {
         return;
     }
+    EnsureTrashIcon(s_active_settings_state);
     sw = (float)GetScreenWidth();
     sh = (float)GetScreenHeight();
     card_w = sw < 720.0f ? sw - 48.0f : 640.0f;
@@ -1484,6 +1560,14 @@ static void SettingsShutdown(PicoHost *app, void *state)
     (void)Unclaim();
     PicoSettings_FreeUserDraft(&s->draft);
     free(s->expanded);
+    if (s->trash_icon.id != 0)
+    {
+        UnloadTexture(s->trash_icon);
+    }
+    if (s->trash_icon_disabled.id != 0)
+    {
+        UnloadTexture(s->trash_icon_disabled);
+    }
     free(s);
     s_active_settings_state = NULL;
 }

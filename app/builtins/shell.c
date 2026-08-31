@@ -6,11 +6,14 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SH_HEAD 12800
@@ -222,15 +225,41 @@ static void LargeOutputMessage(JsonBuf *output, const char *path, uint64_t size)
     JsonBuf_Puts(output, line);
 }
 
+#define SH_DEFAULT_TIMEOUT 180
+
 static const char *kShParams =
     "{\"type\":\"object\",\"properties\":{"
     "\"description\":{\"type\":\"string\",\"description\":\"Succinct 2-10 word summary of what the "
     "command achieves\"},"
-    "\"command\":{\"type\":\"string\",\"description\":\"Shell command to run in the workspace\"}},"
+    "\"command\":{\"type\":\"string\",\"description\":\"Shell command to run in the workspace\"},"
+    "\"timeout\":{\"type\":\"integer\",\"description\":\"Optional command timeout in seconds (default 180)\"}},"
     "\"required\":[\"description\",\"command\"]}";
 
-static char *ExtractCommand(const char *args_json)
+static double MonotonicSeconds(void)
 {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+static void KillProcessGroup(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+    if (kill(-pid, SIGKILL) != 0)
+    {
+        kill(pid, SIGKILL);
+    }
+}
+
+static char *ExtractArgs(const char *args_json, int *timeout_seconds)
+{
+    if (timeout_seconds)
+    {
+        *timeout_seconds = SH_DEFAULT_TIMEOUT;
+    }
     if (!args_json || !args_json[0])
     {
         return NULL;
@@ -241,6 +270,11 @@ static char *ExtractCommand(const char *args_json)
         return NULL;
     }
     char *cmd = JsonObjStr(&doc, 0, "command");
+    if (timeout_seconds)
+    {
+        int t = JsonObjInt(&doc, 0, "timeout", SH_DEFAULT_TIMEOUT);
+        *timeout_seconds = t > 0 ? t : SH_DEFAULT_TIMEOUT;
+    }
     JsonFree(&doc);
     return cmd;
 }
@@ -252,7 +286,8 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
     {
         memset(out, 0, sizeof(*out));
     }
-    char *command = ExtractCommand(args_json);
+    int timeout_seconds = SH_DEFAULT_TIMEOUT;
+    char *command = ExtractArgs(args_json, &timeout_seconds);
     if (!command || !command[0])
     {
         if (out)
@@ -320,12 +355,49 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
     uint64_t output_size = 0;
     char buf[4096];
     int read_error = 0;
+    bool timed_out = false;
+    double deadline = MonotonicSeconds() + (double)timeout_seconds;
     for (;;)
     {
-        ssize_t n = read(pipefd[0], buf, sizeof(buf));
-        if (n < 0 && errno == EINTR)
+        double now = MonotonicSeconds();
+        if (now >= deadline)
         {
-            continue;
+            timed_out = true;
+            break;
+        }
+        int timeout_ms = (int)((deadline - now) * 1000.0 + 0.999);
+        if (timeout_ms <= 0)
+        {
+            timeout_ms = 0;
+        }
+        struct pollfd pfd;
+        pfd.fd = pipefd[0];
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            read_error = errno;
+            break;
+        }
+        if (pr == 0)
+        {
+            timed_out = true;
+            break;
+        }
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            read_error = errno;
+            break;
         }
         if (n <= 0)
         {
@@ -346,12 +418,50 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
         ShellSpoolDiscard(&spool);
     }
     int status = 0;
-    pid_t waited;
-    do
+    int wait_error = 0;
+    if (timed_out)
     {
-        waited = waitpid(pid, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    int wait_error = waited < 0 ? errno : 0;
+        KillProcessGroup(pid);
+        pid_t waited;
+        do
+        {
+            waited = waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        wait_error = waited < 0 ? errno : 0;
+    }
+    else
+    {
+        for (;;)
+        {
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid)
+            {
+                break;
+            }
+            if (waited < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                wait_error = errno;
+                break;
+            }
+            if (MonotonicSeconds() >= deadline)
+            {
+                timed_out = true;
+                KillProcessGroup(pid);
+                do
+                {
+                    waited = waitpid(pid, &status, 0);
+                } while (waited < 0 && errno == EINTR);
+                wait_error = waited < 0 ? errno : 0;
+                break;
+            }
+            struct timespec req = {.tv_sec = 0, .tv_nsec = 5000000L};
+            nanosleep(&req, NULL);
+        }
+    }
     pico_tool_set_child(ctx, 0);
     free(command);
 
@@ -369,7 +479,15 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
         }
     }
     bool failed = false;
-    if (read_error)
+    if (timed_out)
+    {
+        char line[64];
+        snprintf(line, sizeof(line), "\n(timed out after %d second%s)", timeout_seconds,
+                 timeout_seconds == 1 ? "" : "s");
+        JsonBuf_Puts(&b, line);
+        failed = true;
+    }
+    else if (read_error)
     {
         char line[256];
         snprintf(line, sizeof(line), "\n(sh: could not read complete command output: %s)",
@@ -377,7 +495,7 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
         JsonBuf_Puts(&b, line);
         failed = true;
     }
-    if (wait_error)
+    else if (wait_error)
     {
         char line[256];
         snprintf(line, sizeof(line), "\n(sh: could not wait for command: %s)", strerror(wait_error));

@@ -22,6 +22,7 @@
 #define MAX_CAPTURE_RSS_KB (8L * 1024L)
 
 static PicoToolFn g_shell_run;
+static const char *g_shell_params_json;
 static void *g_shell_state;
 static volatile sig_atomic_t g_alarm_count;
 
@@ -30,13 +31,13 @@ bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *descr
 {
     (void)workspace;
     (void)description;
-    (void)params_json;
     (void)apply;
     if (!name || strcmp(name, "sh") != 0 || !run)
     {
         return false;
     }
     g_shell_run = run;
+    g_shell_params_json = params_json;
     g_shell_state = NULL;
     return true;
 }
@@ -73,6 +74,21 @@ static PicoToolResult RunCommand(const char *description, const char *json_comma
     int length = snprintf(args, sizeof(args),
                           "{\"description\":\"%s\",\"command\":\"%s\"}",
                           description, json_command);
+    if (length < 0 || (size_t)length >= sizeof(args))
+    {
+        PicoToolResult result;
+        memset(&result, 0, sizeof(result));
+        return result;
+    }
+    return Run(args);
+}
+
+static PicoToolResult RunCommandTimeout(const char *description, const char *json_command, int timeout)
+{
+    char args[1024];
+    int length = snprintf(args, sizeof(args),
+                          "{\"description\":\"%s\",\"command\":\"%s\",\"timeout\":%d}",
+                          description, json_command, timeout);
     if (length < 0 || (size_t)length >= sizeof(args))
     {
         PicoToolResult result;
@@ -354,6 +370,66 @@ static bool TestCommandFailure(void)
     return ok;
 }
 
+static bool TestTimeoutSchema(void)
+{
+    if (!g_shell_params_json)
+    {
+        return false;
+    }
+    bool has_timeout_prop = strstr(g_shell_params_json, "\"timeout\":{\"type\":\"integer\"") != NULL;
+    bool timeout_optional = strstr(g_shell_params_json, "\"required\":[\"description\",\"command\"]") != NULL;
+    return has_timeout_prop && timeout_optional;
+}
+
+static bool TestCustomTimeoutExceeded(void)
+{
+    PicoToolResult result =
+        RunCommandTimeout("exercise command timeout", "sleep 3", 1);
+    bool ok = result.output && result.is_error &&
+              strcmp(result.output, "\n(timed out after 1 second)") == 0;
+    free(result.output);
+    return ok;
+}
+
+static bool TestCustomTimeoutPreservesOutput(void)
+{
+    PicoToolResult result =
+        RunCommandTimeout("preserve output before timeout", "printf 'partial text'; sleep 3", 1);
+    bool ok = result.output && result.is_error &&
+              strcmp(result.output, "partial text\n(timed out after 1 second)") == 0;
+    free(result.output);
+    return ok;
+}
+
+static bool TestCustomTimeoutSuccess(void)
+{
+    PicoToolResult result =
+        RunCommandTimeout("command completes before timeout", "printf 'fast done'", 2);
+    bool ok = result.output && !result.is_error && strcmp(result.output, "fast done") == 0;
+    free(result.output);
+    return ok;
+}
+
+static bool TestTimeoutPluralSeconds(void)
+{
+    PicoToolResult result =
+        RunCommandTimeout("exercise multi-second timeout message", "sleep 4", 2);
+    bool ok = result.output && result.is_error &&
+              strcmp(result.output, "\n(timed out after 2 seconds)") == 0;
+    free(result.output);
+    return ok;
+}
+
+static bool TestTimeoutClosedPipes(void)
+{
+    PicoToolResult result =
+        RunCommandTimeout("timeout with closed pipes", "exec 1>&- 2>&-; sleep 4", 1);
+    bool ok = result.output && result.is_error &&
+              strcmp(result.output, "\n(timed out after 1 second)") == 0;
+    free(result.output);
+    return ok;
+}
+
 int main(void)
 {
     char temp[] = "/tmp/pico-shell-output-test-XXXXXX";
@@ -373,7 +449,11 @@ int main(void)
     {
         failure = "builtin did not register";
     }
-    else if (!failure && !TestExactLimit())
+    else if (!failure && !TestTimeoutSchema())
+    {
+        failure = "schema does not define optional timeout property";
+    }
+    else if (!TestExactLimit())
     {
         failure = "output at the capture limit was not preserved exactly";
     }
@@ -400,6 +480,26 @@ int main(void)
     else if (!TestCommandFailure())
     {
         failure = "command failure annotation changed";
+    }
+    else if (!TestCustomTimeoutExceeded())
+    {
+        failure = "exceeded timeout was not terminated or annotated correctly";
+    }
+    else if (!TestCustomTimeoutPreservesOutput())
+    {
+        failure = "output produced before timeout was not preserved";
+    }
+    else if (!TestCustomTimeoutSuccess())
+    {
+        failure = "command within timeout failed";
+    }
+    else if (!TestTimeoutPluralSeconds())
+    {
+        failure = "plural seconds timeout annotation incorrect";
+    }
+    else if (!TestTimeoutClosedPipes())
+    {
+        failure = "timeout with closed pipes failed to terminate and reap child";
     }
 
     unsetenv("TMPDIR");

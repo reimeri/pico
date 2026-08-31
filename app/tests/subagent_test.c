@@ -435,7 +435,32 @@ static int TestSubagentChildAsk(void)
                   strcmp(ask.profile, "exploration") == 0 &&
                   parent->state == PICO_AGENT_TOOL_WAIT &&
                   pico_agent_count(&app) == 2;
-    bool answered = pending && pico_tool_answer(&app, ask.id, "{\"answer\":\"continue\"}");
+
+    /* The child ask stays hidden while an unrelated session is open and
+       surfaces again once the parent's session is reopened. */
+    PicoAgentId other_id = 0;
+    PicoAgentCreateOptions other_opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    bool hidden = routed &&
+                  PicoWorkspace_CreateAgent(PicoHost_PrimaryWorkspace(&app), &other_opt, &other_id) == PICO_OK &&
+                  pico_agent_select(&app, other_id);
+    for (int i = 0; hidden && i < 50; i++)
+    {
+        PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
+        PicoToolAsk now;
+        if (pico_tool_pending_ask(&app, &now))
+        {
+            hidden = false;
+        }
+        SleepOneMs();
+    }
+    bool resurfaces = hidden && pico_agent_select(&app, parent->id) &&
+                      pico_tool_pending_ask(&app, &ask) && ask.agent_id != parent->id;
+    if (resurfaces)
+    {
+        (void)pico_agent_close(&app, other_id);
+    }
+
+    bool answered = resurfaces && pico_tool_answer(&app, ask.id, "{\"answer\":\"continue\"}");
     bool completed = answered && WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     pthread_mutex_lock(&g_test.mu);
@@ -458,7 +483,7 @@ static int TestSubagentChildAsk(void)
     rmdir(temp);
     snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
     return routed && completed && child_received && output
-               ? 0 : Fail(name, "child ask was not routable while the parent remained in tool wait");
+               ? 0 : Fail(name, "child ask must follow the open session and stay routable");
 }
 
 static bool WaitForAgentIdle(PicoHost *app, PicoAgentId id, int expected_count)

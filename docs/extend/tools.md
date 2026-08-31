@@ -77,6 +77,8 @@ if (pico_tool_pending_ask(host, &ask))
 }
 ```
 
+Only asks owned by the open session surface this way: the selected agent or a transitive delegated child of it. Other sessions' asks stay pending and hidden until their session is opened.
+
 `pico_tool_answer` returns false if the id is stale, cancelled, or already answered. Ask ids are host-allocated and are not reused for the lifetime of that host. Overlay **Deny/Approve** must answer; **Esc** cancels the turn (`PICO_ASK_CANCEL`), not the same as Deny.
 
 Builtin overlay handles `{"type":"confirm","message":"…"}` (Approve/Deny → `{"ok":true}` / `{"ok":false}`) and scrolls long messages without truncating them. Set `"ui":"custom"` or use another `type` to render your own overlay. Custom UIs may read characters from `on_frame` while a pending ask is open (`PicoUi_ModalOpen` skips the composer). Invalid JSON and invalid builtin confirmations return the immediate error answer instead of opening UI.

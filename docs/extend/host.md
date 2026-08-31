@@ -77,7 +77,7 @@ Host-extension replacement happens between frames. Host extensions cannot regist
 
 Agent-targeted calls locate the workspace by scanning the host's bounded arrays. Pass an explicit `PicoAgentId`. Composer submit and slash commands snapshot the selected ID once; a later selection change cannot retarget that action.
 
-`pico_tool_pending_ask` returns the oldest live ask across all workspaces by host-allocated ask ID. Answer with `pico_tool_answer` using that ID. Closing a workspace cancels its pending asks.
+`pico_tool_pending_ask` returns the oldest live ask by host-allocated ask ID that belongs to the open session: the selected agent or a transitive delegated child of it. Asks owned by other sessions stay pending but hidden until their session is opened. Answer with `pico_tool_answer` using that ID. Closing a workspace cancels its pending asks.
 
 Named UI mailboxes are workspace-owned and keyed by `(agent_id, runtime_generation, name)`. Main-thread lookup is `pico_agent_ui_latest` / `pico_agent_ui_clear`. `pico_ui_latest` / `pico_ui_clear` read or clear the UI-selected agent's mailbox of that name.
 

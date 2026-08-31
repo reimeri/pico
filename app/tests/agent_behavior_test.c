@@ -1230,6 +1230,35 @@ void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complet
     }
 }
 
+void PicoSessionPersist_Init(PicoHost *host)
+{
+    (void)host;
+}
+
+void PicoSessionPersist_Shutdown(PicoHost *host)
+{
+    (void)host;
+}
+
+void PicoSessionPersist_Pump(PicoHost *host)
+{
+    (void)host;
+}
+
+void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent)
+{
+    (void)app;
+    (void)agent;
+}
+
+bool PicoSession_DrainPersistBefore(PicoHost *app, PicoAgent *agent, const struct timespec *deadline)
+{
+    (void)app;
+    (void)agent;
+    (void)deadline;
+    return true;
+}
+
 void PicoPlugins_Load(PicoHost *app)
 {
     if (app)

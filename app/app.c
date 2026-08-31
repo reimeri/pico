@@ -1775,7 +1775,8 @@ void PicoHost_Cancel(PicoHost *app)
 
 bool PicoUi_ModalOpen(const PicoHost *app)
 {
-    return pico_ui_modal_claimed(app) || PicoAgent_AskUiOpen(PicoHost_SelectedAgentConst(app));
+    PicoToolAsk ask;
+    return pico_ui_modal_claimed(app) || pico_tool_pending_ask(app, &ask);
 }
 
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)

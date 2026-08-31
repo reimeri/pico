@@ -538,8 +538,10 @@ void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid);
  * answer. On OK, *answer_json is malloc'd and the caller frees it.
  * On CANCEL/FAIL, *answer_json is always set to NULL. */
 int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer_json);
-/* Main thread. False when no live ask exists. request_json is valid until
- * the next PicoAgent_Pump; do not retain it across frames. */
+/* Main thread. Returns the oldest live ask owned by the open session: the
+ * selected agent or a transitive delegated child of it. False when no such ask
+ * exists. request_json is valid until the next PicoAgent_Pump; do not retain
+ * it across frames. */
 bool pico_tool_pending_ask(const PicoHost *host, PicoToolAsk *out);
 /* Main thread. False if id is stale, cancelled, or no longer pending. */
 bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer_json);

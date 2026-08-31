@@ -131,7 +131,7 @@ static int TestSubagentProfileDiscovery(void)
 
     size_t exploration_len = 0;
     size_t review_len = 0;
-    char *exploration = Pico_ReadFile(PICO_SOURCE_ROOT "/examples/subagents/exploration.json",
+    char *exploration = Pico_ReadFile(PICO_SOURCE_ROOT "/examples/subagents/explore.json",
                                       &exploration_len);
     char *review = Pico_ReadFile(PICO_SOURCE_ROOT "/examples/subagents/review.json",
                                  &review_len);

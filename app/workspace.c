@@ -1104,9 +1104,25 @@ bool PicoWorkspace_SessionReserved(const PicoWorkspace *workspace, const char *p
     return false;
 }
 
+/* An ask surfaces only while the session it belongs to is open: the owner must
+   be the selected agent or, for hidden delegated children, a transitive
+   descendant of it. */
+static bool AskSurfacedForSelection(const PicoHost *app, const PicoAgent *owner)
+{
+    for (const PicoAgent *agent = owner; app && agent;)
+    {
+        if (agent->id == app->selected_agent_id)
+        {
+            return true;
+        }
+        agent = agent->parent_id ? PicoHost_FindAgentConst(app, agent->parent_id) : NULL;
+    }
+    return false;
+}
+
 bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
 {
-    if (!app || !out)
+    if (!app || !out || app->selected_agent_id == 0)
     {
         return false;
     }
@@ -1123,6 +1139,7 @@ bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
         {
             PicoToolAsk ask;
             if (PicoAgent_PendingAsk(workspace->agents[i], &ask) &&
+                AskSurfacedForSelection(app, workspace->agents[i]) &&
                 (!found || ask.id < oldest.id))
             {
                 oldest = ask;

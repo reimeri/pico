@@ -3805,43 +3805,74 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
         started = PicoAgent_IsBusy(agentA) && PicoAgent_IsBusy(agentB);
     }
 
-    PicoToolAsk first = {0}, second = {0};
-    for (int i = 0; started && i < 3000 && first.id == 0; i++)
+    PicoToolAsk ask_a = {0}, ask_b = {0};
+    for (int i = 0; started && i < 3000 && (ask_a.id == 0 || ask_b.id == 0); i++)
     {
         pico_host_pump(host);
-        if (!pico_tool_pending_ask(host, &first))
+        if (ask_a.id == 0)
+        {
+            PicoAgent_PendingAsk(agentA, &ask_a);
+        }
+        if (ask_b.id == 0)
+        {
+            PicoAgent_PendingAsk(agentB, &ask_b);
+        }
+        if (ask_a.id == 0 || ask_b.id == 0)
         {
             usleep(1000);
         }
     }
-    bool first_answered = first.id != 0 &&
-                          (first.agent_id == a1 || first.agent_id == b1) &&
-                          pico_tool_answer(host, first.id, "{\"step\":1}");
-    for (int i = 0; first_answered && i < 3000 && second.id == 0; i++)
+    bool both_pending = ask_a.id != 0 && ask_b.id != 0;
+
+    /* Only the open session's ask surfaces; the other session's stays hidden. */
+    PicoToolAsk surfaced = {0};
+    bool scoped = both_pending && host->selected_agent_id == a1 &&
+                  pico_tool_pending_ask(host, &surfaced) && surfaced.id == ask_a.id;
+
+    /* Opening the other session surfaces its ask instead. */
+    bool switched = scoped && pico_agent_select(host, b1);
+    PicoToolAsk after_switch = {0};
+    bool follows_selection = switched && pico_tool_pending_ask(host, &after_switch) &&
+                             after_switch.id == ask_b.id;
+
+    bool answered_b = follows_selection &&
+                      pico_tool_answer(host, ask_b.id, "{\"step\":2}") &&
+                      !pico_tool_answer(host, ask_b.id, "{\"stale\":true}") &&
+                      !pico_tool_answer(host, 0, "{}") &&
+                      !pico_tool_answer(host, 9999, "{}");
+
+    /* While b1 stays open, a1's still-pending ask never surfaces. */
+    bool stays_hidden = answered_b;
+    for (int i = 0; stays_hidden && i < 50; i++)
     {
         pico_host_pump(host);
-        PicoToolAsk candidate = {0};
-        if (pico_tool_pending_ask(host, &candidate) && candidate.id != first.id)
+        PicoToolAsk still_a = {0};
+        if (!PicoAgent_PendingAsk(agentA, &still_a))
         {
-            second = candidate;
             break;
+        }
+        PicoToolAsk now = {0};
+        if (pico_tool_pending_ask(host, &now) && now.id == ask_a.id)
+        {
+            stays_hidden = false;
         }
         usleep(1000);
     }
-    bool routed = second.id > first.id && second.agent_id != first.agent_id &&
-                  pico_tool_answer(host, second.id, "{\"step\":2}") &&
-                  !pico_tool_answer(host, first.id, "{\"stale\":true}") &&
-                  !pico_tool_answer(host, 0, "{}") &&
-                  !pico_tool_answer(host, 9999, "{}");
-    bool completed = routed && PumpUntilIdle(host, agentA, 3000) &&
+
+    /* Reopening a1 surfaces its ask again; answering it completes both turns. */
+    bool back_to_a = stays_hidden && pico_agent_select(host, a1);
+    PicoToolAsk final_ask = {0};
+    bool resurfaces = back_to_a && pico_tool_pending_ask(host, &final_ask) &&
+                      final_ask.id == ask_a.id;
+    bool answered_a = resurfaces && pico_tool_answer(host, ask_a.id, "{\"step\":1}") &&
+                      !pico_tool_answer(host, ask_a.id, "{\"stale\":true}");
+    bool completed = answered_a && PumpUntilIdle(host, agentA, 3000) &&
                      PumpUntilIdle(host, agentB, 3000);
-    const char *expectedA = first.agent_id == a1 ? "{\"step\":1}" : "{\"step\":2}";
-    const char *expectedB = first.agent_id == b1 ? "{\"step\":1}" : "{\"step\":2}";
     pthread_mutex_lock(&stateA.mu);
-    bool answerA = stateA.answer && strcmp(stateA.answer, expectedA) == 0;
+    bool answerA = stateA.answer && strcmp(stateA.answer, "{\"step\":1}") == 0;
     pthread_mutex_unlock(&stateA.mu);
     pthread_mutex_lock(&stateB.mu);
-    bool answerB = stateB.answer && strcmp(stateB.answer, expectedB) == 0;
+    bool answerB = stateB.answer && strcmp(stateB.answer, "{\"step\":2}") == 0;
     pthread_mutex_unlock(&stateB.mu);
 
     pico_host_free(host);
@@ -3851,7 +3882,7 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
     rmdir(dirB);
     if (!started || !completed || !answerA || !answerB)
     {
-        Fail("oldest asks must be ordered globally and answers routed by ask ID");
+        Fail("asks must surface only for the open session and answers routed by ask ID");
         return 1;
     }
     return 0;

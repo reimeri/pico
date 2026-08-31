@@ -33,7 +33,7 @@ Pico and its extensions never call `chdir()` in the host process. Shell tools ma
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - `PicoToolResult.output` / `details_json`: malloc if set; Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
-- `pico_tool_pending_ask` `request_json`: the oldest live ask across all workspaces; valid until the next pump. Do not retain it across frames.
+- `pico_tool_pending_ask` `request_json`: the oldest live ask owned by the open session (the selected agent or a transitive delegated child); valid until the next pump. Do not retain it across frames.
 - `pico_agent_ui_latest` `status` / `text`: borrowed published mailbox storage keyed by `(agent_id, runtime_generation, name)`, invalidated by the next pump, `pico_agent_ui_clear` of that agent and name, force-cancel or generation retirement, or workspace close. Pico copies posted bytes; do not retain worker pointers. `pico_ui_latest` / `pico_ui_clear` are the same lookup for the UI-selected agent.
 - `pico_subagent_profile_info`: copies the complete profile snapshot into caller storage. Profile strings and tool names in that copy are caller-owned values, not registry pointers.
 - `pico_agent_message` and nested `PicoTraceLine` strings such as `tool_call_id`: borrowed main-thread transcript storage, invalidated by pumping, transcript mutation, agent close, or workspace close.

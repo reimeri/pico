@@ -68,7 +68,7 @@ The parent remains in tool wait while the child runs. Click the `subagent` tool 
 
 ## Asks
 
-`pico_tool_pending_ask` returns the oldest live ask across all workspaces, including hidden delegated children; its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits. The borrowed request remains valid only until the next pump.
+`pico_tool_pending_ask` returns the oldest live ask owned by the open session, where hidden delegated children surface through their ancestor: an ask is visible while its owner or a transitive parent of its owner is the selected agent. Its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits, regardless of which session is open. The borrowed request remains valid only until the next pump.
 
 ## Main-thread targets
 

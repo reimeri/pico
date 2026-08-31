@@ -1,5 +1,7 @@
 # Working instructions for the repo
 
+Use `nix develop` environment for development tooling.
+
 ## Backwards compatability
 
 Do not add any code for backwards compatability as the project is still in development and backwards compatability is not a consideration.

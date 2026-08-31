@@ -26,12 +26,42 @@ static const char *kFontPaths[FONT_COUNT] = {
     "resources/RobotoMono-Medium.ttf",
 };
 
-static int g_codepoints[256];
-static int g_codepoint_count;
+static int *g_codepoints = NULL;
+static int g_codepoint_count = 0;
+static int g_codepoint_capacity = 0;
 static Font g_fonts[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_ready[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_owned[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static float g_font_scale = PICO_FONT_SCALE_DEFAULT;
+
+static bool AddCodepointRange(int start, int end)
+{
+    for (int c = start; c <= end; c++)
+    {
+        if (g_codepoint_count >= g_codepoint_capacity)
+        {
+            int new_cap = g_codepoint_capacity == 0 ? 1024 : g_codepoint_capacity * 2;
+            int *new_pts = (int *)realloc(g_codepoints, (size_t)new_cap * sizeof(int));
+            if (!new_pts)
+            {
+                free(g_codepoints);
+                g_codepoints = NULL;
+                g_codepoint_count = 0;
+                g_codepoint_capacity = 0;
+                return false;
+            }
+            g_codepoints = new_pts;
+            g_codepoint_capacity = new_cap;
+        }
+        g_codepoints[g_codepoint_count++] = c;
+    }
+    return true;
+}
+
+static bool AddCodepoint(int c)
+{
+    return AddCodepointRange(c, c);
+}
 
 static void EnsureCodepoints(void)
 {
@@ -39,19 +69,39 @@ static void EnsureCodepoints(void)
     {
         return;
     }
-    for (int c = 32; c < 127; c++)
+    // Basic Latin & Latin-1 Supplement
+    if (!AddCodepointRange(0x0020, 0x007E) ||
+        !AddCodepointRange(0x00A0, 0x00FF) ||
+        !AddCodepointRange(0x0100, 0x024F) ||
+        !AddCodepointRange(0x0250, 0x02AF) ||
+        !AddCodepointRange(0x02B0, 0x02FF) ||
+        !AddCodepointRange(0x0300, 0x036F) ||
+        !AddCodepointRange(0x0370, 0x03FF) ||
+        !AddCodepointRange(0x0400, 0x052F) ||
+        !AddCodepointRange(0x1E00, 0x1EFF) ||
+        !AddCodepointRange(0x2000, 0x206F) ||
+        !AddCodepointRange(0x2070, 0x209F) ||
+        !AddCodepointRange(0x20A0, 0x20CF) ||
+        !AddCodepointRange(0x2100, 0x214F) ||
+        !AddCodepointRange(0x2150, 0x218F) ||
+        !AddCodepointRange(0x2190, 0x21FF) ||
+        !AddCodepointRange(0x2200, 0x22FF) ||
+        !AddCodepointRange(0x2300, 0x23FF) ||
+        !AddCodepointRange(0x2460, 0x24FF) ||
+        !AddCodepointRange(0x2500, 0x257F) ||
+        !AddCodepointRange(0x2580, 0x259F) ||
+        !AddCodepointRange(0x25A0, 0x25FF) ||
+        !AddCodepointRange(0x2600, 0x26FF) ||
+        !AddCodepointRange(0x2700, 0x27BF) ||
+        !AddCodepointRange(0x27C0, 0x27EF) ||
+        !AddCodepointRange(0x27F0, 0x27FF) ||
+        !AddCodepointRange(0x2900, 0x297F) ||
+        !AddCodepointRange(0x2A00, 0x2AFF) ||
+        !AddCodepointRange(0x2B00, 0x2BFF) ||
+        !AddCodepointRange(0xFB00, 0xFB06) ||
+        !AddCodepoint(0xFFFD))
     {
-        g_codepoints[g_codepoint_count++] = c;
-    }
-    for (int c = 160; c < 256; c++)
-    {
-        g_codepoints[g_codepoint_count++] = c;
-    }
-    int extra[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x203A, 0x25BE, 0x2603, 0x2610,
-                   0x2611};
-    for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
-    {
-        g_codepoints[g_codepoint_count++] = extra[i];
+        return;
     }
 }
 
@@ -92,6 +142,15 @@ static void FontPath(uint16_t fontId, char *out, size_t cap)
     }
 }
 
+static void FallbackFontPath(char *out, size_t cap)
+{
+    const char *relative = "resources/DejaVuSans.ttf";
+    if (!Pico_DataPath(relative, out, cap))
+    {
+        snprintf(out, cap, "%s", relative);
+    }
+}
+
 static int RoundedFontPx(uint16_t design)
 {
     float px = (float)design * g_font_scale;
@@ -113,6 +172,159 @@ uint16_t Pico_FontPxU16(uint16_t design)
     return (uint16_t)RoundedFontPx(design);
 }
 
+static Font LoadFontWithFallback(const char *primaryPath, const char *fallbackPath, int pixelSize, int *codepoints,
+                                 int codepointCount)
+{
+    int primaryDataSize = 0;
+    unsigned char *primaryData = LoadFileData(primaryPath, &primaryDataSize);
+    int fallbackDataSize = 0;
+    unsigned char *fallbackData =
+        (fallbackPath && fallbackPath[0]) ? LoadFileData(fallbackPath, &fallbackDataSize) : NULL;
+
+    if (!primaryData && !fallbackData)
+    {
+        return GetFontDefault();
+    }
+
+    SetTraceLogLevel(LOG_ERROR);
+    GlyphInfo *p_glyphs = primaryData ? LoadFontData(primaryData, primaryDataSize, pixelSize, codepoints,
+                                                     codepointCount, FONT_DEFAULT)
+                                      : NULL;
+    GlyphInfo *f_glyphs = fallbackData ? LoadFontData(fallbackData, fallbackDataSize, pixelSize, codepoints,
+                                                     codepointCount, FONT_DEFAULT)
+                                      : NULL;
+    SetTraceLogLevel(LOG_INFO);
+
+    if (primaryData)
+    {
+        UnloadFileData(primaryData);
+    }
+    if (fallbackData)
+    {
+        UnloadFileData(fallbackData);
+    }
+
+    if (!p_glyphs && !f_glyphs)
+    {
+        return GetFontDefault();
+    }
+
+    int valid_count = 0;
+    for (int i = 0; i < codepointCount; i++)
+    {
+        bool has_p = (p_glyphs && p_glyphs[i].image.data != NULL);
+        bool has_f = (f_glyphs && f_glyphs[i].image.data != NULL);
+        if (has_p || has_f)
+        {
+            valid_count++;
+        }
+    }
+
+    if (valid_count == 0)
+    {
+        if (p_glyphs)
+        {
+            UnloadFontData(p_glyphs, codepointCount);
+        }
+        if (f_glyphs)
+        {
+            UnloadFontData(f_glyphs, codepointCount);
+        }
+        return GetFontDefault();
+    }
+
+    GlyphInfo *glyphs = (GlyphInfo *)RL_CALLOC((size_t)valid_count, sizeof(GlyphInfo));
+    int dst = 0;
+    for (int i = 0; i < codepointCount; i++)
+    {
+        bool has_p = (p_glyphs && p_glyphs[i].image.data != NULL);
+        bool has_f = (f_glyphs && f_glyphs[i].image.data != NULL);
+        if (has_p)
+        {
+            glyphs[dst++] = p_glyphs[i];
+            p_glyphs[i].image.data = NULL;
+        }
+        else if (has_f)
+        {
+            glyphs[dst++] = f_glyphs[i];
+            f_glyphs[i].image.data = NULL;
+        }
+    }
+
+    if (p_glyphs)
+    {
+        for (int i = 0; i < codepointCount; i++)
+        {
+            if (p_glyphs[i].image.data != NULL)
+            {
+                UnloadImage(p_glyphs[i].image);
+            }
+        }
+        RL_FREE(p_glyphs);
+    }
+    if (f_glyphs)
+    {
+        for (int i = 0; i < codepointCount; i++)
+        {
+            if (f_glyphs[i].image.data != NULL)
+            {
+                UnloadImage(f_glyphs[i].image);
+            }
+        }
+        RL_FREE(f_glyphs);
+    }
+
+    int padding = 4;
+    Rectangle *recs = NULL;
+    Image atlas = GenImageFontAtlas(glyphs, &recs, valid_count, pixelSize, padding, 0);
+    Texture2D texture = (Texture2D){0};
+    if (IsWindowReady())
+    {
+        texture = LoadTextureFromImage(atlas);
+    }
+
+    for (int i = 0; i < valid_count; i++)
+    {
+        if (glyphs[i].image.data != NULL)
+        {
+            UnloadImage(glyphs[i].image);
+            glyphs[i].image.data = NULL;
+        }
+        if (recs && atlas.data != NULL && recs[i].width > 0 && recs[i].height > 0)
+        {
+            glyphs[i].image = ImageFromImage(atlas, recs[i]);
+        }
+    }
+    UnloadImage(atlas);
+
+    Font font = {
+        .baseSize = pixelSize,
+        .glyphCount = valid_count,
+        .glyphPadding = padding,
+        .texture = texture,
+        .recs = recs,
+        .glyphs = glyphs,
+    };
+    return font;
+}
+
+static void Pico_UnloadFont(Font font)
+{
+    Font fallback = GetFontDefault();
+    if (font.glyphs != NULL && font.glyphs != fallback.glyphs)
+    {
+        UnloadFontData(font.glyphs, font.glyphCount);
+        if (font.recs != NULL)
+        {
+            RL_FREE(font.recs);
+        }
+        if (font.texture.id != 0 && font.texture.id != fallback.texture.id && IsWindowReady())
+        {
+            UnloadTexture(font.texture);
+        }
+    }
+}
+
 Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
 {
     if (fontId >= FONT_COUNT)
@@ -128,15 +340,17 @@ Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
     EnsureCodepoints();
     int pixel_size = idx + PICO_FONT_SIZE_MIN;
     char path[4096];
+    char fallback_path[4096];
     FontPath(fontId, path, sizeof(path));
-    Font font = LoadFontEx(path, pixel_size, g_codepoints, g_codepoint_count);
+    FallbackFontPath(fallback_path, sizeof(fallback_path));
+    Font font = LoadFontWithFallback(path, fallback_path, pixel_size, g_codepoints, g_codepoint_count);
     Font fallback = GetFontDefault();
-    bool owned = font.texture.id != 0 && font.texture.id != fallback.texture.id;
+    bool owned = (font.glyphs != NULL && font.glyphs != fallback.glyphs);
     if (!owned)
     {
         font = fallback;
     }
-    else
+    else if (font.texture.id != 0 && font.texture.id != fallback.texture.id)
     {
         SetTextureFilter(font.texture, TEXTURE_FILTER_POINT);
     }
@@ -197,13 +411,17 @@ void Pico_UnloadFonts(Font *fonts)
         {
             if (g_font_owned[face][i])
             {
-                UnloadFont(g_fonts[face][i]);
+                Pico_UnloadFont(g_fonts[face][i]);
             }
             g_fonts[face][i] = (Font){0};
             g_font_ready[face][i] = false;
             g_font_owned[face][i] = false;
         }
     }
+    free(g_codepoints);
+    g_codepoints = NULL;
+    g_codepoint_count = 0;
+    g_codepoint_capacity = 0;
     if (fonts)
     {
         memset(fonts, 0, sizeof(Font) * FONT_COUNT);

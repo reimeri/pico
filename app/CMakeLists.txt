@@ -518,6 +518,23 @@ if(BUILD_TESTING)
     target_link_options(pico_font_scale_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_font_scale_tests COMMAND pico_font_scale_tests)
 
+    add_executable(pico_font_symbols_tests
+        tests/font_symbols_test.c
+        theme.c
+        docs_path.c)
+    target_include_directories(pico_font_symbols_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_compile_definitions(pico_font_symbols_tests PRIVATE
+        PICO_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    pico_warnings_are_errors(pico_font_symbols_tests)
+    target_compile_options(pico_font_symbols_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_font_symbols_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_font_symbols_tests PRIVATE raylib)
+    add_test(NAME pico_font_symbols_tests COMMAND pico_font_symbols_tests)
+
     add_executable(pico_chat_width_tests
         tests/chat_width_test.c
         settings.c

@@ -53,9 +53,15 @@ static bool Unclaim(void)
     return true;
 }
 
-void PicoExts_Close(void)
+static bool SelectHost(PicoHost *host)
 {
-    if (!Unclaim())
+    s_active_exts_state = host ? (ExtensionsState *)PicoPlugins_HostState(host, "extensions") : NULL;
+    return s_active_exts_state != NULL;
+}
+
+void PicoExts_Close(PicoHost *host)
+{
+    if (!SelectHost(host) || !Unclaim())
     {
         return;
     }
@@ -63,35 +69,47 @@ void PicoExts_Close(void)
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
-void PicoExts_Open(void)
+void PicoExts_Open(PicoHost *host)
 {
-    PicoPrompt_Close();
+    if (!SelectHost(host))
+    {
+        return;
+    }
+    PicoPrompt_Close(host);
+    PicoSettingsUi_Close(host);
+    SelectHost(host);
     Claim();
 }
 
-void PicoExts_Toggle(void)
+void PicoExts_Toggle(PicoHost *host)
 {
+    if (!SelectHost(host))
+    {
+        return;
+    }
     if (g_open)
     {
         if (g_app && pico_ui_modal_is_top(g_app, "extensions"))
         {
-            PicoExts_Close();
+            PicoExts_Close(host);
         }
     }
     else
     {
-        PicoExts_Open();
+        PicoExts_Open(host);
     }
 }
 
-bool PicoExts_IsOpen(void)
+bool PicoExts_IsOpen(const PicoHost *host)
 {
-    return g_open;
+    ExtensionsState *s = host ? (ExtensionsState *)PicoPlugins_HostState(host, "extensions") : NULL;
+    return s && s->open;
 }
 
 static bool RowToggleable(const PicoExtInfo *info)
 {
-    return info && info->loaded && info->name && info->name[0] && strcmp(info->name, "extensions") != 0;
+    return info && info->loaded && info->name && info->name[0] && strcmp(info->name, "extensions") != 0 &&
+           strcmp(info->name, "settings") != 0;
 }
 
 static Clay_String CStr(const char *s)
@@ -344,7 +362,7 @@ static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *sta
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ExtModalDim"))))
     {
-        PicoExts_Close();
+        PicoExts_Close(app);
     }
 }
 
@@ -360,7 +378,7 @@ static void ExtsOnFrame(PicoHost *app, void *state, float dt)
                              CLAY_STRING("ExtModalScrollHandle"));
     if (IsKeyPressed(KEY_ESCAPE))
     {
-        PicoExts_Close();
+        PicoExts_Close(app);
         return;
     }
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
@@ -388,7 +406,7 @@ static void CmdExtensions(PicoHost *app, PicoAgentId agent_id, const char *args,
     (void)state;
     (void)args;
     (void)agent_id;
-    PicoExts_Open();
+    PicoExts_Open(app);
     PicoComposer_SetText(app, "");
     app->submit_cancel = true;
 }

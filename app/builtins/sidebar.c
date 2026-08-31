@@ -43,6 +43,7 @@ typedef struct SidebarState {
     double last_scan;
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
+    Texture2D settings_icon;
     bool icons_tried;
 } SidebarState;
 
@@ -483,6 +484,7 @@ static void EnsureFolderIcons(SidebarState *s)
     s->icons_tried = true;
     s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png");
     s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png");
+    s->settings_icon = LoadFolderIcon("resources/settings.png");
 }
 
 static void UnloadFolderIcons(SidebarState *s)
@@ -500,6 +502,11 @@ static void UnloadFolderIcons(SidebarState *s)
     {
         UnloadTexture(s->folder_expanded);
         memset(&s->folder_expanded, 0, sizeof(s->folder_expanded));
+    }
+    if (s->settings_icon.id != 0)
+    {
+        UnloadTexture(s->settings_icon);
+        memset(&s->settings_icon, 0, sizeof(s->settings_icon));
     }
 }
 
@@ -926,6 +933,29 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 RenderMoreLessRow(i, shown, total);
             }
         }
+
+        {
+            bool settings_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings")));
+            float icon = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+            float row_h = icon + 12.0f;
+            CLAY(CLAY_ID("SidebarSettingsRow"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childAlignment = {.x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER},
+                             .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_FIXED(row_h)}}})
+            {
+                CLAY(CLAY_ID("SidebarSettings"),
+                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                                 .padding = {6, 6, 4, 4},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(icon + 12.0f),
+                                            .height = CLAY_SIZING_FIXED(icon + 8.0f)}},
+                      .backgroundColor = settings_hover ? (Clay_Color){42, 42, 50, 255} : COLOR_COMPOSER_BG,
+                      .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                {
+                    RenderFolderIcon(&s->settings_icon, "*");
+                }
+            }
+        }
     }
 }
 
@@ -1026,7 +1056,8 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
     int extras;
     int total;
     int shown;
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))))
+    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))) ||
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings"))))
     {
         return true;
     }
@@ -1099,6 +1130,11 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))))
     {
         RequestAddWorkspace(host, s);
+        return;
+    }
+    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings"))))
+    {
+        PicoSettingsUi_Open(host);
         return;
     }
     for (i = 0; i < s->workspace_count; i++)

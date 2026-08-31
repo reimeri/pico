@@ -45,6 +45,8 @@ struct PicoAgent {
     char model_name[128];
     char effort[PICO_EFFORT_LEN];
     int context_limit;
+    PicoModel running_model;
+    bool has_running_model;
     double compact_ratio;
     bool compact_enabled;
 

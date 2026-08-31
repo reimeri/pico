@@ -1962,7 +1962,13 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     pthread_mutex_init(&workspace->ui_post_mu, NULL);
     workspace->accepting_work = true;
     host->workspaces[host->workspace_count++] = workspace;
-    PicoWorkspaceSettings_Load(workspace);
+    if (!PicoWorkspaceSettings_Load(workspace))
+    {
+        host->workspaces[--host->workspace_count] = NULL;
+        workspace->state = PICO_WORKSPACE_CLOSED;
+        PicoWorkspace_Free(workspace);
+        return PICO_NO_MEMORY;
+    }
     PicoPlugins_InitWorkspace(host, workspace);
     if (out)
     {
@@ -2747,6 +2753,7 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
 {
     Clay_BeginLayout();
     MdView_BeginFrame();
+    app->hovered_text = false;
 
     /* The shell owns the viewport height. A vertical GROW root can retain Clay's
      * sub-pixel compression remainder and feed it back through scrolling. */
@@ -2984,7 +2991,7 @@ void PicoHost_Frame(PicoHost *app)
 
     if (IsKeyPressed(KEY_F2))
     {
-        PicoExts_Toggle();
+        PicoExts_Toggle(app);
     }
 #ifdef PICO_CLAY_DEBUG
     if (IsKeyPressed(KEY_F3))
@@ -3096,6 +3103,10 @@ void PicoHost_Frame(PicoHost *app)
              Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
     {
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+    }
+    else if (app->hovered_text)
+    {
+        SetMouseCursor(MOUSE_CURSOR_IBEAM);
     }
     else if (app->hovered_link || app->hovered_tool || app->hovered_clickable)
     {

@@ -1635,6 +1635,23 @@ static int TestHostPluginIsolation(void)
         pico_host_free(host2);
         return 1;
     }
+    PicoSettingsUi_Open(host1);
+    if (!PicoSettingsUi_IsOpen(host1) || PicoSettingsUi_IsOpen(host2) ||
+        !pico_ui_modal_is_top(host1, "settings") || pico_ui_modal_claimed(host2))
+    {
+        Fail("settings modal must route open state to the requested host");
+        pico_host_free(host1);
+        pico_host_free(host2);
+        return 1;
+    }
+    PicoSettingsUi_Close(host1);
+    if (pico_ui_modal_claimed(host1))
+    {
+        Fail("settings modal must close on the requested host");
+        pico_host_free(host1);
+        pico_host_free(host2);
+        return 1;
+    }
 
     pico_host_free(host1);
     pico_host_free(host2);

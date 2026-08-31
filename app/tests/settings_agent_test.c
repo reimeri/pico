@@ -6,6 +6,7 @@
 #include "host_internal.h"
 
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,12 @@ static int Fail(const char *message)
 {
     fprintf(stderr, "settings agent: %s\n", message);
     return 1;
+}
+
+bool PicoAgent_IsBusy(const PicoAgent *agent)
+{
+    return agent && (agent->state == PICO_AGENT_LLM_WAIT || agent->state == PICO_AGENT_TOOL_WAIT ||
+                     agent->state == PICO_AGENT_COMPACT_WAIT);
 }
 
 static int TestModelContextBeatsFallback(void)
@@ -684,6 +691,386 @@ static int TestDocsHintIsBaseSpan(void)
     return failed ? Fail("docs hint was not classified as the base system prompt") : 0;
 }
 
+static int CleanupDraftTemp(const char *settings_path, const char *pico_dir, const char *temp)
+{
+    char lock_path[4096];
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", settings_path);
+    unlink(settings_path);
+    unlink(lock_path);
+    rmdir(pico_dir);
+    rmdir(temp);
+    return 0;
+}
+
+static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
+{
+    char temp[] = "/tmp/pico-settings-seed-XXXXXX";
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    PicoUserSettingsDraft draft;
+    PicoUserSettingsDraft loaded;
+    PicoHost host;
+    char *saved;
+    size_t len = 0;
+    int failed = 0;
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create user draft directory");
+    }
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    if (WriteFile(path, "{\n  \"model\": \"gpt-test\",\n  \"disabled_host_extensions\": [\"footer\"]\n}\n"))
+    {
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not write seed fixture");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    memset(&draft, 0, sizeof(draft));
+    if (!PicoSettings_LoadUserDraft(&draft) || draft.model_count != 1 ||
+        strcmp(draft.models[0].id, "gpt-test") != 0 || strcmp(draft.models[0].provider, "openai") != 0)
+    {
+        PicoSettings_FreeUserDraft(&draft);
+        unsetenv("XDG_CONFIG_HOME");
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("empty models array did not seed from model");
+    }
+    draft.models[0].vision = true;
+    draft.models[0].context_limit = 64000;
+    snprintf(draft.models[0].effort[0], sizeof(draft.models[0].effort[0]), "high");
+    draft.models[0].effort_count = 1;
+    snprintf(draft.models[0].default_effort, sizeof(draft.models[0].default_effort), "high");
+    snprintf(draft.models[0].base_url, sizeof(draft.models[0].base_url), "https://example.test/v1");
+    draft.font_scale = 1.5;
+    draft.chat_width = 100;
+    draft.resume_last = true;
+    draft.compact_enabled = false;
+    const char *err = PicoSettings_ValidateUserDraft(&draft);
+    memset(&host, 0, sizeof(host));
+    pthread_mutex_init(&host.settings_mu, NULL);
+    if (err || !PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        pthread_mutex_destroy(&host.settings_mu);
+        PicoSettings_FreeUserDraft(&draft);
+        unsetenv("XDG_CONFIG_HOME");
+        CleanupDraftTemp(path, pico, temp);
+        return Fail(err ? err : "could not save user draft");
+    }
+    pthread_mutex_destroy(&host.settings_mu);
+    saved = Pico_ReadFile(path, &len);
+    if (!saved || !strstr(saved, "disabled_host_extensions") || !strstr(saved, "footer") ||
+        !strstr(saved, "\"vision\":true") || !strstr(saved, "gpt-test") || !strstr(saved, "models"))
+    {
+        failed = 1;
+    }
+    free(saved);
+    memset(&loaded, 0, sizeof(loaded));
+    if (!failed &&
+        (!PicoSettings_LoadUserDraft(&loaded) || loaded.model_count != 1 || !loaded.models[0].vision ||
+         loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
+         loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
+         strcmp(loaded.models[0].default_effort, "high") != 0))
+    {
+        failed = 1;
+    }
+    PicoSettings_FreeUserDraft(&draft);
+    PicoSettings_FreeUserDraft(&loaded);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("user draft did not round-trip models or preserved disabled_host_extensions") : 0;
+}
+
+static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
+{
+    char temp[] = "/tmp/pico-settings-ws-XXXXXX";
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    char ws[sizeof(temp) + 8];
+    char ws_pico[sizeof(temp) + 16];
+    char ws_path[sizeof(temp) + 40];
+    PicoUserSettingsDraft draft;
+    PicoHost host;
+    char *workspace_file;
+    size_t len = 0;
+    int failed = 0;
+    static const char marker[] = "{\n  \"model\": \"workspace-only\"\n}\n";
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create workspace settings directory");
+    }
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    snprintf(ws, sizeof(ws), "%s/ws", temp);
+    snprintf(ws_pico, sizeof(ws_pico), "%s/ws/.pico", temp);
+    snprintf(ws_path, sizeof(ws_path), "%s/ws/.pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    Pico_MkdirP(ws_pico);
+    if (WriteFile(path, "{\n  \"model\": \"gpt-test\"\n}\n") || WriteFile(ws_path, marker))
+    {
+        unlink(ws_path);
+        rmdir(ws_pico);
+        rmdir(ws);
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not write workspace isolation fixtures");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    memset(&draft, 0, sizeof(draft));
+    if (!PicoSettings_LoadUserDraft(&draft))
+    {
+        unsetenv("XDG_CONFIG_HOME");
+        unlink(ws_path);
+        rmdir(ws_pico);
+        rmdir(ws);
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not load user draft for workspace isolation");
+    }
+    draft.font_scale = 2.0;
+    memset(&host, 0, sizeof(host));
+    pthread_mutex_init(&host.settings_mu, NULL);
+    if (!PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        failed = 1;
+    }
+    pthread_mutex_destroy(&host.settings_mu);
+    workspace_file = Pico_ReadFile(ws_path, &len);
+    if (!workspace_file || len != strlen(marker) || memcmp(workspace_file, marker, strlen(marker)) != 0)
+    {
+        failed = 1;
+    }
+    free(workspace_file);
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(ws_path);
+    rmdir(ws_pico);
+    rmdir(ws);
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("saving user settings wrote workspace .pico/settings.json") : 0;
+}
+
+static int TestUserDraftValidationAndPreservation(void)
+{
+    static const char fixture[] =
+        "{\n"
+        "  // keep root comment\n"
+        "  \"model\": \"old\",\n"
+        "  \"models\": [\n"
+        "    // keep catalog comment\n"
+        "    {\"id\":\"old\",\"name\":\"null\",\"provider\":\"openai\",\"base_url\":null,\n"
+        "     // keep model comment\n"
+        "     \"vendor_option\":{\"enabled\":true},\"context_limit\":100,\"vision\":false,\n"
+        "     \"effort\":[\"none\",\"null\",null],\"selected_effort\":\"none\"}\n"
+        "  ],\n"
+        "  \"compact_at\": 0.9\n"
+        "}\n";
+    char temp[] = "/tmp/pico-settings-preserve-XXXXXX";
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    PicoUserSettingsDraft draft;
+    PicoHost host;
+    char *before = NULL;
+    char *after = NULL;
+    size_t before_len = 0;
+    size_t after_len = 0;
+    int failed = 0;
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create preservation directory");
+    }
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    if (WriteFile(path, fixture))
+    {
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not write preservation fixture");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    memset(&draft, 0, sizeof(draft));
+    memset(&host, 0, sizeof(host));
+    pthread_mutex_init(&host.settings_mu, NULL);
+    if (!PicoSettings_LoadUserDraft(&draft) || strcmp(draft.models[0].name, "null") != 0 ||
+        draft.models[0].base_url[0] != '\0' || draft.models[0].effort_count != 2 ||
+        strcmp(draft.models[0].effort[1], "null") != 0)
+    {
+        failed = 1;
+    }
+    draft.font_scale = 1.25;
+    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        failed = 1;
+    }
+    after = Pico_ReadFile(path, &after_len);
+    if (!after || !strstr(after, "keep catalog comment") || !strstr(after, "vendor_option"))
+    {
+        failed = 1;
+    }
+    free(after);
+    after = NULL;
+    snprintf(draft.models[0].name, sizeof(draft.models[0].name), "%s", "Renamed");
+    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        failed = 1;
+    }
+    after = Pico_ReadFile(path, &after_len);
+    if (!after || !strstr(after, "keep catalog comment") || !strstr(after, "keep model comment") ||
+        !strstr(after, "vendor_option") || !strstr(after, "Renamed"))
+    {
+        failed = 1;
+    }
+    free(after);
+    after = NULL;
+    snprintf(draft.models[0].id, sizeof(draft.models[0].id), "%s", "renamed-id");
+    snprintf(draft.default_model, sizeof(draft.default_model), "%s", "renamed-id");
+    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        failed = 1;
+    }
+    after = Pico_ReadFile(path, &after_len);
+    if (!after || !strstr(after, "vendor_option") || !strstr(after, "renamed-id"))
+    {
+        failed = 1;
+    }
+    free(after);
+    after = NULL;
+    before = Pico_ReadFile(path, &before_len);
+    draft.compact_enabled = true;
+    draft.compact_ratio = NAN;
+    if (!before || PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        failed = 1;
+    }
+    after = Pico_ReadFile(path, &after_len);
+    if (!after || before_len != after_len || memcmp(before, after, before_len) != 0)
+    {
+        failed = 1;
+    }
+    draft.compact_ratio = 0.9;
+    draft.models[0].context_limit = -1;
+    if (PicoSettings_SaveUserDraft(&host, &draft))
+    {
+        failed = 1;
+    }
+    free(after);
+    after = Pico_ReadFile(path, &after_len);
+    if (!after || before_len != after_len || memcmp(before, after, before_len) != 0)
+    {
+        failed = 1;
+    }
+    int parsed_limit = -1;
+    if (!PicoSettings_ValidateUserDraft(&draft) ||
+        !PicoSettings_ParseModelContextLimit("0", &parsed_limit) || parsed_limit != 0 ||
+        PicoSettings_ParseModelContextLimit("abc", &parsed_limit) ||
+        PicoSettings_ParseModelContextLimit("-1", &parsed_limit) ||
+        PicoSettings_ParseModelContextLimit("999999999999999999999", &parsed_limit))
+    {
+        failed = 1;
+    }
+    free(before);
+    free(after);
+    pthread_mutex_destroy(&host.settings_mu);
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("draft validation corrupted or discarded preserved settings content") : 0;
+}
+
+static int TestRunningAgentKeepsModelUntilIdle(void)
+{
+    static const char updated[] =
+        "{\"model\":\"new\",\"models\":["
+        "{\"id\":\"old\",\"name\":\"Old updated\",\"provider\":\"new-provider\","
+        "\"context_limit\":200,\"effort\":[\"none\"],\"selected_effort\":\"none\"},"
+        "{\"id\":\"new\",\"name\":\"New\",\"provider\":\"openai\","
+        "\"context_limit\":300,\"effort\":[\"none\"],\"selected_effort\":\"none\"}]}\n";
+    static const char removed[] =
+        "{\"model\":\"new\",\"models\":["
+        "{\"id\":\"new\",\"name\":\"New\",\"provider\":\"openai\","
+        "\"context_limit\":300,\"effort\":[\"none\"],\"selected_effort\":\"none\"}]}\n";
+    char temp[] = "/tmp/pico-settings-running-XXXXXX";
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    PicoHost host;
+    PicoWorkspace workspace;
+    PicoAgent running;
+    PicoAgent fresh;
+    PicoModel *old_model;
+    int failed = 0;
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create running-agent directory");
+    }
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    if (WriteFile(path, updated))
+    {
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not write running-agent fixture");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    memset(&host, 0, sizeof(host));
+    memset(&workspace, 0, sizeof(workspace));
+    memset(&running, 0, sizeof(running));
+    memset(&fresh, 0, sizeof(fresh));
+    pthread_mutex_init(&host.settings_mu, NULL);
+    old_model = (PicoModel *)calloc(1, sizeof(PicoModel));
+    if (!old_model)
+    {
+        pthread_mutex_destroy(&host.settings_mu);
+        unsetenv("XDG_CONFIG_HOME");
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not allocate running-agent model");
+    }
+    snprintf(old_model->id, sizeof(old_model->id), "%s", "old");
+    snprintf(old_model->name, sizeof(old_model->name), "%s", "Old");
+    snprintf(old_model->provider, sizeof(old_model->provider), "%s", "old-provider");
+    snprintf(old_model->effort[0], sizeof(old_model->effort[0]), "%s", "none");
+    old_model->effort_count = 1;
+    snprintf(old_model->default_effort, sizeof(old_model->default_effort), "%s", "none");
+    workspace.host = &host;
+    workspace.models = old_model;
+    workspace.model_count = 1;
+    workspace.agents[0] = &running;
+    workspace.count = 1;
+    snprintf(workspace.settings.default_model, sizeof(workspace.settings.default_model), "%s", "old");
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    running.workspace = &workspace;
+    running.state = PICO_AGENT_LLM_WAIT;
+    snprintf(running.model, sizeof(running.model), "%s", "old");
+    snprintf(running.effort, sizeof(running.effort), "%s", "none");
+    PicoSettings_ApplyUserDraft(&host);
+    const PicoModel *active = PicoSettings_ActiveModelConst(&running);
+    fresh.workspace = &workspace;
+    PicoSettings_InitAgent(&fresh);
+    if (!active || strcmp(active->provider, "old-provider") != 0 || strcmp(running.model, "old") != 0 ||
+        strcmp(fresh.model, "new") != 0)
+    {
+        failed = 1;
+    }
+    running.state = PICO_AGENT_IDLE;
+    PicoSettings_ReconcileIdleAgent(&running);
+    active = PicoSettings_ActiveModelConst(&running);
+    if (!active || strcmp(running.model, "old") != 0 || strcmp(active->provider, "new-provider") != 0)
+    {
+        failed = 1;
+    }
+    if (WriteFile(path, removed))
+    {
+        failed = 1;
+    }
+    PicoSettings_ApplyUserDraft(&host);
+    if (strcmp(running.model, "new") != 0)
+    {
+        failed = 1;
+    }
+    free(workspace.models);
+    pthread_mutex_destroy(&host.settings_mu);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("running-agent model snapshot or idle reconciliation was incorrect") : 0;
+}
+
 int main(void)
 {
     int rc = TestPerAgentSelection();
@@ -741,5 +1128,25 @@ int main(void)
     {
         return rc;
     }
-    return TestDocsHintIsBaseSpan();
+    rc = TestDocsHintIsBaseSpan();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestUserDraftSeedsEmptyModelsAndPreservesDisabled();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestUserDraftDoesNotWriteWorkspaceSettings();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestUserDraftValidationAndPreservation();
+    if (rc)
+    {
+        return rc;
+    }
+    return TestRunningAgentKeepsModelUntilIdle();
 }

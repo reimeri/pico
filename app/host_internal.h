@@ -120,6 +120,7 @@ struct PicoHost {
     const char *hovered_link;
     bool hovered_tool;
     bool hovered_clickable;
+    bool hovered_text;
     char *status_warn;
 
     uint64_t next_workspace_id;

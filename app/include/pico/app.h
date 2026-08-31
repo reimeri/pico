@@ -660,11 +660,14 @@ bool PicoDiff_IsOpen(const PicoHost *app);
 void PicoDiff_RenderChip(PicoHost *app);
 void PicoOverlay_Render(PicoHost *app, void *state);
 void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt);
-void PicoExts_Open(void);
-void PicoExts_Close(void);
-void PicoExts_Toggle(void);
-bool PicoExts_IsOpen(void);
-void PicoPrompt_Close(void);
-bool PicoPrompt_IsOpen(void);
+void PicoExts_Open(PicoHost *host);
+void PicoExts_Close(PicoHost *host);
+void PicoExts_Toggle(PicoHost *host);
+bool PicoExts_IsOpen(const PicoHost *host);
+void PicoSettingsUi_Open(PicoHost *host);
+void PicoSettingsUi_Close(PicoHost *host);
+bool PicoSettingsUi_IsOpen(const PicoHost *host);
+void PicoPrompt_Close(PicoHost *host);
+bool PicoPrompt_IsOpen(const PicoHost *host);
 
 #endif

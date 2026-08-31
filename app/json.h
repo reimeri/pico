@@ -8,6 +8,7 @@ typedef struct JsonBuf {
     char *data;
     size_t len;
     size_t cap;
+    bool failed;
 } JsonBuf;
 
 void JsonBuf_Init(JsonBuf *b);
@@ -50,6 +51,7 @@ char *JsonObjRaw(const JsonDoc *doc, int obj, const char *key);
 int JsonObjInt(const JsonDoc *doc, int obj, const char *key, int fallback);
 bool JsonIsObject(const JsonDoc *doc, int tok);
 bool JsonIsArray(const JsonDoc *doc, int tok);
+bool JsonIsNull(const JsonDoc *doc, int tok);
 
 int JsonTokStart(const JsonDoc *doc, int tok);
 int JsonTokEnd(const JsonDoc *doc, int tok);

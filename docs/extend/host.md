@@ -55,7 +55,7 @@ Host-only window settings live in `PicoHostPreferences` and are stored with the 
 - `chat_width` (default 75 characters; `PICO_CHAT_WIDTH` overrides)
 - `disabled_host_extensions` — disables host instances only
 
-These fields never come from a workspace `.pico/settings.json`. Disabling a host instance does not disable that module's workspace instances, and the reverse is also true. Settings updates preserve the existing file mode and use an inter-process lock around read-modify-write, a unique temporary file, `fsync`, atomic rename, and containing-directory `fsync`.
+These fields never come from a workspace `.pico/settings.json`. Disabling a host instance does not disable that module's workspace instances, and the reverse is also true. Settings updates preserve the existing file mode and use an inter-process lock around read-modify-write, a unique temporary file, `fsync`, atomic rename, and containing-directory `fsync`. `/settings` validates all managed fields, preserves comments and unrecognized model properties, and publishes the complete update with one atomic replacement; `disabled_host_extensions` remains owned by `/extensions`.
 
 Auth secrets remain host-global in `~/.config/pico/auth.json`. See [auth](auth.md).
 

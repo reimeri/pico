@@ -67,6 +67,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_hyper,
     pico_ext_xai,
     pico_ext_extensions,
+    pico_ext_settings,
     pico_ext_prompt,
     pico_ext_diff,
 };
@@ -1459,7 +1460,8 @@ bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
     {
         return false;
     }
-    if (!info.name || !info.name[0] || strcmp(info.name, "extensions") == 0)
+    if (!info.name || !info.name[0] || strcmp(info.name, "extensions") == 0 ||
+        strcmp(info.name, "settings") == 0)
     {
         return false;
     }

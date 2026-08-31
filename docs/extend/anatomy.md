@@ -88,7 +88,7 @@ A dual-scope user-global source has independent active-generation slots: one hos
 
 `/extensions` (or F2) lists one record per active slot. `PICO_EXTENSION_HOST` uses workspace ID zero; `PICO_EXTENSION_WORKSPACE` uses an explicit workspace ID. Each copied record includes source, name, scope, workspace ID, enabled, desired module-generation ID, active module-generation ID, and the latest scoped error. A dual-scope source is not collapsed into one enabled/active row.
 
-Click a row to toggle it off or on. Disabled extensions stay in the registry (compiled/`dlopen` for user sources) but skip `init` / `on_frame`. The builtin `extensions` manager cannot be turned off. Host toggles persist as `disabled_host_extensions` in user-global `~/.config/pico/settings.json`. Workspace toggles persist as `disabled_extensions` in `<workspace>/.pico/settings.json`. They apply through the same reload path as F5. Disabling one scope/instance does not disable another.
+Click a row to toggle it off or on. Disabled extensions stay in the registry (compiled/`dlopen` for user sources) but skip `init` / `on_frame`. The builtin `extensions` manager and `settings` editor cannot be turned off. Host toggles persist as `disabled_host_extensions` in user-global `~/.config/pico/settings.json`. Workspace toggles persist as `disabled_extensions` in `<workspace>/.pico/settings.json`. They apply through the same reload path as F5. Disabling one scope/instance does not disable another.
 
 ## Directories
 
@@ -118,4 +118,4 @@ Workspace reload is **deferred** until that workspace's live/retired runtimes, p
 
 `/cd` opens or selects a workspace. Relative paths resolve against the command agent's workspace. The previous workspace stays open; returning to an already-open canonical path reuses it. The workspace path is immutable after open. See [workspace](workspace.md).
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `prompt`, `diff`. `/extensions` or F2 lists them.
+Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `settings`, `prompt`, `diff`. `/extensions` or F2 lists them.

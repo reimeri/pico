@@ -25,7 +25,7 @@ void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);
 void PicoHostPreferences_Load(PicoHost *host);
-void PicoWorkspaceSettings_Load(PicoWorkspace *workspace);
+bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace);
 float Pico_ClampChatWidth(float available, float text_max);
 float Pico_ChatTextMaxPx(const PicoHost *app);
 float Pico_ChatColumnMaxPx(const PicoHost *app);
@@ -40,11 +40,35 @@ const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent);
 const char *PicoSettings_ActiveEffort(const PicoAgent *agent);
 void PicoSettings_InitAgent(PicoAgent *agent);
 void PicoSettings_SyncAgent(PicoAgent *agent);
+void PicoSettings_ReconcileIdleAgent(PicoAgent *agent);
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort);
 bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name);
 bool PicoSettings_SetEffort(PicoAgent *agent, const char *level);
 bool PicoSettings_SaveSelection(const PicoAgent *agent, bool save_model, bool save_effort);
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
 bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
+
+#define PICO_SETTINGS_MODEL_MAX 64
+
+typedef struct PicoUserSettingsDraft {
+    char default_model[128];
+    int context_limit_fallback;
+    double compact_ratio;
+    bool compact_enabled;
+    bool resume_last;
+    double font_scale;
+    int chat_width;
+    PicoModel *models;
+    char (*source_model_ids)[128];
+    int model_count;
+} PicoUserSettingsDraft;
+
+void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft);
+void PicoSettings_FreeUserDraft(PicoUserSettingsDraft *draft);
+bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft);
+bool PicoSettings_ParseModelContextLimit(const char *text, int *out);
+const char *PicoSettings_ValidateUserDraft(const PicoUserSettingsDraft *draft);
+bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *draft);
+bool PicoSettings_ApplyUserDraft(PicoHost *host);
 
 #endif

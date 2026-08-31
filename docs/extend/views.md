@@ -35,13 +35,13 @@ Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
 ## Slots
 
-- `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**, full content height. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes; entries whose path is not an existing directory are omitted), with Add workspace (native folder picker and a wait modal), expand/collapse (latest 10 sessions, More/Less to page by 10; the selected session stays visible when its workspace is collapsed), `+` for a new main agent, and click-to-resume or select. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).
+- `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**, full content height. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes; entries whose path is not an existing directory are omitted), with Add workspace (native folder picker and a wait modal), expand/collapse (latest 10 sessions, More/Less to page by 10; the selected session stays visible when its workspace is collapsed), `+` for a new main agent, click-to-resume or select, and a bottom-left settings button that opens `/settings`. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).
 - `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this).
 - `PICO_SLOT_COMPOSER` — input box.
 - `PICO_SLOT_FOOTER` — status line in the main column (from the sidebar's right edge to the view's right edge, not under the sidebar). Builtin footer: click cwd for a folder picker (native dialog; Pico dims the window with a “select a folder” modal until it closes), model/effort for dropdowns. In a git workspace with uncommitted changes the footer also shows a `+adds -dels` chip (including untracked files) that opens the unified diff modal.
-- `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions`, `/show-prompt`, the `ask_user` questionnaire, the workspace folder-picker wait modal (footer cwd and sidebar Add workspace), the subagent inspect chat, the composer image preview, and the diff modal are overlay modals.
+- `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions`, `/settings`, `/show-prompt`, the `ask_user` questionnaire, the workspace folder-picker wait modal (footer cwd and sidebar Add workspace), the subagent inspect chat, the composer image preview, and the diff modal are overlay modals.
 
-`z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`). Host views in a slot are process-global. Workspace views in a slot render only for the selected workspace.
+`z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`). Host views in a slot are process-global. Workspace views in a slot render only for the selected workspace. Builtin modal controls (`PicoExts_*`, `PicoSettingsUi_*`, and `PicoPrompt_*`) take an explicit `PicoHost *`; their open-state queries report only that host's instance.
 
 ## Empty state
 

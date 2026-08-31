@@ -4,6 +4,7 @@
 
 #include "json.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +81,7 @@ void JsonBuf_Free(JsonBuf *b)
 void JsonBuf_Clear(JsonBuf *b)
 {
     b->len = 0;
+    b->failed = false;
     if (b->data)
     {
         b->data[0] = '\0';
@@ -88,18 +90,37 @@ void JsonBuf_Clear(JsonBuf *b)
 
 static void JsonBuf_Need(JsonBuf *b, size_t extra)
 {
-    if (b->len + extra + 1 <= b->cap)
+    size_t needed;
+    size_t cap;
+    char *next;
+    if (b->failed)
     {
         return;
     }
-    size_t cap = b->cap ? b->cap : 64;
-    while (cap < b->len + extra + 1)
+    if (extra > SIZE_MAX - b->len - 1)
     {
+        b->failed = true;
+        return;
+    }
+    needed = b->len + extra + 1;
+    if (needed <= b->cap)
+    {
+        return;
+    }
+    cap = b->cap ? b->cap : 64;
+    while (cap < needed)
+    {
+        if (cap > SIZE_MAX / 2)
+        {
+            cap = needed;
+            break;
+        }
         cap *= 2;
     }
-    char *next = (char *)realloc(b->data, cap);
+    next = (char *)realloc(b->data, cap);
     if (!next)
     {
+        b->failed = true;
         return;
     }
     b->data = next;
@@ -113,8 +134,9 @@ void JsonBuf_Append(JsonBuf *b, const char *s, size_t n)
         return;
     }
     JsonBuf_Need(b, n);
-    if (!b->data || b->len + n + 1 > b->cap)
+    if (b->failed || !b->data || b->len + n + 1 > b->cap)
     {
+        b->failed = true;
         return;
     }
     memcpy(b->data + b->len, s, n);
@@ -200,8 +222,15 @@ void JsonBuf_Bool(JsonBuf *b, bool v)
 
 char *JsonBuf_Steal(JsonBuf *b)
 {
+    char *data;
     JsonBuf_Need(b, 0);
-    char *data = b->data;
+    if (b->failed)
+    {
+        free(b->data);
+        memset(b, 0, sizeof(*b));
+        return NULL;
+    }
+    data = b->data;
     if (data)
     {
         data[b->len] = '\0';
@@ -824,4 +853,10 @@ bool JsonIsObject(const JsonDoc *doc, int tok)
 bool JsonIsArray(const JsonDoc *doc, int tok)
 {
     return doc && tok >= 0 && tok < doc->ntoks && Toks(doc)[tok].type == JSMN_ARRAY;
+}
+
+bool JsonIsNull(const JsonDoc *doc, int tok)
+{
+    return doc && tok >= 0 && tok < doc->ntoks && Toks(doc)[tok].type == JSMN_PRIMITIVE &&
+           TokEq(doc, &Toks(doc)[tok], "null");
 }

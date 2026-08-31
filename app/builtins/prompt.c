@@ -63,18 +63,25 @@ static void ClearPrompt(void)
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
-void PicoPrompt_Close(void)
+static bool SelectHost(PicoHost *host)
 {
-    if (!Unclaim())
+    s_active_prompt_state = host ? (PromptState *)PicoPlugins_HostState(host, "prompt") : NULL;
+    return s_active_prompt_state != NULL;
+}
+
+void PicoPrompt_Close(PicoHost *host)
+{
+    if (!SelectHost(host) || !Unclaim())
     {
         return;
     }
     ClearPrompt();
 }
 
-bool PicoPrompt_IsOpen(void)
+bool PicoPrompt_IsOpen(const PicoHost *host)
 {
-    return g_open;
+    PromptState *s = host ? (PromptState *)PicoPlugins_HostState(host, "prompt") : NULL;
+    return s && s->open;
 }
 
 static Clay_Color PromptSourceColor(PicoPromptSource source)
@@ -309,7 +316,7 @@ static void PromptAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("PromptModalDim"))))
     {
-        PicoPrompt_Close();
+        PicoPrompt_Close(app);
     }
 }
 
@@ -325,7 +332,7 @@ static void PromptOnFrame(PicoHost *app, void *state, float dt)
                                     CLAY_STRING("PromptModalScrollHandle"));
     if (IsKeyPressed(KEY_ESCAPE))
     {
-        PicoPrompt_Close();
+        PicoPrompt_Close(app);
     }
 }
 
@@ -337,7 +344,8 @@ static void CmdShowPrompt(PicoHost *app, PicoAgentId agent_id, const char *args,
     {
         return;
     }
-    PicoExts_Close();
+    PicoExts_Close(app);
+    s_active_prompt_state = state ? (PromptState *)state : (PromptState *)PicoPlugins_HostState(app, "prompt");
     free(g_text);
     g_span_count = 0;
     memset(g_spans, 0, sizeof(g_spans));

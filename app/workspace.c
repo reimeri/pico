@@ -827,6 +827,10 @@ void PicoWorkspace_Pump(PicoWorkspace *workspace)
     }
     LinkDelegationToolRows(workspace);
     ProcessDelegationTerminals(workspace);
+    for (int i = 0; i < workspace->count; i++)
+    {
+        PicoSettings_ReconcileIdleAgent(workspace->agents[i]);
+    }
 }
 
 bool PicoWorkspace_IsQuiescent(const PicoWorkspace *workspace)

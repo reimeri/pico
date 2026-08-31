@@ -950,11 +950,11 @@ void PicoHostPreferences_Load(PicoHost *app)
     (void)app;
 }
 
-void PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
+bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
 {
     if (!workspace)
     {
-        return;
+        return false;
     }
     if (workspace->model_count == 0)
     {
@@ -966,6 +966,12 @@ void PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
             snprintf(workspace->models[0].provider, sizeof(workspace->models[0].provider), "test");
         }
     }
+    return workspace->model_count > 0;
+}
+
+void PicoSettings_ReconcileIdleAgent(PicoAgent *agent)
+{
+    (void)agent;
 }
 
 char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace)

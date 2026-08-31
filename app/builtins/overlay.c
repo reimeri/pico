@@ -399,7 +399,8 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     }
 
     PicoAgent *agent = PicoHost_SelectedAgent(app);
-    if (PicoExts_IsOpen() || PicoPrompt_IsOpen() || (!app->status_warn && !(agent && agent->error)))
+    if (PicoExts_IsOpen(app) || PicoSettingsUi_IsOpen(app) || PicoPrompt_IsOpen(app) ||
+        (!app->status_warn && !(agent && agent->error)))
     {
         return;
     }

@@ -32,6 +32,12 @@ void RichText_BeginLayout(void)
     s_link_serial = 0;
 }
 
+float RichText_MeasureWidth(Clay_String text, Clay_TextElementConfig config)
+{
+    Clay_StringSlice slice = {.length = text.length, .chars = text.chars, .baseChars = text.chars};
+    return s_measure(slice, &config, s_measure_user_data).width;
+}
+
 static Clay_Dimensions Measure(const char *text, int length, Clay_TextElementConfig *config)
 {
     Clay_StringSlice slice = {.length = length, .chars = text, .baseChars = text};

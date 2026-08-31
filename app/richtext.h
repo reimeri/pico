@@ -53,6 +53,10 @@ typedef Clay_Dimensions (*RichTextMeasureFunction)(Clay_StringSlice text,
 
 void RichText_SetMeasureFunction(RichTextMeasureFunction measure, void *userData);
 
+// Measures plain text with the callback configured above. Container renderers
+// use this to subtract sibling text from a paragraph's content width.
+float RichText_MeasureWidth(Clay_String text, Clay_TextElementConfig config);
+
 // Renders a paragraph/heading/list-item/quote block (its chunk list) as
 // pre-wrapped lines. available_width is the horizontal space in pixels.
 // The wrap cache is allocated from `arena` (the document arena).

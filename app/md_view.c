@@ -233,6 +233,15 @@ const char *MdView_HoveredLink(void)
 #define TABLE_CELL_PAD_X 8
 #define TABLE_CELL_PAD_Y 6
 #define TABLE_BORDER 1
+#define QUOTE_PAD_X 16
+#define LIST_INDENT_X 24
+#define LIST_CONTENT_GAP 8
+
+static float MarkdownContentWidth(float available_width, float consumed_width)
+{
+    float width = available_width - consumed_width;
+    return width < 10.0f ? 10.0f : width;
+}
 
 typedef struct {
     float available_width;
@@ -517,14 +526,15 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
 
             if (block->type == MDB_QUOTE)
             {
+                float content_width = MarkdownContentWidth(available_width, 2.0f * QUOTE_PAD_X);
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                         .padding = {16, 16, 10, 10},
+                                         .padding = {QUOTE_PAD_X, QUOTE_PAD_X, 10, 10},
                                          .childGap = 8,
                                          .sizing = {.width = CLAY_SIZING_GROW(0)}},
                               .backgroundColor = COLOR_QUOTE_BG,
                               .border = {.color = COLOR_QUOTE_BORDER, .width = {.left = 4}}})
                 {
-                    RichText_RenderParagraph(block, &doc->arena, available_width, &style, emit);
+                    RichText_RenderParagraph(block, &doc->arena, content_width, &style, emit);
                 }
             }
             else if (block->type == MDB_LIST_ITEM)
@@ -534,38 +544,34 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                 {
                     indent = 0;
                 }
+                const char *marker = block->list_item_task
+                                         ? (block->list_item_done ? "\xE2\x98\x91" : "\xE2\x98\x90")
+                                         : block->list_marker;
+                Clay_String marker_string = {.length = (int32_t)strlen(marker), .chars = marker};
+                Clay_TextElementConfig marker_config = {
+                    .fontId = FONT_REGULAR,
+                    .fontSize = style.font_size,
+                    .textColor = block->list_item_task
+                                     ? (block->list_item_done ? COLOR_MUTED : COLOR_LINK)
+                                     : COLOR_MUTED,
+                    .wrapMode = CLAY_TEXT_WRAP_NONE,
+                };
+                float marker_width = RichText_MeasureWidth(marker_string, marker_config);
+                float content_width = MarkdownContentWidth(
+                    available_width, (float)(indent * LIST_INDENT_X) + marker_width + LIST_CONTENT_GAP);
+
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                         .padding = {.left = (uint16_t)(indent * 24)},
-                                         .childGap = 8,
+                                         .padding = {.left = (uint16_t)(indent * LIST_INDENT_X)},
+                                         .childGap = LIST_CONTENT_GAP,
                                          .sizing = {.width = CLAY_SIZING_GROW(0)},
                                          .childAlignment = {.y = CLAY_ALIGN_Y_TOP}}})
                 {
-                    if (block->list_item_task)
-                    {
-                        const char *checkbox = block->list_item_done ? "\xE2\x98\x91" : "\xE2\x98\x90";
-                        Clay_String checkbox_string = {.length = (int32_t)strlen(checkbox), .chars = checkbox};
-                        PicoChatSel_Text(checkbox_string,
-                                         (Clay_TextElementConfig){.fontId = FONT_REGULAR,
-                                                                  .fontSize = style.font_size,
-                                                                  .textColor = block->list_item_done ? COLOR_MUTED
-                                                                                                     : COLOR_LINK,
-                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE});
-                    }
-                    else
-                    {
-                        Clay_String marker_string = {.length = (int32_t)strlen(block->list_marker),
-                                                     .chars = block->list_marker};
-                        PicoChatSel_Text(marker_string,
-                                         (Clay_TextElementConfig){.fontId = FONT_REGULAR,
-                                                                  .fontSize = style.font_size,
-                                                                  .textColor = COLOR_MUTED,
-                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE});
-                    }
+                    PicoChatSel_Text(marker_string, marker_config);
                     PicoChatSel_Glue(" ");
                     CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                     {
-                        RichText_RenderParagraph(block, &doc->arena, available_width, &style, emit);
+                        RichText_RenderParagraph(block, &doc->arena, content_width, &style, emit);
                     }
                 }
             }

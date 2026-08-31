@@ -1019,15 +1019,14 @@ static void RenderModelRow(SettingsState *s, int index)
                      .childGap = 8,
                      .padding = {10, 10, 8, 8},
                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
-          .backgroundColor = COLOR_CODE_BG,
+          .backgroundColor = hover ? (Clay_Color){54, 54, 66, 255} : COLOR_CODE_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY(CLAY_IDI("SettingsModelRow", index),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = 8,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
-              .backgroundColor = hover ? (Clay_Color){54, 54, 66, 255} : (Clay_Color){0, 0, 0, 0}})
+                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                      .childGap = 8,

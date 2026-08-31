@@ -1329,17 +1329,16 @@ static void RunSlot(PicoHost *host, PicoUiSlot slot)
             view->host_render(host, view->state);
         }
     }
-    PicoWorkspace *ws = PicoHost_SelectedWorkspace(host);
+    const PicoAgent *selected = PicoHost_SelectedAgentConst(host);
+    PicoWorkspace *ws = selected ? selected->workspace : NULL;
     if (ws)
     {
-        const PicoAgent *selected = PicoHost_SelectedAgentConst(host);
-        PicoAgentId selected_id = selected ? selected->id : 0;
         for (int i = 0; i < ws->view_count[slot]; i++)
         {
             PicoSlotView *view = &ws->views[slot][i];
             if (view->workspace_render)
             {
-                view->workspace_render(ws, selected_id, view->state);
+                view->workspace_render(ws, selected->id, view->state);
             }
         }
     }
@@ -2796,9 +2795,15 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
                                  .childGap = 12}})
                 {
                     RunSlot(app, PICO_SLOT_MAIN);
-                    RunSlot(app, PICO_SLOT_COMPOSER);
+                    if (PicoHost_SelectedAgent(app))
+                    {
+                        RunSlot(app, PICO_SLOT_COMPOSER);
+                    }
                 }
-                RunSlot(app, PICO_SLOT_FOOTER);
+                if (PicoHost_SelectedAgent(app))
+                {
+                    RunSlot(app, PICO_SLOT_FOOTER);
+                }
             }
         }
     }
@@ -2979,10 +2984,6 @@ void PicoHost_Frame(PicoHost *app)
     if (app->terminal_shutdown)
     {
         CloseWindow();
-        return;
-    }
-    if (!PicoHost_SelectedAgent(app))
-    {
         return;
     }
     Vector2 mouse_delta = GetMouseWheelMoveV();

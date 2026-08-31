@@ -7,6 +7,7 @@
 #include "scrollbar.h"
 #include "agent_internal.h"
 #include "agent.h"
+#include "overlay.h"
 #include "clay/clay.h"
 
 #include <dirent.h>
@@ -113,6 +114,16 @@ static void ShellTestComposer(PicoHost *host, void *state)
     }
 }
 
+static int g_shell_workspace_view_calls;
+
+static void ShellTestWorkspaceView(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
+{
+    (void)workspace;
+    (void)selected_agent_id;
+    (void)state;
+    g_shell_workspace_view_calls++;
+}
+
 static void ShellTestFooter(PicoHost *host, void *state)
 {
     (void)host;
@@ -133,6 +144,14 @@ static void ShellTestAddView(PicoHost *host, PicoUiSlot slot, PicoHostViewFn ren
     host->views[slot][0].host_render = render;
     host->views[slot][0].state = state;
     host->view_count[slot] = 1;
+}
+
+static Clay_Dimensions ShellMeasureText(Clay_StringSlice text, Clay_TextElementConfig *config,
+                                        void *user_data)
+{
+    (void)user_data;
+    return (Clay_Dimensions){.width = (float)text.length * (float)config->fontSize * 0.6f,
+                             .height = (float)config->fontSize};
 }
 
 static bool ShellBoxStable(Clay_BoundingBox expected, Clay_BoundingBox actual)
@@ -159,6 +178,8 @@ static int RunShellStabilityCase(bool with_sidebar)
     void *memory = malloc(arena_size);
     Clay_Context *previous = Clay_GetCurrentContext();
     PicoHost host;
+    PicoWorkspace workspace;
+    PicoAgent agent;
     ShellTestState state = {.composer_height = 44.0f};
     Clay_BoundingBox expected_root = {0};
     Clay_BoundingBox expected_body = {0};
@@ -184,6 +205,18 @@ static int RunShellStabilityCase(bool with_sidebar)
     }
 
     memset(&host, 0, sizeof(host));
+    memset(&workspace, 0, sizeof(workspace));
+    memset(&agent, 0, sizeof(agent));
+    workspace.host = &host;
+    workspace.id = 1;
+    workspace.state = PICO_WORKSPACE_OPEN;
+    workspace.agents[0] = &agent;
+    workspace.count = 1;
+    agent.id = 1;
+    agent.workspace = &workspace;
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    host.selected_agent_id = agent.id;
     if (with_sidebar)
     {
         ShellTestAddView(&host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
@@ -287,13 +320,151 @@ static int RunShellStabilityCase(bool with_sidebar)
     return g_failed ? 1 : 0;
 }
 
+static int RunWorkspaceLessShellCase(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-empty-layout-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-empty-layout-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoWorkspace *workspace;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_BoundingBox expected_root = {0};
+    Clay_BoundingBox expected_body = {0};
+    Clay_BoundingBox expected_sidebar = {0};
+    Clay_BoundingBox expected_right = {0};
+    Clay_BoundingBox expected_main = {0};
+    Clay_BoundingBox expected_chat = {0};
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("workspace-less shell setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        Fail("workspace-less shell host initialization");
+        return 1;
+    }
+    PicoPlugins_Load(host);
+    host->preferences.chat_width = 0;
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        Clay_SetCurrentContext(previous);
+        Fail("workspace-less shell Clay initialization");
+        return 1;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    host->view_count[PICO_SLOT_FOOTER] = 0;
+    ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    ShellTestAddView(host, PICO_SLOT_FOOTER, ShellTestFooter, NULL);
+
+    for (int frame = 0; frame < 120; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_SetPointerState((Clay_Vector2){550, 400}, false);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        Clay_ElementData root = Clay_GetElementData(CLAY_ID("Root"));
+        Clay_ElementData body = Clay_GetElementData(CLAY_ID("Body"));
+        Clay_ElementData sidebar = Clay_GetElementData(CLAY_ID("Sidebar"));
+        Clay_ElementData right = Clay_GetElementData(CLAY_ID("RightColumn"));
+        Clay_ElementData main = Clay_GetElementData(CLAY_ID("MainColumn"));
+        Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        if (!root.found || !body.found || !sidebar.found || !right.found || !main.found || !chat.found ||
+            !Clay_GetElementData(CLAY_ID("NoWorkspaceCard")).found ||
+            !Clay_GetElementData(CLAY_IDI("EmptyCard", 0)).found ||
+            !Clay_GetElementData(CLAY_IDI("EmptyCard", 1)).found ||
+            !Clay_GetElementData(CLAY_IDI("EmptyCard", 2)).found)
+        {
+            Fail("workspace-less shell must render sidebar and landing cards");
+            break;
+        }
+        if (Clay_GetElementData(CLAY_ID("ComposerAlign")).found ||
+            Clay_GetElementData(CLAY_ID("Footer")).found || host->hovered_clickable ||
+            pico_ui_modal_count(host) != 0)
+        {
+            Fail("workspace-less landing card must be non-actionable and hide agent slots");
+            break;
+        }
+        if (frame == 0)
+        {
+            expected_root = root.boundingBox;
+            expected_body = body.boundingBox;
+            expected_sidebar = sidebar.boundingBox;
+            expected_right = right.boundingBox;
+            expected_main = main.boundingBox;
+            expected_chat = chat.boundingBox;
+        }
+        else if (!ShellBoxStable(expected_root, root.boundingBox) ||
+                 !ShellBoxStable(expected_body, body.boundingBox) ||
+                 !ShellBoxStable(expected_sidebar, sidebar.boundingBox) ||
+                 !ShellBoxStable(expected_right, right.boundingBox) ||
+                 !ShellBoxStable(expected_main, main.boundingBox) ||
+                 !ShellBoxStable(expected_chat, chat.boundingBox))
+        {
+            Fail("workspace-less shell geometry drifted");
+            break;
+        }
+    }
+
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        !(workspace = PicoHost_FindWorkspace(host, workspace_id)) ||
+        workspace->view_count[PICO_SLOT_MAIN] >= PICO_MAX_SLOT_VIEWS)
+    {
+        Fail("open workspace without an agent for shell test");
+    }
+    else
+    {
+        int index = workspace->view_count[PICO_SLOT_MAIN]++;
+        workspace->views[PICO_SLOT_MAIN][index].workspace_render = ShellTestWorkspaceView;
+        workspace->views[PICO_SLOT_MAIN][index].workspace = workspace;
+        g_shell_workspace_view_calls = 0;
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        if (Clay_GetElementData(CLAY_ID("NoWorkspaceCard")).found)
+        {
+            Fail("open workspace without a selected agent must not show open-workspace instruction");
+        }
+        if (g_shell_workspace_view_calls != 0)
+        {
+            Fail("workspace views must not render without a selected agent");
+        }
+    }
+
+    Clay_SetCurrentContext(previous);
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return g_failed ? 1 : 0;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
     {
         return 1;
     }
-    return RunShellStabilityCase(true);
+    if (RunShellStabilityCase(true) != 0)
+    {
+        return 1;
+    }
+    return RunWorkspaceLessShellCase();
 }
 
 static int TestCanonicalOpenAndDuplicate(void)
@@ -4927,6 +5098,122 @@ static int TestUnseenCompletePersistsAcrossRestart(void)
     return 0;
 }
 
+static bool WorkspaceLessToastRenders(PicoHost *host)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    bool rendered = false;
+    if (!memory)
+    {
+        return false;
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+        PicoOverlay_Notify(host, "Workspace-less toast");
+        Clay_BeginLayout();
+        CLAY(CLAY_ID("ToastTestRoot"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(viewport.width),
+                                    .height = CLAY_SIZING_FIXED(viewport.height)}}})
+        {
+        }
+        PicoOverlay_Render(host, NULL);
+        (void)Clay_EndLayout(0.0f);
+        rendered = Clay_GetElementData(CLAY_ID("NotifyToast")).found;
+    }
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    return rendered;
+}
+
+static int TestWorkspaceLessHostTransition(void)
+{
+    char dir[] = "/tmp/pico-ws-empty-start-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-empty-start-XXXXXX";
+    PicoHost *host = NULL;
+    const PicoAgent *selected;
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp workspace-less host");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("init workspace-less host");
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        return 1;
+    }
+    PicoPlugins_Load(host);
+    if (pico_workspace_count(host) != 0 || pico_agent_count(host) != 0 || pico_agent_active(host) != 0 ||
+        !PicoPlugins_HostState(host, "sidebar") || !PicoPlugins_HostState(host, "chat"))
+    {
+        Fail("workspace-less host must load host plugins without creating runtime state");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    if (!WorkspaceLessToastRenders(host))
+    {
+        Fail("workspace-less host must render notifications without an agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    pico_host_pump(host);
+    if (pico_workspace_count(host) != 0 || pico_agent_count(host) != 0 || pico_agent_active(host) != 0)
+    {
+        Fail("workspace-less host pump must tolerate agent id zero");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    if (!PicoPlugins_ReloadHost(host) || pico_workspace_count(host) != 0 || pico_agent_count(host) != 0)
+    {
+        Fail("workspace-less host reload must remain usable");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    if (!PicoHost_ChangeWorkspace(host, NULL, dir))
+    {
+        Fail("workspace-less host must open its first workspace");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    selected = PicoHost_SelectedAgentConst(host);
+    if (pico_workspace_count(host) != 1 || pico_agent_count(host) != 1 || !selected ||
+        strcmp(PicoAgent_WorkspacePath(selected), dir) != 0)
+    {
+        Fail("first workspace must create and select a usable main agent");
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    if (pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        Fail("workspace-less transition must shut down cleanly");
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
 int main(void)
 {
     if (TestBottomFollowShellGeometryStable() != 0)
@@ -4934,6 +5221,10 @@ int main(void)
         return 1;
     }
     if (TestCanonicalOpenAndDuplicate() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspaceLessHostTransition() != 0)
     {
         return 1;
     }

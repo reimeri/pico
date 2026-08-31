@@ -163,7 +163,7 @@ Development builds keep `pico`, `resources/`, `docs/`, `examples/`, `builtins/`,
 
 User extensions are compiled with `${PICO_CC:-cc}` against the packaged `sdk/include` tree and their own source directory. Release archives and AppImages intentionally do not bundle a compiler.
 
-The process starts in the current directory as the first workspace. `/cd` opens or selects another workspace without replacing the others. `pico -h` lists flags.
+Running `pico` directly starts in the current directory as the first workspace. The installed desktop launcher starts without a workspace; choose an existing workspace or session from the sidebar, or use Add workspace. `/cd` opens or selects another workspace without replacing the others. `pico --no-workspace` requests the same landing state, and `pico -h` lists all flags.
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 

@@ -68,6 +68,7 @@ target_include_directories(md4c PUBLIC md4c)
 
 add_executable(pico
     main.c
+    cli.c
     app.c
     ui.c
     plugin.c
@@ -531,6 +532,17 @@ if(BUILD_TESTING)
     target_compile_options(pico_chat_width_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_chat_width_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_chat_width_tests COMMAND pico_chat_width_tests)
+
+    add_executable(pico_cli_tests
+        tests/cli_test.c
+        cli.c)
+    target_include_directories(pico_cli_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_cli_tests)
+    add_test(NAME pico_cli_tests COMMAND pico_cli_tests)
 
     add_executable(pico_ui_tests
         tests/ui_test.c

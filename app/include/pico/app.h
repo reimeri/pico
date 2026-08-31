@@ -47,8 +47,8 @@ typedef enum PicoRole {
 typedef enum PicoUiSlot {
     PICO_SLOT_SIDEBAR = 0,
     PICO_SLOT_MAIN,
-    PICO_SLOT_COMPOSER,
-    PICO_SLOT_FOOTER,
+    PICO_SLOT_COMPOSER, /* not rendered without a selected agent */
+    PICO_SLOT_FOOTER,   /* not rendered without a selected agent */
     PICO_SLOT_OVERLAY,
     PICO_SLOT_COUNT,
 } PicoUiSlot;
@@ -151,6 +151,7 @@ typedef struct PicoScrollbar {
     bool mouse_down;
 } PicoScrollbar;
 
+/* Sidebar/main/overlay host views may run with zero workspaces and no selected agent. */
 typedef void (*PicoHostViewFn)(PicoHost *host, void *state);
 typedef void (*PicoWorkspaceViewFn)(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state);
 

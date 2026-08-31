@@ -68,7 +68,7 @@ void PicoOverlay_Notify(PicoHost *app, const char *text)
 static bool HasError(const PicoHost *app)
 {
     const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
-    return (app->status_warn && app->status_warn[0]) || (agent->error && agent->error[0]);
+    return (app->status_warn && app->status_warn[0]) || (agent && agent->error && agent->error[0]);
 }
 
 static Clay_String CStr(const char *s)
@@ -230,7 +230,8 @@ static void RenderAsk(PicoHost *app)
 static void RenderError(PicoHost *app)
 {
     const char *warn = app->status_warn;
-    const char *agent = (!warn || !warn[0]) ? PicoHost_SelectedAgent(app)->error : NULL;
+    PicoAgent *selected = PicoHost_SelectedAgent(app);
+    const char *agent = (!warn || !warn[0]) && selected ? selected->error : NULL;
     if ((!warn || !warn[0]) && (!agent || !agent[0]))
     {
         return;

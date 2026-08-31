@@ -7,6 +7,7 @@
 
 #define PICO_EXT_ABI 13 /* host and workspace instances; no ABI 12 loader */
 
+/* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);
 typedef void (*PicoHostExtShutdownFn)(PicoHost *host, void *state);
 typedef void (*PicoHostExtFrameFn)(PicoHost *host, void *state, float dt);

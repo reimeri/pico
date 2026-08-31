@@ -2190,7 +2190,7 @@ static void ComposerAttachRender(PicoHost *app, void *state)
 void PicoComposer_Render(PicoHost *app, void *state)
 {
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state)
+    if (!s_active_composer_state || !PicoHost_SelectedAgent(app))
     {
         return;
     }
@@ -2337,7 +2337,7 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
 {
     (void)event;
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || PicoUi_ModalOpen(app))
+    if (!s_active_composer_state || !PicoHost_SelectedAgent(app) || PicoUi_ModalOpen(app))
     {
         return;
     }
@@ -2408,7 +2408,7 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
 {
     (void)event;
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state)
+    if (!s_active_composer_state || !PicoHost_SelectedAgent(app))
     {
         return;
     }
@@ -2461,7 +2461,7 @@ static void ComposerFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state)
+    if (!s_active_composer_state || !PicoHost_SelectedAgent(app))
     {
         return;
     }

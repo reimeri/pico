@@ -33,7 +33,8 @@ typedef enum PicoHostShutdownResult {
 
 PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode);
 PicoHostShutdownResult pico_host_free(PicoHost *host); /* process deadline; may return RETAINED */
-void pico_host_pump(PicoHost *host);                   /* fair round-robin of every live workspace */
+/* Fair round-robin; valid with zero workspaces and active agent ID zero. */
+void pico_host_pump(PicoHost *host);
 
 int pico_workspace_count(const PicoHost *host);
 bool pico_workspace_info(const PicoHost *host, int index, PicoWorkspaceInfo *out);

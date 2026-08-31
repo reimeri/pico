@@ -9,6 +9,7 @@
 #include "agent_internal.h"
 #include "docs_path.h"
 #include "richtext.h"
+#include "cli.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,9 +36,10 @@ static void FputsQuoted(FILE *out, const char *s)
 static void PrintUsage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [--safe] [--resume] [--no-session] [--session FILE]\n"
-            "  --safe        load builtin UI only (skip ~/.config/pico/extensions and .pico/extensions)\n"
-            "  --resume      continue the most recent session for this directory\n"
+            "usage: %s [--safe] [--no-workspace] [--resume] [--no-session] [--session FILE]\n"
+            "  --safe          load builtin UI only (skip ~/.config/pico/extensions and .pico/extensions)\n"
+            "  --no-workspace  start without opening the current directory\n"
+            "  --resume        continue the most recent session for this directory\n"
             "  --no-session  do not persist a JSONL session file\n"
             "  --session F   open an existing session file\n"
             "  -h            this help\n"
@@ -70,43 +72,12 @@ static void PrintUsage(const char *argv0)
 
 int main(int argc, char **argv)
 {
-    bool safe_mode = false;
-    PicoSessionStart session_start = PICO_SESSION_NEW;
-    const char *session_file = NULL;
-    for (int i = 1; i < argc; i++)
+    PicoCliOptions options;
+    PicoCliParseResult parsed = PicoCli_Parse(argc, argv, &options);
+    if (parsed != PICO_CLI_OK)
     {
-        if (strcmp(argv[i], "--safe") == 0)
-        {
-            safe_mode = true;
-        }
-        else if (strcmp(argv[i], "--resume") == 0)
-        {
-            session_start = PICO_SESSION_RESUME;
-        }
-        else if (strcmp(argv[i], "--no-session") == 0)
-        {
-            session_start = PICO_SESSION_NONE;
-        }
-        else if (strcmp(argv[i], "--session") == 0)
-        {
-            if (i + 1 >= argc)
-            {
-                PrintUsage(argv[0]);
-                return 1;
-            }
-            session_file = argv[++i];
-            session_start = PICO_SESSION_RESUME;
-        }
-        else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-        {
-            PrintUsage(argv[0]);
-            return 0;
-        }
-        else
-        {
-            PrintUsage(argv[0]);
-            return 1;
-        }
+        PrintUsage(argv[0]);
+        return parsed == PICO_CLI_HELP ? 0 : 1;
     }
 
     Pico_PathsInit(GetApplicationDirectory());
@@ -118,7 +89,7 @@ int main(int argc, char **argv)
     SetExitKey(KEY_NULL);
 
     char workspace[4096];
-    if (!getcwd(workspace, sizeof(workspace)))
+    if (PicoCli_ShouldOpenDefaultWorkspace(&options) && !getcwd(workspace, sizeof(workspace)))
     {
         snprintf(workspace, sizeof(workspace), ".");
     }
@@ -128,14 +99,21 @@ int main(int argc, char **argv)
     RichText_SetMeasureFunction(Pico_MeasureTextUtf8, fonts);
 
     PicoHost *app = NULL;
-    if (pico_host_init(&app, fonts, safe_mode) != PICO_OK || !app)
+    if (pico_host_init(&app, fonts, options.safe_mode) != PICO_OK || !app)
     {
         fprintf(stderr, "Pico could not initialize.\n");
         Pico_UnloadFonts(fonts);
         Clay_Raylib_Close();
         return 1;
     }
-    PicoHost_Start(app, fonts, workspace, safe_mode, session_start, session_file);
+    if (PicoCli_ShouldOpenDefaultWorkspace(&options))
+    {
+        PicoHost_Start(app, fonts, workspace, options.safe_mode, options.session_start, options.session_file);
+    }
+    else
+    {
+        PicoPlugins_Load(app);
+    }
     while (!WindowShouldClose())
     {
         if (Pico_NeedsClayReinit())

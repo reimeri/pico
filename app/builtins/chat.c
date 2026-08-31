@@ -1005,6 +1005,26 @@ static void RenderEmptyCard(int id, Clay_String title, const char **items, int n
     }
 }
 
+static void RenderNoWorkspaceCard(void)
+{
+    CLAY(CLAY_ID("NoWorkspaceCard"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .padding = {16, 16, 16, 16},
+                     .childGap = 8,
+                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+          .backgroundColor = COLOR_CONTENT_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(8)})
+    {
+        CLAY_TEXT(CLAY_STRING("Open a workspace"),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+        CLAY_TEXT(CLAY_STRING("Choose a workspace from the sidebar or add a new one to get started."),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                    .fontSize = PICO_FONT_CAPTION,
+                                    .textColor = COLOR_MUTED,
+                                    .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+    }
+}
+
 static void RenderEmptyCards(PicoHost *app)
 {
     const char *tools[PICO_MAX_TOOLS];
@@ -1018,7 +1038,7 @@ static void RenderEmptyCards(PicoHost *app)
         }
     }
     const char *ctx[8];
-    int ctx_n = PicoSettings_LoadedContext(PicoAgent_Workspace(PicoHost_SelectedAgentConst(app)), ctx, 8);
+    int ctx_n = PicoSettings_LoadedContext(ws, ctx, 8);
     bool narrow = GetScreenWidth() < 720;
     CLAY(CLAY_ID("EmptyCards"),
          {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
@@ -1073,7 +1093,8 @@ static void RunEmpty(PicoHost *app, PicoEmptyKind kind)
 
 static void RenderEmptyState(PicoHost *app)
 {
-    if (EmptyReplaced(app))
+    bool has_selected_agent = PicoHost_SelectedAgentConst(app) != NULL;
+    if (has_selected_agent && EmptyReplaced(app))
     {
         RunEmpty(app, PICO_EMPTY_REPLACE);
         return;
@@ -1083,9 +1104,19 @@ static void RenderEmptyState(PicoHost *app)
                      .childGap = 12,
                      .sizing = {.width = ChatColumnWidth(app)}}})
     {
-        RunEmpty(app, PICO_EMPTY_ABOVE);
+        if (has_selected_agent)
+        {
+            RunEmpty(app, PICO_EMPTY_ABOVE);
+        }
+        if (pico_workspace_count(app) == 0)
+        {
+            RenderNoWorkspaceCard();
+        }
         RenderEmptyCards(app);
-        RunEmpty(app, PICO_EMPTY_BELOW);
+        if (has_selected_agent)
+        {
+            RunEmpty(app, PICO_EMPTY_BELOW);
+        }
     }
 }
 
@@ -1426,14 +1457,16 @@ bool PicoChat_TakeVirtualRelayout(void)
 
 void PicoChat_Render(PicoHost *app, void *state)
 {
+    PicoAgent *active;
     s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
     if (!s_active_chat_state)
     {
         return;
     }
+    active = PicoHost_SelectedAgent(app);
     app->hovered_tool = false;
     ThinkFrameReset();
-    PicoChatSel_BeginFrame(PicoHost_SelectedAgent(app)->message_count);
+    PicoChatSel_BeginFrame(active ? active->message_count : 0);
     CLAY(CLAY_ID("ChatRow"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
@@ -1444,7 +1477,7 @@ void PicoChat_Render(PicoHost *app, void *state)
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
-            bool empty = PicoHost_SelectedAgent(app)->message_count == 0;
+            bool empty = !active || active->message_count == 0;
             Clay_ChildAlignment align = empty ? (Clay_ChildAlignment){.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}
                                               : (Clay_ChildAlignment){0};
             Clay_Sizing content_size = {.width = ChatColumnWidth(app)};
@@ -1462,23 +1495,25 @@ void PicoChat_Render(PicoHost *app, void *state)
                 {
                     RenderEmptyState(app);
                 }
-                float available_width = ChatWidth(app);
-                PicoAgent *active = PicoHost_SelectedAgent(app);
-                TranscriptView view = {
-                    .app = app,
-                    .messages = active->messages,
-                    .message_count = active->message_count,
-                    .state = active->state,
-                    .activity = active->activity,
-                    .owner = active,
-                    .virtual_cache = &g_main_virtual,
-                    .tool_wrap_cache = &g_main_tool_wrap,
-                    .scroll_id = CLAY_STRING("ChatScroll"),
-                    .id_ns = 0,
-                    .selectable = true,
-                };
-                view.virtual_identity = TranscriptIdentity(&view);
-                RenderTranscript(&view, available_width);
+                if (active)
+                {
+                    float available_width = ChatWidth(app);
+                    TranscriptView view = {
+                        .app = app,
+                        .messages = active->messages,
+                        .message_count = active->message_count,
+                        .state = active->state,
+                        .activity = active->activity,
+                        .owner = active,
+                        .virtual_cache = &g_main_virtual,
+                        .tool_wrap_cache = &g_main_tool_wrap,
+                        .scroll_id = CLAY_STRING("ChatScroll"),
+                        .id_ns = 0,
+                        .selectable = true,
+                    };
+                    view.virtual_identity = TranscriptIdentity(&view);
+                    RenderTranscript(&view, available_width);
+                }
             }
         }
 
@@ -1495,10 +1530,10 @@ static TranscriptView MainTranscriptView(PicoHost *app)
     PicoAgent *active = PicoHost_SelectedAgent(app);
     TranscriptView view = {
         .app = app,
-        .messages = active->messages,
-        .message_count = active->message_count,
-        .state = active->state,
-        .activity = active->activity,
+        .messages = active ? active->messages : NULL,
+        .message_count = active ? active->message_count : 0,
+        .state = active ? active->state : PICO_AGENT_IDLE,
+        .activity = active ? active->activity : NULL,
         .owner = active,
         .virtual_cache = &g_main_virtual,
         .tool_wrap_cache = &g_main_tool_wrap,
@@ -2069,14 +2104,15 @@ static void InspectHandlePointer(PicoHost *app)
 
 void PicoChat_HandleToolRelease(PicoHost *app)
 {
-    if (!app || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
+    PicoAgent *active = PicoHost_SelectedAgent(app);
+    if (!app || !active || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
         !app->chat_sel.mouse_selecting || app->chat_sel.dragging || !app->chat_sel.pressed_tool ||
-        app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= PicoHost_SelectedAgent(app)->message_count)
+        app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= active->message_count)
     {
         return;
     }
 
-    PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[app->chat_sel.tool_msg];
+    PicoMessage *msg = &active->messages[app->chat_sel.tool_msg];
     int t = app->chat_sel.tool_idx;
     TranscriptView main;
     if (t < 0 || t >= msg->trace_count)
@@ -2089,7 +2125,7 @@ void PicoChat_HandleToolRelease(PicoHost *app)
         return;
     }
     PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
-    if (msg->trace[t].is_tool && pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
+    if (msg->trace[t].is_tool && pico_tool_row_activate(ws, active->id, &msg->trace[t]))
     {
         app->chat_sel.pressed_tool = false;
         return;
@@ -2108,6 +2144,12 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
     s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
     if (!s_active_chat_state)
     {
+        return;
+    }
+    if (!PicoHost_SelectedAgent(app))
+    {
+        PicoChat_InspectClose();
+        PicoChatSel_Clear(app);
         return;
     }
     InspectHandlePointer(app);
@@ -2490,7 +2532,7 @@ static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, 
 
 static void PicoChat_DrawThinkSheen(PicoHost *app)
 {
-    if (!app || !app->fonts)
+    if (!app || !app->fonts || !PicoHost_SelectedAgent(app))
     {
         return;
     }

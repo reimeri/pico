@@ -3,7 +3,7 @@
 Add Clay UI into a fixed slot. You cannot remove or replace builtins; you add alongside them. The empty-state (no messages yet) is the exception: `pico_workspace_add_empty_view` can replace it or stack panels around the builtin cards. See [Empty state](#empty-state).
 
 Views are scoped:
-- **Host views** (`pico_host_add_view`) — registered in `host_init`. Callback signature: `void (*PicoHostViewFn)(PicoHost *host, void *state)`.
+- **Host views** (`pico_host_add_view`) — registered in `host_init`. Callback signature: `void (*PicoHostViewFn)(PicoHost *host, void *state)`. Sidebar, main, and overlay host views may run before a workspace or agent exists.
 - **Workspace views** (`pico_workspace_add_view`) — registered in `workspace_init`. Callback signature: `void (*PicoWorkspaceViewFn)(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)`. Called only when the selected agent belongs to that workspace.
 - **Empty-state views** (`pico_workspace_add_empty_view`) — registered in `workspace_init`. Callback signature: `PicoWorkspaceViewFn`.
 
@@ -37,15 +37,15 @@ Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
 - `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**, full content height. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes; entries whose path is not an existing directory are omitted), with Add workspace (native folder picker and a wait modal), expand/collapse (latest 10 sessions, More/Less to page by 10; the selected session stays visible when its workspace is collapsed), `+` for a new main agent, click-to-resume or select, and a bottom-left settings button that opens `/settings`. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).
 - `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this).
-- `PICO_SLOT_COMPOSER` — input box.
-- `PICO_SLOT_FOOTER` — status line in the main column (from the sidebar's right edge to the view's right edge, not under the sidebar). Builtin footer: click cwd for a folder picker (native dialog; Pico dims the window with a “select a folder” modal until it closes), model/effort for dropdowns. In a git workspace with uncommitted changes the footer also shows a `+adds -dels` chip (including untracked files) that opens the unified diff modal.
+- `PICO_SLOT_COMPOSER` — input box. The entire slot, including extra host views, is not rendered when no agent is selected.
+- `PICO_SLOT_FOOTER` — status line in the main column (from the sidebar's right edge to the view's right edge, not under the sidebar). The entire slot, including extra host views, is not rendered when no agent is selected. Builtin footer: click cwd for a folder picker (native dialog; Pico dims the window with a “select a folder” modal until it closes), model/effort for dropdowns. In a git workspace with uncommitted changes the footer also shows a `+adds -dels` chip (including untracked files) that opens the unified diff modal.
 - `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions`, `/settings`, `/show-prompt`, the `ask_user` questionnaire, the workspace folder-picker wait modal (footer cwd and sidebar Add workspace), the subagent inspect chat, the composer image preview, and the diff modal are overlay modals.
 
 `z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`). Host views in a slot are process-global. Workspace views in a slot render only for the selected workspace. Builtin modal controls (`PicoExts_*`, `PicoSettingsUi_*`, and `PicoPrompt_*`) take an explicit `PicoHost *`; their open-state queries report only that host's instance.
 
 ## Empty state
 
-When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. Extensions register extra Clay with `pico_workspace_add_empty_view` during `workspace_init`, not a shell slot — the empty state is inside the chat column.
+When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. With zero live workspaces it also shows a non-interactive “Open a workspace” card above them while the sidebar remains usable. If no agent is selected, workspace empty-state callbacks do not run; they resume once an agent in that workspace is selected. Extensions register extra Clay with `pico_workspace_add_empty_view` during `workspace_init`, not a shell slot — the empty state is inside the chat column.
 
 ```c
 pico_workspace_add_empty_view(workspace, PICO_EMPTY_ABOVE, 0, BannerRender);
@@ -91,7 +91,7 @@ static int CustomEmptyInit(PicoWorkspace *workspace, void **state_out)
 
 ## Contract
 
-- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`, and the type scale `PICO_FONT_CAPTION` 15 / `PICO_FONT_UI` 16 / `PICO_FONT_BODY` 18 / `PICO_FONT_TITLE` 20). Do not set `fontSize` below 14. Those values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16` (`PICO_FONT_CAPTION_LINE` 20 / `PICO_FONT_UI_LINE` 22 / `PICO_FONT_BODY_LINE` 26).
+- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Host sidebar/main/overlay views must tolerate zero live workspaces and `pico_agent_active(host) == 0`. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`, and the type scale `PICO_FONT_CAPTION` 15 / `PICO_FONT_UI` 16 / `PICO_FONT_BODY` 18 / `PICO_FONT_TITLE` 20). Do not set `fontSize` below 14. Those values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16` (`PICO_FONT_CAPTION_LINE` 20 / `PICO_FONT_UI_LINE` 22 / `PICO_FONT_BODY_LINE` 26).
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`). Those hooks are host-scoped.
 - Do not call Clay from a tool, provider, or workspace `on_frame` callback. Workspace `on_frame` runs for every `OPEN` or `RELOADING` workspace and must not draw.

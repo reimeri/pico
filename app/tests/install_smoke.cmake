@@ -44,6 +44,12 @@ foreach(required
     endif()
 endforeach()
 
+set(desktop_file "${staged_datadir}/applications/io.github.reimeri.pico.desktop")
+file(READ "${desktop_file}" desktop_contents)
+if(NOT desktop_contents MATCHES "Exec=pico --no-workspace")
+    message(FATAL_ERROR "installed desktop entry does not request workspace-less startup")
+endif()
+
 set(extension "${PICO_STAGE_DIR}/install-smoke.so")
 set(loader "${PICO_STAGE_DIR}/install-loader")
 execute_process(

@@ -615,7 +615,7 @@ static void RenderStatus(PicoHost *app)
 void PicoFooter_Render(PicoHost *app, void *state)
 {
     s_active_footer_state = state ? (FooterState *)state : (FooterState *)PicoPlugins_HostState(app, "footer");
-    if (!s_active_footer_state)
+    if (!s_active_footer_state || !PicoHost_SelectedAgent(app))
     {
         return;
     }
@@ -708,8 +708,9 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
 {
     (void)event;
     s_active_footer_state = state ? (FooterState *)state : (FooterState *)PicoPlugins_HostState(app, "footer");
-    if (!s_active_footer_state)
+    if (!s_active_footer_state || !PicoHost_SelectedAgent(app))
     {
+        app->hovered_clickable = false;
         return;
     }
     bool own_menu_top = g_menu != FOOTER_MENU_NONE &&
@@ -786,6 +787,15 @@ static void FooterOnFrame(PicoHost *app, void *state, float dt)
     s_active_footer_state = state ? (FooterState *)state : (FooterState *)PicoPlugins_HostState(app, "footer");
     if (!s_active_footer_state)
     {
+        return;
+    }
+    if (!PicoHost_SelectedAgent(app))
+    {
+        CloseMenu();
+        if (g_want_folder)
+        {
+            ClearFolderRequest();
+        }
         return;
     }
     g_esc_block = false;

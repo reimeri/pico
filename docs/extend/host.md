@@ -33,9 +33,9 @@ pico_host_pump(host);
 PicoHostShutdownResult rc = pico_host_free(host);
 ```
 
-Startup convenience (CLI) is this sequence, not a special lifecycle: init, open the initial directory, create one main agent, optional session resume on that agent, then select it. Opening a workspace does not create a main agent.
+The normal CLI startup is this sequence, not a special lifecycle: init, open the initial directory, create one main agent, optional session resume on that agent, then select it. The installed desktop launcher passes `--no-workspace`: Pico initializes host extensions but leaves the live workspace and agent counts at zero until the user opens a workspace or catalog session from the sidebar. Explicit session CLI options keep the normal initial-directory sequence. Opening a workspace does not create a main agent; the sidebar and `/cd` create one when needed.
 
-`pico_host_pump` does one bounded round-robin pass: host posts and process services, then each non-closed workspace once (at most 256 queued runtime events and one new delegation per workspace), then each eligible workspace-extension `on_frame` and each host-extension `on_frame` exactly once with the current frame delta. Contextual views render only for the selected workspace. Inactive workspaces still pump and still run workspace `on_frame`; they must not draw.
+`pico_host_pump` does one bounded round-robin pass: host posts and process services, then each non-closed workspace once (at most 256 queued runtime events and one new delegation per workspace), then each eligible workspace-extension `on_frame` and each host-extension `on_frame` exactly once with the current frame delta. It is valid to pump a host with zero workspaces. Host `on_frame`, views, and UI hooks must tolerate `pico_agent_active(host) == 0`; host init and frame callbacks can run before any workspace exists. Contextual workspace views and empty-state views render only when an agent in that workspace is selected. Inactive workspaces still pump and still run workspace `on_frame`; they must not draw.
 
 `pico_host_free` applies the process-wide bounded shutdown deadline of about one second. It returns `PICO_HOST_SHUTDOWN_CLEAN` when every worker joins, or `PICO_HOST_SHUTDOWN_RETAINED` when a callback is still blocked. Retained shutdown detaches that callback and keeps every registration, auth store, builtin state, and user-extension `.so` it can reach. No extension `shutdown`, `dlclose`, auth destruction, or curl cleanup runs. Pico is then permanently retired in that process; later `pico_host_init` is rejected. Only `pico_host_free` uses this process deadline. Workspace close never does.
 
@@ -69,7 +69,7 @@ Register these only from `host_init`. Workspace init cannot add them:
 - Host after-layout / after-render hooks (`pico_host_add_hook`)
 - Descriptor `host_on_frame`
 
-Host builtins include the sidebar catalog, chat renderer, composer, footer shell, overlay presentation, extension manager UI, prompt UI, clipboard state, and auth UI. Dual-scope builtins keep separate host and workspace states connected only through core APIs and IDs.
+Host builtins include the sidebar catalog, chat renderer, composer, footer shell, overlay presentation, extension manager UI, prompt UI, clipboard state, and auth UI. Dual-scope builtins keep separate host and workspace states connected only through core APIs and IDs. With no selected agent, sidebar, main, and overlay host views may still render; the complete composer and footer slots are withheld.
 
 Host-extension replacement happens between frames. Host extensions cannot register worker callbacks, so only active host callback depth must reach zero before replacement. F5 and `/reload` reload host extensions immediately (user-global / config sources only) and request reload of the selected agent's workspace; other workspaces keep accepting work. See [workspace](workspace.md) and [anatomy](anatomy.md).
 
@@ -86,5 +86,6 @@ Named UI mailboxes are workspace-owned and keyed by `(agent_id, runtime_generati
 - Do not store a `PicoHost *` on an agent; reach the host through `pico_workspace_host(workspace)` on the main thread.
 - Workers receive `PicoAgentContext *`, never `PicoHost *`.
 - Main-thread callbacks must return promptly and must never wait on worker completion. A stuck main-thread callback blocks the whole host.
+- Host-scoped callbacks must treat active agent ID zero and the absence of a selected workspace as normal UI states.
 - Pico and its extensions never call `chdir()` in the host process.
 - Stale workspace, agent, ask, and runtime-generation IDs fail without affecting a different object.

@@ -35,7 +35,7 @@ static void MyWorkspaceHook(PicoWorkspace *workspace, const PicoHookEvent *event
 }
 ```
 
-All notifications run on the main thread.
+All notifications run on the main thread. Host UI notifications may run while no workspace or agent is selected; in that state `event->agent_id` is zero and callbacks must avoid agent-targeted work.
 
 ### Host Notification Hooks (`pico_host_add_hook`)
 Registered during `host_init`. Only valid for host-global UI hooks:

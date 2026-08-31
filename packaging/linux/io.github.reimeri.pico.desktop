@@ -2,7 +2,7 @@
 Type=Application
 Name=Pico
 Comment=Native AI agent harness
-Exec=pico
+Exec=pico --no-workspace
 Icon=pico
 Terminal=false
 Categories=Development;

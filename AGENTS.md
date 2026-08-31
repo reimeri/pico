@@ -27,6 +27,7 @@ The shell has a durable geometry contract: while chat follows the bottom, repeat
 - A test must protect a specific failure mode or product rule.
 - Prefer one representative assertion per behavior. Do not cover the same transition through several equivalent call patterns unless each pattern can fail independently.
 - Choose boundary cases from product semantics (for example, crater center, exact radius, and clearly outside), not from private tolerances or intermediate calculations.
+- Do not assert against a value of a constant or variable that is meant to be configurable. Assert the behavior or relationship it produces so changing the value does not break the test.
 - Avoid exposing production internals solely for tests.
 - Tests should change when intended behavior changes, not when code is reorganized or an equivalent representation replaces another.
 - Pure-function properties such as deterministic output or non-mutation are worth testing only when callers rely on them as part of the function's contract.

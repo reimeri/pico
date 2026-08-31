@@ -44,6 +44,7 @@ typedef struct SidebarState {
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
     Texture2D settings_icon;
+    Texture2D settings_icon_hover;
     bool icons_tried;
 } SidebarState;
 
@@ -452,7 +453,7 @@ static void ResourcePath(const char *relative, char *out, size_t cap)
     }
 }
 
-static Texture2D LoadFolderIcon(const char *relative)
+static Texture2D LoadFolderIcon(const char *relative, Clay_Color tint)
 {
     char path[4096];
     Image img;
@@ -464,8 +465,8 @@ static Texture2D LoadFolderIcon(const char *relative)
         return tex;
     }
     /* Clay draws a filled rect for backgroundColor even on image elements. */
-    ImageColorTint(&img, (Color){(unsigned char)COLOR_MUTED.r, (unsigned char)COLOR_MUTED.g,
-                                 (unsigned char)COLOR_MUTED.b, (unsigned char)COLOR_MUTED.a});
+    ImageColorTint(&img, (Color){(unsigned char)tint.r, (unsigned char)tint.g,
+                                 (unsigned char)tint.b, (unsigned char)tint.a});
     tex = LoadTextureFromImage(img);
     UnloadImage(img);
     if (tex.id != 0)
@@ -482,9 +483,10 @@ static void EnsureFolderIcons(SidebarState *s)
         return;
     }
     s->icons_tried = true;
-    s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png");
-    s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png");
-    s->settings_icon = LoadFolderIcon("resources/settings.png");
+    s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png", COLOR_MUTED);
+    s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png", COLOR_MUTED);
+    s->settings_icon = LoadFolderIcon("resources/settings.png", COLOR_MUTED);
+    s->settings_icon_hover = LoadFolderIcon("resources/settings.png", COLOR_TEXT);
 }
 
 static void UnloadFolderIcons(SidebarState *s)
@@ -507,6 +509,11 @@ static void UnloadFolderIcons(SidebarState *s)
     {
         UnloadTexture(s->settings_icon);
         memset(&s->settings_icon, 0, sizeof(s->settings_icon));
+    }
+    if (s->settings_icon_hover.id != 0)
+    {
+        UnloadTexture(s->settings_icon_hover);
+        memset(&s->settings_icon_hover, 0, sizeof(s->settings_icon_hover));
     }
 }
 
@@ -531,6 +538,23 @@ static void RenderFolderIcon(Texture2D *tex, const char *fallback)
         return;
     }
     RenderGlyph(fallback, COLOR_MUTED);
+}
+
+static void RenderSettingsIcon(SidebarState *s, bool hovered)
+{
+    Texture2D *tex = hovered && s->settings_icon_hover.id != 0 ? &s->settings_icon_hover
+                                                               : &s->settings_icon;
+    float size = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+    if (tex->id != 0)
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                            .height = CLAY_SIZING_FIXED(size)}},
+                      .image = {.imageData = tex}})
+        {
+        }
+        return;
+    }
+    RenderGlyph("*", hovered ? COLOR_TEXT : COLOR_MUTED);
 }
 
 typedef enum SidebarDotKind {
@@ -948,11 +972,9 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                                  .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                                  .padding = {6, 6, 4, 4},
                                  .sizing = {.width = CLAY_SIZING_FIXED(icon + 12.0f),
-                                            .height = CLAY_SIZING_FIXED(icon + 8.0f)}},
-                      .backgroundColor = settings_hover ? (Clay_Color){42, 42, 50, 255} : COLOR_COMPOSER_BG,
-                      .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                                            .height = CLAY_SIZING_FIXED(icon + 8.0f)}}})
                 {
-                    RenderFolderIcon(&s->settings_icon, "*");
+                    RenderSettingsIcon(s, settings_hover);
                 }
             }
         }

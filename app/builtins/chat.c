@@ -32,6 +32,10 @@
 #define INSPECT_MSG_PAD_X 16.0f
 #define TOOL_ROW_FIXED_CHROME 46.0f
 #define TRANSCRIPT_MESSAGE_GAP 8.0f
+/* Clearance below the last message so the overlays floating above the
+ * composer (todo pill, attachment strip) never cover transcript text
+ * when the chat is scrolled to the bottom. */
+#define TRANSCRIPT_BOTTOM_SPACER 100.0f
 #define TRANSCRIPT_OVERSCAN_VIEWPORTS 0.75f
 
 typedef struct ThinkLabelBlock {
@@ -1513,6 +1517,14 @@ void PicoChat_Render(PicoHost *app, void *state)
                     };
                     view.virtual_identity = TranscriptIdentity(&view);
                     RenderTranscript(&view, available_width);
+                }
+                if (!empty)
+                {
+                    CLAY(CLAY_ID("ChatBottomSpacer"),
+                         {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                .height = CLAY_SIZING_FIXED(TRANSCRIPT_BOTTOM_SPACER)}}})
+                    {
+                    }
                 }
             }
         }

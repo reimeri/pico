@@ -5,6 +5,8 @@
 #include "settings.h"
 #include "session.h"
 #include "scrollbar.h"
+#include "richtext.h"
+#include "builtins/chat.h"
 #include "agent_internal.h"
 #include "agent.h"
 #include "overlay.h"
@@ -493,6 +495,154 @@ static int TestBottomFollowShellGeometryStable(void)
         return 1;
     }
     return RunWorkspaceLessShellCase();
+}
+
+static int TestChatBottomFollowClearsComposer(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-chat-spacer-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-chat-spacer-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    int last_index;
+    int frame;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("chat bottom spacer setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("chat bottom spacer host init");
+        return 1;
+    }
+    PicoPlugins_Load(host);
+    /* Headless runs have no real fonts; keep chat on the unclamped width path
+     * and stub the composer, which measures text with raylib directly. */
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("chat bottom spacer open workspace");
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("chat bottom spacer create agent");
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        return 1;
+    }
+    for (int i = 0; i < 30; i++)
+    {
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "chat bottom spacer clearance test message");
+    }
+    last_index = agent->message_count - 1;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Clay_SetCurrentContext(previous);
+        Fail("chat bottom spacer Clay initialization");
+        return 1;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    for (frame = 0; frame < 12; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        Clay_ScrollContainerData scroll =
+            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (!scroll.found || !scroll.scrollPosition)
+        {
+            Fail("chat bottom spacer missing ChatScroll");
+            break;
+        }
+        if (PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                      scroll.contentDimensions.height, &scroll.scrollPosition->y))
+        {
+            (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        }
+        PicoChat_HarvestVirtualHeights(host);
+    }
+
+    {
+        Clay_ScrollContainerData scroll =
+            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        Clay_ElementData last = Clay_GetElementData(CLAY_IDI("MsgMain", last_index));
+        Clay_ElementData composer = Clay_GetElementData(CLAY_ID("ComposerAlign"));
+        Clay_ElementData spacer = Clay_GetElementData(CLAY_ID("ChatBottomSpacer"));
+        if (!scroll.found || !scroll.scrollPosition || !last.found || !composer.found || !spacer.found)
+        {
+            Fail("chat bottom spacer could not find transcript, composer, spacer, or scroll state");
+        }
+        else
+        {
+            float overflow = scroll.contentDimensions.height - scroll.scrollContainerDimensions.height;
+            float gap = composer.boundingBox.y - (last.boundingBox.y + last.boundingBox.height);
+            if (overflow <= 0.0f || fabsf(scroll.scrollPosition->y + overflow) > 0.5f)
+            {
+                Fail("chat bottom spacer test needs an overflowing transcript pinned to the bottom");
+            }
+            /* The todo pill and attachment strip float above the composer; the
+             * bottom spacer must keep the last message clear of them. Whatever
+             * height the spacer is configured to, pinning to the bottom must
+             * turn it into clearance between the message and the composer. */
+            else if (spacer.boundingBox.height <= 0.0f)
+            {
+                Fail("chat must keep a positive-height bottom spacer below the last message");
+            }
+            else if (gap + 0.5f < spacer.boundingBox.height)
+            {
+                Fail("last message must clear the composer overlays when pinned to the bottom");
+            }
+        }
+    }
+
+    Clay_SetCurrentContext(previous);
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return g_failed ? 1 : 0;
 }
 
 static int TestCanonicalOpenAndDuplicate(void)
@@ -5497,6 +5647,10 @@ static int TestWorkspaceLessHostTransition(void)
 int main(void)
 {
     if (TestBottomFollowShellGeometryStable() != 0)
+    {
+        return 1;
+    }
+    if (TestChatBottomFollowClearsComposer() != 0)
     {
         return 1;
     }

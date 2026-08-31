@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.27)
-project(pico VERSION 0.1.3 LANGUAGES C)
+project(pico VERSION 0.1.4 LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 
 include(FetchContent)

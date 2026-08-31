@@ -32,6 +32,7 @@ typedef struct SettingsState {
     bool open;
     bool overflow;
     PicoScrollbar scrollbar;
+    PicoScrollbar model_dropdown_scrollbar;
     PicoUserSettingsDraft draft;
     bool *expanded;
     char context_limit[32];
@@ -44,6 +45,9 @@ typedef struct SettingsState {
     int focus_kind;
     int focus_model;
     bool model_dropdown;
+    int model_dropdown_selected;
+    bool model_dropdown_click_block;
+    bool model_dropdown_ensure_visible;
     Texture2D trash_icon;
     Texture2D trash_icon_disabled;
     bool trash_icon_tried;
@@ -181,6 +185,7 @@ static void DiscardDraft(SettingsState *s)
     s->error[0] = '\0';
     s->overflow = false;
     memset(&s->scrollbar, 0, sizeof(s->scrollbar));
+    memset(&s->model_dropdown_scrollbar, 0, sizeof(s->model_dropdown_scrollbar));
 }
 
 static bool Claim(void)
@@ -843,24 +848,215 @@ static void RenderToggle(Clay_ElementId id, const char *label, bool on)
     }
 }
 
-static void RenderGeneral(SettingsState *s)
+static void CloseModelDropdown(SettingsState *s)
+{
+    if (!s)
+    {
+        return;
+    }
+    s->model_dropdown = false;
+    s->model_dropdown_selected = 0;
+    s->model_dropdown_ensure_visible = false;
+}
+
+static void OpenModelDropdown(SettingsState *s)
 {
     int i;
-    bool default_focus = s->model_dropdown;
+    if (!s)
+    {
+        return;
+    }
+    if (s->model_dropdown)
+    {
+        CloseModelDropdown(s);
+        return;
+    }
+    if (s->draft.model_count <= 0)
+    {
+        return;
+    }
+    SetFocus(s, FOCUS_NONE, -1);
+    s->model_dropdown = true;
+    s->model_dropdown_selected = 0;
+    s->model_dropdown_ensure_visible = true;
+    for (i = 0; i < s->draft.model_count; i++)
+    {
+        if (strcmp(s->draft.default_model, s->draft.models[i].id) == 0)
+        {
+            s->model_dropdown_selected = i;
+            break;
+        }
+    }
+}
+
+static bool AcceptDefaultModel(SettingsState *s)
+{
+    PicoModel *m;
+    if (!s || !s->model_dropdown)
+    {
+        return false;
+    }
+    m = ModelAt(s, s->model_dropdown_selected);
+    if (!m || !m->id[0])
+    {
+        return false;
+    }
+    snprintf(s->draft.default_model, sizeof(s->draft.default_model), "%s", m->id);
+    CloseModelDropdown(s);
+    return true;
+}
+
+static int HoveredDefaultModel(const SettingsState *s)
+{
+    int i;
+    if (!s || !s->model_dropdown)
+    {
+        return -1;
+    }
+    for (i = 0; i < s->draft.model_count; i++)
+    {
+        if (Overi(CLAY_IDI("SettingsDefaultItem", i)))
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void SelectHoveredDefaultModel(SettingsState *s)
+{
+    int hovered;
+    Vector2 delta;
+    if (!s || !s->model_dropdown)
+    {
+        return;
+    }
+    delta = GetMouseDelta();
+    if (delta.x == 0.0f && delta.y == 0.0f)
+    {
+        return;
+    }
+    hovered = HoveredDefaultModel(s);
+    if (hovered >= 0)
+    {
+        s->model_dropdown_selected = hovered;
+    }
+}
+
+static void RenderDefaultModelMenu(SettingsState *s)
+{
+    const float row_gap = 2.0f;
+    float content_h;
+    float menu_h;
+    float row_h;
+    bool scroll;
+    int i;
+    if (!s || s->draft.model_count <= 0)
+    {
+        return;
+    }
+    SelectHoveredDefaultModel(s);
+    row_h = Pico_FontPx(PICO_FONT_UI) + 8.0f;
+    content_h = 12.0f + (float)s->draft.model_count * row_h +
+                (float)(s->draft.model_count - 1) * row_gap;
+    scroll = content_h > 240.0f;
+    menu_h = scroll ? 240.0f : content_h;
+
+    CLAY(CLAY_ID("SettingsDefaultMenu"),
+         {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                       .zIndex = 41,
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
+                                        .parent = CLAY_ATTACH_POINT_LEFT_BOTTOM},
+                       .offset = {.y = 6}},
+          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .padding = {6, 6, 6, 6},
+                     .childGap = 2,
+                     .sizing = {.width = CLAY_SIZING_GROW(0),
+                                .height = scroll ? CLAY_SIZING_FIXED(menu_h) : CLAY_SIZING_FIT(0)}},
+          .backgroundColor = COLOR_CONTENT_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        CLAY(CLAY_ID("SettingsDefaultMenuRow"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = SCROLLBAR_GAP,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY(CLAY_ID("SettingsDefaultMenuScroll"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 2,
+                             .sizing = {.width = CLAY_SIZING_GROW(0),
+                                        .height = scroll ? CLAY_SIZING_GROW(0) : CLAY_SIZING_FIT(0)}},
+                  .clip = {.vertical = scroll,
+                           .horizontal = true,
+                           .childOffset = scroll ? Clay_GetScrollOffset() : (Clay_Vector2){0}}})
+            {
+                for (i = 0; i < s->draft.model_count; i++)
+                {
+                    const PicoModel *m = &s->draft.models[i];
+                    const char *label = m->name[0] ? m->name : (m->id[0] ? m->id : "(unnamed)");
+                    Clay_Color bg = i == s->model_dropdown_selected ? COLOR_CODE_BG : COLOR_CONTENT_BG;
+                    CLAY(CLAY_IDI("SettingsDefaultItem", i),
+                         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                     .childGap = 8,
+                                     .padding = {8, 8, 4, 4},
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                          .backgroundColor = bg,
+                          .cornerRadius = CLAY_CORNER_RADIUS(4)})
+                    {
+                        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                                .fontSize = PICO_FONT_UI,
+                                                                .textColor = COLOR_TEXT,
+                                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        if (m->provider[0])
+                        {
+                            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+                            CLAY_TEXT(CStr(m->provider), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                         .fontSize = PICO_FONT_CAPTION,
+                                                                         .textColor = COLOR_MUTED,
+                                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        }
+                    }
+                }
+            }
+            if (scroll)
+            {
+                PicoScrollbar_Render(CLAY_STRING("SettingsDefaultMenuScroll"),
+                                     CLAY_STRING("SettingsDefaultMenuScrollTrack"),
+                                     CLAY_STRING("SettingsDefaultMenuScrollHandle"));
+            }
+        }
+    }
+}
+
+static void RenderDefaultModelPicker(SettingsState *s)
+{
+    Clay_ElementId id = CLAY_ID("SettingsDefaultModel");
+    bool hover = Clay_PointerOver(id);
+    Clay_Color bg = s->model_dropdown ? (Clay_Color){54, 54, 66, 255}
+                                      : (hover ? COLOR_CODE_BG : COLOR_COMPOSER_BG);
+    CLAY(id, {.layout = {.padding = {8, 8, 6, 6}, .sizing = {.width = CLAY_SIZING_GROW(0)}},
+              .backgroundColor = bg,
+              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        CLAY_TEXT(CStr(s->draft.default_model[0] ? s->draft.default_model : "model id"),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                    .fontSize = PICO_FONT_UI,
+                                    .textColor = s->draft.default_model[0] ? COLOR_TEXT : COLOR_MUTED,
+                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        if (s->model_dropdown)
+        {
+            RenderDefaultModelMenu(s);
+        }
+    }
+}
+
+static void RenderGeneral(SettingsState *s)
+{
     CLAY_TEXT(CLAY_STRING("General"),
               CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
     SETTINGS_ROW_BEGIN
         RenderLabel("Default model");
-        RenderField(CLAY_ID("SettingsDefaultModel"), s->draft.default_model, "model id", default_focus);
-        if (s->model_dropdown)
-        {
-            for (i = 0; i < s->draft.model_count; i++)
-            {
-                const char *id = s->draft.models[i].id[0] ? s->draft.models[i].id : "(unnamed)";
-                RenderChip(CLAY_IDI("SettingsDefaultItem", i), id,
-                           strcmp(s->draft.default_model, s->draft.models[i].id) == 0);
-            }
-        }
+        RenderDefaultModelPicker(s);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Fallback context limit");
@@ -1167,6 +1363,51 @@ static void SettingsRender(PicoHost *app, void *state)
     }
 }
 
+static void KeepDefaultModelSelectionVisible(SettingsState *s)
+{
+    Clay_ScrollContainerData scroll;
+    Clay_ElementData viewport;
+    Clay_ElementData item;
+    float min_y;
+    float viewport_bottom;
+    float item_bottom;
+    if (!s || !s->model_dropdown || s->model_dropdown_selected < 0 ||
+        s->model_dropdown_selected >= s->draft.model_count)
+    {
+        return;
+    }
+    scroll = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("SettingsDefaultMenuScroll")));
+    viewport = Clay_GetElementData(CLAY_ID("SettingsDefaultMenuScroll"));
+    item = Clay_GetElementData(CLAY_IDI("SettingsDefaultItem", s->model_dropdown_selected));
+    if (!scroll.found || !scroll.scrollPosition || !viewport.found || !item.found)
+    {
+        return;
+    }
+    viewport_bottom = viewport.boundingBox.y + viewport.boundingBox.height;
+    item_bottom = item.boundingBox.y + item.boundingBox.height;
+    if (item.boundingBox.y < viewport.boundingBox.y)
+    {
+        scroll.scrollPosition->y += viewport.boundingBox.y - item.boundingBox.y;
+    }
+    else if (item_bottom > viewport_bottom)
+    {
+        scroll.scrollPosition->y -= item_bottom - viewport_bottom;
+    }
+    min_y = viewport.boundingBox.height - scroll.contentDimensions.height;
+    if (min_y > 0.0f)
+    {
+        min_y = 0.0f;
+    }
+    if (scroll.scrollPosition->y < min_y)
+    {
+        scroll.scrollPosition->y = min_y;
+    }
+    if (scroll.scrollPosition->y > 0.0f)
+    {
+        scroll.scrollPosition->y = 0.0f;
+    }
+}
+
 static bool HoveredTextField(SettingsState *s)
 {
     int i;
@@ -1206,6 +1447,10 @@ static bool HoveredClickable(SettingsState *s)
     }
     if (s->model_dropdown)
     {
+        if (OverId(CLAY_STRING("SettingsDefaultMenu")))
+        {
+            return true;
+        }
         for (i = 0; i < s->draft.model_count; i++)
         {
             if (Overi(CLAY_IDI("SettingsDefaultItem", i)))
@@ -1263,6 +1508,11 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         return;
     }
     g_overflow = PicoScrollbar_Overflows(CLAY_STRING("SettingsModalScroll"));
+    if (s_active_settings_state->model_dropdown_ensure_visible)
+    {
+        KeepDefaultModelSelectionVisible(s_active_settings_state);
+        s_active_settings_state->model_dropdown_ensure_visible = false;
+    }
     if (HoveredTextField(s_active_settings_state))
     {
         app->hovered_text = true;
@@ -1272,6 +1522,10 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         app->hovered_clickable = true;
     }
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        return;
+    }
+    if (s_active_settings_state->model_dropdown_click_block)
     {
         return;
     }
@@ -1324,6 +1578,23 @@ static bool HandleClicks(SettingsState *s)
     {
         return false;
     }
+    if (s->model_dropdown)
+    {
+        int hovered = HoveredDefaultModel(s);
+        s->model_dropdown_click_block = true;
+        if (hovered >= 0)
+        {
+            s->model_dropdown_selected = hovered;
+            (void)AcceptDefaultModel(s);
+            return true;
+        }
+        if (OverId(CLAY_STRING("SettingsDefaultMenu")))
+        {
+            return true;
+        }
+        CloseModelDropdown(s);
+        return true;
+    }
     if (OverId(CLAY_STRING("SettingsCancel")))
     {
         PicoSettingsUi_Close(s->host);
@@ -1349,21 +1620,8 @@ static bool HandleClicks(SettingsState *s)
     }
     if (OverId(CLAY_STRING("SettingsDefaultModel")))
     {
-        s->model_dropdown = !s->model_dropdown;
-        s->focus_kind = FOCUS_NONE;
+        OpenModelDropdown(s);
         return true;
-    }
-    if (s->model_dropdown)
-    {
-        for (i = 0; i < s->draft.model_count; i++)
-        {
-            if (Overi(CLAY_IDI("SettingsDefaultItem", i)) && s->draft.models[i].id[0])
-            {
-                snprintf(s->draft.default_model, sizeof(s->draft.default_model), "%s", s->draft.models[i].id);
-                s->model_dropdown = false;
-                return true;
-            }
-        }
     }
     if (OverId(CLAY_STRING("SettingsContextLimit")))
     {
@@ -1499,6 +1757,7 @@ static bool HandleClicks(SettingsState *s)
 
 static void SettingsOnFrame(PicoHost *app, void *state, float dt)
 {
+    SettingsState *s;
     (void)dt;
     s_active_settings_state =
         state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
@@ -1506,15 +1765,45 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
+    s = s_active_settings_state;
+    s->model_dropdown_click_block = false;
     PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("SettingsModalScroll"),
                              CLAY_STRING("SettingsModalScrollHandle"));
+    if (s->model_dropdown)
+    {
+        PicoScrollbar_UpdateDrag(&s->model_dropdown_scrollbar, CLAY_STRING("SettingsDefaultMenuScroll"),
+                                 CLAY_STRING("SettingsDefaultMenuScrollHandle"));
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            CloseModelDropdown(s);
+            return;
+        }
+        if ((IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP)) && s->model_dropdown_selected > 0)
+        {
+            s->model_dropdown_selected--;
+            s->model_dropdown_ensure_visible = true;
+            return;
+        }
+        if ((IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN)) &&
+            s->model_dropdown_selected + 1 < s->draft.model_count)
+        {
+            s->model_dropdown_selected++;
+            s->model_dropdown_ensure_visible = true;
+            return;
+        }
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_TAB))
+        {
+            (void)AcceptDefaultModel(s);
+            return;
+        }
+    }
     if (IsKeyPressed(KEY_ESCAPE))
     {
         PicoSettingsUi_Close(app);
         return;
     }
-    HandleKeys(s_active_settings_state);
-    HandleClicks(s_active_settings_state);
+    HandleKeys(s);
+    HandleClicks(s);
 }
 
 static void CmdSettings(PicoHost *app, PicoAgentId agent_id, const char *args, void *state)

@@ -81,6 +81,22 @@ typedef struct PicoHostStaging {
     int ws_provider_count;
 } PicoHostStaging;
 
+typedef struct PicoSessionPersistJob {
+    PicoAgentId agent_id;
+    PicoAgentKind kind;
+    PicoSessionPersistence persistence;
+    char session_id[40];
+    char session_path[4096];
+    char workspace_path[4096];
+    char *header_json;
+    char *event_json;
+} PicoSessionPersistJob;
+
+typedef struct PicoSessionPersistFailure {
+    PicoAgentId agent_id;
+    char error[256];
+} PicoSessionPersistFailure;
+
 struct PicoHost {
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;
@@ -143,6 +159,17 @@ struct PicoHost {
     PicoWorkspace *reg_workspace_target;
     void *reg_state;
     PicoHostStaging staging;
+
+    bool persist_ready;
+    bool persist_stop;
+    pthread_t persist_thread;
+    pthread_mutex_t persist_mu;
+    pthread_cond_t persist_cv;
+    PicoSessionPersistJob *persist_pending;
+    int persist_pending_count;
+    PicoAgentId persist_flight_agent_id;
+    PicoSessionPersistFailure persist_failures[PICO_MAX_TOTAL_AGENTS];
+    int persist_failure_count;
 };
 
 static inline PicoWorkspace *PicoHost_PrimaryWorkspace(PicoHost *host)

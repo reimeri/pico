@@ -126,5 +126,11 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
 PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent,
                                                      bool complete);
 void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete);
+void PicoSessionPersist_Init(PicoHost *host);
+void PicoSessionPersist_Shutdown(PicoHost *host);
+void PicoSessionPersist_Pump(PicoHost *host);
+void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent);
+void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent);
+bool PicoSession_DrainPersistBefore(PicoHost *app, PicoAgent *agent, const struct timespec *deadline);
 
 #endif

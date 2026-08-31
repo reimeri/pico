@@ -392,6 +392,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_session_usage_tests)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_session_usage_tests PRIVATE Threads::Threads)
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
 
     add_executable(pico_files_tests
@@ -629,6 +630,7 @@ if(BUILD_TESTING)
     target_compile_options(pico_host_workspace_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_host_workspace_tests PRIVATE -Wl,--gc-sections -rdynamic)
     target_compile_definitions(pico_host_workspace_tests PRIVATE
+        PICO_SESSION_TEST_HOOKS=1
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")

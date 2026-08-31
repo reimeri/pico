@@ -1050,12 +1050,7 @@ bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name)
     snprintf(agent->model, sizeof(agent->model), "%s", m->id);
     agent->effort[0] = '\0';
     PicoSettings_SyncAgent(agent);
-    PicoSession_LogModelChange(host, agent, agent->model, PicoSettings_ActiveEffort(agent));
-    if (agent->session_id[0])
-    {
-        PicoCatalog_SetSessionModel(PicoWorkspace_Path(workspace), agent->session_id, agent->model,
-                                    PicoSettings_ActiveEffort(agent));
-    }
+    PicoSession_EnqueueModelChange(host, agent);
     char line[256];
     snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
              PicoSettings_ActiveEffort(agent));
@@ -1089,12 +1084,7 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
         return false;
     }
     snprintf(agent->effort, sizeof(agent->effort), "%s", level);
-    PicoSession_LogModelChange(host, agent, agent->model, PicoSettings_ActiveEffort(agent));
-    if (agent->session_id[0])
-    {
-        PicoCatalog_SetSessionModel(PicoWorkspace_Path(workspace), agent->session_id, agent->model,
-                                    PicoSettings_ActiveEffort(agent));
-    }
+    PicoSession_EnqueueModelChange(host, agent);
     char line[256];
     snprintf(line, sizeof(line), "Effort `%s` for `%s`", agent->effort, m->name[0] ? m->name : m->id);
     PicoOverlay_Notify(host, line);

@@ -727,6 +727,7 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
         if (child && child->parent_id == id)
         {
             PicoAgentId cid = child->id;
+            PicoSession_DrainPersist(app, child);
             for (int k = i + 1; k < workspace->count; k++)
             {
                 workspace->agents[k - 1] = workspace->agents[k];
@@ -739,6 +740,7 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
         }
     }
 
+    PicoSession_DrainPersist(app, agent);
     index = FindIndex(workspace, id);
     if (index < 0)
     {
@@ -978,6 +980,10 @@ bool PicoWorkspace_QuiesceBefore(PicoWorkspace *workspace, const struct timespec
     bool clean = true;
     for (int i = 0; i < workspace->count; i++)
     {
+        if (!PicoSession_DrainPersistBefore(workspace->host, workspace->agents[i], deadline))
+        {
+            clean = false;
+        }
         pico_run_hooks(workspace->host, PICO_HOOK_ON_AGENT_DESTROY, workspace->agents[i]->id);
         if (!PicoAgent_DestroyBefore(workspace->agents[i], deadline))
         {

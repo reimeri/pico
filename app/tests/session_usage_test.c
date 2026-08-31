@@ -67,7 +67,11 @@ bool PicoSession_TestHook(const char *stage)
     if (stage && strcmp(stage, "catalog_before_upsert") == 0 &&
         g_catalog_ready_fd >= 0 && g_catalog_continue_fd >= 0)
     {
-        if (!TransferByte(g_catalog_ready_fd, true) || !TransferByte(g_catalog_continue_fd, false))
+        int ready_fd = g_catalog_ready_fd;
+        int continue_fd = g_catalog_continue_fd;
+        g_catalog_ready_fd = -1;
+        g_catalog_continue_fd = -1;
+        if (!TransferByte(ready_fd, true) || !TransferByte(continue_fd, false))
         {
             return true;
         }
@@ -1932,6 +1936,273 @@ static int TestCatalogOmitsMissingPath(void)
     return 0;
 }
 
+static int CountType(const char *file, const char *type)
+{
+    int n = 0;
+    const char *p = file;
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"type\":\"%s\"", type);
+    while ((p = strstr(p, needle)))
+    {
+        n++;
+        p += 1;
+    }
+    return n;
+}
+
+static int TestQueuedModelChangeOrdersUserWrite(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    size_t file_len = 0;
+    char *file = NULL;
+    const char *user;
+    const char *change;
+    const char *header;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &writer_agent;
+    writer_ws.count = 1;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.id = 1;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "first-model");
+    snprintf(writer_agent.effort, sizeof(writer_agent.effort), "low");
+    PicoSessionPersist_Init(&writer);
+    PicoSession_EnqueueModelChange(&writer, &writer_agent);
+    if (!writer_agent.session_id[0] || !writer_agent.session_path[0])
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("queued model change must assign a session identity before the jsonl exists");
+    }
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "second-model");
+    snprintf(writer_agent.effort, sizeof(writer_agent.effort), "high");
+    PicoSession_EnqueueModelChange(&writer, &writer_agent);
+    if (PicoSession_LogUser(&writer, &writer_agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_OK)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        unlink(writer_agent.session_path);
+        return Fail("user write did not drain queued model change");
+    }
+    PicoSessionPersist_Shutdown(&writer);
+    file = Pico_ReadFile(writer_agent.session_path, &file_len);
+    unlink(writer_agent.session_path);
+    if (!file)
+    {
+        return Fail("queued model change did not create a session file");
+    }
+    header = strstr(file, "\"type\":\"session\"");
+    user = strstr(file, "\"type\":\"message\"");
+    change = NULL;
+    {
+        const char *cursor = file;
+        while ((cursor = strstr(cursor, "\"type\":\"model_change\"")))
+        {
+            change = cursor;
+            cursor += 1;
+        }
+    }
+    if (!header || !change || !user || header > change || change > user ||
+        !strstr(change, "\"model\":\"second-model\"") || !strstr(change, "\"effort\":\"high\"") ||
+        CountType(file, "session") != 1)
+    {
+        free(file);
+        return Fail("user write must follow the header and latest queued model_change");
+    }
+    free(file);
+    return 0;
+}
+
+static int TestQueuedModelChangeFailureThenDrain(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &writer_agent;
+    writer_ws.count = 1;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.id = 2;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "fail-model");
+    PicoSessionPersist_Init(&writer);
+    g_status_warning[0] = '\0';
+    g_session_fail_stage = "append_write";
+    PicoSession_EnqueueModelChange(&writer, &writer_agent);
+    if (PicoSession_LogUser(&writer, &writer_agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_FAILED ||
+        writer_agent.persistence != PICO_SESSION_FAILED || g_status_warning[0] == '\0')
+    {
+        g_session_fail_stage = NULL;
+        PicoSessionPersist_Shutdown(&writer);
+        if (writer_agent.session_path[0])
+        {
+            unlink(writer_agent.session_path);
+        }
+        return Fail("queued model-change write failure was not applied on drain");
+    }
+    g_session_fail_stage = NULL;
+    PicoSessionPersist_Shutdown(&writer);
+    if (writer_agent.session_path[0])
+    {
+        unlink(writer_agent.session_path);
+    }
+    return 0;
+}
+
+static int TestQueuedModelChangeCreatesHeaderPerAgent(void)
+{
+    char ws[] = "/tmp/pico-persist-multi-XXXXXX";
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent first;
+    PicoAgent second;
+    int ready[2];
+    int proceed[2];
+    size_t file_len = 0;
+    char *file = NULL;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("multi-agent persist workspace");
+    }
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "%s", ws);
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    first.workspace = &writer_ws;
+    second.workspace = &writer_ws;
+    writer_ws.agents[0] = &first;
+    writer_ws.agents[1] = &second;
+    writer_ws.count = 2;
+    first.persistence = second.persistence = PICO_SESSION_DURABLE;
+    first.kind = second.kind = PICO_AGENT_MAIN;
+    first.id = 3;
+    second.id = 4;
+    snprintf(first.model, sizeof(first.model), "first-agent-model");
+    snprintf(second.model, sizeof(second.model), "second-agent-model");
+    if (pipe(ready) != 0 || pipe(proceed) != 0)
+    {
+        return Fail("multi-agent persist pipes");
+    }
+
+    PicoSessionPersist_Init(&writer);
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = proceed[0];
+    PicoSession_EnqueueModelChange(&writer, &first);
+    if (!TransferByte(ready[0], false))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("first agent did not reach blocked catalog write");
+    }
+    PicoSession_EnqueueModelChange(&writer, &second);
+    if (!TransferByte(proceed[1], true))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("could not release blocked catalog write");
+    }
+    PicoSession_DrainPersist(&writer, &first);
+    PicoSession_DrainPersist(&writer, &second);
+    PicoSessionPersist_Shutdown(&writer);
+    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+
+    file = Pico_ReadFile(second.session_path, &file_len);
+    unlink(first.session_path);
+    unlink(second.session_path);
+    if (!file || CountType(file, "session") != 1 || CountType(file, "model_change") != 1 ||
+        strstr(file, "\"type\":\"session\"") > strstr(file, "\"type\":\"model_change\""))
+    {
+        free(file);
+        return Fail("each fresh agent must persist its own header before model_change");
+    }
+    free(file);
+    rmdir(ws);
+    return 0;
+}
+
+static int TestQueuedModelChangeDrainDeadline(void)
+{
+    char ws[] = "/tmp/pico-persist-deadline-XXXXXX";
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent agent;
+    struct timespec deadline;
+    int ready[2];
+    int proceed[2];
+    bool timed_out;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("persist deadline workspace");
+    }
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&agent, 0, sizeof(agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "%s", ws);
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &agent;
+    writer_ws.count = 1;
+    agent.persistence = PICO_SESSION_DURABLE;
+    agent.kind = PICO_AGENT_MAIN;
+    agent.id = 5;
+    snprintf(agent.model, sizeof(agent.model), "deadline-model");
+    if (pipe(ready) != 0 || pipe(proceed) != 0)
+    {
+        return Fail("persist deadline pipes");
+    }
+
+    PicoSessionPersist_Init(&writer);
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = proceed[0];
+    PicoSession_EnqueueModelChange(&writer, &agent);
+    if (!TransferByte(ready[0], false))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("persist deadline did not reach blocked catalog write");
+    }
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 100000000L;
+    if (deadline.tv_nsec >= 1000000000L)
+    {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    timed_out = !PicoSession_DrainPersistBefore(&writer, &agent, &deadline);
+    if (!TransferByte(proceed[1], true))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("could not release persist deadline write");
+    }
+    PicoSession_DrainPersist(&writer, &agent);
+    PicoSessionPersist_Shutdown(&writer);
+    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+    unlink(agent.session_path);
+    rmdir(ws);
+    return timed_out ? 0 : Fail("blocked persistence must report the shared drain deadline");
+}
+
 static int TestModelResumeReplay(void)
 {
     PicoHost writer;
@@ -2328,7 +2599,10 @@ int main(void)
         TestCatalog() != 0 ||
         TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
         TestUnseenCompleteRoundTrip() != 0 ||
-        TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0)
+        TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||
+        TestQueuedModelChangeOrdersUserWrite() != 0 || TestQueuedModelChangeFailureThenDrain() != 0 ||
+        TestQueuedModelChangeCreatesHeaderPerAgent() != 0 ||
+        TestQueuedModelChangeDrainDeadline() != 0)
     {
         return 1;
     }

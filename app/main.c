@@ -126,8 +126,7 @@ int main(int argc, char **argv)
     char session_path[4096];
     session_path[0] = '\0';
     const PicoAgent *active = PicoHost_SelectedAgentConst(app);
-    if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0] &&
-        access(active->session_path, F_OK) == 0)
+    if (active && active->persistence != PICO_SESSION_EPHEMERAL && active->session_path[0])
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
@@ -139,7 +138,7 @@ int main(int argc, char **argv)
     {
         fprintf(stderr, "Pico retained a blocked worker and is exiting without unloading extensions.\n");
     }
-    if (session_path[0])
+    if (session_path[0] && access(session_path, F_OK) == 0)
     {
         fprintf(stderr, "Resume: ");
         FputsQuoted(stderr, argv[0]);

@@ -34,6 +34,10 @@ static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *
 static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
                                 const char *title_override, const char *event_json,
                                 const struct stat *previous_stat);
+static void CatalogWriteThroughFields(PicoAgentKind kind, PicoSessionPersistence persistence,
+                                      const char *session_id, const char *session_path,
+                                      const char *ws_path, const char *title_override,
+                                      const char *event_json, const struct stat *previous_stat);
 #ifdef PICO_SESSION_TEST_HOOKS
 extern bool PicoSession_TestHook(const char *stage);
 #endif
@@ -697,18 +701,29 @@ static bool SyncParentDir(const char *path)
     return ok;
 }
 
-static bool WriteLine(PicoHost *app, PicoAgent *agent, const char *json, bool write_catalog,
-                      char *error, size_t error_cap)
+static bool WriteLineAtPath(const char *session_path, const char *json, bool write_catalog,
+                            PicoAgentKind kind, PicoSessionPersistence persistence,
+                            const char *session_id, const char *workspace_path,
+                            char *error, size_t error_cap)
 {
     int failure = 0;
     struct stat previous_stat;
     bool have_previous_stat = false;
-    int lock_fd = SessionLockAcquire(agent->session_path, error, error_cap);
+    int lock_fd;
+    if (!session_path || !session_path[0] || !json)
+    {
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "session path is missing");
+        }
+        return false;
+    }
+    lock_fd = SessionLockAcquire(session_path, error, error_cap);
     if (lock_fd < 0)
     {
         return false;
     }
-    int fd = open(agent->session_path, O_WRONLY | O_APPEND | O_CREAT, 0600);
+    int fd = open(session_path, O_WRONLY | O_APPEND | O_CREAT, 0600);
     off_t original_size = -1;
     if (fd < 0)
     {
@@ -736,8 +751,8 @@ static bool WriteLine(PicoHost *app, PicoAgent *agent, const char *json, bool wr
     }
     if (failure == 0 && write_catalog)
     {
-        CatalogWriteThrough(app, agent, NULL, json,
-                            have_previous_stat ? &previous_stat : NULL);
+        CatalogWriteThroughFields(kind, persistence, session_id, session_path, workspace_path, NULL, json,
+                                  have_previous_stat ? &previous_stat : NULL);
     }
     SessionLockRelease(lock_fd);
     if (failure != 0 && error && error_cap > 0)
@@ -745,6 +760,18 @@ static bool WriteLine(PicoHost *app, PicoAgent *agent, const char *json, bool wr
         snprintf(error, error_cap, "%s", strerror(failure));
     }
     return failure == 0;
+}
+
+static bool WriteLine(PicoHost *app, PicoAgent *agent, const char *json, bool write_catalog,
+                      char *error, size_t error_cap)
+{
+    if (!agent)
+    {
+        return false;
+    }
+    return WriteLineAtPath(agent->session_path, json, write_catalog, agent->kind, agent->persistence,
+                           agent->session_id, PicoWorkspace_Path(SessionWorkspace(app, agent)), error,
+                           error_cap);
 }
 
 static void PersistenceFailed(PicoHost *app, PicoAgent *agent, const char *reason)
@@ -780,40 +807,15 @@ static char *EventPrefix(const char *type)
     return JsonBuf_Steal(&b);
 }
 
-static int CreateNew(PicoHost *app, PicoAgent *agent)
+static char *BuildSessionHeaderJson(PicoHost *app, PicoAgent *agent)
 {
-    char dir[4096];
-    if (!SessionDir(SessionWorkspace(app, agent), dir, sizeof(dir)))
-    {
-        PersistenceFailed(app, agent, "session directory path is too long");
-        return -1;
-    }
-    Pico_MkdirP(dir);
-    Pico_RandomHex(agent->session_id, sizeof(agent->session_id));
-    char stamp[40];
-    Pico_IsoTime(stamp, sizeof(stamp), true);
-    char canonical_dir[4096];
-    if (!realpath(dir, canonical_dir))
-    {
-        PersistenceFailed(app, agent, strerror(errno ? errno : EIO));
-        return -1;
-    }
-    if ((size_t)snprintf(agent->session_path, sizeof(agent->session_path), "%s/%s_%s.jsonl",
-                         canonical_dir, stamp, agent->session_id) >= sizeof(agent->session_path))
-    {
-        PersistenceFailed(app, agent, "session path is too long");
-        return -1;
-    }
-    PicoWorkspace *ws = agent->workspace;
-    if (ws && !PicoWorkspace_ReserveSession(ws, agent->id, agent->session_path))
-    {
-        PersistenceFailed(app, agent, "session path is already reserved");
-        return -1;
-    }
-
     char ts[40];
-    Pico_IsoTime(ts, sizeof(ts), false);
     JsonBuf b;
+    if (!agent)
+    {
+        return NULL;
+    }
+    Pico_IsoTime(ts, sizeof(ts), false);
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":4,\"id\":");
     JsonBuf_String(&b, agent->session_id);
@@ -844,13 +846,116 @@ static int CreateNew(PicoHost *app, PicoAgent *agent)
         JsonBuf_String(&b, cache_key);
     }
     JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
+}
+
+static char *BuildModelChangeJson(const char *model, const char *effort)
+{
+    char *pre = EventPrefix("model_change");
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    JsonBuf_Puts(&b, ",\"model\":");
+    JsonBuf_String(&b, model ? model : "");
+    if (effort && effort[0])
+    {
+        JsonBuf_Puts(&b, ",\"effort\":");
+        JsonBuf_String(&b, effort);
+    }
+    JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
+    free(pre);
+    return line;
+}
+
+static int AssignSessionIdentity(PicoHost *app, PicoAgent *agent)
+{
+    char dir[4096];
+    char stamp[40];
+    if (!agent)
+    {
+        return -1;
+    }
+    if (agent->session_path[0])
+    {
+        return 0;
+    }
+    if (!SessionDir(SessionWorkspace(app, agent), dir, sizeof(dir)))
+    {
+        PersistenceFailed(app, agent, "session directory path is too long");
+        return -1;
+    }
+    Pico_RandomHex(agent->session_id, sizeof(agent->session_id));
+    Pico_IsoTime(stamp, sizeof(stamp), true);
+    if ((size_t)snprintf(agent->session_path, sizeof(agent->session_path), "%s/%s_%s.jsonl",
+                         dir, stamp, agent->session_id) >= sizeof(agent->session_path))
+    {
+        PersistenceFailed(app, agent, "session path is too long");
+        return -1;
+    }
+    PicoWorkspace *ws = agent->workspace;
+    if (ws && !PicoWorkspace_ReserveSession(ws, agent->id, agent->session_path))
+    {
+        PersistenceFailed(app, agent, "session path is already reserved");
+        return -1;
+    }
+    return 0;
+}
+
+static bool EnsureSessionParent(const char *session_path, char *error, size_t error_cap)
+{
+    char dir[4096];
+    struct stat st;
+    char *slash;
+    if (!session_path ||
+        (size_t)snprintf(dir, sizeof(dir), "%s", session_path) >= sizeof(dir) ||
+        !(slash = strrchr(dir, '/')))
+    {
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "session directory path is invalid");
+        }
+        return false;
+    }
+    *slash = '\0';
+    Pico_MkdirP(dir);
+    if (stat(dir, &st) != 0)
+    {
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
+        }
+        return false;
+    }
+    if (!S_ISDIR(st.st_mode))
+    {
+        if (error && error_cap > 0)
+        {
+            snprintf(error, error_cap, "%s", strerror(ENOTDIR));
+        }
+        return false;
+    }
+    return true;
+}
+
+static int CreateNew(PicoHost *app, PicoAgent *agent)
+{
+    char error[256] = {0};
+    if (AssignSessionIdentity(app, agent) != 0)
+    {
+        return -1;
+    }
+    if (!EnsureSessionParent(agent->session_path, error, sizeof(error)))
+    {
+        PersistenceFailed(app, agent, error);
+        return -1;
+    }
+    char *line = BuildSessionHeaderJson(app, agent);
     if (!line)
     {
         PersistenceFailed(app, agent, "out of memory while creating the session header");
         return -1;
     }
-    char error[256] = {0};
     bool wrote = WriteLine(app, agent, line, false, error, sizeof(error));
     free(line);
     if (!wrote)
@@ -871,6 +976,7 @@ static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const 
     {
         return PICO_SESSION_WRITE_SKIPPED;
     }
+    PicoSession_DrainPersist(app, agent);
     if (agent->persistence == PICO_SESSION_FAILED)
     {
         return PICO_SESSION_WRITE_FAILED;
@@ -2071,6 +2177,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     {
         return;
     }
+    PicoSession_DrainPersist(app, agent);
     if (agent->workspace)
     {
         PicoWorkspace_ReleaseSessions(agent->workspace, agent->id);
@@ -2293,22 +2400,9 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,
                                                   const char *model, const char *effort)
 {
-    char *pre = EventPrefix("model_change");
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, pre);
-    JsonBuf_Puts(&b, ",\"model\":");
-    JsonBuf_String(&b, model ? model : "");
-    if (effort && effort[0])
-    {
-        JsonBuf_Puts(&b, ",\"effort\":");
-        JsonBuf_String(&b, effort);
-    }
-    JsonBuf_Putc(&b, '}');
-    char *line = JsonBuf_Steal(&b);
+    char *line = BuildModelChangeJson(model, effort);
     PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
-    free(pre);
     return result;
 }
 
@@ -2480,6 +2574,7 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
     {
         return PICO_SESSION_WRITE_SKIPPED;
     }
+    PicoSession_DrainPersist(app, agent);
     if (agent->persistence == PICO_SESSION_FAILED)
     {
         return PICO_SESSION_WRITE_FAILED;
@@ -3400,11 +3495,11 @@ static void CatalogRowFromFile(const char *path, PicoCatalogSession *row)
     row->kind = info.kind;
 }
 
-static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
-                                const char *title_override, const char *event_json,
-                                const struct stat *previous_stat)
+static void CatalogWriteThroughFields(PicoAgentKind kind, PicoSessionPersistence persistence,
+                                      const char *session_id, const char *session_path,
+                                      const char *ws_path, const char *title_override,
+                                      const char *event_json, const struct stat *previous_stat)
 {
-    const char *ws_path;
     char dir[4096];
     char meta[4096];
     PicoCatalogWorkspace ws;
@@ -3414,14 +3509,12 @@ static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
     int lock_fd;
     int index = -1;
     bool row_ready = false;
-    if (!app || !agent || agent->kind != PICO_AGENT_MAIN ||
-        agent->persistence != PICO_SESSION_DURABLE || !agent->session_id[0] ||
-        !agent->session_path[0])
+    if (kind != PICO_AGENT_MAIN || persistence != PICO_SESSION_DURABLE || !session_id ||
+        !session_id[0] || !session_path || !session_path[0])
     {
         return;
     }
-    ws_path = PicoWorkspace_Path(SessionWorkspace(app, agent));
-    if (!ws_path || !ws_path[0] || stat(agent->session_path, &current_stat) != 0 ||
+    if (!ws_path || !ws_path[0] || stat(session_path, &current_stat) != 0 ||
         !S_ISREG(current_stat.st_mode) || PicoCatalog_Ensure(ws_path) != 0 ||
         !CatalogDirForPath(ws_path, dir, sizeof(dir)) ||
         !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
@@ -3437,7 +3530,7 @@ static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
     {
         goto done;
     }
-    previous = CatalogFindSession(&ws, agent->session_id);
+    previous = CatalogFindSession(&ws, session_id);
     if (previous && previous_stat && CatalogGenerationMatches(previous, previous_stat))
     {
         row = *previous;
@@ -3453,13 +3546,13 @@ static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
     }
     if (!row_ready)
     {
-        CatalogRowFromFile(agent->session_path, &row);
+        CatalogRowFromFile(session_path, &row);
     }
     if (!row.id[0])
     {
-        snprintf(row.id, sizeof(row.id), "%s", agent->session_id);
+        snprintf(row.id, sizeof(row.id), "%s", session_id);
     }
-    row.kind = agent->kind;
+    row.kind = kind;
     CopyStatToCatalog(&row, &current_stat);
     for (int i = 0; i < ws.session_count; i++)
     {
@@ -3482,6 +3575,19 @@ static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
 done:
     CatalogClearSessions(&ws);
     CatalogLockRelease(lock_fd);
+}
+
+static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
+                                const char *title_override, const char *event_json,
+                                const struct stat *previous_stat)
+{
+    if (!app || !agent)
+    {
+        return;
+    }
+    CatalogWriteThroughFields(agent->kind, agent->persistence, agent->session_id, agent->session_path,
+                              PicoWorkspace_Path(SessionWorkspace(app, agent)), title_override, event_json,
+                              previous_stat);
 }
 
 static bool CatalogScanDir(const char *dir, const char *key, PicoCatalogWorkspace *out)
@@ -3614,4 +3720,444 @@ int PicoCatalog_Scan(PicoCatalogWorkspace **out)
     }
     *out = list;
     return n;
+}
+
+static void PersistJobClear(PicoSessionPersistJob *job)
+{
+    if (!job)
+    {
+        return;
+    }
+    free(job->header_json);
+    free(job->event_json);
+    memset(job, 0, sizeof(*job));
+}
+
+static PicoAgent *PersistFindAgent(PicoHost *host, PicoAgentId id)
+{
+    int i;
+    int j;
+    if (!host || id == 0)
+    {
+        return NULL;
+    }
+    for (i = 0; i < host->workspace_count; i++)
+    {
+        PicoWorkspace *workspace = host->workspaces[i];
+        if (!workspace)
+        {
+            continue;
+        }
+        for (j = 0; j < workspace->count; j++)
+        {
+            PicoAgent *agent = workspace->agents[j];
+            if (agent && agent->id == id)
+            {
+                return agent;
+            }
+        }
+    }
+    return NULL;
+}
+
+static bool PersistHasWorkLocked(const PicoHost *host, PicoAgentId id)
+{
+    int i;
+    if (!host || id == 0 || !host->persist_pending)
+    {
+        return false;
+    }
+    if (host->persist_flight_agent_id == id)
+    {
+        return true;
+    }
+    for (i = 0; i < host->persist_pending_count; i++)
+    {
+        if (host->persist_pending[i].agent_id == id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int PersistTakeFailuresLocked(PicoHost *host, PicoAgentId id,
+                                     PicoSessionPersistFailure *out, int cap)
+{
+    int i;
+    int n = 0;
+    int kept = 0;
+    if (!host || !out || cap <= 0)
+    {
+        return 0;
+    }
+    for (i = 0; i < host->persist_failure_count; i++)
+    {
+        PicoSessionPersistFailure *item = &host->persist_failures[i];
+        if (id == 0 || item->agent_id == id)
+        {
+            if (n < cap)
+            {
+                out[n++] = *item;
+            }
+        }
+        else
+        {
+            if (kept != i)
+            {
+                host->persist_failures[kept] = *item;
+            }
+            kept++;
+        }
+    }
+    host->persist_failure_count = kept;
+    return n;
+}
+
+static void PersistApplyFailures(PicoHost *host, const PicoSessionPersistFailure *items, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        PicoAgent *agent = PersistFindAgent(host, items[i].agent_id);
+        if (agent)
+        {
+            PersistenceFailed(host, agent, items[i].error);
+        }
+    }
+}
+
+static PicoSessionPersistJob *PersistPendingForAgentLocked(PicoHost *host, PicoAgentId id)
+{
+    int i;
+    if (!host || id == 0 || !host->persist_pending)
+    {
+        return NULL;
+    }
+    for (i = 0; i < host->persist_pending_count; i++)
+    {
+        if (host->persist_pending[i].agent_id == id)
+        {
+            return &host->persist_pending[i];
+        }
+    }
+    return NULL;
+}
+
+static bool PersistTakeNextLocked(PicoHost *host, PicoSessionPersistJob *out)
+{
+    int i;
+    if (!host || !out || !host->persist_pending || host->persist_pending_count <= 0)
+    {
+        return false;
+    }
+    *out = host->persist_pending[0];
+    for (i = 1; i < host->persist_pending_count; i++)
+    {
+        host->persist_pending[i - 1] = host->persist_pending[i];
+    }
+    host->persist_pending_count--;
+    memset(&host->persist_pending[host->persist_pending_count], 0,
+           sizeof(host->persist_pending[0]));
+    return true;
+}
+
+static void PersistDropPendingForAgentLocked(PicoHost *host, PicoAgentId agent_id)
+{
+    int i = 0;
+    if (!host || agent_id == 0)
+    {
+        return;
+    }
+    while (i < host->persist_pending_count)
+    {
+        if (host->persist_pending[i].agent_id != agent_id)
+        {
+            i++;
+            continue;
+        }
+        PersistJobClear(&host->persist_pending[i]);
+        for (int j = i + 1; j < host->persist_pending_count; j++)
+        {
+            host->persist_pending[j - 1] = host->persist_pending[j];
+        }
+        host->persist_pending_count--;
+        memset(&host->persist_pending[host->persist_pending_count], 0,
+               sizeof(host->persist_pending[0]));
+    }
+}
+
+static void PersistRecordFailureLocked(PicoHost *host, PicoAgentId agent_id, const char *error)
+{
+    PicoSessionPersistFailure *item;
+    if (!host || agent_id == 0)
+    {
+        return;
+    }
+    for (int i = 0; i < host->persist_failure_count; i++)
+    {
+        if (host->persist_failures[i].agent_id == agent_id)
+        {
+            return;
+        }
+    }
+    if (host->persist_failure_count >= PICO_MAX_TOTAL_AGENTS)
+    {
+        return;
+    }
+    item = &host->persist_failures[host->persist_failure_count++];
+    memset(item, 0, sizeof(*item));
+    item->agent_id = agent_id;
+    snprintf(item->error, sizeof(item->error), "%s", error ? error : "");
+}
+
+static void *PersistThreadMain(void *arg)
+{
+    PicoHost *host = (PicoHost *)arg;
+    while (host)
+    {
+        PicoSessionPersistJob job;
+        char error[256];
+        bool failed = false;
+        memset(&job, 0, sizeof(job));
+        pthread_mutex_lock(&host->persist_mu);
+        while (!host->persist_stop && host->persist_pending_count == 0)
+        {
+            pthread_cond_wait(&host->persist_cv, &host->persist_mu);
+        }
+        if (host->persist_pending_count == 0)
+        {
+            pthread_mutex_unlock(&host->persist_mu);
+            break;
+        }
+        if (!PersistTakeNextLocked(host, &job))
+        {
+            pthread_mutex_unlock(&host->persist_mu);
+            continue;
+        }
+        host->persist_flight_agent_id = job.agent_id;
+        pthread_mutex_unlock(&host->persist_mu);
+
+        error[0] = '\0';
+        if (job.header_json && job.header_json[0] &&
+            (!EnsureSessionParent(job.session_path, error, sizeof(error)) ||
+             !WriteLineAtPath(job.session_path, job.header_json, false, job.kind, job.persistence,
+                              job.session_id, job.workspace_path, error, sizeof(error))))
+        {
+            failed = true;
+        }
+        else if (job.event_json && job.event_json[0] &&
+                 !WriteLineAtPath(job.session_path, job.event_json, true, job.kind, job.persistence,
+                                  job.session_id, job.workspace_path, error, sizeof(error)))
+        {
+            failed = true;
+        }
+
+        pthread_mutex_lock(&host->persist_mu);
+        if (failed)
+        {
+            PersistDropPendingForAgentLocked(host, job.agent_id);
+            PersistRecordFailureLocked(host, job.agent_id, error);
+        }
+        host->persist_flight_agent_id = 0;
+        pthread_cond_broadcast(&host->persist_cv);
+        pthread_mutex_unlock(&host->persist_mu);
+        PersistJobClear(&job);
+    }
+    return NULL;
+}
+
+void PicoSessionPersist_Init(PicoHost *host)
+{
+    if (!host || host->persist_ready)
+    {
+        return;
+    }
+    if (pthread_mutex_init(&host->persist_mu, NULL) != 0)
+    {
+        return;
+    }
+    if (pthread_cond_init(&host->persist_cv, NULL) != 0)
+    {
+        pthread_mutex_destroy(&host->persist_mu);
+        return;
+    }
+    host->persist_pending = (PicoSessionPersistJob *)calloc(PICO_MAX_TOTAL_AGENTS,
+                                                            sizeof(*host->persist_pending));
+    if (!host->persist_pending)
+    {
+        pthread_cond_destroy(&host->persist_cv);
+        pthread_mutex_destroy(&host->persist_mu);
+        return;
+    }
+    host->persist_stop = false;
+    host->persist_pending_count = 0;
+    host->persist_flight_agent_id = 0;
+    host->persist_failure_count = 0;
+    host->persist_ready = true;
+    if (pthread_create(&host->persist_thread, NULL, PersistThreadMain, host) != 0)
+    {
+        host->persist_ready = false;
+        free(host->persist_pending);
+        host->persist_pending = NULL;
+        pthread_cond_destroy(&host->persist_cv);
+        pthread_mutex_destroy(&host->persist_mu);
+        return;
+    }
+}
+
+void PicoSessionPersist_Shutdown(PicoHost *host)
+{
+    int i;
+    if (!host)
+    {
+        return;
+    }
+    if (host->persist_ready)
+    {
+        pthread_mutex_lock(&host->persist_mu);
+        host->persist_stop = true;
+        pthread_cond_broadcast(&host->persist_cv);
+        pthread_mutex_unlock(&host->persist_mu);
+    }
+    if (host->persist_ready)
+    {
+        pthread_join(host->persist_thread, NULL);
+        for (i = 0; i < host->persist_pending_count; i++)
+        {
+            PersistJobClear(&host->persist_pending[i]);
+        }
+        host->persist_pending_count = 0;
+        free(host->persist_pending);
+        host->persist_pending = NULL;
+        host->persist_flight_agent_id = 0;
+        host->persist_failure_count = 0;
+        pthread_cond_destroy(&host->persist_cv);
+        pthread_mutex_destroy(&host->persist_mu);
+        host->persist_ready = false;
+        host->persist_stop = false;
+    }
+}
+
+void PicoSessionPersist_Pump(PicoHost *host)
+{
+    PicoSessionPersistFailure local[PICO_MAX_TOTAL_AGENTS];
+    int n = 0;
+    if (!host || !host->persist_ready)
+    {
+        return;
+    }
+    pthread_mutex_lock(&host->persist_mu);
+    n = PersistTakeFailuresLocked(host, 0, local, PICO_MAX_TOTAL_AGENTS);
+    pthread_mutex_unlock(&host->persist_mu);
+    PersistApplyFailures(host, local, n);
+}
+
+bool PicoSession_DrainPersistBefore(PicoHost *app, PicoAgent *agent, const struct timespec *deadline)
+{
+    PicoSessionPersistFailure local[PICO_MAX_TOTAL_AGENTS];
+    bool drained;
+    int n = 0;
+    if (!app || !agent || !app->persist_ready || agent->id == 0)
+    {
+        return true;
+    }
+    pthread_mutex_lock(&app->persist_mu);
+    while (PersistHasWorkLocked(app, agent->id))
+    {
+        int wait_result = deadline
+            ? pthread_cond_timedwait(&app->persist_cv, &app->persist_mu, deadline)
+            : pthread_cond_wait(&app->persist_cv, &app->persist_mu);
+        if (wait_result != 0 && PersistHasWorkLocked(app, agent->id))
+        {
+            break;
+        }
+    }
+    drained = !PersistHasWorkLocked(app, agent->id);
+    n = PersistTakeFailuresLocked(app, agent->id, local, PICO_MAX_TOTAL_AGENTS);
+    pthread_mutex_unlock(&app->persist_mu);
+    PersistApplyFailures(app, local, n);
+    return drained;
+}
+
+void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent)
+{
+    (void)PicoSession_DrainPersistBefore(app, agent, NULL);
+}
+
+void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
+{
+    PicoSessionPersistJob *pending;
+    PicoSessionPersistJob job;
+    bool new_identity;
+    if (!app || !agent || agent->persistence != PICO_SESSION_DURABLE)
+    {
+        return;
+    }
+    if (!app->persist_ready)
+    {
+        (void)PicoSession_LogModelChange(app, agent, agent->model,
+                                         agent->effort[0] ? agent->effort : "none");
+        return;
+    }
+
+    memset(&job, 0, sizeof(job));
+    job.event_json = BuildModelChangeJson(agent->model,
+                                          agent->effort[0] ? agent->effort : "none");
+    if (!job.event_json)
+    {
+        PersistenceFailed(app, agent, "out of memory while logging the model change");
+        return;
+    }
+    new_identity = !agent->session_path[0];
+    if (AssignSessionIdentity(app, agent) != 0 || !agent->session_path[0] || agent->id == 0)
+    {
+        PersistJobClear(&job);
+        return;
+    }
+    if (new_identity)
+    {
+        job.header_json = BuildSessionHeaderJson(app, agent);
+        if (!job.header_json)
+        {
+            PersistJobClear(&job);
+            PersistenceFailed(app, agent, "out of memory while creating the session header");
+            return;
+        }
+    }
+    job.agent_id = agent->id;
+    job.kind = agent->kind;
+    job.persistence = agent->persistence;
+    snprintf(job.session_id, sizeof(job.session_id), "%s", agent->session_id);
+    snprintf(job.session_path, sizeof(job.session_path), "%s", agent->session_path);
+    snprintf(job.workspace_path, sizeof(job.workspace_path), "%s",
+             PicoWorkspace_Path(SessionWorkspace(app, agent)));
+
+    pthread_mutex_lock(&app->persist_mu);
+    pending = PersistPendingForAgentLocked(app, agent->id);
+    if (pending)
+    {
+        free(pending->event_json);
+        pending->event_json = job.event_json;
+        job.event_json = NULL;
+        if (!pending->header_json && job.header_json)
+        {
+            pending->header_json = job.header_json;
+            job.header_json = NULL;
+        }
+        PersistJobClear(&job);
+    }
+    else if (app->persist_pending && app->persist_pending_count < PICO_MAX_TOTAL_AGENTS)
+    {
+        app->persist_pending[app->persist_pending_count++] = job;
+        pthread_cond_signal(&app->persist_cv);
+    }
+    else
+    {
+        pthread_mutex_unlock(&app->persist_mu);
+        PersistJobClear(&job);
+        PersistenceFailed(app, agent, "session persist queue is full");
+        return;
+    }
+    pthread_mutex_unlock(&app->persist_mu);
 }

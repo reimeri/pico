@@ -1805,6 +1805,7 @@ static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
     {
         host->composer.text[0] = '\0';
     }
+    PicoSessionPersist_Init(host);
 }
 
 static int CanonicalizeWorkspacePath(const char *path, char *out, size_t cap)
@@ -1871,6 +1872,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
     PicoHost_InitFields(host, fonts, safe_mode);
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
     {
+        PicoSessionPersist_Shutdown(host);
         pthread_mutex_destroy(&host->ask_id_mu);
         free(host->modules);
         free(host->composer.text);
@@ -2076,6 +2078,7 @@ void pico_host_pump(PicoHost *host)
         return;
     }
     PicoHost_PumpLifecycle(host);
+    PicoSessionPersist_Pump(host);
     float dt = GetFrameTime();
     for (int w = 0; w < host->workspace_count; w++)
     {
@@ -2124,6 +2127,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
         PicoHost_InitFields(host, fonts, safe_mode);
         if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
         {
+            PicoSessionPersist_Shutdown(host);
             free(host->modules);
             host->modules = NULL;
             host->module_capacity = 0;
@@ -2715,6 +2719,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         }
     }
     host->workspace_count = 0;
+    PicoSessionPersist_Shutdown(host);
     PicoAuth_Free(host);
     PicoHost_ClearMessages(host, host->selected_agent_id);
     free(host->modules);

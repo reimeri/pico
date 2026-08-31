@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
@@ -32,6 +33,33 @@ _Static_assert(PICO_MAX_AGENTS == 16, "PICO_MAX_AGENTS");
 _Static_assert(PICO_MAX_TOTAL_AGENTS == 32, "PICO_MAX_TOTAL_AGENTS");
 
 static int g_failed;
+static int g_persist_ready_fd = -1;
+static int g_persist_continue_fd = -1;
+
+static bool TransferTestByte(int fd, bool write_byte)
+{
+    char byte = 'x';
+    ssize_t result;
+    do
+    {
+        result = write_byte ? write(fd, &byte, 1) : read(fd, &byte, 1);
+    } while (result < 0 && errno == EINTR);
+    return result == 1;
+}
+
+bool PicoSession_TestHook(const char *stage)
+{
+    if (stage && strcmp(stage, "catalog_before_upsert") == 0 &&
+        g_persist_ready_fd >= 0 && g_persist_continue_fd >= 0)
+    {
+        int ready_fd = g_persist_ready_fd;
+        int continue_fd = g_persist_continue_fd;
+        g_persist_ready_fd = -1;
+        g_persist_continue_fd = -1;
+        return !TransferTestByte(ready_fd, true) || !TransferTestByte(continue_fd, false);
+    }
+    return false;
+}
 
 static void Fail(const char *msg)
 {
@@ -4457,6 +4485,80 @@ static int TestDiffShutdownDoesNotWaitForGit(void)
     return 0;
 }
 
+static int TestPersistenceShutdownUsesSharedDeadline(void)
+{
+    int ready[2];
+    int proceed[2];
+    if (pipe(ready) != 0 || pipe(proceed) != 0)
+    {
+        Fail("persist shutdown pipes");
+        return 1;
+    }
+    pid_t child = fork();
+    if (child < 0)
+    {
+        Fail("persist shutdown fork");
+        return 1;
+    }
+    if (child == 0)
+    {
+        char dir[] = "/tmp/pico-persist-shutdown-XXXXXX";
+        char cfg[] = "/tmp/pico-persist-shutdown-cfg-XXXXXX";
+        PicoHost *host = NULL;
+        PicoWorkspaceId ws = 0;
+        PicoAgentCreateOptions opt = {
+            .kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_NEW,
+            .select = true,
+        };
+        PicoAgentId id = 0;
+        if (!mkdtemp(dir) || !mkdtemp(cfg))
+        {
+            _exit(2);
+        }
+        setenv("XDG_CONFIG_HOME", cfg, 1);
+        if (pico_host_init(&host, NULL, true) != PICO_OK ||
+            pico_workspace_open(host, dir, &ws) != PICO_OK ||
+            pico_main_agent_create(host, ws, &opt, &id) != PICO_OK)
+        {
+            _exit(3);
+        }
+        PicoAgent *agent = PicoHost_FindAgent(host, id);
+        if (!agent)
+        {
+            _exit(4);
+        }
+        snprintf(agent->model, sizeof(agent->model), "shutdown-model");
+        g_persist_ready_fd = ready[1];
+        g_persist_continue_fd = proceed[0];
+        PicoSession_EnqueueModelChange(host, agent);
+        if (!TransferTestByte(ready[0], false))
+        {
+            _exit(5);
+        }
+        struct timespec start;
+        struct timespec end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        PicoHostShutdownResult result = PicoHost_Shutdown(host);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        (void)TransferTestByte(proceed[1], true);
+        double elapsed = ElapsedSeconds(&start, &end);
+        _exit(result == PICO_HOST_SHUTDOWN_RETAINED && elapsed >= 0.75 && elapsed < 1.7 ? 0 : 6);
+    }
+
+    sleep(2);
+    (void)TransferTestByte(proceed[1], true);
+    int status = 0;
+    waitpid(child, &status, 0);
+    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        Fail("blocked persistence must consume the process-wide shutdown deadline");
+        return 1;
+    }
+    return 0;
+}
+
 static int TestProcessShutdownUsesSharedDeadline(void)
 {
     char dirA[] = "/tmp/pico-deadline-a-XXXXXX";
@@ -4743,6 +4845,153 @@ static int TestPersistedSessionKeptOnSelect(void)
     pico_host_free(host);
     unsetenv("XDG_CONFIG_HOME");
     unlink(session_path);
+    rmdir(dir);
+    return 0;
+}
+
+static int TestModelChangeKeepsUnusedDraftOnSelect(void)
+{
+    char dir[] = "/tmp/pico-ws-model-draft-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-model-draft-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoWorkspace *workspace;
+    PicoAgentCreateOptions opt;
+    PicoAgentId first = 0;
+    PicoAgentId other = 0;
+    PicoAgent *agent;
+    PicoAgentInfo info;
+    PicoModel models[1];
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp model draft");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init model draft");
+        unsetenv("XDG_CONFIG_HOME");
+        if (host)
+        {
+            pico_host_free(host);
+        }
+        return 1;
+    }
+    workspace = PicoHost_FindWorkspace(host, ws);
+    memset(models, 0, sizeof(models));
+    snprintf(models[0].id, sizeof(models[0].id), "kept-model");
+    snprintf(models[0].name, sizeof(models[0].name), "kept-model");
+    workspace->models = models;
+    workspace->model_count = 1;
+    snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model), "kept-model");
+
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &first) != PICO_OK || first == 0)
+    {
+        Fail("create model draft");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    agent = PicoHost_FindAgent(host, first);
+    if (!agent || !PicoSettings_SetModel(agent, "kept-model") || !agent->session_id[0] ||
+        !agent->session_path[0])
+    {
+        Fail("SetModel must assign a session identity immediately");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = false;
+    if (pico_main_agent_create(host, ws, &opt, &other) != PICO_OK || other == 0)
+    {
+        Fail("create other agent");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    if (!pico_agent_select(host, other) || pico_agent_active(host) != other ||
+        !pico_agent_find(host, first, &info) || !pico_agent_find(host, other, &info))
+    {
+        Fail("model change must keep the unused draft when selecting another agent");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        return 1;
+    }
+    workspace->models = NULL;
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    return 0;
+}
+
+static int TestAgentCloseAppliesQueuedPersistenceFailure(void)
+{
+    char dir[] = "/tmp/pico-ws-close-persist-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-close-persist-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoWorkspace *workspace;
+    PicoAgentCreateOptions opt;
+    PicoAgentId id = 0;
+    PicoAgent *agent;
+    PicoModel models[1];
+    char missing_path[4096];
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp close persistence");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws) != PICO_OK)
+    {
+        Fail("init close persistence");
+        return 1;
+    }
+    workspace = PicoHost_FindWorkspace(host, ws);
+    memset(models, 0, sizeof(models));
+    snprintf(models[0].id, sizeof(models[0].id), "close-model");
+    snprintf(models[0].name, sizeof(models[0].name), "close-model");
+    workspace->models = models;
+    workspace->model_count = 1;
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws, &opt, &id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, id)))
+    {
+        workspace->models = NULL;
+        pico_host_free(host);
+        Fail("create close persistence agent");
+        return 1;
+    }
+    snprintf(agent->session_id, sizeof(agent->session_id), "close-persist-id");
+    snprintf(missing_path, sizeof(missing_path), "%s/missing/session.jsonl", dir);
+    snprintf(agent->session_path, sizeof(agent->session_path), "%s", missing_path);
+    if (!PicoSettings_SetModel(agent, "close-model") || pico_agent_close(host, id) != PICO_OK ||
+        !host->status_warn || !strstr(host->status_warn, "Session persistence failed"))
+    {
+        workspace->models = NULL;
+        pico_host_free(host);
+        Fail("agent close must apply queued persistence failure before removal");
+        return 1;
+    }
+    workspace->models = NULL;
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
     rmdir(dir);
     return 0;
 }
@@ -5428,6 +5677,14 @@ int main(void)
     {
         return 1;
     }
+    if (TestModelChangeKeepsUnusedDraftOnSelect() != 0)
+    {
+        return 1;
+    }
+    if (TestAgentCloseAppliesQueuedPersistenceFailure() != 0)
+    {
+        return 1;
+    }
     if (TestResumeLoadsStoredModel() != 0)
     {
         return 1;
@@ -5437,6 +5694,10 @@ int main(void)
         return 1;
     }
     if (TestUnseenCompletePersistsAcrossRestart() != 0)
+    {
+        return 1;
+    }
+    if (TestPersistenceShutdownUsesSharedDeadline() != 0)
     {
         return 1;
     }

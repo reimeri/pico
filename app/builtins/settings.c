@@ -1352,11 +1352,20 @@ static void SettingsRender(PicoHost *app, void *state)
             CLAY(CLAY_ID("SettingsModalButtons"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childGap = 8,
-                             .childAlignment = {.x = CLAY_ALIGN_X_RIGHT},
+                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                 RenderButton(CLAY_ID("SettingsCancel"), "Cancel", true, false);
+                CLAY_AUTO_ID({.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER,
+                                                            .y = CLAY_ALIGN_Y_CENTER},
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                {
+                    CLAY_TEXT(CLAY_STRING("v" PICO_VERSION),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = PICO_FONT_CAPTION,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
                 RenderButton(CLAY_ID("SettingsApply"), "Apply", true, true);
             }
         }

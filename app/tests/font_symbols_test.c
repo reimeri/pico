@@ -117,6 +117,15 @@ static int TestSymbolMeasurements(void)
         return Fail("box drawing characters have zero dimension");
     }
 
+    // Blank-line preservation uses U+00A0 as an invisible marker. It must remain
+    // addressable instead of falling back to a visible question mark.
+    Font regular = Pico_FontAt(FONT_REGULAR, PICO_FONT_BODY);
+    GlyphInfo nbsp = GetGlyphInfo(regular, 0x00A0);
+    if (nbsp.value != 0x00A0)
+    {
+        return Fail("non-breaking space fell back to another glyph");
+    }
+
     // Test missing codepoints in loaded range (U+2AE0, U+2072) and out-of-range (U+4F60)
     // They must fall back to '?' and have positive width instead of measuring 0.0 or disappearing
     Clay_Dimensions dim_question = MeasureSlice("?", FONT_REGULAR, PICO_FONT_BODY);

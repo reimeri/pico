@@ -214,7 +214,8 @@ static Font LoadFontWithFallback(const char *primaryPath, const char *fallbackPa
     {
         bool has_p = (p_glyphs && p_glyphs[i].image.data != NULL);
         bool has_f = (f_glyphs && f_glyphs[i].image.data != NULL);
-        if (has_p || has_f)
+        bool keep_blank = codepoints[i] == 0x00A0 && (p_glyphs || f_glyphs);
+        if (has_p || has_f || keep_blank)
         {
             valid_count++;
         }
@@ -248,6 +249,14 @@ static Font LoadFontWithFallback(const char *primaryPath, const char *fallbackPa
         {
             glyphs[dst++] = f_glyphs[i];
             f_glyphs[i].image.data = NULL;
+        }
+        else if (codepoints[i] == 0x00A0 && p_glyphs)
+        {
+            glyphs[dst++] = p_glyphs[i];
+        }
+        else if (codepoints[i] == 0x00A0 && f_glyphs)
+        {
+            glyphs[dst++] = f_glyphs[i];
         }
     }
 

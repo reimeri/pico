@@ -57,9 +57,9 @@ typedef struct PicoCatalogWorkspace {
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
 /* Scan ~/.config/pico/sessions. jsonl files are authoritative for sessions.
  * Recovers missing .workspace.json from jsonl cwd. Omits entries whose path is
- * not an existing directory. .workspace.json caches listing rows keyed by
- * id plus the JSONL stat generation so unchanged jsonl is not re-parsed. Caller frees with
- * PicoCatalog_Free. */
+ * not an existing directory. .workspace-order.json is the canonical path order;
+ * .workspace.json caches listing rows keyed by id plus the JSONL stat generation
+ * so unchanged jsonl is not re-parsed. Caller frees with PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
 int PicoCatalog_Ensure(const char *workspace_path);
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
@@ -126,9 +126,24 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
 PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent,
                                                      bool complete);
 void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete);
+typedef enum PicoCatalogPersistStatus {
+    PICO_CATALOG_PERSIST_FAILED = -1,
+    PICO_CATALOG_PERSIST_PENDING = 0,
+    PICO_CATALOG_PERSIST_SUCCEEDED = 1,
+} PicoCatalogPersistStatus;
+
 void PicoSessionPersist_Init(PicoHost *host);
 void PicoSessionPersist_Shutdown(PicoHost *host);
 void PicoSessionPersist_Pump(PicoHost *host);
+/* Main-thread snapshot only; file I/O runs on the host persistence worker.
+ * Pending catalog-order jobs coalesce to the latest complete path sequence. */
+uint64_t PicoCatalog_EnqueueOrder(PicoHost *host,
+                                  const PicoCatalogWorkspace *workspaces, int count);
+PicoCatalogPersistStatus PicoCatalog_OrderPersistStatus(PicoHost *host,
+                                                        uint64_t generation);
+/* Uses the host shutdown deadline; false leaves the execution host retained. */
+bool PicoCatalog_DrainOrderPersistBefore(PicoHost *host,
+                                         const struct timespec *deadline);
 void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent);
 void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent);
 bool PicoSession_DrainPersistBefore(PicoHost *app, PicoAgent *agent, const struct timespec *deadline);

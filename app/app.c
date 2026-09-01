@@ -2704,6 +2704,10 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
             }
         }
     }
+    if (!PicoCatalog_DrainOrderPersistBefore(host, &deadline))
+    {
+        clean = false;
+    }
     if (!clean)
     {
         host->terminal_shutdown = true;
@@ -2759,6 +2763,7 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
     Clay_BeginLayout();
     MdView_BeginFrame();
     app->hovered_text = false;
+    app->hovered_drag = false;
 
     /* The shell owns the viewport height. A vertical GROW root can retain Clay's
      * sub-pixel compression remainder and feed it back through scrolling. */
@@ -2980,6 +2985,13 @@ static Clay_RenderCommandArray RecoverClayLayoutIfNeeded(PicoHost *app, Clay_Ren
     return commands;
 }
 
+bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
+                                 bool had_complete, bool had_todo, bool had_modal)
+{
+    return host && !had_warn && !had_complete && !had_todo && !had_modal &&
+           !host->ui_drag_active;
+}
+
 void PicoHost_Frame(PicoHost *app)
 {
     if (!app)
@@ -3024,7 +3036,8 @@ void PicoHost_Frame(PicoHost *app)
     bool had_complete = PicoComplete_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
     bool had_modal = pico_ui_modal_claimed(app);
-    if (!had_warn && !had_complete && !had_todo && !had_modal && IsKeyPressed(KEY_ESCAPE))
+    if (PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_todo, had_modal) &&
+        IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgentId id = app->selected_agent_id;
         PicoAgent *active = PicoHost_FindAgent(app, id);
@@ -3100,7 +3113,11 @@ void PicoHost_Frame(PicoHost *app)
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
 
-    if (!modal_open && PicoComposer_PointerOverAttachmentRemove())
+    if (app->hovered_drag)
+    {
+        SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+    }
+    else if (!modal_open && PicoComposer_PointerOverAttachmentRemove())
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }

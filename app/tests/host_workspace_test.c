@@ -7,6 +7,7 @@
 #include "scrollbar.h"
 #include "richtext.h"
 #include "builtins/chat.h"
+#include "builtins/sidebar.h"
 #include "agent_internal.h"
 #include "agent.h"
 #include "overlay.h"
@@ -848,6 +849,41 @@ static int TestSubmitSettersTakeOwnership(void)
     }
     pico_host_set_agent_input(&host, NULL);
     pico_host_set_agent_parts(&host, NULL);
+    return 0;
+}
+
+static int TestSidebarDragBehavior(void)
+{
+    const float midpoints[] = {10.0f, 40.0f, 70.0f};
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    if (PicoSidebar_DragMoved(20.0f, 20.0f, 20.0f, 20.0f) ||
+        !PicoSidebar_DragMoved(20.0f, 20.0f, 80.0f, 80.0f))
+    {
+        Fail("workspace drag should require pointer movement");
+        return 1;
+    }
+    if (PicoSidebar_DragTarget(midpoints, 3, 1, 40.0f) != 1 ||
+        PicoSidebar_DragTarget(midpoints, 3, 1, 69.0f) != 1 ||
+        PicoSidebar_DragTarget(midpoints, 3, 1, 71.0f) != 2 ||
+        PicoSidebar_DragTarget(midpoints, 3, 1, 9.0f) != 0 ||
+        PicoSidebar_DragTarget(midpoints, 3, 0, 39.0f) != 0 ||
+        PicoSidebar_DropTarget(midpoints, 3, 1, 71.0f, false) != -1)
+    {
+        Fail("workspace drag should cross an adjacent row midpoint before reordering");
+        return 1;
+    }
+    if (!PicoHost_AgentEscapeEnabled(&host, false, false, false, false))
+    {
+        Fail("agent Escape should be enabled without a competing UI interaction");
+        return 1;
+    }
+    host.ui_drag_active = true;
+    if (PicoHost_AgentEscapeEnabled(&host, false, false, false, false))
+    {
+        Fail("workspace drag should own Escape instead of cancelling the active agent");
+        return 1;
+    }
     return 0;
 }
 
@@ -5667,6 +5703,10 @@ int main(void)
         return 1;
     }
     if (TestSubmitSettersTakeOwnership() != 0)
+    {
+        return 1;
+    }
+    if (TestSidebarDragBehavior() != 0)
     {
         return 1;
     }

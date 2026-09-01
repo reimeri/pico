@@ -28,6 +28,7 @@
 
 static bool CatalogMetaPath(const char *dir, char *out, size_t cap);
 static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out);
+static int CmpCatalogOrder(const void *a, const void *b);
 static void CatalogClearSessions(PicoCatalogWorkspace *ws);
 static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
                                                     const char *id);
@@ -2840,21 +2841,30 @@ static bool CatalogMetaPath(const char *dir, char *out, size_t cap)
 
 static pthread_mutex_t g_catalog_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int CatalogLockAcquire(const char *dir)
+static int CatalogFileLockAcquire(const char *path, char *error, size_t error_cap)
 {
-    char meta[4096];
-    char error[256];
     int fd;
-    if (!CatalogMetaPath(dir, meta, sizeof(meta)) || pthread_mutex_lock(&g_catalog_mutex) != 0)
+    if (!path || !path[0] || pthread_mutex_lock(&g_catalog_mutex) != 0)
     {
         return -1;
     }
-    fd = SessionLockAcquire(meta, error, sizeof(error));
+    fd = SessionLockAcquire(path, error, error_cap);
     if (fd < 0)
     {
         pthread_mutex_unlock(&g_catalog_mutex);
     }
     return fd;
+}
+
+static int CatalogLockAcquire(const char *dir)
+{
+    char meta[4096];
+    char error[256];
+    if (!CatalogMetaPath(dir, meta, sizeof(meta)))
+    {
+        return -1;
+    }
+    return CatalogFileLockAcquire(meta, error, sizeof(error));
 }
 
 static void CatalogLockRelease(int fd)
@@ -3003,6 +3013,136 @@ static bool CatalogWrite(const PicoCatalogWorkspace *ws, const char *dir)
     ok = CatalogAtomicWrite(meta, json, strlen(json));
     free(json);
     return ok;
+}
+
+static bool CatalogOrderPath(char *out, size_t cap)
+{
+    char root[4096];
+    return SessionsRoot(root, sizeof(root)) &&
+           PicoPath_Format(out, cap, "%s/.workspace-order.json", root);
+}
+
+static char *CatalogOrderSerialize(const PicoCatalogWorkspace *workspaces, int count)
+{
+    JsonBuf b;
+    int i;
+    if (!workspaces || count <= 0 || count > PICO_MAX_CATALOG_WORKSPACES)
+    {
+        return NULL;
+    }
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"version\":1,\"workspaces\":[");
+    for (i = 0; i < count; i++)
+    {
+        if (i > 0)
+        {
+            JsonBuf_Putc(&b, ',');
+        }
+        JsonBuf_String(&b, workspaces[i].path);
+    }
+    JsonBuf_Puts(&b, "]}");
+    return JsonBuf_Steal(&b);
+}
+
+static bool CatalogWriteOrderJson(const char *json, char *error, size_t error_cap)
+{
+    char root[4096];
+    char path[4096];
+    int lock_fd;
+    bool ok;
+    if (!json || !json[0] || !SessionsRoot(root, sizeof(root)) ||
+        !PicoPath_Format(path, sizeof(path), "%s/.workspace-order.json", root))
+    {
+        snprintf(error, error_cap, "catalog order path is too long");
+        return false;
+    }
+    Pico_MkdirP(root);
+    if (SessionTestFail("catalog_order_before_write"))
+    {
+        snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
+        return false;
+    }
+    lock_fd = CatalogFileLockAcquire(path, error, error_cap);
+    if (lock_fd < 0)
+    {
+        return false;
+    }
+    ok = CatalogAtomicWrite(path, json, strlen(json));
+    if (!ok && error && error_cap > 0 && !error[0])
+    {
+        snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
+    }
+    CatalogLockRelease(lock_fd);
+    return ok;
+}
+
+static void CatalogApplyOrderFile(PicoCatalogWorkspace *list, int count)
+{
+    char path[4096];
+    char error[256];
+    char *raw;
+    size_t raw_len = 0;
+    JsonDoc doc;
+    int workspaces;
+    int order_count;
+    int lock_fd;
+    int i;
+    if (!list || count <= 1 || !CatalogOrderPath(path, sizeof(path)))
+    {
+        return;
+    }
+    error[0] = '\0';
+    lock_fd = CatalogFileLockAcquire(path, error, sizeof(error));
+    if (lock_fd < 0)
+    {
+        return;
+    }
+    raw = Pico_ReadFile(path, &raw_len);
+    CatalogLockRelease(lock_fd);
+    if (!raw)
+    {
+        return;
+    }
+    if (JsonParse(&doc, raw, raw_len) != 0)
+    {
+        free(raw);
+        return;
+    }
+    workspaces = JsonObjGet(&doc, 0, "workspaces");
+    order_count = JsonArrayLen(&doc, workspaces);
+    if (!JsonIsObject(&doc, 0) || JsonObjInt(&doc, 0, "version", 0) != 1 ||
+        !JsonIsArray(&doc, workspaces) || order_count < 0 ||
+        order_count > PICO_MAX_CATALOG_WORKSPACES)
+    {
+        JsonFree(&doc);
+        free(raw);
+        return;
+    }
+    for (i = 0; i < count; i++)
+    {
+        list[i].order = order_count + i;
+    }
+    for (i = 0; i < order_count; i++)
+    {
+        char *ordered_path = JsonStrDup(&doc, JsonArrayAt(&doc, workspaces, i));
+        int j;
+        if (!ordered_path)
+        {
+            continue;
+        }
+        for (j = 0; j < count; j++)
+        {
+            if (list[j].order >= order_count && strcmp(list[j].path, ordered_path) == 0)
+            {
+                list[j].order = i;
+                break;
+            }
+        }
+        free(ordered_path);
+    }
+    JsonFree(&doc);
+    free(raw);
+    qsort(list, (size_t)count, sizeof(*list), CmpCatalogOrder);
 }
 
 static void CatalogClearSessions(PicoCatalogWorkspace *ws)
@@ -3717,6 +3857,7 @@ int PicoCatalog_Scan(PicoCatalogWorkspace **out)
     if (n > 1)
     {
         qsort(list, (size_t)n, sizeof(*list), CmpCatalogOrder);
+        CatalogApplyOrderFile(list, n);
     }
     *out = list;
     return n;
@@ -3730,6 +3871,7 @@ static void PersistJobClear(PicoSessionPersistJob *job)
     }
     free(job->header_json);
     free(job->event_json);
+    free(job->catalog_order_json);
     memset(job, 0, sizeof(*job));
 }
 
@@ -3773,7 +3915,8 @@ static bool PersistHasWorkLocked(const PicoHost *host, PicoAgentId id)
     }
     for (i = 0; i < host->persist_pending_count; i++)
     {
-        if (host->persist_pending[i].agent_id == id)
+        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_SESSION &&
+            host->persist_pending[i].agent_id == id)
         {
             return true;
         }
@@ -3836,7 +3979,25 @@ static PicoSessionPersistJob *PersistPendingForAgentLocked(PicoHost *host, PicoA
     }
     for (i = 0; i < host->persist_pending_count; i++)
     {
-        if (host->persist_pending[i].agent_id == id)
+        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_SESSION &&
+            host->persist_pending[i].agent_id == id)
+        {
+            return &host->persist_pending[i];
+        }
+    }
+    return NULL;
+}
+
+static PicoSessionPersistJob *PersistPendingCatalogOrderLocked(PicoHost *host)
+{
+    int i;
+    if (!host || !host->persist_pending)
+    {
+        return NULL;
+    }
+    for (i = 0; i < host->persist_pending_count; i++)
+    {
+        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
         {
             return &host->persist_pending[i];
         }
@@ -3871,7 +4032,8 @@ static void PersistDropPendingForAgentLocked(PicoHost *host, PicoAgentId agent_i
     }
     while (i < host->persist_pending_count)
     {
-        if (host->persist_pending[i].agent_id != agent_id)
+        if (host->persist_pending[i].job_kind != PICO_PERSIST_JOB_SESSION ||
+            host->persist_pending[i].agent_id != agent_id)
         {
             i++;
             continue;
@@ -3935,14 +4097,25 @@ static void *PersistThreadMain(void *arg)
             pthread_mutex_unlock(&host->persist_mu);
             continue;
         }
-        host->persist_flight_agent_id = job.agent_id;
+        if (job.job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
+        {
+            host->persist_flight_catalog_order = true;
+        }
+        else
+        {
+            host->persist_flight_agent_id = job.agent_id;
+        }
         pthread_mutex_unlock(&host->persist_mu);
 
         error[0] = '\0';
-        if (job.header_json && job.header_json[0] &&
-            (!EnsureSessionParent(job.session_path, error, sizeof(error)) ||
-             !WriteLineAtPath(job.session_path, job.header_json, false, job.kind, job.persistence,
-                              job.session_id, job.workspace_path, error, sizeof(error))))
+        if (job.job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
+        {
+            failed = !CatalogWriteOrderJson(job.catalog_order_json, error, sizeof(error));
+        }
+        else if (job.header_json && job.header_json[0] &&
+                 (!EnsureSessionParent(job.session_path, error, sizeof(error)) ||
+                  !WriteLineAtPath(job.session_path, job.header_json, false, job.kind, job.persistence,
+                                   job.session_id, job.workspace_path, error, sizeof(error))))
         {
             failed = true;
         }
@@ -3954,12 +4127,30 @@ static void *PersistThreadMain(void *arg)
         }
 
         pthread_mutex_lock(&host->persist_mu);
-        if (failed)
+        if (job.job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
         {
-            PersistDropPendingForAgentLocked(host, job.agent_id);
-            PersistRecordFailureLocked(host, job.agent_id, error);
+            PicoSessionPersistJob *newer = PersistPendingCatalogOrderLocked(host);
+            host->persist_catalog_completed_generation = job.catalog_order_generation;
+            if (failed)
+            {
+                host->persist_catalog_failed_generation = job.catalog_order_generation;
+                if (!newer || newer->catalog_order_generation <= job.catalog_order_generation)
+                {
+                    snprintf(host->persist_catalog_error, sizeof(host->persist_catalog_error),
+                             "%s", error[0] ? error : "unknown error");
+                }
+            }
+            host->persist_flight_catalog_order = false;
         }
-        host->persist_flight_agent_id = 0;
+        else
+        {
+            if (failed)
+            {
+                PersistDropPendingForAgentLocked(host, job.agent_id);
+                PersistRecordFailureLocked(host, job.agent_id, error);
+            }
+            host->persist_flight_agent_id = 0;
+        }
         pthread_cond_broadcast(&host->persist_cv);
         pthread_mutex_unlock(&host->persist_mu);
         PersistJobClear(&job);
@@ -3982,7 +4173,7 @@ void PicoSessionPersist_Init(PicoHost *host)
         pthread_mutex_destroy(&host->persist_mu);
         return;
     }
-    host->persist_pending = (PicoSessionPersistJob *)calloc(PICO_MAX_TOTAL_AGENTS,
+    host->persist_pending = (PicoSessionPersistJob *)calloc(PICO_PERSIST_QUEUE_CAPACITY,
                                                             sizeof(*host->persist_pending));
     if (!host->persist_pending)
     {
@@ -3993,6 +4184,11 @@ void PicoSessionPersist_Init(PicoHost *host)
     host->persist_stop = false;
     host->persist_pending_count = 0;
     host->persist_flight_agent_id = 0;
+    host->persist_flight_catalog_order = false;
+    host->persist_catalog_next_generation = 0;
+    host->persist_catalog_completed_generation = 0;
+    host->persist_catalog_failed_generation = 0;
+    host->persist_catalog_error[0] = '\0';
     host->persist_failure_count = 0;
     host->persist_ready = true;
     if (pthread_create(&host->persist_thread, NULL, PersistThreadMain, host) != 0)
@@ -4031,6 +4227,11 @@ void PicoSessionPersist_Shutdown(PicoHost *host)
         free(host->persist_pending);
         host->persist_pending = NULL;
         host->persist_flight_agent_id = 0;
+        host->persist_flight_catalog_order = false;
+        host->persist_catalog_next_generation = 0;
+        host->persist_catalog_completed_generation = 0;
+        host->persist_catalog_failed_generation = 0;
+        host->persist_catalog_error[0] = '\0';
         host->persist_failure_count = 0;
         pthread_cond_destroy(&host->persist_cv);
         pthread_mutex_destroy(&host->persist_mu);
@@ -4042,15 +4243,72 @@ void PicoSessionPersist_Shutdown(PicoHost *host)
 void PicoSessionPersist_Pump(PicoHost *host)
 {
     PicoSessionPersistFailure local[PICO_MAX_TOTAL_AGENTS];
+    char catalog_error[256];
     int n = 0;
     if (!host || !host->persist_ready)
     {
         return;
     }
+    catalog_error[0] = '\0';
     pthread_mutex_lock(&host->persist_mu);
     n = PersistTakeFailuresLocked(host, 0, local, PICO_MAX_TOTAL_AGENTS);
+    if (host->persist_catalog_error[0])
+    {
+        snprintf(catalog_error, sizeof(catalog_error), "%s", host->persist_catalog_error);
+        host->persist_catalog_error[0] = '\0';
+    }
     pthread_mutex_unlock(&host->persist_mu);
     PersistApplyFailures(host, local, n);
+    if (catalog_error[0])
+    {
+        char line[320];
+        snprintf(line, sizeof(line), "Workspace order persistence failed: %s", catalog_error);
+        pico_status_warn(host, line);
+    }
+}
+
+static bool PersistHasCatalogOrderLocked(const PicoHost *host)
+{
+    int i;
+    if (!host || !host->persist_pending)
+    {
+        return false;
+    }
+    if (host->persist_flight_catalog_order)
+    {
+        return true;
+    }
+    for (i = 0; i < host->persist_pending_count; i++)
+    {
+        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PicoCatalog_DrainOrderPersistBefore(PicoHost *host, const struct timespec *deadline)
+{
+    bool drained;
+    if (!host || !host->persist_ready)
+    {
+        return true;
+    }
+    pthread_mutex_lock(&host->persist_mu);
+    while (PersistHasCatalogOrderLocked(host))
+    {
+        int wait_result = deadline
+            ? pthread_cond_timedwait(&host->persist_cv, &host->persist_mu, deadline)
+            : pthread_cond_wait(&host->persist_cv, &host->persist_mu);
+        if (wait_result != 0 && PersistHasCatalogOrderLocked(host))
+        {
+            break;
+        }
+    }
+    drained = !PersistHasCatalogOrderLocked(host);
+    pthread_mutex_unlock(&host->persist_mu);
+    return drained;
 }
 
 bool PicoSession_DrainPersistBefore(PicoHost *app, PicoAgent *agent, const struct timespec *deadline)
@@ -4083,6 +4341,85 @@ bool PicoSession_DrainPersistBefore(PicoHost *app, PicoAgent *agent, const struc
 void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent)
 {
     (void)PicoSession_DrainPersistBefore(app, agent, NULL);
+}
+
+uint64_t PicoCatalog_EnqueueOrder(PicoHost *host,
+                                  const PicoCatalogWorkspace *workspaces, int count)
+{
+    PicoSessionPersistJob *pending;
+    PicoSessionPersistJob job;
+    char *json;
+    uint64_t generation;
+    if (!host || !workspaces || count <= 0 || count > PICO_MAX_CATALOG_WORKSPACES)
+    {
+        return 0;
+    }
+    json = CatalogOrderSerialize(workspaces, count);
+    if (!json)
+    {
+        pico_status_warn(host, "Could not prepare workspace order persistence.");
+        return 0;
+    }
+    if (!host->persist_ready)
+    {
+        free(json);
+        pico_status_warn(host, "Workspace order persistence is unavailable.");
+        return 0;
+    }
+
+    memset(&job, 0, sizeof(job));
+    job.job_kind = PICO_PERSIST_JOB_CATALOG_ORDER;
+    job.catalog_order_json = json;
+    pthread_mutex_lock(&host->persist_mu);
+    generation = ++host->persist_catalog_next_generation;
+    if (generation == 0)
+    {
+        generation = ++host->persist_catalog_next_generation;
+    }
+    job.catalog_order_generation = generation;
+    pending = PersistPendingCatalogOrderLocked(host);
+    if (pending)
+    {
+        free(pending->catalog_order_json);
+        pending->catalog_order_json = job.catalog_order_json;
+        pending->catalog_order_generation = generation;
+        job.catalog_order_json = NULL;
+        PersistJobClear(&job);
+    }
+    else if (host->persist_pending &&
+             host->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY)
+    {
+        host->persist_pending[host->persist_pending_count++] = job;
+        pthread_cond_signal(&host->persist_cv);
+    }
+    else
+    {
+        pthread_mutex_unlock(&host->persist_mu);
+        PersistJobClear(&job);
+        pico_status_warn(host, "Workspace order persist queue is full.");
+        return 0;
+    }
+    pthread_mutex_unlock(&host->persist_mu);
+    return generation;
+}
+
+PicoCatalogPersistStatus PicoCatalog_OrderPersistStatus(PicoHost *host,
+                                                        uint64_t generation)
+{
+    PicoCatalogPersistStatus status = PICO_CATALOG_PERSIST_PENDING;
+    if (!host || !host->persist_ready || generation == 0)
+    {
+        return PICO_CATALOG_PERSIST_FAILED;
+    }
+    pthread_mutex_lock(&host->persist_mu);
+    if (host->persist_catalog_completed_generation >= generation)
+    {
+        status = host->persist_catalog_failed_generation == generation
+            ? PICO_CATALOG_PERSIST_FAILED
+            : PICO_CATALOG_PERSIST_SUCCEEDED;
+    }
+    pthread_mutex_unlock(&host->persist_mu);
+    return status;
 }
 
 void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
@@ -4147,7 +4484,8 @@ void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
         }
         PersistJobClear(&job);
     }
-    else if (app->persist_pending && app->persist_pending_count < PICO_MAX_TOTAL_AGENTS)
+    else if (app->persist_pending &&
+             app->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY)
     {
         app->persist_pending[app->persist_pending_count++] = job;
         pthread_cond_signal(&app->persist_cv);

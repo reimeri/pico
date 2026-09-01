@@ -10,6 +10,7 @@
 #include "docs_path.h"
 #include "overlay.h"
 #include "session.h"
+#include "builtins/sidebar.h"
 #include "tinyfiledialogs.h"
 
 #include "clay/clay.h"
@@ -25,6 +26,7 @@
 #define SIDEBAR_ROW_GAP 6
 #define SIDEBAR_FOLDER_ICON 17
 #define SIDEBAR_SESSION_DOT 8
+#define SIDEBAR_DRAG_THRESHOLD 4.0f
 
 typedef struct SidebarWsUi {
     char path[4096];
@@ -46,6 +48,13 @@ typedef struct SidebarState {
     Texture2D settings_icon;
     Texture2D settings_icon_hover;
     bool icons_tried;
+    bool drag_press_pending;
+    int drag_source_index;
+    Vector2 drag_press_pos;
+    bool is_dragging;
+    int drag_target_index;
+    uint64_t order_persist_generation;
+    bool order_unsaved;
 } SidebarState;
 
 static Clay_String CStr(const char *s)
@@ -112,6 +121,42 @@ static int PrevShownForPath(const SidebarWsUi *ui, int ui_count, const char *pat
     return SIDEBAR_SESSION_PAGE;
 }
 
+static int SidebarWorkspaceOrderCmp(const void *a, const void *b)
+{
+    const PicoCatalogWorkspace *x = (const PicoCatalogWorkspace *)a;
+    const PicoCatalogWorkspace *y = (const PicoCatalogWorkspace *)b;
+    if (x->order != y->order)
+    {
+        return x->order < y->order ? -1 : 1;
+    }
+    return strcmp(x->name, y->name);
+}
+
+static void SidebarPreserveWorkspaceOrder(PicoCatalogWorkspace *next, int next_count,
+                                          const PicoCatalogWorkspace *previous,
+                                          int previous_count)
+{
+    int i;
+    int j;
+    if (!next || next_count <= 0 || !previous || previous_count <= 0)
+    {
+        return;
+    }
+    for (i = 0; i < next_count; i++)
+    {
+        next[i].order = previous_count;
+        for (j = 0; j < previous_count; j++)
+        {
+            if (strcmp(next[i].path, previous[j].path) == 0)
+            {
+                next[i].order = j;
+                break;
+            }
+        }
+    }
+    qsort(next, (size_t)next_count, sizeof(*next), SidebarWorkspaceOrderCmp);
+}
+
 static void SidebarRefresh(SidebarState *s)
 {
     PicoCatalogWorkspace *next = NULL;
@@ -125,6 +170,10 @@ static void SidebarRefresh(SidebarState *s)
         return;
     }
     n = PicoCatalog_Scan(&next);
+    if (s->order_unsaved)
+    {
+        SidebarPreserveWorkspaceOrder(next, n, s->workspaces, s->workspace_count);
+    }
     prev_ui = s->ui;
     prev_ui_count = s->ui_count;
     if (n > 0)
@@ -668,18 +717,149 @@ static int SessionRowId(int ws_index, int session_index)
     return ws_index * 512 + session_index;
 }
 
+bool PicoSidebar_DragMoved(float press_x, float press_y, float mouse_x, float mouse_y)
+{
+    float dx = mouse_x - press_x;
+    float dy = mouse_y - press_y;
+    return dx * dx + dy * dy >= SIDEBAR_DRAG_THRESHOLD * SIDEBAR_DRAG_THRESHOLD;
+}
+
+int PicoSidebar_DragTarget(const float *midpoints, int count, int source, float mouse_y)
+{
+    int target = source;
+    int k;
+    if (!midpoints || count <= 0 || source < 0 || source >= count)
+    {
+        return -1;
+    }
+    if (mouse_y < midpoints[source])
+    {
+        for (k = source - 1; k >= 0 && mouse_y < midpoints[k]; k--)
+        {
+            target = k;
+        }
+    }
+    else
+    {
+        for (k = source + 1; k < count && mouse_y > midpoints[k]; k++)
+        {
+            target = k;
+        }
+    }
+    return target;
+}
+
+int PicoSidebar_DropTarget(const float *midpoints, int count, int source, float mouse_y,
+                           bool pointer_over_list)
+{
+    return pointer_over_list
+        ? PicoSidebar_DragTarget(midpoints, count, source, mouse_y)
+        : -1;
+}
+
+static int SidebarComputeDragTarget(SidebarState *s, float mouse_y,
+                                    bool pointer_over_list)
+{
+    int n = s ? s->workspace_count : 0;
+    float mids[PICO_MAX_CATALOG_WORKSPACES];
+    int k;
+    if (!s || s->drag_source_index < 0 || s->drag_source_index >= n)
+    {
+        return -1;
+    }
+    if (n > PICO_MAX_CATALOG_WORKSPACES)
+    {
+        n = PICO_MAX_CATALOG_WORKSPACES;
+    }
+    for (k = 0; k < n; k++)
+    {
+        Clay_ElementData el = Clay_GetElementData(CLAY_IDI("SidebarWs", k));
+        if (!el.found)
+        {
+            return s->drag_source_index;
+        }
+        mids[k] = el.boundingBox.y + el.boundingBox.height * 0.5f;
+    }
+    return PicoSidebar_DropTarget(mids, n, s->drag_source_index, mouse_y,
+                                  pointer_over_list);
+}
+
+static void SidebarReorderWorkspaces(SidebarState *s, int from, int to)
+{
+    PicoCatalogWorkspace moved_ws;
+    SidebarWsUi moved_ui;
+    bool has_ui;
+    int k;
+    if (!s || from < 0 || to < 0 || from >= s->workspace_count || to >= s->workspace_count || from == to)
+    {
+        return;
+    }
+    moved_ws = s->workspaces[from];
+    memset(&moved_ui, 0, sizeof(moved_ui));
+    has_ui = s->ui && from < s->ui_count && to < s->ui_count;
+    if (has_ui)
+    {
+        moved_ui = s->ui[from];
+    }
+    if (from < to)
+    {
+        memmove(&s->workspaces[from], &s->workspaces[from + 1], sizeof(PicoCatalogWorkspace) * (size_t)(to - from));
+        if (has_ui)
+        {
+            memmove(&s->ui[from], &s->ui[from + 1], sizeof(SidebarWsUi) * (size_t)(to - from));
+        }
+    }
+    else
+    {
+        memmove(&s->workspaces[to + 1], &s->workspaces[to], sizeof(PicoCatalogWorkspace) * (size_t)(from - to));
+        if (has_ui)
+        {
+            memmove(&s->ui[to + 1], &s->ui[to], sizeof(SidebarWsUi) * (size_t)(from - to));
+        }
+    }
+    s->workspaces[to] = moved_ws;
+    if (has_ui)
+    {
+        s->ui[to] = moved_ui;
+    }
+    for (k = 0; k < s->workspace_count; k++)
+    {
+        s->workspaces[k].order = k;
+    }
+    s->order_persist_generation = PicoCatalog_EnqueueOrder(s->host, s->workspaces,
+                                                            s->workspace_count);
+    if (s->order_persist_generation == 0)
+    {
+        s->order_unsaved = true;
+    }
+}
+
+static void RenderDropIndicator(void)
+{
+    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                        .height = CLAY_SIZING_FIXED(2)}},
+                  .backgroundColor = (Clay_Color){80, 140, 255, 255},
+                  .cornerRadius = CLAY_CORNER_RADIUS(1)})
+    {
+    }
+}
+
 static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws, int index)
 {
     Clay_ElementId row_id = CLAY_IDI("SidebarWs", index);
     Clay_ElementId plus_id = CLAY_IDI("SidebarPlus", index);
-    bool plus_hovered = Clay_PointerOver(plus_id);
-    bool hovered = Clay_PointerOver(row_id) || plus_hovered;
+    bool is_dragged = s && s->is_dragging && s->drag_source_index == index;
+    bool plus_hovered = !is_dragged && Clay_PointerOver(plus_id);
+    bool hovered = !is_dragged && (Clay_PointerOver(row_id) || plus_hovered);
+    Clay_Color fill = is_dragged ? (Clay_Color){35, 35, 42, 100} : RowFill(false, hovered);
+    Clay_Color text_col = is_dragged ? (Clay_Color){120, 120, 135, 120} : COLOR_TEXT;
+
     CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
                              .childGap = SIDEBAR_ROW_GAP,
                              .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
-                  .backgroundColor = RowFill(false, hovered),
+                  .backgroundColor = fill,
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         RenderFolderIcon(ws->collapsed ? &s->folder_collapsed : &s->folder_expanded,
@@ -690,10 +870,10 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
             CLAY_TEXT(CStr(ws->name),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = PICO_FONT_UI,
-                                        .textColor = COLOR_TEXT,
+                                        .textColor = text_col,
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
-        if (hovered)
+        if (hovered && !is_dragged)
         {
             CLAY(plus_id, {.layout = {.padding = {4, 4, 0, 0}}})
             {
@@ -938,23 +1118,71 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
         {
             for (i = 0; i < s->workspace_count; i++)
             {
+                if (s->is_dragging && s->drag_target_index != s->drag_source_index)
+                {
+                    if (s->drag_target_index < s->drag_source_index && s->drag_target_index == i)
+                    {
+                        RenderDropIndicator();
+                    }
+                }
                 const PicoCatalogWorkspace *ws = &s->workspaces[i];
                 RenderWorkspaceRow(host, s, ws, i);
                 if (ws->collapsed)
                 {
                     RenderPinnedSelected(host, ws, i);
-                    continue;
                 }
-                extras = CountLiveExtras(host, ws);
-                total = extras + ws->session_count;
-                shown = ShownForIndex(s, i, total);
-                RenderLiveExtras(host, ws, i, shown < extras ? shown : extras);
-                for (j = 0; j < shown - extras && j < ws->session_count; j++)
+                else
                 {
-                    RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id, 0,
-                                     SessionRowId(i, extras + j), ws->sessions[j].unseen_complete);
+                    extras = CountLiveExtras(host, ws);
+                    total = extras + ws->session_count;
+                    shown = ShownForIndex(s, i, total);
+                    RenderLiveExtras(host, ws, i, shown < extras ? shown : extras);
+                    for (j = 0; j < shown - extras && j < ws->session_count; j++)
+                    {
+                        RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id, 0,
+                                         SessionRowId(i, extras + j), ws->sessions[j].unseen_complete);
+                    }
+                    RenderMoreLessRow(i, shown, total);
                 }
-                RenderMoreLessRow(i, shown, total);
+                if (s->is_dragging && s->drag_target_index != s->drag_source_index)
+                {
+                    if (s->drag_target_index > s->drag_source_index && s->drag_target_index == i)
+                    {
+                        RenderDropIndicator();
+                    }
+                }
+            }
+        }
+
+        if (s->is_dragging && s->drag_source_index >= 0 && s->drag_source_index < s->workspace_count)
+        {
+            Vector2 mouse = GetMousePosition();
+            const PicoCatalogWorkspace *drag_ws = &s->workspaces[s->drag_source_index];
+            CLAY(CLAY_ID("SidebarDragPreview"),
+                 {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+                               .offset = {.x = mouse.x + 12.0f, .y = mouse.y - 12.0f},
+                               .zIndex = 50,
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+                  .layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                             .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
+                             .childGap = SIDEBAR_ROW_GAP,
+                             .sizing = {.width = CLAY_SIZING_FIXED(180)}},
+                  .backgroundColor = (Clay_Color){42, 42, 50, 230},
+                  .cornerRadius = CLAY_CORNER_RADIUS(6),
+                  .border = {.width = {1, 1, 1, 1}, .color = (Clay_Color){80, 140, 255, 200}}})
+            {
+                RenderFolderIcon(drag_ws->collapsed ? &s->folder_collapsed : &s->folder_expanded,
+                                 drag_ws->collapsed ? ">" : "v");
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .clip = {.horizontal = true}})
+                {
+                    CLAY_TEXT(CStr(drag_ws->name),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = PICO_FONT_UI,
+                                                .textColor = COLOR_TEXT,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
             }
         }
 
@@ -972,7 +1200,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                                  .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                                  .padding = {6, 6, 4, 4},
                                  .sizing = {.width = CLAY_SIZING_FIXED(icon + 12.0f),
-                                            .height = CLAY_SIZING_FIXED(icon + 8.0f)}}})
+                                             .height = CLAY_SIZING_FIXED(icon + 8.0f)}}})
                 {
                     RenderSettingsIcon(s, settings_hover);
                 }
@@ -1137,14 +1365,82 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     {
         return;
     }
-    if (s->want_folder || PicoUi_ModalOpen(host))
+    if (s->want_folder || PicoUi_ModalOpen(host) || IsKeyPressed(KEY_ESCAPE))
     {
+        s->drag_press_pending = false;
+        s->is_dragging = false;
+        s->drag_source_index = -1;
+        s->drag_target_index = -1;
+        host->ui_drag_active = false;
         return;
     }
-    if (SidebarPointerOverClickable(host, s))
+
+    if (s->is_dragging)
+    {
+        host->hovered_drag = true;
+    }
+    else if (SidebarPointerOverClickable(host, s))
     {
         host->hovered_clickable = true;
     }
+
+    if (s->drag_press_pending)
+    {
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            Vector2 mouse = GetMousePosition();
+            if (!s->is_dragging &&
+                PicoSidebar_DragMoved(s->drag_press_pos.x, s->drag_press_pos.y,
+                                      mouse.x, mouse.y))
+            {
+                s->is_dragging = true;
+            }
+            if (s->is_dragging)
+            {
+                host->hovered_drag = true;
+                s->drag_target_index = SidebarComputeDragTarget(
+                    s, mouse.y,
+                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll"))));
+                return;
+            }
+        }
+        else
+        {
+            if (s->is_dragging)
+            {
+                Vector2 mouse = GetMousePosition();
+                s->drag_target_index = SidebarComputeDragTarget(
+                    s, mouse.y,
+                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll"))));
+                if (s->drag_target_index >= 0 && s->drag_target_index < s->workspace_count &&
+                    s->drag_target_index != s->drag_source_index)
+                {
+                    SidebarReorderWorkspaces(s, s->drag_source_index, s->drag_target_index);
+                }
+                s->is_dragging = false;
+                s->drag_press_pending = false;
+                s->drag_source_index = -1;
+                s->drag_target_index = -1;
+                host->ui_drag_active = false;
+                return;
+            }
+            else
+            {
+                int clicked = s->drag_source_index;
+                s->drag_press_pending = false;
+                s->drag_source_index = -1;
+                s->drag_target_index = -1;
+                host->ui_drag_active = false;
+                if (clicked >= 0 && clicked < s->workspace_count &&
+                    Clay_PointerOver(CLAY_IDI("SidebarWs", clicked)))
+                {
+                    ToggleCollapsed(s, clicked);
+                    return;
+                }
+            }
+        }
+    }
+
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return;
@@ -1169,7 +1465,12 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         }
         if (Clay_PointerOver(CLAY_IDI("SidebarWs", i)))
         {
-            ToggleCollapsed(s, i);
+            s->drag_press_pending = true;
+            s->drag_source_index = i;
+            s->drag_press_pos = GetMousePosition();
+            s->is_dragging = false;
+            s->drag_target_index = i;
+            host->ui_drag_active = true;
             return;
         }
         if (ws->collapsed)
@@ -1223,7 +1524,25 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         return;
     }
     selected = PicoHost_SelectedAgentConst(host);
-    if (s->dirty || s->last_scan <= 0.0 || GetTime() - s->last_scan >= SIDEBAR_SCAN_SEC)
+    if (s->order_persist_generation != 0)
+    {
+        PicoCatalogPersistStatus status = PicoCatalog_OrderPersistStatus(
+            host, s->order_persist_generation);
+        if (status == PICO_CATALOG_PERSIST_SUCCEEDED)
+        {
+            s->order_persist_generation = 0;
+            s->order_unsaved = false;
+            s->dirty = true;
+        }
+        else if (status == PICO_CATALOG_PERSIST_FAILED)
+        {
+            s->order_persist_generation = 0;
+            s->order_unsaved = true;
+        }
+    }
+    if (!s->is_dragging && !s->drag_press_pending &&
+        s->order_persist_generation == 0 &&
+        (s->dirty || s->last_scan <= 0.0 || GetTime() - s->last_scan >= SIDEBAR_SCAN_SEC))
     {
         SidebarRefresh(s);
     }
@@ -1283,12 +1602,15 @@ static int SidebarInit(PicoHost *host, void **state_out)
 static void SidebarShutdown(PicoHost *host, void *state)
 {
     SidebarState *s = (SidebarState *)state;
-    (void)host;
     if (!s)
     {
         return;
     }
     (void)ClearFolderRequest(s);
+    if (host)
+    {
+        host->ui_drag_active = false;
+    }
     UnloadFolderIcons(s);
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);

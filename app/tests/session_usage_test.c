@@ -33,6 +33,8 @@ static int g_title_ready_fd = -1;
 static int g_title_continue_fd = -1;
 static int g_catalog_ready_fd = -1;
 static int g_catalog_continue_fd = -1;
+static int g_order_ready_fd = -1;
+static int g_order_continue_fd = -1;
 static int g_lock_attempt_fd = -1;
 static int g_scan_session_calls;
 
@@ -71,6 +73,18 @@ bool PicoSession_TestHook(const char *stage)
         int continue_fd = g_catalog_continue_fd;
         g_catalog_ready_fd = -1;
         g_catalog_continue_fd = -1;
+        if (!TransferByte(ready_fd, true) || !TransferByte(continue_fd, false))
+        {
+            return true;
+        }
+    }
+    if (stage && strcmp(stage, "catalog_order_before_write") == 0 &&
+        g_order_ready_fd >= 0 && g_order_continue_fd >= 0)
+    {
+        int ready_fd = g_order_ready_fd;
+        int continue_fd = g_order_continue_fd;
+        g_order_ready_fd = -1;
+        g_order_continue_fd = -1;
         if (!TransferByte(ready_fd, true) || !TransferByte(continue_fd, false))
         {
             return true;
@@ -1533,6 +1547,173 @@ static int TestCatalog(void)
     return 0;
 }
 
+static int TestCatalogWorkspaceReorder(void)
+{
+    char ws_a[] = "/tmp/pico-cat-ord-a-XXXXXX";
+    char ws_b[] = "/tmp/pico-cat-ord-b-XXXXXX";
+    PicoCatalogWorkspace order[2];
+    PicoCatalogWorkspace *list = NULL;
+    PicoHost writer;
+    uint64_t generation;
+    const char *failure = NULL;
+    int ready_pipe[2] = {-1, -1};
+    int continue_pipe[2] = {-1, -1};
+    int n = 0;
+    int idx_a;
+    int idx_b;
+    int i;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(order, 0, sizeof(order));
+    if (!mkdtemp(ws_a) || !mkdtemp(ws_b))
+    {
+        return Fail("mkdtemp reorder");
+    }
+    if (PicoCatalog_Ensure(ws_a) != 0 || PicoCatalog_Ensure(ws_b) != 0)
+    {
+        failure = "ensure reorder workspaces";
+        goto done;
+    }
+    PicoSessionPersist_Init(&writer);
+    snprintf(order[0].path, sizeof(order[0].path), "%s", ws_b);
+    snprintf(order[1].path, sizeof(order[1].path), "%s", ws_a);
+    generation = PicoCatalog_EnqueueOrder(&writer, order, 2);
+    if (!generation || !PicoCatalog_DrainOrderPersistBefore(&writer, NULL) ||
+        PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_SUCCEEDED)
+    {
+        failure = "initial background workspace order persistence";
+        goto done;
+    }
+
+    n = PicoCatalog_Scan(&list);
+    idx_a = -1;
+    idx_b = -1;
+    for (i = 0; i < n; i++)
+    {
+        idx_a = strcmp(list[i].path, ws_a) == 0 ? i : idx_a;
+        idx_b = strcmp(list[i].path, ws_b) == 0 ? i : idx_b;
+    }
+    PicoCatalog_Free(list, n);
+    list = NULL;
+    n = 0;
+    if (idx_b < 0 || idx_a < 0 || idx_b >= idx_a)
+    {
+        failure = "persisted catalog order should place B before A";
+        goto done;
+    }
+
+    if (pipe(ready_pipe) != 0 || pipe(continue_pipe) != 0)
+    {
+        failure = "workspace order persistence pipes";
+        goto done;
+    }
+    g_order_ready_fd = ready_pipe[1];
+    g_order_continue_fd = continue_pipe[0];
+    snprintf(order[0].path, sizeof(order[0].path), "%s", ws_a);
+    snprintf(order[1].path, sizeof(order[1].path), "%s", ws_b);
+    generation = PicoCatalog_EnqueueOrder(&writer, order, 2);
+    if (!generation || !TransferByte(ready_pipe[0], false) ||
+        PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_PENDING)
+    {
+        failure = "workspace order enqueue should return before the worker writes";
+        goto done;
+    }
+    n = PicoCatalog_Scan(&list);
+    idx_a = -1;
+    idx_b = -1;
+    for (i = 0; i < n; i++)
+    {
+        idx_a = strcmp(list[i].path, ws_a) == 0 ? i : idx_a;
+        idx_b = strcmp(list[i].path, ws_b) == 0 ? i : idx_b;
+    }
+    PicoCatalog_Free(list, n);
+    list = NULL;
+    n = 0;
+    if (idx_b < 0 || idx_a < 0 || idx_b >= idx_a || !TransferByte(continue_pipe[1], true) ||
+        !PicoCatalog_DrainOrderPersistBefore(&writer, NULL) ||
+        PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_SUCCEEDED)
+    {
+        failure = "blocked background reorder should preserve then atomically replace durable order";
+        goto done;
+    }
+
+    n = PicoCatalog_Scan(&list);
+    idx_a = -1;
+    idx_b = -1;
+    for (i = 0; i < n; i++)
+    {
+        idx_a = strcmp(list[i].path, ws_a) == 0 ? i : idx_a;
+        idx_b = strcmp(list[i].path, ws_b) == 0 ? i : idx_b;
+    }
+    PicoCatalog_Free(list, n);
+    list = NULL;
+    n = 0;
+    if (idx_a < 0 || idx_b < 0 || idx_a >= idx_b)
+    {
+        failure = "persisted catalog order should place A before B";
+        goto done;
+    }
+
+    g_session_fail_stage = "catalog_order_before_write";
+    g_status_warning[0] = '\0';
+    snprintf(order[0].path, sizeof(order[0].path), "%s", ws_b);
+    snprintf(order[1].path, sizeof(order[1].path), "%s", ws_a);
+    generation = PicoCatalog_EnqueueOrder(&writer, order, 2);
+    if (!generation || !PicoCatalog_DrainOrderPersistBefore(&writer, NULL) ||
+        PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_FAILED)
+    {
+        failure = "failed workspace order write should report failure";
+        goto done;
+    }
+    g_session_fail_stage = NULL;
+    PicoSessionPersist_Pump(&writer);
+    if (!strstr(g_status_warning, "Workspace order persistence failed"))
+    {
+        failure = "workspace order write failure should warn";
+        goto done;
+    }
+    n = PicoCatalog_Scan(&list);
+    idx_a = -1;
+    idx_b = -1;
+    for (i = 0; i < n; i++)
+    {
+        idx_a = strcmp(list[i].path, ws_a) == 0 ? i : idx_a;
+        idx_b = strcmp(list[i].path, ws_b) == 0 ? i : idx_b;
+    }
+    if (idx_a < 0 || idx_b < 0 || idx_a >= idx_b)
+    {
+        failure = "failed atomic order write should preserve the previous durable order";
+    }
+
+done:
+    g_session_fail_stage = NULL;
+    g_order_ready_fd = -1;
+    g_order_continue_fd = -1;
+    if (continue_pipe[1] >= 0 && failure && writer.persist_ready)
+    {
+        (void)TransferByte(continue_pipe[1], true);
+    }
+    PicoCatalog_Free(list, n);
+    if (writer.persist_ready)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+    }
+    for (i = 0; i < 2; i++)
+    {
+        if (ready_pipe[i] >= 0)
+        {
+            close(ready_pipe[i]);
+        }
+        if (continue_pipe[i] >= 0)
+        {
+            close(continue_pipe[i]);
+        }
+    }
+    rmdir(ws_a);
+    rmdir(ws_b);
+    return failure ? Fail(failure) : 0;
+}
+
 static int TestCatalogListingCache(void)
 {
     char ws[] = "/tmp/pico-catalog-cache-XXXXXX";
@@ -2596,7 +2777,7 @@ int main(void)
         TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
         TestConcurrentAppendDuringTitle() != 0 || TestConcurrentDoneCatalog() != 0 ||
-        TestCatalog() != 0 ||
+        TestCatalog() != 0 || TestCatalogWorkspaceReorder() != 0 ||
         TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
         TestUnseenCompleteRoundTrip() != 0 ||
         TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||

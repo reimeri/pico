@@ -81,7 +81,15 @@ typedef struct PicoHostStaging {
     int ws_provider_count;
 } PicoHostStaging;
 
+typedef enum PicoPersistJobKind {
+    PICO_PERSIST_JOB_SESSION = 0,
+    PICO_PERSIST_JOB_CATALOG_ORDER,
+} PicoPersistJobKind;
+
+#define PICO_PERSIST_QUEUE_CAPACITY (PICO_MAX_TOTAL_AGENTS + 1)
+
 typedef struct PicoSessionPersistJob {
+    PicoPersistJobKind job_kind;
     PicoAgentId agent_id;
     PicoAgentKind kind;
     PicoSessionPersistence persistence;
@@ -90,6 +98,8 @@ typedef struct PicoSessionPersistJob {
     char workspace_path[4096];
     char *header_json;
     char *event_json;
+    char *catalog_order_json;
+    uint64_t catalog_order_generation;
 } PicoSessionPersistJob;
 
 typedef struct PicoSessionPersistFailure {
@@ -136,6 +146,8 @@ struct PicoHost {
     const char *hovered_link;
     bool hovered_tool;
     bool hovered_clickable;
+    bool hovered_drag;
+    bool ui_drag_active;
     bool hovered_text;
     char *status_warn;
 
@@ -168,9 +180,17 @@ struct PicoHost {
     PicoSessionPersistJob *persist_pending;
     int persist_pending_count;
     PicoAgentId persist_flight_agent_id;
+    bool persist_flight_catalog_order;
+    uint64_t persist_catalog_next_generation;
+    uint64_t persist_catalog_completed_generation;
+    uint64_t persist_catalog_failed_generation;
+    char persist_catalog_error[256];
     PicoSessionPersistFailure persist_failures[PICO_MAX_TOTAL_AGENTS];
     int persist_failure_count;
 };
+
+bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
+                                 bool had_complete, bool had_todo, bool had_modal);
 
 static inline PicoWorkspace *PicoHost_PrimaryWorkspace(PicoHost *host)
 {

@@ -1245,6 +1245,13 @@ void PicoSessionPersist_Pump(PicoHost *host)
     (void)host;
 }
 
+bool PicoCatalog_DrainOrderPersistBefore(PicoHost *host, const struct timespec *deadline)
+{
+    (void)host;
+    (void)deadline;
+    return true;
+}
+
 void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent)
 {
     (void)app;

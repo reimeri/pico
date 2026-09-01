@@ -1979,10 +1979,10 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     return PICO_OK;
 }
 
-PicoResult pico_workspace_request_reload(PicoHost *host, PicoWorkspaceId id)
+PicoResult PicoWorkspace_RequestReload(PicoHost *host, PicoWorkspace *workspace,
+                                       bool retry_compile_failures)
 {
-    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, id);
-    if (!host || !workspace)
+    if (!host || !workspace || workspace->host != host)
     {
         return PICO_NOT_FOUND;
     }
@@ -1990,6 +1990,7 @@ PicoResult pico_workspace_request_reload(PicoHost *host, PicoWorkspaceId id)
     {
         return PICO_BUSY;
     }
+    workspace->reload_retry_compile_failures |= retry_compile_failures;
     if (workspace->state == PICO_WORKSPACE_OPEN)
     {
         workspace->state = PICO_WORKSPACE_RELOADING;
@@ -1997,6 +1998,11 @@ PicoResult pico_workspace_request_reload(PicoHost *host, PicoWorkspaceId id)
         PicoWorkspace_PrepareReload(workspace);
     }
     return PICO_OK;
+}
+
+PicoResult pico_workspace_request_reload(PicoHost *host, PicoWorkspaceId id)
+{
+    return PicoWorkspace_RequestReload(host, PicoHost_FindWorkspace(host, id), true);
 }
 
 PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id)

@@ -32,6 +32,7 @@ typedef struct PicoModuleGeneration {
     int ref_count;
     bool builtin;
     bool desired;
+    bool compile_failed;
 } PicoModuleGeneration;
 
 typedef struct PicoExtensionInstance {

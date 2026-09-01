@@ -37,7 +37,7 @@ static int ModuleCapacity(const PicoHost *host)
     return host ? host->module_capacity : 0;
 }
 
-static bool ValidateUserSources(PicoHost *app);
+static bool ValidateUserSources(PicoHost *app, bool retry_compile_failures);
 static int CollectGlobalSources(char paths[][4096], time_t *mtimes,
                                 uint64_t *hashes, int cap);
 static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][4096],
@@ -445,7 +445,8 @@ static void RollbackModuleCandidates(PicoHost *app, uint64_t generation_floor)
     for (int i = app ? app->module_count - 1 : -1; i >= 0; i--)
     {
         LoadedPlugin *module = &app->modules[i];
-        if (module->generation > generation_floor && module->desired)
+        if (module->generation > generation_floor && module->desired &&
+            !module->compile_failed)
         {
             module->desired = false;
             PicoModule_Release(module);
@@ -478,6 +479,7 @@ static void RecordStub(PicoHost *app, const char *src, time_t mtime, const char 
 
 static LoadedPlugin *FindDesiredSource(PicoHost *app, const char *src)
 {
+    LoadedPlugin *stub = NULL;
     if (!app || !src)
     {
         return NULL;
@@ -485,12 +487,19 @@ static LoadedPlugin *FindDesiredSource(PicoHost *app, const char *src)
     for (int i = 0; i < app->module_count; i++)
     {
         LoadedPlugin *p = &app->modules[i];
-        if (!p->builtin && p->desired && p->handle && strcmp(p->source, src) == 0)
+        if (!p->builtin && p->desired && strcmp(p->source, src) == 0)
         {
-            return p;
+            if (p->handle)
+            {
+                return p;
+            }
+            if (!stub)
+            {
+                stub = p;
+            }
         }
     }
-    return NULL;
+    return stub;
 }
 
 static void RecordStubIfMissing(PicoHost *app, const char *src, time_t mtime, const char *err)
@@ -516,6 +525,60 @@ static void RetireSourceGeneration(PicoHost *app, const char *src, LoadedPlugin 
             PicoModule_Release(p); /* release the module-store reference */
         }
     }
+}
+
+static bool CompileFailureMatches(const LoadedPlugin *module, const char *src,
+                                  time_t mtime, uint64_t content_hash)
+{
+    return module && module->compile_failed && src &&
+           strcmp(module->source, src) == 0 && module->mtime == mtime &&
+           module->content_hash == content_hash;
+}
+
+static bool PreserveCompileFailure(const PicoHost *app, const LoadedPlugin *module,
+                                   uint64_t generation_floor,
+                                   bool retry_compile_failures)
+{
+    struct stat st;
+    if (!app || !module || retry_compile_failures || !module->compile_failed ||
+        !module->source[0] || stat(module->source, &st) != 0)
+    {
+        return false;
+    }
+    for (int i = 0; i < app->module_count; i++)
+    {
+        const LoadedPlugin *candidate = &app->modules[i];
+        if (candidate->generation > generation_floor && candidate->desired &&
+            strcmp(candidate->source, module->source) == 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void RememberCompileFailure(PicoHost *app, const char *src, time_t mtime,
+                                   uint64_t content_hash)
+{
+    LoadedPlugin *current;
+    if (!app || !src)
+    {
+        return;
+    }
+    current = FindDesiredSource(app, src);
+    if (!current)
+    {
+        RecordStub(app, src, mtime, NULL);
+        current = FindDesiredSource(app, src);
+    }
+    if (!current)
+    {
+        return;
+    }
+    current->mtime = mtime;
+    current->content_hash = content_hash;
+    current->compile_failed = true;
+    RetireSourceGeneration(app, src, current);
 }
 
 static int LoadSo(PicoHost *app, const char *src, const char *so, time_t mtime, bool activate)
@@ -616,10 +679,7 @@ static void LoadUserFile(PicoHost *app, const char *src)
             char line[8700];
             snprintf(line, sizeof(line), "compile %s:\n%s", src, err);
             pico_status_warn(app, line);
-            if (!current)
-            {
-                RecordStub(app, src, st.st_mtime, line);
-            }
+            RememberCompileFailure(app, src, st.st_mtime, content_hash);
             return;
         }
     }
@@ -631,16 +691,24 @@ static void LoadUserFile(PicoHost *app, const char *src)
     }
 }
 
-static int LoadUserCandidate(PicoHost *app, const char *src)
+static int LoadUserCandidate(PicoHost *app, const char *src,
+                             bool retry_compile_failures)
 {
     struct stat st;
     char so[4096];
     uint64_t content_hash;
+    LoadedPlugin *current;
     if (stat(src, &st) != 0)
     {
         return -1;
     }
     content_hash = SourceHash(src);
+    current = FindDesiredSource(app, src);
+    if (!retry_compile_failures &&
+        CompileFailureMatches(current, src, st.st_mtime, content_hash))
+    {
+        return 0;
+    }
     if (!SoPathFor(src, st.st_mtime, content_hash, so, sizeof(so)))
     {
         return -1;
@@ -651,6 +719,7 @@ static int LoadUserCandidate(PicoHost *app, const char *src)
         if (CompileExt(src, so, err, sizeof(err)) != 0)
         {
             pico_status_warn(app, err);
+            RememberCompileFailure(app, src, st.st_mtime, content_hash);
             return -1;
         }
     }
@@ -814,7 +883,7 @@ static bool AddBuiltinCandidate(PicoHost *app, PicoExt ext)
     return true;
 }
 
-static bool LoadCandidateUsers(PicoHost *app)
+static bool LoadCandidateUsers(PicoHost *app, bool retry_compile_failures)
 {
     if (app->safe_mode)
     {
@@ -828,7 +897,7 @@ static bool LoadCandidateUsers(PicoHost *app)
     (void)hashes;
     for (int i = 0; i < n; i++)
     {
-        if (LoadUserCandidate(app, paths[i]) != 0)
+        if (LoadUserCandidate(app, paths[i], retry_compile_failures) != 0)
         {
             return false;
         }
@@ -903,6 +972,7 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     uint64_t old_module_generation;
     int n;
     int i;
+    bool retry_compile_failures;
     bool ok = true;
 
     if (!app || !workspace || app->safe_mode || app->terminal_shutdown || PicoHost_ProcessRetired())
@@ -913,10 +983,11 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     n = CollectWorkspaceSources(workspace, paths, mtimes, hashes, PICO_MAX_USER_PLUGINS);
     (void)mtimes;
     (void)hashes;
+    retry_compile_failures = workspace->reload_retry_compile_failures;
     old_module_generation = app->next_module_generation;
     for (i = 0; i < n && ok; i++)
     {
-        if (LoadUserCandidate(app, paths[i]) != 0)
+        if (LoadUserCandidate(app, paths[i], retry_compile_failures) != 0)
         {
             ok = false;
         }
@@ -935,7 +1006,9 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
         {
             LoadedPlugin *p = &app->modules[i];
             if (p->generation <= old_module_generation && p->desired && !p->builtin &&
-                SourceWorkspace(app, p->source) == workspace)
+                SourceWorkspace(app, p->source) == workspace &&
+                !PreserveCompileFailure(app, p, old_module_generation,
+                                        retry_compile_failures))
             {
                 p->desired = false;
                 PicoModule_Release(p);
@@ -944,14 +1017,14 @@ void PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     }
 }
 
-bool PicoPlugins_ReloadHost(PicoHost *app)
+static bool ReloadHostWithPolicy(PicoHost *app, bool retry_compile_failures)
 {
     if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return false;
     }
 
-    if (!ValidateUserSources(app))
+    if (!ValidateUserSources(app, retry_compile_failures))
     {
         return false;
     }
@@ -965,7 +1038,7 @@ bool PicoPlugins_ReloadHost(PicoHost *app)
     }
     if (candidate_ok)
     {
-        candidate_ok = LoadCandidateUsers(app);
+        candidate_ok = LoadCandidateUsers(app, retry_compile_failures);
     }
 
     if (!candidate_ok)
@@ -976,12 +1049,14 @@ bool PicoPlugins_ReloadHost(PicoHost *app)
 
     for (int i = 0; i < app->module_count; i++)
     {
-        if (app->modules[i].generation <= old_module_generation &&
-            app->modules[i].desired &&
-            !IsWorkspaceLocalSource(app, app->modules[i].source))
+        LoadedPlugin *module = &app->modules[i];
+        if (module->generation <= old_module_generation && module->desired &&
+            !IsWorkspaceLocalSource(app, module->source) &&
+            !PreserveCompileFailure(app, module, old_module_generation,
+                                    retry_compile_failures))
         {
-            app->modules[i].desired = false;
-            PicoModule_Release(&app->modules[i]);
+            module->desired = false;
+            PicoModule_Release(module);
         }
     }
 
@@ -989,10 +1064,15 @@ bool PicoPlugins_ReloadHost(PicoHost *app)
     return true;
 }
 
-static void RequestWorkspaceRollout(PicoHost *host, PicoWorkspace *workspace)
+bool PicoPlugins_ReloadHost(PicoHost *app)
 {
-    if (!host || !workspace ||
-        pico_workspace_request_reload(host, workspace->id) != PICO_OK)
+    return ReloadHostWithPolicy(app, true);
+}
+
+static void RequestWorkspaceRollout(PicoHost *host, PicoWorkspace *workspace,
+                                    bool retry_compile_failures)
+{
+    if (PicoWorkspace_RequestReload(host, workspace, retry_compile_failures) != PICO_OK)
     {
         return;
     }
@@ -1010,7 +1090,7 @@ void PicoPlugins_Reload(PicoHost *app)
     }
     for (int i = 0; i < app->workspace_count; i++)
     {
-        RequestWorkspaceRollout(app, app->workspaces[i]);
+        RequestWorkspaceRollout(app, app->workspaces[i], true);
     }
 }
 
@@ -1110,7 +1190,7 @@ static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][
     return ctx.collect.n;
 }
 
-static bool ValidateUserSources(PicoHost *app)
+static bool ValidateUserSources(PicoHost *app, bool retry_compile_failures)
 {
     char paths[PICO_MAX_USER_PLUGINS][4096];
     time_t mtimes[PICO_MAX_USER_PLUGINS];
@@ -1119,6 +1199,12 @@ static bool ValidateUserSources(PicoHost *app)
     for (int i = 0; i < n; i++)
     {
         char so[4096];
+        LoadedPlugin *current = FindDesiredSource(app, paths[i]);
+        if (!retry_compile_failures &&
+            CompileFailureMatches(current, paths[i], mtimes[i], hashes[i]))
+        {
+            continue;
+        }
         if (!SoPathFor(paths[i], mtimes[i], hashes[i], so, sizeof(so)))
         {
             pico_status_warn(app, "Extension cache path is too long.");
@@ -1132,6 +1218,7 @@ static bool ValidateUserSources(PicoHost *app)
                 char line[8700];
                 snprintf(line, sizeof(line), "compile %.4000s:\n%.4000s", paths[i], err);
                 pico_status_warn(app, line);
+                RememberCompileFailure(app, paths[i], mtimes[i], hashes[i]);
                 return false;
             }
         }
@@ -1251,12 +1338,12 @@ void PicoPlugins_Poll(PicoHost *app)
     bool global_ready = !global_changed;
     if (global_changed)
     {
-        global_ready = PicoPlugins_ReloadHost(app);
+        global_ready = ReloadHostWithPolicy(app, false);
         if (global_ready)
         {
             for (int w = 0; w < app->workspace_count; w++)
             {
-                RequestWorkspaceRollout(app, app->workspaces[w]);
+                RequestWorkspaceRollout(app, app->workspaces[w], false);
             }
         }
     }
@@ -1265,7 +1352,7 @@ void PicoPlugins_Poll(PicoHost *app)
         PicoWorkspace *workspace = app->workspaces[w];
         if (workspace && workspace_changed[w] && !(global_changed && global_ready))
         {
-            RequestWorkspaceRollout(app, workspace);
+            RequestWorkspaceRollout(app, workspace, false);
         }
         else if (workspace && workspace->reload_queued &&
                  !PicoWorkspace_BlocksReload(workspace))

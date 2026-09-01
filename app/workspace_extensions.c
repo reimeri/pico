@@ -562,6 +562,10 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     {
         return false;
     }
+    if (workspace->state == PICO_WORKSPACE_OPEN)
+    {
+        workspace->reload_retry_compile_failures = true;
+    }
 
     if (PicoWorkspace_BlocksReload(workspace))
     {
@@ -588,6 +592,7 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     PicoWorkspace_SetAcceptingWork(workspace, false);
 
     PicoPlugins_LoadWorkspaceSources(host, workspace);
+    workspace->reload_retry_compile_failures = false;
 
     PicoWorkspaceExtensionSet old;
     CaptureWorkspaceExtensionSet(workspace, &old);

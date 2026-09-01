@@ -108,11 +108,11 @@ cc -shared -fPIC -std=c99 -I<pico SDK>/include -I<source dir> -o <cache>.so <fil
 
 The packaged SDK is `share/pico/sdk/include` relative to Pico's install prefix and contains the public `pico/` headers plus the Clay, Raylib, JSON, markdown, and text-range headers those contracts expose. Development builds create the same `sdk/include` layout beside the executable. `PICO_DATA_DIR` can override the runtime data root when testing a staged package.
 
-The source directory is also on the include path, so local headers next to the `.c` file work. Packaged archives and AppImages require a host C99 compiler; the Nix package supplies GCC. Compile failures, a missing compiler/SDK, and failed `pico_add_tool` registrations show in the overlay; the previous working module generation remains active when a replacement fails.
+The source directory is also on the include path, so local headers next to the `.c` file work. Packaged archives and AppImages require a host C99 compiler; the Nix package supplies GCC. Compile failures, a missing compiler/SDK, and failed `pico_add_tool` registrations show in the overlay; the previous working module generation remains active when a replacement fails. Polling does not recompile an unchanged failed source; F5 and `/reload` still retry.
 
 ## Reload
 
-F5, `/reload`, toggling an extension in `/extensions`, or a `.c` content change (polled ~0.5s). Host-extension replacement compiles user-global (config) sources only and happens between frames; it does not wait for workspace workers. Workspace-local `.c` files reload with that workspace. A compile failure in one workspace does not block host reload or another workspace.
+F5, `/reload`, toggling an extension in `/extensions`, or a `.c` content change (polled ~0.5s). An unchanged compile failure is not polled again until the source changes or the user reloads. Host-extension replacement compiles user-global (config) sources only and happens between frames; it does not wait for workspace workers. Workspace-local `.c` files reload with that workspace. A compile failure in one workspace does not block host reload or another workspace.
 
 Workspace reload is **deferred** until that workspace's live/retired runtimes, pending asks, offered catalogs, events, and delegation jobs are quiescent. A queued workspace reload prevents new turns and delegations only in that workspace. After publication, old instances shut down once they are quiescent; retained runtimes keep their exact generation alive until their callbacks and queued events finish. Reload then validates the complete named-profile registry against the new tools/models, revalidates copied restricted agent policies, sends session-reset notification for every live agent, and replays structured tool details.
 

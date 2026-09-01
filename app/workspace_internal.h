@@ -170,6 +170,7 @@ struct PicoWorkspace {
     int workspace_plugin_count;
     bool accepting_work;
     bool reload_queued;
+    bool reload_retry_compile_failures;
     bool retained_shutdown;
 };
 
@@ -194,6 +195,8 @@ void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt);
 void *PicoWorkspaceExtensions_State(const PicoWorkspace *workspace, const char *name);
 void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId agent_id);
 bool PicoWorkspace_Reload(PicoWorkspace *workspace);
+PicoResult PicoWorkspace_RequestReload(PicoHost *host, PicoWorkspace *workspace,
+                                       bool retry_compile_failures);
 void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace);
 bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name);
 

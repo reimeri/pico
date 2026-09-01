@@ -2770,6 +2770,285 @@ fail:
     return 1;
 }
 
+static const char *kQuarantineHostExt =
+    "#include \"pico/plugin.h\"\n"
+    "static int HostInit(PicoHost *host, void **state_out)\n"
+    "{\n"
+    "    static int state;\n"
+    "    (void)host;\n"
+    "    *state_out = &state;\n"
+    "    return 0;\n"
+    "}\n"
+    "PicoExt pico_ext(void)\n"
+    "{\n"
+    "    return (PicoExt){\n"
+    "        .abi = PICO_EXT_ABI,\n"
+    "        .name = \"quarantine_host\",\n"
+    "        .host_init = HostInit,\n"
+    "    };\n"
+    "}\n";
+
+static const char *kQuarantineOtherHostExt =
+    "#include \"pico/plugin.h\"\n"
+    "static int HostInit(PicoHost *host, void **state_out)\n"
+    "{\n"
+    "    static int state;\n"
+    "    (void)host;\n"
+    "    *state_out = &state;\n"
+    "    return 0;\n"
+    "}\n"
+    "PicoExt pico_ext(void)\n"
+    "{\n"
+    "    return (PicoExt){\n"
+    "        .abi = PICO_EXT_ABI,\n"
+    "        .name = \"quarantine_other_host\",\n"
+    "        .host_init = HostInit,\n"
+    "    };\n"
+    "}\n";
+
+static const char *kQuarantineWorkspaceExt =
+    "#include \"pico/plugin.h\"\n"
+    "static int WorkspaceInit(PicoWorkspace *workspace, void **state_out)\n"
+    "{\n"
+    "    static int state;\n"
+    "    (void)workspace;\n"
+    "    *state_out = &state;\n"
+    "    return 0;\n"
+    "}\n"
+    "PicoExt pico_ext(void)\n"
+    "{\n"
+    "    return (PicoExt){\n"
+    "        .abi = PICO_EXT_ABI,\n"
+    "        .name = \"quarantine_ws\",\n"
+    "        .workspace_init = WorkspaceInit,\n"
+    "    };\n"
+    "}\n";
+
+static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
+{
+    char cfg[] = "/tmp/pico-qhost-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-qhost-cache-XXXXXX";
+    char ws[] = "/tmp/pico-qhost-ws-XXXXXX";
+    char ext_dir[4096];
+    char source[8192];
+    char other_source[8192];
+    PicoHost *host = NULL;
+    PicoWorkspaceId id = 0;
+    void *working_state = NULL;
+    char *warned = NULL;
+
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(ws))
+    {
+        Fail("mkdtemp host compile quarantine");
+        return 1;
+    }
+    snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
+    snprintf(source, sizeof(source), "%s/quarantine_host.c", ext_dir);
+    snprintf(other_source, sizeof(other_source), "%s/quarantine_other_host.c", ext_dir);
+    if (MkdirParents(ext_dir) != 0 || WriteFile(source, kQuarantineHostExt) != 0)
+    {
+        Fail("write host compile quarantine extension");
+        RmRf(cfg);
+        RmRf(cache);
+        RmRf(ws);
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, false) != PICO_OK || !host ||
+        pico_workspace_open(host, ws, &id) != PICO_OK)
+    {
+        Fail("open host compile quarantine");
+        goto fail;
+    }
+    PicoPlugins_Load(host);
+    working_state = PicoPlugins_HostState(host, "quarantine_host");
+    if (!working_state)
+    {
+        Fail("host compile quarantine extension must start active");
+        goto fail;
+    }
+    if (WriteFile(source, "this is not valid C {\n") != 0)
+    {
+        Fail("overwrite host compile quarantine extension");
+        goto fail;
+    }
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    if (!host->status_warn || !strstr(host->status_warn, "quarantine_host.c"))
+    {
+        Fail("host compile failure must warn");
+        goto fail;
+    }
+    if (PicoPlugins_HostState(host, "quarantine_host") != working_state)
+    {
+        Fail("host compile failure must preserve the working generation");
+        goto fail;
+    }
+    warned = strdup(host->status_warn);
+    if (!warned)
+    {
+        Fail("strdup host compile quarantine warning");
+        goto fail;
+    }
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    if (!host->status_warn || strcmp(host->status_warn, warned) != 0)
+    {
+        Fail("unchanged host compile failure must not retry on poll");
+        goto fail;
+    }
+    if (WriteFile(other_source, kQuarantineOtherHostExt) != 0)
+    {
+        Fail("write second host extension beside quarantined failure");
+        goto fail;
+    }
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    if (!host->status_warn || strcmp(host->status_warn, warned) != 0 ||
+        !PicoPlugins_HostState(host, "quarantine_other_host"))
+    {
+        Fail("another host source change must skip the quarantined failure");
+        goto fail;
+    }
+    if (PicoPlugins_ReloadHost(host) || !host->status_warn ||
+        strcmp(host->status_warn, warned) == 0)
+    {
+        Fail("explicit host reload must retry a quarantined compile failure");
+        goto fail;
+    }
+    free(warned);
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(ws);
+    return 0;
+
+fail:
+    free(warned);
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(ws);
+    return 1;
+}
+
+static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
+{
+    char cfg[] = "/tmp/pico-qws-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-qws-cache-XXXXXX";
+    char ws[] = "/tmp/pico-qws-ws-XXXXXX";
+    char ext_dir[4096];
+    char source[8192];
+    char global_ext_dir[4096];
+    char global_source[8192];
+    PicoHost *host = NULL;
+    PicoWorkspaceId id = 0;
+    PicoWorkspace *workspace;
+    void *working_state = NULL;
+    char *warned = NULL;
+
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(ws))
+    {
+        Fail("mkdtemp workspace compile quarantine");
+        return 1;
+    }
+    snprintf(ext_dir, sizeof(ext_dir), "%s/.pico/extensions", ws);
+    snprintf(source, sizeof(source), "%s/quarantine_ws.c", ext_dir);
+    snprintf(global_ext_dir, sizeof(global_ext_dir), "%s/pico/extensions", cfg);
+    snprintf(global_source, sizeof(global_source), "%s/quarantine_other_host.c", global_ext_dir);
+    if (MkdirParents(ext_dir) != 0 || WriteFile(source, kQuarantineWorkspaceExt) != 0)
+    {
+        Fail("write initial workspace compile quarantine extension");
+        RmRf(cfg);
+        RmRf(cache);
+        RmRf(ws);
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, false) != PICO_OK || !host ||
+        pico_workspace_open(host, ws, &id) != PICO_OK)
+    {
+        Fail("open workspace compile quarantine");
+        goto fail;
+    }
+    workspace = PicoHost_FindWorkspace(host, id);
+    working_state = PicoPlugins_WorkspaceState(workspace, "quarantine_ws");
+    if (!workspace || !working_state || WriteFile(source, "this is not valid C {\n") != 0)
+    {
+        Fail("activate and overwrite workspace compile quarantine extension");
+        goto fail;
+    }
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    if (!host->status_warn || !strstr(host->status_warn, "quarantine_ws.c"))
+    {
+        Fail("workspace compile failure must warn");
+        goto fail;
+    }
+    if (PicoPlugins_WorkspaceState(workspace, "quarantine_ws") != working_state)
+    {
+        Fail("workspace compile failure must preserve the working generation");
+        goto fail;
+    }
+    warned = strdup(host->status_warn);
+    if (!warned)
+    {
+        Fail("strdup workspace compile quarantine warning");
+        goto fail;
+    }
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    if (!host->status_warn || strcmp(host->status_warn, warned) != 0)
+    {
+        Fail("unchanged workspace compile failure must not retry on poll");
+        goto fail;
+    }
+    if (MkdirParents(global_ext_dir) != 0 ||
+        WriteFile(global_source, kQuarantineOtherHostExt) != 0)
+    {
+        Fail("write global extension beside workspace quarantine");
+        goto fail;
+    }
+    host->plugin_last_poll = -1.0;
+    PicoPlugins_Poll(host);
+    if (!host->status_warn || strcmp(host->status_warn, warned) != 0 ||
+        !PicoPlugins_HostState(host, "quarantine_other_host"))
+    {
+        Fail("global rollout must skip unchanged workspace compile failure");
+        goto fail;
+    }
+    (void)PicoWorkspace_Reload(workspace);
+    if (!host->status_warn || strcmp(host->status_warn, warned) == 0)
+    {
+        Fail("explicit workspace reload must retry a quarantined compile failure");
+        goto fail;
+    }
+    free(warned);
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(ws);
+    return 0;
+
+fail:
+    free(warned);
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(ws);
+    return 1;
+}
+
 static const char *kWorkspaceLocalWithHostExt =
     "#include \"pico/plugin.h\"\n"
     "#include <stdlib.h>\n"
@@ -5789,6 +6068,14 @@ int main(void)
         return 1;
     }
     if (TestWorkspaceLocalPollingReloadsOnlyOwner() != 0)
+    {
+        return 1;
+    }
+    if (TestHostCompileFailureQuarantinesUnchangedPoll() != 0)
+    {
+        return 1;
+    }
+    if (TestWorkspaceCompileFailureQuarantinesUnchangedPoll() != 0)
     {
         return 1;
     }

@@ -27,6 +27,8 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent);
 bool PicoAgent_IsBusy(const PicoAgent *agent);
 /* Main-thread: which pending call this id is. IDLE if it is not in the live queue. */
 PicoToolCallProgress PicoAgent_ToolCallProgress(const PicoAgent *agent, const char *call_id);
+/* Milliseconds since the current LLM or tool wait started. 0 if idle. */
+int PicoAgent_LiveActionMs(const PicoAgent *agent);
 bool PicoAgent_CancelRequested(const PicoAgent *agent);
 bool PicoAgent_AskUiOpen(const PicoAgent *agent);
 void PicoAgent_DismissError(PicoAgent *agent);

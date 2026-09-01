@@ -155,6 +155,7 @@ struct PicoAgentRt {
 
     int stream_msg;
     bool stream_dirty;
+    double action_t0;
 
     uint64_t ask_id;
     char *ask_request;
@@ -1635,6 +1636,38 @@ static double ThinkNow(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
+static void StampActionT0(PicoAgentRt *rt)
+{
+    if (!rt)
+    {
+        return;
+    }
+    rt->action_t0 = ThinkNow();
+    if (rt->action_t0 <= 0.0)
+    {
+        rt->action_t0 = 0.000000001;
+    }
+}
+
+static int ElapsedMsSince(double t0)
+{
+    if (t0 <= 0.0)
+    {
+        return 0;
+    }
+    double elapsed = ThinkNow() - t0;
+    if (elapsed < 0.0)
+    {
+        elapsed = 0.0;
+    }
+    int ms = (int)(elapsed * 1000.0 + 0.5);
+    if (ms < 1)
+    {
+        ms = 1;
+    }
+    return ms;
+}
+
 void PicoTraceLine_Release(PicoTraceLine *line)
 {
     if (!line)
@@ -1659,13 +1692,21 @@ void PicoTraceLine_Release(PicoTraceLine *line)
     memset(line, 0, sizeof(*line));
 }
 
-static void ThinkLineStart(PicoTraceLine *line)
+static void ThinkLineStart(const PicoAgent *agent, PicoTraceLine *line)
 {
     if (!line || line->think_ms > 0 || line->think_t0 > 0.0)
     {
         return;
     }
-    line->think_t0 = ThinkNow();
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (rt && rt->action_t0 > 0.0)
+    {
+        line->think_t0 = rt->action_t0;
+    }
+    else
+    {
+        line->think_t0 = ThinkNow();
+    }
     if (line->think_t0 <= 0.0)
     {
         line->think_t0 = 0.000000001;
@@ -1678,17 +1719,7 @@ void PicoTraceLine_FreezeThink(PicoTraceLine *line)
     {
         return;
     }
-    double elapsed = ThinkNow() - line->think_t0;
-    if (elapsed < 0.0)
-    {
-        elapsed = 0.0;
-    }
-    int ms = (int)(elapsed * 1000.0 + 0.5);
-    if (ms < 1)
-    {
-        ms = 1;
-    }
-    line->think_ms = ms;
+    line->think_ms = ElapsedMsSince(line->think_t0);
 }
 
 static int FreezeTrailingThinkMs(PicoMessage *m)
@@ -1738,7 +1769,7 @@ static void TraceAppendThink(PicoHost *app, PicoAgent *agent, int idx, const cha
     {
         return;
     }
-    ThinkLineStart(line);
+    ThinkLineStart(agent, line);
     size_t old = line->text ? strlen(line->text) : 0;
     char *next = (char *)realloc(line->text, old + n + 1);
     if (!next)
@@ -1822,7 +1853,7 @@ static void TraceSetThinkSummary(PicoHost *app, PicoAgent *agent, int idx, const
     {
         return;
     }
-    ThinkLineStart(line);
+    ThinkLineStart(agent, line);
     int index = (steps > 0 ? steps : line->think_steps) - 1;
     if (index < 0)
     {
@@ -2162,6 +2193,7 @@ static void StartNextTool(PicoHost *app, PicoAgent *agent)
         StartNextTool(app, agent);
         return;
     }
+    StampActionT0(rt);
     if (!QueueTool(app, agent, call->name, call->arguments, call->call_id, tool->run, tool->state))
     {
         SetErrorState(app, agent, "Failed to start tool");
@@ -2183,6 +2215,7 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
     }
     rt->stream_dirty = false;
     agent->state = PICO_AGENT_LLM_WAIT;
+    StampActionT0(rt);
     SetActivity(app, agent, "Thinking…");
     free(agent->error);
     agent->error = NULL;
@@ -2586,6 +2619,20 @@ PicoToolCallProgress PicoAgent_ToolCallProgress(const PicoAgent *agent, const ch
         return i == rt->pending_next ? PICO_TOOL_CALL_RUNNING : PICO_TOOL_CALL_QUEUED;
     }
     return PICO_TOOL_CALL_IDLE;
+}
+
+int PicoAgent_LiveActionMs(const PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    if (!rt || rt->action_t0 <= 0.0)
+    {
+        return 0;
+    }
+    if (agent->state != PICO_AGENT_LLM_WAIT && agent->state != PICO_AGENT_TOOL_WAIT)
+    {
+        return 0;
+    }
+    return ElapsedMsSince(rt->action_t0);
 }
 
 bool PicoAgent_CancelRequested(const PicoAgent *agent)

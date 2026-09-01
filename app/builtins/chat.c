@@ -414,6 +414,16 @@ static Clay_ElementId ThinkSynthId(const TranscriptView *view, int message_index
     return ToolElementId(view, message_index, 0, CLAY_STRING("ThinkSynth"));
 }
 
+static Clay_ElementId ThinkSynthRowId(const TranscriptView *view, int message_index)
+{
+    return ToolElementId(view, message_index, 0, CLAY_STRING("ThinkSynthRow"));
+}
+
+static Clay_ElementId ThinkSynthChevronId(const TranscriptView *view, int message_index)
+{
+    return ToolElementId(view, message_index, 0, CLAY_STRING("ThinkSynthChevron"));
+}
+
 static void ThinkFrameReset(void)
 {
     for (ThinkLabelBlock *block = g_think_label_blocks; block; block = block->next)
@@ -794,15 +804,31 @@ static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int
 
 static void RenderSyntheticThink(const TranscriptView *view, int message_index)
 {
+    Clay_ElementId row_id = ThinkSynthRowId(view, message_index);
     Clay_ElementId label_id = ThinkSynthId(view, message_index);
-    CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                    .clip = {.horizontal = true, .vertical = true}})
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 6,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
-        CLAY_TEXT(CLAY_STRING("Thinking…"),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
-                                    .fontSize = PICO_FONT_UI,
-                                    .textColor = COLOR_MUTED,
-                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = 8,
+                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                            .clip = {.horizontal = true, .vertical = true}})
+            {
+                ViewText(view, ViewCStr("Thinking…"),
+                         (Clay_TextElementConfig){.fontId = FONT_ITALIC,
+                                                  .fontSize = PICO_FONT_UI,
+                                                  .textColor = COLOR_MUTED,
+                                                  .wrapMode = CLAY_TEXT_WRAP_NONE});
+            }
+            CLAY(ThinkSynthChevronId(view, message_index),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_GROW(0)}}})
+            {
+            }
+        }
     }
     ViewBreak(view);
 }
@@ -2311,6 +2337,20 @@ static Color ClayToRay(Clay_Color c)
     return (Color){(unsigned char)c.r, (unsigned char)c.g, (unsigned char)c.b, (unsigned char)c.a};
 }
 
+static bool TraceLineLive(const TranscriptView *view, const PicoTraceLine *line, int message_index,
+                          int trace_index)
+{
+    if (!view || !line)
+    {
+        return false;
+    }
+    if (line->is_tool)
+    {
+        return ToolProgress(view, line) == PICO_TOOL_CALL_RUNNING;
+    }
+    return ThinkBurstLive(view, message_index, trace_index);
+}
+
 static void IntersectScissor(Clay_BoundingBox a, Clay_BoundingBox b, Rectangle *out)
 {
     float x1 = a.x > b.x ? a.x : b.x;
@@ -2411,7 +2451,7 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
             Clay_ElementId chevron_id =
                 line->is_tool ? ToolChevronId(view, i, t) : ThinkChevronId(view, i, t);
             bool hovered = Clay_PointerOver(row_id);
-            if (!hovered && !line->expanded)
+            if (!hovered && !line->expanded && !TraceLineLive(view, line, i, t))
             {
                 continue;
             }
@@ -2425,6 +2465,82 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
             Color color = ClayToRay(hovered ? COLOR_TOOL_NAME_HOVER : COLOR_TOOL_CHEVRON);
             DrawTextPro(font, glyph, center, (Vector2){size.x * 0.5f, size.y * 0.5f},
                         line->expanded ? 90.0f : 0.0f, glyph_px, 0.0f, color);
+        }
+    }
+    EndScissorMode();
+}
+
+static void FormatLiveTimer(int ms, char *buf, size_t cap)
+{
+    long sec = ms / 1000;
+    if (sec < 0)
+    {
+        sec = 0;
+    }
+    snprintf(buf, cap, "%lds", sec);
+}
+
+static void DrawLiveTimerLabel(Clay_BoundingBox row, const Clay_BoundingBox *chevron, int ms)
+{
+    char text[32];
+    FormatLiveTimer(ms, text, sizeof(text));
+    Font font = Pico_FontAt(FONT_REGULAR, PICO_FONT_UI);
+    float px = Pico_FontPx(PICO_FONT_UI);
+    Vector2 size = MeasureTextEx(font, text, px, 0.0f);
+    /* Anchor past the 14px chevron slot, or past the header row when that
+     * slot is missing. Never right-align to a growing label: that box ends
+     * before the slot, so the timer jumps right when the real row appears. */
+    Clay_BoundingBox anchor = chevron ? *chevron : row;
+    float x = (chevron ? chevron->x + chevron->width : row.x + row.width) + 8.0f;
+    float y = anchor.y + (anchor.height - size.y) * 0.5f;
+    DrawTextEx(font, text, (Vector2){roundf(x), roundf(y)}, px, 0.0f, ClayToRay(COLOR_MUTED));
+}
+
+static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox clip)
+{
+    if (!view || !view->messages)
+    {
+        return;
+    }
+    int live_ms = PicoAgent_LiveActionMs(view->owner);
+    if (live_ms <= 0)
+    {
+        return;
+    }
+    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+    for (int i = 0; i < view->message_count; i++)
+    {
+        PicoMessage *msg = (PicoMessage *)&view->messages[i];
+        for (int t = 0; t < msg->trace_count; t++)
+        {
+            PicoTraceLine *line = &msg->trace[t];
+            if (!TraceLineLive(view, line, i, t))
+            {
+                continue;
+            }
+            Clay_ElementData row = Clay_GetElementData(TraceRowId(view, line, i, t));
+            if (!row.found)
+            {
+                continue;
+            }
+            Clay_ElementId chevron_id =
+                line->is_tool ? ToolChevronId(view, i, t) : ThinkChevronId(view, i, t);
+            Clay_ElementData chevron = Clay_GetElementData(chevron_id);
+            DrawLiveTimerLabel(row.boundingBox, chevron.found ? &chevron.boundingBox : NULL, live_ms);
+        }
+        bool has_source = msg->source && msg->source[0];
+        bool live_llm = i == view->message_count - 1 && view->state == PICO_AGENT_LLM_WAIT;
+        bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
+                              ThinkHasBody(&msg->trace[msg->trace_count - 1]);
+        if (live_llm && !has_source && !trailing_think)
+        {
+            Clay_ElementData row = Clay_GetElementData(ThinkSynthRowId(view, i));
+            Clay_ElementData chevron = Clay_GetElementData(ThinkSynthChevronId(view, i));
+            if (row.found)
+            {
+                DrawLiveTimerLabel(row.boundingBox, chevron.found ? &chevron.boundingBox : NULL,
+                                   live_ms);
+            }
         }
     }
     EndScissorMode();
@@ -2468,6 +2584,49 @@ static void PicoChat_DrawChevrons(PicoHost *app)
                     .selectable = false,
                 };
                 DrawTraceChevrons(&view, clip);
+            }
+        }
+    }
+}
+
+static void PicoChat_DrawLiveTimers(PicoHost *app)
+{
+    if (!app->fonts)
+    {
+        return;
+    }
+    if (!PicoUi_ModalOpen(app))
+    {
+        Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (scroll.found)
+        {
+            TranscriptView main = MainTranscriptView(app);
+            DrawTraceLiveTimers(&main, scroll.boundingBox);
+        }
+    }
+    if (InspectIsTopModal(app))
+    {
+        PicoSubagentInspect inspect;
+        memset(&inspect, 0, sizeof(inspect));
+        const char *fallback = NULL;
+        if (InspectCurrent(app, &inspect, &fallback) && inspect.message_count > 0)
+        {
+            Clay_BoundingBox clip;
+            if (InspectScrollClip(&clip))
+            {
+                PicoAgent *owner =
+                    inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
+                TranscriptView view = {
+                    .app = app,
+                    .messages = inspect.messages,
+                    .message_count = inspect.message_count,
+                    .state = inspect.state,
+                    .activity = inspect.activity,
+                    .owner = owner,
+                    .id_ns = g_inspect_n,
+                    .selectable = false,
+                };
+                DrawTraceLiveTimers(&view, clip);
             }
         }
     }
@@ -2641,6 +2800,7 @@ void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state
     {
         PicoChat_DrawInspectSheen(app);
     }
+    PicoChat_DrawLiveTimers(app);
 }
 
 static void ChatOnFrame(PicoHost *app, void *state, float dt)

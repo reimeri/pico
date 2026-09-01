@@ -3279,11 +3279,12 @@ static int TestQueuedToolCallProgress(void)
     pthread_mutex_lock(&g_test.mu);
     int invocations = g_test.tool_invocations;
     pthread_mutex_unlock(&g_test.mu);
+    int live_ms = PicoAgent_LiveActionMs(agent);
     bool queued = first && !first->tool_output &&
                   PicoAgent_ToolCallProgress(agent, "call-1-0") == PICO_TOOL_CALL_RUNNING &&
                   second && !second->tool_output &&
                   PicoAgent_ToolCallProgress(agent, "call-1-1") == PICO_TOOL_CALL_QUEUED &&
-                  invocations == 1;
+                  invocations == 1 && live_ms > 0;
 
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
@@ -3294,8 +3295,13 @@ static int TestQueuedToolCallProgress(void)
         PicoHost_Shutdown(&app);
         return Fail(name, "batched tools did not finish");
     }
+    int idle_ms = PicoAgent_LiveActionMs(TestAgent(&app));
     PicoHost_Shutdown(&app);
-    return queued ? 0 : Fail(name, "the later call was running before the first finished");
+    if (!queued)
+    {
+        return Fail(name, "the later call was running before the first finished");
+    }
+    return idle_ms == 0 ? 0 : Fail(name, "live action timer did not clear after tools finished");
 }
 
 static int TestTodoAgentIsolation(void)
@@ -3878,11 +3884,23 @@ static int TestCancelledThinkingPersistence(void)
         PicoHost_Shutdown(&app);
         return Fail(name, "thinking provider did not start");
     }
+    int live_ms = PicoAgent_LiveActionMs(TestAgent(&app));
     PicoAgent_Cancel(TestAgent(&app));
     if (!WaitForIdle(&app))
     {
         PicoHost_Shutdown(&app);
         return Fail(name, "cancelled thinking provider did not return idle");
+    }
+    int idle_ms = PicoAgent_LiveActionMs(TestAgent(&app));
+    if (live_ms <= 0)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "live thinking had no elapsed timer");
+    }
+    if (idle_ms != 0)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "live action timer did not clear after cancel");
     }
     pthread_mutex_lock(&g_test.mu);
     bool logged = strcmp(g_test.logged_thinking, "partial-think") == 0;

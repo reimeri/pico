@@ -104,6 +104,7 @@ typedef struct PicoSessionPersistJob {
 
 typedef struct PicoSessionPersistFailure {
     PicoAgentId agent_id;
+    char session_id[40];
     char error[256];
 } PicoSessionPersistFailure;
 

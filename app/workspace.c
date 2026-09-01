@@ -2020,12 +2020,14 @@ static void ProcessDelegationTerminals(PicoWorkspace *workspace)
             }
             else if (child->state == PICO_AGENT_ERROR)
             {
+                PicoSession_DrainPersist(workspace->host, child);
                 PublishDelegation(job, PICO_DELEGATION_ERROR, "error", child,
                                   child->error ? child->error : "subagent failed", true);
                 CloseDelegationChild(workspace, job, child_id);
             }
             else if (!PicoAgent_IsBusy(child) && child->state == PICO_AGENT_IDLE)
             {
+                PicoSession_DrainPersist(workspace->host, child);
                 PublishDelegation(job, PICO_DELEGATION_DONE, "completed", child,
                                   LastAssistantSince(child, child_message_start), false);
                 CloseDelegationChild(workspace, job, child_id);

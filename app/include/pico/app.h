@@ -573,7 +573,8 @@ bool pico_llm_result_add_tool_call(PicoLlmResult *r, const char *call_id, const 
 bool pico_llm_result_has_output(const PicoLlmResult *r);
 void pico_clear_registrations(PicoHost *host);
 void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id);
-/* Main thread. Logs to the explicit agent's session and reports durability. */
+/* Main thread. Queues a record to the explicit agent's session on Pico's persist thread;
+ * PICO_SESSION_WRITE_OK reports acceptance; write failures surface asynchronously. */
 PicoSessionWriteResult pico_session_log_custom(PicoHost *host, PicoAgentId agent_id, const char *ext,
                                                const char *data_json);
 /* ON_COMPACT only. Takes ownership of malloc'd summary; NULL keeps default compaction. */

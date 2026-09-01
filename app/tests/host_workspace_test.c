@@ -5041,6 +5041,8 @@ static int TestPersistedSessionKeptOnSelect(void)
         unsetenv("XDG_CONFIG_HOME");
         return 1;
     }
+    /* Session appends are written by the persist thread; wait for the file. */
+    PicoSession_DrainPersist(host, agent);
     snprintf(session_path, sizeof(session_path), "%s", agent->session_path);
     if (pico_main_agent_create(host, ws, &opt, &second) != PICO_OK || second == 0 || second == first)
     {

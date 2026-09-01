@@ -2182,6 +2182,7 @@ static int TestQueuedModelChangeOrdersUserWrite(void)
     }
     header = strstr(file, "\"type\":\"session\"");
     user = strstr(file, "\"type\":\"message\"");
+    const char *first_change = strstr(file, "\"type\":\"model_change\"");
     change = NULL;
     {
         const char *cursor = file;
@@ -2197,6 +2198,12 @@ static int TestQueuedModelChangeOrdersUserWrite(void)
     {
         free(file);
         return Fail("user write must follow the header and latest queued model_change");
+    }
+    if (CountType(file, "model_change") != 2 || !first_change || first_change == change ||
+        !strstr(first_change, "\"model\":\"first-model\""))
+    {
+        free(file);
+        return Fail("queued writes must accumulate in call order, not replace");
     }
     free(file);
     return 0;
@@ -2226,8 +2233,8 @@ static int TestQueuedModelChangeFailureThenDrain(void)
     g_status_warning[0] = '\0';
     g_session_fail_stage = "append_write";
     PicoSession_EnqueueModelChange(&writer, &writer_agent);
-    if (PicoSession_LogUser(&writer, &writer_agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_FAILED ||
-        writer_agent.persistence != PICO_SESSION_FAILED || g_status_warning[0] == '\0')
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    if (writer_agent.persistence != PICO_SESSION_FAILED || g_status_warning[0] == '\0')
     {
         g_session_fail_stage = NULL;
         PicoSessionPersist_Shutdown(&writer);
@@ -2238,6 +2245,15 @@ static int TestQueuedModelChangeFailureThenDrain(void)
         return Fail("queued model-change write failure was not applied on drain");
     }
     g_session_fail_stage = NULL;
+    if (PicoSession_LogUser(&writer, &writer_agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_FAILED)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        if (writer_agent.session_path[0])
+        {
+            unlink(writer_agent.session_path);
+        }
+        return Fail("write to a failed session target was not rejected");
+    }
     PicoSessionPersist_Shutdown(&writer);
     if (writer_agent.session_path[0])
     {

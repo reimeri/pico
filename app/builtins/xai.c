@@ -836,8 +836,15 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
     }
 
     const char *bearer = BearerOf(&auth, oauth);
+    char conv_hdr[80];
+    const char *extras[1];
+    int extra_count = 0;
+    if (pico_xai_conv_id_header(turn->cache_key, conv_hdr, sizeof(conv_hdr)))
+    {
+        extras[extra_count++] = conv_hdr;
+    }
     PicoCompletionsCtx ctx;
-    int rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
+    int rc = pico_completions_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, &ctx);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
         pico_completions_ctx_free(&ctx);
@@ -854,7 +861,7 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
             return PICO_LLM_FAIL;
         }
         bearer = BearerOf(&auth, true);
-        rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
+        rc = pico_completions_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, &ctx);
     }
     free(body);
     pico_auth_entry_free(&auth);

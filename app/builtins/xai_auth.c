@@ -2,6 +2,7 @@
 
 #include "json.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,25 @@ int pico_xai_oauth_slow_down_interval(int current, int supplied)
         next = 1;
     }
     return next;
+}
+
+bool pico_xai_conv_id_header(const char *cache_key, char *out, size_t cap)
+{
+    if (out && cap)
+    {
+        out[0] = 0;
+    }
+    if (!cache_key || !cache_key[0] || !out || cap == 0)
+    {
+        return false;
+    }
+    int n = snprintf(out, cap, "x-grok-conv-id: %s", cache_key);
+    if (n < 0 || (size_t)n >= cap)
+    {
+        out[0] = 0;
+        return false;
+    }
+    return true;
 }
 
 bool pico_xai_https_uri_ok(const char *uri)

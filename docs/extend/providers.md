@@ -10,7 +10,7 @@ Hyper models use `"provider": "hyper"` at the fixed HTTPS base `https://hyper.ch
 
 Hyper talks to `POST https://hyper.charm.land/v1/chat/completions`. Requests use `store: false`, `stream_options: { "include_usage": true }`, `max_tokens` when set, and DeepSeek thinking (`thinking: { "type": "enabled"|"disabled" }` plus `reasoning_effort` when effort is on). Each completion choice projects to one canonical assistant item followed by all of that message's tool-call items, regardless of streamed field order. Replay folds those items back into one assistant message; a tool-only message uses `content: null`. If the model is reasoning, replayed assistant messages include `reasoning_content` (the stored thinking text, or `""`). A reasoning-compatibility retry removes the root thinking controls and historical message-level `reasoning_content`. Encrypted OpenAI reasoning blobs and Responses `function_call` item ids are dropped. Authenticate with `HYPER_API_KEY` or `/login hyper`. Hyper rejects non-canonical `base_url` values; only `https://hyper.charm.land/v1` or `https://hyper.charm.land/v1/chat/completions` are accepted.
 
-xAI talks to `POST https://api.x.ai/v1/chat/completions`. Requests use `store: false` and `stream_options: { "include_usage": true }`. Incoming `reasoning` / `reasoning_content` still streams; Pico does not send DeepSeek `thinking` or `reasoning_effort`. Authenticate with `XAI_API_KEY` or `/login xai`. xAI rejects non-canonical `base_url` values; only `https://api.x.ai/v1` or `https://api.x.ai/v1/chat/completions` are accepted.
+xAI talks to `POST https://api.x.ai/v1/chat/completions`. Requests use `store: false` and `stream_options: { "include_usage": true }`. When `PicoLlmTurn.cache_key` is set, it is sent as the `x-grok-conv-id` header so repeated turns can keep prompt-cache affinity. Incoming `reasoning` / `reasoning_content` still streams; Pico does not send DeepSeek `thinking` or `reasoning_effort`. Authenticate with `XAI_API_KEY` or `/login xai`. xAI rejects non-canonical `base_url` values; only `https://api.x.ai/v1` or `https://api.x.ai/v1/chat/completions` are accepted.
 
 `provider` must match `PicoProvider.name`. Providers may interpret optional `base_url` values; the builtin OpenAI provider accepts overrides, while Hyper and xAI only accept their canonical endpoints.
 
@@ -46,7 +46,7 @@ Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`) 
 
 ## Turn
 
-`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `effort`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`.
+`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`.
 
 `input_json` uses Pico's provider-neutral item forms. `user` and `assistant` carry a `parts` array (`text`, `refusal`, `image`, `audio`). `tool_call` and `tool_result` use `call_id` / `name` / `arguments` or `output`. Request-only `context` items are:
 

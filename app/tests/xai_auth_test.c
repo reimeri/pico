@@ -31,6 +31,16 @@ static void TestRefreshDecision(void)
           "slow_down increases the interval by at least five seconds");
 }
 
+static void TestConvIdHeader(void)
+{
+    char buf[64];
+    Check(pico_xai_conv_id_header("session-1", buf, sizeof(buf)) &&
+              strcmp(buf, "x-grok-conv-id: session-1") == 0,
+          "a cache key is sent as x-grok-conv-id");
+    Check(!pico_xai_conv_id_header("", buf, sizeof(buf)) && buf[0] == 0,
+          "an empty cache key omits the header");
+}
+
 static void TestHttpsUri(void)
 {
     Check(pico_xai_https_uri_ok("https://auth.x.ai/authorize"), "https verification URI is accepted");
@@ -63,6 +73,7 @@ static void TestTokenParse(void)
 int main(void)
 {
     TestRefreshDecision();
+    TestConvIdHeader();
     TestHttpsUri();
     TestTokenParse();
     return g_failed;

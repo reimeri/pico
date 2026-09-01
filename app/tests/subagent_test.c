@@ -87,6 +87,29 @@ static int TestNamedSubagentDelegation(void)
                ? 0 : Fail(name, "child context, policy, result, or cleanup was incorrect");
 }
 
+static int TestSubagentParentGuidance(void)
+{
+    const char *name = "subagent parent guidance";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoExt extension = pico_ext_subagent();
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "agent did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool ok = g_test.last_instructions &&
+              strstr(g_test.last_instructions, "no parent context") &&
+              strstr(g_test.last_instructions, "session_id resumes that child only");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "parent prompt omitted isolation or session resume guidance");
+}
+
 static int TestSubagentParentCancellation(void)
 {
     const char *name = "subagent parent cancellation";

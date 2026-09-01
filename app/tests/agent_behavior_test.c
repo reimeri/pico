@@ -4265,6 +4265,7 @@ int main(void)
     failed |= TestSubagentProfileResolution();
     failed |= TestSubagentProfileDiscovery();
     failed |= TestNamedSubagentDelegation();
+    failed |= TestSubagentParentGuidance();
     failed |= TestSubagentParentCancellation();
     failed |= TestSubagentCancellationBeforeEnqueue();
     failed |= TestSubagentDirectChildCancellation();

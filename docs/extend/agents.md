@@ -60,7 +60,7 @@ The builtin `subagent` tool accepts only a named profile, a delegated `task`, an
 {"profile":"exploration","task":"Find the replay boundary.","session_id":"optional-child-id"}
 ```
 
-A fresh child gets current workspace/system instructions, a clearly delimited profile purpose, only the delegated user task, and the profile's copied tool policy. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or cache key. It shares that workspace's registrations, providers, authentication, and workspace services. Cross-workspace parent IDs are rejected.
+When `subagent` is offered, parent extra instructions say children start with no parent context, so `task` must carry the briefing; `session_id` resumes that child only and still needs parent-side changes. A fresh child gets current workspace/system instructions, a clearly delimited profile purpose, only the delegated user task, and the profile's copied tool policy. It does not inherit the parent transcript, provider history, compaction briefing, TODO state, or cache key. It shares that workspace's registrations, providers, authentication, and workspace services. Cross-workspace parent IDs are rejected.
 
 Supplying `session_id` reserves and replays exactly that prior subagent session. The stored profile must match. Transcript/provider history, usage, compaction state, and prompt cache are restored, then model, effort, purpose, and tools are refreshed from the current profile and parent. A model change rotates the cache key. The delegated task is appended to the same JSONL session.
 

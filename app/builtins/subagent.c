@@ -9,7 +9,7 @@
 static const char *kSubagentParams =
     "{\"type\":\"object\",\"properties\":{"
     "\"profile\":{\"type\":\"string\",\"description\":\"Discovered named subagent profile\"},"
-    "\"task\":{\"type\":\"string\",\"description\":\"Task delegated to the child agent\"},"
+    "\"task\":{\"type\":\"string\",\"description\":\"Full briefing; the child cannot see this conversation\"},"
     "\"session_id\":{\"type\":\"string\",\"description\":\"Optional exact previous child session ID\"}},"
     "\"required\":[\"profile\",\"task\"]}";
 
@@ -84,7 +84,7 @@ static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, Pic
     }
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "The subagent tool delegates synchronously using one of these named profiles:");
+    JsonBuf_Puts(&b, "Children start with no parent context; put requirements, paths, and constraints in task; session_id resumes that child only, still include parent-side changes. Profiles:");
     int count = pico_subagent_profile_count(app);
     for (int i = 0; i < count; i++)
     {

@@ -915,6 +915,72 @@ static int TestTitleFailureStage(const char *stage, bool expect_original)
     return ok ? 0 : Fail("injected title failure had the wrong persistence or preservation result");
 }
 
+static bool DisplayTitleIs(const PicoAgent *agent, const char *title)
+{
+    char got[PICO_SESSION_TITLE_MAX_BYTES + 1];
+    PicoSession_CopyDisplayTitle(agent, got, sizeof(got));
+    return title && strcmp(got, title) == 0;
+}
+
+static int TestSessionDisplayTitle(void)
+{
+    PicoHost app;
+    PicoAgent agent;
+    PicoSessionHeader header;
+    char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
+    memset(&app, 0, sizeof(app));
+    memset(&agent, 0, sizeof(agent));
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    PicoHost_SetPath(&app, "/workspace");
+
+    PicoSession_LogModelChange(&app, &agent, "saved-model", "high");
+    if (!agent.session_path[0])
+    {
+        return Fail("display title test did not create a session file");
+    }
+    if (PicoSession_ReadHeader(agent.session_path, &header) != 0 || header.title[0] ||
+        !DisplayTitleIs(&agent, "Untitled"))
+    {
+        unlink(agent.session_path);
+        return Fail("empty session did not fall back to Untitled");
+    }
+
+    PicoAgent_AddMessage(&app, &agent, PICO_ROLE_USER, "live first user message");
+    if (!DisplayTitleIs(&agent, "live first user message"))
+    {
+        PicoAgent_ClearMessages(&agent);
+        unlink(agent.session_path);
+        return Fail("in-memory user message did not become the display title");
+    }
+
+    PicoSession_LogUser(&app, &agent, "file first user message", "file first user message", NULL);
+    PicoAgent_ClearMessages(&agent);
+    if (!DisplayTitleIs(&agent, "file first user message"))
+    {
+        unlink(agent.session_path);
+        return Fail("jsonl user message did not become the display title");
+    }
+
+    if (PicoSession_LogTitle(&app, &agent, "Add todo task field") != PICO_SESSION_WRITE_OK)
+    {
+        unlink(agent.session_path);
+        return Fail("display title header write failed");
+    }
+    PicoAgent_AddMessage(&app, &agent, PICO_ROLE_USER, "later live message should not win");
+    if (!DisplayTitleIs(&agent, "Add todo task field"))
+    {
+        PicoAgent_ClearMessages(&agent);
+        unlink(agent.session_path);
+        return Fail("explicit header title did not win over user messages");
+    }
+    PicoAgent_ClearMessages(&agent);
+    unlink(agent.session_path);
+
+    PicoSession_CopyDisplayTitle(NULL, title, sizeof(title));
+    return strcmp(title, "Untitled") == 0 ? 0 : Fail("missing agent did not fall back to Untitled");
+}
+
 static int TestSessionTitleFailureStages(void)
 {
     return TestTitleFailureStage("title_after_copy", true) |
@@ -2791,6 +2857,7 @@ int main(void)
     unlink(writer_agent.session_path);
     if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
         TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
+        TestSessionDisplayTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
         TestConcurrentAppendDuringTitle() != 0 || TestConcurrentDoneCatalog() != 0 ||
         TestCatalog() != 0 || TestCatalogWorkspaceReorder() != 0 ||

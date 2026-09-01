@@ -85,6 +85,9 @@ int PicoSession_Open(PicoHost *app, PicoAgent *agent, const char *id);
 int PicoSession_Resolve(const PicoWorkspace *workspace, const char *id, bool allow_prefix,
                         char *path, size_t path_cap);
 int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out);
+/* Listing title for a live agent: explicit header title, else first user message
+ * from in-memory transcript, else the same derivation from jsonl. */
+void PicoSession_CopyDisplayTitle(const PicoAgent *agent, char *out, size_t cap);
 /* Read a durable session's visible transcript without reserving the file.
  * Messages have source, reasoning, and tool strings; markdown documents are
  * empty until PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */

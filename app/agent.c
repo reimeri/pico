@@ -2607,19 +2607,30 @@ bool PicoAgent_AskUiOpen(const PicoAgent *agent)
     return rt && rt->snap_id != 0;
 }
 
-static void PublishAskSnapshot(PicoAgentRt *rt)
+static void PublishAskSnapshot(PicoHost *app, PicoAgent *agent)
 {
+    PicoAgentRt *rt = agent ? agent->runtime : NULL;
+    uint64_t previous_id;
+    uint64_t now_id;
+    uint64_t publish_id;
+    char *live_copy = NULL;
+    if (!rt)
+    {
+        return;
+    }
+    previous_id = rt->snap_id;
     pthread_mutex_lock(&rt->mu);
     bool waiting = rt->ask_waiting && !rt->cancel && !rt->stop;
     uint64_t live_id = waiting ? rt->ask_id : 0;
-    char *live_copy = NULL;
-    if (waiting && rt->ask_request && (rt->snap_retired || rt->snap_id != live_id))
+    /* An answered/cancelled snapshot stays unpublished until a new ask id appears. */
+    publish_id = (rt->snap_retired && live_id == rt->snap_id) ? 0 : live_id;
+    if (publish_id != 0 && rt->ask_request && (rt->snap_retired || rt->snap_id != publish_id))
     {
         live_copy = Dup(rt->ask_request);
     }
     pthread_mutex_unlock(&rt->mu);
 
-    if (!rt->snap_retired && rt->snap_id == live_id && live_id != 0)
+    if (!rt->snap_retired && rt->snap_id == publish_id && publish_id != 0)
     {
         return;
     }
@@ -2627,13 +2638,22 @@ static void PublishAskSnapshot(PicoAgentRt *rt)
     rt->snap_request = NULL;
     rt->snap_id = 0;
     rt->snap_retired = false;
-    if (live_id != 0)
+    if (publish_id != 0)
     {
-        rt->snap_id = live_id;
+        rt->snap_id = publish_id;
         rt->snap_request = live_copy;
         live_copy = NULL;
     }
     free(live_copy);
+    now_id = rt->snap_id;
+    if (previous_id != 0 && previous_id != now_id)
+    {
+        pico_run_hooks(app, PICO_HOOK_ON_ASK_END, agent->id);
+    }
+    if (now_id != 0 && now_id != previous_id)
+    {
+        pico_run_hooks(app, PICO_HOOK_ON_ASK, agent->id);
+    }
 }
 
 bool PicoAgent_BlocksReload(const PicoAgent *agent)
@@ -3139,6 +3159,7 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
     pthread_mutex_unlock(&old->mu);
     KillToolChild(child);
 
+    bool ask_open = PicoAgent_AskUiOpen(agent);
     ApplyCancel(app, agent);
 
     rt->input = old->input;
@@ -3155,6 +3176,10 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
     workspace->retired_runtimes = old;
     workspace->retired_count++;
     agent->runtime = rt;
+    if (ask_open)
+    {
+        pico_run_hooks(app, PICO_HOOK_ON_ASK_END, agent->id);
+    }
 }
 
 void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid)
@@ -3476,7 +3501,7 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     {
         return;
     }
-    PublishAskSnapshot(rt);
+    PublishAskSnapshot(app, agent);
 
     pthread_mutex_lock(&rt->mu);
     char *stream = rt->stream;

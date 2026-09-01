@@ -33,6 +33,7 @@ PicoExt pico_ext_composer(void);
 PicoExt pico_ext_footer(void);
 PicoExt pico_ext_sidebar(void);
 PicoExt pico_ext_overlay(void);
+PicoExt pico_ext_notify(void);
 PicoExt pico_ext_ask_user(void);
 PicoExt pico_ext_todo(void);
 PicoExt pico_ext_shell(void);

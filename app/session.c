@@ -1707,6 +1707,46 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     return valid ? 0 : -1;
 }
 
+void PicoSession_CopyDisplayTitle(const PicoAgent *agent, char *out, size_t cap)
+{
+    PicoSessionHeader header;
+    PicoSessionInfo info;
+    int i;
+    if (!out || cap == 0)
+    {
+        return;
+    }
+    out[0] = '\0';
+    if (agent && agent->session_path[0] && PicoSession_ReadHeader(agent->session_path, &header) == 0 &&
+        header.title[0])
+    {
+        snprintf(out, cap, "%s", header.title);
+        return;
+    }
+    if (agent)
+    {
+        for (i = 0; i < agent->message_count; i++)
+        {
+            if (agent->messages[i].role == PICO_ROLE_USER)
+            {
+                MakeTitle(out, cap, agent->messages[i].source);
+                return;
+            }
+        }
+    }
+    if (agent && agent->session_path[0])
+    {
+        memset(&info, 0, sizeof(info));
+        ScanSessionFile(agent->session_path, &info, false);
+        if (info.title[0])
+        {
+            snprintf(out, cap, "%s", info.title);
+            return;
+        }
+    }
+    snprintf(out, cap, "Untitled");
+}
+
 static void LoadedTranscriptFree(PicoMessage *messages, int count)
 {
     if (!messages)

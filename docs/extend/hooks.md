@@ -52,6 +52,8 @@ Registered during `workspace_init`. Valid for agent lifecycle hooks:
 - `PICO_HOOK_ON_TURN_END` — target became idle after a completed turn, not cancel/error.
 - `PICO_HOOK_ON_CANCEL` — target turn was cancelled.
 - `PICO_HOOK_ON_ERROR` — target entered `PICO_AGENT_ERROR`.
+- `PICO_HOOK_ON_ASK` — a pending ask snapshot was published for the target. Fires for that agent even when another session is selected. `PicoHookEvent` is still only `{hook, agent_id}`; `pico_tool_pending_ask` remains the selected-session ask.
+- `PICO_HOOK_ON_ASK_END` — that ask is no longer pending after answer, cancel, or force-cancel/stop. Not fired on `PICO_HOOK_ON_AGENT_DESTROY`.
 - `PICO_HOOK_ON_SESSION_RESET` — target starts a new/resumed/ephemeral session, or a reload re-announces a live session; clear only that ID's session state. After reload, structured tool details are replayed to rebuild it.
 - `PICO_HOOK_ON_AGENT_DESTROY` — target is about to become invalid; remove its ID-keyed extension state.
 

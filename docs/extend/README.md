@@ -22,7 +22,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
-- `hooks` — submit, layout, compact, session reset, turn end/cancel/error; tool, tool-row, and LLM interceptors
+- `hooks` — submit, layout, compact, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
 - `tools` — LLM-callable tools and structured replayable details
 - `commands` — slash commands (`/foo`)

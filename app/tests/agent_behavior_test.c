@@ -100,6 +100,8 @@ typedef struct TestState {
     int life_cancel;
     int life_error;
     int life_after_compact;
+    int life_ask;
+    int life_ask_end;
     PicoAgentId tool_ctx_id;
     PicoAgentId after_agent_id;
     PicoAgentId apply_agent_id;
@@ -202,6 +204,8 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.life_cancel = 0;
     g_test.life_error = 0;
     g_test.life_after_compact = 0;
+    g_test.life_ask = 0;
+    g_test.life_ask_end = 0;
     g_test.tool_ctx_id = 0;
     g_test.after_agent_id = 0;
     g_test.apply_agent_id = 0;
@@ -836,6 +840,22 @@ static void LifeError(PicoWorkspace *workspace, const PicoHookEvent *event, void
     (void)state;
     (void)event;
     g_test.life_error++;
+}
+
+static void LifeAsk(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)workspace;
+    (void)state;
+    g_test.life_ask++;
+    g_test.hook_agent_id = event ? event->agent_id : 0;
+}
+
+static void LifeAskEnd(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)workspace;
+    (void)state;
+    g_test.life_ask_end++;
+    g_test.hook_agent_id = event ? event->agent_id : 0;
 }
 
 static void LifeAfterCompact(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
@@ -2908,6 +2928,8 @@ static void AddLifeHooks(PicoHost *app)
     TestAddHook(app, PICO_HOOK_ON_CANCEL, LifeCancel);
     TestAddHook(app, PICO_HOOK_ON_ERROR, LifeError);
     TestAddHook(app, PICO_HOOK_AFTER_COMPACT, LifeAfterCompact);
+    TestAddHook(app, PICO_HOOK_ON_ASK, LifeAsk);
+    TestAddHook(app, PICO_HOOK_ON_ASK_END, LifeAskEnd);
 }
 
 static int TestTurnEnd(void)
@@ -2947,7 +2969,8 @@ static int TestCancelNotification(void)
     {
         return Fail(name, "agent did not cancel");
     }
-    bool ok = g_test.life_cancel == 1 && g_test.life_turn_end == 0 && g_test.life_error == 0;
+    bool ok = g_test.life_cancel == 1 && g_test.life_turn_end == 0 && g_test.life_error == 0 &&
+              g_test.life_ask == 1 && g_test.life_ask_end == 1;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "ON_CANCEL did not fire (or TURN_END did)");
 }
@@ -2972,6 +2995,133 @@ static int TestErrorNotification(void)
               TestAgent(&app)->session_cached_tokens == 0 && g_test.usage_log_count == 0;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "failed request changed usage or did not fire ON_ERROR");
+}
+
+
+static int TestAskNotification(void)
+{
+    const char *name = "ask notification";
+    ResetTest(TEST_SINGLE, 1);
+    PicoHost app;
+    InitApp(&app);
+    AddLifeHooks(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    PicoToolAsk ask;
+    if (!WaitForPending(&app, 0, &ask))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "request was not published");
+    }
+    bool opened = g_test.life_ask == 1 && g_test.life_ask_end == 0 &&
+                  g_test.hook_agent_id == pico_agent_id(TestAgent(&app));
+    if (!pico_tool_answer(&app, ask.id, "{\"ok\":true}"))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "answer was rejected");
+    }
+    PicoAgent_Pump(&app, TestAgent(&app));
+    bool closed = g_test.life_ask == 1 && g_test.life_ask_end == 1;
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "agent did not return idle");
+    }
+    PicoHost_Shutdown(&app);
+    return opened && closed ? 0 : Fail(name, "ON_ASK / ON_ASK_END did not fire once");
+}
+
+static int TestAskForceCancelNotification(void)
+{
+    const char *name = "ask force-cancel notification";
+    ResetTest(TEST_SINGLE, 1);
+    PicoHost app;
+    InitApp(&app);
+    AddLifeHooks(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    PicoToolAsk ask;
+    if (!WaitForPending(&app, 0, &ask))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "request was not published");
+    }
+    PicoAgent_ForceCancel(&app, TestAgent(&app));
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "agent did not force-cancel");
+    }
+    bool ok = g_test.life_ask == 1 && g_test.life_ask_end == 1 && g_test.life_cancel == 1 &&
+              g_test.life_turn_end == 0;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "force-cancelled ask did not fire ON_ASK_END");
+}
+
+static int TestAskReplaceNotification(void)
+{
+    const char *name = "ask replace notification";
+    ResetTest(TEST_SEQUENTIAL, 1);
+    PicoHost app;
+    InitApp(&app);
+    AddLifeHooks(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    PicoToolAsk first;
+    if (!WaitForPending(&app, 0, &first) || !strstr(first.request_json, "first"))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "first request was not published");
+    }
+    if (g_test.life_ask != 1 || g_test.life_ask_end != 0)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "first ask did not fire ON_ASK once");
+    }
+    if (!pico_tool_answer(&app, first.id, "{\"step\":1}"))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "first answer was rejected");
+    }
+    bool first_done = false;
+    for (int i = 0; i < 3000; i++)
+    {
+        pthread_mutex_lock(&g_test.mu);
+        first_done = g_test.ask_rc[0][0] == PICO_ASK_OK;
+        pthread_mutex_unlock(&g_test.mu);
+        if (first_done)
+        {
+            break;
+        }
+        SleepOneMs();
+    }
+    if (!first_done)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "first ask was not answered");
+    }
+    /* The next pico_tool_ask is entered immediately after the first returns.
+     * Do not pump until then, so one snapshot pass replaces old-id → new-id. */
+    for (int i = 0; i < 50; i++)
+    {
+        SleepOneMs();
+    }
+    PicoAgent_Pump(&app, TestAgent(&app));
+    PicoToolAsk second;
+    if (!pico_tool_pending_ask(&app, &second) || second.id == first.id ||
+        !strstr(second.request_json, "second"))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "second request was not published on the replacement pump");
+    }
+    bool replaced = g_test.life_ask == 2 && g_test.life_ask_end == 1 &&
+                    g_test.hook_agent_id == pico_agent_id(TestAgent(&app));
+    if (!pico_tool_answer(&app, second.id, "{\"step\":2}") || !WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "second ask did not finish");
+    }
+    PicoHost_Shutdown(&app);
+    return replaced && g_test.life_ask == 2 && g_test.life_ask_end == 2
+               ? 0
+               : Fail(name, "ask replacement did not fire ON_ASK_END then ON_ASK");
 }
 
 static int TestCancelledProviderUsage(void)
@@ -4082,6 +4232,9 @@ int main(void)
     failed |= TestTurnEnd();
     failed |= TestCancelNotification();
     failed |= TestErrorNotification();
+    failed |= TestAskNotification();
+    failed |= TestAskForceCancelNotification();
+    failed |= TestAskReplaceNotification();
     failed |= TestCancelledProviderUsage();
     failed |= TestSessionUsageAccumulation();
     failed |= TestUsageNormalizationAndSaturation();

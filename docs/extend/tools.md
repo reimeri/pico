@@ -77,7 +77,7 @@ if (pico_tool_pending_ask(host, &ask))
 }
 ```
 
-Only asks owned by the open session surface this way: the selected agent or a transitive delegated child of it. Other sessions' asks stay pending and hidden until their session is opened.
+Only asks owned by the open session surface this way: the selected agent or a transitive delegated child of it. Other sessions' asks stay pending and hidden until their session is opened. `PICO_HOOK_ON_ASK` / `PICO_HOOK_ON_ASK_END` still fire for that agent regardless of selection.
 
 `pico_tool_answer` returns false if the id is stale, cancelled, or already answered. Ask ids are host-allocated and are not reused for the lifetime of that host. Overlay **Deny/Approve** must answer; **Esc** cancels the turn (`PICO_ASK_CANCEL`), not the same as Deny.
 

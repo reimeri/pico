@@ -89,7 +89,7 @@
 
           postFixup = ''
             wrapProgram "$out/bin/pico" \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gcc pkgs.git ]} \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gcc pkgs.git pkgs.libnotify ]} \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
                 pkgs.wayland
                 pkgs.libxkbcommon
@@ -147,6 +147,7 @@
               gdb
               git
               curl
+              libnotify
             ];
 
             FETCHCONTENT_SOURCE_DIR_RAYLIB = "${raylib}";

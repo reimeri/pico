@@ -102,6 +102,7 @@ add_executable(pico
     builtins/footer.c
     builtins/sidebar.c
     builtins/overlay.c
+    builtins/notify.c
     builtins/ask_user.c
     builtins/todo.c
     builtins/todo_model.c
@@ -611,6 +612,7 @@ if(BUILD_TESTING)
         builtins/footer.c
         builtins/sidebar.c
         builtins/overlay.c
+        builtins/notify.c
         builtins/shell.c
         builtins/commands.c
         builtins/complete.c
@@ -641,7 +643,8 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyfiledialogs
-        ${raylib_SOURCE_DIR}/src)
+        ${raylib_SOURCE_DIR}/src
+        ${raylib_SOURCE_DIR}/src/external/glfw/include)
     pico_warnings_are_errors(pico_host_workspace_tests)
     set_target_properties(pico_host_workspace_tests PROPERTIES ENABLE_EXPORTS ON)
     target_compile_options(pico_host_workspace_tests PRIVATE -ffunction-sections -fdata-sections)

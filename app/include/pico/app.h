@@ -70,6 +70,8 @@ typedef enum PicoHook {
     PICO_HOOK_ON_TURN_END, /* idle after a finished turn (not cancel/error) */
     PICO_HOOK_ON_CANCEL,
     PICO_HOOK_ON_ERROR,
+    PICO_HOOK_ON_ASK, /* pending ask snapshot published for this agent */
+    PICO_HOOK_ON_ASK_END, /* that ask is no longer pending (answer/cancel/stop) */
     PICO_HOOK_ON_SESSION_RESET,
     PICO_HOOK_ON_AGENT_DESTROY,
     PICO_HOOK_COUNT,

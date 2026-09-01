@@ -70,6 +70,8 @@ The parent remains in tool wait while the child runs. Click the `subagent` tool 
 
 `pico_tool_pending_ask` returns the oldest live ask owned by the open session, where hidden delegated children surface through their ancestor: an ask is visible while its owner or a transitive parent of its owner is the selected agent. Its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits, regardless of which session is open. The borrowed request remains valid only until the next pump.
 
+`PICO_HOOK_ON_ASK` fires on the main thread when that agent's pending-ask snapshot is published, even if another session is selected. `PICO_HOOK_ON_ASK_END` fires when that ask is no longer pending after answer, cancel, or force-cancel/stop. Neither hook carries `request_json`; the event is still `{hook, agent_id}`. `ON_ASK_END` is not fired on `PICO_HOOK_ON_AGENT_DESTROY`.
+
 ## Main-thread targets
 
 Notification events, LLM hooks, context hooks, tool apply callbacks, and after-tool hooks identify their target with a `PicoAgentId`. Keep main-thread agent/session state in an ID-keyed map. Main-thread callbacks are serialized.

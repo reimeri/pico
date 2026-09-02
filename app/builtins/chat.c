@@ -453,10 +453,8 @@ static void ThinkFrameFree(void)
     g_think_doc_cap = 0;
 }
 
-static const char *ThinkLabelDup(const char *s)
+static char *ThinkLabelAlloc(size_t need)
 {
-    size_t n = s ? strlen(s) : 0;
-    size_t need = n + 1;
     ThinkLabelBlock *block = g_think_label_block;
     while (block && block->cap - block->len < need)
     {
@@ -472,7 +470,7 @@ static const char *ThinkLabelDup(const char *s)
         block = (ThinkLabelBlock *)malloc(sizeof(*block) + cap);
         if (!block)
         {
-            return "";
+            return NULL;
         }
         block->next = NULL;
         block->len = 0;
@@ -493,12 +491,23 @@ static const char *ThinkLabelDup(const char *s)
     }
     g_think_label_block = block;
     char *out = block->data + block->len;
+    block->len += need;
+    return out;
+}
+
+static const char *ThinkLabelDup(const char *s)
+{
+    size_t n = s ? strlen(s) : 0;
+    char *out = ThinkLabelAlloc(n + 1);
+    if (!out)
+    {
+        return "";
+    }
     if (s)
     {
         memcpy(out, s, n);
     }
     out[n] = '\0';
-    block->len += need;
     return out;
 }
 
@@ -995,21 +1004,110 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
     ViewBreak(view);
 }
 
-static Clay_String EmptyCStr(const char *s)
+#define CHAT_CONTENT_PAD_X 4
+#define CHAT_CONTENT_PAD_Y 8
+#define EMPTY_CARD_PADDING 16
+#define EMPTY_CARD_GAP 8
+#define EMPTY_CARD_COLUMN_GAP 8
+#define EMPTY_CARDS_GAP 12
+#define EMPTY_CARDS_NARROW_WIDTH 720.0f
+/* Must match PicoHost_LayoutShell: Root padding, Body childGap, Sidebar width. */
+#define EMPTY_SHELL_ROOT_PAD_X 12.0f
+#define EMPTY_SHELL_BODY_GAP 12.0f
+#define EMPTY_SHELL_SIDEBAR_WIDTH 200.0f
+
+/* Text width available to each of the card's two columns, derived from this
+ * frame's layout dimensions and shell chrome rather than last frame's bounds. */
+static float EmptyCardColumnWidth(PicoHost *app, bool narrow)
 {
-    if (!s)
+    float width = Clay_GetLayoutDimensions().width;
+    width -= 2.0f * EMPTY_SHELL_ROOT_PAD_X;
+    if (app && app->view_count[PICO_SLOT_SIDEBAR] > 0)
     {
-        s = "";
+        width -= EMPTY_SHELL_SIDEBAR_WIDTH + EMPTY_SHELL_BODY_GAP;
     }
-    return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+    float column_max = Pico_ChatColumnMaxPx(app);
+    if (column_max > 0.0f && width > column_max)
+    {
+        width = column_max;
+    }
+    width -= 2.0f * CHAT_CONTENT_PAD_X;
+    if (!narrow)
+    {
+        width = (width - 2.0f * EMPTY_CARDS_GAP) / 3.0f;
+    }
+    width = (width - 2.0f * EMPTY_CARD_PADDING - EMPTY_CARD_COLUMN_GAP) * 0.5f;
+    return width > 0.0f ? width : 0.0f;
 }
 
-static void RenderEmptyCard(int id, Clay_String title, const char **items, int n)
+/* Items occupy a single line; labels wider than the column are trimmed with
+ * an ellipsis. Clay draws text after the layout pass, so a trimmed label is
+ * copied into the per-frame label arena to outlive the frame. */
+static Clay_String EmptyCardLabel(const char *item, float width,
+                                  Clay_TextElementConfig *config)
+{
+    int length = item ? (int)strlen(item) : 0;
+    if (length <= 0)
+    {
+        return CLAY_STRING(" ");
+    }
+    if (width > 0.0f)
+    {
+        int prefix = 0;
+        if (!PicoWrappedText_Fits(item, length, width, MeasureWrappedCharacter, config, &prefix))
+        {
+            static const char ellipsis[] = "\xE2\x80\xA6";
+            size_t n = (size_t)prefix + 3;
+            char *frame_label = ThinkLabelAlloc(n + 1);
+            if (!frame_label)
+            {
+                return (Clay_String){.length = length, .chars = item};
+            }
+            memcpy(frame_label, item, (size_t)prefix);
+            memcpy(frame_label + prefix, ellipsis, 3);
+            frame_label[n] = '\0';
+            return (Clay_String){.length = (int32_t)n, .chars = frame_label};
+        }
+    }
+    return (Clay_String){.length = length, .chars = item};
+}
+
+static void RenderEmptyCardItems(const char **items, int n, float width)
+{
+    Clay_TextElementConfig config = {.fontId = FONT_REGULAR,
+                                     .fontSize = PICO_FONT_CAPTION,
+                                     .textColor = COLOR_TEXT,
+                                     .wrapMode = CLAY_TEXT_WRAP_NONE};
+    int left = (n + 1) / 2;
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = EMPTY_CARD_COLUMN_GAP,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        for (int column = 0; column < 2; column++)
+        {
+            int begin = column == 0 ? 0 : left;
+            int end = column == 0 ? left : n;
+            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .childGap = EMPTY_CARD_GAP,
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                          .clip = {.horizontal = true}})
+            {
+                for (int i = begin; i < end; i++)
+                {
+                    CLAY_TEXT(EmptyCardLabel(items[i], width, &config), config);
+                }
+            }
+        }
+    }
+}
+
+static void RenderEmptyCard(int id, Clay_String title, const char **items, int n, float column_width)
 {
     CLAY(CLAY_IDI("EmptyCard", id),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .padding = {16, 16, 16, 16},
-                     .childGap = 8,
+                     .padding = {EMPTY_CARD_PADDING, EMPTY_CARD_PADDING, EMPTY_CARD_PADDING,
+                                 EMPTY_CARD_PADDING},
+                     .childGap = EMPTY_CARD_GAP,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
@@ -1024,13 +1122,7 @@ static void RenderEmptyCard(int id, Clay_String title, const char **items, int n
         }
         else
         {
-            for (int i = 0; i < n; i++)
-            {
-                CLAY_TEXT(EmptyCStr(items[i]), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                 .fontSize = PICO_FONT_CAPTION,
-                                                                 .textColor = COLOR_TEXT,
-                                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            }
+            RenderEmptyCardItems(items, n, column_width);
         }
     }
 }
@@ -1069,15 +1161,16 @@ static void RenderEmptyCards(PicoHost *app)
     }
     const char *ctx[8];
     int ctx_n = PicoSettings_LoadedContext(ws, ctx, 8);
-    bool narrow = GetScreenWidth() < 720;
+    bool narrow = Clay_GetLayoutDimensions().width < EMPTY_CARDS_NARROW_WIDTH;
+    float column_width = EmptyCardColumnWidth(app, narrow);
     CLAY(CLAY_ID("EmptyCards"),
          {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
-                     .childGap = 12,
+                     .childGap = EMPTY_CARDS_GAP,
                      .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
-        RenderEmptyCard(0, CLAY_STRING("Tools"), tools, tool_n);
-        RenderEmptyCard(1, CLAY_STRING("Context"), ctx, ctx_n);
-        RenderEmptyCard(2, CLAY_STRING("Skills"), NULL, 0);
+        RenderEmptyCard(0, CLAY_STRING("Tools"), tools, tool_n, column_width);
+        RenderEmptyCard(1, CLAY_STRING("Context"), ctx, ctx_n, column_width);
+        RenderEmptyCard(2, CLAY_STRING("Skills"), NULL, 0, column_width);
     }
 }
 
@@ -1517,7 +1610,8 @@ void PicoChat_Render(PicoHost *app, void *state)
             }
             CLAY(CLAY_ID("ChatContent"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .padding = {4, 4, 8, 8},
+                             .padding = {CHAT_CONTENT_PAD_X, CHAT_CONTENT_PAD_X, CHAT_CONTENT_PAD_Y,
+                                         CHAT_CONTENT_PAD_Y},
                              .childAlignment = align,
                              .sizing = content_size}})
             {

@@ -114,3 +114,64 @@ bool PicoWrappedText_Prepare(PicoWrappedText *wrapped, const char *text,
     wrapped->valid = true;
     return true;
 }
+
+bool PicoWrappedText_Fits(const char *text, int text_length, float width,
+                          PicoWrappedTextMeasureFn measure, void *measure_user,
+                          int *prefix_length)
+{
+    if (prefix_length)
+    {
+        *prefix_length = 0;
+    }
+    if (!text || text_length <= 0)
+    {
+        return true;
+    }
+    if (!measure || !(width > 0.0f))
+    {
+        return false;
+    }
+    float line_width = 0.0f;
+    int position = 0;
+    while (position < text_length)
+    {
+        int next = Utf8Step(text, text_length, position);
+        float character_width = measure(measure_user, text + position, next - position);
+        if (line_width + character_width > width)
+        {
+            break;
+        }
+        line_width += character_width;
+        position = next;
+    }
+    if (position >= text_length)
+    {
+        if (prefix_length)
+        {
+            *prefix_length = text_length;
+        }
+        return true;
+    }
+    static const char ellipsis[] = "\xE2\x80\xA6";
+    float ellipsis_width = measure(measure_user, ellipsis, 3);
+    float prefix_width = 0.0f;
+    int prefix = 0;
+    position = 0;
+    while (position < text_length)
+    {
+        int next = Utf8Step(text, text_length, position);
+        float character_width = measure(measure_user, text + position, next - position);
+        if (prefix_width + character_width + ellipsis_width > width)
+        {
+            break;
+        }
+        prefix_width += character_width;
+        position = next;
+        prefix = position;
+    }
+    if (prefix_length)
+    {
+        *prefix_length = prefix;
+    }
+    return false;
+}

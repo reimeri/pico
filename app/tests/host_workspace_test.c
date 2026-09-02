@@ -486,6 +486,220 @@ static int RunWorkspaceLessShellCase(void)
     return g_failed ? 1 : 0;
 }
 
+/* Finds a rendered text run by exact contents. The landing page renders no
+ * other text with these labels. */
+static Clay_RenderCommand *FindCardText(Clay_RenderCommandArray *commands, const char *text)
+{
+    size_t length = strlen(text);
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        Clay_StringSlice contents = command->renderData.text.stringContents;
+        if (contents.length == (int32_t)length && memcmp(contents.chars, text, length) == 0)
+        {
+            return command;
+        }
+    }
+    return NULL;
+}
+
+/* Finds a rendered text run made of a strict prefix of `label` plus an
+ * ellipsis, i.e. a label trimmed to its column. */
+static Clay_RenderCommand *FindTrimmedCardText(Clay_RenderCommandArray *commands,
+                                               const char *label)
+{
+    static const char ellipsis[] = "\xE2\x80\xA6";
+    size_t label_length = strlen(label);
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        Clay_StringSlice contents = command->renderData.text.stringContents;
+        int prefix = contents.length - 3;
+        if (prefix > 0 && (size_t)prefix < label_length &&
+            memcmp(contents.chars + prefix, ellipsis, 3) == 0 &&
+            memcmp(contents.chars, label, (size_t)prefix) == 0)
+        {
+            return command;
+        }
+    }
+    return NULL;
+}
+
+static int AssertDesktopEmptyCardTrim(Clay_RenderCommandArray *commands, const char *long_name)
+{
+    Clay_ElementData card0 = Clay_GetElementData(CLAY_IDI("EmptyCard", 0));
+    Clay_ElementData card1 = Clay_GetElementData(CLAY_IDI("EmptyCard", 1));
+    Clay_ElementData card2 = Clay_GetElementData(CLAY_IDI("EmptyCard", 2));
+    if (!card0.found || !card1.found || !card2.found)
+    {
+        Fail("landing cards were not laid out");
+        return 1;
+    }
+    if (fabsf(card0.boundingBox.y - card1.boundingBox.y) > 0.5f ||
+        fabsf(card1.boundingBox.y - card2.boundingBox.y) > 0.5f ||
+        card1.boundingBox.x + 0.5f < card0.boundingBox.x + card0.boundingBox.width ||
+        card2.boundingBox.x + 0.5f < card1.boundingBox.x + card1.boundingBox.width)
+    {
+        Fail("landing cards were not laid out in a desktop row");
+        return 1;
+    }
+
+    /* The card content area splits into two equal columns separated by the
+     * same gap used between rows of a card. */
+    const float card_padding = 16.0f;
+    const float column_gap = 8.0f;
+    float content_left = card0.boundingBox.x + card_padding;
+    float content_right = card0.boundingBox.x + card0.boundingBox.width - card_padding;
+    float column_width = (content_right - content_left - column_gap) * 0.5f;
+    float right_x = content_left + column_width + column_gap;
+
+    Clay_RenderCommand *alpha = FindCardText(commands, "alpha");
+    Clay_RenderCommand *beta = FindCardText(commands, "beta");
+    Clay_RenderCommand *delta = FindCardText(commands, "delta");
+    Clay_RenderCommand *trimmed = FindTrimmedCardText(commands, long_name);
+    if (!alpha || !beta || !delta)
+    {
+        Fail("landing card items were not rendered");
+        return 1;
+    }
+    /* Column-major: the first three items stack in the left column, the
+     * rest continue at the top of the right column. */
+    if (fabsf(alpha->boundingBox.x - content_left) > 0.01f ||
+        fabsf(beta->boundingBox.x - content_left) > 0.01f ||
+        beta->boundingBox.y <= alpha->boundingBox.y ||
+        fabsf(delta->boundingBox.x - right_x) > 0.01f ||
+        fabsf(delta->boundingBox.y - alpha->boundingBox.y) > 0.01f)
+    {
+        Fail("landing card items were not split into two equal columns");
+        return 1;
+    }
+    if (FindCardText(commands, long_name))
+    {
+        Fail("overwide landing card label was not trimmed");
+        return 1;
+    }
+    if (!trimmed || fabsf(trimmed->boundingBox.x - right_x) > 0.01f ||
+        trimmed->boundingBox.x + trimmed->boundingBox.width > right_x + column_width + 0.5f)
+    {
+        Fail("trimmed landing card label escaped its column");
+        return 1;
+    }
+    return 0;
+}
+
+static int TestEmptyCardsTwoColumnTrim(void)
+{
+    Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-card-columns-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-card-columns-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoWorkspace *workspace;
+    ShellTestState state = {.composer_height = 44.0f};
+    static const char long_name[] =
+        "tool_with_a_very_long_name_that_cannot_possibly_fit_inside_a_narrow_card_column";
+    static const char *names[] = {"alpha", "beta", "gamma", "delta", long_name};
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("empty card column test setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        Fail("empty card column host initialization");
+        return 1;
+    }
+    PicoPlugins_Load(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    host->view_count[PICO_SLOT_FOOTER] = 0;
+    ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    ShellTestAddView(host, PICO_SLOT_FOOTER, ShellTestFooter, NULL);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        !(workspace = PicoHost_FindWorkspace(host, workspace_id)))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        Fail("empty card column open workspace");
+        return 1;
+    }
+    /* Deterministic card content: four short labels and one label that is far
+     * wider than a column. */
+    for (int i = 0; i < 5; i++)
+    {
+        workspace->tools[i].name = names[i];
+    }
+    workspace->tool_count = 5;
+
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        Clay_SetCurrentContext(previous);
+        Fail("empty card column Clay initialization");
+        return 1;
+    }
+    /* Measure with the production font metrics so layout and label trimming
+     * agree on widths. */
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+
+    Clay_SetLayoutDimensions(viewport);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (AssertDesktopEmptyCardTrim(&commands, long_name) != 0)
+    {
+        goto done;
+    }
+
+    /* First frame after a desktop resize must trim to the new column, not the
+     * previous viewport's width. */
+    viewport.width = 900;
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (AssertDesktopEmptyCardTrim(&commands, long_name) != 0)
+    {
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    rmdir(cfg);
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -6077,6 +6291,10 @@ static int TestWorkspaceLessHostTransition(void)
 int main(void)
 {
     if (TestBottomFollowShellGeometryStable() != 0)
+    {
+        return 1;
+    }
+    if (TestEmptyCardsTwoColumnTrim() != 0)
     {
         return 1;
     }

@@ -22,6 +22,13 @@ static float UnitMeasure(void *user, const char *text, int length)
     return 1.0f;
 }
 
+static float ByteMeasure(void *user, const char *text, int length)
+{
+    (void)user;
+    (void)text;
+    return (float)length;
+}
+
 static int LineEquals(const PicoWrappedText *wrapped, int index,
                       const char *source, const char *expected)
 {
@@ -113,5 +120,50 @@ int main(void)
     }
 
     PicoWrappedText_Free(&wrapped);
+
+    int prefix = -1;
+    const char *label = "abcdef";
+    if (!PicoWrappedText_Fits(label, 6, 6.0f, UnitMeasure, &measure, &prefix) || prefix != 6)
+    {
+        return Fail("text exactly as wide as the column must not be trimmed");
+    }
+    prefix = -1;
+    if (PicoWrappedText_Fits(label, 6, 4.0f, UnitMeasure, &measure, &prefix) || prefix != 3)
+    {
+        return Fail("trimmed prefix must leave room for the ellipsis");
+    }
+    prefix = -1;
+    if (PicoWrappedText_Fits(label, 6, 0.5f, UnitMeasure, &measure, &prefix) || prefix != 0)
+    {
+        return Fail("a column too narrow for one character trims to the ellipsis alone");
+    }
+    prefix = -1;
+    if (PicoWrappedText_Fits(label, 6, 0.0f, UnitMeasure, &measure, &prefix) || prefix != 0)
+    {
+        return Fail("unknown column width must not invent a prefix");
+    }
+    prefix = -1;
+    if (!PicoWrappedText_Fits("", 0, 4.0f, UnitMeasure, &measure, &prefix))
+    {
+        return Fail("empty text always fits");
+    }
+    prefix = -1;
+    if (PicoWrappedText_Fits(utf8, (int)strlen(utf8), 2.0f, UnitMeasure, &measure, &prefix) ||
+        prefix != 2)
+    {
+        return Fail("trimming must not split a UTF-8 codepoint");
+    }
+    prefix = -1;
+    if (!PicoWrappedText_Fits(utf8, (int)strlen(utf8), 6.0f, ByteMeasure, &measure, &prefix) ||
+        prefix != 6)
+    {
+        return Fail("multibyte text measuring within the width must not be trimmed");
+    }
+    prefix = -1;
+    if (PicoWrappedText_Fits(utf8, (int)strlen(utf8), 5.0f, ByteMeasure, &measure, &prefix) ||
+        prefix != 2)
+    {
+        return Fail("multibyte trim must keep the widest fitting codepoint prefix");
+    }
     return 0;
 }

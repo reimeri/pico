@@ -3604,6 +3604,45 @@ static int TestShToolCallDescriptionArgs(void)
     return ok ? 0 : Fail(name, "sh tool row did not show description");
 }
 
+static int TestBackgroundToolCallDescriptionArgs(void)
+{
+    const char *name = "run_background tool rows show description only";
+    PicoHost app;
+    InitApp(&app);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "run_background",
+                         "{\"description\":\"serving the site on port 8000\","
+                         "\"command\":\"python3 -m http.server 8000\"}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    bool ok = line && line->tool_args &&
+              strcmp(line->tool_args, "serving the site on port 8000") == 0 &&
+              line->tool_args_json &&
+              strstr(line->tool_args_json, "\"command\":\"python3 -m http.server 8000\"");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "run_background tool row did not show the description alone");
+}
+
+static int TestBackgroundToolCallCommandExtraction(void)
+{
+    const char *name = "run_background expanded row recovers exact command";
+    PicoHost app;
+    InitApp(&app);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "run_background",
+                         "{\"description\":\"serving the site on port 8000\","
+                         "\"command\":\"python3 -m http.server 8000\"}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    char *command = line ? PicoAgent_FormatToolCommand(line->tool_name, line->tool_args_json)
+                         : NULL;
+    bool ok = command && strcmp(command, "python3 -m http.server 8000") == 0;
+    free(command);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "run_background",
+                         "{\"description\":\"no command\"}");
+    line = LastToolTrace(&app);
+    command = line ? PicoAgent_FormatToolCommand(line->tool_name, line->tool_args_json) : NULL;
+    ok = ok && !command;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "exact command was not recovered from run_background args");
+}
+
 static int TestShToolCallCommandExtraction(void)
 {
     const char *name = "sh expanded row recovers exact command";
@@ -4267,6 +4306,8 @@ int main(void)
     failed |= TestAskUserToolCancellation();
     failed |= TestResumedToolCallArgs();
     failed |= TestShToolCallDescriptionArgs();
+    failed |= TestBackgroundToolCallDescriptionArgs();
+    failed |= TestBackgroundToolCallCommandExtraction();
     failed |= TestShToolCallCommandExtraction();
     failed |= TestToolActivityDescriptionScope();
     failed |= TestToolCallListArgs();

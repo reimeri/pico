@@ -31,7 +31,7 @@ char *PicoAgent_FormatToolArgs(const char *name, const char *args_json)
         FlattenPut(&b, args_json, 240);
         return JsonBuf_Steal(&b);
     }
-    if (name && strcmp(name, "sh") == 0)
+    if (name && (strcmp(name, "sh") == 0 || strcmp(name, "run_background") == 0))
     {
         char *description = JsonObjStr(&doc, 0, "description");
         if (description && description[0])
@@ -106,7 +106,8 @@ char *PicoAgent_FormatToolArgs(const char *name, const char *args_json)
 
 char *PicoAgent_FormatToolCommand(const char *name, const char *args_json)
 {
-    if (!name || strcmp(name, "sh") != 0 || !args_json || !args_json[0])
+    if (!name || (strcmp(name, "sh") != 0 && strcmp(name, "run_background") != 0) || !args_json ||
+        !args_json[0])
     {
         return NULL;
     }

@@ -310,6 +310,12 @@ static int TestKillAndReap(PicoBgTable *table, const char *cwd)
         free(error);
         return Fail(test, "kill did not report killed");
     }
+    /* A killed job died by signal; the response must not claim a clean exit code. */
+    if (!strstr(killed, "\"signal\":") || strstr(killed, "\"exit_code\":0"))
+    {
+        free(killed);
+        return Fail(test, "kill response did not report the signal");
+    }
     free(killed);
 
     {

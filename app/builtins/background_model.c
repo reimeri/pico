@@ -36,7 +36,6 @@ typedef struct PicoBgJob {
     pid_t pgid;
     int fd;
     PicoBgStatus status;
-    bool kill_requested;
     bool reaped;
     int exit_code;
     int term_signal;
@@ -69,6 +68,24 @@ const char *PicoBgStatus_Name(PicoBgStatus status)
         return "exited";
     }
     return "running";
+}
+
+/* Close-on-exec pipe: children forked by concurrent spawns must not inherit this
+ * job's pipe ends past their exec, or the parent's read end never sees EOF while
+ * such a child lives. dup2 in the child keeps the descriptors it needs. */
+static int OpenJobPipe(int pipefd[2])
+{
+#if defined(__linux__)
+    return pipe2(pipefd, O_CLOEXEC);
+#else
+    if (pipe(pipefd) != 0)
+    {
+        return -1;
+    }
+    (void)fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#endif
 }
 
 static void KillProcessGroup(pid_t pgid)
@@ -359,10 +376,15 @@ static char *FormatJobJson(const PicoBgJob *job, bool include_command)
     }
     if (job->status != PICO_BG_RUNNING)
     {
-        if (job->term_signal > 0)
+        int sig = job->term_signal;
+        if (sig <= 0 && job->status == PICO_BG_KILLED && !job->reaped)
+        {
+            sig = SIGKILL; /* kill always sends SIGKILL; reap has not landed yet */
+        }
+        if (sig > 0)
         {
             JsonBuf_Puts(&b, ",\"signal\":");
-            JsonBuf_Int(&b, job->term_signal);
+            JsonBuf_Int(&b, sig);
         }
         else
         {
@@ -578,7 +600,7 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         return NULL;
     }
 
-    if (pipe(pipefd) != 0)
+    if (OpenJobPipe(pipefd) != 0)
     {
         free(desc_copy);
         free(cmd_copy);
@@ -710,7 +732,6 @@ char *PicoBgTable_Kill(PicoBgTable *table, PicoAgentId agent_id, const char *id,
     }
     if (job->status == PICO_BG_RUNNING && job->pid > 0)
     {
-        job->kill_requested = true;
         job->status = PICO_BG_KILLED;
         pgid = job->pgid > 0 ? job->pgid : job->pid;
         pid = job->pid;
@@ -842,7 +863,6 @@ void PicoBgTable_ResetAgent(PicoBgTable *table, PicoAgentId agent_id)
         if (job->agent_id == agent_id && !job->reaped && job->pid > 0)
         {
             KillProcessGroup(job->pgid > 0 ? job->pgid : job->pid);
-            job->kill_requested = true;
             job->status = PICO_BG_KILLED;
         }
     }

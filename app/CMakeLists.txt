@@ -677,7 +677,7 @@ if(BUILD_TESTING)
 endif()
 
 set(_pico_ref_builtins
-    shell.c background.c background_model.c openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    shell.c background.c background_model.c background_model.h openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
     completions.c completions.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory

@@ -1939,7 +1939,7 @@ static char *FormatToolLine(const char *name, const char *args_json)
         JsonDoc doc;
         if (JsonParse(&doc, args_json, strlen(args_json)) == 0)
         {
-            if (name && strcmp(name, "sh") == 0)
+            if (name && (strcmp(name, "sh") == 0 || strcmp(name, "run_background") == 0))
             {
                 detail = JsonObjStr(&doc, 0, "description");
             }

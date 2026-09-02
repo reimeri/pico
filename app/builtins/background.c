@@ -18,12 +18,11 @@
 #define BG_LOG_NAME "background-log"
 
 typedef struct BackgroundState {
-    PicoWorkspace *workspace;
     char pill_label[32];
     char selected_id[PICO_BG_ID_MAX];
     char log_copy[PICO_BG_LOG_MAX + 1];
-    size_t log_len;
     char log_caption[96];
+    bool selected_running;
     bool list_overflow;
     bool log_overflow;
     PicoScrollbar list_scrollbar;
@@ -194,6 +193,30 @@ static void OpenList(PicoHost *host)
     }
 }
 
+static void RefreshLogCopy(PicoBgTable *table, PicoAgentId agent_id, BackgroundState *s)
+{
+    PicoBgJobInfo jobs[PICO_BG_MAX_RECORDS];
+    int job_n;
+    int i;
+    if (!PicoBgTable_CopyLog(table, agent_id, s->selected_id, s->log_copy, sizeof(s->log_copy),
+                             NULL))
+    {
+        s->log_copy[0] = '\0';
+    }
+    s->selected_running = false;
+    job_n = PicoBgTable_CopyJobs(table, agent_id, jobs, PICO_BG_MAX_RECORDS);
+    for (i = 0; i < job_n; i++)
+    {
+        if (strcmp(jobs[i].id, s->selected_id) == 0)
+        {
+            s->selected_running = jobs[i].status == PICO_BG_RUNNING;
+            break;
+        }
+    }
+    snprintf(s->log_caption, sizeof(s->log_caption),
+             "Latest 64 KiB of output; oldest lines are dropped.");
+}
+
 static void OpenLog(PicoHost *host, BackgroundState *s, const char *id)
 {
     if (!host || !s || !id || !id[0])
@@ -201,6 +224,8 @@ static void OpenLog(PicoHost *host, BackgroundState *s, const char *id)
         return;
     }
     snprintf(s->selected_id, sizeof(s->selected_id), "%s", id);
+    /* Fill the log right away so the modal never shows the previous job's output. */
+    RefreshLogCopy(TableForWorkspace(PicoHost_SelectedWorkspace(host)), pico_agent_active(host), s);
     if (!pico_ui_modal_has(host, BG_LIST_NAME))
     {
         (void)pico_ui_modal_push(host, BG_LIST_NAME);
@@ -413,13 +438,16 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                 {
                     CLAY_TEXT(CStr(s->selected_id[0] ? s->selected_id : "Log"),
                               CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
-                    CLAY(CLAY_ID("BackgroundLogStop"),
-                         {.layout = {.padding = {10, 10, 6, 6}},
-                          .backgroundColor = COLOR_CODE_BG,
-                          .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                    if (s->selected_running)
                     {
-                        CLAY_TEXT(CLAY_STRING("Stop"),
-                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_TEXT}));
+                        CLAY(CLAY_ID("BackgroundLogStop"),
+                             {.layout = {.padding = {10, 10, 6, 6}},
+                              .backgroundColor = COLOR_CODE_BG,
+                              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                        {
+                            CLAY_TEXT(CLAY_STRING("Stop"),
+                                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_TEXT}));
+                        }
                     }
                 }
                 CLAY_TEXT(CStr(s->log_caption),
@@ -600,15 +628,7 @@ static void BackgroundWorkspaceFrame(PicoWorkspace *workspace, void *state, floa
     }
     if (app && pico_ui_modal_has(app, BG_LOG_NAME) && s->selected_id[0] && agent_id)
     {
-        size_t n = 0;
-        if (!PicoBgTable_CopyLog(TableForWorkspace(workspace), agent_id, s->selected_id, s->log_copy,
-                                 sizeof(s->log_copy), &n))
-        {
-            s->log_copy[0] = '\0';
-            n = 0;
-        }
-        s->log_len = n;
-        snprintf(s->log_caption, sizeof(s->log_caption), "Latest 64 KiB of output; oldest lines are dropped.");
+        RefreshLogCopy(TableForWorkspace(workspace), agent_id, s);
         PicoScrollbar_UpdateDrag(&s->log_scrollbar, CLAY_STRING("BackgroundLogScroll"),
                                  CLAY_STRING("BackgroundLogScrollHandle"));
     }
@@ -648,7 +668,6 @@ static int BackgroundWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     {
         return 1;
     }
-    s->workspace = workspace;
     if (state_out)
     {
         *state_out = s;

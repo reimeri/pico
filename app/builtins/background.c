@@ -2,6 +2,7 @@
 #include "background_model.h"
 #include "workspace_internal.h"
 #include "host_internal.h"
+#include "docs_path.h"
 #include "json.h"
 #include "scrollbar.h"
 #include "agent.h"
@@ -14,6 +15,7 @@
 
 #define BG_PILL_HEIGHT 42.0f
 #define BG_GAP 8.0f
+#define BG_ICON_SIZE 18
 #define BG_LIST_NAME "background-list"
 #define BG_LOG_NAME "background-log"
 
@@ -25,6 +27,8 @@ typedef struct BackgroundState {
     bool selected_running;
     bool list_overflow;
     bool log_overflow;
+    bool icon_tried;
+    Texture2D icon;
     PicoScrollbar list_scrollbar;
     PicoScrollbar log_scrollbar;
 } BackgroundState;
@@ -51,6 +55,53 @@ static Clay_String CStr(const char *s)
         s = "";
     }
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+}
+
+static void ResourcePath(const char *relative, char *out, size_t cap)
+{
+    if (!Pico_DataPath(relative, out, cap))
+    {
+        snprintf(out, cap, "%s", relative);
+    }
+}
+
+static void EnsureIcon(BackgroundState *s)
+{
+    char path[4096];
+    Image img;
+    if (!s || s->icon_tried || !IsWindowReady())
+    {
+        return;
+    }
+    s->icon_tried = true;
+    ResourcePath("resources/background.png", path, sizeof(path));
+    img = LoadImage(path);
+    if (!img.data)
+    {
+        return;
+    }
+    /* Clay draws a filled rect for backgroundColor even on image elements. */
+    ImageColorTint(&img, (Color){(unsigned char)COLOR_TEXT.r, (unsigned char)COLOR_TEXT.g,
+                                 (unsigned char)COLOR_TEXT.b, (unsigned char)COLOR_TEXT.a});
+    s->icon = LoadTextureFromImage(img);
+    UnloadImage(img);
+    if (s->icon.id != 0)
+    {
+        SetTextureFilter(s->icon, TEXTURE_FILTER_BILINEAR);
+    }
+}
+
+static void UnloadIcon(BackgroundState *s)
+{
+    if (!s)
+    {
+        return;
+    }
+    if (s->icon.id != 0)
+    {
+        UnloadTexture(s->icon);
+        memset(&s->icon, 0, sizeof(s->icon));
+    }
 }
 
 static PicoBgTable *TableForWorkspace(PicoWorkspace *workspace)
@@ -262,10 +313,17 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
     }
 
     running = PicoBgTable_RunningCount(table, selected_agent_id);
-    snprintf(s->pill_label, sizeof(s->pill_label), "bg %d", running);
-
     if (running > 0)
     {
+        EnsureIcon(s);
+        if (s->icon.id != 0)
+        {
+            snprintf(s->pill_label, sizeof(s->pill_label), "%d", running);
+        }
+        else
+        {
+            snprintf(s->pill_label, sizeof(s->pill_label), "bg %d", running);
+        }
         CLAY(CLAY_ID("BackgroundPill"),
              {.floating = {.offset = {.y = -BG_GAP},
                            .parentId = CLAY_ID("Composer").id,
@@ -275,12 +333,22 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                            .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
                            .attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID},
               .layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                         .padding = {14, 14, 8, 8},
+                         .padding = {12, 12, 8, 8},
+                         .childGap = 6,
                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                          .sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIXED(BG_PILL_HEIGHT)}},
               .backgroundColor = COLOR_CONTENT_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(18)})
         {
+            if (s->icon.id != 0)
+            {
+                float icon_size = Pico_FontPx(BG_ICON_SIZE);
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(icon_size),
+                                                    .height = CLAY_SIZING_FIXED(icon_size)}},
+                              .image = {.imageData = &s->icon}})
+                {
+                }
+            }
             CLAY_TEXT(CStr(s->pill_label),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
                                         .fontSize = PICO_FONT_UI,
@@ -702,6 +770,7 @@ static void BackgroundWorkspaceShutdown(PicoWorkspace *workspace, void *state)
         CloseTopModal(host, BG_LOG_NAME);
         CloseTopModal(host, BG_LIST_NAME);
     }
+    UnloadIcon(s);
     free(s);
 }
 

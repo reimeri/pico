@@ -66,6 +66,7 @@ typedef struct PicoSubagentInspect {
 #include "pico/plugin.h"
 
 typedef struct PicoModuleGeneration PicoModuleGeneration;
+struct PicoBgTable;
 
 typedef struct PicoPluginSlot {
     char name[64];
@@ -172,6 +173,7 @@ struct PicoWorkspace {
     bool reload_queued;
     bool reload_retry_compile_failures;
     bool retained_shutdown;
+    struct PicoBgTable *background;
 };
 
 void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPostKind kind,
@@ -206,6 +208,7 @@ bool PicoWorkspace_Quiesce(PicoWorkspace *workspace);
 void PicoWorkspace_Free(PicoWorkspace *workspace);
 bool PicoWorkspace_Destroy(PicoWorkspace *workspace);
 void PicoWorkspace_Pump(PicoWorkspace *workspace);
+struct PicoBgTable *PicoWorkspace_Background(PicoWorkspace *workspace);
 bool PicoWorkspace_BlocksReload(const PicoWorkspace *workspace);
 bool PicoWorkspace_IsQuiescent(const PicoWorkspace *workspace);
 bool PicoWorkspace_AcceptsNewWork(const PicoWorkspace *workspace);

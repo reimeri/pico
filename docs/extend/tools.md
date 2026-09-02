@@ -42,7 +42,7 @@ static int EchoInit(PicoWorkspace *workspace, void **state_out)
 }
 ```
 
-Full file: [`../../examples/echo_tool.c`](../../examples/echo_tool.c). Builtin reference: [`../../builtins/shell.c`](../../builtins/shell.c) (`sh`). Asking the user: [`../../examples/ask_tool.c`](../../examples/ask_tool.c) (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: [`../../examples/permit_tool.c`](../../examples/permit_tool.c) (a before-tool hook).
+Full file: [`../../examples/echo_tool.c`](../../examples/echo_tool.c). Builtin reference: [`../../builtins/shell.c`](../../builtins/shell.c) (`sh`). Background processes: [`../../builtins/background.c`](../../builtins/background.c) (`run_background`, `kill_background`, `list_background`, `log_background`). Those jobs outlive the tool call, are local to one agent, and keep only the latest 64 KiB of output (oldest lines dropped). They do not use `pico_tool_set_child` or `details_json`. Asking the user: [`../../examples/ask_tool.c`](../../examples/ask_tool.c) (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: [`../../examples/permit_tool.c`](../../examples/permit_tool.c) (a before-tool hook).
 
 ## Asking the user
 

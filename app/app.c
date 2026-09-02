@@ -15,6 +15,7 @@
 #include "md_view_internal.h"
 #include "builtins/chat.h"
 #include "builtins/todo.h"
+#include "builtins/background_model.h"
 #include "host_internal.h"
 #include "path.h"
 
@@ -1962,6 +1963,13 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     pthread_mutex_init(&workspace->delegation_mu, NULL);
     pthread_mutex_init(&workspace->lifecycle_mu, NULL);
     pthread_mutex_init(&workspace->ui_post_mu, NULL);
+    workspace->background = PicoBgTable_Create();
+    if (!workspace->background)
+    {
+        workspace->state = PICO_WORKSPACE_CLOSED;
+        PicoWorkspace_Free(workspace);
+        return PICO_NO_MEMORY;
+    }
     workspace->accepting_work = true;
     host->workspaces[host->workspace_count++] = workspace;
     if (!PicoWorkspaceSettings_Load(workspace))

@@ -61,6 +61,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_ask_user,
     pico_ext_todo,
     pico_ext_shell,
+    pico_ext_background,
     pico_ext_subagent,
     pico_ext_commands,
     pico_ext_files,

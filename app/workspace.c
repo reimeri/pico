@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "subagent_config.h"
 #include "host_internal.h"
+#include "builtins/background_model.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -813,12 +814,18 @@ PicoResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
     return PICO_OK;
 }
 
+struct PicoBgTable *PicoWorkspace_Background(PicoWorkspace *workspace)
+{
+    return workspace ? workspace->background : NULL;
+}
+
 void PicoWorkspace_Pump(PicoWorkspace *workspace)
 {
     if (!workspace)
     {
         return;
     }
+    PicoBgTable_Pump(workspace->background);
     PicoWorkspace_PumpUiPosts(workspace);
     PicoAgent_ReapRetired(workspace);
     ProcessDelegationRequests(workspace);
@@ -1032,6 +1039,8 @@ void PicoWorkspace_Free(PicoWorkspace *workspace)
     workspace->snapshot_count = 0;
     workspace->snapshot_capacity = 0;
     FreeUiPosts(workspace);
+    PicoBgTable_Destroy(workspace->background);
+    workspace->background = NULL;
     free(workspace->models);
     workspace->models = NULL;
     workspace->model_count = 0;

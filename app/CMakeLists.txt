@@ -106,6 +106,8 @@ add_executable(pico
     builtins/ask_user.c
     builtins/todo.c
     builtins/todo_model.c
+    builtins/background.c
+    builtins/background_model.c
     builtins/shell.c
     builtins/subagent.c
     builtins/complete.c
@@ -323,6 +325,17 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_todo_tests)
     add_test(NAME pico_todo_tests COMMAND pico_todo_tests)
 
+    add_executable(pico_background_tests
+        tests/background_test.c
+        builtins/background_model.c
+        json.c)
+    target_include_directories(pico_background_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    pico_warnings_are_errors(pico_background_tests)
+    target_link_libraries(pico_background_tests PRIVATE Threads::Threads)
+    add_test(NAME pico_background_tests COMMAND pico_background_tests)
+
     add_executable(pico_ask_user_tests
         tests/ask_user_test.c
         builtins/ask_user.c
@@ -359,6 +372,7 @@ if(BUILD_TESTING)
         builtins/subagent.c
         builtins/todo.c
         builtins/todo_model.c
+        builtins/background_model.c
         json.c
         canonical.c
         usage.c
@@ -411,6 +425,7 @@ if(BUILD_TESTING)
         host_extensions.c
         workspace_extensions.c
         subagent_config.c
+        builtins/background_model.c
         json.c
         canonical.c
         usage.c
@@ -448,6 +463,7 @@ if(BUILD_TESTING)
         host_extensions.c
         workspace_extensions.c
         subagent_config.c
+        builtins/background_model.c
         json.c
         canonical.c
         usage.c
@@ -607,6 +623,8 @@ if(BUILD_TESTING)
         builtins/subagent.c
         builtins/todo.c
         builtins/todo_model.c
+        builtins/background.c
+        builtins/background_model.c
         builtins/chat.c
         builtins/composer.c
         builtins/footer.c
@@ -659,7 +677,7 @@ if(BUILD_TESTING)
 endif()
 
 set(_pico_ref_builtins
-    shell.c openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    shell.c background.c background_model.c openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
     completions.c completions.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory

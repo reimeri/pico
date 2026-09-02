@@ -7,6 +7,7 @@
 #include "scrollbar.h"
 #include "richtext.h"
 #include "builtins/chat.h"
+#include "builtins/background_model.h"
 #include "builtins/sidebar.h"
 #include "agent_internal.h"
 #include "agent.h"
@@ -1400,6 +1401,118 @@ static int TestCdOpensSelectsAndReusesWorkspace(void)
     pico_host_free(host);
     rmdir(dirA);
     rmdir(dirB);
+    return 0;
+}
+
+
+static int TestBackgroundJobsSurviveWorkspaceReload(void)
+{
+    PicoHost *host = NULL;
+    char dir[] = "/tmp/pico-bg-rl-XXXXXX";
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgentId agent_id = 0;
+    PicoWorkspace *ws;
+    PicoBgTable *table;
+    char *error = NULL;
+    char *json;
+    char *list;
+    int i;
+    bool found_tool = false;
+    const PicoRegistrationGeneration *reg;
+
+    if (!mkdtemp(dir))
+    {
+        Fail("mkdtemp background reload");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init background reload");
+        rmdir(dir);
+        return 1;
+    }
+    if (pico_workspace_open(host, dir, &ws_id) != PICO_OK)
+    {
+        Fail("open workspace background reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, ws_id, &opt, &agent_id) != PICO_OK)
+    {
+        Fail("create agent background reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    ws = PicoHost_FindWorkspace(host, ws_id);
+    table = PicoWorkspace_Background(ws);
+    if (!ws || !table)
+    {
+        Fail("background table missing before reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    json = PicoBgTable_Spawn(table, agent_id, dir, "sleep", "sleep 30", &error);
+    if (!json)
+    {
+        free(error);
+        Fail("spawn before reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    free(json);
+    PicoHost_RequestReload(host);
+    for (i = 0; i < 32; i++)
+    {
+        pico_host_pump(host);
+        if (ws->state == PICO_WORKSPACE_OPEN && PicoWorkspace_AcceptsNewWork(ws))
+        {
+            break;
+        }
+    }
+    if (ws->state != PICO_WORKSPACE_OPEN || PicoWorkspace_Background(ws) != table)
+    {
+        Fail("background table must survive workspace reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    list = PicoBgTable_ListJson(table, agent_id);
+    if (!list || !strstr(list, "running") || PicoBgTable_RunningCount(table, agent_id) < 1)
+    {
+        free(list);
+        Fail("background job did not stay running across reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    free(list);
+    reg = PicoWorkspace_RegistrationActiveConst(ws);
+    for (i = 0; reg && i < reg->tool_count; i++)
+    {
+        if (reg->tools[i].name && strcmp(reg->tools[i].name, "run_background") == 0)
+        {
+            found_tool = true;
+            break;
+        }
+    }
+    if (!found_tool)
+    {
+        Fail("run_background must re-register after reload");
+        pico_host_free(host);
+        rmdir(dir);
+        return 1;
+    }
+    pico_host_free(host);
+    rmdir(dir);
     return 0;
 }
 
@@ -6008,6 +6121,10 @@ int main(void)
         return 1;
     }
     if (TestCdOpensSelectsAndReusesWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestBackgroundJobsSurviveWorkspaceReload() != 0)
     {
         return 1;
     }

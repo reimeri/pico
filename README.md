@@ -24,6 +24,7 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 
 ### 1. Install Pico
 
+
 On x86-64 Linux, the easiest option is to download the AppImage from the **[latest GitHub release](https://github.com/reimeri/pico/releases/latest)**. Then run it from your download directory:
 
 ```bash
@@ -41,7 +42,8 @@ cd pico-*-linux-x86_64
 
 A host C compiler (`cc`) is only needed if you want Pico to compile hot-reloadable C extensions. The release downloads do not bundle one.
 
-#### NixOS / Nix
+<details>
+<summary>NixOS / Nix</summary>
 
 For a quick flake-based install into your user profile:
 
@@ -85,6 +87,7 @@ sudo nixos-rebuild switch --flake .#hostname
 ```
 
 The flake supports `x86_64-linux` and `aarch64-linux`. Its package includes GCC on `PATH`, so C extensions compile out of the box.
+</details>
 
 ### 2. Start Pico
 

@@ -1782,20 +1782,18 @@ void PicoComposer_HandleInput(PicoHost *app)
         return;
     }
 
-    if (ctrl && (Pico_ShortcutPressed('a') || IsKeyPressed(KEY_HOME)))
+    if (ctrl && Pico_ShortcutPressed('a'))
     {
-        MoveCursor(c, LineStart(text, c->cursor), shift);
+        MoveCursor(c, 0, false);
+        MoveCursor(c, c->length, true);
     }
-    else if (IsKeyPressed(KEY_HOME))
+
+    if (IsKeyPressed(KEY_HOME))
     {
         MoveCursor(c, LineStart(text, c->cursor), shift);
     }
 
-    if (ctrl && (Pico_ShortcutPressed('e') || IsKeyPressed(KEY_END)))
-    {
-        MoveCursor(c, LineEnd(text, c->length, c->cursor), shift);
-    }
-    else if (IsKeyPressed(KEY_END))
+    if (IsKeyPressed(KEY_END))
     {
         MoveCursor(c, LineEnd(text, c->length, c->cursor), shift);
     }
@@ -1839,22 +1837,17 @@ void PicoComposer_HandleInput(PicoHost *app)
         {
             DeleteSelection(c);
         }
+        else if (ctrl)
+        {
+            ComposerDeleteRange(c, PrevWord(text, c->cursor), c->cursor);
+        }
         else
         {
             ComposerDeleteRange(c, Utf8Prev(text, c->cursor), c->cursor);
         }
     }
 
-    if (ctrl && Pico_ShortcutPressed('k'))
-    {
-        int to = LineEnd(text, c->length, c->cursor);
-        if (to == c->cursor && to < c->length && text[to] == '\n')
-        {
-            to++;
-        }
-        ComposerDeleteRange(c, c->cursor, to);
-    }
-    else if (repeat_del)
+    if (repeat_del)
     {
         if (PicoComposer_HasSelection(app))
         {

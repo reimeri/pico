@@ -114,6 +114,7 @@ typedef struct PicoMessage {
     char *source;
     PicoTraceLine *trace;
     int trace_count;
+    bool trace_group_expanded;
     MdDocument doc;
 } PicoMessage;
 
@@ -124,6 +125,7 @@ typedef struct PicoChatSelect {
     bool mouse_selecting;
     bool dragging;
     bool pressed_tool;
+    bool pressed_group;
     int tool_msg;
     int tool_idx;
     float press_x;

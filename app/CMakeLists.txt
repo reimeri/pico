@@ -97,6 +97,7 @@ add_executable(pico
     scrollbar.c
     transcript_virtual.c
     wrapped_text.c
+    trace_group.c
     builtins/chat.c
     builtins/composer.c
     builtins/footer.c
@@ -268,6 +269,17 @@ if(BUILD_TESTING)
     target_include_directories(pico_transcript_virtual_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_transcript_virtual_tests)
     add_test(NAME pico_transcript_virtual_tests COMMAND pico_transcript_virtual_tests)
+
+    add_executable(pico_trace_group_tests
+        tests/trace_group_test.c
+        trace_group.c)
+    target_include_directories(pico_trace_group_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    pico_warnings_are_errors(pico_trace_group_tests)
+    add_test(NAME pico_trace_group_tests COMMAND pico_trace_group_tests)
 
     add_executable(pico_wrapped_text_tests
         tests/wrapped_text_test.c
@@ -652,6 +664,7 @@ if(BUILD_TESTING)
         text_range.c
         wrapped_text.c
         transcript_virtual.c
+        trace_group.c
         diff_lines.c
         http.c
         http_capture.c

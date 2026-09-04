@@ -13,6 +13,7 @@
 #include "scrollbar.h"
 #include "markdown.h"
 #include "transcript_virtual.h"
+#include "trace_group.h"
 #include "wrapped_text.h"
 
 #include "clay/clay.h"
@@ -99,6 +100,7 @@ typedef struct ChatState {
     bool inspect_pressed_dim;
     bool inspect_pressed_back;
     bool inspect_pressed_tool;
+    bool inspect_pressed_group;
     int inspect_tool_msg;
     int inspect_tool_idx;
     PicoTranscriptVirtual main_virtual;
@@ -130,6 +132,7 @@ static ChatState *ActiveChatState(void)
 #define g_inspect_pressed_dim (ActiveChatState()->inspect_pressed_dim)
 #define g_inspect_pressed_back (ActiveChatState()->inspect_pressed_back)
 #define g_inspect_pressed_tool (ActiveChatState()->inspect_pressed_tool)
+#define g_inspect_pressed_group (ActiveChatState()->inspect_pressed_group)
 #define g_inspect_tool_msg (ActiveChatState()->inspect_tool_msg)
 #define g_inspect_tool_idx (ActiveChatState()->inspect_tool_idx)
 #define g_main_virtual (ActiveChatState()->main_virtual)
@@ -422,6 +425,21 @@ static Clay_ElementId ThinkSynthRowId(const TranscriptView *view, int message_in
 static Clay_ElementId ThinkSynthChevronId(const TranscriptView *view, int message_index)
 {
     return ToolElementId(view, message_index, 0, CLAY_STRING("ThinkSynthChevron"));
+}
+
+static Clay_ElementId TraceGroupRowId(const TranscriptView *view, int message_index)
+{
+    return ToolElementId(view, message_index, 0, CLAY_STRING("TraceGroupRow"));
+}
+
+static Clay_ElementId TraceGroupLabelId(const TranscriptView *view, int message_index)
+{
+    return ToolElementId(view, message_index, 0, CLAY_STRING("TraceGroupLabel"));
+}
+
+static Clay_ElementId TraceGroupChevronId(const TranscriptView *view, int message_index)
+{
+    return ToolElementId(view, message_index, 0, CLAY_STRING("TraceGroupChevron"));
 }
 
 static void ThinkFrameReset(void)
@@ -876,7 +894,206 @@ static PicoToolCallProgress ToolProgress(const TranscriptView *view, const PicoT
     return PicoAgent_ToolCallProgress(view ? view->owner : NULL, line ? line->tool_call_id : NULL);
 }
 
-static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLine *line)
+static bool ToolFallbackLive(const TranscriptView *view, int message_index, int trace_index)
+{
+    return view && message_index == view->message_count - 1 && message_index >= 0 &&
+           trace_index == view->messages[message_index].trace_count - 1 && OwnerWaiting(view);
+}
+
+static bool TraceLineOpen(const TranscriptView *view, const PicoTraceLine *line, int message_index,
+                          int trace_index)
+{
+    bool pending = false;
+    if (line && line->is_tool)
+    {
+        PicoToolCallProgress progress = ToolProgress(view, line);
+        pending = progress == PICO_TOOL_CALL_RUNNING || progress == PICO_TOOL_CALL_QUEUED;
+    }
+    return pico_trace_line_open(line, pending,
+                                ToolFallbackLive(view, message_index, trace_index),
+                                ThinkBurstLive(view, message_index, trace_index));
+}
+
+static bool MessageHasFinishedTrace(const TranscriptView *view, const PicoMessage *msg,
+                                    int message_index)
+{
+    if (!msg)
+    {
+        return false;
+    }
+    for (int t = 0; t < msg->trace_count; t++)
+    {
+        if (pico_trace_line_visible(&msg->trace[t]) &&
+            !TraceLineOpen(view, &msg->trace[t], message_index, t))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void CountFinishedTraceGroup(const TranscriptView *view, const PicoMessage *msg,
+                                    int message_index, int *tool_calls, int *spawn_processes,
+                                    int *subagents, bool *has_thinking, int *think_ms)
+{
+    int tools = 0;
+    int spawns = 0;
+    int subs = 0;
+    bool thinking = false;
+    int ms = 0;
+    if (msg)
+    {
+        for (int t = 0; t < msg->trace_count; t++)
+        {
+            const PicoTraceLine *line = &msg->trace[t];
+            if (!pico_trace_line_visible(line) || TraceLineOpen(view, line, message_index, t))
+            {
+                continue;
+            }
+            switch (pico_trace_line_group_kind(line))
+            {
+            case PICO_TRACE_GROUP_TOOL:
+                tools++;
+                break;
+            case PICO_TRACE_GROUP_SPAWN:
+                spawns++;
+                break;
+            case PICO_TRACE_GROUP_SUBAGENT:
+                subs++;
+                break;
+            case PICO_TRACE_GROUP_THINK:
+                thinking = true;
+                if (line->think_ms > 0)
+                {
+                    ms += line->think_ms;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    if (tool_calls)
+    {
+        *tool_calls = tools;
+    }
+    if (spawn_processes)
+    {
+        *spawn_processes = spawns;
+    }
+    if (subagents)
+    {
+        *subagents = subs;
+    }
+    if (has_thinking)
+    {
+        *has_thinking = thinking;
+    }
+    if (think_ms)
+    {
+        *think_ms = ms;
+    }
+}
+
+static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int message_index,
+                           int trace_index, float available_width);
+
+static void RenderTraceLine(const TranscriptView *view, PicoTraceLine *line, int message_index,
+                            int trace_index, float available_width)
+{
+    if (!line)
+    {
+        return;
+    }
+    if (line->is_tool)
+    {
+        RenderToolLine(view, line, message_index, trace_index, available_width);
+        return;
+    }
+    RenderThinkLine(view, line, message_index, trace_index, available_width);
+}
+
+static void RenderTraceGroupHeader(const TranscriptView *view, PicoMessage *msg, int message_index)
+{
+    char title[160];
+    int tool_calls = 0;
+    int spawn_processes = 0;
+    int subagents = 0;
+    bool has_thinking = false;
+    int think_ms = 0;
+    Clay_ElementId row_id = TraceGroupRowId(view, message_index);
+    Clay_ElementId label_id = TraceGroupLabelId(view, message_index);
+    bool hovered = Clay_PointerOver(row_id);
+    Clay_Color color = hovered ? COLOR_TOOL_NAME_HOVER : COLOR_MUTED;
+
+    CountFinishedTraceGroup(view, msg, message_index, &tool_calls, &spawn_processes, &subagents,
+                            &has_thinking, &think_ms);
+    pico_trace_group_format_title(title, sizeof(title), tool_calls, spawn_processes, subagents,
+                                  has_thinking, think_ms);
+    if (hovered)
+    {
+        view->app->hovered_tool = true;
+    }
+
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 6,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = 8,
+                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                            .clip = {.horizontal = true, .vertical = true}})
+            {
+                ViewText(view, ViewCStr(ThinkLabelDup(title)),
+                         (Clay_TextElementConfig){.fontId = FONT_ITALIC,
+                                                  .fontSize = PICO_FONT_UI,
+                                                  .textColor = color,
+                                                  .wrapMode = CLAY_TEXT_WRAP_NONE});
+            }
+            CLAY(TraceGroupChevronId(view, message_index),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_GROW(0)}}})
+            {
+            }
+        }
+    }
+    ViewBreak(view);
+}
+
+static void RenderMessageTrace(const TranscriptView *view, PicoMessage *msg, int message_index,
+                               float available_width)
+{
+    bool has_finished = MessageHasFinishedTrace(view, msg, message_index);
+    if (has_finished)
+    {
+        RenderTraceGroupHeader(view, msg, message_index);
+        if (msg->trace_group_expanded)
+        {
+            for (int t = 0; t < msg->trace_count; t++)
+            {
+                PicoTraceLine *line = &msg->trace[t];
+                if (pico_trace_line_visible(line) &&
+                    !TraceLineOpen(view, line, message_index, t))
+                {
+                    RenderTraceLine(view, line, message_index, t, available_width);
+                }
+            }
+        }
+    }
+    for (int t = 0; t < msg->trace_count; t++)
+    {
+        PicoTraceLine *line = &msg->trace[t];
+        if (pico_trace_line_visible(line) && TraceLineOpen(view, line, message_index, t))
+        {
+            RenderTraceLine(view, line, message_index, t, available_width);
+        }
+    }
+}
+
+static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLine *line,
+                                  int message_index, int trace_index)
 {
     if (line->tool_output)
     {
@@ -887,21 +1104,24 @@ static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLin
     {
         return COLOR_STATUS_OFF;
     }
-    if (progress == PICO_TOOL_CALL_RUNNING || OwnerWaiting(view))
+    if (progress == PICO_TOOL_CALL_RUNNING ||
+        ToolFallbackLive(view, message_index, trace_index))
     {
         return COLOR_STATUS_RUN;
     }
     return COLOR_STATUS_OFF;
 }
 
-static const char *ToolPendingLabel(const TranscriptView *view, const PicoTraceLine *line)
+static const char *ToolPendingLabel(const TranscriptView *view, const PicoTraceLine *line,
+                                    int message_index, int trace_index)
 {
     PicoToolCallProgress progress = ToolProgress(view, line);
     if (progress == PICO_TOOL_CALL_QUEUED)
     {
         return "Queued…";
     }
-    if (progress == PICO_TOOL_CALL_RUNNING || OwnerWaiting(view))
+    if (progress == PICO_TOOL_CALL_RUNNING ||
+        ToolFallbackLive(view, message_index, trace_index))
     {
         return OwnerHasAsk(view) ? "Waiting for you…" : "Running…";
     }
@@ -948,7 +1168,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
         {
             CLAY(ToolStatusId(view, message_index, trace_index),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
-                  .backgroundColor = ToolStatusColor(view, line),
+                  .backgroundColor = ToolStatusColor(view, line, message_index, trace_index),
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
             }
@@ -996,7 +1216,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             const char *output = line->tool_output;
             if (!output)
             {
-                output = ToolPendingLabel(view, line);
+                output = ToolPendingLabel(view, line, message_index, trace_index);
             }
             RenderTitledToolBlock(view, "Output", output, available_width);
         }
@@ -1296,6 +1516,7 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
             hash = RevisionPointer(hash, line->think_parts ? line->think_parts[p] : NULL);
         }
     }
+    hash = RevisionMix(hash, msg->trace_group_expanded ? 1 : 0);
     if (message_index == view->message_count - 1)
     {
         /* Streaming buffers often grow in place, so pointer identity alone is
@@ -1381,16 +1602,7 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
         bool has_source = msg->source && msg->source[0];
         bool live = !user && i == view->message_count - 1 && OwnerWaiting(view);
         bool live_llm = live && view->state == PICO_AGENT_LLM_WAIT;
-        for (int t = 0; t < msg->trace_count; t++)
-        {
-            PicoTraceLine *line = &msg->trace[t];
-            if (line->is_tool)
-            {
-                RenderToolLine(view, line, i, t, available_width);
-                continue;
-            }
-            RenderThinkLine(view, line, i, t, available_width);
-        }
+        RenderMessageTrace(view, msg, i, available_width);
         bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
                               ThinkHasBody(&msg->trace[msg->trace_count - 1]);
         if (live_llm && !has_source && !trailing_think)
@@ -1735,6 +1947,7 @@ void PicoChat_InspectClose(void)
     g_inspect_pressed_dim = false;
     g_inspect_pressed_back = false;
     g_inspect_pressed_tool = false;
+    g_inspect_pressed_group = false;
     g_inspect_overflow = false;
     memset(&g_inspect_bar, 0, sizeof(g_inspect_bar));
 }
@@ -1752,6 +1965,7 @@ static void InspectForceReset(void)
     g_inspect_pressed_dim = false;
     g_inspect_pressed_back = false;
     g_inspect_pressed_tool = false;
+    g_inspect_pressed_group = false;
     g_inspect_overflow = false;
     memset(&g_inspect_bar, 0, sizeof(g_inspect_bar));
 }
@@ -2147,6 +2361,11 @@ static bool HitTraceRow(const TranscriptView *view, const PicoTraceLine *line, i
            (line->is_tool || ThinkHasBody(line));
 }
 
+static bool HitTraceGroup(const TranscriptView *view, int message_index)
+{
+    return Clay_PointerOver(TraceGroupRowId(view, message_index));
+}
+
 static void InspectHandlePointer(PicoHost *app)
 {
     if (!InspectIsTopModal(app))
@@ -2171,12 +2390,18 @@ static void InspectHandlePointer(PicoHost *app)
         .selectable = false,
     };
 
+    int group_msg = -1;
     int tool_msg = -1;
     int tool_idx = -1;
     if (over_scroll && found)
     {
         for (int i = 0; i < view.message_count; i++)
         {
+            if (HitTraceGroup(&view, i))
+            {
+                group_msg = i;
+                break;
+            }
             const PicoMessage *msg = &view.messages[i];
             for (int t = 0; t < msg->trace_count; t++)
             {
@@ -2199,8 +2424,9 @@ static void InspectHandlePointer(PicoHost *app)
     {
         g_inspect_pressed_dim = over_dim && !over_card;
         g_inspect_pressed_back = over_back;
+        g_inspect_pressed_group = group_msg >= 0;
         g_inspect_pressed_tool = tool_idx >= 0;
-        g_inspect_tool_msg = tool_msg;
+        g_inspect_tool_msg = group_msg >= 0 ? group_msg : tool_msg;
         g_inspect_tool_idx = tool_idx;
     }
     if (!IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
@@ -2214,6 +2440,12 @@ static void InspectHandlePointer(PicoHost *app)
     else if (g_inspect_pressed_back && over_back)
     {
         InspectPop();
+    }
+    else if (g_inspect_pressed_group && group_msg >= 0 && group_msg == g_inspect_tool_msg &&
+             found && group_msg < inspect.message_count)
+    {
+        PicoMessage *msg = (PicoMessage *)&inspect.messages[group_msg];
+        msg->trace_group_expanded = !msg->trace_group_expanded;
     }
     else if (g_inspect_pressed_tool && tool_idx >= 0 && tool_msg == g_inspect_tool_msg &&
              tool_idx == g_inspect_tool_idx && found && tool_msg < inspect.message_count)
@@ -2232,6 +2464,7 @@ static void InspectHandlePointer(PicoHost *app)
     g_inspect_pressed_dim = false;
     g_inspect_pressed_back = false;
     g_inspect_pressed_tool = false;
+    g_inspect_pressed_group = false;
 }
 
 void PicoChat_HandleToolRelease(PicoHost *app)
@@ -2310,6 +2543,7 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
             app->chat_sel.mouse_selecting = false;
             app->chat_sel.dragging = false;
             app->chat_sel.pressed_tool = false;
+            app->chat_sel.pressed_group = false;
             PicoClickSeq_Reset(&app->chat_sel.click_seq);
         }
         return;
@@ -2317,11 +2551,17 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over_chat)
     {
+        int group_msg = -1;
         int tool_msg = -1;
         int tool_idx = -1;
         for (int i = 0; i < PicoHost_SelectedAgent(app)->message_count; i++)
         {
             PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[i];
+            if (HitTraceGroup(&main, i))
+            {
+                group_msg = i;
+                break;
+            }
             for (int t = 0; t < msg->trace_count; t++)
             {
                 if ((msg->trace[t].is_tool || ThinkHasBody(&msg->trace[t])) &&
@@ -2342,11 +2582,12 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
         app->chat_sel.dragging = false;
         app->chat_sel.press_x = mouse.x;
         app->chat_sel.press_y = mouse.y;
+        app->chat_sel.pressed_group = group_msg >= 0;
         app->chat_sel.pressed_tool = tool_idx >= 0;
-        app->chat_sel.tool_msg = tool_msg;
+        app->chat_sel.tool_msg = group_msg >= 0 ? group_msg : tool_msg;
         app->chat_sel.tool_idx = tool_idx;
         app->composer.sel_anchor = app->composer.cursor;
-        if (tool_idx >= 0)
+        if (group_msg >= 0 || tool_idx >= 0)
         {
             PicoClickSeq_Reset(&app->chat_sel.click_seq);
             app->chat_sel.granularity = 1;
@@ -2367,29 +2608,39 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
 
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
-        if (app->chat_sel.mouse_selecting && !app->chat_sel.dragging && app->chat_sel.pressed_tool &&
-            app->chat_sel.tool_msg >= 0 && app->chat_sel.tool_msg < PicoHost_SelectedAgent(app)->message_count)
+        if (app->chat_sel.mouse_selecting && !app->chat_sel.dragging &&
+            app->chat_sel.tool_msg >= 0 &&
+            app->chat_sel.tool_msg < PicoHost_SelectedAgent(app)->message_count)
         {
             PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[app->chat_sel.tool_msg];
-            int t = app->chat_sel.tool_idx;
-            if (t >= 0 && t < msg->trace_count &&
-                HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
+            if (app->chat_sel.pressed_group &&
+                HitTraceGroup(&main, app->chat_sel.tool_msg))
             {
-                PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
-                if (msg->trace[t].is_tool &&
-                    pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
+                msg->trace_group_expanded = !msg->trace_group_expanded;
+            }
+            else if (app->chat_sel.pressed_tool)
+            {
+                int t = app->chat_sel.tool_idx;
+                if (t >= 0 && t < msg->trace_count &&
+                    HitTraceRow(&main, &msg->trace[t], app->chat_sel.tool_msg, t))
                 {
-                    /* hook handled the row */
-                }
-                else
-                {
-                    msg->trace[t].expanded = !msg->trace[t].expanded;
+                    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+                    if (msg->trace[t].is_tool &&
+                        pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
+                    {
+                        /* hook handled the row */
+                    }
+                    else
+                    {
+                        msg->trace[t].expanded = !msg->trace[t].expanded;
+                    }
                 }
             }
             app->chat_sel.anchor = app->chat_sel.cursor;
         }
         app->chat_sel.mouse_selecting = false;
         app->chat_sel.pressed_tool = false;
+        app->chat_sel.pressed_group = false;
         if (!app->chat_sel.dragging && app->chat_sel.anchor == app->chat_sel.cursor)
         {
             app->chat_sel.dragging = false;
@@ -2409,7 +2660,8 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
         {
             int msg = app->chat_sel.msg;
             int pos = PicoChatSel_OffsetAtPoint(app, mouse.x, mouse.y, msg, &msg);
-            if (app->chat_sel.pressed_tool || app->chat_sel.granularity <= 1)
+            if (app->chat_sel.pressed_tool || app->chat_sel.pressed_group ||
+                app->chat_sel.granularity <= 1)
             {
                 if (app->chat_sel.msg < 0)
                 {
@@ -2533,6 +2785,24 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
     for (int i = 0; i < view->message_count; i++)
     {
         PicoMessage *msg = (PicoMessage *)&view->messages[i];
+        if (MessageHasFinishedTrace(view, msg, i))
+        {
+            Clay_ElementId row_id = TraceGroupRowId(view, i);
+            bool hovered = Clay_PointerOver(row_id);
+            if (hovered || msg->trace_group_expanded)
+            {
+                Clay_ElementData el = Clay_GetElementData(TraceGroupChevronId(view, i));
+                if (el.found)
+                {
+                    Clay_BoundingBox box = el.boundingBox;
+                    Vector2 center = {roundf(box.x + box.width * 0.5f),
+                                      roundf(box.y + box.height * 0.5f)};
+                    Color color = ClayToRay(hovered ? COLOR_TOOL_NAME_HOVER : COLOR_TOOL_CHEVRON);
+                    DrawTextPro(font, glyph, center, (Vector2){size.x * 0.5f, size.y * 0.5f},
+                                msg->trace_group_expanded ? 90.0f : 0.0f, glyph_px, 0.0f, color);
+                }
+            }
+        }
         for (int t = 0; t < msg->trace_count; t++)
         {
             PicoTraceLine *line = &msg->trace[t];

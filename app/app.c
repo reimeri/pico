@@ -2611,6 +2611,7 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
     {
         copy[i].role = src[i].role;
         copy[i].source = src[i].source ? JsonDup(src[i].source) : NULL;
+        copy[i].trace_group_expanded = src[i].trace_group_expanded;
         if (src[i].trace_count > 0)
         {
             copy[i].trace = (PicoTraceLine *)calloc((size_t)src[i].trace_count, sizeof(PicoTraceLine));

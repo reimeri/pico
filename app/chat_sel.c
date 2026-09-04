@@ -376,6 +376,7 @@ void PicoChatSel_Clear(PicoHost *app)
     app->chat_sel.mouse_selecting = false;
     app->chat_sel.dragging = false;
     app->chat_sel.pressed_tool = false;
+    app->chat_sel.pressed_group = false;
     app->chat_sel.granularity = 1;
     app->chat_sel.unit_from = 0;
     app->chat_sel.unit_to = 0;

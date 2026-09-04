@@ -229,11 +229,13 @@ static int NotifyHostInit(PicoHost *host, void **state_out)
     {
         return 1;
     }
-    s->have_notify_send = CommandOnPath("notify-send");
-    if (state_out)
+    if (!state_out)
     {
-        *state_out = s;
+        free(s);
+        return 1;
     }
+    s->have_notify_send = CommandOnPath("notify-send");
+    *state_out = s;
     return 0;
 }
 

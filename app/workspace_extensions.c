@@ -235,7 +235,8 @@ static bool ActivateWorkspaceModule(PicoWorkspace *workspace, PicoWorkspace *tar
     {
         slot = &target->workspace_plugins[target->workspace_plugin_count++];
         memset(slot, 0, sizeof(*slot));
-        snprintf(slot->name, sizeof(slot->name), "%s", module->ext.name);
+        /* ext.name is extension-controlled and may be NULL; %s with NULL is UB. */
+        snprintf(slot->name, sizeof(slot->name), "%s", module->ext.name ? module->ext.name : "");
         slot->source = module->source[0] ? module->source : NULL;
     }
     if (slot && slot->initialized && slot->module == module)
@@ -692,7 +693,8 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         {
             slot = &workspace->workspace_plugins[workspace->workspace_plugin_count++];
             memset(slot, 0, sizeof(*slot));
-            snprintf(slot->name, sizeof(slot->name), "%s", failed_module->ext.name);
+            snprintf(slot->name, sizeof(slot->name), "%s",
+                     failed_module->ext.name ? failed_module->ext.name : "");
             slot->source = failed_module->source[0] ? failed_module->source : NULL;
         }
         if (slot)

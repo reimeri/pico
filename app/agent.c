@@ -991,6 +991,8 @@ static void *WorkerMain(void *arg)
         char *tool_args = rt->work_tool_args;
         char *call_id = rt->work_call_id;
         PicoToolFn tool_fn = rt->work_tool_fn;
+        void *stream_state = rt->work_stream_state;
+        void *tool_state = rt->work_tool_state;
         rt->work = PICO_WORK_IDLE;
         rt->work_stream = NULL;
         rt->work_model = NULL;
@@ -1043,7 +1045,7 @@ static void *WorkerMain(void *arg)
             t_worker_context = PICO_WORKER_PROVIDER;
             t_agent_context = &rt->context;
             int rc = stream_fn ? stream_fn(&rt->context, &turn, CancelCb, DeltaCb, rt, &result,
-                                           rt->work_stream_state)
+                                           stream_state)
                                : PICO_LLM_FAIL;
             t_agent_context = NULL;
             t_worker_context = PICO_WORKER_NONE;
@@ -1111,7 +1113,7 @@ static void *WorkerMain(void *arg)
                 {
                     rt->context.tool_call_id = call_id;
                     t_agent_context = &rt->context;
-                    tool_fn(&rt->context, tool_args ? tool_args : "{}", &result, rt->work_tool_state);
+                    tool_fn(&rt->context, tool_args ? tool_args : "{}", &result, tool_state);
                     t_agent_context = NULL;
                     rt->context.tool_call_id = NULL;
                     bool details_valid = false;
@@ -1211,13 +1213,18 @@ static void RunContextHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact,
         return;
     }
     input = next;
+    int appended = 0;
     for (int i = 0; i < extra_count; i++)
     {
-        input[base_count + i] = pico_canonical_context_text(extras[i]);
+        char *text = pico_canonical_context_text(extras[i]);
         free(extras[i]);
+        if (text)
+        {
+            input[base_count + appended++] = text;
+        }
     }
     *input_inout = input;
-    *count_inout = base_count + extra_count;
+    *count_inout = base_count + appended;
 }
 
 static bool InputHasContextItem(char **input, int count)
@@ -1286,6 +1293,16 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         for (int i = 0; i < input_count; i++)
         {
             input[i] = Dup(rt->input[i].json);
+            if (!input[i])
+            {
+                for (int j = 0; j < i; j++)
+                {
+                    free(input[j]);
+                }
+                free(input);
+                SetErrorState(app, agent, "out of memory");
+                return false;
+            }
         }
     }
 
@@ -2901,13 +2918,29 @@ static PicoAgentRt *CreateRt(PicoHost *app, PicoAgent *agent)
         return NULL;
     }
     rt->stream_msg = -1;
-    pthread_mutex_init(&rt->mu, NULL);
-    pthread_cond_init(&rt->cv, NULL);
-    RefreshWorkerContext(rt, app, agent);
-    if (pthread_create(&rt->thread, NULL, WorkerMain, rt) == 0)
+    if (pthread_mutex_init(&rt->mu, NULL) != 0)
     {
-        rt->started = true;
+        free(rt);
+        return NULL;
     }
+    if (pthread_cond_init(&rt->cv, NULL) != 0)
+    {
+        pthread_mutex_destroy(&rt->mu);
+        free(rt);
+        return NULL;
+    }
+    RefreshWorkerContext(rt, app, agent);
+    if (pthread_create(&rt->thread, NULL, WorkerMain, rt) != 0)
+    {
+        /* Without a worker, queued work would set busy forever and block
+           destruction; fail creation instead of returning a dead agent. */
+        PicoWorkspace_RegistrationRelease(rt->registration);
+        pthread_cond_destroy(&rt->cv);
+        pthread_mutex_destroy(&rt->mu);
+        free(rt);
+        return NULL;
+    }
+    rt->started = true;
     return rt;
 }
 

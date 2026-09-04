@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 char *JsonDup(const char *s)
 {
@@ -37,6 +38,14 @@ char *Pico_ReadFile(const char *path, size_t *out_len)
     FILE *f = fopen(path, "rb");
     if (!f)
     {
+        return NULL;
+    }
+    /* fopen() succeeds on directories; ftell() then reports LONG_MAX and the
+       allocation below requests petabytes. Only read regular files. */
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        fclose(f);
         return NULL;
     }
     if (fseek(f, 0, SEEK_END) != 0)

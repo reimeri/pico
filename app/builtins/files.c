@@ -445,12 +445,14 @@ static int FilesWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     {
         return 1;
     }
+    if (!state_out)
+    {
+        free(s);
+        return 1;
+    }
     s->workspace = workspace;
     snprintf(s->root, sizeof(s->root), "%s", workspace ? workspace->path : "");
-    if (state_out)
-    {
-        *state_out = s;
-    }
+    *state_out = s;
     pico_workspace_add_completer(workspace, '@', false, pico_files_complete, NULL);
     pico_workspace_add_hook(workspace, PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
     return 0;

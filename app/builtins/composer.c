@@ -15,6 +15,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1491,27 +1492,32 @@ static void EnsureCaretVisible(PicoHost *app)
     }
 }
 
-static void ComposerReserve(PicoComposer *c, int extra)
+static bool ComposerReserve(PicoComposer *c, int extra)
 {
-    int needed = c->length + extra + 1;
-    if (needed <= c->capacity)
+    /* size_t math: length/extra are int and their sum can overflow near INT_MAX. */
+    size_t needed = (size_t)c->length + (size_t)extra + 1;
+    if (needed <= (size_t)c->capacity)
     {
-        return;
+        return true;
     }
-    int capacity = c->capacity == 0 ? 256 : c->capacity;
+    if (needed > (size_t)INT_MAX)
+    {
+        return false;
+    }
+    size_t capacity = c->capacity == 0 ? 256 : (size_t)c->capacity;
     while (capacity < needed)
     {
-        capacity *= 2;
+        size_t doubled = capacity * 2;
+        capacity = doubled > (size_t)INT_MAX ? needed : doubled;
     }
-    c->text = (char *)realloc(c->text, (size_t)capacity);
-    c->capacity = capacity;
-    if (!c->text)
+    char *next = (char *)realloc(c->text, capacity);
+    if (!next)
     {
-        c->capacity = 0;
-        c->length = 0;
-        c->cursor = 0;
-        c->sel_anchor = 0;
+        return false; /* keep the old buffer and capacity; caller must not insert */
     }
+    c->text = next;
+    c->capacity = (int)capacity;
+    return true;
 }
 
 static int SelFrom(const PicoComposer *c)
@@ -1605,12 +1611,11 @@ static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
     {
         return;
     }
-    DeleteSelection(c);
-    ComposerReserve(c, nbytes);
-    if (!c->text)
+    if (!ComposerReserve(c, nbytes))
     {
         return;
     }
+    DeleteSelection(c);
     memmove(c->text + c->cursor + nbytes, c->text + c->cursor, (size_t)(c->length - c->cursor));
     memcpy(c->text + c->cursor, bytes, (size_t)nbytes);
     c->length += nbytes;
@@ -1737,6 +1742,7 @@ static void PasteClipboard(PicoComposer *c)
                 ComposerInsert(c, tmpl, (int)strlen(tmpl));
                 return;
             }
+            unlink(tmpl); /* partial/failed write: don't leave an orphan temp file */
         }
     }
     ComposerInsert(c, clip, len);

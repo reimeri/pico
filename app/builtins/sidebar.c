@@ -20,7 +20,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef PICO_SESSION_TEST_HOOKS
+extern bool PicoSession_TestHook(const char *stage);
+#endif
+
 #define SIDEBAR_SCAN_SEC 0.5
+#define SIDEBAR_RECONCILE_SEC 60.0
 #define SIDEBAR_SESSION_PAGE 10
 #define SIDEBAR_ROW_PAD_X 6
 #define SIDEBAR_ROW_GAP 6
@@ -42,7 +47,11 @@ typedef struct SidebarState {
     bool want_folder;
     bool folder_painted;
     bool dirty;
+    bool catalog_scanned;
     double last_scan;
+    double last_reconcile;
+    char catalog_change_token[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    bool catalog_change_token_valid;
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
     Texture2D settings_icon;
@@ -159,6 +168,8 @@ static void SidebarPreserveWorkspaceOrder(PicoCatalogWorkspace *next, int next_c
 
 static void SidebarRefresh(SidebarState *s)
 {
+    char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
     PicoCatalogWorkspace *next = NULL;
     SidebarWsUi *next_ui = NULL;
     SidebarWsUi *prev_ui;
@@ -169,7 +180,9 @@ static void SidebarRefresh(SidebarState *s)
     {
         return;
     }
+    bool token_before_valid = PicoCatalog_ReadChangeToken(token_before);
     n = PicoCatalog_Scan(&next);
+    bool token_after_valid = PicoCatalog_ReadChangeToken(token_after);
     if (s->order_unsaved)
     {
         SidebarPreserveWorkspaceOrder(next, n, s->workspaces, s->workspace_count);
@@ -194,8 +207,27 @@ static void SidebarRefresh(SidebarState *s)
     s->workspace_count = n;
     s->ui = next_ui;
     s->ui_count = next_ui ? n : 0;
-    s->dirty = false;
+    s->catalog_change_token_valid = token_after_valid;
+    if (token_after_valid)
+    {
+        snprintf(s->catalog_change_token, sizeof(s->catalog_change_token), "%s", token_after);
+    }
+    s->dirty = token_after_valid &&
+               (!token_before_valid || strcmp(token_before, token_after) != 0);
+    s->catalog_scanned = true;
     s->last_scan = GetTime();
+    s->last_reconcile = s->last_scan;
+}
+
+static bool SidebarCatalogChanged(SidebarState *s)
+{
+    char token[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    if (!s || !PicoCatalog_ReadChangeToken(token))
+    {
+        return true;
+    }
+    return !s->catalog_change_token_valid ||
+           strcmp(s->catalog_change_token, token) != 0;
 }
 
 static bool FolderDialogGraphic(void)
@@ -1540,11 +1572,22 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
             s->order_unsaved = true;
         }
     }
+    double now = GetTime();
+    bool poll_due = !s->catalog_scanned || now - s->last_scan >= SIDEBAR_SCAN_SEC;
+#ifdef PICO_SESSION_TEST_HOOKS
+    poll_due = poll_due || PicoSession_TestHook("sidebar_poll_due");
+#endif
+    bool reconcile_due = !s->catalog_scanned ||
+                         now - s->last_reconcile >= SIDEBAR_RECONCILE_SEC;
     if (!s->is_dragging && !s->drag_press_pending &&
         s->order_persist_generation == 0 &&
-        (s->dirty || s->last_scan <= 0.0 || GetTime() - s->last_scan >= SIDEBAR_SCAN_SEC))
+        (s->dirty || (poll_due && (reconcile_due || SidebarCatalogChanged(s)))))
     {
         SidebarRefresh(s);
+    }
+    else if (poll_due)
+    {
+        s->last_scan = now;
     }
     if (!s->want_folder || !s->folder_painted || !pico_ui_modal_is_top(host, "sidebar-folder"))
     {

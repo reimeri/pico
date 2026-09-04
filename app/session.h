@@ -28,6 +28,7 @@ typedef struct PicoSessionInfo {
 #define PICO_CATALOG_NAME_MAX 128
 #define PICO_MAX_CATALOG_WORKSPACES 64
 #define PICO_MAX_CATALOG_SESSIONS 256
+#define PICO_CATALOG_CHANGE_TOKEN_MAX 65
 
 typedef struct PicoCatalogSession {
     char id[40];
@@ -61,6 +62,8 @@ void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
  * .workspace.json caches listing rows keyed by id plus the JSONL stat generation
  * so unchanged jsonl is not re-parsed. Caller frees with PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
+/* Missing token files report a valid empty token. Read failures return false. */
+bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
 int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_id,

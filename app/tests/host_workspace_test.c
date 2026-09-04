@@ -39,6 +39,8 @@ _Static_assert(PICO_MAX_TOTAL_AGENTS == 32, "PICO_MAX_TOTAL_AGENTS");
 static int g_failed;
 static int g_persist_ready_fd = -1;
 static int g_persist_continue_fd = -1;
+static int g_catalog_scan_calls;
+static bool g_sidebar_poll_due;
 
 static bool TransferTestByte(int fd, bool write_byte)
 {
@@ -53,6 +55,16 @@ static bool TransferTestByte(int fd, bool write_byte)
 
 bool PicoSession_TestHook(const char *stage)
 {
+    if (stage && strcmp(stage, "catalog_scan") == 0)
+    {
+        g_catalog_scan_calls++;
+    }
+    if (stage && strcmp(stage, "sidebar_poll_due") == 0)
+    {
+        bool due = g_sidebar_poll_due;
+        g_sidebar_poll_due = false;
+        return due;
+    }
     if (stage && strcmp(stage, "catalog_before_upsert") == 0 &&
         g_persist_ready_fd >= 0 && g_persist_continue_fd >= 0)
     {
@@ -6203,6 +6215,66 @@ static bool WorkspaceLessToastRenders(PicoHost *host)
     return rendered;
 }
 
+static int TestSidebarCatalogChangeToken(void)
+{
+    char dir[] = "/tmp/pico-sidebar-token-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-sidebar-token-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    int scans_before;
+    int result = 1;
+
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("mkdtemp sidebar catalog token");
+        goto done;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("init sidebar catalog token host");
+        goto done;
+    }
+    PicoPlugins_Load(host);
+    scans_before = g_catalog_scan_calls;
+    pico_host_pump(host);
+    if (g_catalog_scan_calls != scans_before + 1)
+    {
+        Fail("sidebar must scan the catalog on its first pump");
+        goto done;
+    }
+    g_sidebar_poll_due = true;
+    pico_host_pump(host);
+    if (g_catalog_scan_calls != scans_before + 1)
+    {
+        Fail("unchanged catalog token must skip the periodic full scan");
+        goto done;
+    }
+    if (PicoCatalog_Ensure(dir) != 0)
+    {
+        Fail("create sidebar catalog token change");
+        goto done;
+    }
+    g_sidebar_poll_due = true;
+    pico_host_pump(host);
+    if (g_catalog_scan_calls != scans_before + 2)
+    {
+        Fail("changed catalog token must refresh the sidebar");
+        goto done;
+    }
+    result = 0;
+
+done:
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    g_sidebar_poll_due = false;
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    return result;
+}
+
 static int TestWorkspaceLessHostTransition(void)
 {
     char dir[] = "/tmp/pico-ws-empty-start-XXXXXX";
@@ -6303,6 +6375,10 @@ int main(void)
         return 1;
     }
     if (TestCanonicalOpenAndDuplicate() != 0)
+    {
+        return 1;
+    }
+    if (TestSidebarCatalogChangeToken() != 0)
     {
         return 1;
     }

@@ -32,6 +32,7 @@ static int CmpCatalogOrder(const void *a, const void *b);
 static void CatalogClearSessions(PicoCatalogWorkspace *ws);
 static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
                                                     const char *id);
+static void CatalogMarkChanged(void);
 static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
                                 const char *title_override, const char *event_json,
                                 const struct stat *previous_stat);
@@ -757,6 +758,10 @@ static bool WriteLineAtPath(const char *session_path, const char *json, bool wri
     {
         CatalogWriteThroughFields(kind, persistence, session_id, session_path, workspace_path, NULL, json,
                                   have_previous_stat ? &previous_stat : NULL);
+    }
+    if (failure == 0 && kind == PICO_AGENT_MAIN && persistence == PICO_SESSION_DURABLE)
+    {
+        CatalogMarkChanged();
     }
     SessionLockRelease(lock_fd);
     if (failure != 0 && error && error_cap > 0)
@@ -2767,10 +2772,11 @@ done:
     {
         unlink(tmp_path);
     }
-    if (failure == 0)
+    if (failure == 0 && renamed)
     {
         CatalogWriteThrough(app, agent, title, NULL,
                             have_previous_stat ? &previous_stat : NULL);
+        CatalogMarkChanged();
     }
     SessionLockRelease(lock_fd);
     if (failure != 0)
@@ -3074,6 +3080,72 @@ static bool CatalogWrite(const PicoCatalogWorkspace *ws, const char *dir)
     return ok;
 }
 
+static bool CatalogChangeTokenPath(char *out, size_t cap)
+{
+    char root[4096];
+    return SessionsRoot(root, sizeof(root)) &&
+           PicoPath_Format(out, cap, "%s/.catalog-change", root);
+}
+
+bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX])
+{
+    char path[4096];
+    struct stat st;
+    char *raw;
+    size_t len = 0;
+    if (!out)
+    {
+        return false;
+    }
+    out[0] = '\0';
+    if (!CatalogChangeTokenPath(path, sizeof(path)))
+    {
+        return false;
+    }
+    if (stat(path, &st) != 0)
+    {
+        return errno == ENOENT;
+    }
+    raw = Pico_ReadFile(path, &len);
+    if (!raw || len == 0 || len >= PICO_CATALOG_CHANGE_TOKEN_MAX)
+    {
+        free(raw);
+        return false;
+    }
+    memcpy(out, raw, len);
+    out[len] = '\0';
+    free(raw);
+    return true;
+}
+
+static void CatalogMarkChanged(void)
+{
+    char root[4096];
+    char path[4096];
+    char token[PICO_CATALOG_CHANGE_TOKEN_MAX] = {0};
+    if (!SessionsRoot(root, sizeof(root)) ||
+        !PicoPath_Format(path, sizeof(path), "%s/.catalog-change", root))
+    {
+        return;
+    }
+    Pico_MkdirP(root);
+    Pico_RandomHex(token, sizeof(token));
+    if (token[0])
+    {
+        (void)CatalogAtomicWrite(path, token, strlen(token));
+    }
+}
+
+static bool CatalogWriteChanged(const PicoCatalogWorkspace *ws, const char *dir)
+{
+    if (!CatalogWrite(ws, dir))
+    {
+        return false;
+    }
+    CatalogMarkChanged();
+    return true;
+}
+
 static bool CatalogOrderPath(char *out, size_t cap)
 {
     char root[4096];
@@ -3127,6 +3199,10 @@ static bool CatalogWriteOrderJson(const char *json, char *error, size_t error_ca
         return false;
     }
     ok = CatalogAtomicWrite(path, json, strlen(json));
+    if (ok)
+    {
+        CatalogMarkChanged();
+    }
     if (!ok && error && error_cap > 0 && !error[0])
     {
         snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
@@ -3535,7 +3611,7 @@ int PicoCatalog_Ensure(const char *workspace_path)
         fresh.session_count = loaded.session_count;
         loaded.sessions = NULL;
         loaded.session_count = 0;
-        result = CatalogWrite(&fresh, dir) ? 0 : -1;
+        result = CatalogWriteChanged(&fresh, dir) ? 0 : -1;
         goto done;
     }
     fresh.order = CountSessionDirs(root) - 1;
@@ -3543,7 +3619,7 @@ int PicoCatalog_Ensure(const char *workspace_path)
     {
         fresh.order = 0;
     }
-    result = CatalogWrite(&fresh, dir) ? 0 : -1;
+    result = CatalogWriteChanged(&fresh, dir) ? 0 : -1;
 
 done:
     CatalogClearSessions(&loaded);
@@ -3568,7 +3644,7 @@ int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed)
     if (CatalogLoadMeta(meta, &ws))
     {
         ws.collapsed = collapsed;
-        result = CatalogWrite(&ws, dir) ? 0 : -1;
+        result = CatalogWriteChanged(&ws, dir) ? 0 : -1;
     }
     CatalogClearSessions(&ws);
     CatalogLockRelease(lock_fd);
@@ -3618,7 +3694,7 @@ int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_
             goto done;
         }
     }
-    result = CatalogWrite(&ws, dir) ? 0 : -1;
+    result = CatalogWriteChanged(&ws, dir) ? 0 : -1;
 
 done:
     CatalogClearSessions(&ws);
@@ -3907,6 +3983,9 @@ done:
 
 int PicoCatalog_Scan(PicoCatalogWorkspace **out)
 {
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_scan");
+#endif
     char root[4096];
     DIR *d;
     struct dirent *ent;

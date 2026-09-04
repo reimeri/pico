@@ -1472,6 +1472,78 @@ static const PicoCatalogWorkspace *FindCatalogPath(PicoCatalogWorkspace *list, i
     return NULL;
 }
 
+static int TestCatalogChangeToken(void)
+{
+    char ws_path[] = "/tmp/pico-catalog-token-XXXXXX";
+    char before[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    char after[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    PicoHost host;
+    PicoWorkspace workspace;
+    PicoAgent agent;
+    PicoCatalogWorkspace *catalog = NULL;
+    int catalog_count;
+
+    if (!mkdtemp(ws_path) || !PicoCatalog_ReadChangeToken(before))
+    {
+        return Fail("catalog token setup");
+    }
+    if (PicoCatalog_Ensure(ws_path) != 0 || !PicoCatalog_ReadChangeToken(after) ||
+        !after[0] || strcmp(before, after) == 0)
+    {
+        return Fail("catalog ensure did not change token");
+    }
+    snprintf(before, sizeof(before), "%s", after);
+    if (PicoCatalog_Ensure(ws_path) != 0 || !PicoCatalog_ReadChangeToken(after) ||
+        strcmp(before, after) != 0)
+    {
+        return Fail("unchanged catalog ensure changed token");
+    }
+
+    memset(&host, 0, sizeof(host));
+    memset(&workspace, 0, sizeof(workspace));
+    memset(&agent, 0, sizeof(agent));
+    workspace.host = &host;
+    snprintf(workspace.path, sizeof(workspace.path), "%s", ws_path);
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    agent.workspace = &workspace;
+    agent.kind = PICO_AGENT_MAIN;
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "token-model");
+
+    snprintf(before, sizeof(before), "%s", after);
+    if (PicoSession_LogUser(&host, &agent, "token message", "token message", NULL) !=
+            PICO_SESSION_WRITE_OK ||
+        !PicoCatalog_ReadChangeToken(after) || strcmp(before, after) == 0)
+    {
+        return Fail("session append did not change catalog token");
+    }
+    snprintf(before, sizeof(before), "%s", after);
+    if (PicoSession_LogTitle(&host, &agent, "token title") != PICO_SESSION_WRITE_OK ||
+        !PicoCatalog_ReadChangeToken(after) || strcmp(before, after) == 0)
+    {
+        return Fail("title rewrite did not change catalog token");
+    }
+    snprintf(before, sizeof(before), "%s", after);
+    if (PicoCatalog_SetCollapsed(ws_path, true) != 0 ||
+        !PicoCatalog_ReadChangeToken(after) || strcmp(before, after) == 0)
+    {
+        return Fail("catalog metadata write did not change token");
+    }
+
+    snprintf(before, sizeof(before), "%s", after);
+    catalog_count = PicoCatalog_Scan(&catalog);
+    PicoCatalog_Free(catalog, catalog_count);
+    if (!PicoCatalog_ReadChangeToken(after) || strcmp(before, after) != 0)
+    {
+        return Fail("catalog scan changed token");
+    }
+
+    unlink(agent.session_path);
+    rmdir(ws_path);
+    return 0;
+}
+
 static int TestCatalog(void)
 {
     char ws[] = "/tmp/pico-catalog-ws-XXXXXX";
@@ -1621,6 +1693,8 @@ static int TestCatalogWorkspaceReorder(void)
     PicoCatalogWorkspace *list = NULL;
     PicoHost writer;
     uint64_t generation;
+    char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
     const char *failure = NULL;
     int ready_pipe[2] = {-1, -1};
     int continue_pipe[2] = {-1, -1};
@@ -1641,6 +1715,11 @@ static int TestCatalogWorkspaceReorder(void)
         goto done;
     }
     PicoSessionPersist_Init(&writer);
+    if (!PicoCatalog_ReadChangeToken(token_before))
+    {
+        failure = "read token before workspace order persistence";
+        goto done;
+    }
     snprintf(order[0].path, sizeof(order[0].path), "%s", ws_b);
     snprintf(order[1].path, sizeof(order[1].path), "%s", ws_a);
     generation = PicoCatalog_EnqueueOrder(&writer, order, 2);
@@ -1648,6 +1727,12 @@ static int TestCatalogWorkspaceReorder(void)
         PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_SUCCEEDED)
     {
         failure = "initial background workspace order persistence";
+        goto done;
+    }
+    if (!PicoCatalog_ReadChangeToken(token_after) ||
+        strcmp(token_before, token_after) == 0)
+    {
+        failure = "workspace order persistence did not change catalog token";
         goto done;
     }
 
@@ -2860,7 +2945,8 @@ int main(void)
         TestSessionDisplayTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
         TestConcurrentAppendDuringTitle() != 0 || TestConcurrentDoneCatalog() != 0 ||
-        TestCatalog() != 0 || TestCatalogWorkspaceReorder() != 0 ||
+        TestCatalogChangeToken() != 0 || TestCatalog() != 0 ||
+        TestCatalogWorkspaceReorder() != 0 ||
         TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
         TestUnseenCompleteRoundTrip() != 0 ||
         TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||

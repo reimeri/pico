@@ -71,7 +71,7 @@ Register these only from `host_init`. Workspace init cannot add them:
 
 Host builtins include the sidebar catalog, chat renderer, composer, footer shell, overlay presentation, extension manager UI, prompt UI, clipboard state, and auth UI. Dual-scope builtins keep separate host and workspace states connected only through core APIs and IDs. With no selected agent, sidebar, main, and overlay host views may still render; the complete composer and footer slots are withheld.
 
-Host-extension replacement happens between frames. Host extensions cannot register worker callbacks, so only active host callback depth must reach zero before replacement. F5 and `/reload` reload host extensions immediately (user-global / config sources only) and request reload of the selected agent's workspace; other workspaces keep accepting work. See [workspace](workspace.md) and [anatomy](anatomy.md).
+Host-extension replacement happens between frames. Host extensions cannot register worker callbacks, so only active host callback depth must reach zero before replacement. F5 and `/reload` request host-extension replacement (user-global / config sources only), compiling asynchronously when needed and request reload of the selected agent's workspace; other workspaces keep accepting work. See [workspace](workspace.md) and [anatomy](anatomy.md).
 
 ## Routing
 

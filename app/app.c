@@ -2435,6 +2435,10 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
         host->reload_queued = false;
         PicoPlugins_ReloadHost(host);
     }
+    if (host->plugin_compile || host->plugin_reload_pending)
+    {
+        PicoPlugins_Poll(host);
+    }
     int count = host->workspace_count;
     if (count > 0)
     {
@@ -2687,6 +2691,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     {
         return PICO_HOST_SHUTDOWN_RETAINED;
     }
+    PicoPlugins_CancelCompiles(host);
     PicoChat_InspectClose();
     bool clean = true;
     struct timespec deadline;

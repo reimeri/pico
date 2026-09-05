@@ -622,8 +622,10 @@ typedef struct PicoExtInfo {
 
 void PicoPlugins_Load(PicoHost *host);
 void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace);
-/* Compile and swap user-global (config) modules only. Workspace-local sources
-   are refreshed by that workspace's reload. */
+/* Request compilation and swap of user-global (config) modules only. Returns
+   true when activated now; false on failure or while compilation is pending.
+   Pending builds finish through PicoPlugins_Poll / pico_host_pump. Workspace-local
+   sources are refreshed by that workspace's reload. */
 bool PicoPlugins_ReloadHost(PicoHost *host);
 void PicoPlugins_Reload(PicoHost *host);
 void PicoPlugins_Poll(PicoHost *host);

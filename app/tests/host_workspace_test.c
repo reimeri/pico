@@ -15,6 +15,7 @@
 #include "clay/clay.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -32,6 +33,55 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
 
 _Static_assert((PicoWorkspaceId)0 == 0, "zero is an invalid workspace id");
 _Static_assert((PicoAgentId)0 == 0, "zero is an invalid agent id");
+
+/* Existing lifecycle scenarios assert the final generation. Wait for compilation
+ * while keeping the actual production entry points nonblocking. */
+static void WaitPluginLoad(PicoHost *host)
+{
+    for (int i = 0; i < 10000; i++)
+    {
+        PicoPlugins_Load(host);
+        if (!host->plugin_compile) return;
+        usleep(1000);
+    }
+}
+static void WaitPluginPoll(PicoHost *host)
+{
+    for (int i = 0; i < 10000; i++)
+    {
+        host->plugin_last_poll = -1;
+        PicoPlugins_Poll(host);
+        if (!host->plugin_compile) return;
+        usleep(1000);
+    }
+}
+static bool WaitHostReload(PicoHost *host)
+{
+    for (int i = 0; i < 10000; i++)
+    {
+        bool ok = PicoPlugins_ReloadHost(host);
+        if (!host->plugin_compile) return ok;
+        usleep(1000);
+    }
+    return false;
+}
+static bool WaitWorkspaceReload(PicoWorkspace *workspace)
+{
+    for (int i = 0; i < 10000; i++)
+    {
+        bool ok = PicoWorkspace_Reload(workspace);
+        if (!workspace->host->plugin_compile) return ok;
+        PicoPlugins_Poll(workspace->host);
+        usleep(1000);
+    }
+    return false;
+}
+static void WaitPluginsReload(PicoHost *host)
+{
+    PicoPlugins_Reload(host);
+    WaitPluginPoll(host);
+}
+
 
 static int g_failed;
 static int g_persist_ready_fd = -1;
@@ -394,7 +444,7 @@ static int RunWorkspaceLessShellCase(void)
         Fail("workspace-less shell host initialization");
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     host->preferences.chat_width = 0;
     Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
     if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
@@ -667,7 +717,7 @@ static int TestEmptyCardsTwoColumnTrim(void)
         Fail("empty card column host initialization");
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     host->preferences.chat_width = 0;
     host->view_count[PICO_SLOT_SIDEBAR] = 0;
     host->view_count[PICO_SLOT_COMPOSER] = 0;
@@ -786,7 +836,7 @@ static int TestChatBottomFollowClearsComposer(void)
         Fail("chat bottom spacer host init");
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     /* Headless runs have no real fonts; keep chat on the unclamped width path
      * and stub the composer, which measures text with raylib directly. */
     host->preferences.chat_width = 0;
@@ -1390,7 +1440,7 @@ static int StartLifecycleHost(PicoHost **host_out, char *cfg, char *cache, char 
         *host_out = NULL;
         return -1;
     }
-    PicoPlugins_Load(*host_out);
+    WaitPluginLoad(*host_out);
     return 0;
 }
 
@@ -1936,7 +1986,7 @@ static int TestHostReloadIgnoresWorkspaceLocalCompileFailure(void)
         RmRf(dirB);
         return 1;
     }
-    if (!PicoPlugins_ReloadHost(host))
+    if (!WaitHostReload(host))
     {
         Fail("host reload must succeed when another workspace's local extension fails to compile");
         pico_host_free(host);
@@ -2304,8 +2354,8 @@ static int TestWorkspacePluginIsolation(void)
         rmdir(ws2_dir);
         return 1;
     }
-    PicoPlugins_Load(host1);
-    PicoPlugins_Load(host2);
+    WaitPluginLoad(host1);
+    WaitPluginLoad(host2);
     PicoWorkspace *ws1 = PicoHost_PrimaryWorkspace(host1);
     PicoWorkspace *ws2 = PicoHost_PrimaryWorkspace(host2);
     void *files1 = PicoPlugins_WorkspaceState(ws1, "files");
@@ -2359,7 +2409,7 @@ static int TestHostPluginIsolation(void)
         Fail("host1 init");
         return 1;
     }
-    PicoPlugins_Load(host1);
+    WaitPluginLoad(host1);
 
     setenv("XDG_CONFIG_HOME", cfg2, 1);
     setenv("XDG_CACHE_HOME", cache2, 1);
@@ -2370,7 +2420,7 @@ static int TestHostPluginIsolation(void)
         pico_host_free(host1);
         return 1;
     }
-    PicoPlugins_Load(host2);
+    WaitPluginLoad(host2);
 
     void *comp1 = PicoPlugins_HostState(host1, "composer");
     void *comp2 = PicoPlugins_HostState(host2, "composer");
@@ -2464,7 +2514,7 @@ static int TestHostSettingsPersistence(void)
         pico_host_free(host);
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
 
     int ext_count = PicoPlugins_Count(host);
     int target_idx = -1;
@@ -2920,7 +2970,7 @@ static int TestWorkspaceReloadUsesLiveOwnerAndSettings(void)
     host.module_count = 1;
     host.module_capacity = 1;
 
-    bool first = PicoWorkspace_Reload(workspace);
+    bool first = WaitWorkspaceReload(workspace);
     if (first && workspace->command_count == 1)
     {
         workspace->commands[0].workspace_run(workspace, 0, "",
@@ -2934,7 +2984,7 @@ static int TestWorkspaceReloadUsesLiveOwnerAndSettings(void)
     snprintf(workspace->settings.disabled_extensions[0],
              sizeof(workspace->settings.disabled_extensions[0]), "%s", module.ext.name);
     workspace->settings.disabled_extension_count = 1;
-    bool second = PicoWorkspace_Reload(workspace);
+    bool second = WaitWorkspaceReload(workspace);
     bool disabled = second && g_workspace_reload_inits == 1 &&
                     g_workspace_reload_shutdowns == 1 && workspace->command_count == 0 &&
                     workspace->workspace_plugin_count == 1 &&
@@ -3051,6 +3101,97 @@ static uint64_t WorkspaceSourceGeneration(const PicoWorkspace *workspace,
     return 0;
 }
 
+static double TestMonotonicTime(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static int TestHeaderReloadIsAsynchronous(void)
+{
+    char cfg[] = "/tmp/pico-header-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-header-cache-XXXXXX";
+    char ws[] = "/tmp/pico-header-ws-XXXXXX";
+    char ext_dir[4096], source[8192], header[8192], compiler[4096];
+    PicoHost *host = NULL;
+    int failed = 1;
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(ws)) return 1;
+    snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
+    snprintf(source, sizeof(source), "%s/probe.c", ext_dir);
+    snprintf(header, sizeof(header), "%s/value header.h", ext_dir);
+    snprintf(compiler, sizeof(compiler), "%s/compiler", cfg);
+    const char *code =
+        "#include \"pico/plugin.h\"\n#include \"value header.h\"\n"
+        "static int Init(PicoHost *h, void **s) { (void)h; int *v=malloc(sizeof(*v)); if(!v)return -1; *v=VALUE; *s=v; return 0; }\n"
+        "static void Stop(PicoHost *h, void *s) { (void)h; free(s); }\n"
+        "PicoExt pico_ext(void) { return (PicoExt){.abi=PICO_EXT_ABI,.name=\"header_probe\",.host_init=Init,.host_shutdown=Stop}; }\n";
+    if (MkdirParents(ext_dir) || WriteFile(source, code) || WriteFile(header, "#define VALUE 10\n")) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    PicoWorkspaceId id;
+    if (pico_host_init(&host, NULL, false) != PICO_OK || pico_workspace_open(host, ws, &id) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    int *value = PicoPlugins_HostState(host, "header_probe");
+    if (!value || *value != 10) goto done;
+    PicoRegistrationGeneration *registration = PicoHost_FindWorkspace(host, id)->active_registration;
+    struct stat st;
+    if (stat(header, &st)) goto done;
+    if (WriteFile(header, "#define VALUE 20\n") ||
+        WriteFile(compiler, "#!/bin/sh\nsleep 1\nexec cc \"$@\"\n") || chmod(compiler, 0700)) goto done;
+    struct timespec times[2] = {st.st_atim, st.st_mtim};
+    if (utimensat(AT_FDCWD, header, times, 0)) goto done;
+    setenv("PICO_CC", compiler, 1);
+    double start = TestMonotonicTime();
+    bool immediate = PicoPlugins_ReloadHost(host);
+    if (immediate || TestMonotonicTime() - start > 0.5 ||
+        PicoPlugins_HostState(host, "header_probe") != value) goto done;
+    double deadline = TestMonotonicTime() + 8;
+    while (TestMonotonicTime() < deadline)
+    {
+        pico_host_pump(host);
+        value = PicoPlugins_HostState(host, "header_probe");
+        if (value && *value == 20) break;
+        usleep(1000);
+    }
+    if (!value || *value != 20 || PicoHost_FindWorkspace(host, id)->active_registration != registration) goto done;
+    /* A compiler that never produces output must still expire, keeping the
+     * previous generation active. The generous harness deadline is not an
+     * assertion of the configurable production duration. */
+    if (WriteFile(compiler, "#!/bin/sh\nsleep 60\n") || WriteFile(header, "#define VALUE 25\n")) goto done;
+    PicoPlugins_ReloadHost(host);
+    deadline = TestMonotonicTime() + 45;
+    while (TestMonotonicTime() < deadline &&
+           (!host->status_warn || !strstr(host->status_warn, "compiler timed out")))
+    {
+        pico_host_pump(host);
+        usleep(10000);
+    }
+    value = PicoPlugins_HostState(host, "header_probe");
+    if (!value || *value != 20 || !host->status_warn || !strstr(host->status_warn, "compiler timed out")) goto done;
+    if (WriteFile(compiler, "#!/bin/sh\nsleep 1\nexec cc \"$@\"\n")) goto done;
+    /* Removing a queued source must cancel its build, without blocking future builds. */
+    if (WriteFile(header, "#define VALUE 30\n")) goto done;
+    PicoPlugins_ReloadHost(host);
+    unlink(source);
+    deadline = TestMonotonicTime() + 5;
+    while (host->plugin_compile && TestMonotonicTime() < deadline)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    if (host->plugin_compile) goto done;
+    failed = 0;
+done:
+    if (failed) Fail("header dependency reload must be nonblocking, scoped, and cancellable");
+    pico_host_free(host);
+    unsetenv("PICO_CC");
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg); RmRf(cache); RmRf(ws);
+    return failed;
+}
+
 static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
 {
     char cfg[] = "/tmp/pico-local-poll-cfg-XXXXXX";
@@ -3083,6 +3224,7 @@ static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
         Fail("open workspaces for local polling isolation");
         goto fail;
     }
+    WaitPluginPoll(host);
     PicoWorkspace *workspace_a = PicoHost_FindWorkspace(host, id_a);
     PicoWorkspace *workspace_b = PicoHost_FindWorkspace(host, id_b);
     PicoRegistrationGeneration *old_a = workspace_a->active_registration;
@@ -3099,7 +3241,7 @@ static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
     }
 
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     uint64_t new_local_generation = WorkspaceSourceGeneration(workspace_a, source);
     bool isolated = new_local_generation > old_local_generation &&
                     workspace_a->active_registration != old_a &&
@@ -3224,7 +3366,7 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
         Fail("open host compile quarantine");
         goto fail;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     working_state = PicoPlugins_HostState(host, "quarantine_host");
     if (!working_state)
     {
@@ -3237,7 +3379,7 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
         goto fail;
     }
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     if (!host->status_warn || !strstr(host->status_warn, "quarantine_host.c"))
     {
         Fail("host compile failure must warn");
@@ -3255,7 +3397,7 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
         goto fail;
     }
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     if (!host->status_warn || strcmp(host->status_warn, warned) != 0)
     {
         Fail("unchanged host compile failure must not retry on poll");
@@ -3267,14 +3409,14 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
         goto fail;
     }
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     if (!host->status_warn || strcmp(host->status_warn, warned) != 0 ||
         !PicoPlugins_HostState(host, "quarantine_other_host"))
     {
         Fail("another host source change must skip the quarantined failure");
         goto fail;
     }
-    if (PicoPlugins_ReloadHost(host) || !host->status_warn ||
+    if (WaitHostReload(host) || !host->status_warn ||
         strcmp(host->status_warn, warned) == 0)
     {
         Fail("explicit host reload must retry a quarantined compile failure");
@@ -3340,21 +3482,23 @@ static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
         Fail("open workspace compile quarantine");
         goto fail;
     }
+    WaitPluginPoll(host);
     workspace = PicoHost_FindWorkspace(host, id);
     working_state = PicoPlugins_WorkspaceState(workspace, "quarantine_ws");
+    PicoRegistrationGeneration *working_registration = workspace ? workspace->active_registration : NULL;
     if (!workspace || !working_state || WriteFile(source, "this is not valid C {\n") != 0)
     {
         Fail("activate and overwrite workspace compile quarantine extension");
         goto fail;
     }
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     if (!host->status_warn || !strstr(host->status_warn, "quarantine_ws.c"))
     {
         Fail("workspace compile failure must warn");
         goto fail;
     }
-    if (PicoPlugins_WorkspaceState(workspace, "quarantine_ws") != working_state)
+    if (workspace->active_registration != working_registration)
     {
         Fail("workspace compile failure must preserve the working generation");
         goto fail;
@@ -3366,7 +3510,7 @@ static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
         goto fail;
     }
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     if (!host->status_warn || strcmp(host->status_warn, warned) != 0)
     {
         Fail("unchanged workspace compile failure must not retry on poll");
@@ -3379,14 +3523,14 @@ static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
         goto fail;
     }
     host->plugin_last_poll = -1.0;
-    PicoPlugins_Poll(host);
+    WaitPluginPoll(host);
     if (!host->status_warn || strcmp(host->status_warn, warned) != 0 ||
         !PicoPlugins_HostState(host, "quarantine_other_host"))
     {
         Fail("global rollout must skip unchanged workspace compile failure");
         goto fail;
     }
-    (void)PicoWorkspace_Reload(workspace);
+    (void)WaitWorkspaceReload(workspace);
     if (!host->status_warn || strcmp(host->status_warn, warned) == 0)
     {
         Fail("explicit workspace reload must retry a quarantined compile failure");
@@ -3468,7 +3612,7 @@ static int TestWorkspaceLocalExtensionWithHostCallbacksRejected(void)
         pico_host_free(host);
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
 
     if (!host->status_warn || !strstr(host->status_warn, "workspace-local extension cannot have host callbacks"))
     {
@@ -3515,7 +3659,7 @@ static int TestReloadInitRollbackPreservesActiveState(void)
     {
         preserved = false;
     }
-    PicoPlugins_Reload(host);
+    WaitPluginsReload(host);
     preserved = preserved && PicoPlugins_HostState(host, "lifecycle") == host_state &&
                 PicoPlugins_WorkspaceState(PicoHost_PrimaryWorkspace(host), "lifecycle") == workspace_state;
     if (WriteFile(source, kLifecycleExt) != 0)
@@ -3523,7 +3667,7 @@ static int TestReloadInitRollbackPreservesActiveState(void)
         preserved = false;
     }
     setenv("PICO_TEST_FAIL_WORKSPACE", "1", 1);
-    PicoPlugins_Reload(host);
+    WaitPluginsReload(host);
     ReadFileStr(life, log, sizeof(log));
     preserved = preserved &&
                 PicoPlugins_WorkspaceState(PicoHost_PrimaryWorkspace(host), "lifecycle") == workspace_state &&
@@ -3656,9 +3800,9 @@ static int TestReloadReusesReleasedModuleSlots(void)
         Fail("host init module slot reuse");
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     int high_water = host->module_count;
-    bool reloaded = high_water > 0 && PicoPlugins_ReloadHost(host);
+    bool reloaded = high_water > 0 && WaitHostReload(host);
 
     /* Force a failed transaction after it reuses one released hole. The
      * candidate must be removed without disturbing occupied old generations. */
@@ -3683,7 +3827,7 @@ static int TestReloadReusesReleasedModuleSlots(void)
         }
     }
     host->module_capacity = rollback_count;
-    bool failed_cleanly = kept_hole >= 0 && !PicoPlugins_ReloadHost(host) &&
+    bool failed_cleanly = kept_hole >= 0 && !WaitHostReload(host) &&
                           host->module_count == rollback_count &&
                           host->modules[kept_hole].generation == 0;
     for (int i = 0; i < rollback_count; i++)
@@ -3700,7 +3844,7 @@ static int TestReloadReusesReleasedModuleSlots(void)
     reloaded = reloaded && failed_cleanly;
     for (int i = 0; i < 32 && reloaded; i++)
     {
-        reloaded = PicoPlugins_ReloadHost(host);
+        reloaded = WaitHostReload(host);
         if (host->module_count > high_water * 2)
         {
             reloaded = false;
@@ -4067,7 +4211,7 @@ static int TestStatelessExtensionRollbackDoesNotLeakModule(void)
     ws->state = PICO_WORKSPACE_RELOADING;
     PicoWorkspace_SetAcceptingWork(ws, false);
 
-    bool reload_ok = PicoWorkspace_Reload(ws);
+    bool reload_ok = WaitWorkspaceReload(ws);
     if (reload_ok)
     {
         Fail("workspace reload must fail when one module fails init");
@@ -4111,7 +4255,7 @@ static int TestBusyReloadQueuesAndRejectsNewWork(void)
     ws->agents[0]->workspace = ws;
     ws->agents[0]->state = PICO_AGENT_TOOL_WAIT;
 
-    bool ok = PicoWorkspace_Reload(ws);
+    bool ok = WaitWorkspaceReload(ws);
     if (ok)
     {
         Fail("reload must not proceed while workspace is busy");
@@ -6253,7 +6397,7 @@ static int TestSidebarCatalogChangeToken(void)
         Fail("init sidebar catalog token host");
         goto done;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     scans_before = g_catalog_scan_calls;
     pico_host_pump(host);
     if (g_catalog_scan_calls != scans_before + 1)
@@ -6314,7 +6458,7 @@ static int TestWorkspaceLessHostTransition(void)
         rmdir(cfg);
         return 1;
     }
-    PicoPlugins_Load(host);
+    WaitPluginLoad(host);
     if (pico_workspace_count(host) != 0 || pico_agent_count(host) != 0 || pico_agent_active(host) != 0 ||
         !PicoPlugins_HostState(host, "sidebar") || !PicoPlugins_HostState(host, "chat"))
     {
@@ -6341,7 +6485,7 @@ static int TestWorkspaceLessHostTransition(void)
         rmdir(dir);
         return 1;
     }
-    if (!PicoPlugins_ReloadHost(host) || pico_workspace_count(host) != 0 || pico_agent_count(host) != 0)
+    if (!WaitHostReload(host) || pico_workspace_count(host) != 0 || pico_agent_count(host) != 0)
     {
         Fail("workspace-less host reload must remain usable");
         pico_host_free(host);
@@ -6497,6 +6641,7 @@ int main(void)
     {
         return 1;
     }
+    if (TestHeaderReloadIsAsynchronous()) return 1;
     if (TestWorkspaceLocalPollingReloadsOnlyOwner() != 0)
     {
         return 1;

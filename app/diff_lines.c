@@ -104,6 +104,22 @@ bool PicoDiff_Lines(const char *old_text, const char *new_text, PicoDiffLines *o
         goto done;
     }
 
+    /* Empty-sided diffs need no search or trace. */
+    if (n == 0 || m == 0)
+    {
+        for (int i = 0; i < (n ? n : m); i++)
+        {
+            if (!LinesPush(out, n ? PICO_DIFF_DEL : PICO_DIFF_ADD,
+                           n ? a_ptrs[i] : b_ptrs[i], n ? a_lens[i] : b_lens[i]))
+            {
+                PicoDiff_LinesFree(out);
+                goto done;
+            }
+        }
+        ok = true;
+        goto done;
+    }
+
     int max = n + m;
     int width = 2 * max + 1;
     v = calloc((size_t)width, sizeof(*v));
@@ -117,6 +133,12 @@ bool PicoDiff_Lines(const char *old_text, const char *new_text, PicoDiffLines *o
     int d_found = -1;
     for (int d = 0; d <= max; d++)
     {
+        /* Keep pathological replacements bounded. The caller can display a
+         * coarse diff when finding a shortest script exceeds this budget. */
+        if ((size_t)(d + 1) > (32u * 1024u * 1024u) / sizeof(*trace) / (size_t)width)
+        {
+            goto done;
+        }
         int *next_trace = realloc(trace, (size_t)(d + 1) * (size_t)width * sizeof(*trace));
         if (!next_trace)
         {

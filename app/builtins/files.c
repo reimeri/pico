@@ -10,6 +10,7 @@
 #include "host_internal.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -362,9 +363,24 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
             continue;
         }
         size_t len = 0;
-        char *src = Pico_ReadFile(paths[i], &len);
+        errno = 0;
+        char *src = Pico_ReadFileLimited(paths[i], FILES_MAX_BYTES, &len);
         if (!src)
         {
+            if (errno == EFBIG)
+            {
+                char note[80];
+                if (len > 0)
+                {
+                    snprintf(note, sizeof(note), "(file too large, omitted, %.1f MB)",
+                             (double)len / (1024.0 * 1024.0));
+                }
+                else
+                {
+                    snprintf(note, sizeof(note), "(file too large, omitted)");
+                }
+                AppendFileBlock(&b, paths[i], note);
+            }
             free(paths[i]);
             paths[i] = NULL;
             continue;
@@ -372,10 +388,6 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
         if (memchr(src, '\0', len > 4096 ? 4096 : len))
         {
             AppendFileBlock(&b, paths[i], "(binary file omitted)");
-        }
-        else if (len > FILES_MAX_BYTES)
-        {
-            AppendFileBlock(&b, paths[i], "(file too large, omitted)");
         }
         else
         {

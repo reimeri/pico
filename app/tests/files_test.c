@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 
 char *pico_files_expand_mentions(const char *workspace, const char *text, bool vision,
                                  char **parts_json_out);
@@ -43,10 +46,15 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
     (void)workspace;
 }
 
-void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
+void PicoPlugins_CancelCompiles(PicoHost *host) { (void)host; }
+
+void PicoPlugins_Poll(PicoHost *host) { (void)host; }
+
+bool PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
 {
     (void)host;
     (void)workspace;
+    return true;
 }
 
 static int g_failed;
@@ -231,8 +239,39 @@ static void TestCompleteRebuildsAtTokenStart(void)
     rmdir(temp);
 }
 
+static void TestBoundedMentions(void)
+{
+    char root[] = "/tmp/pico-bounded-files-XXXXXX";
+    Check(mkdtemp(root) != NULL, "create bounded file fixture");
+    char large[4096], fifo[4096];
+    snprintf(large, sizeof(large), "%s/large.txt", root);
+    snprintf(fifo, sizeof(fifo), "%s/pipe", root);
+    FILE *file = fopen(large, "wb");
+    Check(file && ftruncate(fileno(file), 256u * 1024u * 1024u) == 0, "create sparse oversized file");
+    if (file) fclose(file);
+    Check(mkfifo(fifo, 0600) == 0, "create FIFO fixture");
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        alarm(3);
+        struct rlimit limit = {128u * 1024u * 1024u, 128u * 1024u * 1024u};
+        if (setrlimit(RLIMIT_AS, &limit) != 0) _exit(2);
+        char *result = pico_files_expand_mentions(root, "@large.txt @pipe", false, NULL);
+        bool ok = result && strstr(result, "(file too large, omitted, 256.0 MB)");
+        free(result);
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    Check(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "oversized files are omitted within memory budget and FIFOs never block submission");
+    unlink(large);
+    unlink(fifo);
+    rmdir(root);
+}
+
 int main(void)
 {
+    TestBoundedMentions();
     TestMentionImagePart();
     TestCompleteRebuildsAtTokenStart();
     return g_failed;

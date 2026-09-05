@@ -167,6 +167,11 @@ struct PicoHost {
     int module_capacity;
     uint64_t next_module_generation;
     double plugin_last_poll;
+    struct PicoCompileJob *plugin_compile;
+    bool plugin_compile_pending;
+    bool plugin_reload_pending;
+    bool plugin_reload_retry;
+    bool plugin_rollout_pending;
 
     int reg_scope;
     PicoWorkspace *reg_workspace;
@@ -302,6 +307,7 @@ static inline const PicoWorkspace *PicoHost_SelectedWorkspaceConst(const PicoHos
 
 uint64_t PicoHost_AllocAskId(PicoHost *host);
 int PicoHost_TotalAgentCount(const PicoHost *host);
+void PicoPlugins_CancelCompiles(PicoHost *host);
 void PicoModule_Retain(PicoModuleGeneration *module);
 void PicoModule_Release(PicoModuleGeneration *module);
 

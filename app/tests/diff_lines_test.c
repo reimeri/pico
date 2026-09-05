@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static int Fail(const char *test, const char *message)
 {
@@ -112,6 +115,29 @@ static int CheckDiff(const char *test, const char *old_text, const char *new_tex
     return rc;
 }
 
+/* An ordinary generated file must diff successfully in a modest process,
+ * without quadratic search storage for an all-addition/all-deletion case. */
+static int LargeEmptySide(void)
+{
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        struct rlimit limit = {128u * 1024u * 1024u, 128u * 1024u * 1024u};
+        if (setrlimit(RLIMIT_AS, &limit) != 0) _exit(2);
+        int n = 20000;
+        char *text = malloc((size_t)n * 2 + 1);
+        if (!text) _exit(2);
+        for (int i = 0; i < n; i++) { text[i*2] = 'x'; text[i*2+1] = '\n'; }
+        text[n*2] = 0;
+        int result = CheckDiff("large untracked", "", text, n, 0) |
+                     CheckDiff("large deleted", text, "", 0, n);
+        free(text);
+        _exit(result);
+    }
+    int status;
+    return pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status);
+}
+
 int main(void)
 {
     const struct {
@@ -133,7 +159,7 @@ int main(void)
         {"duplicate_lines", "x\nx\nx\n", "x\nx\nx\nx\n", 1, 0},
         {"both_empty", "", "", 0, 0},
     };
-    int rc = 0;
+    int rc = LargeEmptySide();
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
     {
         rc |= CheckDiff(cases[i].name, cases[i].old_text, cases[i].new_text,

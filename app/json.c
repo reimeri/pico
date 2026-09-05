@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #define JSMN_STATIC
 #define JSMN_STRICT
 #include "jsmn.h"
@@ -5,6 +6,9 @@
 #include "json.h"
 
 #include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +31,11 @@ char *JsonDup(const char *s)
 
 char *Pico_ReadFile(const char *path, size_t *out_len)
 {
+    return Pico_ReadFileLimited(path, SIZE_MAX - 1, out_len);
+}
+
+char *Pico_ReadFileLimited(const char *path, size_t limit, size_t *out_len)
+{
     if (out_len)
     {
         *out_len = 0;
@@ -35,39 +44,49 @@ char *Pico_ReadFile(const char *path, size_t *out_len)
     {
         return NULL;
     }
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
     {
         return NULL;
     }
-    /* fopen() succeeds on directories; ftell() then reports LONG_MAX and the
-       allocation below requests petabytes. Only read regular files. */
     struct stat st;
-    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode))
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0)
     {
-        fclose(f);
+        close(fd);
         return NULL;
     }
-    if (fseek(f, 0, SEEK_END) != 0)
+    if ((uintmax_t)st.st_size > limit || (uintmax_t)st.st_size >= SIZE_MAX)
     {
-        fclose(f);
+        if (out_len && (uintmax_t)st.st_size < SIZE_MAX)
+        {
+            *out_len = (size_t)st.st_size;
+        }
+        close(fd);
+        errno = EFBIG;
         return NULL;
     }
-    long sz = ftell(f);
-    if (sz < 0)
-    {
-        fclose(f);
-        return NULL;
-    }
-    rewind(f);
-    char *buf = (char *)malloc((size_t)sz + 1);
+    size_t size = (size_t)st.st_size;
+    char *buf = malloc(size + 1);
     if (!buf)
     {
-        fclose(f);
+        close(fd);
         return NULL;
     }
-    size_t n = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
+    size_t n = 0;
+    while (n < size)
+    {
+        ssize_t got = read(fd, buf + n, size - n);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0)
+        {
+            free(buf);
+            close(fd);
+            return NULL;
+        }
+        if (!got) break;
+        n += (size_t)got;
+    }
+    close(fd);
     buf[n] = '\0';
     if (out_len)
     {

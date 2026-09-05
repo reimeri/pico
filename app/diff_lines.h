@@ -23,7 +23,7 @@ typedef struct PicoDiffLines {
 
 /* Myers O(ND) shortest edit script over lines. Output borrows from old_text
  * and new_text; both must outlive `out`. Lines are emitted in order with the
- * minimal number of edits; false on allocation failure. */
+ * minimal number of edits; false on allocation failure or when the search exceeds its memory budget. */
 bool PicoDiff_Lines(const char *old_text, const char *new_text, PicoDiffLines *out);
 void PicoDiff_LinesFree(PicoDiffLines *d);
 

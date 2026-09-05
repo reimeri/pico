@@ -40,10 +40,15 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
     (void)workspace;
 }
 
-void PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
+void PicoPlugins_CancelCompiles(PicoHost *host) { (void)host; }
+
+void PicoPlugins_Poll(PicoHost *host) { (void)host; }
+
+bool PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace)
 {
     (void)host;
     (void)workspace;
+    return true;
 }
 
 static void Check(bool ok, const char *message)

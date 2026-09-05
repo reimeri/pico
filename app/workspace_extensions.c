@@ -567,6 +567,13 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     {
         workspace->reload_retry_compile_failures = true;
     }
+    if (host->plugin_reload_pending)
+    {
+        workspace->reload_queued = true;
+        workspace->state = PICO_WORKSPACE_RELOADING;
+        PicoWorkspace_SetAcceptingWork(workspace, false);
+        return false;
+    }
 
     if (PicoWorkspace_BlocksReload(workspace))
     {
@@ -592,7 +599,17 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
     workspace->reload_queued = false;
     PicoWorkspace_SetAcceptingWork(workspace, false);
 
-    PicoPlugins_LoadWorkspaceSources(host, workspace);
+    if (!PicoPlugins_LoadWorkspaceSources(host, workspace))
+    {
+        workspace->reload_queued = host->plugin_compile_pending;
+        workspace->state = host->plugin_compile_pending ? PICO_WORKSPACE_RELOADING : PICO_WORKSPACE_OPEN;
+        if (!host->plugin_compile_pending)
+        {
+            workspace->reload_retry_compile_failures = false;
+            PicoWorkspace_SetAcceptingWork(workspace, true);
+        }
+        return false;
+    }
     workspace->reload_retry_compile_failures = false;
 
     PicoWorkspaceExtensionSet old;

@@ -56,6 +56,8 @@ bool JsonIsNull(const JsonDoc *doc, int tok);
 int JsonTokStart(const JsonDoc *doc, int tok);
 int JsonTokEnd(const JsonDoc *doc, int tok);
 char *JsonDup(const char *s);
+/* Reject non-regular files without blocking; EFBIG when over limit, with out_len set to the file size when it fits. */
+char *Pico_ReadFileLimited(const char *path, size_t limit, size_t *out_len);
 char *Pico_ReadFile(const char *path, size_t *out_len);
 
 #endif

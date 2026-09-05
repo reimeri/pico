@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 typedef struct HttpCtx {
     PicoHttpCancelFn cancel;
@@ -19,7 +20,12 @@ typedef struct HttpCtx {
     void *user;
     JsonBuf acc;
     bool saw_sse;
+    bool skip_lf;
+    bool have_data;
+    JsonBuf data;
+    char event[64];
     bool json_abort;
+    bool buffer_failed;
     PicoHttpCapture capture;
 } HttpCtx;
 
@@ -28,143 +34,121 @@ static bool Cancelled(HttpCtx *c)
     return c->json_abort || (c->cancel && c->cancel(c->user));
 }
 
-static void StripCR(char *s)
-{
-    char *w = s;
-    for (char *r = s; *r; r++)
-    {
-        if (*r != '\r')
-        {
-            *w++ = *r;
-        }
-    }
-    *w = '\0';
-}
-
 static void EmitJson(HttpCtx *c, const char *event, const char *json, size_t len)
 {
-    if (len == 0 || !c->on_json)
-    {
-        return;
-    }
-    if (!c->on_json(c->user, event, json, len))
+    if (len && c->on_json && !Cancelled(c) && !c->on_json(c->user, event, json, len))
     {
         c->json_abort = true;
     }
 }
 
-static void HandleSseBlock(HttpCtx *c, char *block)
+static void SseLine(HttpCtx *c)
 {
-    StripCR(block);
-    JsonBuf data;
-    JsonBuf_Init(&data);
-    char event[64] = {0};
-    char *save = NULL;
-    for (char *line = strtok_r(block, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+    const char *line = c->acc.data ? c->acc.data : "";
+    if (!c->acc.len)
     {
-        if (!line[0] || line[0] == ':')
+        if (c->have_data)
         {
-            continue;
+            EmitJson(c, c->event[0] ? c->event : NULL,
+                     c->data.data ? c->data.data : "", c->data.len);
         }
-        if (strncmp(line, "event:", 6) == 0)
+        JsonBuf_Clear(&c->data);
+        c->have_data = false;
+        c->event[0] = '\0';
+    }
+    else if (line[0] != ':')
+    {
+        const char *colon = strchr(line, ':');
+        size_t field_len = colon ? (size_t)(colon - line) : strlen(line);
+        const char *value = colon ? colon + 1 : "";
+        if (*value == ' ') value++;
+        if (field_len == 4 && memcmp(line, "data", 4) == 0)
         {
-            const char *p = line + 6;
-            if (*p == ' ')
-            {
-                p++;
-            }
-            snprintf(event, sizeof(event), "%s", p);
-            continue;
+            if (c->have_data) JsonBuf_Putc(&c->data, '\n');
+            JsonBuf_Puts(&c->data, value);
+            c->have_data = true;
         }
-        if (strncmp(line, "data:", 5) == 0)
+        else if (field_len == 5 && memcmp(line, "event", 5) == 0)
         {
-            const char *p = line + 5;
-            if (*p == ' ')
-            {
-                p++;
-            }
-            if (data.len)
-            {
-                JsonBuf_Putc(&data, '\n');
-            }
-            JsonBuf_Puts(&data, p);
+            snprintf(c->event, sizeof(c->event), "%s", value);
         }
     }
-    if (data.len)
-    {
-        EmitJson(c, event[0] ? event : NULL, data.data, data.len);
-    }
-    JsonBuf_Free(&data);
+    JsonBuf_Clear(&c->acc);
 }
 
 static void DrainSse(HttpCtx *c, bool finish)
 {
-    for (;;)
+    if (!finish || c->buffer_failed || Cancelled(c)) return;
+    if (c->saw_sse)
     {
-        if (!c->acc.data || c->acc.len == 0)
-        {
-            break;
-        }
-        char *start = c->acc.data;
-        char *split = strstr(start, "\n\n");
-        size_t sep = 2;
-        if (!split)
-        {
-            split = strstr(start, "\r\n\r\n");
-            if (!split)
-            {
-                break;
-            }
-            sep = 4;
-        }
-        *split = '\0';
-        HandleSseBlock(c, start);
-        size_t used = (size_t)(split - start) + sep;
-        size_t remain = c->acc.len > used ? c->acc.len - used : 0;
-        memmove(c->acc.data, c->acc.data + used, remain);
-        c->acc.len = remain;
-        if (c->acc.data)
-        {
-            c->acc.data[c->acc.len] = '\0';
-        }
+        if (c->acc.len) SseLine(c);
+        SseLine(c);
     }
-    if (finish && c->acc.len)
+    else
     {
-        if (c->saw_sse)
-        {
-            HandleSseBlock(c, c->acc.data);
-        }
-        else
-        {
-            EmitJson(c, NULL, c->acc.data, c->acc.len);
-        }
+        EmitJson(c, NULL, c->acc.data, c->acc.len);
         JsonBuf_Clear(&c->acc);
     }
 }
 
+static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    HttpCtx *c = userdata;
+    size_t n = size * nmemb;
+    if (n >= 5 && memcmp(ptr, "HTTP/", 5) == 0)
+    {
+        /* A redirect or interim response must not determine the final framing. */
+        c->saw_sse = false;
+        c->skip_lf = false;
+        c->have_data = false;
+        c->event[0] = '\0';
+        JsonBuf_Clear(&c->acc);
+        JsonBuf_Clear(&c->data);
+    }
+    if (n >= 13 && strncasecmp(ptr, "Content-Type:", 13) == 0)
+    {
+        size_t i = 13;
+        while (i < n && (ptr[i] == ' ' || ptr[i] == '\t')) i++;
+        const char *type = "text/event-stream";
+        size_t len = strlen(type);
+        c->saw_sse = n - i >= len && strncasecmp(ptr + i, type, len) == 0 &&
+                     (n - i == len || strchr("; \t\r\n", ptr[i + len]) != NULL);
+    }
+    return n;
+}
+
 static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
-    HttpCtx *c = (HttpCtx *)userdata;
+    HttpCtx *c = userdata;
     size_t n = size * nmemb;
-    if (n == 0)
-    {
-        return 0;
-    }
     PicoHttpCapture_Write(&c->capture, ptr, n);
-    if (Cancelled(c))
+    if (Cancelled(c)) return 0;
+    if (!c->saw_sse)
     {
-        return 0;
+        JsonBuf_Append(&c->acc, ptr, n);
     }
-    JsonBuf_Append(&c->acc, ptr, n);
-    if (!c->saw_sse && c->acc.data && (strstr(c->acc.data, "data:") || strstr(c->acc.data, "event:")))
+    else
     {
-        c->saw_sse = true;
+        for (size_t i = 0; i < n && !c->json_abort; i++)
+        {
+            char ch = ptr[i];
+            if (c->skip_lf && ch == '\n')
+            {
+                c->skip_lf = false;
+                continue;
+            }
+            c->skip_lf = ch == '\r';
+            if (ch == '\r' || ch == '\n') SseLine(c);
+            else JsonBuf_Putc(&c->acc, ch);
+            if (c->acc.failed || c->data.failed)
+            {
+                c->buffer_failed = true;
+                break;
+            }
+        }
     }
-    if (c->saw_sse)
-    {
-        DrainSse(c, false);
-    }
-    return Cancelled(c) ? 0 : n;
+    c->buffer_failed |= c->acc.failed || c->data.failed;
+    return Cancelled(c) || c->buffer_failed ? 0 : n;
 }
 
 static int OnXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
@@ -230,6 +214,8 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(req->body));
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, OnHeader);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnWrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnXfer);
@@ -275,6 +261,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     PicoHttpCapture_Finish(&ctx.capture, req->url, http, outcome, (int)rc,
                            rc == CURLE_OK ? "" : curl_easy_strerror(rc));
     JsonBuf_Free(&ctx.acc);
+    JsonBuf_Free(&ctx.data);
 
     /* An aborting callback already recorded why it stopped, so report success
      * and let the caller surface its own error. */

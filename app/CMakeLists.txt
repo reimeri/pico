@@ -193,6 +193,13 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_shell_tests)
     add_test(NAME pico_shell_tests COMMAND pico_shell_tests)
 
+    add_executable(pico_http_tests tests/http_test.c http.c http_capture.c json.c)
+    target_include_directories(pico_http_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(pico_http_tests PRIVATE CURL::libcurl Threads::Threads)
+    pico_warnings_are_errors(pico_http_tests)
+    add_test(NAME pico_http_tests COMMAND pico_http_tests)
+    set_tests_properties(pico_http_tests PROPERTIES TIMEOUT 15)
+
     add_executable(pico_http_capture_tests
         tests/http_capture_test.c
         http_capture.c

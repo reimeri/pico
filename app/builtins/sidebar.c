@@ -1130,16 +1130,26 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                      .childGap = 6,
                      .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}}})
     {
-        CLAY(CLAY_ID("SidebarAddWs"),
+        CLAY(CLAY_ID("SidebarProjectsHeader"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                         .padding = {8, 8, 6, 6},
-                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
-              .backgroundColor = add_hover ? (Clay_Color){42, 42, 50, 255} : COLOR_COMPOSER_BG,
-              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                         .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
+                         .childGap = SIDEBAR_ROW_GAP,
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
         {
-            CLAY_TEXT(CLAY_STRING("Add workspace"),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                          .clip = {.horizontal = true}})
+            {
+                CLAY_TEXT(CLAY_STRING("Projects"),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                            .fontSize = PICO_FONT_UI,
+                                            .textColor = COLOR_MUTED,
+                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
+            CLAY(CLAY_ID("SidebarAddWs"), {.layout = {.padding = {4, 4, 0, 0}}})
+            {
+                RenderGlyph("+", add_hover ? COLOR_TEXT : COLOR_MUTED);
+            }
         }
 
         CLAY(CLAY_ID("SidebarScroll"),

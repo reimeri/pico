@@ -16,6 +16,7 @@ enum {
 #define COLOR_BG (Clay_Color){24, 24, 28, 255}
 #define COLOR_CONTENT_BG (Clay_Color){30, 30, 36, 255}
 #define COLOR_USER_BG (Clay_Color){30, 30, 36, 255}
+#define COLOR_USER_BG_OVERLAY (Clay_Color){38, 38, 46, 255}
 #define COLOR_ASSISTANT_BG (Clay_Color){0, 0, 0, 0}
 #define COLOR_COMPOSER_BG (Clay_Color){34, 34, 42, 255}
 #define COLOR_FOOTER_BG (Clay_Color){22, 22, 26, 255}

@@ -1575,7 +1575,8 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
 {
     PicoMessage *msg = (PicoMessage *)&view->messages[i];
     bool user = msg->role == PICO_ROLE_USER;
-    Clay_Color bg = user ? COLOR_USER_BG : COLOR_ASSISTANT_BG;
+    bool overlay = view->id_ns != 0;
+    Clay_Color bg = user ? (overlay ? COLOR_USER_BG_OVERLAY : COLOR_USER_BG) : COLOR_ASSISTANT_BG;
     Clay_Padding pad = user ? (Clay_Padding){16, 16, 12, 12} : (Clay_Padding){8, 8, 0, 0};
     float msg_max = available_width + (float)(pad.left + pad.right);
     if (msg_max < 50.0f)

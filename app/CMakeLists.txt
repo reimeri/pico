@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.27)
-project(pico VERSION 0.1.11 LANGUAGES C)
+project(pico VERSION 0.1.12 LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 
 include(FetchContent)
@@ -405,6 +405,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        trace_group.c
         tool_args.c
         workspace.c
         host_extensions.c

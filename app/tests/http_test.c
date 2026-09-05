@@ -27,7 +27,9 @@ static void *Serve(void *arg)
         if (end && len >= (size_t)(end - request) + 6) break;
     }
     char header[512];
-    int n = snprintf(header, sizeof(header), "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", s->type, strlen(s->body));
+    int n = snprintf(header, sizeof(header), "HTTP/1.1 200 OK\r\n%s%s%sContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                     s->type ? "Content-Type: " : "", s->type ? s->type : "",
+                     s->type ? "\r\n" : "", strlen(s->body));
     send(fd, header, (size_t)n, MSG_NOSIGNAL);
     /* A CR/LF pair can cross any transport boundary. */
     for (const char *p = s->body; *p; p++) send(fd, p, 1, MSG_NOSIGNAL);
@@ -77,6 +79,16 @@ int main(void)
             strcmp(sse.json[0], "{\"a\":1}") || strcmp(sse.event[0], "first") ||
             strcmp(sse.json[1], "{\"b\":\n2}") || strcmp(sse.json[2], "{\"c\":3}");
     fail |= Request("text/event-stream", events, &stopped) || stopped.count != 1;
+    Result untyped = {0}, untyped_json = {0};
+    fail |= Request(NULL, events, &untyped) || untyped.count != 3 ||
+            strcmp(untyped.event[0], "first") || strcmp(untyped.json[0], "{\"a\":1}") ||
+            strcmp(untyped.json[1], "{\"b\":\n2}") || strcmp(untyped.json[2], "{\"c\":3}");
+    fail |= Request(NULL, error, &untyped_json) || untyped_json.count != 1 ||
+            strcmp(untyped_json.json[0], error);
+    Result explicit_json = {0};
+    const char *sse_body = "data: {}\n\n";
+    fail |= Request("application/json", sse_body, &explicit_json) || explicit_json.count != 1 ||
+            strcmp(explicit_json.json[0], sse_body);
     curl_global_cleanup();
     if (fail) fprintf(stderr, "HTTP framing or callback cancellation failed\n");
     return fail;

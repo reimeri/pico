@@ -76,7 +76,7 @@ Builtin Responses maps `type: "context"` to a `developer` input message; builtin
 
 Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.
 
-HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_http_form_encode` in `pico/http.h`. `pico_http_get` uses the same `PicoHttpReq` as POST and ignores `body`. Buffered requests return `PICO_HTTP_OK` when the transfer completes even for HTTP 4xx/5xx; inspect `out_http` for application status. Streaming responses must use `Content-Type: text/event-stream`; non-SSE responses are delivered as one JSON body. Mixed LF/CRLF/CR event boundaries are supported. See [contracts](contracts.md#http-helpers) for ownership, cancellation, redirects, and timeout behavior.
+HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_http_form_encode` in `pico/http.h`. `pico_http_get` uses the same `PicoHttpReq` as POST and ignores `body`. Buffered requests return `PICO_HTTP_OK` when the transfer completes even for HTTP 4xx/5xx; inspect `out_http` for application status. Streaming responses use `Content-Type: text/event-stream`. When that header is absent, the helper recognizes SSE from a first line beginning with `event:`, `data:`, `id:`, `retry:`, or `:`. An explicit content type takes precedence; non-SSE responses are delivered as one JSON body. Mixed LF/CRLF/CR event boundaries are supported. See [contracts](contracts.md#http-helpers) for ownership, cancellation, redirects, and timeout behavior.
 
 ## Contract
 

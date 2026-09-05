@@ -21,6 +21,7 @@ typedef struct HttpCtx
     void *user;
     JsonBuf acc;
     bool saw_sse;
+    bool framing_known;
     bool skip_lf;
     bool have_data;
     JsonBuf data;
@@ -104,6 +105,7 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
     {
         /* A redirect or interim response must not determine the final framing. */
         c->saw_sse = false;
+        c->framing_known = false;
         c->skip_lf = false;
         c->have_data = false;
         c->event[0] = '\0';
@@ -112,6 +114,7 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
     }
     if (n >= 13 && strncasecmp(ptr, "Content-Type:", 13) == 0)
     {
+        c->framing_known = true;
         size_t i = 13;
         while (i < n && (ptr[i] == ' ' || ptr[i] == '\t'))
             i++;
@@ -130,30 +133,52 @@ static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
     PicoHttpCapture_Write(&c->capture, ptr, n);
     if (Cancelled(c))
         return 0;
-    if (!c->saw_sse)
+    for (size_t i = 0; i < n && !c->json_abort; i++)
     {
-        JsonBuf_Append(&c->acc, ptr, n);
-    }
-    else
-    {
-        for (size_t i = 0; i < n && !c->json_abort; i++)
+        char ch = ptr[i];
+        if (c->skip_lf && ch == '\n')
         {
-            char ch = ptr[i];
-            if (c->skip_lf && ch == '\n')
+            c->skip_lf = false;
+            continue;
+        }
+        if (!c->framing_known)
+        {
+            /* Codex can omit Content-Type. Inspect only the first complete
+             * line so transport chunk boundaries cannot affect detection.
+             * An explicit Content-Type always takes precedence. */
+            if (ch == '\r' || ch == '\n')
             {
-                c->skip_lf = false;
+                const char *line = c->acc.data ? c->acc.data : "";
+                c->saw_sse = line[0] == ':' || strncmp(line, "event:", 6) == 0 ||
+                             strncmp(line, "data:", 5) == 0 || strncmp(line, "id:", 3) == 0 ||
+                             strncmp(line, "retry:", 6) == 0;
+                c->framing_known = true;
+            }
+            else
+            {
+                JsonBuf_Putc(&c->acc, ch);
+                if (c->acc.failed)
+                {
+                    c->buffer_failed = true;
+                    break;
+                }
                 continue;
             }
-            c->skip_lf = ch == '\r';
-            if (ch == '\r' || ch == '\n')
-                SseLine(c);
-            else
-                JsonBuf_Putc(&c->acc, ch);
-            if (c->acc.failed || c->data.failed)
-            {
-                c->buffer_failed = true;
-                break;
-            }
+        }
+        if (!c->saw_sse)
+        {
+            JsonBuf_Append(&c->acc, ptr + i, n - i);
+            break;
+        }
+        c->skip_lf = ch == '\r';
+        if (ch == '\r' || ch == '\n')
+            SseLine(c);
+        else
+            JsonBuf_Putc(&c->acc, ch);
+        if (c->acc.failed || c->data.failed)
+        {
+            c->buffer_failed = true;
+            break;
         }
     }
     c->buffer_failed |= c->acc.failed || c->data.failed;

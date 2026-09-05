@@ -547,12 +547,6 @@ static const char *FirstEnv(const char *a, const char *b)
     return NULL;
 }
 
-static bool SettingsFileExists(const char *path)
-{
-    struct stat st;
-    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
-}
-
 static bool UserSettingsPath(char *out, size_t cap)
 {
     char dir[4096];
@@ -664,26 +658,6 @@ static bool WorkspaceSettingsPath(const PicoWorkspace *workspace, char *out, siz
         out[0] = '\0';
     }
     return true;
-}
-
-static bool FileHasModels(const char *path)
-{
-    size_t len = 0;
-    char *src = Pico_ReadFile(path, &len);
-    if (!src)
-    {
-        return false;
-    }
-    JsonStripComments(src, len);
-    JsonDoc doc;
-    bool has = false;
-    if (JsonParse(&doc, src, len) == 0)
-    {
-        has = JsonIsArray(&doc, JsonObjGet(&doc, 0, "models"));
-        JsonFree(&doc);
-    }
-    free(src);
-    return has;
 }
 
 void PicoHostPreferences_Load(PicoHost *host)
@@ -1260,36 +1234,6 @@ static bool ObjectIsEmpty(const char *src, const JsonDoc *doc, int obj, int clos
     return true;
 }
 
-static bool PatchStringTok(char **src, size_t *len, const JsonDoc *doc, int tok, const char *value)
-{
-    int start = JsonTokStart(doc, tok);
-    int end = JsonTokEnd(doc, tok);
-    if (start < 0 || end < start)
-    {
-        return false;
-    }
-    char *quoted = JsonQuoted(value);
-    if (!quoted || quoted[0] != '"')
-    {
-        free(quoted);
-        return false;
-    }
-    size_t qn = strlen(quoted);
-    char *inner = quoted + 1;
-    size_t inner_len = qn >= 2 ? qn - 2 : 0;
-    inner[inner_len] = '\0';
-    char *next = Splice(*src, *len, start, end - start, inner);
-    free(quoted);
-    if (!next)
-    {
-        return false;
-    }
-    free(*src);
-    *src = next;
-    *len = strlen(next);
-    return true;
-}
-
 static bool InsertObjectKey(char **src, size_t *len, const JsonDoc *doc, int obj, const char *key,
                             const char *json_value)
 {
@@ -1319,73 +1263,6 @@ static bool InsertObjectKey(char **src, size_t *len, const JsonDoc *doc, int obj
     *src = next;
     *len = strlen(next);
     return true;
-}
-
-static bool PatchRootStringUnlocked(const char *path, const char *key, const char *value)
-{
-    size_t len = 0;
-    char *src = Pico_ReadFile(path, &len);
-    if (!src)
-    {
-        JsonBuf b;
-        JsonBuf_Init(&b);
-        JsonBuf_Puts(&b, "{\n  ");
-        JsonBuf_String(&b, key);
-        JsonBuf_Puts(&b, ": ");
-        JsonBuf_String(&b, value);
-        JsonBuf_Puts(&b, "\n}\n");
-        char *out = JsonBuf_Steal(&b);
-        bool ok = WriteFile(path, out, out ? strlen(out) : 0);
-        free(out);
-        return ok;
-    }
-    char *stripped = (char *)malloc(len + 1);
-    if (!stripped)
-    {
-        free(src);
-        return false;
-    }
-    memcpy(stripped, src, len + 1);
-    JsonStripComments(stripped, len);
-    JsonDoc doc;
-    if (JsonParse(&doc, stripped, len) != 0)
-    {
-        free(stripped);
-        free(src);
-        return false;
-    }
-    int tok = JsonObjGet(&doc, 0, key);
-    bool ok = false;
-    if (tok >= 0)
-    {
-        ok = PatchStringTok(&src, &len, &doc, tok, value);
-    }
-    else
-    {
-        char *quoted = JsonQuoted(value);
-        ok = InsertObjectKey(&src, &len, &doc, 0, key, quoted);
-        free(quoted);
-    }
-    JsonFree(&doc);
-    free(stripped);
-    if (ok)
-    {
-        ok = WriteFile(path, src, len);
-    }
-    free(src);
-    return ok;
-}
-
-static bool PatchRootString(const char *path, const char *key, const char *value)
-{
-    int lock_fd = SettingsLockAcquire(path);
-    if (lock_fd < 0)
-    {
-        return false;
-    }
-    bool ok = PatchRootStringUnlocked(path, key, value);
-    SettingsLockRelease(lock_fd);
-    return ok;
 }
 
 static bool PatchTokSpan(char **src, size_t *len, const JsonDoc *doc, int tok, const char *json_value)
@@ -1487,7 +1364,7 @@ static char *DisabledHostExtensionsJson(const PicoHostPreferences *p)
         {
             JsonBuf_Putc(&b, ',');
         }
-        JsonBuf_String(&b, p->disabled_host_extension_count ? p->disabled_host_extensions[i] : "");
+        JsonBuf_String(&b, p->disabled_host_extensions[i]);
     }
     JsonBuf_Putc(&b, ']');
     return JsonBuf_Steal(&b);
@@ -1642,7 +1519,7 @@ bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *na
     return ok;
 }
 
-static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected_effort)
+static void WriteModelValue(JsonBuf *b, const PicoModel *m)
 {
     JsonBuf_Puts(b, "{\"name\":");
     JsonBuf_String(b, m->name);
@@ -1672,160 +1549,8 @@ static void WriteModelValue(JsonBuf *b, const PicoModel *m, const char *selected
         JsonBuf_String(b, m->effort[i]);
     }
     JsonBuf_Puts(b, "],\"selected_effort\":");
-    JsonBuf_String(b, selected_effort && selected_effort[0] ? selected_effort :
-                      (m->default_effort[0] ? m->default_effort : "none"));
+    JsonBuf_String(b, m->default_effort[0] ? m->default_effort : "none");
     JsonBuf_Putc(b, '}');
-}
-
-static bool PatchSelectedEffortUnlocked(const char *path, PicoWorkspace *workspace, const PicoAgent *agent)
-{
-    PicoModel *active = PicoSettings_ActiveModel(agent);
-    if (!active)
-    {
-        return false;
-    }
-    size_t len = 0;
-    char *src = Pico_ReadFile(path, &len);
-    if (!src)
-    {
-        JsonBuf b;
-        JsonBuf_Init(&b);
-        JsonBuf_Puts(&b, "{\n  \"model\":");
-        JsonBuf_String(&b, agent->model);
-        JsonBuf_Puts(&b, ",\n  \"models\":[");
-        WriteModelValue(&b, active, agent->effort);
-        JsonBuf_Puts(&b, "]\n}\n");
-        char *out = JsonBuf_Steal(&b);
-        bool ok = WriteFile(path, out, out ? strlen(out) : 0);
-        free(out);
-        return ok;
-    }
-    char *stripped = (char *)malloc(len + 1);
-    if (!stripped)
-    {
-        free(src);
-        return false;
-    }
-    memcpy(stripped, src, len + 1);
-    JsonStripComments(stripped, len);
-    JsonDoc doc;
-    if (JsonParse(&doc, stripped, len) != 0)
-    {
-        free(stripped);
-        free(src);
-        return false;
-    }
-    int arr = JsonObjGet(&doc, 0, "models");
-    bool ok = false;
-    if (!JsonIsArray(&doc, arr))
-    {
-        JsonBuf b;
-        JsonBuf_Init(&b);
-        JsonBuf_Putc(&b, '[');
-        for (int i = 0; i < workspace->model_count; i++)
-        {
-            if (i)
-            {
-                JsonBuf_Putc(&b, ',');
-            }
-            WriteModelValue(&b, &workspace->models[i],
-                            strcmp(workspace->models[i].id, agent->model) == 0 ? agent->effort : NULL);
-        }
-        JsonBuf_Putc(&b, ']');
-        char *val = JsonBuf_Steal(&b);
-        ok = InsertObjectKey(&src, &len, &doc, 0, "models", val);
-        free(val);
-    }
-    else
-    {
-        int n = JsonArrayLen(&doc, arr);
-        int found = -1;
-        for (int i = 0; i < n; i++)
-        {
-            int item = JsonArrayAt(&doc, arr, i);
-            char *id = JsonObjStr(&doc, item, "id");
-            if (id && strcmp(id, active->id) == 0)
-            {
-                found = item;
-                free(id);
-                break;
-            }
-            free(id);
-        }
-        if (found >= 0)
-        {
-            int tok = JsonObjGet(&doc, found, "selected_effort");
-            if (tok >= 0)
-            {
-                ok = PatchStringTok(&src, &len, &doc, tok, agent->effort);
-            }
-            else
-            {
-                char *quoted = JsonQuoted(agent->effort);
-                ok = InsertObjectKey(&src, &len, &doc, found, "selected_effort", quoted);
-                free(quoted);
-            }
-        }
-    }
-    JsonFree(&doc);
-    free(stripped);
-    if (ok)
-    {
-        ok = WriteFile(path, src, len);
-    }
-    free(src);
-    return ok;
-}
-
-static bool PatchSelectedEffort(const char *path, PicoWorkspace *workspace, const PicoAgent *agent)
-{
-    int lock_fd = SettingsLockAcquire(path);
-    if (lock_fd < 0)
-    {
-        return false;
-    }
-    bool ok = PatchSelectedEffortUnlocked(path, workspace, agent);
-    SettingsLockRelease(lock_fd);
-    return ok;
-}
-
-bool PicoSettings_SaveSelection(const PicoAgent *agent, bool save_model, bool save_effort)
-{
-    if (!agent || !agent->workspace)
-    {
-        return false;
-    }
-    PicoWorkspace *workspace = agent->workspace;
-    PicoHost *host = workspace->host;
-    char user[4096];
-    char ws_path[4096];
-    if (!UserSettingsPath(user, sizeof(user)) ||
-        !WorkspaceSettingsPath(workspace, ws_path, sizeof(ws_path)))
-    {
-        return false;
-    }
-    bool ok = true;
-    if (save_model)
-    {
-        const char *path = SettingsFileExists(ws_path) ? ws_path : user;
-        pthread_mutex_t *mu = (path == ws_path) ? &workspace->settings_mu : (host ? &host->settings_mu : NULL);
-        if (mu) pthread_mutex_lock(mu);
-        ok = PatchRootString(path, "model", agent->model) && ok;
-        if (mu) pthread_mutex_unlock(mu);
-    }
-    if (save_effort)
-    {
-        const char *path = FileHasModels(ws_path) ? ws_path : (FileHasModels(user) ? user : NULL);
-        if (!path)
-        {
-            path = SettingsFileExists(ws_path) ? ws_path : user;
-        }
-        pthread_mutex_t *mu = (path == ws_path) ? &workspace->settings_mu : (host ? &host->settings_mu : NULL);
-        if (mu) pthread_mutex_lock(mu);
-        ok = PatchSelectedEffort(path, workspace, agent) && ok;
-        if (mu) pthread_mutex_unlock(mu);
-    }
-    return ok;
 }
 
 void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft)
@@ -2378,7 +2103,7 @@ static char *ModelsJsonPreserving(const char *src, size_t len, const PicoUserSet
         }
         else
         {
-            WriteModelValue(&b, model, NULL);
+            WriteModelValue(&b, model);
         }
         free(object);
     }

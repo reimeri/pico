@@ -92,12 +92,7 @@ typedef struct AskUiState {
 
 static __thread AskUiState *s_active_ask_state = NULL;
 
-static AskUiState *ActiveAskState(void)
-{
-    return s_active_ask_state;
-}
-
-#define g_ui (*ActiveAskState())
+#define g_ui (*s_active_ask_state)
 
 static void MarkTextViewDirty(void);
 

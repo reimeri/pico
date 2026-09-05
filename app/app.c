@@ -92,11 +92,6 @@ PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id)
     return NULL;
 }
 
-const PicoWorkspace *PicoHost_FindWorkspaceConst(const PicoHost *host, PicoWorkspaceId id)
-{
-    return PicoHost_FindWorkspace((PicoHost *)host, id);
-}
-
 PicoAgent *PicoHost_FindAgent(PicoHost *host, PicoAgentId id)
 {
     if (!host || id == 0)
@@ -2105,18 +2100,6 @@ void pico_host_pump(PicoHost *host)
         }
     }
     PicoHostExtensions_OnFrame(host, dt);
-}
-
-PicoResult pico_host_init_and_start(PicoHost **out, Font *fonts, const char *workspace, bool safe_mode,
-                                    PicoSessionStart session_start, const char *session_file)
-{
-    PicoResult result = pico_host_init(out, fonts, safe_mode);
-    if (result != PICO_OK)
-    {
-        return result;
-    }
-    PicoHost_Start(*out, fonts, workspace, safe_mode, session_start, session_file);
-    return PICO_OK;
 }
 
 void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool safe_mode,

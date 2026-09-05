@@ -259,7 +259,6 @@ bool PicoHost_ProcessRetired(void);
 Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *host, float viewport_height, float delta_time);
 PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source);
 PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id);
-const PicoWorkspace *PicoHost_FindWorkspaceConst(const PicoHost *host, PicoWorkspaceId id);
 PicoAgent *PicoHost_FindAgent(PicoHost *host, PicoAgentId id);
 const PicoAgent *PicoHost_FindAgentConst(const PicoHost *host, PicoAgentId id);
 /* UI-only. Backend code must take an explicit agent ID or pointer. */

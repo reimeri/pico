@@ -113,34 +113,29 @@ typedef struct ChatState {
 
 static __thread ChatState *s_active_chat_state = NULL;
 
-static ChatState *ActiveChatState(void)
-{
-    return s_active_chat_state;
-}
-
-#define g_think_label_blocks (ActiveChatState()->think_label_blocks)
-#define g_think_label_block (ActiveChatState()->think_label_block)
-#define g_think_docs (ActiveChatState()->think_docs)
-#define g_think_doc_count (ActiveChatState()->think_doc_count)
-#define g_think_doc_cap (ActiveChatState()->think_doc_cap)
-#define g_app (ActiveChatState()->app)
-#define g_inspect (ActiveChatState()->inspect)
-#define g_inspect_n (ActiveChatState()->inspect_n)
-#define g_inspect_follow (ActiveChatState()->inspect_follow)
-#define g_inspect_overflow (ActiveChatState()->inspect_overflow)
-#define g_inspect_bar (ActiveChatState()->inspect_bar)
-#define g_inspect_pressed_dim (ActiveChatState()->inspect_pressed_dim)
-#define g_inspect_pressed_back (ActiveChatState()->inspect_pressed_back)
-#define g_inspect_pressed_tool (ActiveChatState()->inspect_pressed_tool)
-#define g_inspect_pressed_group (ActiveChatState()->inspect_pressed_group)
-#define g_inspect_tool_msg (ActiveChatState()->inspect_tool_msg)
-#define g_inspect_tool_idx (ActiveChatState()->inspect_tool_idx)
-#define g_main_virtual (ActiveChatState()->main_virtual)
-#define g_inspect_virtual (ActiveChatState()->inspect_virtual)
-#define g_main_tool_wrap (ActiveChatState()->main_tool_wrap)
-#define g_inspect_tool_wrap (ActiveChatState()->inspect_tool_wrap)
-#define g_inspect_virtual_ns (ActiveChatState()->inspect_virtual_ns)
-#define g_virtual_relayout (ActiveChatState()->virtual_relayout)
+#define g_think_label_blocks (s_active_chat_state->think_label_blocks)
+#define g_think_label_block (s_active_chat_state->think_label_block)
+#define g_think_docs (s_active_chat_state->think_docs)
+#define g_think_doc_count (s_active_chat_state->think_doc_count)
+#define g_think_doc_cap (s_active_chat_state->think_doc_cap)
+#define g_app (s_active_chat_state->app)
+#define g_inspect (s_active_chat_state->inspect)
+#define g_inspect_n (s_active_chat_state->inspect_n)
+#define g_inspect_follow (s_active_chat_state->inspect_follow)
+#define g_inspect_overflow (s_active_chat_state->inspect_overflow)
+#define g_inspect_bar (s_active_chat_state->inspect_bar)
+#define g_inspect_pressed_dim (s_active_chat_state->inspect_pressed_dim)
+#define g_inspect_pressed_back (s_active_chat_state->inspect_pressed_back)
+#define g_inspect_pressed_tool (s_active_chat_state->inspect_pressed_tool)
+#define g_inspect_pressed_group (s_active_chat_state->inspect_pressed_group)
+#define g_inspect_tool_msg (s_active_chat_state->inspect_tool_msg)
+#define g_inspect_tool_idx (s_active_chat_state->inspect_tool_idx)
+#define g_main_virtual (s_active_chat_state->main_virtual)
+#define g_inspect_virtual (s_active_chat_state->inspect_virtual)
+#define g_main_tool_wrap (s_active_chat_state->main_tool_wrap)
+#define g_inspect_tool_wrap (s_active_chat_state->inspect_tool_wrap)
+#define g_inspect_virtual_ns (s_active_chat_state->inspect_virtual_ns)
+#define g_virtual_relayout (s_active_chat_state->virtual_relayout)
 
 static bool IsSubagentTool(const PicoTraceLine *line)
 {
@@ -1935,7 +1930,7 @@ static bool InspectPop(void)
 
 void PicoChat_InspectClose(void)
 {
-    ChatState *s = ActiveChatState();
+    ChatState *s = s_active_chat_state;
     if (!s)
     {
         return;

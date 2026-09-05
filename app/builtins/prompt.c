@@ -21,18 +21,13 @@ typedef struct PromptState {
 
 static __thread PromptState *s_active_prompt_state = NULL;
 
-static PromptState *ActivePromptState(void)
-{
-    return s_active_prompt_state;
-}
-
-#define g_app (ActivePromptState()->app)
-#define g_open (ActivePromptState()->open)
-#define g_text (ActivePromptState()->text)
-#define g_spans (ActivePromptState()->spans)
-#define g_span_count (ActivePromptState()->span_count)
-#define g_overflow (ActivePromptState()->overflow)
-#define g_scrollbar (ActivePromptState()->scrollbar)
+#define g_app (s_active_prompt_state->app)
+#define g_open (s_active_prompt_state->open)
+#define g_text (s_active_prompt_state->text)
+#define g_spans (s_active_prompt_state->spans)
+#define g_span_count (s_active_prompt_state->span_count)
+#define g_overflow (s_active_prompt_state->overflow)
+#define g_scrollbar (s_active_prompt_state->scrollbar)
 
 #define COLOR_PROMPT_BASE (Clay_Color){186, 164, 122, 255}
 #define COLOR_PROMPT_WORKSPACE (Clay_Color){122, 156, 148, 255}

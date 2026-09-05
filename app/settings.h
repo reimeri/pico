@@ -44,7 +44,6 @@ void PicoSettings_ReconcileIdleAgent(PicoAgent *agent);
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort);
 bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name);
 bool PicoSettings_SetEffort(PicoAgent *agent, const char *level);
-bool PicoSettings_SaveSelection(const PicoAgent *agent, bool save_model, bool save_effort);
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
 bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
 

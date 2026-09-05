@@ -11,8 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SETTINGS_MODEL_MAX PICO_SETTINGS_MODEL_MAX
-
 enum {
     FOCUS_NONE = 0,
     FOCUS_CONTEXT_LIMIT,
@@ -39,7 +37,7 @@ typedef struct SettingsState {
     char compact_at[32];
     char font_scale[32];
     char chat_width[32];
-    char model_contexts[SETTINGS_MODEL_MAX][32];
+    char model_contexts[PICO_SETTINGS_MODEL_MAX][32];
     char custom_effort[PICO_EFFORT_LEN];
     char error[256];
     int focus_kind;
@@ -56,17 +54,12 @@ typedef struct SettingsState {
 static __thread SettingsState *s_active_settings_state = NULL;
 static char s_caret[520];
 
-static SettingsState *ActiveSettingsState(void)
-{
-    return s_active_settings_state;
-}
-
-#define g_host (ActiveSettingsState()->host)
-#define g_open (ActiveSettingsState()->open)
-#define g_overflow (ActiveSettingsState()->overflow)
-#define g_scrollbar (ActiveSettingsState()->scrollbar)
-#define g_draft (ActiveSettingsState()->draft)
-#define g_error (ActiveSettingsState()->error)
+#define g_host (s_active_settings_state->host)
+#define g_open (s_active_settings_state->open)
+#define g_overflow (s_active_settings_state->overflow)
+#define g_scrollbar (s_active_settings_state->scrollbar)
+#define g_draft (s_active_settings_state->draft)
+#define g_error (s_active_settings_state->error)
 
 static PicoModel *ModelAt(SettingsState *s, int index);
 static void FlushModelContext(SettingsState *s);
@@ -152,7 +145,7 @@ static void SyncFieldsFromDraft(SettingsState *s)
     snprintf(s->font_scale, sizeof(s->font_scale), "%g", s->draft.font_scale);
     snprintf(s->chat_width, sizeof(s->chat_width), "%d", s->draft.chat_width);
     memset(s->model_contexts, 0, sizeof(s->model_contexts));
-    for (i = 0; i < s->draft.model_count && i < SETTINGS_MODEL_MAX; i++)
+    for (i = 0; i < s->draft.model_count && i < PICO_SETTINGS_MODEL_MAX; i++)
     {
         snprintf(s->model_contexts[i], sizeof(s->model_contexts[i]), "%d", s->draft.models[i].context_limit);
     }
@@ -161,7 +154,7 @@ static void SyncFieldsFromDraft(SettingsState *s)
 static bool LoadDraft(SettingsState *s)
 {
     if (!s || !PicoSettings_LoadUserDraft(&s->draft) ||
-        s->draft.model_count > SETTINGS_MODEL_MAX || !ResetExpanded(s))
+        s->draft.model_count > PICO_SETTINGS_MODEL_MAX || !ResetExpanded(s))
     {
         return false;
     }
@@ -198,11 +191,11 @@ static bool Claim(void)
         return false;
     }
     g_open = true;
-    if (!LoadDraft(ActiveSettingsState()))
+    if (!LoadDraft(s_active_settings_state))
     {
         (void)pico_ui_modal_pop(g_host, "settings");
         g_open = false;
-        DiscardDraft(ActiveSettingsState());
+        DiscardDraft(s_active_settings_state);
         PicoOverlay_Notify(g_host, "Could not load settings.json.");
         return false;
     }
@@ -220,7 +213,7 @@ static bool Unclaim(void)
         return false;
     }
     g_open = false;
-    DiscardDraft(ActiveSettingsState());
+    DiscardDraft(s_active_settings_state);
     return true;
 }
 
@@ -306,7 +299,7 @@ static bool ParseFieldsIntoDraft(SettingsState *s)
         return false;
     }
     s->draft.chat_width = (int)width;
-    if (s->draft.model_count > SETTINGS_MODEL_MAX)
+    if (s->draft.model_count > PICO_SETTINGS_MODEL_MAX)
     {
         snprintf(s->error, sizeof(s->error), "%s", "Model catalog has more than 64 entries.");
         return false;
@@ -445,7 +438,7 @@ static bool AddModel(SettingsState *s)
     bool *expanded;
     PicoModel *m;
     int n;
-    if (!s || !s->expanded || s->draft.model_count >= SETTINGS_MODEL_MAX)
+    if (!s || !s->expanded || s->draft.model_count >= PICO_SETTINGS_MODEL_MAX)
     {
         snprintf(s->error, sizeof(s->error), "%s", "Model catalog is full.");
         return false;
@@ -557,7 +550,7 @@ static char *FocusBuf(SettingsState *s, size_t *cap)
         *cap = sizeof(s->custom_effort);
         return s->custom_effort;
     case FOCUS_MODEL_CONTEXT:
-        if (s->focus_model < 0 || s->focus_model >= SETTINGS_MODEL_MAX)
+        if (s->focus_model < 0 || s->focus_model >= PICO_SETTINGS_MODEL_MAX)
         {
             return NULL;
         }
@@ -600,7 +593,7 @@ static void FlushModelContext(SettingsState *s)
         return;
     }
     m = ModelAt(s, s->focus_model);
-    if (!m || s->focus_model < 0 || s->focus_model >= SETTINGS_MODEL_MAX)
+    if (!m || s->focus_model < 0 || s->focus_model >= PICO_SETTINGS_MODEL_MAX)
     {
         return;
     }
@@ -628,7 +621,7 @@ static void SetFocus(SettingsState *s, int kind, int model)
     if (kind == FOCUS_MODEL_CONTEXT)
     {
         m = ModelAt(s, model);
-        if (m && model >= 0 && model < SETTINGS_MODEL_MAX)
+        if (m && model >= 0 && model < PICO_SETTINGS_MODEL_MAX)
         {
             snprintf(s->model_contexts[model], sizeof(s->model_contexts[model]), "%d", m->context_limit);
         }
@@ -669,11 +662,6 @@ static void Backspace(char *buf)
 static bool OverId(Clay_String id)
 {
     return Clay_PointerOver(Clay_GetElementId(id));
-}
-
-static bool Overi(Clay_ElementId id)
-{
-    return Clay_PointerOver(id);
 }
 
 static void RenderLabel(const char *label)
@@ -914,7 +902,7 @@ static int HoveredDefaultModel(const SettingsState *s)
     }
     for (i = 0; i < s->draft.model_count; i++)
     {
-        if (Overi(CLAY_IDI("SettingsDefaultItem", i)))
+        if (Clay_PointerOver(CLAY_IDI("SettingsDefaultItem", i)))
         {
             return i;
         }
@@ -1083,7 +1071,7 @@ static void RenderModelEditor(SettingsState *s, int index, PicoModel *m)
 {
     const PicoWorkspace *ws;
     int i;
-    const char *context_value = (index >= 0 && index < SETTINGS_MODEL_MAX) ? s->model_contexts[index] : "";
+    const char *context_value = (index >= 0 && index < PICO_SETTINGS_MODEL_MAX) ? s->model_contexts[index] : "";
     bool context_focus = s->focus_kind == FOCUS_MODEL_CONTEXT && s->focus_model == index;
     SETTINGS_ROW_BEGIN
         RenderLabel("Id");
@@ -1430,9 +1418,9 @@ static bool HoveredTextField(SettingsState *s)
         {
             continue;
         }
-        if (Overi(CLAY_IDI("SettingsModelId", i)) || Overi(CLAY_IDI("SettingsModelName", i)) ||
-            Overi(CLAY_IDI("SettingsModelProvider", i)) || Overi(CLAY_IDI("SettingsModelBaseUrl", i)) ||
-            Overi(CLAY_IDI("SettingsModelContext", i)) || Overi(CLAY_IDI("SettingsCustomEffort", i)))
+        if (Clay_PointerOver(CLAY_IDI("SettingsModelId", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelName", i)) ||
+            Clay_PointerOver(CLAY_IDI("SettingsModelProvider", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelBaseUrl", i)) ||
+            Clay_PointerOver(CLAY_IDI("SettingsModelContext", i)) || Clay_PointerOver(CLAY_IDI("SettingsCustomEffort", i)))
         {
             return true;
         }
@@ -1461,7 +1449,7 @@ static bool HoveredClickable(SettingsState *s)
         }
         for (i = 0; i < s->draft.model_count; i++)
         {
-            if (Overi(CLAY_IDI("SettingsDefaultItem", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsDefaultItem", i)))
             {
                 return true;
             }
@@ -1469,7 +1457,7 @@ static bool HoveredClickable(SettingsState *s)
     }
     for (i = 0; i < s->draft.model_count; i++)
     {
-        if (Overi(CLAY_IDI("SettingsModelRow", i)) || Overi(CLAY_IDI("SettingsModelRemove", i)))
+        if (Clay_PointerOver(CLAY_IDI("SettingsModelRow", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelRemove", i)))
         {
             return true;
         }
@@ -1477,16 +1465,16 @@ static bool HoveredClickable(SettingsState *s)
         {
             continue;
         }
-        if (Overi(CLAY_IDI("SettingsModelId", i)) || Overi(CLAY_IDI("SettingsModelName", i)) ||
-            Overi(CLAY_IDI("SettingsModelProvider", i)) || Overi(CLAY_IDI("SettingsModelBaseUrl", i)) ||
-            Overi(CLAY_IDI("SettingsModelContext", i)) || Overi(CLAY_IDI("SettingsModelVision", i)) ||
-            Overi(CLAY_IDI("SettingsCustomEffort", i)) || Overi(CLAY_IDI("SettingsAddEffort", i)))
+        if (Clay_PointerOver(CLAY_IDI("SettingsModelId", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelName", i)) ||
+            Clay_PointerOver(CLAY_IDI("SettingsModelProvider", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelBaseUrl", i)) ||
+            Clay_PointerOver(CLAY_IDI("SettingsModelContext", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelVision", i)) ||
+            Clay_PointerOver(CLAY_IDI("SettingsCustomEffort", i)) || Clay_PointerOver(CLAY_IDI("SettingsAddEffort", i)))
         {
             return true;
         }
         for (p = 0; p < kEffortPresetCount; p++)
         {
-            if (Overi(CLAY_IDI("SettingsEffortPreset", i * 16 + p)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsEffortPreset", i * 16 + p)))
             {
                 return true;
             }
@@ -1496,7 +1484,7 @@ static bool HoveredClickable(SettingsState *s)
         {
             for (p = 0; p < ws->provider_count; p++)
             {
-                if (Overi(CLAY_IDI("SettingsProvChip", i * 16 + p)))
+                if (Clay_PointerOver(CLAY_IDI("SettingsProvChip", i * 16 + p)))
                 {
                     return true;
                 }
@@ -1658,56 +1646,56 @@ static bool HandleClicks(SettingsState *s)
         {
             continue;
         }
-        if (Overi(CLAY_IDI("SettingsModelRemove", i)))
+        if (Clay_PointerOver(CLAY_IDI("SettingsModelRemove", i)))
         {
             RemoveModel(s, i);
             return true;
         }
         if (s->expanded && s->expanded[i])
         {
-            if (Overi(CLAY_IDI("SettingsModelId", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsModelId", i)))
             {
                 SetFocus(s, FOCUS_MODEL_ID, i);
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsModelName", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsModelName", i)))
             {
                 SetFocus(s, FOCUS_MODEL_NAME, i);
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsModelProvider", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsModelProvider", i)))
             {
                 SetFocus(s, FOCUS_MODEL_PROVIDER, i);
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsModelBaseUrl", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsModelBaseUrl", i)))
             {
                 SetFocus(s, FOCUS_MODEL_BASE_URL, i);
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsModelContext", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsModelContext", i)))
             {
                 SetFocus(s, FOCUS_MODEL_CONTEXT, i);
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsModelVision", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsModelVision", i)))
             {
                 m->vision = !m->vision;
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsCustomEffort", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsCustomEffort", i)))
             {
                 SetFocus(s, FOCUS_CUSTOM_EFFORT, i);
                 return true;
             }
-            if (Overi(CLAY_IDI("SettingsAddEffort", i)))
+            if (Clay_PointerOver(CLAY_IDI("SettingsAddEffort", i)))
             {
                 AddCustomEffort(s, i);
                 return true;
             }
             for (p = 0; p < kEffortPresetCount; p++)
             {
-                if (Overi(CLAY_IDI("SettingsEffortPreset", i * 16 + p)))
+                if (Clay_PointerOver(CLAY_IDI("SettingsEffortPreset", i * 16 + p)))
                 {
                     ToggleEffort(m, kEffortPresets[p]);
                     return true;
@@ -1715,18 +1703,18 @@ static bool HandleClicks(SettingsState *s)
             }
             for (p = 0; p < m->effort_count; p++)
             {
-                if (Overi(CLAY_IDI("SettingsEffortExtra", i * 16 + p)))
+                if (Clay_PointerOver(CLAY_IDI("SettingsEffortExtra", i * 16 + p)))
                 {
                     ToggleEffort(m, m->effort[p]);
                     return true;
                 }
-                if (Overi(CLAY_IDI("SettingsSelectedEffort", i * 16 + p)))
+                if (Clay_PointerOver(CLAY_IDI("SettingsSelectedEffort", i * 16 + p)))
                 {
                     snprintf(m->default_effort, sizeof(m->default_effort), "%s", m->effort[p]);
                     return true;
                 }
             }
-            if (m->effort_count <= 0 && Overi(CLAY_IDI("SettingsSelectedEffort", i * 16)))
+            if (m->effort_count <= 0 && Clay_PointerOver(CLAY_IDI("SettingsSelectedEffort", i * 16)))
             {
                 snprintf(m->default_effort, sizeof(m->default_effort), "%s", "none");
                 return true;
@@ -1736,7 +1724,7 @@ static bool HandleClicks(SettingsState *s)
             {
                 for (p = 0; p < ws->provider_count; p++)
                 {
-                    if (Overi(CLAY_IDI("SettingsProvChip", i * 16 + p)) && ws->providers[p].name)
+                    if (Clay_PointerOver(CLAY_IDI("SettingsProvChip", i * 16 + p)) && ws->providers[p].name)
                     {
                         snprintf(m->provider, sizeof(m->provider), "%s", ws->providers[p].name);
                         return true;
@@ -1744,7 +1732,7 @@ static bool HandleClicks(SettingsState *s)
                 }
             }
         }
-        if (Overi(CLAY_IDI("SettingsModelRow", i)))
+        if (Clay_PointerOver(CLAY_IDI("SettingsModelRow", i)))
         {
             if (s->expanded)
             {

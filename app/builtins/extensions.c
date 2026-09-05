@@ -15,15 +15,10 @@ typedef struct ExtensionsState {
 
 static __thread ExtensionsState *s_active_exts_state = NULL;
 
-static ExtensionsState *ActiveExtensionsState(void)
-{
-    return s_active_exts_state;
-}
-
-#define g_app (ActiveExtensionsState()->app)
-#define g_open (ActiveExtensionsState()->open)
-#define g_overflow (ActiveExtensionsState()->overflow)
-#define g_scrollbar (ActiveExtensionsState()->scrollbar)
+#define g_app (s_active_exts_state->app)
+#define g_open (s_active_exts_state->open)
+#define g_overflow (s_active_exts_state->overflow)
+#define g_scrollbar (s_active_exts_state->scrollbar)
 
 static bool Claim(void)
 {

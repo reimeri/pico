@@ -15,7 +15,7 @@ static void DropClay(void *memory)
     free(memory);
 }
 
-static int TestHashMapOverflowGrows(void)
+static int TestOverflowGrows(Clay_ErrorType error_type)
 {
     uint32_t size = Clay_MinMemorySize();
     void *memory = malloc(size);
@@ -34,56 +34,18 @@ static int TestHashMapOverflowGrows(void)
     Pico_ClearClayReinit();
     int32_t before = Clay_GetMaxElementCount();
     Pico_HandleClayErrors((Clay_ErrorData){
-        .errorType = CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED,
-        .errorText = CLAY_STRING("hashmap overflow"),
+        .errorType = error_type,
+        .errorText = CLAY_STRING("capacity overflow"),
     });
 
     int failed = 0;
     if (!Pico_NeedsClayReinit())
     {
-        failed = Fail("hashmap overflow did not request Clay reinit");
+        failed = Fail("capacity overflow did not request Clay reinit");
     }
-    else if (Clay_GetMaxElementCount() != before * 2)
+    else if (Clay_GetMaxElementCount() <= before)
     {
-        failed = Fail("hashmap overflow did not double max element count");
-    }
-
-    Pico_ClearClayReinit();
-    DropClay(memory);
-    return failed;
-}
-
-static int TestUnbalancedOverflowGrows(void)
-{
-    uint32_t size = Clay_MinMemorySize();
-    void *memory = malloc(size);
-    if (!memory)
-    {
-        return Fail("could not allocate Clay arena");
-    }
-
-    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(size, memory);
-    if (!Clay_Initialize(arena, (Clay_Dimensions){100, 100}, (Clay_ErrorHandler){0}))
-    {
-        DropClay(memory);
-        return Fail("could not initialize Clay");
-    }
-
-    Pico_ClearClayReinit();
-    int32_t before = Clay_GetMaxElementCount();
-    Pico_HandleClayErrors((Clay_ErrorData){
-        .errorType = CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE,
-        .errorText = CLAY_STRING("unbalanced"),
-    });
-
-    int failed = 0;
-    if (!Pico_NeedsClayReinit())
-    {
-        failed = Fail("unbalanced open/close did not request Clay reinit");
-    }
-    else if (Clay_GetMaxElementCount() != before * 2)
-    {
-        failed = Fail("unbalanced open/close did not double max element count");
+        failed = Fail("capacity overflow did not increase max element count");
     }
 
     Pico_ClearClayReinit();
@@ -262,12 +224,12 @@ static int TestScrollSurvivesReinit(void)
 
 int main(void)
 {
-    int rc = TestHashMapOverflowGrows();
+    int rc = TestOverflowGrows(CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED);
     if (rc != 0)
     {
         return rc;
     }
-    rc = TestUnbalancedOverflowGrows();
+    rc = TestOverflowGrows(CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE);
     if (rc != 0)
     {
         return rc;

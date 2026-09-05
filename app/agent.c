@@ -529,22 +529,6 @@ static char *ResultAssistantText(const char *payload)
     return JsonBuf_Steal(&refusal);
 }
 
-static char *ResultStr(const char *payload, const char *key)
-{
-    if (!payload)
-    {
-        return NULL;
-    }
-    JsonDoc doc;
-    if (JsonParse(&doc, payload, strlen(payload)) != 0)
-    {
-        return NULL;
-    }
-    char *s = JsonObjStr(&doc, 0, key);
-    JsonFree(&doc);
-    return s;
-}
-
 static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
 {
     PicoAgentRt *rt = (PicoAgentRt *)user;
@@ -1485,16 +1469,6 @@ static char *BuildAssistantItemFromParts(const char *parts_json, const char *thi
     return BuildAssistantItem(NULL, thinking, signature);
 }
 
-static char *BuildToolCall(const char *call_id, const char *name, const char *args, const char *item_id)
-{
-    return pico_canonical_tool_call_json(call_id, name, args, item_id);
-}
-
-static char *BuildToolResult(const char *call_id, const char *name, const char *output, bool is_error)
-{
-    return pico_canonical_tool_result_json(call_id, name, output, is_error);
-}
-
 static bool Blank(const char *s);
 static int FreezeTrailingThinkMs(PicoMessage *m);
 
@@ -1993,7 +1967,7 @@ static char *FormatToolLine(const char *name, const char *args_json)
 static void PushFunctionOutput(PicoAgentRt *rt, const char *call_id, const char *name, const char *output,
                                bool is_error)
 {
-    PushInput(rt, BuildToolResult(call_id, name, output, is_error));
+    PushInput(rt, pico_canonical_tool_result_json(call_id, name, output, is_error));
 }
 
 static void AbortRemainingCalls(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt)
@@ -3805,7 +3779,10 @@ void PicoAgent_PushHistoryAssistantParts(PicoAgent *agent, const char *text, con
 void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name, const char *args,
                                        const char *item_id)
 {
-    if (agent && agent->runtime) PushInput(agent->runtime, BuildToolCall(call_id, name, args, item_id));
+    if (agent && agent->runtime)
+    {
+        PushInput(agent->runtime, pico_canonical_tool_call_json(call_id, name, args, item_id));
+    }
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,

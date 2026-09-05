@@ -144,6 +144,10 @@ bool Pico_DocsRelPath(const char *topic, char *out, size_t cap)
     {
         return PicoPath_Format(out, cap, "docs/subagents.md");
     }
+    if (FoldEq(name, "skills"))
+    {
+        return PicoPath_Format(out, cap, "docs/skills.md");
+    }
     return PicoPath_Format(out, cap, "docs/extend/%s.md", name);
 }
 

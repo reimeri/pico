@@ -10,6 +10,8 @@
 #include "json.h"
 #include "richtext.h"
 #include "settings.h"
+#include "skill_load.h"
+#include "skills.h"
 #include "scrollbar.h"
 #include "markdown.h"
 #include "transcript_virtual.h"
@@ -1389,6 +1391,13 @@ static void RenderEmptyCards(PicoHost *app)
     }
     const char *ctx[8];
     int ctx_n = PicoSettings_LoadedContext(ws, ctx, 8);
+    PicoSkillInfo skill_infos[PICO_SKILLS_MAX];
+    const char *skills[PICO_SKILLS_MAX];
+    int skill_n = ws ? PicoSkills_List(ws, skill_infos, PICO_SKILLS_MAX) : 0;
+    for (int i = 0; i < skill_n; i++)
+    {
+        skills[i] = skill_infos[i].name;
+    }
     bool narrow = Clay_GetLayoutDimensions().width < EMPTY_CARDS_NARROW_WIDTH;
     float column_width = EmptyCardColumnWidth(app, narrow);
     CLAY(CLAY_ID("EmptyCards"),
@@ -1398,7 +1407,7 @@ static void RenderEmptyCards(PicoHost *app)
     {
         RenderEmptyCard(0, CLAY_STRING("Tools"), tools, tool_n, column_width);
         RenderEmptyCard(1, CLAY_STRING("Context"), ctx, ctx_n, column_width);
-        RenderEmptyCard(2, CLAY_STRING("Skills"), NULL, 0, column_width);
+        RenderEmptyCard(2, CLAY_STRING("Skills"), skills, skill_n, column_width);
     }
 }
 

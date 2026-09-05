@@ -441,7 +441,8 @@ static void FilesBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *eve
         root = PicoWorkspace_Path(workspace);
     }
     char *parts = NULL;
-    char *expanded = pico_files_expand_mentions(root[0] ? root : ".", app->composer.text, vision, &parts);
+    const char *text = app->agent_input && app->agent_input[0] ? app->agent_input : app->composer.text;
+    char *expanded = pico_files_expand_mentions(root[0] ? root : ".", text, vision, &parts);
     if (!expanded)
     {
         return;

@@ -2195,6 +2195,64 @@ static int TestReloadTargetsSelectedWorkspace(void)
     return 0;
 }
 
+static int TestSkillSubmissionPreservesFileMentions(void)
+{
+    char root[] = "/tmp/pico-skill-submit-XXXXXX";
+    char skill_dir[1024], skill_path[1200], file_path[1024];
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    int failed = 1;
+    if (!mkdtemp(root))
+    {
+        Fail("mkdtemp skill submission");
+        return 1;
+    }
+    snprintf(skill_dir, sizeof(skill_dir), "%s/.pico/skills/review", root);
+    snprintf(skill_path, sizeof(skill_path), "%s/SKILL.md", skill_dir);
+    snprintf(file_path, sizeof(file_path), "%s/README.md", root);
+    if (MkdirParents(skill_dir) != 0 ||
+        WriteFile(skill_path, "---\nname: review\ndescription: Review files.\n---\n"
+                             "Check the implementation carefully.\n") != 0 ||
+        WriteFile(file_path, "File content for review.\n") != 0 ||
+        pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        pico_workspace_open(host, root, &workspace_id) != PICO_OK)
+    {
+        Fail("setup skill submission");
+        goto done;
+    }
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN,
+                                  .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK)
+    {
+        Fail("create skill submission agent");
+        goto done;
+    }
+    PicoComposer_SetText(host, "/skill review review @README.md");
+    /* Exercise the actual command and file hooks without starting a provider. */
+    pico_run_hooks(host, PICO_HOOK_BEFORE_SUBMIT, agent_id);
+    if (host->submit_cancel || !host->agent_input ||
+        !strstr(host->agent_input, "Check the implementation carefully.") ||
+        !strstr(host->agent_input, "File content for review.") ||
+        strcmp(host->composer.text, "/skill review review @README.md") != 0)
+    {
+        Fail("skill submission must keep skill instructions, mentioned file, and display text");
+        goto done;
+    }
+    failed = 0;
+done:
+    if (host) pico_host_free(host);
+    unlink(skill_path);
+    unlink(file_path);
+    rmdir(skill_dir);
+    snprintf(skill_dir, sizeof(skill_dir), "%s/.pico/skills", root);
+    rmdir(skill_dir);
+    snprintf(skill_dir, sizeof(skill_dir), "%s/.pico", root);
+    rmdir(skill_dir);
+    rmdir(root);
+    return failed;
+}
+
 static PicoAgentId g_cd_other_agent;
 
 static void SelectOtherBeforeCd(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
@@ -6894,6 +6952,10 @@ int main(void)
         return 1;
     }
     if (TestHostReloadIgnoresWorkspaceLocalCompileFailure() != 0)
+    {
+        return 1;
+    }
+    if (TestSkillSubmissionPreservesFileMentions() != 0)
     {
         return 1;
     }

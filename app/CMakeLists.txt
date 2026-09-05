@@ -114,6 +114,8 @@ add_executable(pico
     builtins/complete.c
     builtins/commands.c
     builtins/files.c
+    builtins/skills.c
+    builtins/skill_load.c
     builtins/openai.c
     builtins/hyper.c
     builtins/hyper_auth.c
@@ -180,6 +182,27 @@ if(BUILD_TESTING)
     target_include_directories(pico_json_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_json_tests)
     add_test(NAME pico_json_tests COMMAND pico_json_tests)
+
+    add_executable(pico_skills_tests
+        tests/skills_test.c
+        builtins/skill_load.c)
+    target_include_directories(pico_skills_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_skills_tests)
+    add_test(NAME pico_skills_tests COMMAND pico_skills_tests)
+
+    add_executable(pico_skills_builtin_tests
+        tests/skills_builtin_test.c
+        builtins/skills.c
+        builtins/skill_load.c
+        json.c)
+    target_include_directories(pico_skills_builtin_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_link_libraries(pico_skills_builtin_tests PRIVATE Threads::Threads)
+    pico_warnings_are_errors(pico_skills_builtin_tests)
+    add_test(NAME pico_skills_builtin_tests COMMAND pico_skills_builtin_tests)
 
     add_executable(pico_shell_tests
         tests/shell_test.c
@@ -654,6 +677,8 @@ if(BUILD_TESTING)
         builtins/commands.c
         builtins/complete.c
         builtins/files.c
+        builtins/skills.c
+        builtins/skill_load.c
         builtins/openai.c
         builtins/hyper.c
         builtins/hyper_auth.c

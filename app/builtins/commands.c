@@ -9,6 +9,8 @@
 #include "workspace_internal.h"
 #include "session.h"
 #include "settings.h"
+#include "skills.h"
+#include "skill_load.h"
 #include "overlay.h"
 #include "pico/auth.h"
 #include "json.h"
@@ -274,8 +276,8 @@ static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void 
 }
 
 static const char *const kDocTopics[] = {
-    "README", "subagents", "anatomy", "host", "workspace", "agents", "views", "hooks", "context",
-    "tools", "commands", "completers", "providers", "auth", "contracts",
+    "README", "subagents", "skills", "anatomy", "host", "workspace", "agents", "views", "hooks",
+    "context", "tools", "commands", "completers", "providers", "auth", "contracts",
 };
 
 static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);
@@ -669,7 +671,7 @@ static bool NeedsArgs(const char *name)
 {
     return FoldEq(name, "model") || FoldEq(name, "effort") || FoldEq(name, "login") ||
            FoldEq(name, "logout") || FoldEq(name, "docs") || FoldEq(name, "resume") ||
-           FoldEq(name, "cd");
+           FoldEq(name, "cd") || FoldEq(name, "skill");
 }
 
 static bool HasSpace(const char *s)
@@ -913,6 +915,30 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
             n++;
         }
         free(list);
+        return n;
+    }
+    if (FoldEq(cmd, "skill"))
+    {
+        PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+        PicoSkillInfo infos[PICO_SKILLS_MAX];
+        int count = ws ? PicoSkills_List(ws, infos, PICO_SKILLS_MAX) : 0;
+        for (int i = 0; i < count && n < max; i++)
+        {
+            if (!FoldPrefix(infos[i].name, rest) && !FoldContains(infos[i].name, rest))
+            {
+                continue;
+            }
+            snprintf(out[n].label, sizeof(out[n].label), "%s", infos[i].name);
+            int d = 0;
+            for (const char *t = infos[i].description; t && *t && d < (int)sizeof(out[n].detail) - 1;
+                 t++)
+            {
+                out[n].detail[d++] = (*t == '\n' || *t == '\r') ? ' ' : *t;
+            }
+            out[n].detail[d] = '\0';
+            snprintf(out[n].insert, sizeof(out[n].insert), "/skill %s", infos[i].name);
+            n++;
+        }
         return n;
     }
     if (FoldEq(cmd, "cd"))

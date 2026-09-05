@@ -41,6 +41,7 @@ PicoExt pico_ext_background(void);
 PicoExt pico_ext_subagent(void);
 PicoExt pico_ext_commands(void);
 PicoExt pico_ext_files(void);
+PicoExt pico_ext_skills(void);
 PicoExt pico_ext_openai(void);
 PicoExt pico_ext_hyper(void);
 PicoExt pico_ext_xai(void);

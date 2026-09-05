@@ -281,23 +281,35 @@ static void TestDiscovery(void)
 {
     snprintf(g_tmp, sizeof(g_tmp), "/tmp/pico-skills-test-XXXXXX");
     CHECK(mkdtemp(g_tmp) != NULL);
-    char global_dir[512], ws_dir[512];
-    snprintf(global_dir, sizeof(global_dir), "%s/global", g_tmp);
-    snprintf(ws_dir, sizeof(ws_dir), "%s/workspace", g_tmp);
-    CHECK(mkdir(global_dir, 0755) == 0);
-    CHECK(mkdir(ws_dir, 0755) == 0);
+    char agents_global[512], pico_global[512], ws_agents[512], ws_pico[512];
+    snprintf(agents_global, sizeof(agents_global), "%s/agents-global", g_tmp);
+    snprintf(pico_global, sizeof(pico_global), "%s/pico-global", g_tmp);
+    snprintf(ws_agents, sizeof(ws_agents), "%s/agents-workspace", g_tmp);
+    snprintf(ws_pico, sizeof(ws_pico), "%s/pico-workspace", g_tmp);
+    CHECK(mkdir(agents_global, 0755) == 0);
+    CHECK(mkdir(pico_global, 0755) == 0);
+    CHECK(mkdir(ws_agents, 0755) == 0);
+    CHECK(mkdir(ws_pico, 0755) == 0);
 
-    MakeSkill(global_dir, "alpha", "---\nname: alpha\ndescription: global alpha\n---\nglobal body\n");
-    MakeSkill(global_dir, "broken", "---\nname: WRONG\ndescription: x\n---\n");
-    MakeSkill(ws_dir, "beta", "---\nname: beta\ndescription: workspace beta\n---\n");
-    MakeSkill(ws_dir, "alpha", "---\nname: alpha\ndescription: workspace alpha\n---\nws body\n");
+    MakeSkill(agents_global, "alpha",
+              "---\nname: alpha\ndescription: agents global alpha\n---\nagents global body\n");
+    MakeSkill(agents_global, "gamma", "---\nname: gamma\ndescription: agents global gamma\n---\n");
+    MakeSkill(pico_global, "alpha",
+              "---\nname: alpha\ndescription: pico global alpha\n---\npico global body\n");
+    MakeSkill(pico_global, "broken", "---\nname: WRONG\ndescription: x\n---\n");
+    MakeSkill(ws_agents, "alpha",
+              "---\nname: alpha\ndescription: agents workspace alpha\n---\nagents ws body\n");
+    MakeSkill(ws_agents, "delta", "---\nname: delta\ndescription: agents workspace delta\n---\n");
+    MakeSkill(ws_pico, "beta", "---\nname: beta\ndescription: pico workspace beta\n---\n");
+    MakeSkill(ws_pico, "alpha",
+              "---\nname: alpha\ndescription: pico workspace alpha\n---\nws body\n");
 
     /* A directory without SKILL.md and a stray file must be ignored. */
     char noskill[2048];
-    snprintf(noskill, sizeof(noskill), "%s/no-skill-here", ws_dir);
+    snprintf(noskill, sizeof(noskill), "%s/no-skill-here", ws_pico);
     CHECK(mkdir(noskill, 0755) == 0);
     char stray[2048];
-    snprintf(stray, sizeof(stray), "%s/stray-file", ws_dir);
+    snprintf(stray, sizeof(stray), "%s/stray-file", ws_pico);
     FILE *f = fopen(stray, "wb");
     CHECK(f != NULL);
     if (f)
@@ -308,17 +320,19 @@ static void TestDiscovery(void)
     PicoSkillCatalog cat;
     memset(&cat, 0, sizeof(cat));
     g_warnings = 0;
-    int n = PicoSkillCatalog_Scan(&cat, global_dir, ws_dir, CountWarn, NULL);
-    CHECK(n == 2);
-    CHECK(cat.count == 2);
-    /* Sorted by name; the workspace version shadows the global one. */
+    const char *dirs[] = {agents_global, pico_global, ws_agents, ws_pico};
+    int n = PicoSkillCatalog_Scan(&cat, dirs, 4, CountWarn, NULL);
+    CHECK(n == 4);
+    CHECK(cat.count == 4);
+    /* Sorted by name; later directories shadow earlier ones of the same name. */
     CHECK(strcmp(cat.skills[0].name, "alpha") == 0);
     CHECK(strcmp(cat.skills[1].name, "beta") == 0);
+    CHECK(strcmp(cat.skills[2].name, "delta") == 0);
+    CHECK(strcmp(cat.skills[3].name, "gamma") == 0);
     const PicoSkill *alpha = PicoSkillCatalog_Find(&cat, "alpha");
-    CHECK(alpha && alpha->workspace);
-    CHECK(alpha && strcmp(alpha->description, "workspace alpha") == 0);
+    CHECK(alpha && strcmp(alpha->description, "pico workspace alpha") == 0);
     CHECK(PicoSkillCatalog_Find(&cat, "missing") == NULL);
-    CHECK(g_warnings == 1); /* only the invalid global skill */
+    CHECK(g_warnings == 1); /* only the invalid pico-global skill */
 
     /* The body is read without the frontmatter. */
     size_t body_len = 0;

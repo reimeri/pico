@@ -143,20 +143,46 @@ int main(void)
     snprintf(g_config_dir, sizeof(g_config_dir), "%s/config", tmp);
     char global_skills[1200];
     snprintf(global_skills, sizeof(global_skills), "%s/skills", g_config_dir);
+    char home_dir[1200];
+    snprintf(home_dir, sizeof(home_dir), "%s/home", tmp);
+    char home_agents[1400];
+    snprintf(home_agents, sizeof(home_agents), "%s/.agents", home_dir);
+    char home_skills[1600];
+    snprintf(home_skills, sizeof(home_skills), "%s/skills", home_agents);
     char ws_path[1024];
     snprintf(ws_path, sizeof(ws_path), "%s/workspace", tmp);
     char ws_pico[1200];
     snprintf(ws_pico, sizeof(ws_pico), "%s/.pico", ws_path);
     char ws_skills[1400];
     snprintf(ws_skills, sizeof(ws_skills), "%s/skills", ws_pico);
+    char ws_agents[1400];
+    snprintf(ws_agents, sizeof(ws_agents), "%s/.agents", ws_path);
+    char ws_agent_skills[1600];
+    snprintf(ws_agent_skills, sizeof(ws_agent_skills), "%s/skills", ws_agents);
     if (mkdir(g_config_dir, 0755) != 0 || mkdir(global_skills, 0755) != 0 ||
-        mkdir(ws_path, 0755) != 0 || mkdir(ws_pico, 0755) != 0 || mkdir(ws_skills, 0755) != 0)
+        mkdir(home_dir, 0755) != 0 || mkdir(home_agents, 0755) != 0 ||
+        mkdir(home_skills, 0755) != 0 || mkdir(ws_path, 0755) != 0 || mkdir(ws_pico, 0755) != 0 ||
+        mkdir(ws_skills, 0755) != 0 || mkdir(ws_agents, 0755) != 0 ||
+        mkdir(ws_agent_skills, 0755) != 0)
     {
         fprintf(stderr, "setup mkdir failed\n");
         return 1;
     }
+    if (setenv("HOME", home_dir, 1) != 0)
+    {
+        fprintf(stderr, "setenv HOME failed\n");
+        return 1;
+    }
+    WriteSkill(home_skills, "agents-global",
+               "---\nname: agents-global\ndescription: A home agents skill.\n---\nhome agents body\n");
     WriteSkill(global_skills, "global-skill",
                "---\nname: global-skill\ndescription: A global skill.\n---\nglobal body\n");
+    WriteSkill(ws_agent_skills, "agents-ws",
+               "---\nname: agents-ws\ndescription: A workspace agents skill.\n---\n"
+               "Do the agents thing.\n");
+    WriteSkill(ws_agent_skills, "ws-skill",
+               "---\nname: ws-skill\ndescription: Shadowed agents workspace skill.\n---\n"
+               "Do the agents thing.\n");
     WriteSkill(ws_skills, "ws-skill", "---\nname: ws-skill\ndescription: A workspace skill.\n---\n"
                                        "Do the workspace thing.\n");
 
@@ -175,7 +201,7 @@ int main(void)
     Check(g_tool_run != NULL, "use_skill tool registered");
     Check(g_tool_name && strcmp(g_tool_name, "use_skill") == 0, "tool is named use_skill");
 
-    /* LLM hook lists both skills with their descriptions. */
+    /* LLM hook lists loaded skills with their descriptions. */
     Check(g_llm_hook != NULL, "llm hook registered");
     PicoTool skill_tool = {.name = "use_skill"};
     PicoLlmEvent ev;
@@ -187,10 +213,16 @@ int main(void)
     Check(ev.extra_instructions != NULL, "hook injects extra instructions");
     if (ev.extra_instructions)
     {
+        Check(strstr(ev.extra_instructions, "agents-global") != NULL,
+              "metadata lists home agents skill");
         Check(strstr(ev.extra_instructions, "global-skill") != NULL, "metadata lists global skill");
+        Check(strstr(ev.extra_instructions, "agents-ws") != NULL,
+              "metadata lists workspace agents skill");
         Check(strstr(ev.extra_instructions, "ws-skill") != NULL, "metadata lists workspace skill");
         Check(strstr(ev.extra_instructions, "A workspace skill.") != NULL,
               "metadata includes descriptions");
+        Check(strstr(ev.extra_instructions, "Shadowed agents workspace skill.") == NULL,
+              "pico workspace skill shadows agents workspace skill");
         free(ev.extra_instructions);
     }
 
@@ -222,11 +254,12 @@ int main(void)
     /* Card listing. */
     PicoSkillInfo infos[8];
     int n = PicoSkills_List(&ws, infos, 8);
-    Check(n == 2, "card lists both skills");
-    Check(n == 2 && strcmp(infos[0].name, "global-skill") == 0 &&
-              strcmp(infos[1].name, "ws-skill") == 0,
+    Check(n == 4, "card lists skills from each discovery directory");
+    Check(n == 4 && strcmp(infos[0].name, "agents-global") == 0 &&
+              strcmp(infos[1].name, "agents-ws") == 0 &&
+              strcmp(infos[2].name, "global-skill") == 0 && strcmp(infos[3].name, "ws-skill") == 0,
           "card listing is sorted by name");
-    Check(n == 2 && strcmp(infos[1].description, "A workspace skill.") == 0,
+    Check(n == 4 && strcmp(infos[3].description, "A workspace skill.") == 0,
           "card listing carries descriptions");
 
     /* Tool returns the body and base directory for a known skill. */

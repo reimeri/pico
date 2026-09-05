@@ -170,7 +170,7 @@ Running `pico` directly starts in the current directory as the first workspace. 
 
 Named subagents are configured as JSONC files under `$XDG_CONFIG_HOME/pico/subagents/` or `~/.config/pico/subagents/`. Pico creates the directory but does not install profiles. Copy the exploration/review templates from [`examples/subagents/`](examples/subagents/) and see the [subagent guide](docs/subagents.md). Tool allowlists control Pico's offered/executable catalog; they are not process or filesystem sandboxes.
 
-Skills follow the [Agent Skills](https://agentskills.io) format and load from `$XDG_CONFIG_HOME/pico/skills/` (or `~/.config/pico/skills/`) and `<workspace>/.pico/skills/`; the agent activates them with the `use_skill` tool or you can load one with `/skill <name>`. See the [skills guide](docs/skills.md) and the [`examples/skills/`](examples/skills/) template.
+Skills follow the [Agent Skills](https://agentskills.io) format and load from `~/.agents/skills/`, `$XDG_CONFIG_HOME/pico/skills/` (or `~/.config/pico/skills/`), `<workspace>/.agents/skills/`, and `<workspace>/.pico/skills/` (later locations shadow earlier ones of the same name); the agent activates them with the `use_skill` tool or you can load one with `/skill <name>`. See the [skills guide](docs/skills.md) and the [`examples/skills/`](examples/skills/) template.
 
 F5 and `/reload` reload host extensions and the selected workspace. `/cd` opens or selects a workspace without replacing the others. Extension API: [`docs/extend/`](docs/extend/README.md).
 

@@ -25,7 +25,6 @@ typedef struct PicoSkill {
     PicoSkillMeta *meta; /* optional arbitrary string map */
     int meta_count;
     char *dir;           /* skill directory, as scanned */
-    bool workspace;      /* true when loaded from <workspace>/.pico/skills */
 } PicoSkill;
 
 typedef struct PicoSkillCatalog {
@@ -48,10 +47,10 @@ bool PicoSkill_Parse(const char *text, size_t len, const char *dir_name, PicoSki
 /* Loads <dir>/SKILL.md; dir also sets the name-vs-directory check. */
 bool PicoSkill_Load(const char *dir, PicoSkill *out, char *err, size_t err_cap);
 
-/* Merges both skill directories into cat (sorted by name). Either dir may be
- * NULL. Workspace skills shadow global skills of the same name. Invalid
+/* Merges skill directories into cat (sorted by name). NULL or empty entries
+ * are skipped. Later directories shadow earlier ones of the same name. Invalid
  * skills are skipped and reported through warn (may be NULL). Returns count. */
-int PicoSkillCatalog_Scan(PicoSkillCatalog *cat, const char *global_dir, const char *workspace_dir,
+int PicoSkillCatalog_Scan(PicoSkillCatalog *cat, const char *const *dirs, int dir_count,
                           PicoSkillWarnFn warn, void *ctx);
 
 const PicoSkill *PicoSkillCatalog_Find(const PicoSkillCatalog *cat, const char *name);

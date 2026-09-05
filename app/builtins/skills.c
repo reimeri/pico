@@ -16,8 +16,11 @@
 
 /* Agent Skills (agentskills.io) as a builtin extension.
  *
- * Discovery: <config>/pico/skills/<name>/SKILL.md (global) and
- * <workspace>/.pico/skills/<name>/SKILL.md (workspace, shadows global).
+ * Discovery, later directories shadow earlier:
+ *   ~/.agents/skills/<name>/SKILL.md
+ *   <config>/pico/skills/<name>/SKILL.md
+ *   <workspace>/.agents/skills/<name>/SKILL.md
+ *   <workspace>/.pico/skills/<name>/SKILL.md
  * Progressive disclosure: the LLM hook lists name+description in the
  * instructions; the use_skill tool loads the full body into the transcript.
  * The catalog is rescanned on every prompt build so skills dropped onto disk
@@ -44,23 +47,35 @@ static void SkillsWarn(const char *path, const char *message, void *ctx)
 static void SkillsRescan(SkillsState *s)
 {
     char config[1024];
-    char global_dir[1200];
-    const char *global = NULL;
-    if (Pico_ConfigDir(config, sizeof(config)) &&
-        PicoPath_Format(global_dir, sizeof(global_dir), "%s/skills", config))
+    char agents_global[4200];
+    char pico_global[1200];
+    char ws_agents[4600];
+    char ws_pico[4600];
+    const char *dirs[4] = {0};
+    const char *home = getenv("HOME");
+    if (home && home[0] &&
+        PicoPath_Format(agents_global, sizeof(agents_global), "%s/.agents/skills", home))
     {
-        global = global_dir;
+        dirs[0] = agents_global;
     }
-    char ws_dir[4600];
-    const char *ws_path = PicoWorkspace_Path(s->workspace);
-    const char *workspace = NULL;
-    if (ws_path[0] && PicoPath_Format(ws_dir, sizeof(ws_dir), "%s/.pico/skills", ws_path))
+    if (Pico_ConfigDir(config, sizeof(config)) &&
+        PicoPath_Format(pico_global, sizeof(pico_global), "%s/skills", config))
     {
-        workspace = ws_dir;
+        dirs[1] = pico_global;
+    }
+    const char *ws_path = PicoWorkspace_Path(s->workspace);
+    if (ws_path[0] &&
+        PicoPath_Format(ws_agents, sizeof(ws_agents), "%s/.agents/skills", ws_path))
+    {
+        dirs[2] = ws_agents;
+    }
+    if (ws_path[0] && PicoPath_Format(ws_pico, sizeof(ws_pico), "%s/.pico/skills", ws_path))
+    {
+        dirs[3] = ws_pico;
     }
     PicoHost *app = pico_workspace_host(s->workspace);
     pthread_mutex_lock(&s->lock);
-    PicoSkillCatalog_Scan(&s->catalog, global, workspace, SkillsWarn, app);
+    PicoSkillCatalog_Scan(&s->catalog, dirs, 4, SkillsWarn, app);
     pthread_mutex_unlock(&s->lock);
 }
 

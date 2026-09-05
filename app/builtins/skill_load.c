@@ -1064,8 +1064,7 @@ static int CompareSkills(const void *a, const void *b)
     return strcmp(((const PicoSkill *)a)->name, ((const PicoSkill *)b)->name);
 }
 
-static void ScanDir(PicoSkillCatalog *cat, const char *dir, bool workspace, PicoSkillWarnFn warn,
-                    void *ctx)
+static void ScanDir(PicoSkillCatalog *cat, const char *dir, PicoSkillWarnFn warn, void *ctx)
 {
     DIR *d = opendir(dir);
     if (!d)
@@ -1111,23 +1110,11 @@ static void ScanDir(PicoSkillCatalog *cat, const char *dir, bool workspace, Pico
             }
             continue;
         }
-        skill.workspace = workspace;
         int idx = FindIndex(cat, skill.name);
         if (idx >= 0)
         {
-            if (workspace && !cat->skills[idx].workspace)
-            {
-                PicoSkill_Free(&cat->skills[idx]);
-                cat->skills[idx] = skill;
-            }
-            else
-            {
-                if (warn)
-                {
-                    warn(path, "duplicate skill name; ignoring", ctx);
-                }
-                PicoSkill_Free(&skill);
-            }
+            PicoSkill_Free(&cat->skills[idx]);
+            cat->skills[idx] = skill;
             continue;
         }
         if (cat->count >= PICO_SKILLS_MAX)
@@ -1144,17 +1131,23 @@ static void ScanDir(PicoSkillCatalog *cat, const char *dir, bool workspace, Pico
     closedir(d);
 }
 
-int PicoSkillCatalog_Scan(PicoSkillCatalog *cat, const char *global_dir, const char *workspace_dir,
+int PicoSkillCatalog_Scan(PicoSkillCatalog *cat, const char *const *dirs, int dir_count,
                           PicoSkillWarnFn warn, void *ctx)
 {
-    PicoSkillCatalog_Clear(cat);
-    if (global_dir)
+    if (!cat)
     {
-        ScanDir(cat, global_dir, false, warn, ctx);
+        return 0;
     }
-    if (workspace_dir)
+    PicoSkillCatalog_Clear(cat);
+    if (dirs)
     {
-        ScanDir(cat, workspace_dir, true, warn, ctx);
+        for (int i = 0; i < dir_count; i++)
+        {
+            if (dirs[i] && dirs[i][0])
+            {
+                ScanDir(cat, dirs[i], warn, ctx);
+            }
+        }
     }
     qsort(cat->skills, (size_t)cat->count, sizeof(PicoSkill), CompareSkills);
     return cat->count;

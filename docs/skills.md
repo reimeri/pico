@@ -4,12 +4,14 @@ Pico loads [Agent Skills](https://agentskills.io): directories of instructions, 
 
 ## Skill directories
 
-Skills are discovered from two places:
+Skills are discovered from these locations, later entries shadow earlier ones of the same name:
 
-- `$XDG_CONFIG_HOME/pico/skills/<name>/` when `XDG_CONFIG_HOME` is set, otherwise `~/.config/pico/skills/<name>/` — available in every workspace;
-- `<workspace>/.pico/skills/<name>/` — available only in that workspace.
+- `~/.agents/skills/<name>/` — user-global, shared with other agent harnesses;
+- `$XDG_CONFIG_HOME/pico/skills/<name>/` when `XDG_CONFIG_HOME` is set, otherwise `~/.config/pico/skills/<name>/` — Pico-specific, available in every workspace;
+- `<workspace>/.agents/skills/<name>/` — workspace-scoped, shared with other agent harnesses;
+- `<workspace>/.pico/skills/<name>/` — Pico-specific to that workspace.
 
-Only direct subdirectories containing a `SKILL.md` file are discovered. A workspace skill shadows a global skill with the same name. The catalog is rescanned whenever a prompt is built, so adding or editing a skill takes effect on the next turn without a reload.
+Only direct subdirectories containing a `SKILL.md` file are discovered. The catalog is rescanned whenever a prompt is built, so adding or editing a skill takes effect on the next turn without a reload.
 
 Invalid skills are skipped with a status warning and never block other skills from loading.
 

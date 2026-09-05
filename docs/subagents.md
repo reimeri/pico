@@ -15,7 +15,7 @@ To install the bundled examples (paths from this file):
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/pico/subagents"
-cp ../examples/subagents/exploration.json ../examples/subagents/review.json \
+cp ../examples/subagents/explore.json ../examples/subagents/review.json \
   "${XDG_CONFIG_HOME:-$HOME/.config}/pico/subagents/"
 ```
 

@@ -6,7 +6,6 @@
 bool PicoComposer_HasAttachments(const PicoHost *app);
 bool PicoComposer_PointerOverAttachments(void);
 bool PicoComposer_PointerOverAttachmentRemove(void);
-bool PicoComposer_PreviewOpen(void);
 bool PicoComposer_ApplyAttachments(PicoHost *app);
 void PicoComposer_ReleaseAttachments(void);
 void PicoComposer_DiscardAttachments(void);

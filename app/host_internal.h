@@ -254,11 +254,7 @@ static inline void PicoHost_SetPath(PicoHost *host, const char *path)
     workspace->state = PICO_WORKSPACE_OPEN;
 }
 
-static inline PicoHost *PicoWorkspace_Host(PicoWorkspace *workspace)
-{
-    return workspace ? workspace->host : NULL;
-}
-
+int PicoHost_ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap);
 bool PicoHost_ProcessRetired(void);
 Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *host, float viewport_height, float delta_time);
 PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source);

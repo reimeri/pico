@@ -660,7 +660,7 @@ void PicoFooter_Render(PicoHost *app, void *state)
 
     PicoModel *active = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
     bool show_effort = active && active->effort_count > 0;
-    const char *model = PicoHost_SelectedAgent(app)->model_name ? PicoHost_SelectedAgent(app)->model_name : "?";
+    const char *model = PicoHost_SelectedAgent(app)->model_name;
     snprintf(g_model, sizeof(g_model), "%s", model);
     if (show_effort)
     {

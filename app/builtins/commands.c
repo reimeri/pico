@@ -482,74 +482,6 @@ static void StripTrailingSlashes(char *s)
     }
 }
 
-static int ExpandUserPath(const char *workspace, const char *arg, char *out, size_t cap)
-{
-    if (!arg || !arg[0] || !out || cap < 2)
-    {
-        return -1;
-    }
-    if (arg[0] == '~' && (arg[1] == '\0' || arg[1] == '/'))
-    {
-        const char *home = getenv("HOME");
-        if (!home || !home[0])
-        {
-            return -1;
-        }
-        if (arg[1] == '\0')
-        {
-            snprintf(out, cap, "%s", home);
-            return 0;
-        }
-        int n = snprintf(out, cap, "%s%s", home, arg + 1);
-        if (n < 0 || (size_t)n >= cap)
-        {
-            return -1;
-        }
-        return 0;
-    }
-    if (arg[0] == '/')
-    {
-        if (strlen(arg) >= cap)
-        {
-            return -1;
-        }
-        snprintf(out, cap, "%s", arg);
-        return 0;
-    }
-    const char *ws = (workspace && workspace[0]) ? workspace : ".";
-    int n = snprintf(out, cap, "%s/%s", ws, arg);
-    if (n < 0 || (size_t)n >= cap)
-    {
-        return -1;
-    }
-    return 0;
-}
-
-static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap)
-{
-    char expanded[4096];
-    if (ExpandUserPath(workspace, arg, expanded, sizeof(expanded)) != 0)
-    {
-        return -1;
-    }
-    char real[4096];
-    if (!realpath(expanded, real))
-    {
-        return -1;
-    }
-    struct stat st;
-    if (stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
-    {
-        return -1;
-    }
-    if (strlen(real) >= cap)
-    {
-        return -1;
-    }
-    snprintf(out, cap, "%s", real);
-    return 0;
-}
-
 static void CmdCd(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
     PicoHost *app = workspace ? workspace->host : NULL;
@@ -636,7 +568,7 @@ static int CdQuery(PicoHost *app, const char *rest, PicoCompleteItem *out, int m
         char parent_arg[4096];
         snprintf(parent_arg, sizeof(parent_arg), "%s", parent_typed);
         StripTrailingSlashes(parent_arg);
-        if (ResolveWorkspaceDir(ws, parent_arg, list_dir, sizeof(list_dir)) != 0)
+        if (PicoHost_ResolveWorkspaceDir(ws, parent_arg, list_dir, sizeof(list_dir)) != 0)
         {
             return 0;
         }

@@ -1014,7 +1014,7 @@ static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const 
     return PICO_SESSION_WRITE_OK;
 }
 
-static void ApplyHeader(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int obj)
+static void ApplyHeader(PicoAgent *agent, const JsonDoc *doc, int obj)
 {
     char *profile = JsonObjStr(doc, obj, "profile");
     if (profile)
@@ -1173,7 +1173,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     }
     if (strcmp(type, "session") == 0)
     {
-        ApplyHeader(app, agent, doc, obj);
+        ApplyHeader(agent, doc, obj);
     }
     else if (strcmp(type, "usage") == 0)
     {
@@ -2944,7 +2944,6 @@ static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
     char tmp[4096];
     int fd;
     bool ok;
-    size_t off;
     int dfd;
     if (!path || !path[0] || !data)
     {

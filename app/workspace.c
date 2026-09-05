@@ -1014,14 +1014,6 @@ bool PicoWorkspace_QuiesceBefore(PicoWorkspace *workspace, const struct timespec
     return true;
 }
 
-bool PicoWorkspace_Quiesce(PicoWorkspace *workspace)
-{
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 1;
-    return PicoWorkspace_QuiesceBefore(workspace, &deadline);
-}
-
 void PicoWorkspace_Free(PicoWorkspace *workspace)
 {
     if (!workspace)
@@ -1049,16 +1041,6 @@ void PicoWorkspace_Free(PicoWorkspace *workspace)
     pthread_mutex_destroy(&workspace->lifecycle_mu);
     pthread_mutex_destroy(&workspace->delegation_mu);
     free(workspace);
-}
-
-bool PicoWorkspace_Destroy(PicoWorkspace *workspace)
-{
-    if (!PicoWorkspace_Quiesce(workspace))
-    {
-        return false;
-    }
-    PicoWorkspace_Free(workspace);
-    return true;
 }
 
 bool PicoWorkspace_ReserveSession(PicoWorkspace *workspace, PicoAgentId owner,

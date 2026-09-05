@@ -44,7 +44,6 @@ static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][
                                    time_t *mtimes, uint64_t *hashes, int cap);
 static bool ConfigExtDir(char *out, size_t cap);
 static bool WorkspaceExtDir(const PicoWorkspace *workspace, char *out, size_t cap);
-static bool PathWithinDirectory(const char *path, const char *directory);
 static PicoWorkspace *SourceWorkspace(const PicoHost *host, const char *src);
 static bool IsWorkspaceLocalSource(const PicoHost *host, const char *src);
 static bool ModuleAppliesToWorkspace(const PicoHost *host,
@@ -191,17 +190,6 @@ static bool WorkspaceExtDir(const PicoWorkspace *workspace, char *out, size_t ca
         return false;
     }
     return PicoPath_Format(out, cap, "%s/.pico/extensions", root);
-}
-
-static bool PathWithinDirectory(const char *path, const char *directory)
-{
-    if (!path || !directory || !directory[0])
-    {
-        return false;
-    }
-    size_t len = strlen(directory);
-    return strncmp(path, directory, len) == 0 &&
-           (path[len] == '/' || path[len] == '\0');
 }
 
 static PicoWorkspace *SourceWorkspace(const PicoHost *host, const char *src)
@@ -1136,7 +1124,6 @@ typedef struct CollectCtx {
     time_t *mtimes;
     uint64_t *hashes;
     int n;
-    int cap;
 } CollectCtx;
 
 static bool CollectWalk(void *ctx, const char *path, time_t mtime)
@@ -1167,7 +1154,7 @@ static bool CollectWorkspaceWalk(void *ctx, const char *path, time_t mtime)
 static int CollectGlobalSources(char paths[][4096], time_t *mtimes,
                                 uint64_t *hashes, int cap)
 {
-    CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .hashes = hashes, .n = 0, .cap = cap};
+    CollectCtx ctx = {.paths = paths, .mtimes = mtimes, .hashes = hashes, .n = 0};
     char dir[4096];
     if (ConfigExtDir(dir, sizeof(dir)))
     {
@@ -1180,7 +1167,7 @@ static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][
                                    time_t *mtimes, uint64_t *hashes, int cap)
 {
     WorkspaceCollectCtx ctx = {
-        .collect = {.paths = paths, .mtimes = mtimes, .hashes = hashes, .n = 0, .cap = cap},
+        .collect = {.paths = paths, .mtimes = mtimes, .hashes = hashes, .n = 0},
         .workspace = workspace,
     };
     char dir[4096];

@@ -2280,7 +2280,7 @@ static int ExpandUserPath(const char *workspace, const char *arg, char *out, siz
     return 0;
 }
 
-static int ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap)
+int PicoHost_ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap)
 {
     char expanded[4096];
     if (ExpandUserPath(workspace, arg, expanded, sizeof(expanded)) != 0)
@@ -2360,7 +2360,7 @@ bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const c
     }
 
     ws = PicoWorkspace_Path(from);
-    if (ResolveWorkspaceDir(ws[0] ? ws : ".", trimmed, resolved, sizeof(resolved)) != 0)
+    if (PicoHost_ResolveWorkspaceDir(ws[0] ? ws : ".", trimmed, resolved, sizeof(resolved)) != 0)
     {
         char shown[400];
         snprintf(shown, sizeof(shown), "%s", trimmed);

@@ -541,7 +541,7 @@ void PicoChatSel_ExtendUnitTo(PicoHost *app, int pos)
     }
 }
 
-static int HitOffset(PicoHost *app, const SelHit *hit, Clay_BoundingBox box, float x, float y)
+static int HitOffset(const SelHit *hit, Clay_BoundingBox box, float x, float y)
 {
     SelBuf *b = (hit->msg >= 0 && hit->msg < s_msg_n) ? &s_msgs[hit->msg] : NULL;
     if (!b || !b->text || hit->start < 0 || hit->start > b->len)
@@ -622,14 +622,14 @@ int PicoChatSel_OffsetAtPoint(PicoHost *app, float x, float y, int lock_msg, int
             inside = true;
             best_dist = dist;
             best_msg = s_hits[h].msg;
-            best_off = HitOffset(app, &s_hits[h], box, x, y);
+            best_off = HitOffset(&s_hits[h], box, x, y);
             continue;
         }
         if (dist <= best_dist)
         {
             best_dist = dist;
             best_msg = s_hits[h].msg;
-            best_off = HitOffset(app, &s_hits[h], box, x, y);
+            best_off = HitOffset(&s_hits[h], box, x, y);
         }
     }
 

@@ -66,7 +66,6 @@ static SettingsState *ActiveSettingsState(void)
 #define g_overflow (ActiveSettingsState()->overflow)
 #define g_scrollbar (ActiveSettingsState()->scrollbar)
 #define g_draft (ActiveSettingsState()->draft)
-#define g_expanded (ActiveSettingsState()->expanded)
 #define g_error (ActiveSettingsState()->error)
 
 static PicoModel *ModelAt(SettingsState *s, int index);

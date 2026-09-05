@@ -1196,17 +1196,6 @@ static void RmRf(const char *path)
     rmdir(path);
 }
 
-static void WriteFileStr(const char *path, const char *content)
-{
-    FILE *f = fopen(path, "wb");
-    if (!f)
-    {
-        return;
-    }
-    fputs(content, f);
-    fclose(f);
-}
-
 static int MkdirParents(const char *path)
 {
     char buf[4096];

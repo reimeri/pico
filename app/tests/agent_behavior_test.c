@@ -1544,11 +1544,6 @@ char *pico_composer_display_message(const char *text)
     return g_composer_has_attachment ? JsonDup("![image](/tmp/pasted.png)") : NULL;
 }
 
-bool PicoComposer_PreviewOpen(void)
-{
-    return false;
-}
-
 static PicoWorkspace *TestWs(PicoHost *host)
 {
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(host);

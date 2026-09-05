@@ -52,7 +52,7 @@ Copy-templates (paths from this README):
 - [`../../examples/time_cmd.c`](../../examples/time_cmd.c) — host slash command
 - [`../../examples/modal.c`](../../examples/modal.c) — named overlay modal and tool-row click
 - [`../../examples/stream_modal.c`](../../examples/stream_modal.c) — tool worker posts into a named overlay mailbox
-- [`../../examples/subagents/exploration.json`](../../examples/subagents/exploration.json) — read-only exploration profile
+- [`../../examples/subagents/explore.json`](../../examples/subagents/explore.json) — read-only exploration profile
 - [`../../examples/subagents/review.json`](../../examples/subagents/review.json) — read-only review profile
 
 The JSON profiles are examples only. Copy or adapt them under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`); Pico does not install them automatically. Their `sh` allowlist limits the exposed tool catalog, not the shell commands that tool may execute.

@@ -949,7 +949,6 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
     (void)state;
-    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));

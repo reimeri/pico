@@ -879,8 +879,6 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
     {
         return;
     }
-    PicoHost *app = workspace ? workspace->host : NULL;
-
     float sw = (float)GetScreenWidth();
     float sh = (float)GetScreenHeight();
     float card_w = sw - 96.0f;

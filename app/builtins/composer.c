@@ -326,7 +326,6 @@ static ComposerState *ActiveComposerState(void)
 #define s_composer_width (ActiveComposerState()->composer_width)
 #define s_seen_cursor (ActiveComposerState()->seen_cursor)
 #define s_seen_length (ActiveComposerState()->seen_length)
-#define s_goal_x (ActiveComposerState()->goal_x)
 #define s_caret_blink_at (ActiveComposerState()->caret_blink_at)
 #define g_app (ActiveComposerState()->app)
 #define g_attach (ActiveComposerState()->attach)
@@ -563,11 +562,6 @@ bool PicoComposer_HasAttachments(const PicoHost *app)
 {
     ComposerState *s = (ComposerState *)PicoPlugins_HostState(app, "composer");
     return s && s->attach_n > 0;
-}
-
-bool PicoComposer_PreviewOpen(void)
-{
-    return g_preview >= 0;
 }
 
 int pico_composer_attachment_count(void)

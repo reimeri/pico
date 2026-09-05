@@ -911,7 +911,6 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
     (void)state;
-    (void)state;
     if (out)
     {
         memset(out, 0, sizeof(*out));

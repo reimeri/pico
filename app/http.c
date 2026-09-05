@@ -5,7 +5,7 @@
 #include "json.h"
 
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.1.10"
+#define PICO_VERSION "0.1.11"
 #endif
 
 #include <curl/curl.h>
@@ -14,7 +14,8 @@
 #include <string.h>
 #include <strings.h>
 
-typedef struct HttpCtx {
+typedef struct HttpCtx
+{
     PicoHttpCancelFn cancel;
     PicoHttpJsonFn on_json;
     void *user;
@@ -61,10 +62,12 @@ static void SseLine(HttpCtx *c)
         const char *colon = strchr(line, ':');
         size_t field_len = colon ? (size_t)(colon - line) : strlen(line);
         const char *value = colon ? colon + 1 : "";
-        if (*value == ' ') value++;
+        if (*value == ' ')
+            value++;
         if (field_len == 4 && memcmp(line, "data", 4) == 0)
         {
-            if (c->have_data) JsonBuf_Putc(&c->data, '\n');
+            if (c->have_data)
+                JsonBuf_Putc(&c->data, '\n');
             JsonBuf_Puts(&c->data, value);
             c->have_data = true;
         }
@@ -78,10 +81,12 @@ static void SseLine(HttpCtx *c)
 
 static void DrainSse(HttpCtx *c, bool finish)
 {
-    if (!finish || c->buffer_failed || Cancelled(c)) return;
+    if (!finish || c->buffer_failed || Cancelled(c))
+        return;
     if (c->saw_sse)
     {
-        if (c->acc.len) SseLine(c);
+        if (c->acc.len)
+            SseLine(c);
         SseLine(c);
     }
     else
@@ -108,7 +113,8 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
     if (n >= 13 && strncasecmp(ptr, "Content-Type:", 13) == 0)
     {
         size_t i = 13;
-        while (i < n && (ptr[i] == ' ' || ptr[i] == '\t')) i++;
+        while (i < n && (ptr[i] == ' ' || ptr[i] == '\t'))
+            i++;
         const char *type = "text/event-stream";
         size_t len = strlen(type);
         c->saw_sse = n - i >= len && strncasecmp(ptr + i, type, len) == 0 &&
@@ -122,7 +128,8 @@ static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
     HttpCtx *c = userdata;
     size_t n = size * nmemb;
     PicoHttpCapture_Write(&c->capture, ptr, n);
-    if (Cancelled(c)) return 0;
+    if (Cancelled(c))
+        return 0;
     if (!c->saw_sse)
     {
         JsonBuf_Append(&c->acc, ptr, n);
@@ -138,8 +145,10 @@ static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
                 continue;
             }
             c->skip_lf = ch == '\r';
-            if (ch == '\r' || ch == '\n') SseLine(c);
-            else JsonBuf_Putc(&c->acc, ch);
+            if (ch == '\r' || ch == '\n')
+                SseLine(c);
+            else
+                JsonBuf_Putc(&c->acc, ch);
             if (c->acc.failed || c->data.failed)
             {
                 c->buffer_failed = true;
@@ -284,7 +293,8 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     return PICO_HTTP_OK;
 }
 
-typedef struct BodyCtx {
+typedef struct BodyCtx
+{
     PicoHttpCancelFn cancel;
     void *user;
     JsonBuf acc;

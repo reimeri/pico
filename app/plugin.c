@@ -26,7 +26,7 @@
 #define PICO_CC "cc"
 #endif
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.1.10"
+#define PICO_VERSION "0.1.11"
 #endif
 
 #define PICO_MAX_USER_PLUGINS 32
@@ -135,7 +135,6 @@ static void WarnClear(PicoHost *app)
     app->status_warn = NULL;
 }
 
-
 static int MkdirP(const char *path)
 {
     char buf[4096];
@@ -230,7 +229,8 @@ static unsigned PathHash(const char *s)
 
 /* Hash contents only when the file's stat generation changes. Dependency
  * polling otherwise rereads the entire SDK on every frame during a build. */
-typedef struct FileHashEntry {
+typedef struct FileHashEntry
+{
     char path[4096];
     struct stat stat;
     uint64_t hash;
@@ -255,19 +255,22 @@ static uint64_t FileHash(const char *src)
     static FileHashEntry cache[128]; /* main-thread loader only */
     static unsigned next;
     struct stat st;
-    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
     FileHashEntry *entry = NULL;
     for (size_t i = 0; i < sizeof(cache) / sizeof(cache[0]); i++)
     {
         if (strcmp(cache[i].path, src) == 0)
         {
-            if (SameFileGeneration(&cache[i].stat, &st)) return cache[i].hash;
+            if (SameFileGeneration(&cache[i].stat, &st))
+                return cache[i].hash;
             entry = &cache[i];
             break;
         }
     }
     int fd = open(src, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) return 0;
+    if (fd < 0)
+        return 0;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
     {
         close(fd);
@@ -280,18 +283,21 @@ static uint64_t FileHash(const char *src)
     {
         if (n < 0)
         {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             close(fd);
             return 0;
         }
-        for (ssize_t i = 0; i < n; i++) hash = (hash ^ buffer[i]) * 1099511628211ULL;
+        for (ssize_t i = 0; i < n; i++)
+            hash = (hash ^ buffer[i]) * 1099511628211ULL;
     }
     struct stat after;
     bool stable = fstat(fd, &after) == 0 && SameFileGeneration(&st, &after);
     close(fd);
     if (stable)
     {
-        if (!entry) entry = &cache[next++ % (sizeof(cache) / sizeof(cache[0]))];
+        if (!entry)
+            entry = &cache[next++ % (sizeof(cache) / sizeof(cache[0]))];
         snprintf(entry->path, sizeof(entry->path), "%s", src);
         entry->stat = st;
         entry->hash = hash;
@@ -312,7 +318,8 @@ static uint64_t MixDependency(uint64_t hash, const char *path,
     if (started)
     {
         struct stat st;
-        if (stat(path, &st) != 0) *changed = true;
+        if (stat(path, &st) != 0)
+            *changed = true;
         else
         {
 #ifdef __APPLE__
@@ -321,7 +328,8 @@ static uint64_t MixDependency(uint64_t hash, const char *path,
             struct timespec ctime = st.st_ctim;
 #endif
             if (ctime.tv_sec > started->tv_sec ||
-                (ctime.tv_sec == started->tv_sec && ctime.tv_nsec > started->tv_nsec)) *changed = true;
+                (ctime.tv_sec == started->tv_sec && ctime.tv_nsec > started->tv_nsec))
+                *changed = true;
         }
     }
     return (hash * 1099511628211ULL) ^ FileHash(path);
@@ -334,13 +342,16 @@ static uint64_t HashDependencies(const char *manifest, uint64_t hash,
     FILE *file = fopen(manifest, "rb");
     if (!file)
     {
-        if (changed) *changed = true;
+        if (changed)
+            *changed = true;
         return hash;
     }
     /* GCC/Clang make dependencies: fixed target, escaped spaces/backslashes,
      * continued lines, and doubled dollars. */
     int ch;
-    while ((ch = fgetc(file)) != EOF && ch != ':') {}
+    while ((ch = fgetc(file)) != EOF && ch != ':')
+    {
+    }
     size_t n = 0;
     bool overflow = false;
     while ((ch = fgetc(file)) != EOF)
@@ -348,8 +359,10 @@ static uint64_t HashDependencies(const char *manifest, uint64_t hash,
         if (ch == '\\')
         {
             ch = fgetc(file);
-            if (ch == '\n') continue;
-            if (ch == EOF) break;
+            if (ch == '\n')
+                continue;
+            if (ch == EOF)
+                break;
         }
         else if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
         {
@@ -365,10 +378,13 @@ static uint64_t HashDependencies(const char *manifest, uint64_t hash,
         else if (ch == '$')
         {
             int next = fgetc(file);
-            if (next != '$' && next != EOF) ungetc(next, file);
+            if (next != '$' && next != EOF)
+                ungetc(next, file);
         }
-        if (n + 1 < sizeof(path)) path[n++] = (char)ch;
-        else overflow = true;
+        if (n + 1 < sizeof(path))
+            path[n++] = (char)ch;
+        else
+            overflow = true;
     }
     if (n && !overflow)
     {
@@ -384,7 +400,8 @@ static uint64_t SourceHash(const char *src)
     char manifest[4096];
     uint64_t hash = FileHash(src);
     return DependencyPath(src, manifest, sizeof(manifest))
-               ? HashDependencies(manifest, hash, NULL, NULL) : hash;
+               ? HashDependencies(manifest, hash, NULL, NULL)
+               : hash;
 }
 
 static bool SoPathFor(const char *src, time_t mtime, uint64_t content_hash, char *out, size_t cap)
@@ -401,7 +418,8 @@ static bool SoPathFor(const char *src, time_t mtime, uint64_t content_hash, char
                            (unsigned long long)content_hash, PICO_EXT_ABI);
 }
 
-typedef struct PicoCompileJob {
+typedef struct PicoCompileJob
+{
     struct PicoCompileJob *next;
     bool done;
     pid_t pid;
@@ -427,8 +445,10 @@ static double CompileTime(void)
 static void CompileJobFree(PicoHost *host, PicoCompileJob *job)
 {
     PicoCompileJob **link = &host->plugin_compile;
-    while (*link && *link != job) link = &(*link)->next;
-    if (!*link) return;
+    while (*link && *link != job)
+        link = &(*link)->next;
+    if (!*link)
+        return;
     *link = job->next;
     close(job->fd);
     unlink(job->tmp);
@@ -444,10 +464,13 @@ static bool CompileJobPoll(PicoCompileJob *job, int *status)
     for (int i = 0; i < 16; i++)
     {
         ssize_t n = read(job->fd, buf, sizeof(buf));
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            break;
         size_t keep = sizeof(job->error) - 1 - job->error_len;
-        if (keep > (size_t)n) keep = (size_t)n;
+        if (keep > (size_t)n)
+            keep = (size_t)n;
         memcpy(job->error + job->error_len, buf, keep);
         job->error_len += keep;
         job->error[job->error_len] = '\0';
@@ -458,8 +481,10 @@ static bool CompileJobPoll(PicoCompileJob *job, int *status)
         kill(-job->pid, SIGKILL);
     }
     pid_t result = waitpid(job->pid, status, WNOHANG);
-    if (result == 0 || (result < 0 && errno == EINTR)) return false;
-    if (result < 0) *status = -1;
+    if (result == 0 || (result < 0 && errno == EINTR))
+        return false;
+    if (result < 0)
+        *status = -1;
     return true;
 }
 
@@ -478,15 +503,18 @@ static void AdvanceCompiles(PicoHost *host)
                              job->source[strlen(global)] == '/';
         bool wanted = (global_source || SourceWorkspace(host, job->source)) &&
                       stat(job->source, &st) == 0 && job->source_hash == SourceHash(job->source);
-        if (!wanted && !job->done) kill(-job->pid, SIGKILL);
+        if (!wanted && !job->done)
+            kill(-job->pid, SIGKILL);
         int status = 0;
-        if (!job->done && !CompileJobPoll(job, &status)) continue;
+        if (!job->done && !CompileJobPoll(job, &status))
+            continue;
         if (!wanted)
         {
             CompileJobFree(host, job);
             continue;
         }
-        if (job->done) continue;
+        if (job->done)
+            continue;
         job->done = true;
         bool ok = !job->timed_out && status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
         if (ok)
@@ -527,8 +555,10 @@ static int CompileExt(PicoHost *host, const char *src, char *so, char *err, size
     host->plugin_compile_pending = false;
     AdvanceCompiles(host);
     struct stat st;
-    if (stat(src, &st) != 0 || !SoPathFor(src, st.st_mtime, SourceHash(src), so, 4096)) return -1;
-    if (access(so, R_OK) == 0) return 0;
+    if (stat(src, &st) != 0 || !SoPathFor(src, st.st_mtime, SourceHash(src), so, 4096))
+        return -1;
+    if (access(so, R_OK) == 0)
+        return 0;
     bool running = false;
     for (PicoCompileJob *existing = host->plugin_compile; existing; existing = existing->next)
     {
@@ -550,7 +580,8 @@ static int CompileExt(PicoHost *host, const char *src, char *so, char *err, size
     PicoCompileJob *job;
     char cache[4096], sdk_include[4096], sdk_flag[4112], srcdir_flag[4112];
     const char *compiler = getenv("PICO_CC");
-    if (!compiler || !compiler[0]) compiler = PICO_CC;
+    if (!compiler || !compiler[0])
+        compiler = PICO_CC;
     if (!Pico_SdkIncludeDir(sdk_include, sizeof(sdk_include)) ||
         access(sdk_include, R_OK) != 0 || !CacheDir(cache, sizeof(cache)) || MkdirP(cache) != 0)
     {
@@ -558,7 +589,8 @@ static int CompileExt(PicoHost *host, const char *src, char *so, char *err, size
         return -1;
     }
     job = calloc(1, sizeof(*job));
-    if (!job) return -1;
+    if (!job)
+        return -1;
     snprintf(job->source, sizeof(job->source), "%s", src);
     clock_gettime(CLOCK_REALTIME, &job->started);
     job->source_hash = SourceHash(src);
@@ -568,15 +600,21 @@ static int CompileExt(PicoHost *host, const char *src, char *so, char *err, size
         return -1;
     }
     int tmp_fd = mkstemp(job->tmp);
-    if (tmp_fd < 0) { free(job); return -1; }
+    if (tmp_fd < 0)
+    {
+        free(job);
+        return -1;
+    }
     close(tmp_fd);
     snprintf(job->deps, sizeof(job->deps), "%s.d", job->tmp);
     snprintf(sdk_flag, sizeof(sdk_flag), "-I%s", sdk_include);
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", src);
     char *slash = strrchr(dir, '/');
-    if (slash) *slash = '\0';
-    else snprintf(dir, sizeof(dir), ".");
+    if (slash)
+        *slash = '\0';
+    else
+        snprintf(dir, sizeof(dir), ".");
     snprintf(srcdir_flag, sizeof(srcdir_flag), "-I%s", dir);
     int fds[2];
     if (pipe(fds) != 0)
@@ -808,7 +846,7 @@ static int LoadSo(PicoHost *app, const char *src, const char *so, time_t mtime, 
         RecordStubIfMissing(app, src, mtime, line);
         return -1;
     }
-    PicoExt (*entry)(void) = (PicoExt(*)(void))dlsym(handle, "pico_ext");
+    PicoExt (*entry)(void) = (PicoExt (*)(void))dlsym(handle, "pico_ext");
     if (!entry)
     {
         char line[2048];
@@ -892,7 +930,8 @@ static void LoadUserFile(PicoHost *app, const char *src)
         char err[8192] = {0};
         if (CompileExt(app, src, so, err, sizeof(err)) != 0)
         {
-            if (app->plugin_compile_pending) return;
+            if (app->plugin_compile_pending)
+                return;
             char line[8700];
             snprintf(line, sizeof(line), "compile %s:\n%s", src, err);
             pico_status_warn(app, line);
@@ -935,7 +974,8 @@ static int LoadUserCandidate(PicoHost *app, const char *src,
         char err[8192] = {0};
         if (CompileExt(app, src, so, err, sizeof(err)) != 0)
         {
-            if (app->plugin_compile_pending) return -2;
+            if (app->plugin_compile_pending)
+                return -2;
             pico_status_warn(app, err);
             RememberCompileFailure(app, src, st.st_mtime, content_hash);
             return -1;
@@ -999,7 +1039,8 @@ static bool LoadWalk(void *ctx, const char *path, time_t mtime)
     return true;
 }
 
-typedef struct WorkspaceLoadCtx {
+typedef struct WorkspaceLoadCtx
+{
     PicoHost *host;
     PicoWorkspace *workspace;
 } WorkspaceLoadCtx;
@@ -1194,8 +1235,10 @@ bool PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     bool retry_compile_failures;
     bool ok = true;
 
-    if (app) app->plugin_compile_pending = false;
-    if (app && workspace && app->safe_mode) return true;
+    if (app)
+        app->plugin_compile_pending = false;
+    if (app && workspace && app->safe_mode)
+        return true;
     if (!app || !workspace || app->safe_mode || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
         return false;
@@ -1209,9 +1252,11 @@ bool PicoPlugins_LoadWorkspaceSources(PicoHost *app, PicoWorkspace *workspace)
     for (i = 0; i < n; i++)
     {
         LoadedPlugin *current = FindDesiredSource(app, paths[i]);
-        if (!retry_compile_failures && CompileFailureMatches(current, paths[i], mtimes[i], hashes[i])) continue;
+        if (!retry_compile_failures && CompileFailureMatches(current, paths[i], mtimes[i], hashes[i]))
+            continue;
         char so[4096], err[8192] = {0};
-        if (!SoPathFor(paths[i], mtimes[i], hashes[i], so, sizeof(so))) return false;
+        if (!SoPathFor(paths[i], mtimes[i], hashes[i], so, sizeof(so)))
+            return false;
         if (access(so, R_OK) != 0 && CompileExt(app, paths[i], so, err, sizeof(err)) != 0)
         {
             if (!app->plugin_compile_pending)
@@ -1341,7 +1386,9 @@ void PicoPlugins_Reload(PicoHost *app)
 static void *ReapCompiler(void *arg)
 {
     pid_t pid = (pid_t)(intptr_t)arg;
-    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+    {
+    }
     return NULL;
 }
 
@@ -1404,7 +1451,8 @@ void PicoPlugins_Shutdown(PicoHost *app)
     pico_ui_modal_reset(app);
 }
 
-typedef struct CollectCtx {
+typedef struct CollectCtx
+{
     char (*paths)[4096];
     time_t *mtimes;
     uint64_t *hashes;
@@ -1420,7 +1468,8 @@ static bool CollectWalk(void *ctx, const char *path, time_t mtime)
     return true;
 }
 
-typedef struct WorkspaceCollectCtx {
+typedef struct WorkspaceCollectCtx
+{
     CollectCtx collect;
     const PicoWorkspace *workspace;
 } WorkspaceCollectCtx;
@@ -1465,7 +1514,8 @@ static int CollectWorkspaceSources(const PicoWorkspace *workspace, char paths[][
 
 static bool ValidateUserSources(PicoHost *app, bool retry_compile_failures)
 {
-    if (app->safe_mode) return true;
+    if (app->safe_mode)
+        return true;
     char paths[PICO_MAX_USER_PLUGINS][4096];
     time_t mtimes[PICO_MAX_USER_PLUGINS];
     uint64_t hashes[PICO_MAX_USER_PLUGINS];
@@ -1489,7 +1539,8 @@ static bool ValidateUserSources(PicoHost *app, bool retry_compile_failures)
             char err[8192] = {0};
             if (CompileExt(app, paths[i], so, err, sizeof(err)) != 0)
             {
-                if (app->plugin_compile_pending) return false;
+                if (app->plugin_compile_pending)
+                    return false;
                 char line[8700];
                 snprintf(line, sizeof(line), "compile %.4000s:\n%.4000s", paths[i], err);
                 pico_status_warn(app, line);
@@ -1505,7 +1556,7 @@ static bool ValidateUserSources(PicoHost *app, bool retry_compile_failures)
             pico_status_warn(app, line);
             return false;
         }
-        PicoExt (*entry)(void) = (PicoExt(*)(void))dlsym(handle, "pico_ext");
+        PicoExt (*entry)(void) = (PicoExt (*)(void))dlsym(handle, "pico_ext");
         PicoExt ext;
         if (!entry)
         {
@@ -1622,11 +1673,11 @@ void PicoPlugins_Poll(PicoHost *app)
             for (int w = 0; w < app->workspace_count; w++)
             {
                 RequestWorkspaceRollout(app, app->workspaces[w], app->plugin_rollout_pending);
-
             }
         }
     }
-    if (global_ready) app->plugin_rollout_pending = false;
+    if (global_ready)
+        app->plugin_rollout_pending = false;
     for (int w = 0; w < app->workspace_count; w++)
     {
         PicoWorkspace *workspace = app->workspaces[w];
@@ -1658,7 +1709,8 @@ void PicoPlugins_OnFrame(PicoHost *app, float dt)
     }
 }
 
-typedef struct PluginSlotRecord {
+typedef struct PluginSlotRecord
+{
     const LoadedPlugin *module;
     PicoExtensionScope scope;
     PicoWorkspaceId workspace_id;
@@ -1731,7 +1783,8 @@ static int EnumerateSlots(const PicoHost *host, PluginSlotRecord *records, int m
                 for (int w = 0; w < host->workspace_count; w++)
                 {
                     PicoWorkspace *ws = host->workspaces[w];
-                    if (!ws) continue;
+                    if (!ws)
+                        continue;
                     if (records && count < max_records)
                     {
                         records[count].module = p;

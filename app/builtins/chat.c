@@ -2174,7 +2174,10 @@ static void InspectRender(PicoHost *app, void *state)
 
     static char title[192];
     static char meta[256];
-    const char *status = found && inspect.live ? "Running" : "Done";
+    const InspectFrame *frame = &g_inspect[g_inspect_n - 1];
+    bool queued = !found && !frame->child_id && !frame->session_id[0] &&
+                  (!fallback || !fallback[0]);
+    const char *status = found && inspect.live ? "Running" : queued ? "Queued" : "Done";
     if (found && inspect.profile[0])
     {
         snprintf(title, sizeof(title), "%s · %s", inspect.profile, status);

@@ -950,6 +950,159 @@ static int TestChatBottomFollowClearsComposer(void)
     return g_failed ? 1 : 0;
 }
 
+static Clay_ElementId MainTraceRowId(int message_index, int trace_index, const char *label)
+{
+    Clay_ElementId message = CLAY_IDI("MsgMain", message_index);
+    Clay_String key = {.length = (int32_t)strlen(label), .chars = label};
+    return Clay__HashStringWithOffset(key, (uint32_t)trace_index, message.id);
+}
+
+static float TraceRowHeight(Clay_ElementId id, bool *found)
+{
+    Clay_ElementData el = Clay_GetElementData(id);
+    *found = el.found;
+    return el.found ? el.boundingBox.height : -1.0f;
+}
+
+/* A running tool row, a live think row, the synthetic Thinking… row, and the
+ * finished-trace group header replace each other as tools complete and the
+ * agent starts thinking. The chat pins to the bottom, so if these rows do not
+ * share one height every transition shifts the transcript by the difference. */
+static int TestChatTraceRowsShareHeight(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-trace-rows-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-trace-rows-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    bool f_tool, f_group, f_think, f_think_group, f_synth;
+    float tool_h, group_h, think_h, think_group_h, synth_h;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("trace row height setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("trace row height host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    /* Headless runs have no real fonts; keep chat on the unclamped width path
+     * and stub the composer, which measures text with raylib directly. */
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("trace row height open workspace");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("trace row height create agent");
+        goto done_host;
+    }
+
+    /* msg 0: finished tool call, collapsed into the group header row. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoAgent_AddToolCallWithId(host, agent, "done-1", "read", "");
+    PicoAgent_SetLastToolOutput(agent, "ok", false);
+    /* msg 1 (last): running tool call, rendered as an open tool row. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoAgent_AddToolCallWithId(host, agent, "run-1", "read", "");
+    agent->state = PICO_AGENT_TOOL_WAIT;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("trace row height Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    tool_h = TraceRowHeight(MainTraceRowId(1, 0, "ToolRow"), &f_tool);
+    group_h = TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
+
+    /* The tool completes and the agent starts thinking: the open tool row is
+     * replaced by the group header plus a live think row. */
+    PicoAgent_SetToolOutputByCallId(agent, "run-1", "ok", false);
+    PicoAgent_AppendThink(host, agent, "reasoning", 0);
+    agent->state = PICO_AGENT_LLM_WAIT;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    think_h = TraceRowHeight(MainTraceRowId(1, 1, "ThinkRow"), &f_think);
+    think_group_h = TraceRowHeight(MainTraceRowId(1, 0, "TraceGroupRow"), &f_think_group);
+
+    /* Before any thinking body streams, the synthetic Thinking… row stands in. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    synth_h = TraceRowHeight(MainTraceRowId(2, 0, "ThinkSynthRow"), &f_synth);
+
+    if (!f_tool || !f_group || !f_think || !f_think_group || !f_synth)
+    {
+        Fail("trace row height scenario did not render every row kind");
+        goto done;
+    }
+    if (fabsf(tool_h - group_h) > 0.001f || fabsf(tool_h - think_h) > 0.001f ||
+        fabsf(tool_h - think_group_h) > 0.001f || fabsf(tool_h - synth_h) > 0.001f)
+    {
+        fprintf(stderr, "trace row heights: tool %.3f group %.3f think %.3f think-group %.3f synth %.3f\n",
+                tool_h, group_h, think_h, think_group_h, synth_h);
+        Fail("tool, think, and group header rows must share one height");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 static int TestCanonicalOpenAndDuplicate(void)
 {
     char dir[] = "/tmp/pico-ws-XXXXXX";
@@ -6534,6 +6687,10 @@ int main(void)
         return 1;
     }
     if (TestChatBottomFollowClearsComposer() != 0)
+    {
+        return 1;
+    }
+    if (TestChatTraceRowsShareHeight() != 0)
     {
         return 1;
     }

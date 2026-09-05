@@ -1182,8 +1182,12 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
             }
+            /* Keep the slot exactly one text line tall so tool rows match the
+             * think and group header rows they swap with; a fixed slot stays
+             * top-aligned with the first line when args wrap. */
             CLAY(ToolChevronId(view, message_index, trace_index),
-                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_FIXED(18)}}})
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14),
+                                        .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI))}}})
             {
             }
         }

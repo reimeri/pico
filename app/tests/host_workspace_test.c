@@ -789,6 +789,163 @@ done:
     return rc;
 }
 
+static int TestEmptyCardsOverflowScroll(void)
+{
+    Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-card-overflow-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-card-overflow-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoWorkspace *workspace;
+    ShellTestState state = {.composer_height = 44.0f};
+    static char names[40][16];
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("empty card overflow test setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        Fail("empty card overflow host initialization");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    host->view_count[PICO_SLOT_FOOTER] = 0;
+    ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    ShellTestAddView(host, PICO_SLOT_FOOTER, ShellTestFooter, NULL);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        !(workspace = PicoHost_FindWorkspace(host, workspace_id)))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        Fail("empty card overflow open workspace");
+        return 1;
+    }
+    for (int i = 0; i < 40; i++)
+    {
+        snprintf(names[i], sizeof(names[i]), "tool_%02d", i);
+        workspace->tools[i].name = names[i];
+    }
+    workspace->tool_count = 40;
+
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        rmdir(cfg);
+        Clay_SetCurrentContext(previous);
+        Fail("empty card overflow Clay initialization");
+        return 1;
+    }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+
+    Clay_SetLayoutDimensions(viewport);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+
+    Clay_ElementData card0 = Clay_GetElementData(CLAY_IDI("EmptyCard", 0));
+    Clay_ElementData card1 = Clay_GetElementData(CLAY_IDI("EmptyCard", 1));
+    Clay_ElementData card2 = Clay_GetElementData(CLAY_IDI("EmptyCard", 2));
+    Clay_ScrollContainerData tools_scroll =
+        Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("EmptyCardScroll0")));
+    Clay_ScrollContainerData context_scroll =
+        Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("EmptyCardScroll1")));
+    if (!card0.found || !card1.found || !card2.found)
+    {
+        Fail("overflow landing cards were not laid out");
+        goto done;
+    }
+    if (fabsf(card0.boundingBox.height - card1.boundingBox.height) > 0.5f ||
+        fabsf(card1.boundingBox.height - card2.boundingBox.height) > 0.5f)
+    {
+        Fail("landing cards must keep equal height under the cap");
+        goto done;
+    }
+    if (!tools_scroll.found || !tools_scroll.scrollPosition ||
+        tools_scroll.contentDimensions.height <= tools_scroll.scrollContainerDimensions.height + 0.5f)
+    {
+        Fail("overfull landing card items must scroll inside the card");
+        goto done;
+    }
+    if (!context_scroll.found ||
+        context_scroll.contentDimensions.height > context_scroll.scrollContainerDimensions.height + 0.5f)
+    {
+        Fail("short landing card must not scroll");
+        goto done;
+    }
+    if (!Clay_GetElementData(CLAY_ID("EmptyCardScrollTrack0")).found)
+    {
+        Fail("overfull landing card must show a scrollbar");
+        goto done;
+    }
+    if (Clay_GetElementData(CLAY_ID("EmptyCardScrollTrack1")).found)
+    {
+        Fail("short landing card must not show a scrollbar");
+        goto done;
+    }
+
+    Clay_RenderCommand *title = FindCardText(&commands, "Tools");
+    Clay_RenderCommand *item = FindCardText(&commands, "tool_00");
+    if (!title || !item)
+    {
+        Fail("overflow landing card title or item was not rendered");
+        goto done;
+    }
+    float title_y = title->boundingBox.y;
+    float item_y = item->boundingBox.y;
+    tools_scroll.scrollPosition->y = -40.0f;
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    title = FindCardText(&commands, "Tools");
+    item = FindCardText(&commands, "tool_00");
+    if (!title || !item)
+    {
+        Fail("scrolled landing card title or item was not rendered");
+        goto done;
+    }
+    if (fabsf(title->boundingBox.y - title_y) > 0.5f)
+    {
+        Fail("landing card title must stay pinned while items scroll");
+        goto done;
+    }
+    if (item->boundingBox.y >= item_y - 0.5f)
+    {
+        Fail("landing card items must move when the card scrolls");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir);
+    rmdir(cfg);
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -6884,6 +7041,10 @@ int main(void)
         return 1;
     }
     if (TestEmptyCardsTwoColumnTrim() != 0)
+    {
+        return 1;
+    }
+    if (TestEmptyCardsOverflowScroll() != 0)
     {
         return 1;
     }

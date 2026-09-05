@@ -492,22 +492,24 @@ void PicoComplete_Render(PicoHost *app)
             {
                 Clay_String label = {.length = (int32_t)strlen(g_complete.items[i].label),
                                      .chars = g_complete.items[i].label};
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                              .clip = {.horizontal = true}})
-                {
-                    CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                       .fontSize = PICO_FONT_UI,
-                                                       .textColor = COLOR_TEXT,
-                                                       .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
+                /* Commands keep their natural width so a long description cannot
+                 * compress or paint over them. Details fill leftover space. */
+                CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                   .fontSize = PICO_FONT_UI,
+                                                   .textColor = COLOR_TEXT,
+                                                   .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 if (g_complete.items[i].detail[0])
                 {
                     Clay_String detail = {.length = (int32_t)strlen(g_complete.items[i].detail),
                                           .chars = g_complete.items[i].detail};
-                    CLAY_TEXT(detail, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = PICO_FONT_CAPTION,
-                                                        .textColor = COLOR_MUTED,
-                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
+                                  .clip = {.horizontal = true}})
+                    {
+                        CLAY_TEXT(detail, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                            .fontSize = PICO_FONT_CAPTION,
+                                                            .textColor = COLOR_MUTED,
+                                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
                 }
             }
         }

@@ -28,6 +28,7 @@
 #define TOOL_OUTPUT_MAX_LINES 100
 #define TOOL_WRAP_MAX_LINES PICO_WRAPPED_TEXT_LINE_CAPACITY
 #define THINK_SHEEN_PERIOD 1.4f
+#define EMPTY_CARD_COUNT 3
 #define THINK_SHEEN_BAND 56.0f
 #define INSPECT_CARD_PAD_X 16.0f
 #define INSPECT_CARD_PAD_Y 14.0f
@@ -99,6 +100,8 @@ typedef struct ChatState {
     bool inspect_follow;
     bool inspect_overflow;
     PicoScrollbar inspect_bar;
+    bool empty_card_overflow[EMPTY_CARD_COUNT];
+    PicoScrollbar empty_card_bar[EMPTY_CARD_COUNT];
     bool inspect_pressed_dim;
     bool inspect_pressed_back;
     bool inspect_pressed_tool;
@@ -1241,6 +1244,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
 #define EMPTY_CARD_COLUMN_GAP 8
 #define EMPTY_CARDS_GAP 12
 #define EMPTY_CARDS_NARROW_WIDTH 720.0f
+#define EMPTY_CARD_MAX_HEIGHT 192.0f
 /* Must match PicoHost_LayoutShell: Root padding, Body childGap, Sidebar width. */
 #define EMPTY_SHELL_ROOT_PAD_X 12.0f
 #define EMPTY_SHELL_BODY_GAP 12.0f
@@ -1248,7 +1252,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
 
 /* Text width available to each of the card's two columns, derived from this
  * frame's layout dimensions and shell chrome rather than last frame's bounds. */
-static float EmptyCardColumnWidth(PicoHost *app, bool narrow)
+static float EmptyCardColumnWidth(PicoHost *app, bool narrow, bool overflow)
 {
     float width = Clay_GetLayoutDimensions().width;
     width -= 2.0f * EMPTY_SHELL_ROOT_PAD_X;
@@ -1266,8 +1270,122 @@ static float EmptyCardColumnWidth(PicoHost *app, bool narrow)
     {
         width = (width - 2.0f * EMPTY_CARDS_GAP) / 3.0f;
     }
-    width = (width - 2.0f * EMPTY_CARD_PADDING - EMPTY_CARD_COLUMN_GAP) * 0.5f;
+    width -= 2.0f * EMPTY_CARD_PADDING;
+    if (overflow)
+    {
+        width -= (float)(SCROLLBAR_WIDTH + SCROLLBAR_GAP);
+    }
+    width = (width - EMPTY_CARD_COLUMN_GAP) * 0.5f;
     return width > 0.0f ? width : 0.0f;
+}
+
+static Clay_String EmptyCardScrollId(int id)
+{
+    switch (id)
+    {
+    case 1:
+        return CLAY_STRING("EmptyCardScroll1");
+    case 2:
+        return CLAY_STRING("EmptyCardScroll2");
+    default:
+        return CLAY_STRING("EmptyCardScroll0");
+    }
+}
+
+static Clay_String EmptyCardScrollTrackId(int id)
+{
+    switch (id)
+    {
+    case 1:
+        return CLAY_STRING("EmptyCardScrollTrack1");
+    case 2:
+        return CLAY_STRING("EmptyCardScrollTrack2");
+    default:
+        return CLAY_STRING("EmptyCardScrollTrack0");
+    }
+}
+
+static Clay_String EmptyCardScrollHandleId(int id)
+{
+    switch (id)
+    {
+    case 1:
+        return CLAY_STRING("EmptyCardScrollHandle1");
+    case 2:
+        return CLAY_STRING("EmptyCardScrollHandle2");
+    default:
+        return CLAY_STRING("EmptyCardScrollHandle0");
+    }
+}
+
+static void ApplyEmptyCardWheel(Clay_String container_id, float wheel_x, float wheel_y)
+{
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(container_id));
+    if (!data.found || !data.scrollPosition)
+    {
+        return;
+    }
+    if (data.config.vertical && wheel_y != 0.0f)
+    {
+        float overflow = data.contentDimensions.height - data.scrollContainerDimensions.height;
+        float min_y = overflow > 0.0f ? -overflow : 0.0f;
+        float y = data.scrollPosition->y + wheel_y * 10.0f;
+        if (y > 0.0f)
+        {
+            y = 0.0f;
+        }
+        else if (y < min_y)
+        {
+            y = min_y;
+        }
+        data.scrollPosition->y = y;
+    }
+    if (data.config.horizontal && wheel_x != 0.0f)
+    {
+        float overflow = data.contentDimensions.width - data.scrollContainerDimensions.width;
+        float min_x = overflow > 0.0f ? -overflow : 0.0f;
+        float x = data.scrollPosition->x + wheel_x * 10.0f;
+        if (x > 0.0f)
+        {
+            x = 0.0f;
+        }
+        else if (x < min_x)
+        {
+            x = min_x;
+        }
+        data.scrollPosition->x = x;
+    }
+}
+
+static bool EmptyCardScrollHovered(int id)
+{
+    Clay_String scroll = EmptyCardScrollId(id);
+    Clay_String track = EmptyCardScrollTrackId(id);
+    Clay_String handle = EmptyCardScrollHandleId(id);
+    return Clay_PointerOver(Clay_GetElementId(scroll)) || Clay_PointerOver(Clay_GetElementId(track)) ||
+           Clay_PointerOver(Clay_GetElementId(handle));
+}
+
+static bool EmptyCardBarHovered(int id)
+{
+    return Clay_PointerOver(Clay_GetElementId(EmptyCardScrollTrackId(id))) ||
+           Clay_PointerOver(Clay_GetElementId(EmptyCardScrollHandleId(id)));
+}
+
+static bool EmptyCardScrollbarActive(const ChatState *state)
+{
+    if (!state)
+    {
+        return false;
+    }
+    for (int i = 0; i < EMPTY_CARD_COUNT; i++)
+    {
+        if (state->empty_card_bar[i].mouse_down || EmptyCardBarHovered(i))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* Items occupy a single line; labels wider than the column are trimmed with
@@ -1331,28 +1449,49 @@ static void RenderEmptyCardItems(const char **items, int n, float width)
     }
 }
 
-static void RenderEmptyCard(int id, Clay_String title, const char **items, int n, float column_width)
+static void RenderEmptyCard(PicoHost *app, int id, Clay_String title, const char **items, int n,
+                            bool narrow)
 {
+    bool overflow = s_active_chat_state && id >= 0 && id < EMPTY_CARD_COUNT &&
+                    s_active_chat_state->empty_card_overflow[id];
+    float column_width = EmptyCardColumnWidth(app, narrow, overflow);
     CLAY(CLAY_IDI("EmptyCard", id),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .padding = {EMPTY_CARD_PADDING, EMPTY_CARD_PADDING, EMPTY_CARD_PADDING,
                                  EMPTY_CARD_PADDING},
                      .childGap = EMPTY_CARD_GAP,
-                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                     .sizing = {.width = CLAY_SIZING_GROW(0),
+                                .height = CLAY_SIZING_GROW(0, EMPTY_CARD_MAX_HEIGHT)}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
         CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
-        if (n <= 0)
+        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = SCROLLBAR_GAP,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY_TEXT(CLAY_STRING("None"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                             .fontSize = PICO_FONT_CAPTION,
-                                                             .textColor = COLOR_MUTED,
-                                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        }
-        else
-        {
-            RenderEmptyCardItems(items, n, column_width);
+            CLAY(CLAY_SID(EmptyCardScrollId(id)),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+            {
+                if (n <= 0)
+                {
+                    CLAY_TEXT(CLAY_STRING("None"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                     .fontSize = PICO_FONT_CAPTION,
+                                                                     .textColor = COLOR_MUTED,
+                                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+                else
+                {
+                    RenderEmptyCardItems(items, n, column_width);
+                }
+            }
+            if (overflow)
+            {
+                PicoScrollbar_Render(EmptyCardScrollId(id), EmptyCardScrollTrackId(id),
+                                     EmptyCardScrollHandleId(id));
+            }
         }
     }
 }
@@ -1398,16 +1537,22 @@ static void RenderEmptyCards(PicoHost *app)
     {
         skills[i] = skill_infos[i].name;
     }
+    if (s_active_chat_state)
+    {
+        for (int i = 0; i < EMPTY_CARD_COUNT; i++)
+        {
+            s_active_chat_state->empty_card_overflow[i] = PicoScrollbar_Overflows(EmptyCardScrollId(i));
+        }
+    }
     bool narrow = Clay_GetLayoutDimensions().width < EMPTY_CARDS_NARROW_WIDTH;
-    float column_width = EmptyCardColumnWidth(app, narrow);
     CLAY(CLAY_ID("EmptyCards"),
          {.layout = {.layoutDirection = narrow ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
                      .childGap = EMPTY_CARDS_GAP,
                      .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
-        RenderEmptyCard(0, CLAY_STRING("Tools"), tools, tool_n, column_width);
-        RenderEmptyCard(1, CLAY_STRING("Context"), ctx, ctx_n, column_width);
-        RenderEmptyCard(2, CLAY_STRING("Skills"), skills, skill_n, column_width);
+        RenderEmptyCard(app, 0, CLAY_STRING("Tools"), tools, tool_n, narrow);
+        RenderEmptyCard(app, 1, CLAY_STRING("Context"), ctx, ctx_n, narrow);
+        RenderEmptyCard(app, 2, CLAY_STRING("Skills"), skills, skill_n, narrow);
     }
 }
 
@@ -1924,6 +2069,31 @@ void PicoChat_UpdateInspectFollowFromUserScroll(PicoHost *app, float wheel_y)
     {
         state->inspect_follow = false;
     }
+}
+
+bool PicoChat_ScrollHoveredEmptyCard(PicoHost *app, float wheel_x, float wheel_y)
+{
+    ChatState *state = app ? (ChatState *)PicoPlugins_HostState(app, "chat") : NULL;
+    if (!state)
+    {
+        return false;
+    }
+    for (int i = 0; i < EMPTY_CARD_COUNT; i++)
+    {
+        if (!state->empty_card_overflow[i] || !EmptyCardScrollHovered(i))
+        {
+            continue;
+        }
+        ApplyEmptyCardWheel(EmptyCardScrollId(i), wheel_x, wheel_y);
+        return true;
+    }
+    return false;
+}
+
+bool PicoChat_EmptyCardScrollbarActive(PicoHost *app)
+{
+    ChatState *state = app ? (ChatState *)PicoPlugins_HostState(app, "chat") : NULL;
+    return EmptyCardScrollbarActive(state);
 }
 
 static bool InspectIsTopModal(PicoHost *app)
@@ -2548,7 +2718,8 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
 
     Vector2 mouse = GetMousePosition();
     bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))) ||
-                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollTrack")));
+                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollTrack"))) ||
+                    EmptyCardScrollbarActive(s_active_chat_state);
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
     bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
     TranscriptView main = MainTranscriptView(app);
@@ -3192,7 +3363,16 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     s_active_chat_state = state ? (ChatState *)state : (ChatState *)PicoPlugins_HostState(app, "chat");
-    if (!s_active_chat_state || g_inspect_n <= 0)
+    if (!s_active_chat_state)
+    {
+        return;
+    }
+    for (int i = 0; i < EMPTY_CARD_COUNT; i++)
+    {
+        PicoScrollbar_UpdateDrag(&s_active_chat_state->empty_card_bar[i], EmptyCardScrollId(i),
+                                 EmptyCardScrollHandleId(i));
+    }
+    if (g_inspect_n <= 0)
     {
         return;
     }

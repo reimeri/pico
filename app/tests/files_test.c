@@ -3,6 +3,9 @@
 #include "pico/app.h"
 #include "host_internal.h"
 
+#include "clay/clay.h"
+
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,10 +272,126 @@ static void TestBoundedMentions(void)
     rmdir(root);
 }
 
+static int LongDetailQuery(PicoHost *host, const char *prefix, PicoCompleteItem *out, int max,
+                           void *state)
+{
+    (void)host;
+    (void)prefix;
+    (void)state;
+    if (max < 1)
+    {
+        return 0;
+    }
+    snprintf(out[0].label, sizeof(out[0].label), "convex-audit");
+    snprintf(out[0].detail, sizeof(out[0].detail),
+             "Audit and harden Convex authorization identity-from-arg impersonation missing checks");
+    snprintf(out[0].insert, sizeof(out[0].insert), "/skill convex-audit");
+    return 1;
+}
+
+static Clay_Dimensions CompleteMeasureText(Clay_StringSlice text, Clay_TextElementConfig *config,
+                                           void *user_data)
+{
+    (void)user_data;
+    return (Clay_Dimensions){.width = (float)text.length * (float)config->fontSize * 0.6f,
+                             .height = (float)config->fontSize};
+}
+
+static Clay_RenderCommand *FindTextCommand(Clay_RenderCommandArray *commands, const char *text)
+{
+    size_t length = strlen(text);
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        Clay_StringSlice contents = command->renderData.text.stringContents;
+        if (contents.length == (int32_t)length && memcmp(contents.chars, text, length) == 0)
+        {
+            return command;
+        }
+    }
+    return NULL;
+}
+
+static void TestCompleteDetailDoesNotCoverLabel(void)
+{
+    const Clay_Dimensions viewport = {280, 400};
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost app;
+    char composer[32];
+    const char *label = "convex-audit";
+    const char *detail =
+        "Audit and harden Convex authorization identity-from-arg impersonation missing checks";
+    bool ok = false;
+    if (!memory)
+    {
+        Check(false, "could not allocate complete layout arena");
+        return;
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Check(false, "could not initialize Clay for complete layout");
+        free(memory);
+        return;
+    }
+    Clay_SetMeasureTextFunction(CompleteMeasureText, NULL);
+    Clay_SetLayoutDimensions(viewport);
+    memset(&app, 0, sizeof(app));
+    app.completers[0] = (PicoCompleter){
+        .trigger = '/',
+        .bol_only = true,
+        .host_query = LongDetailQuery,
+    };
+    app.completer_count = 1;
+    SetComposer(&app, composer, sizeof(composer), "/skill ");
+    PicoComplete_Refresh(&app);
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("CompleteTestRoot"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .sizing = {.width = CLAY_SIZING_FIXED(viewport.width),
+                                .height = CLAY_SIZING_FIXED(viewport.height)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_GROW(0)}}})
+        {
+        }
+        CLAY(CLAY_ID("CompleteTestParent"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                    .height = CLAY_SIZING_FIXED(48)}}})
+        {
+            PicoComplete_Render(&app);
+        }
+    }
+    Clay_RenderCommandArray commands = Clay_EndLayout(0.0f);
+    Clay_RenderCommand *label_cmd = FindTextCommand(&commands, label);
+    Clay_RenderCommand *detail_cmd = FindTextCommand(&commands, detail);
+    Clay_TextElementConfig label_cfg = {.fontSize = PICO_FONT_UI};
+    Clay_StringSlice label_slice = {.length = (int32_t)strlen(label), .chars = label};
+    float expected_label_w = CompleteMeasureText(label_slice, &label_cfg, NULL).width;
+    if (label_cmd && detail_cmd &&
+        fabsf(label_cmd->boundingBox.width - expected_label_w) <= 0.01f &&
+        label_cmd->boundingBox.x + label_cmd->boundingBox.width <=
+            detail_cmd->boundingBox.x + 0.01f)
+    {
+        ok = true;
+    }
+    Check(ok, "a long complete description must not cover the command name");
+    PicoComplete_Close();
+    Clay_SetCurrentContext(previous);
+    free(memory);
+}
+
 int main(void)
 {
     TestBoundedMentions();
     TestMentionImagePart();
     TestCompleteRebuildsAtTokenStart();
+    TestCompleteDetailDoesNotCoverLabel();
     return g_failed;
 }

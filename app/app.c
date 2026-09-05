@@ -3079,9 +3079,11 @@ void PicoHost_Frame(PicoHost *app)
      * would eat the wheel. Route it to the chat / inspect pane instead. */
     bool over_inspect = PicoChat_InspectIsOpen() &&
                         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
-    bool pane_wheel = over_inspect || (over_chat && !modal_open);
-    bool sidebar_wheel = over_sidebar && !modal_open && !over_inspect;
     Clay_Vector2 wheel = {.x = mouse_delta.x, .y = mouse_delta.y};
+    bool empty_card_wheel = !modal_open && !over_inspect &&
+                            PicoChat_ScrollHoveredEmptyCard(app, wheel.x, wheel.y);
+    bool pane_wheel = over_inspect || (over_chat && !modal_open && !empty_card_wheel);
+    bool sidebar_wheel = over_sidebar && !modal_open && !over_inspect;
     bool shift_wheel = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) &&
                        wheel.x == 0.0f && wheel.y != 0.0f;
     float markdown_x = wheel.x + (shift_wheel ? wheel.y : 0.0f);
@@ -3127,7 +3129,8 @@ void PicoHost_Frame(PicoHost *app)
     else if ((!modal_open && PicoComposer_PointerOverAttachments()) ||
              Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollBarHandle"))) ||
              Clay_PointerOver(Clay_GetElementId(CLAY_STRING("CompScrollTrack"))) ||
-             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))))
+             Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScrollBarHandle"))) ||
+             PicoChat_EmptyCardScrollbarActive(app))
     {
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }

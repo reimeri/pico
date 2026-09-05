@@ -5,6 +5,7 @@
 #include "settings.h"
 #include "session.h"
 #include "scrollbar.h"
+#include "trace_group.h"
 #include "richtext.h"
 #include "builtins/chat.h"
 #include "builtins/background_model.h"
@@ -1186,6 +1187,7 @@ static int TestChatTraceRowsShareHeight(void)
     PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
     PicoAgent_AddToolCallWithId(host, agent, "done-1", "read", "");
     PicoAgent_SetLastToolOutput(agent, "ok", false);
+    agent->messages[0].trace[0].tool_done_t0 = 0.0;
     /* msg 1 (last): running tool call, rendered as an open tool row. */
     PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
     PicoAgent_AddToolCallWithId(host, agent, "run-1", "read", "");
@@ -1213,6 +1215,7 @@ static int TestChatTraceRowsShareHeight(void)
     /* The tool completes and the agent starts thinking: the open tool row is
      * replaced by the group header plus a live think row. */
     PicoAgent_SetToolOutputByCallId(agent, "run-1", "ok", false);
+    agent->messages[1].trace[0].tool_done_t0 = 0.0;
     PicoAgent_AppendThink(host, agent, "reasoning", 0);
     agent->state = PICO_AGENT_LLM_WAIT;
     for (int frame = 0; frame < 3; frame++)
@@ -1245,6 +1248,206 @@ static int TestChatTraceRowsShareHeight(void)
         fprintf(stderr, "trace row heights: tool %.3f group %.3f think %.3f think-group %.3f synth %.3f\n",
                 tool_h, group_h, think_h, think_group_h, synth_h);
         Fail("tool, think, and group header rows must share one height");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
+/* Fast tool completions must keep the individual row on screen before the
+ * collapsed group replaces it; otherwise the row only flashes. */
+static int TestChatCompletedToolRowDwells(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-tool-dwell-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-tool-dwell-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    bool f_tool, f_group;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("completed tool dwell setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("completed tool dwell host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("completed tool dwell open workspace");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("completed tool dwell create agent");
+        goto done_host;
+    }
+
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoAgent_AddToolCallWithId(host, agent, "done-1", "read", "");
+    PicoAgent_SetLastToolOutput(agent, "ok", false);
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("completed tool dwell Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
+    if (!f_tool || f_group)
+    {
+        Fail("a just-completed tool row stays visible instead of grouping");
+        goto done;
+    }
+
+    agent->messages[0].trace[0].tool_done_t0 = 0.0;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
+    if (f_tool || !f_group)
+    {
+        Fail("a completed tool row joins the group after the dwell");
+        goto done;
+    }
+    /* Measure two dwelling rows, then move them outside the mounted range.
+     * Expiry must shrink their spacer without scrolling back to the rows. */
+    PicoAgent_AddToolCallWithId(host, agent, "done-2", "read", "");
+    PicoAgent_SetLastToolOutput(agent, "ok", false);
+    agent->messages[0].trace[0].tool_done_t0 = pico_trace_now();
+    for (int i = 0; i < 100; i++)
+    {
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, "Later message");
+    }
+    host->chat_follow_bottom = false;
+    for (int frame = 0; frame < 4; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition)
+        {
+            Fail("offscreen dwell requires a scroll container");
+            goto done;
+        }
+        scroll.scrollPosition->y = scroll.scrollContainerDimensions.height -
+                                   scroll.contentDimensions.height;
+    }
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
+    Clay_ScrollContainerData before = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    float dwelling_height = before.contentDimensions.height;
+    if (f_tool)
+    {
+        Fail("dwelling rows must be offscreen for the expiry regression");
+        goto done;
+    }
+    for (int t = 0; t < agent->messages[0].trace_count; t++)
+    {
+        agent->messages[0].trace[t].tool_done_t0 = pico_trace_now() - 60.0;
+    }
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    Clay_ScrollContainerData after = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!after.found || after.contentDimensions.height >= dwelling_height - 1.0f)
+    {
+        Fail("offscreen tool expiry must shrink the transcript scroll extent");
+        goto done;
+    }
+
+    /* Exercise the real replay path, whose output setters also serve live tools. */
+    char replay_path[4096];
+    snprintf(replay_path, sizeof(replay_path), "%s/replay.jsonl", dir);
+    FILE *replay = fopen(replay_path, "w");
+    if (!replay)
+    {
+        Fail("create tool dwell replay fixture");
+        goto done;
+    }
+    fputs("{\"type\":\"session\",\"version\":4,\"id\":\"dwell-replay\",\"kind\":\"normal\"}\n"
+          "{\"type\":\"tool_call\",\"message_group\":0,\"call_id\":\"restored\",\"name\":\"read\",\"arguments\":\"{}\"}\n"
+          "{\"type\":\"tool_result\",\"call_id\":\"restored\",\"name\":\"read\",\"output\":\"ok\",\"is_error\":false}\n", replay);
+    fclose(replay);
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)) ||
+        PicoSession_Replay(host, agent, replay_path, false) != 0)
+    {
+        unlink(replay_path);
+        Fail("replay completed tool into a selected agent");
+        goto done;
+    }
+    unlink(replay_path);
+    Clay_ScrollContainerData restored_scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (restored_scroll.found && restored_scroll.scrollPosition)
+    {
+        restored_scroll.scrollPosition->y = 0.0f;
+    }
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
+    (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
+    if (f_tool || !f_group)
+    {
+        Fail("replayed tools must group immediately without a completion dwell");
         goto done;
     }
     rc = g_failed ? 1 : 0;
@@ -7053,6 +7256,10 @@ int main(void)
         return 1;
     }
     if (TestChatTraceRowsShareHeight() != 0)
+    {
+        return 1;
+    }
+    if (TestChatCompletedToolRowDwells() != 0)
     {
         return 1;
     }

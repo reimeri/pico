@@ -16,8 +16,11 @@ typedef enum PicoTraceGroupKind {
 
 bool pico_trace_line_visible(const PicoTraceLine *line);
 PicoTraceGroupKind pico_trace_line_group_kind(const PicoTraceLine *line);
+double pico_trace_now(void);
+bool pico_trace_tool_row_dwelling(double done_t0, double now);
+void pico_trace_line_stamp_tool_done(PicoTraceLine *line);
 bool pico_trace_line_open(const PicoTraceLine *line, bool tool_pending, bool tool_fallback_live,
-                          bool think_live);
+                          bool think_live, bool tool_dwell_live);
 int pico_trace_group_format_title(char *buf, size_t cap, int tool_calls, int spawn_processes,
                                   int subagents, bool has_thinking, int think_ms);
 

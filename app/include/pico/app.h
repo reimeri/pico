@@ -98,6 +98,7 @@ typedef struct PicoTraceLine {
     char *tool_args_json; /* original JSON supplied by the provider */
     char *tool_output;
     bool tool_error;
+    double tool_done_t0;
     bool expanded;
     int think_steps;
     char **think_parts;

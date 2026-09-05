@@ -904,14 +904,16 @@ static bool TraceLineOpen(const TranscriptView *view, const PicoTraceLine *line,
                           int trace_index)
 {
     bool pending = false;
+    bool dwell = false;
     if (line && line->is_tool)
     {
         PicoToolCallProgress progress = ToolProgress(view, line);
         pending = progress == PICO_TOOL_CALL_RUNNING || progress == PICO_TOOL_CALL_QUEUED;
+        dwell = pico_trace_tool_row_dwelling(line->tool_done_t0, pico_trace_now());
     }
     return pico_trace_line_open(line, pending,
                                 ToolFallbackLive(view, message_index, trace_index),
-                                ThinkBurstLive(view, message_index, trace_index));
+                                ThinkBurstLive(view, message_index, trace_index), dwell);
 }
 
 static bool MessageHasFinishedTrace(const TranscriptView *view, const PicoMessage *msg,
@@ -1673,6 +1675,9 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         hash = RevisionMix(hash, line->tool_error ? 1 : 0);
         hash = RevisionMix(hash, line->expanded ? 1 : 0);
         hash = RevisionMix(hash, (uint64_t)ToolProgress(view, line));
+        /* Offscreen messages must be measured again when a completed row
+         * joins its group, even if no transcript data changed. */
+        hash = RevisionMix(hash, TraceLineOpen(view, line, message_index, t) ? 1 : 0);
         for (int p = 0; p < line->think_part_count; p++)
         {
             hash = RevisionPointer(hash, line->think_parts ? line->think_parts[p] : NULL);

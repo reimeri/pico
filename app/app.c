@@ -18,6 +18,7 @@
 #include "builtins/background_model.h"
 #include "host_internal.h"
 #include "path.h"
+#include "trace_group.h"
 
 #include <curl/curl.h>
 
@@ -1455,6 +1456,7 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
             free(m->trace[t].tool_output);
             m->trace[t].tool_output = JsonDup(output ? output : "");
             m->trace[t].tool_error = is_error;
+            pico_trace_line_stamp_tool_done(&m->trace[t]);
             return;
         }
     }
@@ -1513,6 +1515,7 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                 free(line->tool_output);
                 line->tool_output = JsonDup(output ? output : "");
                 line->tool_error = is_error;
+                pico_trace_line_stamp_tool_done(line);
                 return;
             }
         }
@@ -2614,6 +2617,7 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
                 PicoTraceLine *to = &copy[i].trace[t];
                 to->is_tool = from->is_tool;
                 to->tool_error = from->tool_error;
+                to->tool_done_t0 = from->tool_done_t0;
                 to->expanded = from->expanded;
                 to->think_steps = from->think_steps;
                 to->think_ms = from->think_ms;

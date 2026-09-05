@@ -1490,6 +1490,15 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
     {
         PicoSession_AppendInterrupted(app, agent);
     }
+    /* Replay uses the live output setters, but historical tools must group
+     * immediately when the restored transcript is first presented. */
+    for (int i = 0; i < agent->message_count; i++)
+    {
+        for (int t = 0; t < agent->messages[i].trace_count; t++)
+        {
+            agent->messages[i].trace[t].tool_done_t0 = 0.0;
+        }
+    }
     return 0;
 
 invalid:

@@ -1,9 +1,14 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "trace_group.h"
 
 #include "pico/app.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+#define PICO_TOOL_ROW_DWELL_SEC 0.5
 
 bool pico_trace_line_visible(const PicoTraceLine *line)
 {
@@ -43,8 +48,39 @@ PicoTraceGroupKind pico_trace_line_group_kind(const PicoTraceLine *line)
     return PICO_TRACE_GROUP_TOOL;
 }
 
+double pico_trace_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+bool pico_trace_tool_row_dwelling(double done_t0, double now)
+{
+    double elapsed;
+    if (done_t0 <= 0.0)
+    {
+        return false;
+    }
+    elapsed = now - done_t0;
+    return elapsed >= 0.0 && elapsed < PICO_TOOL_ROW_DWELL_SEC;
+}
+
+void pico_trace_line_stamp_tool_done(PicoTraceLine *line)
+{
+    if (!line || line->tool_done_t0 > 0.0)
+    {
+        return;
+    }
+    line->tool_done_t0 = pico_trace_now();
+    if (line->tool_done_t0 <= 0.0)
+    {
+        line->tool_done_t0 = 0.000000001;
+    }
+}
+
 bool pico_trace_line_open(const PicoTraceLine *line, bool tool_pending, bool tool_fallback_live,
-                          bool think_live)
+                          bool think_live, bool tool_dwell_live)
 {
     if (!pico_trace_line_visible(line))
     {
@@ -52,7 +88,7 @@ bool pico_trace_line_open(const PicoTraceLine *line, bool tool_pending, bool too
     }
     if (line->is_tool)
     {
-        return tool_pending || (!line->tool_output && tool_fallback_live);
+        return tool_pending || tool_dwell_live || (!line->tool_output && tool_fallback_live);
     }
     return think_live;
 }

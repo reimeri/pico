@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "usage.h"
 #include "host_internal.h"
+#include "trace_group.h"
 
 #include <curl/curl.h>
 #include <errno.h>
@@ -1917,6 +1918,7 @@ static void TraceSetLastToolOutput(PicoHost *app, PicoAgent *agent, int idx, con
             free(m->trace[t].tool_output);
             m->trace[t].tool_output = Dup(output ? output : "");
             m->trace[t].tool_error = is_error;
+            pico_trace_line_stamp_tool_done(&m->trace[t]);
             return;
         }
     }

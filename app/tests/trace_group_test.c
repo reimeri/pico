@@ -76,24 +76,49 @@ static int TestOpenAndKind(void)
     {
         return Fail("finished-row kinds did not split think, tools, spawn, and subagent");
     }
-    if (!pico_trace_line_open(&sh, true, false, false) ||
-        pico_trace_line_open(&sh, false, false, true))
+    if (!pico_trace_line_open(&sh, true, false, false, false) ||
+        pico_trace_line_open(&sh, false, false, true, false))
     {
         return Fail("pending tools stay open; idle tools join the group");
     }
-    if (!pico_trace_line_open(&sh, false, true, false))
+    if (!pico_trace_line_open(&sh, false, true, false, false))
     {
         return Fail("an output-less tool stays open when it is the fallback live row");
     }
     sh.tool_output = "done";
-    if (pico_trace_line_open(&sh, false, true, false))
+    if (!pico_trace_line_open(&sh, false, false, false, true))
+    {
+        return Fail("a just-completed tool stays open during dwell");
+    }
+    if (pico_trace_line_open(&sh, false, true, false, false))
     {
         return Fail("a tool with output joins the group despite fallback live state");
     }
-    if (!pico_trace_line_open(&think, false, false, true) ||
-        pico_trace_line_open(&think, true, true, false))
+    if (!pico_trace_line_open(&think, false, false, true, false) ||
+        pico_trace_line_open(&think, true, true, false, true))
     {
         return Fail("live think stays open; frozen think joins the group");
+    }
+    return 0;
+}
+
+static int TestToolRowDwell(void)
+{
+    if (pico_trace_tool_row_dwelling(0.0, 10.0) || pico_trace_tool_row_dwelling(-1.0, 10.0))
+    {
+        return Fail("historical tools with no completion stamp join immediately");
+    }
+    if (!pico_trace_tool_row_dwelling(10.0, 10.0))
+    {
+        return Fail("a just-completed tool stays visible");
+    }
+    if (pico_trace_tool_row_dwelling(10.0, 11.0))
+    {
+        return Fail("a completed tool joins the group after the dwell");
+    }
+    if (pico_trace_tool_row_dwelling(10.0, 9.0))
+    {
+        return Fail("a completion stamp in the future does not dwell");
     }
     return 0;
 }
@@ -103,5 +128,6 @@ int main(void)
     int failed = 0;
     failed |= TestTitle();
     failed |= TestOpenAndKind();
+    failed |= TestToolRowDwell();
     return failed;
 }

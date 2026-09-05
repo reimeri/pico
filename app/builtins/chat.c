@@ -1161,11 +1161,20 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
                                  .childAlignment = {.y = CLAY_ALIGN_Y_TOP},
                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY(ToolStatusId(view, message_index, trace_index),
-                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
-                  .backgroundColor = ToolStatusColor(view, line, message_index, trace_index),
-                  .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            /* Center the dot on the first text line: the wrapper is exactly
+             * one text line tall (like the chevron slot), so the row keeps its
+             * shared height and the dot stays glued to the first line when
+             * args wrap. */
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8),
+                                                .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI))},
+                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}})
             {
+                CLAY(ToolStatusId(view, message_index, trace_index),
+                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_FIXED(8)}},
+                      .backgroundColor = ToolStatusColor(view, line, message_index, trace_index),
+                      .cornerRadius = CLAY_CORNER_RADIUS(4)})
+                {
+                }
             }
             ViewText(view, name, name_cfg);
             if (args.length > 0)

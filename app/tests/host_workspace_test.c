@@ -1103,6 +1103,149 @@ done_host:
     return rc;
 }
 
+/* The status dot on an open tool row must sit at the vertical center of the
+ * first text line. For a one-line row that is the row center; when args wrap
+ * and the row grows taller the dot must keep the same offset from the row top
+ * instead of drifting to the middle of the row. */
+static int TestChatToolStatusDotCentered(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-dot-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-dot-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    Clay_ElementData row, dot;
+    float single_row_h, dot_off, center_delta;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("status dot setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("status dot host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("status dot open workspace");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("status dot create agent");
+        goto done_host;
+    }
+
+    /* A running tool call renders as an open tool row; empty args keep the
+     * row exactly one text line tall. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoAgent_AddToolCallWithId(host, agent, "run-1", "sh", "");
+    agent->state = PICO_AGENT_TOOL_WAIT;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("status dot Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    row = Clay_GetElementData(MainTraceRowId(0, 0, "ToolRow"));
+    dot = Clay_GetElementData(MainTraceRowId(0, 0, "ToolStatus"));
+    if (!row.found || !dot.found)
+    {
+        Fail("status dot scenario did not render the tool row");
+        goto done;
+    }
+    single_row_h = row.boundingBox.height;
+    dot_off = dot.boundingBox.y - row.boundingBox.y;
+    center_delta = fabsf((dot.boundingBox.y + dot.boundingBox.height * 0.5f) -
+                         (row.boundingBox.y + row.boundingBox.height * 0.5f));
+    if (center_delta > 0.001f)
+    {
+        fprintf(stderr, "status dot center offset: %.3f\n", center_delta);
+        Fail("status dot must be vertically centered on a one-line tool row");
+        goto done;
+    }
+
+    /* Wrapped args make the row taller; the dot must stay on the first line. */
+    free(agent->messages[0].trace[0].tool_args);
+    agent->messages[0].trace[0].tool_args = strdup(
+        "build the project with the debug preset and run every workspace test "
+        "and then run the entire suite again after the fix to be sure nothing "
+        "else regressed while the row layout changed");
+    if (!agent->messages[0].trace[0].tool_args)
+    {
+        Fail("status dot args allocation");
+        goto done;
+    }
+    for (int frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+    }
+    row = Clay_GetElementData(MainTraceRowId(0, 0, "ToolRow"));
+    dot = Clay_GetElementData(MainTraceRowId(0, 0, "ToolStatus"));
+    if (!row.found || !dot.found || row.boundingBox.height <= single_row_h + 1.0f)
+    {
+        Fail("status dot wrapped-args scenario did not grow the row");
+        goto done;
+    }
+    if (fabsf(dot.boundingBox.y - row.boundingBox.y - dot_off) > 0.001f)
+    {
+        fprintf(stderr, "status dot offset: wrapped %.3f single-line %.3f\n",
+                dot.boundingBox.y - row.boundingBox.y, dot_off);
+        Fail("status dot must stay on the first line when tool args wrap");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 static int TestCanonicalOpenAndDuplicate(void)
 {
     char dir[] = "/tmp/pico-ws-XXXXXX";
@@ -6691,6 +6834,10 @@ int main(void)
         return 1;
     }
     if (TestChatTraceRowsShareHeight() != 0)
+    {
+        return 1;
+    }
+    if (TestChatToolStatusDotCentered() != 0)
     {
         return 1;
     }

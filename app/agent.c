@@ -3625,6 +3625,7 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     {
         AppendMessageText(app, agent, rt->stream_msg, stream, stream_len);
         rt->stream_dirty = true;
+        SetActivity(app, agent, "Writing…");
     }
     free(stream);
 

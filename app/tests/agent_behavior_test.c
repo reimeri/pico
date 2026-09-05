@@ -27,6 +27,7 @@ typedef enum TestMode {
     TEST_BATCH_TOOLS,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
+    TEST_PROVIDER_TEXT_BLOCK,
     TEST_SIGNATURE_CONTINUATION,
     TEST_CATALOG_BLOCK,
     TEST_DUPLICATE_CALLS,
@@ -400,6 +401,22 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         if (on_delta)
         {
             on_delta(user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
+        }
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_entered = true;
+        pthread_cond_broadcast(&g_test.cv);
+        pthread_mutex_unlock(&g_test.mu);
+        while (!cancel(user))
+        {
+            SleepOneMs();
+        }
+        return PICO_LLM_CANCEL;
+    }
+    if (mode == TEST_PROVIDER_TEXT_BLOCK)
+    {
+        if (on_delta)
+        {
+            on_delta(user, PICO_LLM_DELTA_TEXT, "draft", 5);
         }
         pthread_mutex_lock(&g_test.mu);
         g_test.block_entered = true;
@@ -3958,6 +3975,38 @@ static int TestCancelledThinkingPersistence(void)
     return logged && history ? 0 : Fail(name, "cancelled thinking was not logged and replayed");
 }
 
+static int TestStreamingTextActivity(void)
+{
+    const char *name = "streaming message text reports writing activity";
+    ResetTest(TEST_PROVIDER_TEXT_BLOCK, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "streaming provider did not start");
+    }
+    bool writing = false;
+    for (int i = 0; i < 3000 && !writing; i++)
+    {
+        PicoAgent_Pump(&app, TestAgent(&app));
+        writing = strcmp(TestAgent(&app)->activity, "Writing…") == 0;
+        if (!writing)
+        {
+            SleepOneMs();
+        }
+    }
+    PicoAgent_Cancel(TestAgent(&app));
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "streaming provider did not return idle");
+    }
+    PicoHost_Shutdown(&app);
+    return writing ? 0 : Fail(name, "message streaming did not report writing activity");
+}
+
 static int TestThinkSummaryCoalesce(void)
 {
     const char *name = "think summaries coalesce until a tool";
@@ -4345,6 +4394,7 @@ int main(void)
     failed |= TestMediaPersistenceFailureIsAtomic();
     failed |= TestNonVisionMediaRejected();
     failed |= TestCancelledThinkingPersistence();
+    failed |= TestStreamingTextActivity();
     failed |= TestThinkSummaryCoalesce();
     failed |= TestRestoredThinkKeepsUnknownDuration();
     failed |= TestUiPostAppendReplace();

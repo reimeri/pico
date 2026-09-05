@@ -14,9 +14,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define EXPECTED_HEAD ((size_t)12800)
-#define EXPECTED_TAIL ((size_t)27200)
-#define EXPECTED_LIMIT (EXPECTED_HEAD + EXPECTED_TAIL)
+/* Learn the advertised inline limit from a spooled result, then exercise both
+ * sides of that boundary without duplicating the private capture sizes. */
+static size_t capture_limit;
+#define EXPECTED_LIMIT capture_limit
+#define EXPECTED_HEAD (capture_limit / 2)
+#define EXPECTED_TAIL (capture_limit - EXPECTED_HEAD)
 #define OVER_LIMIT (EXPECTED_LIMIT + (size_t)1)
 #define LARGE_HEAD_SIZE UINT64_C(33554432)
 #define MAX_CAPTURE_RSS_KB (8L * 1024L)
@@ -312,8 +315,8 @@ static bool TestLargeOutput(void)
     snprintf(command, sizeof(command),
              "head -c %" PRIu64 " /dev/zero | tr '\\\\000' H; "
              "head -c %zu /dev/zero | tr '\\\\000' T",
-             LARGE_HEAD_SIZE, EXPECTED_TAIL);
-    const uint64_t expected_size = LARGE_HEAD_SIZE + (uint64_t)EXPECTED_TAIL;
+             LARGE_HEAD_SIZE, (size_t)1024);
+    const uint64_t expected_size = LARGE_HEAD_SIZE + UINT64_C(1024);
     struct rusage before;
     struct rusage after;
     if (getrusage(RUSAGE_SELF, &before) != 0)
@@ -323,7 +326,10 @@ static bool TestLargeOutput(void)
     PicoToolResult result = RunCommand("exercise bounded spooling", command);
     bool usage_read = getrusage(RUSAGE_SELF, &after) == 0;
     char path[4096] = {0};
-    bool ok = usage_read && result.output && !result.is_error &&
+    bool advertised_limit = result.output &&
+                            sscanf(result.output, "Shell output exceeded %zu bytes.", &capture_limit) == 1 &&
+                            capture_limit > 1 && capture_limit < LARGE_HEAD_SIZE;
+    bool ok = advertised_limit && usage_read && result.output && !result.is_error &&
               ParseLargeOutput(result.output, expected_size, path, sizeof(path)) &&
               after.ru_maxrss - before.ru_maxrss <= MAX_CAPTURE_RSS_KB &&
               VerifyLargeFile(path, expected_size);
@@ -453,6 +459,10 @@ int main(void)
     {
         failure = "schema does not define optional timeout property";
     }
+    else if (!TestLargeOutput())
+    {
+        failure = "large output was not saved completely with bounded memory";
+    }
     else if (!TestExactLimit())
     {
         failure = "output at the capture limit was not preserved exactly";
@@ -464,10 +474,6 @@ int main(void)
     else if (!TestTempFallback(temp))
     {
         failure = "invalid TMPDIR did not fall back to /tmp";
-    }
-    else if (!TestLargeOutput())
-    {
-        failure = "large output was not saved completely with bounded memory";
     }
     else if (!TestInterruptedRead())
     {

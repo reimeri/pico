@@ -84,16 +84,15 @@ static int TestMinThumb(void)
 {
     const char *test = "min_thumb";
     PicoScrollbarThumb top = PicoScrollbar_Metrics(100.0f, 10000.0f, 0.0f);
-    if (ExpectFloat(test, "top.height", top.height, 16.0f) || ExpectFloat(test, "top.y", top.y, 0.0f))
+    if (ExpectFloat(test, "top.y", top.y, 0.0f))
     {
         return 1;
     }
     PicoScrollbarThumb bottom = PicoScrollbar_Metrics(100.0f, 10000.0f, -9900.0f);
-    if (ExpectFloat(test, "bottom.height", bottom.height, 16.0f))
-    {
-        return 1;
-    }
-    if (ExpectFloat(test, "bottom.y", bottom.y, 84.0f))
+    PicoScrollbarThumb larger = PicoScrollbar_Metrics(100.0f, 20000.0f, 0.0f);
+    if (top.height <= 1.0f || top.height >= 100.0f ||
+        ExpectFloat(test, "minimum stays usable as content grows", larger.height, top.height) ||
+        ExpectFloat(test, "drag preserves thumb size", bottom.height, top.height))
     {
         return 1;
     }

@@ -32,9 +32,6 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
 
 _Static_assert((PicoWorkspaceId)0 == 0, "zero is an invalid workspace id");
 _Static_assert((PicoAgentId)0 == 0, "zero is an invalid agent id");
-_Static_assert(PICO_MAX_WORKSPACES == 8, "PICO_MAX_WORKSPACES");
-_Static_assert(PICO_MAX_AGENTS == 16, "PICO_MAX_AGENTS");
-_Static_assert(PICO_MAX_TOTAL_AGENTS == 32, "PICO_MAX_TOTAL_AGENTS");
 
 static int g_failed;
 static int g_persist_ready_fd = -1;
@@ -545,6 +542,35 @@ static Clay_RenderCommand *FindTrimmedCardText(Clay_RenderCommandArray *commands
     return NULL;
 }
 
+/* Find the active clipping region containing a rendered label. */
+static Clay_BoundingBox CardTextClip(Clay_RenderCommandArray *commands, Clay_RenderCommand *text)
+{
+    int closed = 0;
+    bool found_text = false;
+    for (int i = commands->length - 1; i >= 0; i--)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!found_text)
+        {
+            found_text = command == text;
+            continue;
+        }
+        if (command->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_END)
+        {
+            closed++;
+        }
+        else if (command->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_START)
+        {
+            if (closed == 0)
+            {
+                return command->boundingBox;
+            }
+            closed--;
+        }
+    }
+    return (Clay_BoundingBox){0};
+}
+
 static int AssertDesktopEmptyCardTrim(Clay_RenderCommandArray *commands, const char *long_name)
 {
     Clay_ElementData card0 = Clay_GetElementData(CLAY_IDI("EmptyCard", 0));
@@ -564,15 +590,6 @@ static int AssertDesktopEmptyCardTrim(Clay_RenderCommandArray *commands, const c
         return 1;
     }
 
-    /* The card content area splits into two equal columns separated by the
-     * same gap used between rows of a card. */
-    const float card_padding = 16.0f;
-    const float column_gap = 8.0f;
-    float content_left = card0.boundingBox.x + card_padding;
-    float content_right = card0.boundingBox.x + card0.boundingBox.width - card_padding;
-    float column_width = (content_right - content_left - column_gap) * 0.5f;
-    float right_x = content_left + column_width + column_gap;
-
     Clay_RenderCommand *alpha = FindCardText(commands, "alpha");
     Clay_RenderCommand *beta = FindCardText(commands, "beta");
     Clay_RenderCommand *delta = FindCardText(commands, "delta");
@@ -582,12 +599,22 @@ static int AssertDesktopEmptyCardTrim(Clay_RenderCommandArray *commands, const c
         Fail("landing card items were not rendered");
         return 1;
     }
+    Clay_BoundingBox left = CardTextClip(commands, alpha);
+    Clay_BoundingBox right = CardTextClip(commands, delta);
+    if (left.width <= 0.0f || right.width <= 0.0f ||
+        fabsf(left.width - right.width) > 0.5f ||
+        right.x < left.x + left.width || left.x < card0.boundingBox.x ||
+        right.x + right.width > card0.boundingBox.x + card0.boundingBox.width + 0.5f)
+    {
+        Fail("landing card columns must be equal, non-overlapping, and inside the card");
+        return 1;
+    }
     /* Column-major: the first three items stack in the left column, the
      * rest continue at the top of the right column. */
-    if (fabsf(alpha->boundingBox.x - content_left) > 0.01f ||
-        fabsf(beta->boundingBox.x - content_left) > 0.01f ||
+    if (fabsf(alpha->boundingBox.x - left.x) > 0.01f ||
+        fabsf(beta->boundingBox.x - left.x) > 0.01f ||
         beta->boundingBox.y <= alpha->boundingBox.y ||
-        fabsf(delta->boundingBox.x - right_x) > 0.01f ||
+        fabsf(delta->boundingBox.x - right.x) > 0.01f ||
         fabsf(delta->boundingBox.y - alpha->boundingBox.y) > 0.01f)
     {
         Fail("landing card items were not split into two equal columns");
@@ -598,8 +625,8 @@ static int AssertDesktopEmptyCardTrim(Clay_RenderCommandArray *commands, const c
         Fail("overwide landing card label was not trimmed");
         return 1;
     }
-    if (!trimmed || fabsf(trimmed->boundingBox.x - right_x) > 0.01f ||
-        trimmed->boundingBox.x + trimmed->boundingBox.width > right_x + column_width + 0.5f)
+    if (!trimmed || fabsf(trimmed->boundingBox.x - right.x) > 0.01f ||
+        trimmed->boundingBox.x + trimmed->boundingBox.width > right.x + right.width + 0.5f)
     {
         Fail("trimmed landing card label escaped its column");
         return 1;
@@ -964,10 +991,11 @@ static int TestCanonicalOpenAndDuplicate(void)
             return 1;
         }
 
-        /* Test exhausting workspace limit (PICO_MAX_WORKSPACES = 8) */
-        char extra_dirs[6][32];
-        PicoWorkspaceId extra_ids[6];
-        for (int i = 0; i < 6; i++)
+        /* Fill the remaining workspace slots, then verify overflow rejection. */
+        char extra_dirs[PICO_MAX_WORKSPACES][64];
+        int extra_count = PICO_MAX_WORKSPACES - pico_workspace_count(host);
+        PicoWorkspaceId extra_ids[PICO_MAX_WORKSPACES];
+        for (int i = 0; i < extra_count; i++)
         {
             snprintf(extra_dirs[i], sizeof(extra_dirs[i]), "/tmp/pico-ws-ext-%d-XXXXXX", i);
             if (!mkdtemp(extra_dirs[i]))
@@ -985,18 +1013,18 @@ static int TestCanonicalOpenAndDuplicate(void)
             Fail("workspace count should reach PICO_MAX_WORKSPACES");
         }
 
-        char ninth[] = "/tmp/pico-ws-ninth-XXXXXX";
-        PicoWorkspaceId ninth_id = 0;
-        if (mkdtemp(ninth))
+        char overflow[] = "/tmp/pico-ws-overflow-XXXXXX";
+        PicoWorkspaceId overflow_id = 0;
+        if (mkdtemp(overflow))
         {
-            if (pico_workspace_open(host, ninth, &ninth_id) != PICO_LIMIT || ninth_id != 0)
+            if (pico_workspace_open(host, overflow, &overflow_id) != PICO_LIMIT || overflow_id != 0)
             {
-                Fail("opening ninth workspace should return PICO_LIMIT");
+                Fail("opening a workspace beyond capacity should return PICO_LIMIT");
             }
-            rmdir(ninth);
+            rmdir(overflow);
         }
 
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < extra_count; i++)
         {
             rmdir(extra_dirs[i]);
         }
@@ -2052,19 +2080,20 @@ static int TestCdResolvesAgainstCommandWorkspace(void)
 
 static int TestCdRollsBackNewWorkspaceOnAgentLimit(void)
 {
+    const int workspace_count = (PICO_MAX_TOTAL_AGENTS + PICO_MAX_AGENTS - 1) / PICO_MAX_AGENTS;
+    /* This scenario needs room to open a workspace after filling the agent
+     * budget. Otherwise workspace capacity rejects /cd before agent creation. */
+    if (workspace_count >= PICO_MAX_WORKSPACES)
+    {
+        return 0;
+    }
     PicoHost *host = NULL;
-    char dirA[] = "/tmp/pico-cdlim-A-XXXXXX";
-    char dirB[] = "/tmp/pico-cdlim-B-XXXXXX";
-    char dirC[] = "/tmp/pico-cdlim-C-XXXXXX";
-    PicoWorkspaceId idA = 0;
-    PicoWorkspaceId idB = 0;
-    PicoAgentCreateOptions opt;
-    PicoAgentId idsA[PICO_MAX_AGENTS];
-    PicoAgentId idsB[PICO_MAX_AGENTS];
-    int i;
-    int count_before;
-
-    if (!mkdtemp(dirA) || !mkdtemp(dirB) || !mkdtemp(dirC))
+    char root[] = "/tmp/pico-cdlim-XXXXXX";
+    char directories[PICO_MAX_WORKSPACES][128] = {{0}};
+    int created = 0;
+    PicoWorkspaceId first = 0;
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    if (!mkdtemp(root))
     {
         Fail("mkdtemp cd rollback");
         return 1;
@@ -2072,52 +2101,58 @@ static int TestCdRollsBackNewWorkspaceOnAgentLimit(void)
     if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
     {
         Fail("host init cd rollback");
-        rmdir(dirA);
-        rmdir(dirB);
-        rmdir(dirC);
+        rmdir(root);
         return 1;
     }
-    if (pico_workspace_open(host, dirA, &idA) != PICO_OK || pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    int total = 0;
+    for (int w = 0; w <= workspace_count; w++)
     {
-        Fail("open workspaces cd rollback");
-        pico_host_free(host);
-        rmdir(dirA);
-        rmdir(dirB);
-        rmdir(dirC);
-        return 1;
-    }
-    memset(&opt, 0, sizeof(opt));
-    opt.kind = PICO_AGENT_MAIN;
-    opt.session_start = PICO_SESSION_NONE;
-    for (i = 0; i < PICO_MAX_AGENTS; i++)
-    {
-        if (pico_main_agent_create(host, idA, &opt, &idsA[i]) != PICO_OK ||
-            pico_main_agent_create(host, idB, &opt, &idsB[i]) != PICO_OK)
+        snprintf(directories[w], sizeof(directories[w]), "%s/workspace-%d", root, w);
+        if (mkdir(directories[w], 0700) != 0)
         {
-            Fail("fill agents for cd rollback");
-            pico_host_free(host);
-            rmdir(dirA);
-            rmdir(dirB);
-            rmdir(dirC);
-            return 1;
+            Fail("mkdir cd rollback workspace");
+            goto done;
+        }
+        created++;
+        if (w == workspace_count)
+        {
+            break;
+        }
+        PicoWorkspaceId workspace = 0;
+        if (pico_workspace_open(host, directories[w], &workspace) != PICO_OK)
+        {
+            Fail("open workspace cd rollback");
+            goto done;
+        }
+        if (w == 0)
+        {
+            first = workspace;
+        }
+        for (int i = 0; i < PICO_MAX_AGENTS && total < PICO_MAX_TOTAL_AGENTS; i++, total++)
+        {
+            PicoAgentId id = 0;
+            if (pico_main_agent_create(host, workspace, &opt, &id) != PICO_OK)
+            {
+                Fail("fill host agent budget for cd rollback");
+                goto done;
+            }
         }
     }
-    count_before = pico_workspace_count(host);
-    if (PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, idA), dirC) ||
+    int count_before = pico_workspace_count(host);
+    if (PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, first), directories[workspace_count]) ||
         pico_workspace_count(host) != count_before)
     {
         Fail("cd must roll back a newly opened workspace when agent creation fails");
-        pico_host_free(host);
-        rmdir(dirA);
-        rmdir(dirB);
-        rmdir(dirC);
-        return 1;
     }
+
+done:
     pico_host_free(host);
-    rmdir(dirA);
-    rmdir(dirB);
-    rmdir(dirC);
-    return 0;
+    for (int i = 0; i < created; i++)
+    {
+        rmdir(directories[i]);
+    }
+    rmdir(root);
+    return g_failed ? 1 : 0;
 }
 
 static int TestCdRejectsClosingWorkspace(void)
@@ -2400,7 +2435,7 @@ static int TestHostSettingsPersistence(void)
     snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", cfg);
     snprintf(legacy_path, sizeof(legacy_path), "%s/pico/host_preferences.json", cfg);
     Pico_MkdirP(config_dir);
-    if (WriteFile(settings_path, "{\n  \"model\": \"keep-me\",\n  \"chat_width\": 110\n}\n") != 0 ||
+    if (WriteFile(settings_path, "{\n  \"model\": \"keep-me\",\n  \"chat_width\": 110,\n  \"font_scale\": 1.25\n}\n") != 0 ||
         WriteFile(legacy_path, legacy_settings) != 0 || chmod(settings_path, 0640) != 0)
     {
         Fail("write unified settings fixtures");
@@ -2416,7 +2451,7 @@ static int TestHostSettingsPersistence(void)
         Fail("pref host init");
         return 1;
     }
-    if (host->preferences.font_scale != 1.0 || host->preferences.chat_width != 110 ||
+    if (host->preferences.font_scale != 1.25 || host->preferences.chat_width != 110 ||
         host->preferences.disabled_host_extension_count != 0)
     {
         Fail("host_preferences.json must not be read");
@@ -5057,64 +5092,59 @@ static int TestMultiWorkspaceAgentLimits(void)
         return 1;
     }
 
-    char dirA[] = "/tmp/pico-ws-limA-XXXXXX";
-    char dirB[] = "/tmp/pico-ws-limB-XXXXXX";
-    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    char directories[PICO_MAX_WORKSPACES][64] = {{0}};
+    int opened = 0;
+    int total = 0;
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+
+    /* Fill workspaces until both the per-workspace and shared host limits have
+     * been exercised. A fresh workspace must still reject at the host limit. */
+    for (int w = 0; w < PICO_MAX_WORKSPACES; w++)
     {
-        Fail("mkdtemp limits test");
-        return 1;
-    }
-
-    PicoWorkspaceId idA = 0, idB = 0;
-    pico_workspace_open(host, dirA, &idA);
-    pico_workspace_open(host, dirB, &idB);
-
-    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
-
-    /* Fill workspace A up to PICO_MAX_AGENTS (16) */
-    PicoAgentId idsA[16];
-    for (int i = 0; i < 16; i++)
-    {
-        if (pico_main_agent_create(host, idA, &opt, &idsA[i]) != PICO_OK)
+        snprintf(directories[w], sizeof(directories[w]), "/tmp/pico-ws-limit-%d-XXXXXX", w);
+        if (!mkdtemp(directories[w]))
         {
-            Fail("create agent in A up to 16");
-            pico_host_free(host);
-            return 1;
+            Fail("mkdtemp limits test");
+            break;
+        }
+        opened++;
+        PicoWorkspaceId workspace = 0;
+        if (pico_workspace_open(host, directories[w], &workspace) != PICO_OK)
+        {
+            Fail("open workspace for capacity test");
+            break;
+        }
+        int available = PICO_MAX_TOTAL_AGENTS - total;
+        int count = available < PICO_MAX_AGENTS ? available : PICO_MAX_AGENTS;
+        for (int i = 0; i < count; i++)
+        {
+            PicoAgentId id = 0;
+            if (pico_main_agent_create(host, workspace, &opt, &id) != PICO_OK || id == 0)
+            {
+                Fail("create agent within workspace and host capacity");
+                goto done;
+            }
+            total++;
+        }
+        PicoAgentId overflow = 0;
+        if (pico_main_agent_create(host, workspace, &opt, &overflow) != PICO_LIMIT ||
+            overflow != 0 || PicoHost_TotalAgentCount(host) != total)
+        {
+            Fail("capacity overflow must reject creation without adding an agent");
+        }
+        if (count < PICO_MAX_AGENTS)
+        {
+            break;
         }
     }
-    PicoAgentId overflowA = 0;
-    if (pico_main_agent_create(host, idA, &opt, &overflowA) != PICO_LIMIT || overflowA != 0)
-    {
-        Fail("17th agent in workspace A should return PICO_LIMIT");
-    }
 
-    /* Fill workspace B with 16 agents (total agents in host = 32) */
-    PicoAgentId idsB[16];
-    for (int i = 0; i < 16; i++)
-    {
-        if (pico_main_agent_create(host, idB, &opt, &idsB[i]) != PICO_OK)
-        {
-            Fail("create agent in B up to 16");
-            pico_host_free(host);
-            return 1;
-        }
-    }
-    if (PicoHost_TotalAgentCount(host) != PICO_MAX_TOTAL_AGENTS)
-    {
-        Fail("total agents in host should reach PICO_MAX_TOTAL_AGENTS (32)");
-    }
-
-    /* 33rd agent in host should return PICO_LIMIT */
-    PicoAgentId overflowB = 0;
-    if (pico_main_agent_create(host, idB, &opt, &overflowB) != PICO_LIMIT || overflowB != 0)
-    {
-        Fail("exceeding PICO_MAX_TOTAL_AGENTS should return PICO_LIMIT");
-    }
-
+done:
     pico_host_free(host);
-    rmdir(dirA);
-    rmdir(dirB);
-    return 0;
+    for (int i = 0; i < opened; i++)
+    {
+        rmdir(directories[i]);
+    }
+    return g_failed ? 1 : 0;
 }
 
 static int TestMultiWorkspaceStaleIds(void)

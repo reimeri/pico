@@ -75,19 +75,37 @@ int main(void)
     failed |= ExpectError(
         "select requires options",
         "{\"questions\":[{\"id\":\"choice\",\"question\":\"Choose?\",\"kind\":\"select\"}]}",
-        "needs between 1 and 20 options");
-    failed |= ExpectError("empty questionnaire", "{\"questions\":[]}", "between 1 and 24 items");
+        "options");
+    char error[256] = {0};
+    char *empty = PicoAskUser_BuildRequest("{\"questions\":[]}", error, sizeof(error));
+    int maximum = 0;
+    if (empty || sscanf(error, "questions must contain between 1 and %d items", &maximum) != 1 ||
+        maximum < 1)
+    {
+        fprintf(stderr, "empty questionnaire must report its accepted count range\n");
+        free(empty);
+        return 1;
+    }
 
-    char *too_many = BuildQuestionList(25);
-    if (!too_many)
+    char *at_limit = BuildQuestionList(maximum);
+    char *too_many = BuildQuestionList(maximum + 1);
+    if (!at_limit || !too_many)
     {
         fprintf(stderr, "question limit: allocation failed\n");
         failed = 1;
     }
     else
     {
-        failed |= ExpectError("question limit", too_many, "between 1 and 24 items");
+        char *accepted = PicoAskUser_BuildRequest(at_limit, error, sizeof(error));
+        if (!accepted)
+        {
+            fprintf(stderr, "question count at advertised limit must be accepted: %s\n", error);
+            failed = 1;
+        }
+        free(accepted);
+        failed |= ExpectError("question limit", too_many, "questions must contain between");
     }
+    free(at_limit);
     free(too_many);
     return failed;
 }

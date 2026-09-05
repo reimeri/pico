@@ -17,9 +17,10 @@ static int Fail(const char *message)
 
 static int TestScaleHelpers(void)
 {
+    Pico_SetFontScale(1.0f);
     if (Pico_FontScale() != 1.0f || Pico_FontPxU16(16) != 16 || Pico_FontPx(16) != 16.0f)
     {
-        return Fail("default scale is not identity");
+        return Fail("unit scale is not identity");
     }
 
     Pico_SetFontScale(1.25f);

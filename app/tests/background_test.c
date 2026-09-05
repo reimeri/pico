@@ -206,7 +206,7 @@ static int TestRollingLog(PicoBgTable *table, const char *cwd)
         return Fail(test, "could not write rolling input");
     }
     fprintf(file, "FIRST_LINE\n");
-    for (i = 0; i < 20000; i++)
+    for (i = 0; i < PICO_BG_LOG_MAX; i++)
     {
         fprintf(file, "PAD-%05d\n", i);
     }

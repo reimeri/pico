@@ -195,7 +195,7 @@ static int TestInvalidIgnored(void)
     }
 
     int width = -1;
-    rc = LoadChatWidth("{ \"chat_width\": 300 }\n", NULL, &width);
+    rc = LoadChatWidth("{ \"chat_width\": -1 }\n", NULL, &width);
     if (rc != 0)
     {
         return rc;

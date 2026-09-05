@@ -256,7 +256,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
 
     CURLcode rc = curl_easy_perform(curl);

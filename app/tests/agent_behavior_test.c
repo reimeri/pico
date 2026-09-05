@@ -27,6 +27,8 @@ typedef enum TestMode {
     TEST_BATCH_TOOLS,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
+    TEST_PROVIDER_THINK_FAIL,
+    TEST_PROVIDER_TEXT_FAIL,
     TEST_PROVIDER_TEXT_BLOCK,
     TEST_SIGNATURE_CONTINUATION,
     TEST_CATALOG_BLOCK,
@@ -94,6 +96,7 @@ typedef struct TestState {
     bool emit_think_summaries;
     bool logged_thinking_parts;
     char logged_thinking[256];
+    char logged_content[256];
     char session_item_order[64];
     int session_message_groups[64];
     int session_message_group_count;
@@ -199,6 +202,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.emit_think_summaries = false;
     g_test.logged_thinking_parts = false;
     g_test.logged_thinking[0] = '\0';
+    g_test.logged_content[0] = '\0';
     g_test.session_item_order[0] = '\0';
     g_test.session_message_group_count = 0;
     g_test.life_turn_end = 0;
@@ -315,6 +319,16 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         snprintf(tool_name, sizeof(tool_name), "ask_test");
         snprintf(tool_args, sizeof(tool_args), "{}");
+    }
+    if (mode == TEST_PROVIDER_THINK_FAIL || mode == TEST_PROVIDER_TEXT_FAIL)
+    {
+        on_delta(user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
+        if (mode == TEST_PROVIDER_TEXT_FAIL)
+        {
+            on_delta(user, PICO_LLM_DELTA_TEXT, "draft", 5);
+        }
+        out->error = JsonDup("Timeout was reached");
+        return PICO_LLM_FAIL;
     }
     if (fail)
     {
@@ -1165,6 +1179,7 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoHost *app, PicoAgent *agent,
         g_test.logged_thinking_parts = true;
     }
     (void)thinking_ms;
+    snprintf(g_test.logged_content, sizeof(g_test.logged_content), "%s", content ? content : "");
     snprintf(g_test.logged_thinking, sizeof(g_test.logged_thinking), "%s", thinking ? thinking : "");
     strncat(g_test.session_item_order, "A",
             sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
@@ -3928,6 +3943,39 @@ static int TestCanonicalContinuationState(void)
     return signature_ok ? 0 : Fail(name, "signature-only assistant state was not sent on the follow-up");
 }
 
+static int TestFailedStreamPersistence(TestMode mode)
+{
+    const char *name = "failed stream persistence";
+    ResetTest(mode, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "failed provider did not finish");
+    }
+    bool logged = TestAgent(&app)->state == PICO_AGENT_ERROR &&
+                  strcmp(g_test.session_item_order, "A") == 0 &&
+                  strcmp(g_test.logged_thinking, "partial-think") == 0 &&
+                  strcmp(g_test.logged_content, mode == TEST_PROVIDER_TEXT_FAIL ? "draft" : "") == 0;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.mode = TEST_SINGLE;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "continue");
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "follow-up after failure did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    bool history = g_test.last_input && strstr(g_test.last_input, "\"thinking\":\"partial-think\"") &&
+                   (mode != TEST_PROVIDER_TEXT_FAIL || strstr(g_test.last_input, "draft"));
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return logged && history ? 0 : Fail(name, "partial output was not saved exactly once and retained for continuation");
+}
+
 static int TestCancelledThinkingPersistence(void)
 {
     const char *name = "cancelled thinking persistence";
@@ -4393,6 +4441,8 @@ int main(void)
     failed |= TestMalformedCanonicalResult();
     failed |= TestMediaPersistenceFailureIsAtomic();
     failed |= TestNonVisionMediaRejected();
+    failed |= TestFailedStreamPersistence(TEST_PROVIDER_THINK_FAIL);
+    failed |= TestFailedStreamPersistence(TEST_PROVIDER_TEXT_FAIL);
     failed |= TestCancelledThinkingPersistence();
     failed |= TestStreamingTextActivity();
     failed |= TestThinkSummaryCoalesce();

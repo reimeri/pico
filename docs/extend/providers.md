@@ -60,6 +60,8 @@ They come from context hooks, are not persisted in history, and must be mapped t
 
 Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_THINKING_SUMMARY`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
 
+If a non-compaction request fails or is cancelled after streaming output, Pico preserves partial text, raw thinking, and reasoning-summary steps in the session. Partial text and raw thinking remain in continuation history. Failed results do not execute tool calls or contribute usage. The SSE HTTP helper has a 600-second total request timeout.
+
 `PICO_LLM_DELTA_THINKING` appends raw thinking. `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current reasoning-summary snapshot (OpenAI-style short titles). A zero-length `THINKING_SUMMARY` starts a new step in that streak; Pico coalesces consecutive summaries until a tool call. The thinking widget title is the latest summary; expanding it shows every step. Durable sessions preserve the ordered steps. After a tool, the next summary starts a new line.
 
 ## Result

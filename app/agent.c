@@ -2019,15 +2019,9 @@ static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
     pico_run_hooks(app, PICO_HOOK_ON_TURN_END, agent->id);
 }
 
-static void ApplyCancel(PicoHost *app, PicoAgent *agent)
+static void SavePartialAssistant(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
-    if (rt->compacting)
-    {
-        GoIdle(app, agent);
-        pico_run_hooks(app, PICO_HOOK_ON_CANCEL, agent->id);
-        return;
-    }
     pthread_mutex_lock(&rt->mu);
     char *thinking = Dup(rt->turn_think);
     pthread_mutex_unlock(&rt->mu);
@@ -2047,6 +2041,18 @@ static void ApplyCancel(PicoHost *app, PicoAgent *agent)
     }
     free(thinking_parts);
     free(thinking);
+}
+
+static void ApplyCancel(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    if (rt->compacting)
+    {
+        GoIdle(app, agent);
+        pico_run_hooks(app, PICO_HOOK_ON_CANCEL, agent->id);
+        return;
+    }
+    SavePartialAssistant(app, agent);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
         PopLastMessage(app, agent);
@@ -3685,6 +3691,10 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
             OnLlmDone(app, agent, ev);
             break;
         case PICO_AEV_LLM_FAIL:
+            if (!rt->compacting)
+            {
+                SavePartialAssistant(app, agent);
+            }
             SetErrorState(app, agent, ev->text ? ev->text : "LLM request failed");
             break;
         case PICO_AEV_LLM_CANCEL:

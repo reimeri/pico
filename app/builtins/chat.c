@@ -114,6 +114,16 @@ typedef struct ChatState {
     ToolWrapCacheSet inspect_tool_wrap;
     int inspect_virtual_ns;
     bool virtual_relayout;
+    uint64_t bottom_identity;
+    float bottom_extent;
+    float bottom_space;
+    float bottom_input_y;
+    float bottom_view_height;
+    float bottom_width;
+    float bottom_font_scale;
+    bool bottom_reset;
+    bool bottom_configured;
+    bool bottom_rebase_pending;
 } ChatState;
 
 static __thread ChatState *s_active_chat_state = NULL;
@@ -1958,6 +1968,91 @@ bool PicoChat_TakeVirtualRelayout(void)
     return relayout;
 }
 
+static ChatState *ChatScrollState(PicoHost *app)
+{
+    return app ? (ChatState *)PicoPlugins_HostState(app, "chat") : NULL;
+}
+
+void PicoChat_ResetBottomSpace(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    if (state)
+    {
+        state->bottom_reset = true;
+    }
+}
+
+void PicoChat_BeginScrollLayout(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (state)
+    {
+        state->bottom_input_y = scroll.found && scroll.scrollPosition ? scroll.scrollPosition->y : 0.0f;
+    }
+}
+
+bool PicoChat_StabilizeScrollLayout(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    Clay_ElementData spacer = Clay_GetElementData(CLAY_ID("ChatStabilizationSpacer"));
+    Clay_ElementData content = Clay_GetElementData(CLAY_ID("ChatContent"));
+    if (!state || !scroll.found || !scroll.scrollPosition || !spacer.found || !content.found)
+    {
+        return false;
+    }
+    /* Subtract the actual laid-out temporary space, never the newly requested
+     * space. The permanent overlay clearance remains part of natural height. */
+    /* Clay's scroll contentDimensions can lag the child's bounds during a
+     * same-frame correction. Mixing that old extent with the new spacer would
+     * retain the spacer itself as content and ratchet the high-water mark. */
+    float natural = fmaxf(0.0f, content.boundingBox.height - spacer.boundingBox.height);
+    float viewport = scroll.scrollContainerDimensions.height;
+    float width = content.boundingBox.width;
+    bool geometry_changed = !state->bottom_configured ||
+                            fabsf(viewport - state->bottom_view_height) > 0.01f ||
+                            fabsf(width - state->bottom_width) > 0.01f ||
+                            state->bottom_font_scale != Pico_FontScale();
+    bool rebase = state->bottom_reset || geometry_changed || state->bottom_rebase_pending;
+    /* Offscreen virtual spacers can still describe the old geometry. Measure
+     * all rows in the correction pass before committing the new baseline. */
+    state->bottom_rebase_pending = geometry_changed;
+    if (geometry_changed)
+    {
+        state->main_virtual.measure_all = true;
+    }
+    state->bottom_reset = false;
+    state->bottom_configured = true;
+    state->bottom_view_height = viewport;
+    state->bottom_width = width;
+    state->bottom_font_scale = Pico_FontScale();
+    if (rebase)
+    {
+        state->bottom_extent = natural;
+        state->bottom_space = 0.0f;
+    }
+    if (app->chat_follow_bottom)
+    {
+        state->bottom_extent = fmaxf(state->bottom_extent, natural);
+        state->bottom_space = state->bottom_extent - natural;
+    }
+    else
+    {
+        /* Only reclaim space; scrolling through history must not create it. */
+        float needed = fmaxf(0.0f, -state->bottom_input_y + viewport - natural);
+        state->bottom_space = fminf(state->bottom_space, needed);
+        state->bottom_extent = natural + state->bottom_space;
+    }
+    float bottom = fminf(0.0f, viewport - natural - state->bottom_space);
+    float target = app->chat_follow_bottom ? bottom : fmaxf(bottom, fminf(0.0f, state->bottom_input_y));
+    bool changed = fabsf(scroll.contentDimensions.height - natural - state->bottom_space) > 0.01f ||
+                   fabsf(spacer.boundingBox.height - state->bottom_space) > 0.01f ||
+                   fabsf(scroll.scrollPosition->y - target) > 0.01f;
+    scroll.scrollPosition->y = target;
+    return changed || geometry_changed;
+}
+
 void PicoChat_Render(PicoHost *app, void *state)
 {
     PicoAgent *active;
@@ -1967,6 +2062,17 @@ void PicoChat_Render(PicoHost *app, void *state)
         return;
     }
     active = PicoHost_SelectedAgent(app);
+    TranscriptView identity_view = {.owner = active};
+    uint64_t identity = active && active->message_count
+                            ? RevisionMix(TranscriptIdentity(&identity_view), app->chat_transcript_revision)
+                            : 0;
+    if (s_active_chat_state->bottom_identity != identity)
+    {
+        s_active_chat_state->bottom_identity = identity;
+        s_active_chat_state->bottom_space = 0.0f;
+        s_active_chat_state->bottom_extent = 0.0f;
+        s_active_chat_state->bottom_reset = true;
+    }
     app->hovered_tool = false;
     ThinkFrameReset();
     PicoChatSel_BeginFrame(active ? active->message_count : 0);
@@ -2023,6 +2129,11 @@ void PicoChat_Render(PicoHost *app, void *state)
                     CLAY(CLAY_ID("ChatBottomSpacer"),
                          {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
                                                 .height = CLAY_SIZING_FIXED(TRANSCRIPT_BOTTOM_SPACER)}}})
+                    {
+                    }
+                    CLAY(CLAY_ID("ChatStabilizationSpacer"),
+                         {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                               .height = CLAY_SIZING_FIXED(s_active_chat_state->bottom_space)}}})
                     {
                     }
                 }
@@ -2814,6 +2925,10 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
                 HitTraceGroup(&main, app->chat_sel.tool_msg))
             {
                 msg->trace_group_expanded = !msg->trace_group_expanded;
+                if (!msg->trace_group_expanded && app->chat_follow_bottom)
+                {
+                    PicoChat_ResetBottomSpace(app);
+                }
             }
             else if (app->chat_sel.pressed_tool)
             {

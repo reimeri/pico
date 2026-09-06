@@ -9,6 +9,10 @@ struct PicoWorkspace;
 struct PicoToolRowEvent;
 
 void PicoChat_InspectClose(void);
+/* Private shell integration: retain automatic shrink space, then correct before present. */
+void PicoChat_ResetBottomSpace(struct PicoHost *app);
+void PicoChat_BeginScrollLayout(struct PicoHost *app);
+bool PicoChat_StabilizeScrollLayout(struct PicoHost *app);
 void PicoChat_HarvestVirtualHeights(struct PicoHost *app);
 bool PicoChat_TakeVirtualRelayout(void);
 void PicoChat_UpdateInspectFollowFromUserScroll(struct PicoHost *app, float wheel_y);

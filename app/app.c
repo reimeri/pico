@@ -2667,6 +2667,11 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
     {
         return;
     }
+    PicoHost *host = agent->workspace ? agent->workspace->host : NULL;
+    if (host && host->selected_agent_id == agent->id)
+    {
+        host->chat_transcript_revision++;
+    }
     for (int i = 0; i < agent->message_count; i++)
     {
         free(agent->messages[i].source);
@@ -2771,7 +2776,7 @@ PicoHostShutdownResult pico_host_free(PicoHost *host)
     return result;
 }
 
-Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_height, float delta_time)
+static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_height, float delta_time)
 {
     Clay_BeginLayout();
     MdView_BeginFrame();
@@ -2835,6 +2840,19 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
 
     app->hovered_link = MdView_HoveredLink();
     return Clay_EndLayout(delta_time);
+}
+
+Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_height, float delta_time)
+{
+    PicoChat_BeginScrollLayout(app);
+    Clay_RenderCommandArray commands = LayoutShellPass(app, viewport_height, delta_time);
+    /* Correct shrink-induced clamping before presenting. A second correction
+     * accommodates the new spacer's measured extent; never iterate unboundedly. */
+    for (int pass = 0; pass < 2 && PicoChat_StabilizeScrollLayout(app); pass++)
+    {
+        commands = LayoutShellPass(app, viewport_height, 0.0f);
+    }
+    return commands;
 }
 
 static void UpdateChatScrollbarDrag(PicoHost *app)

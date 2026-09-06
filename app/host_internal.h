@@ -138,6 +138,7 @@ struct PicoHost {
     PicoScrollbar composer_scrollbar;
     PicoChatSelect chat_sel;
     bool chat_follow_bottom;
+    uint64_t chat_transcript_revision; /* Invalidates retained extent on same-session replacement. */
     bool chat_overflow;
     bool composer_overflow;
     bool reinitialize_clay;

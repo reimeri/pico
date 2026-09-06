@@ -262,6 +262,564 @@ static bool ShellVerticallyContains(Clay_BoundingBox outer, Clay_BoundingBox inn
            inner.y + inner.height <= outer.y + outer.height + tolerance;
 }
 
+static Clay_ElementId MainTraceRowId(int message_index, int trace_index, const char *label);
+static float TraceRowHeight(Clay_ElementId id, bool *found);
+
+typedef struct ChatStabilitySnapshot {
+    Clay_BoundingBox root;
+    Clay_BoundingBox body;
+    Clay_BoundingBox sidebar;
+    Clay_BoundingBox right;
+    Clay_BoundingBox main;
+    Clay_BoundingBox chat;
+    Clay_BoundingBox composer;
+    Clay_BoundingBox footer;
+    Clay_BoundingBox bottom;
+    Clay_BoundingBox stabilization;
+    float content_height;
+    bool stabilization_found;
+    float container_height;
+    float scroll_y;
+} ChatStabilitySnapshot;
+
+static bool CaptureChatStabilitySnapshot(bool with_sidebar, ChatStabilitySnapshot *out)
+{
+    Clay_ElementData root = Clay_GetElementData(CLAY_ID("Root"));
+    Clay_ElementData body = Clay_GetElementData(CLAY_ID("Body"));
+    Clay_ElementData sidebar = Clay_GetElementData(CLAY_ID("Sidebar"));
+    Clay_ElementData right = Clay_GetElementData(CLAY_ID("RightColumn"));
+    Clay_ElementData main = Clay_GetElementData(CLAY_ID("MainColumn"));
+    Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    Clay_ElementData composer = Clay_GetElementData(CLAY_ID("ComposerAlign"));
+    Clay_ElementData footer = Clay_GetElementData(CLAY_ID("Footer"));
+    Clay_ElementData bottom = Clay_GetElementData(CLAY_ID("ChatBottomSpacer"));
+    Clay_ElementData stabilization = Clay_GetElementData(CLAY_ID("ChatStabilizationSpacer"));
+    Clay_ScrollContainerData scroll =
+        Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+
+    if (!root.found || !body.found || !right.found || !main.found || !chat.found ||
+        !composer.found || !footer.found || !bottom.found ||
+        (with_sidebar && !sidebar.found) || (!with_sidebar && sidebar.found) ||
+        !scroll.found || !scroll.scrollPosition)
+    {
+        return false;
+    }
+    out->root = root.boundingBox;
+    out->body = body.boundingBox;
+    out->sidebar = sidebar.boundingBox;
+    out->right = right.boundingBox;
+    out->main = main.boundingBox;
+    out->chat = chat.boundingBox;
+    out->composer = composer.boundingBox;
+    out->footer = footer.boundingBox;
+    out->bottom = bottom.boundingBox;
+    out->stabilization = stabilization.boundingBox;
+    out->stabilization_found = stabilization.found;
+    out->content_height = scroll.contentDimensions.height;
+    out->container_height = scroll.scrollContainerDimensions.height;
+    out->scroll_y = scroll.scrollPosition->y;
+    return true;
+}
+
+static bool ChatStabilitySnapshotStable(const ChatStabilitySnapshot *a,
+                                        const ChatStabilitySnapshot *b,
+                                        bool with_sidebar)
+{
+    return ShellBoxStable(a->root, b->root) && ShellBoxStable(a->body, b->body) &&
+           (!with_sidebar || ShellBoxStable(a->sidebar, b->sidebar)) &&
+           ShellBoxStable(a->right, b->right) && ShellBoxStable(a->main, b->main) &&
+           ShellBoxStable(a->chat, b->chat) && ShellBoxStable(a->composer, b->composer) &&
+           ShellBoxStable(a->footer, b->footer) && ShellBoxStable(a->bottom, b->bottom) &&
+           a->stabilization_found == b->stabilization_found &&
+           (!a->stabilization_found || ShellBoxStable(a->stabilization, b->stabilization)) &&
+           fabsf(a->content_height - b->content_height) <= 0.001f &&
+           fabsf(a->container_height - b->container_height) <= 0.001f &&
+           fabsf(a->scroll_y - b->scroll_y) <= 0.001f;
+}
+
+static void LayoutChatStabilityFrame(PicoHost *host, const Clay_Dimensions viewport)
+{
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    PicoChat_HarvestVirtualHeights(host);
+}
+
+/* Exercise the real chat rather than a shell stand-in. A group of completed
+ * tool rows gives us a deterministic, product-level shrink: the visible rows
+ * become one finished-trace header. The assertions intentionally compare the
+ * resulting relationship between the two spacers and the scroll state rather
+ * than the configured spacer heights. */
+static int RunChatRetainedSpacerCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-chat-stabilize-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-chat-stabilize-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    ChatStabilitySnapshot open = {0};
+    ChatStabilitySnapshot collapsed = {0};
+    ChatStabilitySnapshot ended = {0};
+    ChatStabilitySnapshot grown = {0};
+    ChatStabilitySnapshot reset = {0};
+    ChatStabilitySnapshot second_open = {0};
+    ChatStabilitySnapshot second_collapsed = {0};
+    ChatStabilitySnapshot away = {0};
+    ChatStabilitySnapshot away_final = {0};
+    Clay_BoundingBox away_anchor = {0};
+    Clay_BoundingBox away_anchor_final = {0};
+    int trace_message;
+    bool f_tool = false;
+    bool f_group = false;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir))
+    {
+        free(memory);
+        Fail("chat stabilization setup");
+        return 1;
+    }
+    if (!mkdtemp(cfg))
+    {
+        free(memory);
+        rmdir(dir);
+        Fail("chat stabilization config setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("chat stabilization host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (!with_sidebar)
+    {
+        host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    }
+    else if (host->view_count[PICO_SLOT_SIDEBAR] <= 0)
+    {
+        Fail("chat stabilization sidebar was not registered");
+        goto done;
+    }
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("chat stabilization open workspace");
+        goto done;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("chat stabilization create agent");
+        goto done;
+    }
+
+    /* Keep enough history to make every change an overflowing-chat case. */
+    for (int i = 0; i < 28; i++)
+    {
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "retained spacer history message");
+    }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    trace_message = agent->message_count - 1;
+    for (int i = 0; i < 8; i++)
+    {
+        char call_id[32];
+        snprintf(call_id, sizeof(call_id), "stabilize-%d", i);
+        PicoAgent_AddToolCallWithId(host, agent, call_id, "read", "{}");
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+        agent->messages[trace_message].trace[i].tool_done_t0 = 0.0;
+    }
+    agent->messages[trace_message].trace_group_expanded = true;
+    agent->state = PICO_AGENT_TOOL_WAIT;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("chat stabilization Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    host->chat_follow_bottom = true;
+    PicoChat_ResetBottomSpace(host);
+    for (int frame = 0; frame < 5; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    {
+        Clay_ScrollContainerData scroll =
+            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (!scroll.found || !scroll.scrollPosition)
+        {
+            Fail("chat stabilization could not establish the initial bottom");
+            goto done;
+        }
+    }
+    for (int frame = 0; frame < 4; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &open))
+    {
+        Fail("chat stabilization could not capture the open layout");
+        goto done;
+    }
+    if (TraceRowHeight(MainTraceRowId(trace_message, 0, "ToolRow"), &f_tool) <= 0.0f || !f_tool)
+    {
+        Fail("chat stabilization did not render the open tool rows");
+        goto done;
+    }
+    {
+        float overflow = open.content_height - open.container_height;
+        if (overflow <= 0.0f || fabsf(open.scroll_y + overflow) > 0.5f)
+        {
+            Fail("chat stabilization open layout was not at the overflowing bottom");
+            goto done;
+        }
+    }
+
+    /* A direct completion/grouping transition shrinks the real transcript. */
+    for (int i = 0; i < 8; i++)
+    {
+        char call_id[32];
+        snprintf(call_id, sizeof(call_id), "stabilize-%d", i);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+    }
+    agent->messages[trace_message].trace_group_expanded = false;
+    for (int i = 0; i < agent->messages[trace_message].trace_count; i++)
+    {
+        agent->messages[trace_message].trace[i].tool_done_t0 = 0.0;
+    }
+    for (int frame = 0; frame < 10; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &collapsed))
+        {
+            Fail("chat stabilization could not capture the collapsed layout");
+            goto done;
+        }
+        if (fabsf(collapsed.scroll_y - open.scroll_y) > 0.5f)
+        {
+            Fail("grouping must preserve the scroll offset on every presented frame");
+            goto done;
+        }
+    }
+    (void)TraceRowHeight(MainTraceRowId(trace_message, 0, "ToolRow"), &f_tool);
+    (void)TraceRowHeight(MainTraceRowId(trace_message, 0, "TraceGroupRow"), &f_group);
+    if (!f_group || f_tool || collapsed.stabilization.height <= open.stabilization.height + 0.5f ||
+        fabsf(collapsed.content_height - open.content_height) > 0.5f ||
+        fabsf(collapsed.scroll_y - open.scroll_y) > 0.5f)
+    {
+        Fail("bottom-follow shrink must retain the effective extent and offset");
+        goto done;
+    }
+    if (fabsf(collapsed.bottom.height - open.bottom.height) > 0.001f)
+    {
+        Fail("transcript shrink must not replace the real bottom clearance spacer");
+        goto done;
+    }
+
+    /* Once retained, repeated direct layout passes must not accumulate space or
+     * feed a Clay remainder back into any shell pane. */
+    {
+        ChatStabilitySnapshot stable = collapsed;
+        for (int frame = 0; frame < 60; frame++)
+        {
+            LayoutChatStabilityFrame(host, viewport);
+            ChatStabilitySnapshot now;
+            if (!CaptureChatStabilitySnapshot(with_sidebar, &now) ||
+                !ChatStabilitySnapshotStable(&stable, &now, with_sidebar))
+            {
+                Fail(with_sidebar ? "retained chat geometry accumulated with sidebar"
+                                  : "retained chat geometry accumulated without sidebar");
+                goto done;
+            }
+        }
+    }
+
+    /* Repeated equivalent expand/group cycles must not ratchet the extent. */
+    for (int cycle = 0; cycle < 5; cycle++)
+    {
+        agent->messages[trace_message].trace_group_expanded = true;
+        for (int frame = 0; frame < 3; frame++)
+        {
+            LayoutChatStabilityFrame(host, viewport);
+        }
+        agent->messages[trace_message].trace_group_expanded = false;
+        for (int frame = 0; frame < 3; frame++)
+        {
+            LayoutChatStabilityFrame(host, viewport);
+        }
+        ChatStabilitySnapshot now;
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &now) ||
+            !ChatStabilitySnapshotStable(&collapsed, &now, with_sidebar))
+        {
+            Fail("repeated grouping must not accumulate artificial scroll extent");
+            goto done;
+        }
+    }
+
+    /* Completing a turn is not an explicit request to jump to bottom. */
+    agent->state = PICO_AGENT_IDLE;
+    pico_run_hooks(host, PICO_HOOK_ON_TURN_END, agent->id);
+    for (int frame = 0; frame < 6; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &ended) ||
+        ended.stabilization.height <= 0.5f ||
+        !ChatStabilitySnapshotStable(&collapsed, &ended, with_sidebar))
+    {
+        Fail("turn end must not reset retained bottom space");
+        goto done;
+    }
+
+    /* A small message growth consumes retained space rather than adding a
+     * second independent spacer or changing the effective bottom. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, "one small growth message");
+    for (int frame = 0; frame < 8; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &grown) ||
+        !grown.stabilization_found ||
+        grown.stabilization.height >= ended.stabilization.height - 0.5f ||
+        fabsf(grown.content_height - ended.content_height) > 0.5f ||
+        fabsf(grown.scroll_y - ended.scroll_y) > 0.5f)
+    {
+        Fail("chat growth must consume retained bottom space before growing extent");
+        goto done;
+    }
+
+    /* An actual user group collapse must reset retention, not just a direct
+     * call to the reset helper. Reopen it, then release on the group header. */
+    agent->messages[trace_message].trace_group_expanded = true;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    {
+        Clay_ElementData group = Clay_GetElementData(MainTraceRowId(trace_message, 0, "TraceGroupRow"));
+        if (!group.found)
+        {
+            Fail("manual collapse requires a visible group header");
+            goto done;
+        }
+        Clay_SetPointerState((Clay_Vector2){group.boundingBox.x + 8.0f,
+                                           group.boundingBox.y + group.boundingBox.height / 2.0f}, false);
+        host->chat_sel.mouse_selecting = true;
+        host->chat_sel.pressed_group = true;
+        host->chat_sel.tool_msg = trace_message;
+        PicoChat_HandlePointer(host, NULL, NULL);
+        if (agent->messages[trace_message].trace_group_expanded)
+        {
+            Fail("pointer release must collapse the group");
+            goto done;
+        }
+        Clay_SetPointerState((Clay_Vector2){0}, false);
+    }
+    for (int frame = 0; frame < 6; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &reset))
+    {
+        Fail("explicit bottom request could not capture the reset layout");
+        goto done;
+    }
+    {
+        float reset_overflow = reset.content_height - reset.container_height;
+        if (reset.stabilization.height > 0.5f ||
+            reset.content_height >= grown.content_height - 0.5f ||
+            reset.bottom.height <= 0.0f || reset_overflow <= 0.0f ||
+            fabsf(reset.scroll_y + reset_overflow) > 0.5f)
+        {
+            Fail("explicit bottom request must clear retention but keep bottom clearance");
+            goto done;
+        }
+    }
+
+    /* Recreate a retained shrink, then leave the bottom. Space that is below a
+     * top-scrolled viewport is safe to reclaim; it must not pin the user back
+     * to bottom or move the visible top message on later passes. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    trace_message = agent->message_count - 1;
+    for (int i = 0; i < 6; i++)
+    {
+        char call_id[32];
+        snprintf(call_id, sizeof(call_id), "away-%d", i);
+        PicoAgent_AddToolCallWithId(host, agent, call_id, "read", "{}");
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+        agent->messages[trace_message].trace[i].tool_done_t0 = 0.0;
+    }
+    agent->messages[trace_message].trace_group_expanded = true;
+    agent->state = PICO_AGENT_TOOL_WAIT;
+    for (int frame = 0; frame < 6; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &second_open) ||
+        second_open.scroll_y >= reset.scroll_y - 0.5f ||
+        second_open.stabilization.height > 0.5f)
+    {
+        Fail("new output beyond retained space must resume downward following");
+        goto done;
+    }
+    for (int i = 0; i < 6; i++)
+    {
+        char call_id[32];
+        snprintf(call_id, sizeof(call_id), "away-%d", i);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+    }
+    agent->messages[trace_message].trace_group_expanded = false;
+    for (int i = 0; i < agent->messages[trace_message].trace_count; i++)
+    {
+        agent->messages[trace_message].trace[i].tool_done_t0 = 0.0;
+    }
+    for (int frame = 0; frame < 10; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &second_collapsed) ||
+        second_collapsed.stabilization.height <= 0.5f)
+    {
+        Fail("second chat shrink did not retain bottom space");
+        goto done;
+    }
+    {
+        Clay_ScrollContainerData scroll =
+            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (!scroll.found || !scroll.scrollPosition)
+        {
+            Fail("chat stabilization missing scroll state when leaving bottom");
+            goto done;
+        }
+        host->chat_follow_bottom = false;
+        scroll.scrollPosition->y = 0.0f;
+    }
+    LayoutChatStabilityFrame(host, viewport);
+    {
+        Clay_ElementData anchor = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+        if (!anchor.found)
+        {
+            Fail("scrolling away must keep the visible transcript anchor mounted");
+            goto done;
+        }
+        away_anchor = anchor.boundingBox;
+    }
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &away))
+    {
+        Fail("chat stabilization could not capture the scrolled-away layout");
+        goto done;
+    }
+    for (int frame = 0; frame < 20; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    away_anchor_final = Clay_GetElementData(CLAY_IDI("MsgMain", 0)).boundingBox;
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &away_final) ||
+        away_final.stabilization.height >= second_collapsed.stabilization.height - 0.5f ||
+        away_final.scroll_y > 0.5f ||
+        !ShellBoxStable(away_anchor, away_anchor_final))
+    {
+        Fail("scrolling away must reclaim only safe retained space");
+        goto done;
+    }
+
+    /* Recreate retention and change actual width allocation without changing
+     * window dimensions. Geometry changes must not inherit old pixel space. */
+    host->chat_follow_bottom = true;
+    agent->messages[trace_message].trace_group_expanded = true;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    agent->messages[trace_message].trace_group_expanded = false;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (with_sidebar)
+    {
+        host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    }
+    else
+    {
+        ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    }
+    for (int frame = 0; frame < 4; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    ChatStabilitySnapshot rebased;
+    if (!CaptureChatStabilitySnapshot(!with_sidebar, &rebased) ||
+        rebased.stabilization.height > 0.5f)
+    {
+        Fail("changed chat width must rebase retained space");
+        goto done;
+    }
+
+    /* Clear and repopulate in one frame: agent/session identity is unchanged. */
+    agent->messages[trace_message].trace_group_expanded = true;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    agent->messages[trace_message].trace_group_expanded = false;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    PicoHost_ClearMessages(host, agent_id);
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, "replacement transcript");
+    for (int frame = 0; frame < 4; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(!with_sidebar, &rebased) ||
+        rebased.stabilization.height > 0.5f || fabsf(rebased.scroll_y) > 0.5f)
+    {
+        Fail("replaced transcript must not inherit old scroll extent");
+        goto done;
+    }
+
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 static int RunShellStabilityCase(bool with_sidebar)
 {
     const Clay_Dimensions viewport = {1714, 1392};
@@ -954,6 +1512,14 @@ static int TestBottomFollowShellGeometryStable(void)
         return 1;
     }
     if (RunShellStabilityCase(true) != 0)
+    {
+        return 1;
+    }
+    if (RunChatRetainedSpacerCase(false) != 0)
+    {
+        return 1;
+    }
+    if (RunChatRetainedSpacerCase(true) != 0)
     {
         return 1;
     }

@@ -36,11 +36,17 @@ Profiles are parsed as JSONC, so line and block comments are allowed.
   "effort": "low",
 
   // Optional exact-name tool allowlist.
-  "tools": ["sh"]
+  "tools": ["sh"],
+
+  // Explicit opt-in to overlap other calls in the parent's batch. Default false.
+  "parallel_safe": true,
+
+  // Optional concurrency limit for this child's parallel-eligible tools (1–16).
+  "max_parallel_tools": 2
 }
 ```
 
-`purpose` is required and non-empty. `description`, `model`, `effort`, and `tools` are optional. Unknown keys warn but do not invalidate the file. Wrong types, invalid or oversized values, duplicate or unknown tools, unknown models, and unsupported efforts make only that profile unavailable; other valid profiles still load.
+`purpose` is required and non-empty. `description`, `model`, `effort`, `tools`, `parallel_safe`, and `max_parallel_tools` are optional. Unknown keys warn but do not invalidate the file. Wrong types, invalid or oversized values, duplicate or unknown tools, unknown models, and unsupported efforts make only that profile unavailable; other valid profiles still load.
 
 Omitting `tools` allows every registered tool. An empty array allows no tools. A non-empty array exposes only those exact tool names. This is authorization at Pico's tool-catalog and execution boundaries, **not a sandbox**. In particular, allowing `sh` does not restrict which files or commands the shell can access.
 
@@ -71,9 +77,33 @@ The model-facing tool accepts:
 
 The result identifies the profile, resolved model and effort, status, final answer, and whether the child can be resumed. A reusable result also includes its exact `session_id`. If `profile` is not a discovered name, the tool fails and the error lists the profiles that are currently available.
 
+## Parallel delegation
+
+Ask the model to issue independent `subagent` calls whose profiles declare `parallel_safe: true` together in one response. Pico runs eligible calls concurrently up to the parent's effective `max_parallel_tools` limit (default 4). There is no wrapper tool. Each sibling has its own transcript, result, inspection row, asks, and cancellation ownership. A failed child does not cancel siblings; cancelling the parent cancels all outstanding descendants. The parent makes its next model request only after every call in the response settles.
+
+`parallel_safe` is a strict boolean, **default false**. A missing or false value makes that profile's delegation a sequential barrier: earlier calls must finish before it starts, and later calls wait until it finishes. For example, `explore → worker → review` executes in that order if worker has not opted in, even if explore/review are parallel-safe. Invalid or unknown profiles are conservatively scheduled as barriers and return normal tool errors.
+
+This is **parent-batch ordering, not workspace-wide exclusivity**. Another parent or independently running agent may still operate concurrently. Use it for a worker profile that must not overlap siblings; do not mistake it for filesystem locking or a sandbox. The setting is never inferred from the purpose text or tool allowlist.
+
+A worker definition can omit the field or be explicit:
+
+```json
+{
+  "purpose": "Implement the delegated changes.",
+  "parallel_safe": false,
+  "tools": ["sh"]
+}
+```
+
+Pico snapshots eligibility before any calls in a response start. Before-tool hooks may edit a delegation's `task` or deny the call, but cannot change `profile` or `session_id` (including adding/removing `session_id`); such rewrites return a controlled error without starting a child. Equivalent JSON string encoding/key order is allowed. Profile changes on reload affect future batches, not already accepted work.
+
+Set `max_parallel_tools` in user-global or workspace `settings.json` (integer 1–16). `parallel_safe` controls whether this delegation may overlap calls in the parent; `max_parallel_tools` controls **that child's** tool concurrency. A profile limit override controls that child only; omission uses the workspace setting, not the parent's profile override. The limit is copied for each accepted turn. A limit of 1 serializes eligible calls. Other builtins, including `sh`, remain sequential within one agent initially; separate child agents can still execute their own `sh` calls concurrently. Existing workspace/host agent caps remain enforced and return tool errors when exhausted.
+
+The bundled exploration and review profiles explicitly set `parallel_safe: true` and request read-only work through their purpose instructions. They do not enforce filesystem restrictions. Parallel-safe registration is a reentrancy contract, not a sandbox or proof of independence. See [extension tool contracts](extend/tools.md#execution-policy-and-parallel-calls).
+
 ## Continuing a child session
 
-Pass the exact previous child `session_id` with the same profile name. Pico reserves and replays that JSONL session, then refreshes purpose, model, effort, and tools from the current profile. This preserves the child's conversation while applying updated policy. A session cannot be open twice or continued under a different profile.
+Pass the exact previous child `session_id` with the same profile name. Pico reserves and replays that JSONL session, then refreshes purpose, model, effort, tools, and concurrency policy from the current profile. This preserves the child's conversation while applying updated policy. A session cannot be open twice or continued under a different profile.
 
 `/resume` autocomplete lists parent sessions only. A child remains openable by typing its session ID.
 

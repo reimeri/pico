@@ -149,7 +149,7 @@ static int ModalWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
     pico_add_tool(workspace, "modal_demo", "Open the example overlay from its tool row", kParams, ModalDemoRun,
-                  NULL);
+                  NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_tool_row_hook(workspace, ModalToolRow);
     return 0;
 }

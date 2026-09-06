@@ -863,7 +863,7 @@ static void ToolAddFail(PicoHost *host, const char *name, const char *reason)
 }
 
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
-                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply)
+                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply, PicoToolExecution execution)
 {
     PicoHost *host;
     if (!workspace || !workspace->host)
@@ -884,6 +884,11 @@ bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *descr
     if (!run)
     {
         ToolAddFail(host, name, "missing run function");
+        return false;
+    }
+    if (execution != PICO_TOOL_SEQUENTIAL && execution != PICO_TOOL_PARALLEL)
+    {
+        ToolAddFail(host, name, "invalid execution policy");
         return false;
     }
     const char *params_err = ToolParamsError(params_json);
@@ -923,6 +928,7 @@ bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *descr
     t.params_json = params_json;
     t.run = run;
     t.apply = apply;
+    t.execution = execution;
     host->staging.ws_tools[host->staging.ws_tool_count++] = t;
     return true;
 }

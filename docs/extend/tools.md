@@ -37,12 +37,34 @@ static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult
 static int EchoInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(workspace, "echo", "Echo text back", kParams, EchoRun, NULL);
+    pico_add_tool(workspace, "echo", "Echo text back", kParams, EchoRun, NULL, PICO_TOOL_SEQUENTIAL);
     return 0;
 }
 ```
 
 Full file: [`../../examples/echo_tool.c`](../../examples/echo_tool.c). Builtin reference: [`../../builtins/shell.c`](../../builtins/shell.c) (`sh`). Background processes: [`../../builtins/background.c`](../../builtins/background.c) (`run_background`, `kill_background`, `list_background`, `log_background`). Those jobs outlive the tool call, are local to one agent, and keep only the latest 64 KiB of output (oldest lines dropped). They do not use `pico_tool_set_child` or `details_json`. Asking the user: [`../../examples/ask_tool.c`](../../examples/ask_tool.c) (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: [`../../examples/permit_tool.c`](../../examples/permit_tool.c) (a before-tool hook).
+
+## Execution policy and parallel calls
+
+The final argument to `pico_add_tool` is a required `PicoToolExecution`:
+
+- `PICO_TOOL_SEQUENTIAL` — runs alone within that agent's batch and acts as an ordering barrier.
+- `PICO_TOOL_PARALLEL` — may overlap other parallel-eligible calls, including another invocation of the same tool for the same agent.
+
+```c
+pico_add_tool(workspace, "inspect", "Inspect independent inputs", kParams,
+              InspectRun, NULL, PICO_TOOL_PARALLEL);
+```
+
+Opt in only when the tool callback and its shared extension state support same-agent concurrency. This is an execution/reentrancy promise, **not** a claim that every pair of arguments is independent or that the tool is read-only. The model must issue dependent work in later responses. Before-tool hooks must support concurrent calls for the same agent regardless of which tools their extension registers. Main-thread apply callbacks and after-tool hooks remain serialized, but may run while sibling worker callbacks are active; synchronize shared state accordingly.
+
+Pico uses native multiple tool calls from one provider response; there is no parallel wrapper tool. Eligible calls start in response order up to the effective `max_parallel_tools` limit. A free slot immediately admits the next eligible call before a barrier. For `A(parallel), B(parallel), C(sequential), D(parallel)`, A and B may overlap; C waits for both, runs alone, then D starts. Sequential means per-agent, not a workspace-wide lock: different agents have always been able to overlap.
+
+`max_parallel_tools` is an integer from 1–16, default 4, in user-global or workspace `settings.json`. A subagent profile can override it for that child; omission uses the workspace setting, not the parent's override. The effective limit is copied when a turn starts. A value of 1 serializes the batch. Invalid settings retain the inherited/default value and warn; invalid profile values reject that profile. Only builtin `subagent` opts into parallel execution initially, and its calls additionally require the selected profile to declare `parallel_safe: true`. Omission/false makes that delegation a parent-batch barrier. Other builtins remain sequential.
+
+All calls are validated before dispatch. Subagent eligibility is snapshotted from the profile before the batch starts; invalid/unknown profiles are conservative barriers. A before-tool hook that changes `profile` or `session_id` (including adding/removing it) returns a controlled tool error without invoking the delegation. Task edits, denial, and equivalent JSON string representations remain allowed. Pico retains execution policy, callback, apply callback, and state from the offered-tool snapshot. Results are applied, logged, and displayed as they finish, in completion order, associated by call ID. Transcript rows keep response order and independently show queued/running/completed state. The next model request waits for the entire batch. Tool errors, denial, and dispatch failures do not cancel siblings.
+
+Cancellation stops dispatching queued calls and wakes every active ask and delegation. Ordinary callbacks remain cooperative and may run until they return. Force-cancel retires the entire batch, kills every registered process group, and prevents late results from publishing into a replacement generation. Completed results are preserved. Reload and shutdown retain everything reachable by **all** unfinished workers, not just the most recently started call.
 
 ## Asking the user
 
@@ -64,7 +86,7 @@ out->output = answer; /* malloc'd; Pico frees it */
 - `PICO_ASK_OK` — `*answer_json` is malloc'd; the caller frees it (or assigns it to `out->output`). This includes the immediate error answer for an invalid payload.
 - `PICO_ASK_CANCEL` / `PICO_ASK_FAIL` — `*answer_json` is always `NULL`. Return promptly; do not ask again after cancel.
 - Request/answer copies are capped at `PICO_TOOL_ASK_MAX_REQUEST` / `PICO_TOOL_ASK_MAX_ANSWER` (64 KiB). Oversized values fail / are rejected.
-- Nested asks (ask while already waiting) fail. Sequential asks in one tool are allowed; each gets a new `id`.
+- Nested asks within one call (ask while already waiting) fail. Different simultaneous calls may each have a pending ask. Sequential asks in one tool are allowed; each gets a new `id`.
 
 Main thread:
 
@@ -133,7 +155,7 @@ pico_ui_post(ctx, "web_search", PICO_UI_POST_TEXT, chunk, n);
 
 - Worker only (`PicoToolFn` or `PicoToolBeforeFn`). Inactive/force-cancelled generations are dropped. Do not wait on your own condvar.
 - `PICO_UI_POST_TEXT` appends up to `PICO_UI_POST_TEXT_MAX` (64 KiB) and keeps the prefix. `PICO_UI_POST_STATUS` replaces a line of at most `PICO_UI_POST_STATUS_MAX` (128 bytes).
-- Names use the same length limit as modals (`PICO_UI_MODAL_NAME`). At most `PICO_MAX_UI_POSTS` (16) mailbox keys per workspace. The key is `(agent_id, runtime_generation, name)`, so two agents may share a name without collision, and each such pair consumes a slot. A new key is dropped when the table is full.
+- Names use the same length limit as modals (`PICO_UI_MODAL_NAME`). At most `PICO_MAX_UI_POSTS` (16) mailbox keys per workspace. The key is `(agent_id, runtime_generation, name)`, so two agents may share a name without collision. Parallel calls within one agent using the same name share a stream: text interleaves in posting order and latest status wins. Each agent/generation/name key consumes a slot. A new key is dropped when the table is full.
 - The snapshot outlives the tool call until `pico_agent_ui_clear`, force-cancel, generation retirement, or workspace close. Reload does not clear it. `pico_agent_ui_latest` pointers are valid until the next pump, clear of that agent and name, or those same drops. `pico_ui_latest` / `pico_ui_clear` target the UI-selected agent.
 - Copy the snapshot into your own display buffer in `on_frame` if Clay will hold the string. Popping the modal is the usual time to `pico_agent_ui_clear`.
 
@@ -193,7 +215,7 @@ static bool ApplyState(PicoWorkspace *workspace, PicoAgentId agent_id,
     return true;
 }
 
-pico_add_tool(workspace, "stateful", "Update state", kParams, RunStateful, ApplyState);
+pico_add_tool(workspace, "stateful", "Update state", kParams, RunStateful, ApplyState, PICO_TOOL_SEQUENTIAL);
 ```
 
 The apply callback returns `false` to reject details. A live rejection converts the tool result to an error and omits details from persistence. A replay rejection ignores that snapshot and preserves the latest valid state. Pico replays details chronologically on session resume and after extension reload, so details should be complete snapshots and apply should be idempotent. The callback runs on the main thread and may update extension state, but should not call Clay outside a view callback.
@@ -201,15 +223,15 @@ The apply callback returns `false` to reject details. A live rejection converts 
 ## Contract
 
 - `name`, `description`, `params_json` must outlive the extension — use string literals.
-- `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay warning names the tool and the reason.
+- `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration also rejects invalid execution policies. It returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay warning names the tool and the reason.
 - Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
-- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Worker callbacks from different agents may overlap. See [agents](agents.md).
+- Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Parallel-eligible worker callbacks from the same agent, as well as callbacks from different agents, may overlap. See [agents](agents.md).
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload of that workspace still waits until that abandoned worker finishes so your code is not `dlclose`d underneath it. Other workspaces are not blocked. Do not use your own condition variable to wait for UI; Pico cannot wake it.
-- If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this.
+- Each invocation owns its own child-process slot. If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this. A positive PID bound while cancellation/retirement is racing with spawn is killed immediately instead of being left untracked.
 - Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. Failed registration also appends a `status_warn` line with the tool name and reason.
 - Pico applies agent policy before LLM-hook exclusions. Execution and apply resolve from the retained offered snapshot. Hidden/unoffered calls become controlled tool errors and invoke no before hook, tool, apply, or after hook. Malformed/duplicate/oversized call arrays fail the provider round.
-- A model response may include several tool calls; Pico executes them one at a time. Later calls stay queued until earlier ones finish, including a parent `subagent` tool that is blocked on its child. Chat shows queued rows as queued, not running.
+- A model response may include several tool calls. Execution follows the policy, per-agent limit, and barriers described above; each invocation owns its context, ask, and child-process slot.
 - A queued reload of that workspace refuses new external turns and `subagent` delegations there. Work already in a turn drains through its tool/model follow-ups before registrations change. Other workspaces keep accepting work. `/cd` does not pause or destroy the previous workspace.

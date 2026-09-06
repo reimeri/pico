@@ -52,6 +52,7 @@ bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *na
 typedef struct PicoUserSettingsDraft {
     char default_model[128];
     int context_limit_fallback;
+    int max_parallel_tools;
     double compact_ratio;
     bool compact_enabled;
     bool resume_last;

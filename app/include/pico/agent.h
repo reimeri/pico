@@ -78,6 +78,8 @@ typedef struct PicoSubagentProfileInfo {
     char effort[PICO_EFFORT_LEN];
     bool has_model;
     bool has_effort;
+    bool parallel_safe; /* explicit opt-in to overlap sibling calls in the parent batch */
+    int max_parallel_tools; /* zero inherits workspace settings */
     bool restricted_tools;
     int tool_count;
     char tools[PICO_MAX_TOOLS][128];

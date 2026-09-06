@@ -1,6 +1,6 @@
 # Anatomy
 
-Every user extension is one `.c` file that exports `pico_ext`. ABI 13 splits host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
+Every user extension is one `.c` file that exports `pico_ext`. ABI 15 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
 
 ```c
 #include "pico/plugin.h"
@@ -15,7 +15,7 @@ static int MyHostInit(PicoHost *host, void **state_out)
 static int MyWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(workspace, "mytool", "Example tool", "{}", MyRun, NULL);
+    pico_add_tool(workspace, "mytool", "Example tool", "{}", MyRun, NULL, PICO_TOOL_SEQUENTIAL);
     return 0;
 }
 
@@ -31,7 +31,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 13). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 15). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.

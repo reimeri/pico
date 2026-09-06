@@ -36,7 +36,7 @@ Create a user-facing main agent with `pico_main_agent_create(host, workspace_id,
 
 `pico_subagent_profile_count` and `pico_subagent_profile_info` return copied snapshots of valid profiles discovered directly under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`). Pico creates the directory, but does not install profiles. Only direct, regular, non-hidden `*.json` files are read. They use JSONC comment rules, and the filename stem is the profile name.
 
-A profile has this shape:
+A profile has this shape (`parallel_safe` defaults to false; a non-boolean invalidates that file):
 
 ```jsonc
 {
@@ -44,7 +44,9 @@ A profile has this shape:
   "purpose": "Inspect the delegated question.", // required, at most 1024 bytes
   "model": "model-catalog-id",                  // optional
   "effort": "low",                             // optional
-  "tools": ["sh"]                              // optional exact-name allowlist
+  "tools": ["sh"],                             // optional exact-name allowlist
+  "parallel_safe": true,                      // optional: overlap sibling calls; default false
+  "max_parallel_tools": 2                      // optional integer 1–16 for this child
 }
 ```
 
@@ -64,13 +66,15 @@ When `subagent` is offered, parent extra instructions say children start with no
 
 Supplying `session_id` reserves and replays exactly that prior subagent session. The stored profile must match. Transcript/provider history, usage, compaction state, and prompt cache are restored, then model, effort, purpose, and tools are refreshed from the current profile and parent. A model change rotates the cache key. The delegated task is appended to the same JSONL session.
 
-The parent remains in tool wait while the child runs. Click the `subagent` tool row to inspect the child's transcript without selecting it. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. An unknown `profile` fails and lists the currently available profile names in `final_answer`. Parent cancellation wakes the parent generation and cascades to the child. Late child completion cannot publish into a replacement generation.
+The profile's strict boolean `parallel_safe` controls delegation eligibility: false/omission makes it a sequential barrier in the **parent's batch**, not a workspace-wide lock. This is independent of `max_parallel_tools`, which controls tools inside the child. Eligibility is snapshotted when the provider batch is ingested, before worker callbacks. Before-tool hooks cannot change `profile` or `session_id`; they may edit `task` or deny. Invalid/unknown profiles fail closed to barriers and then return controlled errors.
+
+The parent remains in tool wait while the child runs. Independent sibling `subagent` calls whose profiles explicitly set `parallel_safe: true` may run concurrently in one model response, each linked to its own tool row. Existing host/workspace agent caps and session reservations still apply: exceeding an agent cap or concurrently resuming an already-reserved session produces a controlled tool error, not a wait for capacity. A child profile's optional `max_parallel_tools` controls that child's tools, not the number of siblings its parent can launch. Click the `subagent` tool row to inspect the child's transcript without selecting it. The result is JSON with `status`, `profile`, `model`, `effort`, `resumable`, and `final_answer`; a durable child also returns `session_id`. An unknown `profile` fails and lists the currently available profile names in `final_answer`. Parent cancellation wakes all outstanding calls in the parent generation and cascades through every child/descendant. Late child completion cannot publish into a replacement generation.
 
 ## Asks
 
-`pico_tool_pending_ask` returns the oldest live ask owned by the open session, where hidden delegated children surface through their ancestor: an ask is visible while its owner or a transitive parent of its owner is the selected agent. Its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits, regardless of which session is open. The borrowed request remains valid only until the next pump.
+`pico_tool_pending_ask` returns the oldest live ask owned by the open session, where hidden delegated children surface through their ancestor: an ask is visible while its owner or a transitive parent of its owner is the selected agent. Each simultaneous tool invocation may own a pending ask; the oldest is surfaced first. Its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits, regardless of which session is open. The borrowed request remains valid only until the next pump.
 
-`PICO_HOOK_ON_ASK` fires on the main thread when that agent's pending-ask snapshot is published, even if another session is selected. `PICO_HOOK_ON_ASK_END` fires when that ask is no longer pending after answer, cancel, or force-cancel/stop. Neither hook carries `request_json`; the event is still `{hook, agent_id}`. `ON_ASK_END` is not fired on `PICO_HOOK_ON_AGENT_DESTROY`.
+`PICO_HOOK_ON_ASK` fires on the main thread when that agent's pending-ask snapshot is published, even if another session is selected. `PICO_HOOK_ON_ASK_END` fires when that ask is no longer pending after answer, cancel, or force-cancel/stop. Multiple asks from the same agent produce separate hook notifications; do not treat `ON_ASK_END` as meaning that agent has no other pending asks. Neither hook carries `request_json`; the event is still `{hook, agent_id}`. `ON_ASK_END` is not fired on `PICO_HOOK_ON_AGENT_DESTROY`.
 
 ## Main-thread targets
 
@@ -103,13 +107,13 @@ Read-only accessors provide copied worker values:
 - `pico_agent_context_safe_mode(ctx)`
 - `pico_agent_context_cancelled(ctx)`
 
-A context binds to one agent ID and runtime generation. `pico_agent_context_registration_generation` is the workspace registration generation copied when that turn was accepted. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask, post to a UI mailbox, or bind child processes.
+A context binds to one agent ID and runtime generation, with separate callback context and ask/process ownership for each tool invocation. `pico_agent_context_registration_generation` is the workspace registration generation copied when that turn was accepted. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask, post to a UI mailbox, or bind child processes. A still-running tool callback that registers a positive PID after cancellation raced with spawn causes immediate termination of that process group, rather than leaving it untracked.
 
 Use `pico_tool_ask(ctx, ...)`, `pico_ui_post(ctx, ...)`, `pico_tool_set_child(ctx, pid)`, `pico_auth_copy_ctx(ctx, ...)`, callback results, provider cancellation, and delta callbacks. Worker callbacks must not mutate UI, transcripts, sessions, model settings, or main-thread extension state.
 
 ## Concurrency contract
 
-Main-thread hooks and apply callbacks are serialized, but worker callbacks from different agents and workspaces may overlap. Tool, before-tool, and provider code must therefore be reentrant. Thread-safe process-global caches are allowed only when their meaning is independent of agent, workspace, and runtime generation.
+Main-thread hooks and apply callbacks are serialized, but parallel-eligible tool callbacks and before-tool hooks may overlap within the same agent. Worker callbacks from different agents and workspaces also overlap. A main-thread apply/after callback can run while sibling workers remain active. Tool, before-tool, and provider code must therefore be reentrant. Thread-safe process-global caches are allowed only when their meaning is independent of agent, workspace, and runtime generation.
 
 Agent/session changes produced by worker code must travel through callback results and be applied on the main thread after generation validation. Pico intentionally provides no generic extension-state subsystem.
 

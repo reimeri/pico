@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 13 splits host and workspace instances; there is no ABI 12 compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 15 includes explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 
@@ -24,7 +24,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
-- `tools` — LLM-callable tools and structured replayable details
+- `tools` — LLM-callable tools, parallel execution policies, and structured replayable details
 - `commands` — slash commands (`/foo`)
 - `completers` — composer `#` / `@` style completion
 - `providers` — LLM backends

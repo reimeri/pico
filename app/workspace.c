@@ -1883,6 +1883,7 @@ static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
 
     child->kind = PICO_AGENT_SUBAGENT;
     child->parent_id = parent->id;
+    child->max_parallel_tools_override = profile->max_parallel_tools;
     snprintf(child->profile, sizeof(child->profile), "%s", profile->name);
     snprintf(child->purpose, sizeof(child->purpose), "%s", profile->purpose);
     snprintf(child->model, sizeof(child->model), "%s", model);

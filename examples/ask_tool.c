@@ -79,7 +79,7 @@ static void AskRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult 
 static int AskInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(workspace, "confirm", "Ask the user to confirm something", kParams, AskRun, NULL);
+    pico_add_tool(workspace, "confirm", "Ask the user to confirm something", kParams, AskRun, NULL, PICO_TOOL_SEQUENTIAL);
     return 0;
 }
 

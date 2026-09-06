@@ -241,7 +241,7 @@ static int StreamWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
     pico_add_tool(workspace, "stream_demo", "Post fake search progress into the overlay mailbox", kParams,
-                  StreamDemoRun, NULL);
+                  StreamDemoRun, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_tool_row_hook(workspace, StreamToolRow);
     return 0;
 }

@@ -49,6 +49,7 @@ struct PicoAgent {
     bool has_running_model;
     double compact_ratio;
     bool compact_enabled;
+    int max_parallel_tools_override; /* zero uses workspace setting */
 
     /* NULL means all registered tools. A non-NULL snapshot is agent-owned. */
     char **allowed_tools;

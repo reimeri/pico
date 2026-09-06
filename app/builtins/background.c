@@ -744,16 +744,16 @@ static int BackgroundWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                   "Start a shell command in the workspace and leave it running. Returns an opaque job id. "
                   "Output is only the latest 64 KiB; oldest lines are dropped. Use list_background, "
                   "log_background, and kill_background to inspect or stop it.",
-                  kRunParams, RunBackground, NULL);
+                  kRunParams, RunBackground, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_tool(workspace, "kill_background", "Stop a background job started with run_background.", kIdParams,
-                  KillBackground, NULL);
+                  KillBackground, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_tool(workspace, "list_background",
                   "List this session's background jobs (running and recently exited).", kEmptyParams,
-                  ListBackground, NULL);
+                  ListBackground, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_tool(workspace, "log_background",
                   "Read captured output for a background job. Only the latest 64 KiB is kept; oldest lines "
                   "are dropped.",
-                  kIdParams, LogBackground, NULL);
+                  kIdParams, LogBackground, NULL, PICO_TOOL_SEQUENTIAL);
     pico_workspace_add_command(workspace, "background", "Show background processes", BackgroundCommand);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_SESSION_RESET, BackgroundReset);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_AGENT_DESTROY, BackgroundReset);

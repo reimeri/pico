@@ -30,11 +30,12 @@ static void *g_shell_state;
 static volatile sig_atomic_t g_alarm_count;
 
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
-                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply)
+                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply, PicoToolExecution execution)
 {
     (void)workspace;
     (void)description;
     (void)apply;
+    (void)execution;
     if (!name || strcmp(name, "sh") != 0 || !run)
     {
         return false;

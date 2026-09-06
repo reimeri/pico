@@ -88,9 +88,9 @@ static void Before(PicoAgentContext *ctx, PicoToolEvent *event, void *state)
 pico_add_tool_before_hook(workspace, Before);
 ```
 
-Before hooks run on the worker immediately before the offered tool. They may rewrite `args_json_out`, set `deny`, set a malloc'd denial `result`, or call `pico_tool_ask(ctx, ...)`. First deny stops later before hooks. Cancellation wins over denial.
+Before hooks run on the worker immediately before the offered tool. They may rewrite `args_json_out`, set `deny`, set a malloc'd denial `result`, or call `pico_tool_ask(ctx, ...)`. First deny stops later before hooks. Cancellation wins over denial. For `subagent`, each rewrite must preserve `profile` and `session_id` (including presence/absence); changing either produces a controlled error, stops later before hooks, and skips delegation. Task-only edits and equivalent JSON string encodings remain allowed. Scheduling has already snapshotted the selected profile's parallel eligibility, so hooks cannot redirect an admitted parallel call to a sequential worker.
 
-The callback may overlap worker callbacks for other agents. Do not use Clay/UI or mutate main-thread extension state.
+Before callbacks may overlap for parallel-eligible calls in the **same agent**, as well as for other agents. Each invocation has its own context and ask ownership. Hooks must be reentrant; no separate hook opt-in is required. Do not use Clay/UI or mutate unsynchronized main-thread extension state.
 
 ## After-tool interceptor
 
@@ -99,7 +99,7 @@ static void After(PicoWorkspace *workspace, PicoAgentId agent_id, PicoToolEvent 
 {
     (void)workspace;
     (void)state;
-    /* serialized main thread */
+    /* serialized main thread; sibling workers may still be active */
 }
 
 pico_add_tool_after_hook(workspace, After);

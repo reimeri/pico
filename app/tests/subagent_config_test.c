@@ -167,6 +167,7 @@ static int TestSubagentProfileDiscovery(void)
     bool examples = wrote && pico_subagent_profile_count(&app) == 2 &&
                     FindLoadedProfile(&app, "exploration", &exploration_info) &&
                     FindLoadedProfile(&app, "review", &review_info) &&
+                    exploration_info.parallel_safe && review_info.parallel_safe &&
                     exploration_info.restricted_tools && exploration_info.tool_count == 1 &&
                     strcmp(exploration_info.tools[0], "sh") == 0 &&
                     review_info.restricted_tools && review_info.tool_count == 1 &&
@@ -219,4 +220,66 @@ static int TestSubagentProfileDiscovery(void)
     snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
     return created_empty && examples && swapped
                ? 0 : Fail(name, "discovery, invalid-file isolation, examples, or snapshot reload failed");
+}
+
+static int TestSubagentParallelSettingValidation(void)
+{
+    const char *name = "profile parallel limit validation";
+    char temp[] = "/tmp/pico-profile-parallel-XXXXXX";
+    if (!mkdtemp(temp)) return Fail(name, "temporary directory failed");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoWorkspace_LoadProfiles(TestWs(&app));
+    char dir[4096], path[4096];
+    snprintf(dir, sizeof(dir), "%s/subagents", temp);
+    snprintf(path, sizeof(path), "%s/subagents/probe.json", temp);
+    const char *values[] = {"1", "0", "2.5", "\"2\"", "9999999999999999999999999999"};
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
+    {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"purpose\":\"probe\",\"max_parallel_tools\":%s}", values[i]);
+        bool wrote = WriteConfigProfile(dir, "probe.json", json);
+        PicoWorkspace_LoadProfiles(TestWs(&app));
+        PicoSubagentProfileInfo profile;
+        bool found = FindLoadedProfile(&app, "probe", &profile);
+        ok = wrote && (i == 0 ? found && profile.max_parallel_tools == 1 : !found) && ok;
+    }
+    PicoHost_Shutdown(&app);
+    unlink(path); rmdir(dir); rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return ok ? 0 : Fail(name, "invalid limit made a profile available");
+}
+
+static int TestProfileParallelSafeValidation(void)
+{
+    char temp[] = "/tmp/pico-parallel-safe-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("parallel_safe validation", "temporary directory failed");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoWorkspace_LoadProfiles(TestWs(&app));
+    char dir[4096], path[4096];
+    snprintf(dir, sizeof(dir), "%s/subagents", temp);
+    snprintf(path, sizeof(path), "%s/subagents/probe.json", temp);
+    const char *fields[] = {"", ",\"parallel_safe\":false", ",\"parallel_safe\":true",
+                           ",\"parallel_safe\":\"true\"", ",\"parallel_safe\":1", ",\"parallel_safe\":null"};
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+    {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"purpose\":\"probe\"%s}", fields[i]);
+        bool wrote = WriteConfigProfile(dir, "probe.json", json);
+        PicoWorkspace_LoadProfiles(TestWs(&app));
+        PicoSubagentProfileInfo profile;
+        bool found = FindLoadedProfile(&app, "probe", &profile);
+        ok = wrote && (i < 3 ? found && profile.parallel_safe == (i == 2) : !found) && ok;
+    }
+    PicoHost_Shutdown(&app);
+    unlink(path); rmdir(dir); rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return ok ? 0 : Fail("parallel_safe validation", "default, opt-in, or boolean validation failed");
 }

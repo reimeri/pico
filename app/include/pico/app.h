@@ -221,12 +221,21 @@ typedef struct PicoHookEntry {
     void *state;
 } PicoHookEntry;
 
+#define PICO_MAX_PARALLEL_TOOLS 16
+#define PICO_DEFAULT_PARALLEL_TOOLS 4
+
+typedef enum PicoToolExecution {
+    PICO_TOOL_SEQUENTIAL = 0, /* per-agent ordering barrier */
+    PICO_TOOL_PARALLEL,       /* safe to overlap within the same agent */
+} PicoToolExecution;
+
 typedef struct PicoTool {
     const char *name;
     const char *description;
     const char *params_json;
     PicoToolFn run;
     PicoToolApplyFn apply; /* optional; main thread after success and during replay */
+    PicoToolExecution execution;
     void *state;
 } PicoTool;
 
@@ -447,6 +456,7 @@ typedef struct PicoHostPreferences {
 typedef struct PicoWorkspaceSettings {
     char default_model[128];
     int context_limit_fallback;
+    int max_parallel_tools;
     double compact_ratio;
     bool compact_enabled;
     bool resume_last;
@@ -532,11 +542,15 @@ bool pico_tool_row_activate(PicoWorkspace *workspace, PicoAgentId agent_id, cons
 /* Append a line to status_warn (extension-error overlay). */
 void pico_status_warn(PicoHost *host, const char *msg);
 void pico_workspace_status_warn(PicoWorkspace *workspace, const char *msg);
-/* False and a status_warn line on invalid args/schema, duplicate name, or limit. */
+/* False and a status_warn line on invalid args/schema/policy, duplicate name, or limit.
+ * PARALLEL permits overlapping invocations for the same agent; before hooks must
+ * also be reentrant. SEQUENTIAL is an ordering barrier within that agent only.
+ * Apply/after callbacks remain main-thread serialized, in completion order. */
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
-                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply);
+                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply, PicoToolExecution execution);
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process
- * group. Call from the tool (worker thread) after fork; 0 clears. */
+ * group. Each call has its own slot. Call from the tool (worker thread) after
+ * fork; 0 clears. A positive PID bound after cancellation is killed immediately. */
 void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid);
 /* Worker thread, inside PicoToolFn or a before-tool hook. Validates and copies
  * request_json. Invalid JSON/confirm schema returns an immediate OK error

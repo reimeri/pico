@@ -120,6 +120,42 @@ static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char 
         error = "effort is not supported by the configured model";
     }
 
+    int safe_tok = JsonObjGet(&doc, 0, "parallel_safe");
+    if (!error && safe_tok >= 0)
+    {
+        int start = JsonTokStart(&doc, safe_tok);
+        bool quoted = start > 0 && doc.src[start - 1] == '"';
+        if (quoted || (!JsonEq(&doc, safe_tok, "true") && !JsonEq(&doc, safe_tok, "false")))
+        {
+            error = "parallel_safe must be a boolean";
+        }
+        else
+        {
+            out->parallel_safe = JsonEq(&doc, safe_tok, "true");
+        }
+    }
+
+    int parallel_tok = JsonObjGet(&doc, 0, "max_parallel_tools");
+    if (!error && parallel_tok >= 0)
+    {
+        char *raw = JsonRawDup(&doc, parallel_tok);
+        int start = JsonTokStart(&doc, parallel_tok);
+        /* String token bounds exclude quotes; raw duplication alone cannot distinguish "2" from 2. */
+        bool quoted = start > 0 && doc.src[start - 1] == '"';
+        char *end = NULL;
+        long value = raw ? strtol(raw, &end, 10) : 0;
+        bool valid = raw && !quoted && end && end != raw && *end == '\0' &&
+                     value >= 1 && value <= PICO_MAX_PARALLEL_TOOLS;
+        free(raw);
+        if (!valid)
+        {
+            error = "max_parallel_tools must be an integer from 1 to 16";
+        }
+        else
+        {
+            out->max_parallel_tools = (int)value;
+        }
+    }
     int tools_tok = JsonObjGet(&doc, 0, "tools");
     if (!error && tools_tok >= 0)
     {
@@ -168,7 +204,8 @@ static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char 
         }
         char *key = JsonStrDup(&doc, key_tok);
         if (key && strcmp(key, "purpose") != 0 && strcmp(key, "description") != 0 &&
-            strcmp(key, "model") != 0 && strcmp(key, "effort") != 0 && strcmp(key, "tools") != 0)
+            strcmp(key, "model") != 0 && strcmp(key, "effort") != 0 && strcmp(key, "tools") != 0 &&
+            strcmp(key, "max_parallel_tools") != 0 && strcmp(key, "parallel_safe") != 0)
         {
             char reason[256];
             snprintf(reason, sizeof(reason), "unknown profile key `%s`", key);

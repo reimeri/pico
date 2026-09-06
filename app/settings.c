@@ -414,7 +414,7 @@ static bool ReplaceModels(PicoModel **models, int *count, const JsonDoc *doc, in
     return true;
 }
 
-static void ApplyWorkspaceObject(PicoWorkspaceSettings *s, const JsonDoc *doc, int obj)
+static void ApplyWorkspaceObject(PicoWorkspaceSettings *s, const JsonDoc *doc, int obj, PicoHost *host)
 {
     if (!JsonIsObject(doc, obj))
     {
@@ -426,6 +426,28 @@ static void ApplyWorkspaceObject(PicoWorkspaceSettings *s, const JsonDoc *doc, i
     if (limit > 0)
     {
         s->context_limit_fallback = limit;
+    }
+    int parallel_tok = JsonObjGet(doc, obj, "max_parallel_tools");
+    if (parallel_tok >= 0)
+    {
+        char *raw = JsonRawDup(doc, parallel_tok);
+        int start = JsonTokStart(doc, parallel_tok);
+        /* String token bounds exclude quotes; raw duplication alone cannot distinguish "2" from 2. */
+        bool quoted = start > 0 && doc->src[start - 1] == '"';
+        char *end = NULL;
+        long value = raw ? strtol(raw, &end, 10) : 0;
+        bool valid = raw && !quoted && end && end != raw && *end == '\0' &&
+                     value >= 1 && value <= PICO_MAX_PARALLEL_TOOLS;
+        free(raw);
+        if (valid)
+        {
+            s->max_parallel_tools = (int)value;
+        }
+        else if (host)
+        {
+            pico_status_warn(host, "Invalid max_parallel_tools: expected an integer from 1 to 16; "
+                                   "keeping the inherited/default value.");
+        }
     }
     ApplyCompactAtWorkspace(s, doc, obj);
     int resume = JsonObjGet(doc, obj, "resume_last");
@@ -759,6 +781,7 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
     memset(&next, 0, sizeof(next));
     snprintf(next.default_model, sizeof(next.default_model), "gpt-5.6-sol");
     next.context_limit_fallback = 128000;
+    next.max_parallel_tools = PICO_DEFAULT_PARALLEL_TOOLS;
     next.compact_enabled = true;
     next.compact_ratio = 0.9;
 
@@ -772,7 +795,7 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
             JsonDoc doc;
             if (JsonParse(&doc, src, len) == 0)
             {
-                ApplyWorkspaceObject(&next, &doc, 0);
+                ApplyWorkspaceObject(&next, &doc, 0, workspace->host);
                 if (!ReplaceModels(&catalog, &catalog_n, &doc, 0))
                 {
                     JsonFree(&doc);
@@ -797,7 +820,7 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
             JsonDoc doc;
             if (JsonParse(&doc, src, len) == 0)
             {
-                ApplyWorkspaceObject(&next, &doc, 0);
+                ApplyWorkspaceObject(&next, &doc, 0, workspace->host);
                 if (!ReplaceModels(&catalog, &catalog_n, &doc, 0))
                 {
                     JsonFree(&doc);
@@ -1562,6 +1585,7 @@ void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft)
     memset(draft, 0, sizeof(*draft));
     snprintf(draft->default_model, sizeof(draft->default_model), "gpt-5.6-sol");
     draft->context_limit_fallback = 128000;
+    draft->max_parallel_tools = PICO_DEFAULT_PARALLEL_TOOLS;
     draft->compact_enabled = true;
     draft->compact_ratio = 0.9;
     draft->font_scale = 1.0;
@@ -1625,6 +1649,7 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     memset(&workspace, 0, sizeof(workspace));
     snprintf(workspace.default_model, sizeof(workspace.default_model), "%s", next.default_model);
     workspace.context_limit_fallback = next.context_limit_fallback;
+    workspace.max_parallel_tools = next.max_parallel_tools;
     workspace.compact_enabled = next.compact_enabled;
     workspace.compact_ratio = next.compact_ratio;
     workspace.resume_last = next.resume_last;
@@ -1643,7 +1668,7 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
                 free(src);
                 return false;
             }
-            ApplyWorkspaceObject(&workspace, &doc, 0);
+            ApplyWorkspaceObject(&workspace, &doc, 0, NULL);
             ApplyPreferencesObject(&preferences, &doc, 0);
             if (!ReplaceModels(&next.models, &next.model_count, &doc, 0))
             {
@@ -1658,6 +1683,7 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     }
     snprintf(next.default_model, sizeof(next.default_model), "%s", workspace.default_model);
     next.context_limit_fallback = workspace.context_limit_fallback;
+    next.max_parallel_tools = workspace.max_parallel_tools;
     next.compact_enabled = workspace.compact_enabled;
     next.compact_ratio = workspace.compact_ratio;
     next.resume_last = workspace.resume_last;
@@ -1720,6 +1746,10 @@ const char *PicoSettings_ValidateUserDraft(const PicoUserSettingsDraft *draft)
     if (!draft->default_model[0])
     {
         return "Default model is required.";
+    }
+    if (draft->max_parallel_tools < 1 || draft->max_parallel_tools > PICO_MAX_PARALLEL_TOOLS)
+    {
+        return "max_parallel_tools must be an integer from 1 to 16";
     }
     if (draft->context_limit_fallback <= 0)
     {
@@ -2150,6 +2180,7 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     char path[4096];
     char dir[4096];
     char context_buf[32];
+    char parallel_buf[32];
     char compact_buf[32];
     char font_buf[32];
     char width_buf[32];
@@ -2171,6 +2202,7 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     }
     EnsureUserSettingsFile();
     snprintf(context_buf, sizeof(context_buf), "%d", draft->context_limit_fallback);
+    snprintf(parallel_buf, sizeof(parallel_buf), "%d", draft->max_parallel_tools);
     if (draft->compact_enabled)
     {
         snprintf(compact_buf, sizeof(compact_buf), "%.6g", draft->compact_ratio);
@@ -2219,6 +2251,7 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     }
     if (!PatchObjectValue(&src, &len, "model", model) ||
         !PatchObjectValue(&src, &len, "context_limit", context_buf) ||
+        !PatchObjectValue(&src, &len, "max_parallel_tools", parallel_buf) ||
         !PatchObjectValue(&src, &len, "compact_at", compact_buf) ||
         !PatchObjectValue(&src, &len, "resume_last", draft->resume_last ? "true" : "false") ||
         !PatchObjectValue(&src, &len, "font_scale", font_buf) ||

@@ -417,8 +417,9 @@ static void TestThinkingToolContinuation(void)
         pico_canonical_item_json(&out.items[0]),
         pico_canonical_item_json(&out.items[1]),
         pico_canonical_item_json(&out.items[2]),
-        pico_canonical_tool_result_json("c1", "sh", "one", false),
+        /* Parallel calls finish in reverse order; IDs, not position, associate results. */
         pico_canonical_tool_result_json("c2", "sh", "two", false),
+        pico_canonical_tool_result_json("c1", "sh", "one", false),
     };
     const char *input_json[6];
     for (int i = 0; i < 6; i++)
@@ -456,9 +457,9 @@ static void TestThinkingToolContinuation(void)
                     JsonArrayLen(&doc, calls) == 2 && first_id && strcmp(first_id, "c1") == 0 &&
                     second_id && strcmp(second_id, "c2") == 0 &&
                     JsonEq(&doc, JsonObjGet(&doc, first_tool, "role"), "tool") &&
-                    first_result_id && strcmp(first_result_id, "c1") == 0 &&
+                    first_result_id && strcmp(first_result_id, "c2") == 0 &&
                     JsonEq(&doc, JsonObjGet(&doc, second_tool, "role"), "tool") &&
-                    second_result_id && strcmp(second_result_id, "c2") == 0;
+                    second_result_id && strcmp(second_result_id, "c1") == 0;
         free(first_id);
         free(second_id);
         free(first_result_id);

@@ -41,12 +41,13 @@ bool Pico_ConfigDir(char *out, size_t cap)
 }
 
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
-                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply)
+                   const char *params_json, PicoToolFn run, PicoToolApplyFn apply, PicoToolExecution execution)
 {
     (void)workspace;
     (void)description;
     (void)params_json;
     (void)apply;
+    (void)execution;
     g_tool_name = name;
     g_tool_run = run;
     return true;

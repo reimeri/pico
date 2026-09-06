@@ -559,7 +559,7 @@ static int TodoWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                   "Replace the complete canonical TODO list. Set task to a succinct session title for the current "
                   "work and keep it stable unless the goal changes. Include every current item, use stable IDs and "
                   "statuses pending, in_progress, or completed, and keep at most one item in_progress.",
-                  kTodoParams, TodoRun, TodoApply);
+                  kTodoParams, TodoRun, TodoApply, PICO_TOOL_SEQUENTIAL);
     pico_add_context_hook(workspace, TodoContext);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_SESSION_RESET, TodoReset);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_AGENT_DESTROY, TodoReset);

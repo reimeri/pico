@@ -55,7 +55,7 @@ static int CounterWorkspaceInit(PicoWorkspace *workspace, void **state_out)
         *state_out = s;
     }
     pico_add_tool(workspace, "counter_increment", "Increment the per-workspace counter and return its new value",
-                  kParams, CounterToolRun, NULL);
+                  kParams, CounterToolRun, NULL, PICO_TOOL_SEQUENTIAL);
     return 0;
 }
 

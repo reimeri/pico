@@ -366,7 +366,7 @@ static int SkillsWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                   "Load the full instructions of an available skill. Call this when the user's "
                   "task matches a skill's description; the result includes the skill's base "
                   "directory for resolving its scripts and other files.",
-                  kUseSkillParams, UseSkillRun, NULL);
+                  kUseSkillParams, UseSkillRun, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_llm_hook(workspace, SkillsLlmHook);
     pico_workspace_add_command(workspace, "skill", "Load a skill into the conversation",
                                SkillCommand);

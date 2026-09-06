@@ -21,6 +21,13 @@ static int Fail(const char *message)
     return 1;
 }
 
+void pico_status_warn(PicoHost *host, const char *message)
+{
+    if (!host) return;
+    free(host->status_warn);
+    host->status_warn = JsonDup(message);
+}
+
 bool PicoAgent_IsBusy(const PicoAgent *agent)
 {
     return agent && (agent->state == PICO_AGENT_LLM_WAIT || agent->state == PICO_AGENT_TOOL_WAIT ||
@@ -741,6 +748,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     draft.models[0].effort_count = 1;
     snprintf(draft.models[0].default_effort, sizeof(draft.models[0].default_effort), "high");
     snprintf(draft.models[0].base_url, sizeof(draft.models[0].base_url), "https://example.test/v1");
+    draft.max_parallel_tools = 2;
     draft.font_scale = 1.5;
     draft.chat_width = 100;
     draft.resume_last = true;
@@ -768,7 +776,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     if (!failed &&
         (!PicoSettings_LoadUserDraft(&loaded) || loaded.model_count != 1 || !loaded.models[0].vision ||
          loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
-         loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
+         loaded.max_parallel_tools != draft.max_parallel_tools || loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
          strcmp(loaded.models[0].default_effort, "high") != 0))
     {
         failed = 1;
@@ -1071,8 +1079,48 @@ static int TestRunningAgentKeepsModelUntilIdle(void)
     return failed ? Fail("running-agent model snapshot or idle reconciliation was incorrect") : 0;
 }
 
+static int TestParallelSettingsResolution(void)
+{
+    char temp[] = "/tmp/pico-parallel-settings-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create settings fixture");
+    char dir[4096], local[4096], user_path[4096], local_path[4096];
+    snprintf(dir, sizeof(dir), "%s/pico", temp);
+    snprintf(local, sizeof(local), "%s/.pico", temp);
+    snprintf(user_path, sizeof(user_path), "%s/pico/settings.json", temp);
+    snprintf(local_path, sizeof(local_path), "%s/.pico/settings.json", temp);
+    Pico_MkdirP(dir);
+    Pico_MkdirP(local);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoHost host = {0};
+    PicoWorkspace ws = {0};
+    ws.host = &host;
+    snprintf(ws.path, sizeof(ws.path), "%s", temp);
+    bool ok = WriteFile(user_path, "{\"max_parallel_tools\":2}") == 0 &&
+              PicoWorkspaceSettings_Load(&ws) && ws.settings.max_parallel_tools == 2;
+    ok = WriteFile(local_path, "{\"max_parallel_tools\":1}") == 0 &&
+         PicoWorkspaceSettings_Load(&ws) && ws.settings.max_parallel_tools == 1 && ok;
+    const char *invalid[] = {"0", "-1", "2.5", "\"2\"", "999999999999999999999999999999999"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+    {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"max_parallel_tools\":%s}", invalid[i]);
+        free(host.status_warn);
+        host.status_warn = NULL;
+        bool wrote = WriteFile(local_path, json) == 0;
+        ok = wrote && PicoWorkspaceSettings_Load(&ws) && ws.settings.max_parallel_tools == 2 &&
+             host.status_warn && strstr(host.status_warn, "max_parallel_tools") && ok;
+    }
+    free(host.status_warn);
+    free(ws.models);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(local_path); unlink(user_path);
+    rmdir(local); rmdir(dir); rmdir(temp);
+    return ok ? 0 : Fail("parallel settings override or invalid-value fallback failed");
+}
+
 int main(void)
 {
+    if (TestParallelSettingsResolution()) return 1;
     int rc = TestPerAgentSelection();
     if (rc)
     {

@@ -395,11 +395,13 @@ if(BUILD_TESTING)
     set_source_files_properties(tests/workspace_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     set_source_files_properties(tests/subagent_config_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     set_source_files_properties(tests/subagent_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
+    set_source_files_properties(tests/parallel_tool_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
         tests/workspace_test.c
         tests/subagent_config_test.c
         tests/subagent_test.c
+        tests/parallel_tool_test.c
         tests/clay_impl.c
         app.c
         ui.c

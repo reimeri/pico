@@ -3321,7 +3321,7 @@ static int TestScopeEnforcement(void)
     PicoHost_BeginRegistration(&host, PICO_REG_HOST, NULL);
 
     /* Workspace registrations must be rejected during host init */
-    if (pico_add_tool(ws, "invalid_tool", "desc", "{}", DummyTool, NULL))
+    if (pico_add_tool(ws, "invalid_tool", "desc", "{}", DummyTool, NULL, PICO_TOOL_SEQUENTIAL))
     {
         Fail("pico_add_tool must be rejected during host init");
         free(host.workspaces[0]);
@@ -3411,7 +3411,7 @@ static int FailingWorkspaceInit(PicoWorkspace *ws, void **state_out)
 {
     RollbackState *s = (RollbackState *)calloc(1, sizeof(RollbackState));
     *state_out = s;
-    pico_add_tool(ws, "rollback_tool", "desc", "{}", DummyTool, NULL);
+    pico_add_tool(ws, "rollback_tool", "desc", "{}", DummyTool, NULL, PICO_TOOL_SEQUENTIAL);
     pico_workspace_add_command(ws, "rollback_cmd", "help", DummyWsCmd);
     return -1;
 }
@@ -5129,11 +5129,11 @@ static int TestMultiWorkspaceToolNameIsolation(void)
     PicoWorkspace *wsB = PicoHost_FindWorkspace(host, idB);
 
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, wsA);
-    pico_add_tool(wsA, "custom_worker_tool", "desc A", "{}", RunToolA, NULL);
+    pico_add_tool(wsA, "custom_worker_tool", "desc A", "{}", RunToolA, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(host, NULL);
 
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, wsB);
-    pico_add_tool(wsB, "custom_worker_tool", "desc B", "{}", RunToolB, NULL);
+    pico_add_tool(wsB, "custom_worker_tool", "desc B", "{}", RunToolB, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(host, NULL);
 
     int idxA = -1, idxB = -1;
@@ -5430,7 +5430,7 @@ static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
     });
     bool tool_ok = !add_ask_tool ||
                    pico_add_tool(workspace, "matrix_ask", "matrix ask", "{}",
-                                 MatrixAskTool, NULL);
+                                 MatrixAskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(host, state);
     return tool_ok && pico_workspace_find_provider(workspace, "matrix") != NULL;
 }

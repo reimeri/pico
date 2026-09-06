@@ -1883,7 +1883,7 @@ static int AskUserWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                   "in one call. Use kind 'select' with options for a single choice; select questions always include a "
                   "required free-form Other choice. Use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
-                  kAskUserParams, AskUserRun, NULL);
+                  kAskUserParams, AskUserRun, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_llm_hook(workspace, AskUserLlm);
     return 0;
 }

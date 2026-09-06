@@ -49,7 +49,7 @@ static void EchoRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult
 static int EchoInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(workspace, "echo", "Echo text back", kParams, EchoRun, NULL);
+    pico_add_tool(workspace, "echo", "Echo text back", kParams, EchoRun, NULL, PICO_TOOL_SEQUENTIAL);
     return 0;
 }
 

@@ -7,6 +7,7 @@
 #include "path.h"
 #include "session.h"
 #include "settings.h"
+#include "subagent_config.h"
 #include "usage.h"
 #include "host_internal.h"
 #include "trace_group.h"
@@ -23,7 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PICO_MAX_PENDING_CALLS 16
+#define PICO_MAX_PENDING_CALLS PICO_MAX_PARALLEL_TOOLS
 
 typedef struct PicoInputItem {
     char *json;
@@ -34,6 +35,9 @@ typedef struct PicoPendingCall {
     char *name;
     char *arguments;
     char *item_id;
+    PicoToolCallProgress progress;
+    bool completed;
+    bool parallel; /* eligibility snapshotted before any batch callbacks run */
 } PicoPendingCall;
 
 typedef enum PicoAgentEvType {
@@ -51,6 +55,7 @@ typedef struct PicoAgentEv {
     char *payload;
     char *tool_args;
     char *tool_details;
+    int call_index; /* tool events only */
     int tokens;
     int cached;
     bool executed;
@@ -60,11 +65,11 @@ typedef struct PicoAgentEv {
 typedef enum PicoWorkKind {
     PICO_WORK_IDLE = 0,
     PICO_WORK_LLM,
-    PICO_WORK_TOOL,
 } PicoWorkKind;
 
 struct PicoAgentContext {
     PicoAgentRt *runtime;
+    struct PicoToolJob *job; /* NULL for provider callbacks */
     PicoWorkspace *workspace_owner;
     PicoAgentId agent_id;
     uint64_t runtime_generation;
@@ -78,6 +83,29 @@ struct PicoAgentContext {
     bool safe_mode;
     struct PicoAuthStore *auth_store;
 };
+
+/* One callback context, ask, and process group per invocation. Jobs remain
+ * owned by the runtime until their thread is joined on the main thread. */
+typedef struct PicoToolJob {
+    PicoAgentContext context;
+    pthread_t thread;
+    bool started;
+    int call_index;
+    char *name;
+    char *args;
+    char *call_id;
+    PicoToolFn run;
+    void *state;
+    pid_t child;
+    uint64_t ask_id;
+    char *ask_request;
+    char *ask_answer;
+    bool ask_waiting;
+    bool ask_done;
+    uint64_t snap_id;
+    char *snap_request;
+    bool snap_retired;
+} PicoToolJob;
 
 struct PicoAgentRt {
     /* Heap-owned worker services and callback-scoped public context. */
@@ -93,7 +121,10 @@ struct PicoAgentRt {
     bool busy;
     bool cancel;
     bool retired;
-    pid_t tool_child;
+    PicoToolJob *jobs[PICO_MAX_PENDING_CALLS];
+    int active_tools; /* worker count; protected by mu */
+    int running_tools; /* unfinished main-thread completions */
+    int max_parallel_tools;
     struct PicoAgentRt *zombie_next;
 
     PicoWorkKind work;
@@ -110,12 +141,7 @@ struct PicoAgentRt {
     bool work_vision;
     PicoTool *work_tools;
     int work_tool_count;
-    char *work_tool_name;
-    char *work_tool_args;
-    char *work_call_id;
-    PicoToolFn work_tool_fn;
     void *work_stream_state;
-    void *work_tool_state;
 
     char *stream;
     size_t stream_len;
@@ -150,23 +176,12 @@ struct PicoAgentRt {
 
     PicoPendingCall pending[PICO_MAX_PENDING_CALLS];
     int pending_count;
-    int pending_next;
     PicoTool *offered_tools;
     int offered_tool_count;
 
     int stream_msg;
     bool stream_dirty;
     double action_t0;
-
-    uint64_t ask_id;
-    char *ask_request;
-    char *ask_answer;
-    bool ask_waiting;
-    bool ask_done;
-
-    uint64_t snap_id;
-    char *snap_request;
-    bool snap_retired;
 };
 
 static __thread PicoAgentRt *t_worker_rt;
@@ -186,6 +201,9 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
 static char *BuildUserItem(const char *text, const char *parts_json);
 static void *WorkerMain(void *arg);
 static bool AgentContextActive(const PicoAgentContext *ctx);
+static void *ToolWorkerMain(void *arg);
+static void JoinToolJob(PicoAgentRt *rt, int index);
+static void KillToolChildren(PicoAgentRt *rt);
 
 static char *Dup(const char *s)
 {
@@ -231,12 +249,12 @@ static void ClearPending(PicoAgentRt *rt)
         memset(&rt->pending[i], 0, sizeof(rt->pending[i]));
     }
     rt->pending_count = 0;
-    rt->pending_next = 0;
+    rt->running_tools = 0;
 }
 
-/* Ends the work item: `busy` has to clear in the same critical section that
- * publishes the event, or the main thread can pump the event and queue the next
- * request while this thread still looks busy. Exactly one call per work item. */
+/* Completing a work item updates the active worker count in the same critical
+ * section as its terminal event. The main thread separately tracks completions
+ * still to apply, and joins each job before freeing it or starting a new batch. */
 static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, char *tool_args,
                         char *tool_details, int tokens, int cached, bool finish, bool executed, bool is_error)
 {
@@ -249,7 +267,11 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
         {
             if (finish)
             {
-                rt->busy = false;
+                if (t_agent_context && t_agent_context->job)
+                {
+                    rt->active_tools--;
+                }
+                rt->busy = rt->active_tools != 0;
             }
             pthread_cond_broadcast(&rt->cv);
             pthread_mutex_unlock(&rt->mu);
@@ -263,6 +285,7 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
         rt->event_cap = cap;
     }
     PicoAgentEv *ev = &rt->events[rt->event_count++];
+    ev->call_index = t_agent_context && t_agent_context->job ? t_agent_context->job->call_index : -1;
     ev->type = type;
     ev->text = text;
     ev->payload = payload;
@@ -274,7 +297,11 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
     ev->is_error = is_error;
     if (finish)
     {
-        rt->busy = false;
+        if (t_agent_context && t_agent_context->job)
+        {
+            rt->active_tools--;
+        }
+        rt->busy = rt->active_tools != 0;
     }
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
@@ -587,9 +614,50 @@ static bool WorkerIsCancelled(PicoAgentRt *rt)
     return c;
 }
 
-static char *RunToolBeforeHooks(PicoAgentRt *rt, const char *name, const char *call_id, char **args_inout,
+/* Scheduling has already used the original delegation identity. A before hook
+ * may change the briefing, but cannot redirect that call to another profile or
+ * session, even if another hook would later restore the original identity. */
+static bool SameDelegationIdentity(const char *before, const char *after)
+{
+    JsonDoc a, b;
+    if (!before || !after || JsonParse(&a, before, strlen(before)) != 0)
+    {
+        return false;
+    }
+    if (JsonParse(&b, after, strlen(after)) != 0)
+    {
+        JsonFree(&a);
+        return false;
+    }
+    bool same = JsonIsObject(&a, 0) && JsonIsObject(&b, 0);
+    const char *keys[] = {"profile", "session_id"};
+    for (int i = 0; same && i < 2; i++)
+    {
+        int x = JsonObjGet(&a, 0, keys[i]);
+        int y = JsonObjGet(&b, 0, keys[i]);
+        if (x < 0 || y < 0)
+        {
+            same = x < 0 && y < 0;
+            continue;
+        }
+        int xs = JsonTokStart(&a, x), ys = JsonTokStart(&b, y);
+        bool xquoted = xs > 0 && before[xs - 1] == '"';
+        bool yquoted = ys > 0 && after[ys - 1] == '"';
+        char *xvalue = JsonStrDup(&a, x);
+        char *yvalue = JsonStrDup(&b, y);
+        same = xquoted == yquoted && xvalue && yvalue && strcmp(xvalue, yvalue) == 0;
+        free(xvalue);
+        free(yvalue);
+    }
+    JsonFree(&a);
+    JsonFree(&b);
+    return same;
+}
+
+static char *RunToolBeforeHooks(PicoToolJob *job, const char *name, const char *call_id, char **args_inout,
                                 bool *denied)
 {
+    PicoAgentRt *rt = job->context.runtime;
     *denied = false;
     char *args = *args_inout;
     if (!args)
@@ -612,11 +680,19 @@ static char *RunToolBeforeHooks(PicoAgentRt *rt, const char *name, const char *c
         ev.name = name ? name : "";
         ev.call_id = call_id ? call_id : "";
         ev.args_json = args ? args : "{}";
-        t_agent_context = &rt->context;
-        rt->tool_before_hooks[i].fn(&rt->context, &ev, rt->tool_before_hooks[i].state);
-        t_agent_context = NULL;
+        rt->tool_before_hooks[i].fn(&job->context, &ev, rt->tool_before_hooks[i].state);
         if (ev.args_json_out)
         {
+            if (strcmp(name, "subagent") == 0 && !SameDelegationIdentity(args, ev.args_json_out))
+            {
+                if (args != ev.args_json_out)
+                {
+                    free(ev.args_json_out);
+                }
+                free(ev.result);
+                *denied = true;
+                return Dup("subagent: before-tool hooks cannot change profile or session_id");
+            }
             if (args != ev.args_json_out)
             {
                 free(args);
@@ -649,6 +725,10 @@ static char *RunToolAfterHooks(PicoAgentRt *rt, const char *name, const char *ca
     }
     for (int i = 0; i < registration->tool_after_hook_count; i++)
     {
+        if (WorkerIsCancelled(rt))
+        {
+            break;
+        }
         if (!registration->tool_after_hooks[i].fn)
         {
             continue;
@@ -972,12 +1052,7 @@ static void *WorkerMain(void *arg)
         bool vision = rt->work_vision;
         PicoTool *work_tools = rt->work_tools;
         int work_tool_count = rt->work_tool_count;
-        char *tool_name = rt->work_tool_name;
-        char *tool_args = rt->work_tool_args;
-        char *call_id = rt->work_call_id;
-        PicoToolFn tool_fn = rt->work_tool_fn;
         void *stream_state = rt->work_stream_state;
-        void *tool_state = rt->work_tool_state;
         rt->work = PICO_WORK_IDLE;
         rt->work_stream = NULL;
         rt->work_model = NULL;
@@ -992,11 +1067,6 @@ static void *WorkerMain(void *arg)
         rt->work_vision = false;
         rt->work_tools = NULL;
         rt->work_tool_count = 0;
-        rt->work_tool_name = NULL;
-        rt->work_tool_args = NULL;
-        rt->work_call_id = NULL;
-        rt->work_tool_fn = NULL;
-        rt->work_tool_state = NULL;
         rt->work_stream_state = NULL;
         pthread_mutex_unlock(&rt->mu);
 
@@ -1062,70 +1132,6 @@ static void *WorkerMain(void *arg)
                 pico_llm_result_free(&result);
             }
         }
-        else if (kind == PICO_WORK_TOOL)
-        {
-            bool skip_run = false;
-            t_worker_context = PICO_WORKER_TOOL;
-            bool denied = false;
-            char *deny_result = RunToolBeforeHooks(rt, tool_name, call_id, &tool_args, &denied);
-            if (WorkerIsCancelled(rt))
-            {
-                free(deny_result);
-                PostEventEx(rt, PICO_AEV_TOOL_DONE, Dup("(interrupted)"), call_id,
-                            Dup(tool_args ? tool_args : "{}"), NULL, 0, 0, true, false, true);
-                call_id = NULL;
-                skip_run = true;
-            }
-            else if (denied)
-            {
-                PostEventEx(rt, PICO_AEV_TOOL_DONE,
-                            deny_result ? deny_result : Dup("User denied this tool."), call_id,
-                            Dup(tool_args ? tool_args : "{}"), NULL, 0, 0, true, false, true);
-                call_id = NULL;
-                skip_run = true;
-            }
-            else
-            {
-                free(deny_result);
-            }
-            if (!skip_run)
-            {
-                PostEventEx(rt, PICO_AEV_TOOL_START, Dup(tool_name ? tool_name : ""),
-                            Dup(tool_args ? tool_args : "{}"), NULL, NULL, 0, 0, false, false, false);
-                PicoToolResult result;
-                memset(&result, 0, sizeof(result));
-                if (tool_fn)
-                {
-                    rt->context.tool_call_id = call_id;
-                    t_agent_context = &rt->context;
-                    tool_fn(&rt->context, tool_args ? tool_args : "{}", &result, tool_state);
-                    t_agent_context = NULL;
-                    rt->context.tool_call_id = NULL;
-                    bool details_valid = false;
-                    result.details_json = ValidateToolDetails(result.details_json, &details_valid);
-                    if (!details_valid)
-                    {
-                        free(result.output);
-                        result.output = Dup("tool returned invalid details");
-                        result.is_error = true;
-                    }
-                }
-                else
-                {
-                    JsonBuf b;
-                    JsonBuf_Init(&b);
-                    JsonBuf_Puts(&b, "unknown tool: ");
-                    JsonBuf_Puts(&b, tool_name ? tool_name : "?");
-                    result.output = JsonBuf_Steal(&b);
-                    result.is_error = true;
-                }
-                PostEventEx(rt, PICO_AEV_TOOL_DONE, result.output ? result.output : Dup(""), call_id,
-                            Dup(tool_args ? tool_args : "{}"), result.details_json, 0, 0, true,
-                            tool_fn != NULL, result.is_error);
-                call_id = NULL;
-            }
-            t_worker_context = PICO_WORKER_NONE;
-        }
 
         free(model);
         free(base_url);
@@ -1137,10 +1143,53 @@ static void *WorkerMain(void *arg)
             free(input[i]);
         }
         free(input);
-        free(tool_name);
-        free(tool_args);
-        free(call_id);
     }
+    return NULL;
+}
+
+static void *ToolWorkerMain(void *arg)
+{
+    PicoToolJob *job = arg;
+    PicoAgentRt *rt = job->context.runtime;
+    t_worker_rt = rt;
+    t_worker_context = PICO_WORKER_TOOL;
+    t_agent_context = &job->context;
+    bool denied = false;
+    char *denial = RunToolBeforeHooks(job, job->name, job->call_id, &job->args, &denied);
+    PicoToolResult result = {0};
+    bool executed = false;
+    if (WorkerIsCancelled(rt))
+    {
+        result.output = Dup("(interrupted)");
+        result.is_error = true;
+    }
+    else if (denied)
+    {
+        result.output = denial ? denial : Dup("User denied this tool.");
+        denial = NULL;
+        result.is_error = true;
+    }
+    else
+    {
+        PostEventEx(rt, PICO_AEV_TOOL_START, Dup(job->name), Dup(job->args),
+                    NULL, NULL, 0, 0, false, false, false);
+        job->run(&job->context, job->args, &result, job->state);
+        executed = true;
+        bool valid = false;
+        result.details_json = ValidateToolDetails(result.details_json, &valid);
+        if (!valid)
+        {
+            free(result.output);
+            result.output = Dup("tool returned invalid details");
+            result.is_error = true;
+        }
+    }
+    free(denial);
+    PostEventEx(rt, PICO_AEV_TOOL_DONE, result.output ? result.output : Dup(""), Dup(job->call_id),
+                Dup(job->args), result.details_json, 0, 0, true, executed, result.is_error);
+    t_agent_context = NULL;
+    t_worker_context = PICO_WORKER_NONE;
+    t_worker_rt = NULL;
     return NULL;
 }
 
@@ -1374,30 +1423,51 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     return true;
 }
 
-static bool QueueTool(PicoHost *app, PicoAgent *agent, const char *name, const char *args,
-                      const char *call_id, PicoToolFn fn, void *state)
+static bool QueueTool(PicoAgent *agent, int index, const PicoTool *tool)
 {
-    (void)state;
     PicoAgentRt *rt = agent->runtime;
-    RefreshWorkerContext(rt, app, agent);
-    pthread_mutex_lock(&rt->mu);
-    if (rt->busy || rt->stop)
+    PicoPendingCall *call = &rt->pending[index];
+    PicoToolJob *job = calloc(1, sizeof(*job));
+    if (!job)
     {
-        pthread_mutex_unlock(&rt->mu);
         return false;
     }
-    rt->work = PICO_WORK_TOOL;
-    rt->work_tool_name = Dup(name);
-    rt->work_tool_args = Dup(args ? args : "{}");
-    rt->work_call_id = Dup(call_id);
-    rt->work_tool_fn = fn;
-    rt->work_tool_state = state;
-    rt->work_tools = NULL;
-    rt->work_tool_count = 0;
-    rt->tool_child = 0;
+    job->context = rt->context;
+    job->context.job = job;
+    job->call_index = index;
+    job->name = Dup(call->name);
+    job->args = Dup(call->arguments ? call->arguments : "{}");
+    job->call_id = Dup(call->call_id);
+    job->context.tool_call_id = job->call_id;
+    job->run = tool->run;
+    job->state = tool->state;
+    rt->jobs[index] = job;
+    if (!job->name || !job->args || !job->call_id)
+    {
+        JoinToolJob(rt, index);
+        return false;
+    }
+    pthread_mutex_lock(&rt->mu);
+    if (rt->stop || rt->cancel)
+    {
+        pthread_mutex_unlock(&rt->mu);
+        JoinToolJob(rt, index);
+        return false;
+    }
+    rt->active_tools++;
     rt->busy = true;
-    pthread_cond_broadcast(&rt->cv);
+    if (pthread_create(&job->thread, NULL, ToolWorkerMain, job) != 0)
+    {
+        rt->active_tools--;
+        rt->busy = rt->active_tools != 0;
+        pthread_mutex_unlock(&rt->mu);
+        JoinToolJob(rt, index);
+        return false;
+    }
+    job->started = true;
     pthread_mutex_unlock(&rt->mu);
+    call->progress = PICO_TOOL_CALL_RUNNING;
+    rt->running_tools++;
     return true;
 }
 
@@ -1974,8 +2044,9 @@ static void PushFunctionOutput(PicoAgentRt *rt, const char *call_id, const char 
 
 static void AbortRemainingCalls(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt)
 {
-    for (int i = rt->pending_next; i < rt->pending_count; i++)
+    for (int i = 0; i < rt->pending_count; i++)
     {
+        if (rt->pending[i].completed) continue;
         PushFunctionOutput(rt, rt->pending[i].call_id, rt->pending[i].name, "(interrupted)", true);
         PicoSession_LogToolResult(app, agent, rt->pending[i].call_id, rt->pending[i].name,
                                   "(interrupted)", true, NULL);
@@ -2059,12 +2130,8 @@ static void ApplyCancel(PicoHost *app, PicoAgent *agent)
     {
         PopLastMessage(app, agent);
     }
-    bool open_tool = rt->pending_next < rt->pending_count;
+    /* Completed calls may be anywhere in a parallel batch; never rewrite them. */
     AbortRemainingCalls(app, agent, rt);
-    if (open_tool && rt->stream_msg >= 0)
-    {
-        TraceSetLastToolOutput(app, agent, rt->stream_msg, "(interrupted)", true);
-    }
     GoIdle(app, agent);
     pico_run_hooks(app, PICO_HOOK_ON_CANCEL, agent->id);
 }
@@ -2159,43 +2226,99 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
 
 static void StartLlm(PicoHost *app, PicoAgent *agent);
 
+static bool CallAllowsParallel(PicoAgentRt *rt, const PicoPendingCall *call)
+{
+    const PicoTool *tool = FindOfferedTool(rt, call->name);
+    if (!tool || tool->execution != PICO_TOOL_PARALLEL)
+    {
+        return false;
+    }
+    if (strcmp(call->name, "subagent") != 0)
+    {
+        return true;
+    }
+
+    /* Unknown/malformed profiles fail closed to a barrier. Reload cannot replace
+     * this workspace's profile snapshot while the accepted turn is draining. */
+    JsonDoc doc;
+    if (!call->arguments || JsonParse(&doc, call->arguments, strlen(call->arguments)) != 0)
+    {
+        return false;
+    }
+    char *name = JsonIsObject(&doc, 0) ? JsonObjStr(&doc, 0, "profile") : NULL;
+    const PicoSubagentProfileInfo *profile = name
+        ? PicoSubagentConfig_Find(rt->context.workspace_owner, name) : NULL;
+    bool parallel = profile && profile->parallel_safe;
+    free(name);
+    JsonFree(&doc);
+    return parallel;
+}
+
 static void StartNextTool(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
-    if (rt->pending_next >= rt->pending_count)
+    if (PicoAgent_CancelRequested(agent))
+    {
+        return;
+    }
+    for (int i = 0; i < rt->pending_count; i++)
+    {
+        PicoPendingCall *call = &rt->pending[i];
+        if (call->completed)
+        {
+            continue;
+        }
+        PicoTool *tool = FindOfferedTool(rt, call->name);
+        bool parallel = call->parallel;
+        if (call->progress == PICO_TOOL_CALL_RUNNING)
+        {
+            if (!parallel)
+            {
+                return;
+            }
+            continue;
+        }
+        if (rt->running_tools >= rt->max_parallel_tools || (!parallel && rt->running_tools))
+        {
+            return;
+        }
+        agent->state = PICO_AGENT_TOOL_WAIT;
+        if (!tool)
+        {
+            JsonBuf b;
+            JsonBuf_Init(&b);
+            JsonBuf_Puts(&b, "tool was not offered for this request: ");
+            JsonBuf_Puts(&b, call->name);
+            char *error = JsonBuf_Steal(&b);
+            if (!error) error = Dup("unoffered tool");
+            PushFunctionOutput(rt, call->call_id, call->name, error, true);
+            PicoSession_LogToolResult(app, agent, call->call_id, call->name, error, true, NULL);
+            PicoAgent_SetToolOutputByCallId(agent, call->call_id, error, true);
+            free(error);
+            call->completed = true;
+            continue;
+        }
+        SetActivity(app, agent, call->name);
+        StampActionT0(rt);
+        if (!QueueTool(agent, i, tool))
+        {
+            /* A dispatch failure is a call failure, not a reason to abandon siblings. */
+            const char *error = "Failed to start tool";
+            PushFunctionOutput(rt, call->call_id, call->name, error, true);
+            PicoSession_LogToolResult(app, agent, call->call_id, call->name, error, true, NULL);
+            PicoAgent_SetToolOutputByCallId(agent, call->call_id, error, true);
+            call->completed = true;
+            continue;
+        }
+        if (!parallel)
+        {
+            return;
+        }
+    }
+    if (!rt->running_tools)
     {
         ClearPending(rt);
         StartLlm(app, agent);
-        return;
-    }
-    PicoPendingCall *call = &rt->pending[rt->pending_next];
-    agent->state = PICO_AGENT_TOOL_WAIT;
-    SetActivity(app, agent, call->name && call->name[0] ? call->name : "tool");
-    PicoTool *tool = FindOfferedTool(rt, call->name);
-    if (!tool)
-    {
-        JsonBuf b;
-        JsonBuf_Init(&b);
-        JsonBuf_Puts(&b, "tool was not offered for this request: ");
-        JsonBuf_Puts(&b, call->name ? call->name : "");
-        char *error = JsonBuf_Steal(&b);
-        PushFunctionOutput(rt, call->call_id, call->name, error ? error : "unoffered tool", true);
-        PicoSession_LogToolResult(app, agent, call->call_id, call->name,
-                                  error ? error : "unoffered tool", true, NULL);
-        if (rt->stream_msg >= 0)
-        {
-            PicoAgent_SetToolOutputByCallId(agent, call->call_id,
-                                            error ? error : "unoffered tool", true);
-        }
-        free(error);
-        rt->pending_next++;
-        StartNextTool(app, agent);
-        return;
-    }
-    StampActionT0(rt);
-    if (!QueueTool(app, agent, call->name, call->arguments, call->call_id, tool->run, tool->state))
-    {
-        SetErrorState(app, agent, "Failed to start tool");
     }
 }
 
@@ -2411,6 +2534,7 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
                 call->name = JsonObjStr(&doc, obj, "name");
                 call->arguments = JsonObjStr(&doc, obj, "arguments");
                 call->item_id = JsonObjStr(&doc, obj, "item_id");
+                call->parallel = CallAllowsParallel(rt, call);
                 PushInput(rt, pico_canonical_tool_call_json(call->call_id, call->name, call->arguments,
                                                             call->item_id));
                 if (rt->stream_msg >= 0)
@@ -2482,7 +2606,7 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     }
     if (rt->pending_count > 0)
     {
-        rt->pending_next = 0;
+        rt->running_tools = 0;
         StartNextTool(app, agent);
         return;
     }
@@ -2494,9 +2618,9 @@ static void OnToolStart(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     PicoAgentRt *rt = agent->runtime;
     const char *name = ev->text ? ev->text : "tool";
     const char *args = ev->payload ? ev->payload : "{}";
-    if (rt->pending_next < rt->pending_count)
+    if (ev->call_index >= 0 && ev->call_index < rt->pending_count)
     {
-        PicoPendingCall *call = &rt->pending[rt->pending_next];
+        PicoPendingCall *call = &rt->pending[ev->call_index];
         if (ev->payload)
         {
             free(call->arguments);
@@ -2508,8 +2632,8 @@ static void OnToolStart(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     free(line);
     if (rt->stream_msg >= 0)
     {
-        PicoPendingCall *call = rt->pending_next < rt->pending_count
-                                    ? &rt->pending[rt->pending_next] : NULL;
+        PicoPendingCall *call = ev->call_index >= 0 && ev->call_index < rt->pending_count
+                                    ? &rt->pending[ev->call_index] : NULL;
         if (call && TraceHasToolCall(agent, rt->stream_msg, call->call_id))
         {
             PicoAgent_SetToolArgsByCallId(agent, call->call_id, args);
@@ -2526,9 +2650,20 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
 {
     PicoAgentRt *rt = agent->runtime;
     PicoPendingCall *call = NULL;
-    if (rt->pending_next < rt->pending_count)
+    if (ev->call_index >= 0 && ev->call_index < rt->pending_count)
     {
-        call = &rt->pending[rt->pending_next];
+        call = &rt->pending[ev->call_index];
+    }
+    if (!call || call->completed)
+    {
+        return;
+    }
+    bool ended_ask = rt->jobs[ev->call_index] && rt->jobs[ev->call_index]->snap_id;
+    JoinToolJob(rt, ev->call_index);
+    if (ended_ask)
+    {
+        pico_run_hooks(app, PICO_HOOK_ON_ASK_END, agent->id);
+        if (agent->runtime != rt) return;
     }
     if (call && ev->tool_args)
     {
@@ -2558,6 +2693,13 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
         apply_error = Dup("tool result details could not be applied");
     }
 
+    if (agent->runtime != rt)
+    {
+        free(apply_error);
+        return;
+    }
+    cancel = WorkerIsCancelled(rt);
+    is_error = is_error || cancel;
     const char *raw = apply_error ? apply_error : (ev->text ? ev->text : (is_error ? "tool failed" : ""));
     char *output = NULL;
     if (!cancel)
@@ -2565,6 +2707,14 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
         output = RunToolAfterHooks(rt, name, call_id, call ? call->arguments : NULL, raw, details,
                                    ev->executed, is_error);
     }
+    if (agent->runtime != rt)
+    {
+        free(output);
+        free(apply_error);
+        return;
+    }
+    cancel = WorkerIsCancelled(rt);
+    is_error = is_error || cancel;
     const char *use = output ? output : raw;
     PushFunctionOutput(rt, call_id, name, use, is_error);
     PicoSession_LogToolResult(app, agent, call_id, name, use, is_error, details);
@@ -2578,11 +2728,17 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
         }
         PicoAgent_SetToolOutputByCallId(agent, call_id, use, is_error);
     }
-    rt->pending_next++;
+    call->completed = true;
+    call->progress = PICO_TOOL_CALL_IDLE;
+    rt->running_tools--;
     free(output);
     free(apply_error);
     if (cancel)
     {
+        if (rt->running_tools)
+        {
+            return;
+        }
         AbortRemainingCalls(app, agent, rt);
         GoIdle(app, agent);
         pico_run_hooks(app, PICO_HOOK_ON_CANCEL, agent->id);
@@ -2608,14 +2764,15 @@ PicoToolCallProgress PicoAgent_ToolCallProgress(const PicoAgent *agent, const ch
     {
         return PICO_TOOL_CALL_IDLE;
     }
-    for (int i = rt->pending_next; i < rt->pending_count; i++)
+    for (int i = 0; i < rt->pending_count; i++)
     {
         const char *id = rt->pending[i].call_id;
         if (!id || strcmp(id, call_id) != 0)
         {
             continue;
         }
-        return i == rt->pending_next ? PICO_TOOL_CALL_RUNNING : PICO_TOOL_CALL_QUEUED;
+        return rt->pending[i].completed ? PICO_TOOL_CALL_IDLE :
+               rt->pending[i].progress == PICO_TOOL_CALL_RUNNING ? PICO_TOOL_CALL_RUNNING : PICO_TOOL_CALL_QUEUED;
     }
     return PICO_TOOL_CALL_IDLE;
 }
@@ -2650,10 +2807,12 @@ bool PicoAgent_CancelRequested(const PicoAgent *agent)
 bool PicoAgent_AskUiOpen(const PicoAgent *agent)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
-    return rt && rt->snap_id != 0;
+    for (int i = 0; rt && i < PICO_MAX_PENDING_CALLS; i++)
+        if (rt->jobs[i] && rt->jobs[i]->snap_id) return true;
+    return false;
 }
 
-static void PublishAskSnapshot(PicoHost *app, PicoAgent *agent)
+static void PublishJobAskSnapshot(PicoHost *app, PicoAgent *agent, PicoToolJob *job)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     uint64_t previous_id;
@@ -2664,42 +2823,49 @@ static void PublishAskSnapshot(PicoHost *app, PicoAgent *agent)
     {
         return;
     }
-    previous_id = rt->snap_id;
+    previous_id = job->snap_id;
     pthread_mutex_lock(&rt->mu);
-    bool waiting = rt->ask_waiting && !rt->cancel && !rt->stop;
-    uint64_t live_id = waiting ? rt->ask_id : 0;
+    bool waiting = job->ask_waiting && !rt->cancel && !rt->stop;
+    uint64_t live_id = waiting ? job->ask_id : 0;
     /* An answered/cancelled snapshot stays unpublished until a new ask id appears. */
-    publish_id = (rt->snap_retired && live_id == rt->snap_id) ? 0 : live_id;
-    if (publish_id != 0 && rt->ask_request && (rt->snap_retired || rt->snap_id != publish_id))
+    publish_id = (job->snap_retired && live_id == job->snap_id) ? 0 : live_id;
+    if (publish_id != 0 && job->ask_request && (job->snap_retired || job->snap_id != publish_id))
     {
-        live_copy = Dup(rt->ask_request);
+        live_copy = Dup(job->ask_request);
     }
     pthread_mutex_unlock(&rt->mu);
 
-    if (!rt->snap_retired && rt->snap_id == publish_id && publish_id != 0)
+    if (!job->snap_retired && job->snap_id == publish_id && publish_id != 0)
     {
         return;
     }
-    free(rt->snap_request);
-    rt->snap_request = NULL;
-    rt->snap_id = 0;
-    rt->snap_retired = false;
+    free(job->snap_request);
+    job->snap_request = NULL;
+    job->snap_id = 0;
+    job->snap_retired = false;
     if (publish_id != 0)
     {
-        rt->snap_id = publish_id;
-        rt->snap_request = live_copy;
+        job->snap_id = publish_id;
+        job->snap_request = live_copy;
         live_copy = NULL;
     }
     free(live_copy);
-    now_id = rt->snap_id;
+    now_id = job->snap_id;
     if (previous_id != 0 && previous_id != now_id)
     {
         pico_run_hooks(app, PICO_HOOK_ON_ASK_END, agent->id);
     }
-    if (now_id != 0 && now_id != previous_id)
+    if (agent->runtime == rt && now_id != 0 && now_id != previous_id)
     {
         pico_run_hooks(app, PICO_HOOK_ON_ASK, agent->id);
     }
+}
+
+static void PublishAskSnapshot(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS && agent->runtime == rt; i++)
+        if (rt->jobs[i]) PublishJobAskSnapshot(app, agent, rt->jobs[i]);
 }
 
 bool PicoAgent_BlocksReload(const PicoAgent *agent)
@@ -2719,7 +2885,7 @@ bool PicoAgent_BlocksReload(const PicoAgent *agent)
     }
     pthread_mutex_lock(&rt->mu);
     bool blocked = rt->busy || rt->work != PICO_WORK_IDLE ||
-                   rt->event_count > 0 || rt->ask_waiting || rt->pending_count > 0 ||
+                   rt->event_count > 0 || rt->pending_count > 0 ||
                    rt->offered_tool_count > 0 || rt->stream != NULL || rt->think != NULL ||
                    rt->summary != NULL;
     pthread_mutex_unlock(&rt->mu);
@@ -2785,11 +2951,51 @@ static void KillToolChild(pid_t pid)
     }
 }
 
+static void KillToolChildren(PicoAgentRt *rt)
+{
+    pthread_mutex_lock(&rt->mu);
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+    {
+        PicoToolJob *job = rt->jobs[i];
+        if (job)
+        {
+            KillToolChild(job->child);
+            job->child = 0;
+        }
+    }
+    pthread_mutex_unlock(&rt->mu);
+}
+
+static void JoinToolJob(PicoAgentRt *rt, int index)
+{
+    PicoToolJob *job = rt->jobs[index];
+    if (!job)
+    {
+        return;
+    }
+    if (job->started)
+    {
+        pthread_join(job->thread, NULL);
+    }
+    free(job->name);
+    free(job->args);
+    free(job->call_id);
+    free(job->ask_request);
+    free(job->ask_answer);
+    free(job->snap_request);
+    free(job);
+    rt->jobs[index] = NULL;
+}
+
 static void FreeRt(PicoAgentRt *rt)
 {
     if (!rt)
     {
         return;
+    }
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+    {
+        JoinToolJob(rt, i);
     }
     for (int i = 0; i < rt->event_count; i++)
     {
@@ -2821,13 +3027,7 @@ static void FreeRt(PicoAgentRt *rt)
     }
     free(rt->work_input);
     ClearOfferedTools(rt);
-    free(rt->work_tool_name);
-    free(rt->work_tool_args);
-    free(rt->work_call_id);
     free(rt->instructions);
-    free(rt->ask_request);
-    free(rt->ask_answer);
-    free(rt->snap_request);
     PicoWorkspace_RegistrationRelease(rt->registration);
     rt->registration = NULL;
     pthread_mutex_destroy(&rt->mu);
@@ -2855,7 +3055,7 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
         PicoRegistrationGeneration *old;
         pthread_mutex_lock(&rt->mu);
         quiescent = !rt->busy && rt->work == PICO_WORK_IDLE && rt->event_count == 0 &&
-                    !rt->ask_waiting && rt->pending_count == 0;
+                    rt->pending_count == 0;
         if (quiescent)
         {
             if (active)
@@ -2900,6 +3100,7 @@ static PicoAgentRt *CreateRt(PicoHost *app, PicoAgent *agent)
         return NULL;
     }
     rt->stream_msg = -1;
+    rt->max_parallel_tools = PICO_DEFAULT_PARALLEL_TOOLS;
     if (pthread_mutex_init(&rt->mu, NULL) != 0)
     {
         free(rt);
@@ -2911,15 +3112,19 @@ static PicoAgentRt *CreateRt(PicoHost *app, PicoAgent *agent)
         free(rt);
         return NULL;
     }
+    rt->event_cap = 2 * PICO_MAX_PENDING_CALLS + 1;
+    rt->events = calloc((size_t)rt->event_cap, sizeof(*rt->events));
+    if (!rt->events)
+    {
+        FreeRt(rt);
+        return NULL;
+    }
     RefreshWorkerContext(rt, app, agent);
     if (pthread_create(&rt->thread, NULL, WorkerMain, rt) != 0)
     {
         /* Without a worker, queued work would set busy forever and block
            destruction; fail creation instead of returning a dead agent. */
-        PicoWorkspace_RegistrationRelease(rt->registration);
-        pthread_cond_destroy(&rt->cv);
-        pthread_mutex_destroy(&rt->mu);
-        free(rt);
+        FreeRt(rt);
         return NULL;
     }
     rt->started = true;
@@ -2932,8 +3137,10 @@ static bool StopRt(PicoAgentRt *rt, const struct timespec *deadline)
     pthread_mutex_lock(&rt->mu);
     rt->stop = true;
     rt->cancel = true;
-    pid_t child = rt->tool_child;
     pthread_cond_broadcast(&rt->cv);
+    pthread_mutex_unlock(&rt->mu);
+    KillToolChildren(rt);
+    pthread_mutex_lock(&rt->mu);
     if (deadline && rt->busy)
     {
         while (rt->busy)
@@ -2946,7 +3153,6 @@ static bool StopRt(PicoAgentRt *rt, const struct timespec *deadline)
     }
     bool done = !rt->busy;
     pthread_mutex_unlock(&rt->mu);
-    KillToolChild(child);
     return done;
 }
 
@@ -2990,6 +3196,13 @@ bool PicoAgent_RetiredReferences(const PicoWorkspace *workspace, PicoAgentId id)
     return false;
 }
 
+static void DetachRt(PicoAgentRt *rt)
+{
+    if (rt->started) pthread_detach(rt->thread);
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+        if (rt->jobs[i] && rt->jobs[i]->started) pthread_detach(rt->jobs[i]->thread);
+}
+
 /* Share one shutdown deadline across every retired runtime. */
 bool PicoAgent_ShutdownRetired(PicoWorkspace *workspace, const struct timespec *deadline)
 {
@@ -3014,10 +3227,7 @@ bool PicoAgent_ShutdownRetired(PicoWorkspace *workspace, const struct timespec *
         }
         else
         {
-            if (z->started)
-            {
-                pthread_detach(z->thread);
-            }
+            DetachRt(z);
             all_done = false;
         }
         z = next;
@@ -3086,10 +3296,7 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
         /* A worker stuck in a callback keeps the execution host alive. */
         if (!done)
         {
-            if (rt->started)
-            {
-                pthread_detach(rt->thread);
-            }
+            DetachRt(rt);
             agent->runtime = NULL;
             return false;
         }
@@ -3139,6 +3346,10 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
         return;
     }
     PicoAgent_DismissError(agent);
+    int parallel = agent->max_parallel_tools_override ? agent->max_parallel_tools_override
+                                                      : agent->workspace->settings.max_parallel_tools;
+    agent->runtime->max_parallel_tools = parallel >= 1 && parallel <= PICO_MAX_PARALLEL_TOOLS
+                                             ? parallel : PICO_DEFAULT_PARALLEL_TOOLS;
     free(agent->runtime->instructions);
     agent->runtime->instructions = PicoSettings_LoadSystemPrompt(PicoAgent_Workspace(agent));
     if (agent->kind == PICO_AGENT_SUBAGENT)
@@ -3177,7 +3388,8 @@ void PicoAgent_Cancel(PicoAgent *agent)
     pthread_mutex_unlock(&rt->mu);
     PicoWorkspace_CancelDelegations(agent->workspace, agent->id,
                                     agent->runtime_generation);
-    rt->snap_retired = true;
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+        if (rt->jobs[i]) rt->jobs[i]->snap_retired = true;
 }
 
 void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
@@ -3215,13 +3427,13 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
     old->cancel = true;
     old->stop = true;
     old->retired = true;
-    pid_t child = old->tool_child;
-    old->tool_child = 0;
     pthread_cond_broadcast(&old->cv);
     pthread_mutex_unlock(&old->mu);
-    KillToolChild(child);
+    KillToolChildren(old);
 
-    bool ask_open = PicoAgent_AskUiOpen(agent);
+    int asks_open = 0;
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+        if (old->jobs[i] && old->jobs[i]->snap_id) asks_open++;
     ApplyCancel(app, agent);
 
     rt->input = old->input;
@@ -3238,7 +3450,7 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
     workspace->retired_runtimes = old;
     workspace->retired_count++;
     agent->runtime = rt;
-    if (ask_open)
+    while (asks_open-- > 0)
     {
         pico_run_hooks(app, PICO_HOOK_ON_ASK_END, agent->id);
     }
@@ -3246,17 +3458,16 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
 
 void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid)
 {
-    if (t_worker_context != PICO_WORKER_TOOL || !AgentContextActive(ctx))
-    {
+    if (t_worker_context != PICO_WORKER_TOOL || !ctx || t_agent_context != ctx ||
+        t_worker_rt != ctx->runtime || !ctx->job)
         return;
-    }
     PicoAgentRt *rt = ctx->runtime;
     pthread_mutex_lock(&rt->mu);
-    if (!rt->retired && !rt->stop && !rt->cancel)
-    {
-        rt->tool_child = pid;
-    }
+    bool cancelled = rt->retired || rt->stop || rt->cancel;
+    ctx->job->child = cancelled ? 0 : pid;
     pthread_mutex_unlock(&rt->mu);
+    /* Cover cancellation racing with spawn/bind; never orphan a late child. */
+    if (cancelled) KillToolChild(pid);
 }
 
 static uint64_t NextAskId(PicoAgentRt *rt)
@@ -3419,8 +3630,9 @@ int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer
     }
     bool invalid = AskRequestInvalid(request_json);
     PicoAgentRt *rt = ctx->runtime;
+    PicoToolJob *job = ctx->job;
     pthread_mutex_lock(&rt->mu);
-    if (rt->ask_waiting)
+    if (job->ask_waiting)
     {
         pthread_mutex_unlock(&rt->mu);
         return AskFail(answer_json);
@@ -3441,41 +3653,41 @@ int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer
         pthread_mutex_unlock(&rt->mu);
         return AskFail(answer_json);
     }
-    rt->ask_id = NextAskId(rt);
-    rt->ask_request = req;
-    free(rt->ask_answer);
-    rt->ask_answer = NULL;
-    rt->ask_waiting = true;
-    rt->ask_done = false;
-    while (!rt->ask_done && !rt->cancel && !rt->stop)
+    job->ask_id = NextAskId(rt);
+    job->ask_request = req;
+    free(job->ask_answer);
+    job->ask_answer = NULL;
+    job->ask_waiting = true;
+    job->ask_done = false;
+    while (!job->ask_done && !rt->cancel && !rt->stop)
     {
         pthread_cond_wait(&rt->cv, &rt->mu);
     }
     int rc;
     if (rt->stop || rt->cancel)
     {
-        free(rt->ask_answer);
-        rt->ask_answer = NULL;
+        free(job->ask_answer);
+        job->ask_answer = NULL;
         rc = PICO_ASK_CANCEL;
     }
     else
     {
         if (answer_json)
         {
-            *answer_json = rt->ask_answer ? rt->ask_answer : Dup("");
+            *answer_json = job->ask_answer ? job->ask_answer : Dup("");
         }
         else
         {
-            free(rt->ask_answer);
+            free(job->ask_answer);
         }
-        rt->ask_answer = NULL;
+        job->ask_answer = NULL;
         rc = PICO_ASK_OK;
     }
-    free(rt->ask_request);
-    rt->ask_request = NULL;
-    rt->ask_waiting = false;
-    rt->ask_done = false;
-    rt->ask_id = 0;
+    free(job->ask_request);
+    job->ask_request = NULL;
+    job->ask_waiting = false;
+    job->ask_done = false;
+    job->ask_id = 0;
     pthread_mutex_unlock(&rt->mu);
     if (rc == PICO_ASK_CANCEL)
     {
@@ -3487,15 +3699,29 @@ int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer
 bool PicoAgent_PendingAsk(const PicoAgent *agent, PicoToolAsk *out)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
-    if (!rt || !out || rt->snap_id == 0 || !rt->snap_request || rt->snap_retired)
+    PicoToolJob *oldest = NULL;
+    if (!rt || !out)
     {
         return false;
     }
-    out->id = rt->snap_id;
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+    {
+        PicoToolJob *job = rt->jobs[i];
+        if (job && job->snap_id && job->snap_request && !job->snap_retired &&
+            (!oldest || job->snap_id < oldest->snap_id))
+        {
+            oldest = job;
+        }
+    }
+    if (!oldest)
+    {
+        return false;
+    }
+    out->id = oldest->snap_id;
     out->agent_id = agent->id;
     out->profile = agent->profile;
     out->purpose = agent->purpose;
-    out->request_json = rt->snap_request;
+    out->request_json = oldest->snap_request;
     return true;
 }
 
@@ -3516,7 +3742,16 @@ bool PicoAgent_AnswerAsk(PicoAgent *agent, uint64_t id, const char *answer_json)
         return false;
     }
     pthread_mutex_lock(&rt->mu);
-    if (!rt->ask_waiting || rt->ask_done || rt->ask_id != id || rt->cancel || rt->stop)
+    PicoToolJob *job = NULL;
+    for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
+    {
+        if (rt->jobs[i] && rt->jobs[i]->ask_id == id)
+        {
+            job = rt->jobs[i];
+            break;
+        }
+    }
+    if (!job || !job->ask_waiting || job->ask_done || job->ask_id != id || rt->cancel || rt->stop)
     {
         pthread_mutex_unlock(&rt->mu);
         return false;
@@ -3527,13 +3762,13 @@ bool PicoAgent_AnswerAsk(PicoAgent *agent, uint64_t id, const char *answer_json)
         pthread_mutex_unlock(&rt->mu);
         return false;
     }
-    rt->ask_answer = ans;
-    rt->ask_done = true;
+    job->ask_answer = ans;
+    job->ask_done = true;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
-    if (rt->snap_id == id)
+    if (job->snap_id == id)
     {
-        rt->snap_retired = true;
+        job->snap_retired = true;
     }
     return true;
 }
@@ -3564,6 +3799,7 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
         return;
     }
     PublishAskSnapshot(app, agent);
+    if (agent->runtime != rt) return;
 
     pthread_mutex_lock(&rt->mu);
     char *stream = rt->stream;
@@ -3687,7 +3923,8 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     for (int i = 0; i < event_count; i++)
     {
         PicoAgentEv *ev = &events[i];
-        switch (ev->type)
+        /* A main-thread callback may force-cancel while this drain is in progress. */
+        if (agent->runtime == rt) switch (ev->type)
         {
         case PICO_AEV_LLM_DONE:
             OnLlmDone(app, agent, ev);

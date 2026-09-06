@@ -97,6 +97,7 @@ typedef struct TestState {
     bool logged_thinking_parts;
     char logged_thinking[256];
     char logged_content[256];
+    char logged_tool_ids[512];
     char session_item_order[64];
     int session_message_groups[64];
     int session_message_group_count;
@@ -155,6 +156,7 @@ static void ResetTest(TestMode mode, int tool_limit)
             g_test.ask_rc[i][j] = -1;
         }
     }
+    g_test.logged_tool_ids[0] = '\0';
     g_test.mode = mode;
     g_test.provider_tool_limit = tool_limit;
     g_test.provider_tools_issued = 0;
@@ -1230,7 +1232,9 @@ PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent
 {
     (void)app;
     (void)agent;
-    (void)call_id;
+    size_t n = strlen(g_test.logged_tool_ids);
+    snprintf(g_test.logged_tool_ids + n, sizeof(g_test.logged_tool_ids) - n,
+             "%s,", call_id ? call_id : "?");
     (void)name;
     (void)output;
     (void)is_error;
@@ -1327,7 +1331,7 @@ void PicoPlugins_Load(PicoHost *app)
         {
             PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
             pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
-            pico_add_tool(ws, "ask_test", "test", "{}", AskTool, NULL);
+            pico_add_tool(ws, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
             PicoHost_PublishRegistration(app, NULL);
         }
     }
@@ -1374,7 +1378,7 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
     }
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
     pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
-    pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL);
+    pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(host, NULL);
 }
 
@@ -1644,7 +1648,7 @@ static void InitApp(PicoHost *app)
     app->workspace_count = 1;
     PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, workspace);
     pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
-    pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL);
+    pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(app, NULL);
     PicoAgentCreateOptions options = {
         .kind = PICO_AGENT_MAIN,
@@ -1715,7 +1719,7 @@ static bool TestAddTool(PicoHost *app, const char *name, const char *description
 {
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(app);
     PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
-    bool ok = pico_add_tool(ws, name, description, params_json, run, apply);
+    bool ok = pico_add_tool(ws, name, description, params_json, run, apply, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(app, NULL);
     return ok;
 }
@@ -1947,17 +1951,18 @@ static int TestToolSchemaValidation(void)
     (void)TestWs(&app);
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
-    bool null_schema = pico_add_tool(ws, "null_schema", "null", NULL, EchoTool, NULL);
-    bool empty_schema = pico_add_tool(ws, "empty_schema", "empty", "", EchoTool, NULL);
-    bool valid = pico_add_tool(ws, "valid", "valid", "{\"type\":\"object\"}", EchoTool, NULL);
+    bool null_schema = pico_add_tool(ws, "null_schema", "null", NULL, EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
+    bool empty_schema = pico_add_tool(ws, "empty_schema", "empty", "", EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
+    bool valid = pico_add_tool(ws, "valid", "valid", "{\"type\":\"object\"}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
     bool rejected =
-        !pico_add_tool(ws, "extra", "invalid", "{\"type\":\"object\"}}", EchoTool, NULL) &&
-        !pico_add_tool(ws, "literal", "invalid", "{\"type\":falsee}", EchoTool, NULL) &&
-        !pico_add_tool(ws, "number", "invalid", "{\"minimum\":01}", EchoTool, NULL) &&
-        !pico_add_tool(ws, "comma", "invalid", "{\"type\":\"object\",}", EchoTool, NULL) &&
-        !pico_add_tool(ws, "array", "invalid", "[]", EchoTool, NULL) &&
-        !pico_add_tool(ws, "multiple", "invalid", "{} {}", EchoTool, NULL) &&
-        !pico_add_tool(ws, "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL);
+        !pico_add_tool(ws, "bad_execution", "invalid", "{}", EchoTool, NULL, (PicoToolExecution)-1) &&
+        !pico_add_tool(ws, "extra", "invalid", "{\"type\":\"object\"}}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) &&
+        !pico_add_tool(ws, "literal", "invalid", "{\"type\":falsee}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) &&
+        !pico_add_tool(ws, "number", "invalid", "{\"minimum\":01}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) &&
+        !pico_add_tool(ws, "comma", "invalid", "{\"type\":\"object\",}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) &&
+        !pico_add_tool(ws, "array", "invalid", "[]", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) &&
+        !pico_add_tool(ws, "multiple", "invalid", "{} {}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) &&
+        !pico_add_tool(ws, "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(&app, NULL);
 
     PicoHost todo_app;
@@ -1987,12 +1992,12 @@ static int TestToolRegistrationFailureWarns(void)
     (void)TestWs(&app);
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
-    if (!pico_add_tool(ws, "ok", "ok", "{}", EchoTool, NULL) || app.status_warn)
+    if (!pico_add_tool(ws, "ok", "ok", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) || app.status_warn)
     {
         free(app.status_warn);
         return Fail(name, "successful registration warned or failed");
     }
-    if (pico_add_tool(ws, "ok", "dup", "{}", EchoTool, NULL) ||
+    if (pico_add_tool(ws, "ok", "dup", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) ||
         !WarnMentions(&app, "\"ok\"", "already registered"))
     {
         free(app.status_warn);
@@ -2000,7 +2005,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    if (pico_add_tool(ws, "bad_schema", "invalid", "[]", EchoTool, NULL) ||
+    if (pico_add_tool(ws, "bad_schema", "invalid", "[]", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) ||
         !WarnMentions(&app, "\"bad_schema\"", "JSON object"))
     {
         free(app.status_warn);
@@ -2008,7 +2013,7 @@ static int TestToolRegistrationFailureWarns(void)
     }
     free(app.status_warn);
     app.status_warn = NULL;
-    if (pico_add_tool(ws, "no_run", "missing", "{}", NULL, NULL) ||
+    if (pico_add_tool(ws, "no_run", "missing", "{}", NULL, NULL, PICO_TOOL_SEQUENTIAL) ||
         !WarnMentions(&app, "\"no_run\"", "missing run function"))
     {
         free(app.status_warn);
@@ -2021,13 +2026,13 @@ static int TestToolRegistrationFailureWarns(void)
     {
         int i = ws->tool_count + app.staging.ws_tool_count;
         snprintf(extra[i], sizeof(extra[i]), "x%d", i);
-        if (!pico_add_tool(ws, extra[i], "pad", "{}", EchoTool, NULL))
+        if (!pico_add_tool(ws, extra[i], "pad", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL))
         {
             free(app.status_warn);
             return Fail(name, "padding tools to the limit failed");
         }
     }
-    if (pico_add_tool(ws, "overflow", "full", "{}", EchoTool, NULL) ||
+    if (pico_add_tool(ws, "overflow", "full", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL) ||
         !WarnMentions(&app, "\"overflow\"", "tool limit reached"))
     {
         free(app.status_warn);
@@ -2890,7 +2895,7 @@ static int TestOfferedCatalogSnapshot(void)
     InitApp(&app);
     PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
     PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
-    pico_add_tool(ws, "echo_test", "echo", "{}", EchoTool, NULL);
+    pico_add_tool(ws, "echo_test", "echo", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(&app, NULL);
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
@@ -3440,6 +3445,11 @@ static int TestTodoApplyRenamesSession(void)
          tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, renamed, false, todo_state) && g_log_title_calls == 2;
     ext.workspace_on_frame(ws, todo_state, 0.0f);
     ok = ok && g_log_title_calls == 3 && strcmp(g_logged_title, "Rename again") == 0;
+    /* The fixture owns this extension instance: drain its agent hooks before freeing state. */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    ok = PicoWorkspace_QuiesceBefore(ws, &deadline) && ok;
     if (ext.workspace_shutdown)
     {
         ext.workspace_shutdown(ws, todo_state);
@@ -3775,6 +3785,7 @@ static int TestWorkerContextCapturesRegistrationGeneration(void)
 #include "workspace_test.c"
 #include "subagent_config_test.c"
 #include "subagent_test.c"
+#include "parallel_tool_test.c"
 
 static int TestResultItemOrder(TestMode mode, bool assistant_first, const char *name)
 {
@@ -4351,6 +4362,19 @@ static int TestUiPostLimit(void)
 int main(void)
 {
     int failed = 0;
+    failed |= TestProfileParallelSafeValidation();
+    failed |= TestSubagentProfileBarrier();
+    failed |= TestSubagentIdentityRewrite();
+    failed |= TestSubagentParallelSettingValidation();
+    failed |= TestParallelScheduling();
+    failed |= TestParallelLimitOne();
+    failed |= TestParallelAsks();
+    failed |= TestParallelForceCancelReload();
+    failed |= TestParallelCancelKeepsCompleted();
+    failed |= TestParallelProcessCancellation();
+    failed |= TestParallelBeforeHooks();
+    failed |= TestParallelDelegations();
+    failed |= TestParallelResumeReservation();
     failed |= TestSequential();
     failed |= TestCancellation();
     failed |= TestStaleId();

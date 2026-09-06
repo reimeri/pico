@@ -427,6 +427,35 @@ static void TestAnnotations(void)
     pico_llm_result_free(&nonempty);
 }
 
+static void TestParallelResultsReplay(void)
+{
+    const char *input[] = {
+        "{\"type\":\"tool_call\",\"call_id\":\"c1\",\"name\":\"sh\",\"arguments\":\"{}\"}",
+        "{\"type\":\"tool_call\",\"call_id\":\"c2\",\"name\":\"sh\",\"arguments\":\"{}\"}",
+        "{\"type\":\"tool_result\",\"call_id\":\"c2\",\"output\":\"second\"}",
+        "{\"type\":\"tool_result\",\"call_id\":\"c1\",\"output\":\"first\"}",
+    };
+    PicoLlmTurn turn = {.model = "test", .input_json = input, .input_count = 4};
+    PicoResponsesBuildOpts opts = {.provider = "openai"};
+    char *body = pico_responses_build_request(&turn, &opts);
+    JsonDoc doc;
+    bool ok = false;
+    if (body && JsonParse(&doc, body, strlen(body)) == 0)
+    {
+        int items = JsonObjGet(&doc, 0, "input");
+        int second = JsonArrayAt(&doc, items, 2);
+        int first = JsonArrayAt(&doc, items, 3);
+        ok = JsonEq(&doc, JsonObjGet(&doc, second, "type"), "function_call_output") &&
+             JsonEq(&doc, JsonObjGet(&doc, second, "call_id"), "c2") &&
+             JsonEq(&doc, JsonObjGet(&doc, second, "output"), "second") &&
+             JsonEq(&doc, JsonObjGet(&doc, first, "call_id"), "c1") &&
+             JsonEq(&doc, JsonObjGet(&doc, first, "output"), "first");
+        JsonFree(&doc);
+    }
+    Check(ok, "Responses replay preserves the IDs of reverse-order parallel results");
+    free(body);
+}
+
 int main(void)
 {
     TestRequestOptions();
@@ -435,6 +464,7 @@ int main(void)
     TestReasoningRemoval();
     TestRefreshDecision();
     TestSignatureReplay();
+    TestParallelResultsReplay();
     TestReasoningResultProjection();
     TestRefusalProjection();
     TestRefusalRequestReplay();

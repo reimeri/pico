@@ -535,7 +535,7 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
 static int ShellInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_tool(workspace, "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL);
+    pico_add_tool(workspace, "sh", "Run a shell command in the workspace", kShParams, ShRun, NULL, PICO_TOOL_SEQUENTIAL);
     return 0;
 }
 

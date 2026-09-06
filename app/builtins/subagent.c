@@ -84,7 +84,7 @@ static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, Pic
     }
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "Children start with no parent context; put requirements, paths, and constraints in task; session_id resumes that child only, still include parent-side changes. Profiles:");
+    JsonBuf_Puts(&b, "Children start with no parent context; put requirements, paths, and constraints in task; session_id resumes that child only, still include parent-side changes. Issue independent parallel-safe subagent calls together in one response to run them concurrently; other profiles act as barriers in this parent batch; wait for results before dependent calls. Read-only profile instructions are not a filesystem sandbox. Profiles:");
     int count = pico_subagent_profile_count(app);
     for (int i = 0; i < count; i++)
     {
@@ -95,6 +95,7 @@ static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, Pic
         }
         JsonBuf_Puts(&b, "\n- ");
         JsonBuf_Puts(&b, profile.name);
+        JsonBuf_Puts(&b, profile.parallel_safe ? " [parallel-safe]" : " [sequential]");
         if (profile.description[0])
         {
             JsonBuf_Puts(&b, ": ");
@@ -115,7 +116,7 @@ static int SubagentInit(PicoWorkspace *workspace, void **state_out)
     (void)state_out;
     pico_add_tool(workspace, "subagent",
                   "Delegate a task synchronously to a discovered named subagent profile",
-                  kSubagentParams, SubagentRun, NULL);
+                  kSubagentParams, SubagentRun, NULL, PICO_TOOL_PARALLEL);
     pico_add_llm_hook(workspace, SubagentGuidance);
     pico_add_tool_row_hook(workspace, PicoChat_SubagentToolRow);
     return 0;

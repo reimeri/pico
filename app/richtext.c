@@ -270,6 +270,55 @@ static float WordAdvance(const RichTextStyle *style, float default_space, const 
     return gap + word->width + chrome;
 }
 
+static int Utf8Next(const char *text, int length, int position)
+{
+    if (position >= length)
+    {
+        return length;
+    }
+    unsigned char c = (unsigned char)text[position];
+    int step = 1;
+    if ((c & 0xE0) == 0xC0)
+    {
+        step = 2;
+    }
+    else if ((c & 0xF0) == 0xE0)
+    {
+        step = 3;
+    }
+    else if ((c & 0xF8) == 0xF0)
+    {
+        step = 4;
+    }
+    position += step;
+    return position > length ? length : position;
+}
+
+/* Longest UTF-8 prefix that measures at most `width`. Always returns at least
+ * one codepoint when length > 0 so a single glyph wider than the container
+ * still occupies a line instead of looping. */
+static int LongestPrefixBytes(const char *text, int length, Clay_TextElementConfig *config,
+                              float width)
+{
+    if (!text || length <= 0)
+    {
+        return 0;
+    }
+    int position = 0;
+    int best = 0;
+    while (position < length)
+    {
+        int next = Utf8Next(text, length, position);
+        if (Measure(text, next, config).width > width && best > 0)
+        {
+            return best;
+        }
+        best = next;
+        position = next;
+    }
+    return best;
+}
+
 static void ScratchRunAppendWord(ScratchRun *run, RtWord *word, bool add_space)
 {
     int needed = run->length + word->length + (add_space ? 1 : 0) + 1;
@@ -356,6 +405,39 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
         float advance = WordAdvance(style, space_width, last_run, line_x > 0, word);
         bool fits = line_x + advance <= available_width;
 
+        if (line_x > 0 && !fits)
+        {
+            PushLine(&scratch_lines, &scratch_line_count, &scratch_line_capacity, current_line);
+            ScratchLine empty = {0};
+            current_line = empty;
+            line_x = 0;
+            last_run = NULL;
+            advance = WordAdvance(style, space_width, NULL, false, word);
+            fits = advance <= available_width;
+        }
+
+        RtWord place = *word;
+        bool continue_remainder = false;
+        if (line_x == 0 && !fits && word->length > 0)
+        {
+            Clay_TextElementConfig config =
+                TextConfigFor(style, word->bold, word->italic, word->code, word->link_url != NULL);
+            float chrome = word->code ? InlineCodeChromeX() : 0.0f;
+            float budget = available_width - chrome;
+            int prefix = LongestPrefixBytes(word->text, word->length, &config, budget);
+            if (prefix > 0 && prefix < word->length)
+            {
+                place.length = prefix;
+                place.width = Measure(place.text, place.length, &config).width;
+                word->text += prefix;
+                word->length -= prefix;
+                word->space_before = false;
+                word->width = Measure(word->text, word->length, &config).width;
+                continue_remainder = true;
+            }
+        }
+
+        last_run = current_line.run_count > 0 ? &current_line.runs[current_line.run_count - 1] : NULL;
         if (line_x == 0)
         {
             // Start a new line.
@@ -366,19 +448,19 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
                 current_line.run_capacity = new_capacity;
             }
             ScratchRun new_run = {0};
-            new_run.bold = word->bold;
-            new_run.italic = word->italic;
-            new_run.code = word->code;
-            new_run.strike = word->strike;
-            new_run.link_url = word->link_url;
+            new_run.bold = place.bold;
+            new_run.italic = place.italic;
+            new_run.code = place.code;
+            new_run.strike = place.strike;
+            new_run.link_url = place.link_url;
             current_line.runs[current_line.run_count++] = new_run;
-            ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
-            line_x = WordAdvance(style, space_width, NULL, false, word);
+            ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], &place, false);
+            line_x = WordAdvance(style, space_width, NULL, false, &place);
         }
-        else if (fits && ContinuesRun(last_run, word))
+        else if (fits && ContinuesRun(last_run, &place))
         {
             // Extend the current run.
-            ScratchRunAppendWord(last_run, word, word->space_before);
+            ScratchRunAppendWord(last_run, &place, place.space_before);
             line_x += advance;
         }
         else if (fits)
@@ -391,33 +473,25 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
                 current_line.run_capacity = new_capacity;
             }
             ScratchRun new_run = {0};
-            new_run.bold = word->bold;
-            new_run.italic = word->italic;
-            new_run.code = word->code;
-            new_run.strike = word->strike;
-            new_run.link_url = word->link_url;
-            new_run.space_before = word->space_before;
+            new_run.bold = place.bold;
+            new_run.italic = place.italic;
+            new_run.code = place.code;
+            new_run.strike = place.strike;
+            new_run.link_url = place.link_url;
+            new_run.space_before = place.space_before;
             current_line.runs[current_line.run_count++] = new_run;
-            ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
+            ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], &place, false);
             line_x += advance;
         }
-        else
+
+        if (continue_remainder)
         {
-            // Wrap to a new line.
             PushLine(&scratch_lines, &scratch_line_count, &scratch_line_capacity, current_line);
             ScratchLine empty = {0};
             current_line = empty;
-            ScratchRun new_run = {0};
-            new_run.bold = word->bold;
-            new_run.italic = word->italic;
-            new_run.code = word->code;
-            new_run.strike = word->strike;
-            new_run.link_url = word->link_url;
-            current_line.runs = (ScratchRun *)malloc(4 * sizeof(ScratchRun));
-            current_line.run_capacity = 4;
-            current_line.runs[current_line.run_count++] = new_run;
-            ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], word, false);
-            line_x = WordAdvance(style, space_width, NULL, false, word);
+            line_x = 0;
+            i--;
+            continue;
         }
     }
     // Push the final line (possibly empty -> blank paragraph still takes

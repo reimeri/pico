@@ -11,6 +11,8 @@
 // here: chunks are split into styled words, measured with the same text
 // measure function clay uses, greedily packed into lines, and emitted as one
 // LEFT_TO_RIGHT row container per line, with one CLAY_TEXT per style run.
+// Words wider than the line (file paths, long tokens) are broken at UTF-8
+// codepoints so they stay inside available_width; Clay WRAP_WORDS will not.
 // Inline `code` runs are wrapped in a padded pill; that horizontal padding is
 // part of the wrap width so the line does not overflow and overlap.
 //

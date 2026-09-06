@@ -301,6 +301,49 @@ static int TestQuoteUsesInnerWidth(void)
     return result;
 }
 
+static int TestLongUnspacedWordWrapsInsideWidth(void)
+{
+    const char *source =
+        "/home/toor/Pictures/Screenshots/Screenshot-from-2026-09-06-22-08-43.png";
+    MdDocument doc = MdDocument_Parse(source, strlen(source));
+    const float width = 180.0f;
+    Clay_RenderCommandArray commands = RenderDocument(&doc, 5000, width, true);
+    char reconstructed[256];
+    size_t used = 0;
+    reconstructed[0] = '\0';
+    bool overflowed = false;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        Clay_BoundingBox box = command->boundingBox;
+        if (box.x < -0.01f || box.x + box.width > width + 0.5f)
+        {
+            overflowed = true;
+            break;
+        }
+        Clay_StringSlice contents = command->renderData.text.stringContents;
+        if (used + (size_t)contents.length >= sizeof(reconstructed))
+        {
+            overflowed = true;
+            break;
+        }
+        memcpy(reconstructed + used, contents.chars, (size_t)contents.length);
+        used += (size_t)contents.length;
+        reconstructed[used] = '\0';
+    }
+    int result = 0;
+    if (overflowed || used != strlen(source) || memcmp(reconstructed, source, used) != 0)
+    {
+        result = Fail("long unspaced markdown word did not wrap inside its container");
+    }
+    MdDocument_Free(&doc);
+    return result;
+}
+
 int main(void)
 {
     uint32_t arena_size = Clay_MinMemorySize();
@@ -331,6 +374,10 @@ int main(void)
     if (result == 0)
     {
         result = TestQuoteUsesInnerWidth();
+    }
+    if (result == 0)
+    {
+        result = TestLongUnspacedWordWrapsInsideWidth();
     }
     free(memory);
     return result;

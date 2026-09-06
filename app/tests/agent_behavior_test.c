@@ -24,6 +24,7 @@ typedef enum TestMode {
     TEST_SEQUENTIAL,
     TEST_INVALID,
     TEST_BLOCK,
+    TEST_BLOCK_WITH_ASSISTANT,
     TEST_BATCH_TOOLS,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
@@ -503,6 +504,10 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         (void)pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
     }
+    if (mode == TEST_BLOCK_WITH_ASSISTANT)
+    {
+        pico_llm_result_add_text(out, "working");
+    }
     if (mode == TEST_SIGNATURE_CONTINUATION)
     {
         PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
@@ -553,7 +558,7 @@ static void AskTool(PicoAgentContext *ctx, const char *args_json, PicoToolResult
     pthread_mutex_lock(&g_test.mu);
     int invocation = g_test.tool_invocations++;
     TestMode mode = g_test.mode;
-    if (mode == TEST_BLOCK || mode == TEST_BATCH_TOOLS)
+    if (mode == TEST_BLOCK || mode == TEST_BLOCK_WITH_ASSISTANT || mode == TEST_BATCH_TOOLS)
     {
         g_test.block_entered = true;
         g_test.block_entered_count++;
@@ -2432,6 +2437,53 @@ static int TestRetiredRuntimeCap(void)
         fprintf(stderr, "%s: iteration %d: %s\n", name, failed_at, failed_why);
     }
     return ok ? 0 : Fail(name, "force cancellation did not fall back to cooperative cancellation at the cap");
+}
+
+static int TestForceCancelToolPreservesCanonicalHistory(void)
+{
+    const char *name = "force-cancelled tool preserves canonical history";
+    ResetTest(TEST_BLOCK_WITH_ASSISTANT, 1);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "blocking tool did not start");
+    }
+
+    PicoAgent_ForceCancel(&app, TestAgent(&app));
+    pthread_mutex_lock(&g_test.mu);
+    bool persisted_once = strcmp(g_test.session_item_order, "AT") == 0;
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+
+    PicoAgent_StartTurn(&app, TestAgent(&app), "continue");
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "follow-up after force cancellation did not finish");
+    }
+
+    pthread_mutex_lock(&g_test.mu);
+    const char *input = g_test.last_input ? g_test.last_input : "";
+    const char *assistant = strstr(input, "\"type\":\"assistant\"");
+    const char *tool_call = strstr(input, "\"type\":\"tool_call\"");
+    const char *tool_result = strstr(input, "\"type\":\"tool_result\"");
+    const char *duplicate = assistant
+                                ? strstr(assistant + 1, "\"type\":\"assistant\"")
+                                : NULL;
+    const char *content = assistant ? strstr(assistant, "\"text\":\"working\"") : NULL;
+    bool history_ok = assistant && content && tool_call && tool_result &&
+                      assistant < content && content < tool_call && tool_call < tool_result && !duplicate &&
+                      !strstr(content + 1, "\"text\":\"working\"") &&
+                      strstr(tool_result, "(interrupted)");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return persisted_once && history_ok
+               ? 0
+               : Fail(name, "force cancellation duplicated the completed assistant item");
 }
 
 static int TestBeforeForceCancel(void)
@@ -4388,6 +4440,7 @@ int main(void)
     failed |= TestNonVisionSubmitPreservesDraft();
     failed |= TestInvalidPayload();
     failed |= TestRetiredRuntimeCap();
+    failed |= TestForceCancelToolPreservesCanonicalHistory();
     failed |= TestBeforeForceCancel();
     failed |= TestBeforeDeny();
     failed |= TestBeforeAskCancel();

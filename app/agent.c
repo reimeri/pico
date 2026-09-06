@@ -2125,7 +2125,12 @@ static void ApplyCancel(PicoHost *app, PicoAgent *agent)
         pico_run_hooks(app, PICO_HOOK_ON_CANCEL, agent->id);
         return;
     }
-    SavePartialAssistant(app, agent);
+    /* The completed assistant/tool-call result is already canonical and persisted
+     * once tool execution begins. Only provider cancellation has partial output. */
+    if (agent->state == PICO_AGENT_LLM_WAIT)
+    {
+        SavePartialAssistant(app, agent);
+    }
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
         PopLastMessage(app, agent);

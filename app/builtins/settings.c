@@ -14,6 +14,7 @@
 enum {
     FOCUS_NONE = 0,
     FOCUS_CONTEXT_LIMIT,
+    FOCUS_MAX_PARALLEL_TOOLS,
     FOCUS_COMPACT_AT,
     FOCUS_FONT_SCALE,
     FOCUS_CHAT_WIDTH,
@@ -34,6 +35,7 @@ typedef struct SettingsState {
     PicoUserSettingsDraft draft;
     bool *expanded;
     char context_limit[32];
+    char max_parallel_tools[32];
     char compact_at[32];
     char font_scale[32];
     char chat_width[32];
@@ -134,6 +136,7 @@ static void SyncFieldsFromDraft(SettingsState *s)
         return;
     }
     snprintf(s->context_limit, sizeof(s->context_limit), "%d", s->draft.context_limit_fallback);
+    snprintf(s->max_parallel_tools, sizeof(s->max_parallel_tools), "%d", s->draft.max_parallel_tools);
     if (s->draft.compact_enabled)
     {
         snprintf(s->compact_at, sizeof(s->compact_at), "%g", s->draft.compact_ratio);
@@ -254,6 +257,7 @@ static bool ParseFieldsIntoDraft(SettingsState *s)
 {
     char *end = NULL;
     long limit;
+    long parallel;
     long width;
     double scale;
     double ratio;
@@ -270,6 +274,14 @@ static bool ParseFieldsIntoDraft(SettingsState *s)
         return false;
     }
     s->draft.context_limit_fallback = (int)limit;
+    parallel = strtol(s->max_parallel_tools, &end, 10);
+    if (end == s->max_parallel_tools || *end != '\0' || parallel < 1 ||
+        parallel > PICO_MAX_PARALLEL_TOOLS)
+    {
+        snprintf(s->error, sizeof(s->error), "%s", "Max parallel tools must be an integer from 1 to 16.");
+        return false;
+    }
+    s->draft.max_parallel_tools = (int)parallel;
     if (CompactOff(s->compact_at))
     {
         s->draft.compact_enabled = false;
@@ -537,6 +549,9 @@ static char *FocusBuf(SettingsState *s, size_t *cap)
     case FOCUS_CONTEXT_LIMIT:
         *cap = sizeof(s->context_limit);
         return s->context_limit;
+    case FOCUS_MAX_PARALLEL_TOOLS:
+        *cap = sizeof(s->max_parallel_tools);
+        return s->max_parallel_tools;
     case FOCUS_COMPACT_AT:
         *cap = sizeof(s->compact_at);
         return s->compact_at;
@@ -1051,6 +1066,11 @@ static void RenderGeneral(SettingsState *s)
                     s->focus_kind == FOCUS_CONTEXT_LIMIT);
     }
     SETTINGS_ROW_BEGIN
+        RenderLabel("Max parallel tools (1–16)");
+        RenderField(CLAY_ID("SettingsMaxParallelTools"), s->max_parallel_tools, "4",
+                    s->focus_kind == FOCUS_MAX_PARALLEL_TOOLS);
+    }
+    SETTINGS_ROW_BEGIN
         RenderLabel("Compact at (0–1, or off)");
         RenderField(CLAY_ID("SettingsCompactAt"), s->compact_at, "0.9 or off", s->focus_kind == FOCUS_COMPACT_AT);
     }
@@ -1407,8 +1427,9 @@ static void KeepDefaultModelSelectionVisible(SettingsState *s)
 static bool HoveredTextField(SettingsState *s)
 {
     int i;
-    if (OverId(CLAY_STRING("SettingsContextLimit")) || OverId(CLAY_STRING("SettingsCompactAt")) ||
-        OverId(CLAY_STRING("SettingsFontScale")) || OverId(CLAY_STRING("SettingsChatWidth")))
+    if (OverId(CLAY_STRING("SettingsContextLimit")) || OverId(CLAY_STRING("SettingsMaxParallelTools")) ||
+        OverId(CLAY_STRING("SettingsCompactAt")) || OverId(CLAY_STRING("SettingsFontScale")) ||
+        OverId(CLAY_STRING("SettingsChatWidth")))
     {
         return true;
     }
@@ -1434,8 +1455,9 @@ static bool HoveredClickable(SettingsState *s)
     int p;
     const PicoWorkspace *ws;
     if (OverId(CLAY_STRING("SettingsDefaultModel")) || OverId(CLAY_STRING("SettingsContextLimit")) ||
-        OverId(CLAY_STRING("SettingsCompactAt")) || OverId(CLAY_STRING("SettingsResumeLast")) ||
-        OverId(CLAY_STRING("SettingsFontScale")) || OverId(CLAY_STRING("SettingsChatWidth")) ||
+        OverId(CLAY_STRING("SettingsMaxParallelTools")) || OverId(CLAY_STRING("SettingsCompactAt")) ||
+        OverId(CLAY_STRING("SettingsResumeLast")) || OverId(CLAY_STRING("SettingsFontScale")) ||
+        OverId(CLAY_STRING("SettingsChatWidth")) ||
         OverId(CLAY_STRING("SettingsAddModel")) || OverId(CLAY_STRING("SettingsCancel")) ||
         OverId(CLAY_STRING("SettingsApply")))
     {
@@ -1622,6 +1644,11 @@ static bool HandleClicks(SettingsState *s)
     if (OverId(CLAY_STRING("SettingsContextLimit")))
     {
         SetFocus(s, FOCUS_CONTEXT_LIMIT, -1);
+        return true;
+    }
+    if (OverId(CLAY_STRING("SettingsMaxParallelTools")))
+    {
+        SetFocus(s, FOCUS_MAX_PARALLEL_TOOLS, -1);
         return true;
     }
     if (OverId(CLAY_STRING("SettingsCompactAt")))

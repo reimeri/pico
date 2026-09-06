@@ -6642,8 +6642,22 @@ static int TestModelChangeKeepsUnusedDraftOnSelect(void)
         unsetenv("XDG_CONFIG_HOME");
         return 1;
     }
+    /* SetModel queues durable session work. Finish it before shutdown so a
+     * slow persist thread cannot retain the process and poison later tests. */
+    {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 10;
+        PicoSession_DrainPersistBefore(host, PicoHost_FindAgent(host, first), &deadline);
+    }
     workspace->models = NULL;
-    pico_host_free(host);
+    if (pico_host_free(host) == PICO_HOST_SHUTDOWN_RETAINED)
+    {
+        Fail("model-change draft shutdown must complete before later tests");
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
     unsetenv("XDG_CONFIG_HOME");
     rmdir(dir);
     return 0;

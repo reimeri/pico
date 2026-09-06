@@ -94,6 +94,7 @@ add_executable(pico
     chat_sel.c
     text_range.c
     diff_lines.c
+    highlight.c
     scrollbar.c
     transcript_virtual.c
     wrapped_text.c
@@ -260,6 +261,7 @@ if(BUILD_TESTING)
         tests/clay_impl.c
         markdown.c
         md_view.c
+        highlight.c
         richtext.c
         chat_sel.c)
     target_include_directories(pico_md_scroll_layout_tests PRIVATE
@@ -279,6 +281,13 @@ if(BUILD_TESTING)
     target_include_directories(pico_diff_lines_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_diff_lines_tests)
     add_test(NAME pico_diff_lines_tests COMMAND pico_diff_lines_tests)
+
+    add_executable(pico_highlight_tests
+        tests/highlight_test.c
+        highlight.c)
+    target_include_directories(pico_highlight_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_highlight_tests)
+    add_test(NAME pico_highlight_tests COMMAND pico_highlight_tests)
 
     add_executable(pico_scrollbar_tests
         tests/scrollbar_test.c
@@ -695,6 +704,7 @@ if(BUILD_TESTING)
         builtins/diff.c
         markdown.c
         md_view.c
+        highlight.c
         richtext.c
         text_range.c
         wrapped_text.c

@@ -31,6 +31,20 @@ enum {
 #define COLOR_LINK_HOVER (Clay_Color){170, 200, 255, 255}
 #define COLOR_CODE_BG (Clay_Color){42, 42, 52, 255}
 #define COLOR_CODE_TEXT (Clay_Color){230, 200, 140, 255}
+
+/* Syntax highlighting classes (code blocks, diff viewer). Chosen for
+ * contrast on COLOR_CODE_BG; diff ADD/DEL/HUNK classes reuse the diff text
+ * colors so fenced ```diff blocks match the diff viewer. */
+#define COLOR_HL_KEYWORD (Clay_Color){200, 140, 220, 255}
+#define COLOR_HL_TYPE (Clay_Color){120, 190, 200, 255}
+#define COLOR_HL_STRING (Clay_Color){160, 200, 130, 255}
+#define COLOR_HL_NUMBER (Clay_Color){230, 160, 110, 255}
+#define COLOR_HL_COMMENT (Clay_Color){122, 124, 138, 255}
+#define COLOR_HL_PREPROC (Clay_Color){235, 150, 170, 255}
+#define COLOR_HL_FUNC (Clay_Color){140, 170, 240, 255}
+#define COLOR_HL_FIELD (Clay_Color){150, 200, 235, 255}
+#define COLOR_HL_VAR (Clay_Color){220, 185, 100, 255}
+#define COLOR_HL_HUNK (Clay_Color){120, 160, 255, 255}
 #define COLOR_QUOTE_BG (Clay_Color){36, 38, 48, 255}
 #define COLOR_QUOTE_BORDER (Clay_Color){120, 160, 255, 255}
 #define COLOR_HR (Clay_Color){64, 64, 74, 255}

@@ -3,6 +3,8 @@
 #include "pico/theme.h"
 #include "richtext.h"
 #include "chat_sel.h"
+#include "highlight.h"
+#include "hl_colors.h"
 #include "md_view_internal.h"
 
 #include "raylib.h"
@@ -32,6 +34,46 @@ static RichTextStyle BaseStyle = {
 };
 
 static const char *hovered_link = NULL;
+
+/* Highlight span cache stored in the document arena (MdBlock.hl_cache);
+ * computed once per block, freed with the document. */
+typedef struct HlCache {
+    int count;
+    PicoHlSpan spans[];
+} HlCache;
+
+static const HlCache *HlCacheForBlock(MdDocument *doc, MdBlock *block)
+{
+    if (block->type != MDB_CODE || !block->lang)
+    {
+        return NULL;
+    }
+    if (!block->hl_cache)
+    {
+        const PicoHlLang *lang = PicoHl_Lookup(block->lang);
+        int count = lang ? PicoHl_Count(lang, block->raw_text) : 0;
+        HlCache *cache = (HlCache *)MdArena_Alloc(
+            &doc->arena, sizeof(HlCache) + (size_t)count * sizeof(PicoHlSpan), 8);
+        if (!cache)
+        {
+            return NULL;
+        }
+        cache->count = lang ? PicoHl_Fill(lang, block->raw_text, cache->spans, count) : 0;
+        block->hl_cache = cache;
+    }
+    const HlCache *cache = (const HlCache *)block->hl_cache;
+    return cache->count > 0 ? cache : NULL;
+}
+
+static void CodeLineSegment(const char *chars, int length, Clay_Color color)
+{
+    Clay_String text = {.length = length, .chars = chars};
+    PicoChatSel_Text(text, (Clay_TextElementConfig){.fontId = FONT_MONO,
+                                                    .fontSize = PICO_FONT_UI,
+                                                    .lineHeight = Pico_FontPxU16(PICO_FONT_UI_LINE),
+                                                    .textColor = color,
+                                                    .wrapMode = CLAY_TEXT_WRAP_NONE});
+}
 static char image_base_dir[4096] = ".";
 static Clay_ElementId *horizontal_scroll_ids;
 static int horizontal_scroll_count;
@@ -598,6 +640,8 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                               .backgroundColor = COLOR_CODE_BG,
                               .cornerRadius = CLAY_CORNER_RADIUS(6)})
                 {
+                    const HlCache *hl = HlCacheForBlock(doc, block);
+                    int hl_index = 0;
                     char *line = block->raw_text;
                     int line_count = 0;
                     if (strlen(block->raw_text) == 0)
@@ -608,14 +652,49 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     {
                         char *newline = strchr(line, '\n');
                         int length = newline ? (int)(newline - line) : (int)strlen(line);
-                        Clay_String text = {.length = length, .chars = line};
                         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT()}}})
                         {
-                            PicoChatSel_Text(text, (Clay_TextElementConfig){.fontId = FONT_MONO,
-                                                                           .fontSize = PICO_FONT_UI,
-                                                                           .lineHeight = Pico_FontPxU16(PICO_FONT_UI_LINE),
-                                                                           .textColor = COLOR_CODE_TEXT,
-                                                                           .wrapMode = CLAY_TEXT_WRAP_NONE});
+                            if (!hl || length == 0)
+                            {
+                                CodeLineSegment(line, length, COLOR_CODE_TEXT);
+                            }
+                            else
+                            {
+                                int line_start = (int)(line - block->raw_text);
+                                int line_end = line_start + length;
+                                while (hl_index < hl->count && hl->spans[hl_index].end <= line_start)
+                                {
+                                    hl_index++;
+                                }
+                                int cursor = line_start;
+                                while (cursor < line_end)
+                                {
+                                    if (hl_index >= hl->count || hl->spans[hl_index].start >= line_end)
+                                    {
+                                        CodeLineSegment(line + (cursor - line_start), line_end - cursor,
+                                                        COLOR_CODE_TEXT);
+                                        break;
+                                    }
+                                    PicoHlSpan span = hl->spans[hl_index];
+                                    int s = span.start > cursor ? span.start : cursor;
+                                    int e = span.end < line_end ? span.end : line_end;
+                                    if (s > cursor)
+                                    {
+                                        CodeLineSegment(line + (cursor - line_start), s - cursor,
+                                                        COLOR_CODE_TEXT);
+                                    }
+                                    if (e > s)
+                                    {
+                                        CodeLineSegment(line + (s - line_start), e - s,
+                                                        PicoHlClassColor(span.class));
+                                    }
+                                    cursor = e;
+                                    if (span.end <= line_end)
+                                    {
+                                        hl_index++;
+                                    }
+                                }
+                            }
                         }
                         PicoChatSel_Break();
                         line = newline ? newline + 1 : NULL;

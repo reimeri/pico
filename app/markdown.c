@@ -338,6 +338,7 @@ typedef struct {
     int collector_depth;
 
     Buffer raw_buffer; // code / html block contents
+    char *code_lang;   // fence language of the open code block (arena owned)
     bool preserve_newlines;
 
     // GFM table currently being assembled (cells malloc'd until TABLE leave).
@@ -804,6 +805,14 @@ static int OnEnterBlock(MD_BLOCKTYPE type, void *detail, void *userdata)
             break;
         }
         case MD_BLOCK_CODE:
+        {
+            memset(&b->raw_buffer, 0, sizeof(b->raw_buffer));
+            MD_BLOCK_CODE_DETAIL *d = (MD_BLOCK_CODE_DETAIL *)detail;
+            b->code_lang = (d && d->lang.size > 0)
+                               ? MdArena_Dup(b->arena, d->lang.text, d->lang.size)
+                               : NULL;
+            break;
+        }
         case MD_BLOCK_HTML:
         {
             memset(&b->raw_buffer, 0, sizeof(b->raw_buffer));
@@ -901,6 +910,8 @@ static int OnLeaveBlock(MD_BLOCKTYPE type, void *detail, void *userdata)
             block.raw_text = b->raw_buffer.length > 0
                                  ? MdArena_Dup(b->arena, b->raw_buffer.data, b->raw_buffer.length)
                                  : MdArena_DupCstr(b->arena, "");
+            block.lang = b->code_lang;
+            b->code_lang = NULL;
             free(b->raw_buffer.data);
             memset(&b->raw_buffer, 0, sizeof(b->raw_buffer));
             AddBlock(b, block);

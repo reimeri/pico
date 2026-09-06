@@ -95,6 +95,7 @@ typedef struct MdBlock {
     MdChunk *chunks;     // paragraphs, headings, list items, quotes
     int chunk_count;
     char *raw_text;      // code blocks, html blocks
+    char *lang;          // MDB_CODE only: fence info-string language, NULL if none
     char *image_path;    // BLOCK_IMAGE: source path (relative or absolute)
     char *image_alt;     // BLOCK_IMAGE: alt text fallback
     MdTable table;       // MDB_TABLE only
@@ -102,6 +103,9 @@ typedef struct MdBlock {
     // given container width; invalidated when the width changes). Lives in
     // the document arena, so it is freed automatically on reload.
     void *wrap_cache;
+    // Highlight span cache for MDB_CODE (filled in by md_view.c on first
+    // render). Lives in the document arena, freed automatically on reload.
+    void *hl_cache;
 } MdBlock;
 
 typedef struct MdDocument {

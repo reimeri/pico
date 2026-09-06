@@ -3,6 +3,8 @@
 
 #include "pico/plugin.h"
 #include "diff_lines.h"
+#include "highlight.h"
+#include "hl_colors.h"
 #include "scrollbar.h"
 #include "host_internal.h"
 
@@ -31,6 +33,10 @@ typedef struct DiffRow {
     DiffRowKind kind;
     const char *text; /* borrowed from the owning model buffer */
     int len;
+    /* Byte offset of this row in its syntax-highlight image: the post-image
+     * (context + added lines) for ROW_CTX/ROW_ADD, the pre-image (context +
+     * deleted lines) for ROW_DEL. -1 for non-source rows. */
+    int img_off;
 } DiffRow;
 
 typedef struct DiffFile {
@@ -39,6 +45,12 @@ typedef struct DiffFile {
     DiffRow *rows;     /* malloc'd */
     int row_count;
     int row_cap;
+    /* Lazily built syntax spans over the pre/post image (see DiffRow). */
+    bool hl_built;
+    PicoHlSpan *old_spans; /* malloc'd */
+    int old_count;
+    PicoHlSpan *new_spans; /* malloc'd */
+    int new_count;
 } DiffFile;
 
 /* Borrowed storage the model keeps alive for rows/labels outside `patch`. */
@@ -69,6 +81,8 @@ static void DiffModel_Free(DiffModel *m)
     for (int i = 0; i < m->file_count; i++)
     {
         free(m->files[i].rows);
+        free(m->files[i].old_spans);
+        free(m->files[i].new_spans);
     }
     free(m->files);
     free(m->patch);
@@ -127,7 +141,110 @@ static void FilePushRow(DiffFile *f, DiffRowKind kind, const char *text, int len
         f->rows = next;
         f->row_cap = cap;
     }
-    f->rows[f->row_count++] = (DiffRow){.kind = kind, .text = text, .len = len};
+    f->rows[f->row_count++] = (DiffRow){.kind = kind, .text = text, .len = len, .img_off = -1};
+}
+
+/* Rebuilds the file's pre-image (context + deleted) and post-image (context +
+ * added) as temporary strings, highlights both, and keeps the span lists.
+ * Runs once per file; spans index image offsets recorded in DiffRow.img_off.
+ * Approximate by design: an image spliced from hunks is not the full file. */
+/* Highlighting is a visual aid: cap image size so a huge or generated diff
+ * cannot turn it into a stall, and so image offsets always fit in int. */
+#define DIFF_HL_MAX_IMAGE (4 * 1024 * 1024)
+
+static void FileBuildHighlight(DiffFile *f)
+{
+    if (f->hl_built)
+    {
+        return;
+    }
+    f->hl_built = true;
+    if (!f->label || f->label_len <= 0)
+    {
+        return;
+    }
+    char label[1024];
+    int n = f->label_len < (int)sizeof(label) - 1 ? f->label_len : (int)sizeof(label) - 1;
+    memcpy(label, f->label, (size_t)n);
+    label[n] = '\0';
+    const PicoHlLang *lang = PicoHl_LangForPath(label);
+    if (!lang)
+    {
+        return;
+    }
+
+    size_t old_cap = 1, new_cap = 1;
+    for (int i = 0; i < f->row_count; i++)
+    {
+        DiffRowKind kind = f->rows[i].kind;
+        if (kind == ROW_CTX || kind == ROW_DEL)
+        {
+            old_cap += (size_t)f->rows[i].len + 1;
+        }
+        if (kind == ROW_CTX || kind == ROW_ADD)
+        {
+            new_cap += (size_t)f->rows[i].len + 1;
+        }
+    }
+    if (old_cap > DIFF_HL_MAX_IMAGE || new_cap > DIFF_HL_MAX_IMAGE)
+    {
+        return;
+    }
+    char *old_img = (char *)malloc(old_cap);
+    char *new_img = (char *)malloc(new_cap);
+    if (!old_img || !new_img)
+    {
+        free(old_img);
+        free(new_img);
+        return;
+    }
+    int old_off = 0, new_off = 0;
+    for (int i = 0; i < f->row_count; i++)
+    {
+        DiffRow *r = &f->rows[i];
+        if (r->kind == ROW_CTX || r->kind == ROW_DEL)
+        {
+            memcpy(old_img + old_off, r->text, (size_t)r->len);
+            old_img[old_off + r->len] = '\n';
+            if (r->kind == ROW_DEL)
+            {
+                r->img_off = old_off;
+            }
+            old_off += r->len + 1;
+        }
+        if (r->kind == ROW_CTX || r->kind == ROW_ADD)
+        {
+            memcpy(new_img + new_off, r->text, (size_t)r->len);
+            new_img[new_off + r->len] = '\n';
+            r->img_off = new_off;
+            new_off += r->len + 1;
+        }
+    }
+    old_img[old_off] = '\0';
+    new_img[new_off] = '\0';
+
+    f->old_count = PicoHl_Count(lang, old_img);
+    f->old_spans = (PicoHlSpan *)malloc((size_t)f->old_count * sizeof(PicoHlSpan));
+    if (f->old_spans)
+    {
+        f->old_count = PicoHl_Fill(lang, old_img, f->old_spans, f->old_count);
+    }
+    else
+    {
+        f->old_count = 0;
+    }
+    f->new_count = PicoHl_Count(lang, new_img);
+    f->new_spans = (PicoHlSpan *)malloc((size_t)f->new_count * sizeof(PicoHlSpan));
+    if (f->new_spans)
+    {
+        f->new_count = PicoHl_Fill(lang, new_img, f->new_spans, f->new_count);
+    }
+    else
+    {
+        f->new_count = 0;
+    }
+    free(old_img);
+    free(new_img);
 }
 
 /* ------------------------------------------------------------------ */
@@ -538,6 +655,10 @@ static DiffModel *Capture(const char *ws)
     }
 
     AddUntrackedFiles(m, ws);
+    for (int i = 0; i < m->file_count; i++)
+    {
+        FileBuildHighlight(&m->files[i]);
+    }
     return m;
 }
 
@@ -817,16 +938,102 @@ static Clay_Color RowFg(DiffRowKind kind)
             return COLOR_TEXT;
         case ROW_HUNK:
             return COLOR_LINK;
-        case ROW_ADD:
-            return COLOR_DIFF_ADD_TEXT;
-        case ROW_DEL:
-            return COLOR_DIFF_DEL_TEXT;
+        /* Context, add, and delete rows share one text palette so syntax
+         * highlighting matches across the hunk. Add/delete only tint the
+         * background (see RowBg). */
         default:
             return COLOR_MUTED;
     }
 }
 
-static void RenderRow(int index, const DiffRow *row)
+static Clay_Color RowSignFg(DiffRowKind kind)
+{
+    switch (kind)
+    {
+        case ROW_ADD:
+            return COLOR_DIFF_ADD_TEXT;
+        case ROW_DEL:
+            return COLOR_DIFF_DEL_TEXT;
+        default:
+            return RowFg(kind);
+    }
+}
+
+/* First span that may overlap [start, ...): spans are sorted by start. */
+static int SpanLowerBound(const PicoHlSpan *spans, int count, int start)
+{
+    int lo = 0, hi = count;
+    while (lo < hi)
+    {
+        int mid = lo + (hi - lo) / 2;
+        if (spans[mid].end <= start)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/* Row text with syntax spans overlaid on the row's base color; spans index
+ * the row's image at img_off. */
+static void RenderRowText(const DiffRow *row, const PicoHlSpan *spans, int span_count,
+                          Clay_Color base)
+{
+    if (row->img_off < 0 || span_count == 0 || row->len == 0)
+    {
+        CLAY_TEXT(Slice(row->text, row->len),
+                   CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                     .fontSize = PICO_FONT_UI,
+                                     .textColor = base,
+                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        return;
+    }
+    int row_end = row->img_off + row->len;
+    int cursor = row->img_off;
+    int si = SpanLowerBound(spans, span_count, cursor);
+    while (cursor < row_end)
+    {
+        if (si >= span_count || spans[si].start >= row_end)
+        {
+            CLAY_TEXT(Slice(row->text + (cursor - row->img_off), row_end - cursor),
+                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                         .fontSize = PICO_FONT_UI,
+                                         .textColor = base,
+                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            break;
+        }
+        PicoHlSpan span = spans[si];
+        int s = span.start > cursor ? span.start : cursor;
+        int e = span.end < row_end ? span.end : row_end;
+        if (s > cursor)
+        {
+            CLAY_TEXT(Slice(row->text + (cursor - row->img_off), s - cursor),
+                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                         .fontSize = PICO_FONT_UI,
+                                         .textColor = base,
+                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
+        if (e > s)
+        {
+            CLAY_TEXT(Slice(row->text + (s - row->img_off), e - s),
+                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                         .fontSize = PICO_FONT_UI,
+                                         .textColor = PicoHlClassColor(span.class),
+                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
+        cursor = e;
+        if (span.end <= row_end)
+        {
+            si++;
+        }
+    }
+}
+
+static void RenderRow(int index, const DiffFile *f, const DiffRow *row)
 {
     const char *sign = " ";
     if (row->kind == ROW_ADD)
@@ -856,13 +1063,11 @@ static void RenderRow(int index, const DiffRow *row)
         {
             CLAY_TEXT(CStr(sign), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                                     .fontSize = PICO_FONT_UI,
-                                                    .textColor = RowFg(row->kind),
+                                                    .textColor = RowSignFg(row->kind),
                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
-            CLAY_TEXT(Slice(row->text, row->len),
-                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                         .fontSize = PICO_FONT_UI,
-                                         .textColor = RowFg(row->kind),
-                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            const PicoHlSpan *spans = row->kind == ROW_DEL ? f->old_spans : f->new_spans;
+            int span_count = row->kind == ROW_DEL ? f->old_count : f->new_count;
+            RenderRowText(row, spans, span_count, RowFg(row->kind));
         }
     }
 }
@@ -958,7 +1163,7 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
                             DiffFile *f = &s->model->files[fi];
                             for (int ri = 0; ri < f->row_count; ri++)
                             {
-                                RenderRow(row_index++, &f->rows[ri]);
+                                RenderRow(row_index++, f, &f->rows[ri]);
                             }
                         }
                     }

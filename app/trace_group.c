@@ -8,7 +8,7 @@
 #include <string.h>
 #include <time.h>
 
-#define PICO_TOOL_ROW_DWELL_SEC 0.5
+#define PICO_TOOL_ROW_DWELL_SEC 2.0
 
 bool pico_trace_line_visible(const PicoTraceLine *line)
 {

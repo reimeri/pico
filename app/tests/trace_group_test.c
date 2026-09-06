@@ -112,7 +112,7 @@ static int TestToolRowDwell(void)
     {
         return Fail("a just-completed tool stays visible");
     }
-    if (pico_trace_tool_row_dwelling(10.0, 11.0))
+    if (pico_trace_tool_row_dwelling(10.0, 13.0))
     {
         return Fail("a completed tool joins the group after the dwell");
     }

@@ -880,7 +880,33 @@ static void EmitDelta(PicoCompletionsCtx *c, PicoLlmDeltaKind kind, const char *
     {
         return;
     }
-    c->on_delta(c->user, kind, s, n);
+    PicoLlmDelta d = {.kind = kind, .text = s, .len = n, .call_index = -1};
+    c->on_delta(c->user, &d);
+}
+
+static void EmitToolBegin(PicoCompletionsCtx *c, const PicoCompletionsCall *call)
+{
+    if (!c->on_delta || !call->name || !call->name[0])
+    {
+        return;
+    }
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_BEGIN,
+                      .call_index = call->index,
+                      .call_id = call->id,
+                      .name = call->name};
+    c->on_delta(c->user, &d);
+}
+
+static void EmitToolArgs(PicoCompletionsCtx *c, const PicoCompletionsCall *call, const char *s,
+                         size_t n)
+{
+    if (!c->on_delta || !s || n == 0)
+    {
+        return;
+    }
+    PicoLlmDelta d = {
+        .kind = PICO_LLM_DELTA_TOOL_CALL_ARGS, .text = s, .len = n, .call_index = call->index};
+    c->on_delta(c->user, &d);
 }
 
 static PicoCompletionsCall *EnsureCall(PicoCompletionsCtx *c, int index)
@@ -959,13 +985,15 @@ static void ApplyToolCallDelta(PicoCompletionsCtx *c, const JsonDoc *doc, int tc
         }
         call->ordered = true;
     }
+    bool got_id = false;
+    bool got_name = false;
     char *id = JsonObjStr(doc, tc, "id");
     if (id && id[0])
     {
         free(call->id);
         call->id = id;
         id = NULL;
-        EmitDelta(c, PICO_LLM_DELTA_STATUS, call->id, strlen(call->id));
+        got_id = true;
     }
     free(id);
     int fn = JsonObjGet(doc, tc, "function");
@@ -977,15 +1005,22 @@ static void ApplyToolCallDelta(PicoCompletionsCtx *c, const JsonDoc *doc, int tc
             free(call->name);
             call->name = name;
             name = NULL;
-            EmitDelta(c, PICO_LLM_DELTA_STATUS, call->name, strlen(call->name));
+            got_name = true;
         }
         free(name);
         char *args = JsonObjStr(doc, fn, "arguments");
         if (args)
         {
             JsonBuf_Puts(&call->arguments, args);
+            EmitToolArgs(c, call, args, strlen(args));
             free(args);
         }
+    }
+    /* Announce the call as soon as the name is known; re-announce when the id
+     * only arrives afterwards so the agent can attach it to the row. */
+    if (got_id || got_name)
+    {
+        EmitToolBegin(c, call);
     }
 }
 

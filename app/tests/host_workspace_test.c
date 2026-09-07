@@ -6039,7 +6039,8 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
             }
             if (on_delta)
             {
-                on_delta(user, PICO_LLM_DELTA_TEXT, "x", 1);
+                PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TEXT, .text = "x", .len = 1, .call_index = -1};
+                on_delta(user, &d);
             }
             usleep(100);
         }

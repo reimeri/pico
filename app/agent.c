@@ -40,6 +40,26 @@ typedef struct PicoPendingCall {
     bool parallel; /* eligibility snapshotted before any batch callbacks run */
 } PicoPendingCall;
 
+/* A tool call whose name is known while its arguments are still streaming.
+ * Worker side is mutex-protected; the row mirror lives on the main thread. */
+typedef struct PicoProvStream {
+    int call_index; /* provider wire index */
+    char *call_id;  /* NULL until the provider sends it */
+    char *name;     /* NULL until known */
+    size_t args_bytes;
+    bool dirty;
+} PicoProvStream;
+
+typedef struct PicoProvRow {
+    int call_index;
+    char *call_id;
+    char *name;
+    size_t args_bytes;
+    int msg_idx;   /* -1 until the trace row exists */
+    int trace_idx;
+    bool reconciled;
+} PicoProvRow;
+
 typedef enum PicoAgentEvType {
     PICO_AEV_LLM_DONE = 0,
     PICO_AEV_LLM_FAIL,
@@ -160,7 +180,14 @@ struct PicoAgentRt {
     int summary_part_cap;
     int summary_steps;
     bool summary_new_step;
-    char status[128];
+
+    PicoProvStream *prov; /* worker-side, under mu */
+    int prov_count;
+    int prov_cap;
+    bool prov_dirty;
+    PicoProvRow *prov_rows; /* main thread only */
+    int prov_row_count;
+    int prov_row_cap;
 
     PicoAgentEv *events;
     int event_count;
@@ -195,6 +222,8 @@ typedef enum PicoWorkerContext {
 static __thread PicoWorkerContext t_worker_context;
 
 static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg);
+static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt);
+static void ClearProvStream(PicoAgentRt *rt);
 static void FinishAssistantHistory(PicoHost *app, PicoAgent *agent, const char *thinking,
                                    const char *signature);
 static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const PicoAgent *agent);
@@ -557,10 +586,89 @@ static char *ResultAssistantText(const char *payload)
     return JsonBuf_Steal(&refusal);
 }
 
-static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
+static void ProvStreamDirty(PicoProvStream *entry)
+{
+    entry->dirty = true;
+}
+
+static PicoProvStream *ProvStreamFor(PicoAgentRt *rt, int call_index)
+{
+    /* rt->mu held */
+    for (int i = 0; i < rt->prov_count; i++)
+    {
+        if (rt->prov[i].call_index == call_index)
+        {
+            return &rt->prov[i];
+        }
+    }
+    if (rt->prov_count >= PICO_MAX_PENDING_CALLS)
+    {
+        return NULL;
+    }
+    if (rt->prov_count >= rt->prov_cap)
+    {
+        int cap = rt->prov_cap ? rt->prov_cap * 2 : 4;
+        PicoProvStream *next =
+            (PicoProvStream *)realloc(rt->prov, (size_t)cap * sizeof(PicoProvStream));
+        if (!next)
+        {
+            return NULL;
+        }
+        rt->prov = next;
+        rt->prov_cap = cap;
+    }
+    PicoProvStream *entry = &rt->prov[rt->prov_count++];
+    memset(entry, 0, sizeof(*entry));
+    entry->call_index = call_index;
+    return entry;
+}
+
+static void DeltaCb(void *user, const PicoLlmDelta *delta)
 {
     PicoAgentRt *rt = (PicoAgentRt *)user;
+    if (!delta)
+    {
+        return;
+    }
+    PicoLlmDeltaKind kind = delta->kind;
+    const char *s = delta->text;
+    size_t n = delta->len;
     pthread_mutex_lock(&rt->mu);
+    if (kind == PICO_LLM_DELTA_TOOL_CALL_BEGIN)
+    {
+        PicoProvStream *entry = ProvStreamFor(rt, delta->call_index);
+        if (entry)
+        {
+            if (delta->call_id && delta->call_id[0] &&
+                (!entry->call_id || strcmp(entry->call_id, delta->call_id) != 0))
+            {
+                free(entry->call_id);
+                entry->call_id = Dup(delta->call_id);
+            }
+            if (delta->name && delta->name[0] &&
+                (!entry->name || strcmp(entry->name, delta->name) != 0))
+            {
+                free(entry->name);
+                entry->name = Dup(delta->name);
+            }
+            ProvStreamDirty(entry);
+            rt->prov_dirty = true;
+        }
+        pthread_mutex_unlock(&rt->mu);
+        return;
+    }
+    if (kind == PICO_LLM_DELTA_TOOL_CALL_ARGS)
+    {
+        PicoProvStream *entry = ProvStreamFor(rt, delta->call_index);
+        if (entry)
+        {
+            entry->args_bytes += n;
+            ProvStreamDirty(entry);
+            rt->prov_dirty = true;
+        }
+        pthread_mutex_unlock(&rt->mu);
+        return;
+    }
     if (kind == PICO_LLM_DELTA_THINKING_SUMMARY)
     {
         if (n == 0)
@@ -592,12 +700,6 @@ static void DeltaCb(void *user, PicoLlmDeltaKind kind, const char *s, size_t n)
     {
         BufAppend(&rt->think, &rt->think_len, &rt->think_cap, s, n);
         BufAppend(&rt->turn_think, &rt->turn_think_len, &rt->turn_think_cap, s, n);
-    }
-    else if (kind == PICO_LLM_DELTA_STATUS)
-    {
-        size_t copy = n < sizeof(rt->status) - 1 ? n : sizeof(rt->status) - 1;
-        memcpy(rt->status, s, copy);
-        rt->status[copy] = '\0';
     }
     else
     {
@@ -1652,14 +1754,26 @@ static bool MessageEmpty(const PicoAgent *agent, int idx)
     return true;
 }
 
+static int TrailingThinkIndex(const PicoMessage *m)
+{
+    /* Receiving rows are presentation only, not a boundary between reasoning
+     * rounds. Completed tool calls still terminate the preceding round. */
+    for (int i = m ? m->trace_count - 1 : -1; i >= 0; i--)
+    {
+        const PicoTraceLine *line = &m->trace[i];
+        if (line->is_tool && line->tool_streaming)
+        {
+            continue;
+        }
+        return line->is_tool ? -1 : i;
+    }
+    return -1;
+}
+
 static PicoTraceLine *TrailingThinkLine(PicoMessage *m)
 {
-    if (!m || m->trace_count <= 0)
-    {
-        return NULL;
-    }
-    PicoTraceLine *line = &m->trace[m->trace_count - 1];
-    return line->is_tool ? NULL : line;
+    int index = TrailingThinkIndex(m);
+    return index >= 0 ? &m->trace[index] : NULL;
 }
 
 static char *TrailingThinkPartsJson(PicoMessage *m)
@@ -1686,9 +1800,8 @@ static char *TrailingThinkPartsJson(PicoMessage *m)
 
 static bool HasTrailingThinkTrace(const PicoMessage *m)
 {
-    return m && m->trace_count > 0 &&
-           !m->trace[m->trace_count - 1].is_tool &&
-           !Blank(m->trace[m->trace_count - 1].text);
+    int index = TrailingThinkIndex(m);
+    return index >= 0 && !Blank(m->trace[index].text);
 }
 
 static double ThinkNow(void)
@@ -1817,13 +1930,8 @@ static void TraceAppendThink(PicoHost *app, PicoAgent *agent, int idx, const cha
         return;
     }
     PicoMessage *m = &agent->messages[idx];
-    PicoTraceLine *line = NULL;
-    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool &&
-        m->trace[m->trace_count - 1].think_steps == 0)
-    {
-        line = &m->trace[m->trace_count - 1];
-    }
-    else
+    PicoTraceLine *line = TrailingThinkLine(m);
+    if (!line || line->think_steps != 0)
     {
         line = TracePush(m, false);
     }
@@ -1897,13 +2005,8 @@ static void TraceSetThinkSummary(PicoHost *app, PicoAgent *agent, int idx, const
         return;
     }
     PicoMessage *m = &agent->messages[idx];
-    PicoTraceLine *line = NULL;
-    if (m->trace_count > 0 && !m->trace[m->trace_count - 1].is_tool &&
-        m->trace[m->trace_count - 1].think_steps > 0)
-    {
-        line = &m->trace[m->trace_count - 1];
-    }
-    else
+    PicoTraceLine *line = TrailingThinkLine(m);
+    if (!line || line->think_steps <= 0)
     {
         line = TracePush(m, false);
         if (line)
@@ -2131,6 +2234,7 @@ static void ApplyCancel(PicoHost *app, PicoAgent *agent)
     {
         SavePartialAssistant(app, agent);
     }
+    SweepProvisionalRows(agent, rt);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
         PopLastMessage(app, agent);
@@ -2215,6 +2319,7 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
     free(agent->error);
     agent->error = Dup(msg ? msg : "agent error");
     agent->state = PICO_AGENT_ERROR;
+    SweepProvisionalRows(agent, rt);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
         SetMessageText(app, agent, rt->stream_msg, agent->error);
@@ -2341,6 +2446,7 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
         rt->stream_msg = agent->message_count - 1;
     }
     rt->stream_dirty = false;
+    ClearProvStream(rt);
     agent->state = PICO_AGENT_LLM_WAIT;
     StampActionT0(rt);
     SetActivity(app, agent, "Thinking…");
@@ -2395,6 +2501,222 @@ static bool PersistMediaParts(PicoHost *app, PicoAgent *agent, PicoLlmPart *part
         }
     }
     return true;
+}
+
+static void ClearProvStream(PicoAgentRt *rt)
+{
+    pthread_mutex_lock(&rt->mu);
+    for (int i = 0; i < rt->prov_count; i++)
+    {
+        free(rt->prov[i].call_id);
+        free(rt->prov[i].name);
+    }
+    rt->prov_count = 0;
+    rt->prov_dirty = false;
+    pthread_mutex_unlock(&rt->mu);
+}
+
+static PicoProvRow *ProvRowFor(PicoAgentRt *rt, int call_index)
+{
+    for (int i = 0; i < rt->prov_row_count; i++)
+    {
+        if (rt->prov_rows[i].call_index == call_index)
+        {
+            return &rt->prov_rows[i];
+        }
+    }
+    if (rt->prov_row_count >= rt->prov_row_cap)
+    {
+        int cap = rt->prov_row_cap ? rt->prov_row_cap * 2 : 4;
+        PicoProvRow *next = (PicoProvRow *)realloc(rt->prov_rows, (size_t)cap * sizeof(PicoProvRow));
+        if (!next)
+        {
+            return NULL;
+        }
+        rt->prov_rows = next;
+        rt->prov_row_cap = cap;
+    }
+    PicoProvRow *row = &rt->prov_rows[rt->prov_row_count++];
+    memset(row, 0, sizeof(*row));
+    row->call_index = call_index;
+    row->msg_idx = -1;
+    row->trace_idx = -1;
+    return row;
+}
+
+/* Main thread, from the pump: create or refresh the provisional trace row for
+ * a tool call whose arguments are still streaming. */
+static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
+                        const PicoProvStream *update)
+{
+    PicoProvRow *row = ProvRowFor(rt, update->call_index);
+    if (!row)
+    {
+        return;
+    }
+    if (update->name && update->name[0] && (!row->name || strcmp(row->name, update->name) != 0))
+    {
+        free(row->name);
+        row->name = Dup(update->name);
+    }
+    if (update->call_id && update->call_id[0] &&
+        (!row->call_id || strcmp(row->call_id, update->call_id) != 0))
+    {
+        free(row->call_id);
+        row->call_id = Dup(update->call_id);
+    }
+    row->args_bytes = update->args_bytes;
+    if (row->msg_idx >= 0)
+    {
+        if (row->msg_idx < agent->message_count)
+        {
+            PicoMessage *m = &agent->messages[row->msg_idx];
+            if (row->trace_idx < m->trace_count && m->trace[row->trace_idx].tool_streaming)
+            {
+                PicoTraceLine *line = &m->trace[row->trace_idx];
+                line->tool_stream_bytes = row->args_bytes;
+                if (row->call_id && !line->tool_call_id)
+                {
+                    line->tool_call_id = Dup(row->call_id);
+                }
+                if (row->name && line->tool_name && strcmp(line->tool_name, row->name) != 0)
+                {
+                    free(line->tool_name);
+                    line->tool_name = Dup(row->name);
+                }
+            }
+        }
+        return;
+    }
+    if (!row->name || !row->name[0] || rt->stream_msg < 0)
+    {
+        return; /* a row needs a name; arguments may stream before BEGIN lands */
+    }
+    PicoAgent_AddToolCallWithId(app, agent, row->call_id, row->name, NULL);
+    if (agent->message_count <= 0)
+    {
+        return;
+    }
+    PicoMessage *m = &agent->messages[agent->message_count - 1];
+    if (m->trace_count <= 0)
+    {
+        return;
+    }
+    PicoTraceLine *line = &m->trace[m->trace_count - 1];
+    line->tool_streaming = true;
+    line->tool_stream_bytes = row->args_bytes;
+    row->msg_idx = agent->message_count - 1;
+    row->trace_idx = m->trace_count - 1;
+}
+
+/* Fill a provisional row with the completed call instead of appending a new
+ * row. Matches by call id first, then by first-seen order. */
+static bool TraceReconcileProvisional(PicoAgent *agent, const char *call_id, const char *name,
+                                      const char *args_json)
+{
+    PicoAgentRt *rt = agent->runtime;
+    PicoProvRow *row = NULL;
+    if (call_id && call_id[0])
+    {
+        for (int i = 0; i < rt->prov_row_count; i++)
+        {
+            PicoProvRow *r = &rt->prov_rows[i];
+            if (!r->reconciled && r->msg_idx >= 0 && r->call_id &&
+                strcmp(r->call_id, call_id) == 0)
+            {
+                row = r;
+                break;
+            }
+        }
+    }
+    if (!row)
+    {
+        for (int i = 0; i < rt->prov_row_count; i++)
+        {
+            PicoProvRow *r = &rt->prov_rows[i];
+            if (!r->reconciled && r->msg_idx >= 0)
+            {
+                row = r;
+                break;
+            }
+        }
+    }
+    if (!row || row->msg_idx < 0 || row->msg_idx >= agent->message_count)
+    {
+        return false;
+    }
+    PicoMessage *m = &agent->messages[row->msg_idx];
+    if (row->trace_idx >= m->trace_count || !m->trace[row->trace_idx].is_tool ||
+        !m->trace[row->trace_idx].tool_streaming)
+    {
+        return false;
+    }
+    PicoTraceLine *line = &m->trace[row->trace_idx];
+    free(line->tool_call_id);
+    line->tool_call_id = Dup(call_id);
+    if (name && name[0] && (!line->tool_name || strcmp(line->tool_name, name) != 0))
+    {
+        free(line->tool_name);
+        line->tool_name = Dup(name);
+    }
+    free(line->tool_args);
+    line->tool_args = PicoAgent_FormatToolArgs(line->tool_name, args_json);
+    free(line->tool_args_json);
+    line->tool_args_json = Dup(args_json ? args_json : "");
+    line->tool_streaming = false;
+    line->tool_stream_bytes = 0;
+    row->reconciled = true;
+    return true;
+}
+
+static void TraceRemoveLine(PicoMessage *m, int trace_idx)
+{
+    PicoTraceLine_Release(&m->trace[trace_idx]);
+    if (trace_idx + 1 < m->trace_count)
+    {
+        memmove(&m->trace[trace_idx], &m->trace[trace_idx + 1],
+                (size_t)(m->trace_count - trace_idx - 1) * sizeof(PicoTraceLine));
+    }
+    m->trace_count--;
+}
+
+/* Drop provisional rows the completed result never claimed. An interrupted
+ * call is not persisted to the session log, so the transcript must not show
+ * it either. */
+static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt)
+{
+    for (int i = 0; i < rt->prov_row_count; i++)
+    {
+        PicoProvRow *row = &rt->prov_rows[i];
+        if (row->reconciled || row->msg_idx < 0 || row->msg_idx >= agent->message_count)
+        {
+            continue;
+        }
+        PicoMessage *m = &agent->messages[row->msg_idx];
+        if (row->trace_idx < m->trace_count && m->trace[row->trace_idx].is_tool &&
+            m->trace[row->trace_idx].tool_streaming)
+        {
+            TraceRemoveLine(m, row->trace_idx);
+            /* Rows can receive names (and acquire trace indices) in a different
+             * order from their first argument fragments. Keep every remaining
+             * index valid rather than relying on provider arrival order. */
+            for (int j = i + 1; j < rt->prov_row_count; j++)
+            {
+                PicoProvRow *next = &rt->prov_rows[j];
+                if (next->msg_idx == row->msg_idx && next->trace_idx > row->trace_idx)
+                {
+                    next->trace_idx--;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < rt->prov_row_count; i++)
+    {
+        free(rt->prov_rows[i].call_id);
+        free(rt->prov_rows[i].name);
+    }
+    rt->prov_row_count = 0;
+    ClearProvStream(rt);
 }
 
 static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
@@ -2542,7 +2864,8 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
                 call->parallel = CallAllowsParallel(rt, call);
                 PushInput(rt, pico_canonical_tool_call_json(call->call_id, call->name, call->arguments,
                                                             call->item_id));
-                if (rt->stream_msg >= 0)
+                if (rt->stream_msg >= 0 &&
+                    !TraceReconcileProvisional(agent, call->call_id, call->name, call->arguments))
                 {
                     TraceAddTool(app, agent, rt->stream_msg, call->call_id,
                                  call->name, call->arguments);
@@ -2568,6 +2891,7 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     PicoAgentRt *rt = agent->runtime;
     if (rt->compacting)
     {
+        SweepProvisionalRows(agent, rt);
         int normalized_cached = 0;
         if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
         {
@@ -2604,6 +2928,7 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     {
         return;
     }
+    SweepProvisionalRows(agent, rt);
     int normalized_cached = 0;
     if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
     {
@@ -3020,6 +3345,18 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt->think);
     free(rt->turn_think);
     free(rt->summary);
+    for (int i = 0; i < rt->prov_count; i++)
+    {
+        free(rt->prov[i].call_id);
+        free(rt->prov[i].name);
+    }
+    free(rt->prov);
+    for (int i = 0; i < rt->prov_row_count; i++)
+    {
+        free(rt->prov_rows[i].call_id);
+        free(rt->prov_rows[i].name);
+    }
+    free(rt->prov_rows);
     ClearSummaryParts(rt);
     free(rt->work_model);
     free(rt->work_base_url);
@@ -3836,9 +4173,31 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     rt->summary = NULL;
     rt->summary_len = 0;
     rt->summary_cap = 0;
-    char status[128];
-    memcpy(status, rt->status, sizeof(status));
-    rt->status[0] = '\0';
+
+    PicoProvStream *prov_updates = NULL;
+    int prov_update_count = 0;
+    if (rt->prov_dirty)
+    {
+        prov_updates = (PicoProvStream *)calloc((size_t)rt->prov_count, sizeof(PicoProvStream));
+        if (prov_updates)
+        {
+            for (int i = 0; i < rt->prov_count; i++)
+            {
+                PicoProvStream *e = &rt->prov[i];
+                if (!e->dirty)
+                {
+                    continue;
+                }
+                prov_updates[prov_update_count].call_index = e->call_index;
+                prov_updates[prov_update_count].call_id = e->call_id ? Dup(e->call_id) : NULL;
+                prov_updates[prov_update_count].name = e->name ? Dup(e->name) : NULL;
+                prov_updates[prov_update_count].args_bytes = e->args_bytes;
+                prov_update_count++;
+                e->dirty = false;
+            }
+            rt->prov_dirty = false;
+        }
+    }
 
     int max_to_drain = rt->event_count;
     if (budget && *budget >= 0 && max_to_drain > *budget)
@@ -3912,12 +4271,19 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
         free(summary_parts);
     }
 
-    if (status[0])
+    if (prov_update_count > 0 && agent->state == PICO_AGENT_LLM_WAIT)
     {
-        char line[192];
-        snprintf(line, sizeof(line), "Calling `%s`…", status);
-        SetActivity(app, agent, line);
+        for (int i = 0; i < prov_update_count; i++)
+        {
+            ProvRowSync(app, agent, rt, &prov_updates[i]);
+        }
     }
+    for (int i = 0; i < prov_update_count; i++)
+    {
+        free(prov_updates[i].call_id);
+        free(prov_updates[i].name);
+    }
+    free(prov_updates);
 
     if (rt->stream_dirty)
     {

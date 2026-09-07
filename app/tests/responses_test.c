@@ -456,6 +456,67 @@ static void TestParallelResultsReplay(void)
     free(body);
 }
 
+typedef struct DeltaCapture {
+    int begin_count;
+    int args_count;
+    size_t args_bytes;
+    int last_call_index;
+    char last_call_id[64];
+    char last_name[64];
+} DeltaCapture;
+
+static void CaptureDelta(void *user, const PicoLlmDelta *d)
+{
+    DeltaCapture *cap = (DeltaCapture *)user;
+    if (d->kind == PICO_LLM_DELTA_TOOL_CALL_BEGIN)
+    {
+        cap->begin_count++;
+        cap->last_call_index = d->call_index;
+        snprintf(cap->last_call_id, sizeof(cap->last_call_id), "%s", d->call_id ? d->call_id : "");
+        snprintf(cap->last_name, sizeof(cap->last_name), "%s", d->name ? d->name : "");
+    }
+    else if (d->kind == PICO_LLM_DELTA_TOOL_CALL_ARGS)
+    {
+        cap->args_count++;
+        cap->args_bytes += d->len;
+        cap->last_call_index = d->call_index;
+    }
+}
+
+static void TestToolCallDeltaEvents(void)
+{
+    PicoResponsesCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    JsonBuf_Init(&ctx.items);
+    JsonBuf_Init(&ctx.summary);
+    DeltaCapture cap;
+    memset(&cap, 0, sizeof(cap));
+    ctx.on_delta = CaptureDelta;
+    ctx.user = &cap;
+
+    const char *msg_added =
+        "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}";
+    Check(pico_responses_feed(&ctx, msg_added, strlen(msg_added)),
+          "message item-added is accepted");
+    Check(cap.begin_count == 0, "non-function items do not announce a tool call");
+
+    const char *call_added =
+        "{\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"id\":\"fc1\",\"call_id\":\"call_9\",\"name\":\"sh\",\"arguments\":\"\"}}";
+    Check(pico_responses_feed(&ctx, call_added, strlen(call_added)),
+          "function-call item-added is accepted");
+    Check(cap.begin_count == 1 && cap.last_call_index == 2 &&
+              strcmp(cap.last_name, "sh") == 0 && strcmp(cap.last_call_id, "call_9") == 0,
+          "function-call item announces name, id, and output index");
+
+    const char *args_delta =
+        "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":2,\"delta\":\"{\\\"cmd\\\":\"}";
+    Check(pico_responses_feed(&ctx, args_delta, strlen(args_delta)),
+          "arguments delta is accepted");
+    Check(cap.args_count == 1 && cap.args_bytes == 7 && cap.last_call_index == 2,
+          "arguments deltas stream with the call's output index");
+    pico_responses_ctx_free(&ctx);
+}
+
 int main(void)
 {
     TestRequestOptions();
@@ -466,6 +527,7 @@ int main(void)
     TestSignatureReplay();
     TestParallelResultsReplay();
     TestReasoningResultProjection();
+    TestToolCallDeltaEvents();
     TestRefusalProjection();
     TestRefusalRequestReplay();
     TestUnsupportedWebSearch();

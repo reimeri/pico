@@ -536,6 +536,76 @@ static void TestRefusalAndImage(void)
     pico_completions_ctx_free(&ctx);
 }
 
+typedef struct DeltaCapture {
+    int begin_count;
+    int args_count;
+    size_t args_bytes;
+    int last_call_index;
+    char last_call_id[64];
+    char last_name[64];
+} DeltaCapture;
+
+static void CaptureDelta(void *user, const PicoLlmDelta *d)
+{
+    DeltaCapture *cap = (DeltaCapture *)user;
+    if (d->kind == PICO_LLM_DELTA_TOOL_CALL_BEGIN)
+    {
+        cap->begin_count++;
+        cap->last_call_index = d->call_index;
+        snprintf(cap->last_call_id, sizeof(cap->last_call_id), "%s", d->call_id ? d->call_id : "");
+        snprintf(cap->last_name, sizeof(cap->last_name), "%s", d->name ? d->name : "");
+    }
+    else if (d->kind == PICO_LLM_DELTA_TOOL_CALL_ARGS)
+    {
+        cap->args_count++;
+        cap->args_bytes += d->len;
+        cap->last_call_index = d->call_index;
+    }
+}
+
+static void TestToolCallDeltaEvents(void)
+{
+    PicoCompletionsCtx ctx;
+    pico_completions_ctx_init(&ctx);
+    DeltaCapture cap;
+    memset(&cap, 0, sizeof(cap));
+    ctx.on_delta = CaptureDelta;
+    ctx.user = &cap;
+    const char *tool1 =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\","
+        "\"function\":{\"name\":\"sh\",\"arguments\":\"{\"}}]}}]}";
+    const char *tool2 =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]}}]}";
+    Check(pico_completions_feed(&ctx, tool1, strlen(tool1)), "first chunk is accepted");
+    Check(cap.begin_count == 1 && cap.last_call_index == 0 &&
+              strcmp(cap.last_name, "sh") == 0 && strcmp(cap.last_call_id, "c1") == 0,
+          "first tool-call chunk announces name and id");
+    Check(cap.args_count == 1 && cap.args_bytes == 1, "arguments fragment streams");
+    Check(pico_completions_feed(&ctx, tool2, strlen(tool2)), "second chunk is accepted");
+    Check(cap.begin_count == 1, "arguments-only chunks do not re-announce the call");
+    Check(cap.args_count == 2 && cap.args_bytes == 2, "arguments fragments accumulate");
+    pico_completions_ctx_free(&ctx);
+
+    /* A call id that only arrives after the name re-announces the call so the
+     * agent can attach the id to the provisional row. */
+    pico_completions_ctx_init(&ctx);
+    memset(&cap, 0, sizeof(cap));
+    ctx.on_delta = CaptureDelta;
+    ctx.user = &cap;
+    const char *name_only =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"sh\"}}]}}]}";
+    const char *late_id =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c9\"}]}}]}";
+    Check(pico_completions_feed(&ctx, name_only, strlen(name_only)), "name-only chunk is accepted");
+    Check(cap.begin_count == 1 && cap.last_call_id[0] == '\0' &&
+              strcmp(cap.last_name, "sh") == 0,
+          "name is announced before the id is known");
+    Check(pico_completions_feed(&ctx, late_id, strlen(late_id)), "late id chunk is accepted");
+    Check(cap.begin_count == 2 && strcmp(cap.last_call_id, "c9") == 0,
+          "late call id re-announces the call");
+    pico_completions_ctx_free(&ctx);
+}
+
 int main(void)
 {
     TestUrls();
@@ -547,6 +617,7 @@ int main(void)
     TestToolOnlyReasoningContent();
     TestWithoutThinking();
     TestFeedChunks();
+    TestToolCallDeltaEvents();
     TestAssistantAggregation();
     TestThinkingToolContinuation();
     TestUnsupportedCompletionOutput();

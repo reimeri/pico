@@ -98,6 +98,8 @@ typedef struct PicoTraceLine {
     char *tool_args_json; /* original JSON supplied by the provider */
     char *tool_output;
     bool tool_error;
+    bool tool_streaming;      /* provisional row: arguments still streaming */
+    size_t tool_stream_bytes; /* argument bytes received so far */
     double tool_done_t0;
     bool expanded;
     int think_steps;
@@ -319,10 +321,20 @@ typedef enum PicoLlmDeltaKind {
     PICO_LLM_DELTA_TEXT = 0,
     PICO_LLM_DELTA_THINKING,
     PICO_LLM_DELTA_THINKING_SUMMARY,
-    PICO_LLM_DELTA_STATUS,
+    PICO_LLM_DELTA_TOOL_CALL_BEGIN, /* tool name known; arguments still streaming */
+    PICO_LLM_DELTA_TOOL_CALL_ARGS,  /* text carries a raw arguments fragment */
 } PicoLlmDeltaKind;
 
-typedef void (*PicoLlmDeltaFn)(void *user, PicoLlmDeltaKind kind, const char *s, size_t n);
+typedef struct PicoLlmDelta {
+    PicoLlmDeltaKind kind;
+    const char *text;     /* payload for TEXT/THINKING/THINKING_SUMMARY/TOOL_CALL_ARGS */
+    size_t len;
+    int call_index;       /* tool-call deltas: provider wire index, -1 otherwise */
+    const char *call_id;  /* TOOL_CALL_BEGIN: NULL until the provider sends it */
+    const char *name;     /* TOOL_CALL_BEGIN only, NULL otherwise */
+} PicoLlmDelta;
+
+typedef void (*PicoLlmDeltaFn)(void *user, const PicoLlmDelta *delta);
 
 enum {
     PICO_LLM_OK = 0,

@@ -37,6 +37,7 @@ void pico_responses_resolve_url(const char *base, const char *fallback, char *ou
 char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesBuildOpts *opts);
 char *pico_responses_body_without_reasoning(const char *body);
 
+bool pico_responses_feed(PicoResponsesCtx *c, const char *json, size_t len);
 int pico_responses_post(const char *url, const char *body, const char *bearer,
                         const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoResponsesCtx *ctx);

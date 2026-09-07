@@ -671,14 +671,41 @@ static void EmitDelta(PicoResponsesCtx *c, PicoLlmDeltaKind kind, const char *s,
     {
         if (kind == PICO_LLM_DELTA_THINKING_SUMMARY)
         {
-            c->on_delta(c->user, kind, "", 0);
+            PicoLlmDelta d = {.kind = kind, .text = "", .len = 0, .call_index = -1};
+            c->on_delta(c->user, &d);
         }
         return;
     }
     if (s)
     {
-        c->on_delta(c->user, kind, s, n);
+        PicoLlmDelta d = {.kind = kind, .text = s, .len = n, .call_index = -1};
+        c->on_delta(c->user, &d);
     }
+}
+
+static void EmitToolBegin(PicoResponsesCtx *c, int output_index, const char *call_id,
+                          const char *name)
+{
+    if (!c->on_delta || !name || !name[0])
+    {
+        return;
+    }
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_BEGIN,
+                      .call_index = output_index,
+                      .call_id = call_id,
+                      .name = name};
+    c->on_delta(c->user, &d);
+}
+
+static void EmitToolArgs(PicoResponsesCtx *c, int output_index, const char *s, size_t n)
+{
+    if (!c->on_delta || !s || n == 0)
+    {
+        return;
+    }
+    PicoLlmDelta d = {
+        .kind = PICO_LLM_DELTA_TOOL_CALL_ARGS, .text = s, .len = n, .call_index = output_index};
+    c->on_delta(c->user, &d);
 }
 
 static void BeginSummaryStep(PicoResponsesCtx *c, int output_index, int summary_index)
@@ -872,9 +899,22 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             char *name = JsonObjStr(&doc, item, "name");
             if (name)
             {
-                EmitDelta(c, PICO_LLM_DELTA_STATUS, name, strlen(name));
+                char *call_id = JsonObjStr(&doc, item, "call_id");
+                int output_index = JsonObjInt(&doc, 0, "output_index", -1);
+                EmitToolBegin(c, output_index, call_id, name);
+                free(call_id);
                 free(name);
             }
+        }
+    }
+    else if (type && strcmp(type, "response.function_call_arguments.delta") == 0)
+    {
+        char *delta = JsonObjStr(&doc, 0, "delta");
+        if (delta)
+        {
+            int output_index = JsonObjInt(&doc, 0, "output_index", -1);
+            EmitToolArgs(c, output_index, delta, strlen(delta));
+            free(delta);
         }
     }
     else if (type && strcmp(type, "response.output_item.done") == 0)
@@ -1210,6 +1250,15 @@ void pico_responses_ctx_free(PicoResponsesCtx *c)
     JsonBuf_Free(&c->summary);
     free(c->error);
     c->error = NULL;
+}
+
+bool pico_responses_feed(PicoResponsesCtx *c, const char *json, size_t len)
+{
+    if (!c)
+    {
+        return false;
+    }
+    return HandleJson(c, NULL, json, len);
 }
 
 int pico_responses_post(const char *url, const char *body, const char *bearer,

@@ -927,7 +927,8 @@ static bool TraceLineOpen(const TranscriptView *view, const PicoTraceLine *line,
     if (line && line->is_tool)
     {
         PicoToolCallProgress progress = ToolProgress(view, line);
-        pending = progress == PICO_TOOL_CALL_RUNNING || progress == PICO_TOOL_CALL_QUEUED;
+        pending = progress == PICO_TOOL_CALL_RUNNING || progress == PICO_TOOL_CALL_QUEUED ||
+                  line->tool_streaming;
         dwell = pico_trace_tool_row_dwelling(line->tool_done_t0, pico_trace_now());
     }
     return pico_trace_line_open(line, pending,
@@ -1120,6 +1121,10 @@ static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLin
     {
         return line->tool_error ? COLOR_STATUS_ERR : COLOR_STATUS_ON;
     }
+    if (line->tool_streaming)
+    {
+        return COLOR_STATUS_RUN;
+    }
     PicoToolCallProgress progress = ToolProgress(view, line);
     if (progress == PICO_TOOL_CALL_QUEUED)
     {
@@ -1136,6 +1141,10 @@ static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLin
 static const char *ToolPendingLabel(const TranscriptView *view, const PicoTraceLine *line,
                                     int message_index, int trace_index)
 {
+    if (line->tool_streaming)
+    {
+        return "Receiving…";
+    }
     PicoToolCallProgress progress = ToolProgress(view, line);
     if (progress == PICO_TOOL_CALL_QUEUED)
     {
@@ -1147,6 +1156,24 @@ static const char *ToolPendingLabel(const TranscriptView *view, const PicoTraceL
         return OwnerHasAsk(view) ? "Waiting for you…" : "Running…";
     }
     return NULL;
+}
+
+static const char *StreamBytesLabel(size_t bytes)
+{
+    char buf[64];
+    if (bytes == 0)
+    {
+        snprintf(buf, sizeof(buf), "· Receiving…");
+    }
+    else if (bytes < 1024)
+    {
+        snprintf(buf, sizeof(buf), "· Receiving %zu B", bytes);
+    }
+    else
+    {
+        snprintf(buf, sizeof(buf), "· Receiving %.1f KB", (double)bytes / 1024.0);
+    }
+    return ThinkLabelDup(buf);
 }
 
 static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int message_index,
@@ -1213,6 +1240,15 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
                                         message_index, trace_index);
                 }
             }
+            else if (line->tool_streaming)
+            {
+                ViewText(view, ViewCStr(StreamBytesLabel(line->tool_stream_bytes)),
+                         (Clay_TextElementConfig){.fontId = FONT_ITALIC,
+                                                  .fontSize = PICO_FONT_UI,
+                                                  .textColor = COLOR_MUTED,
+                                                  .wrapMode = CLAY_TEXT_WRAP_NONE});
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+            }
             else
             {
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
@@ -1226,7 +1262,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
             }
         }
-        if (subagent && !line->tool_output)
+        if (subagent && !line->tool_output && !line->tool_streaming)
         {
             const char *activity = ToolProgress(view, line) == PICO_TOOL_CALL_QUEUED
                                        ? "Queued…"

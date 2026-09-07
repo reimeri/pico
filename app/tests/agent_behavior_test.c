@@ -51,6 +51,7 @@ typedef enum TestMode {
     TEST_UI_POST_BLOCK,
     TEST_UI_POST_CAP,
     TEST_UI_POST_LIMIT,
+    TEST_PROVIDER_TOOL_STREAM_BLOCK,
 } TestMode;
 
 typedef struct TestState {
@@ -276,6 +277,44 @@ static void SnapshotTurn(const PicoLlmTurn *turn)
     g_test.last_input = JsonBuf_Steal(&b);
 }
 
+static void FakeDelta(PicoLlmDeltaFn on_delta, void *user, PicoLlmDeltaKind kind, const char *s,
+                      size_t n)
+{
+    if (!on_delta)
+    {
+        return;
+    }
+    PicoLlmDelta d = {.kind = kind, .text = s, .len = n, .call_index = -1};
+    on_delta(user, &d);
+}
+
+static void FakeToolBegin(PicoLlmDeltaFn on_delta, void *user, int call_index,
+                          const char *call_id, const char *name)
+{
+    if (!on_delta)
+    {
+        return;
+    }
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_BEGIN,
+                      .call_index = call_index,
+                      .call_id = call_id,
+                      .name = name};
+    on_delta(user, &d);
+}
+
+static void FakeToolArgs(PicoLlmDeltaFn on_delta, void *user, int call_index, const char *frag)
+{
+    if (!on_delta)
+    {
+        return;
+    }
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_ARGS,
+                      .text = frag,
+                      .len = strlen(frag),
+                      .call_index = call_index};
+    on_delta(user, &d);
+}
+
 static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
@@ -325,10 +364,10 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     }
     if (mode == TEST_PROVIDER_THINK_FAIL || mode == TEST_PROVIDER_TEXT_FAIL)
     {
-        on_delta(user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
         if (mode == TEST_PROVIDER_TEXT_FAIL)
         {
-            on_delta(user, PICO_LLM_DELTA_TEXT, "draft", 5);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "draft", 5);
         }
         out->error = JsonDup("Timeout was reached");
         return PICO_LLM_FAIL;
@@ -417,7 +456,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         if (on_delta)
         {
-            on_delta(user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
         }
         pthread_mutex_lock(&g_test.mu);
         g_test.block_entered = true;
@@ -433,7 +472,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         if (on_delta)
         {
-            on_delta(user, PICO_LLM_DELTA_TEXT, "draft", 5);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "draft", 5);
         }
         pthread_mutex_lock(&g_test.mu);
         g_test.block_entered = true;
@@ -444,6 +483,37 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
             SleepOneMs();
         }
         return PICO_LLM_CANCEL;
+    }
+    if (mode == TEST_PROVIDER_TOOL_STREAM_BLOCK && issue_tool)
+    {
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "**first**", 9);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "**second**", 10);
+        FakeToolBegin(on_delta, user, 0, "call-1-0", tool_name);
+        /* The final result only claims the first of these streamed calls. */
+        FakeToolBegin(on_delta, user, 1, "call-1-1", tool_name);
+        FakeToolArgs(on_delta, user, 0, "{\"command\":\"echo");
+        FakeToolArgs(on_delta, user, 0, " hi\"}");
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_entered = true;
+        pthread_cond_broadcast(&g_test.cv);
+        pthread_mutex_unlock(&g_test.mu);
+        for (;;)
+        {
+            pthread_mutex_lock(&g_test.mu);
+            bool released = g_test.block_release;
+            pthread_mutex_unlock(&g_test.mu);
+            if (released || cancel(user))
+            {
+                break;
+            }
+            SleepOneMs();
+        }
+        if (cancel(user))
+        {
+            return PICO_LLM_CANCEL;
+        }
     }
     if (mode == TEST_CONCURRENT_REVERSE)
     {
@@ -478,15 +548,15 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         if (issue_tool)
         {
-            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
-            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "**first**", 9);
-            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
-            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "**second**", 10);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "**first**", 9);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "**second**", 10);
         }
         else
         {
-            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
-            on_delta(user, PICO_LLM_DELTA_THINKING_SUMMARY, "**third**", 9);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "", 0);
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "**third**", 9);
         }
     }
 
@@ -516,6 +586,12 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
             item->thinking_signature = JsonDup(
                 "{\"type\":\"reasoning\",\"id\":\"rs-only\",\"encrypted_content\":\"blob\"}");
         }
+    }
+
+    if (mode == TEST_PROVIDER_TOOL_STREAM_BLOCK)
+    {
+        PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        item->thinking = JsonDup("**first**\n**second**");
     }
 
     int emitted = mode == TEST_TOO_MANY_CALLS ? 17 :
@@ -1901,6 +1977,140 @@ static int TestCancellation(void)
     pthread_mutex_unlock(&g_test.mu);
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "tool did not receive cancellation");
+}
+
+static const PicoTraceLine *FirstToolLine(PicoAgent *agent, int *count)
+{
+    const PicoTraceLine *first = NULL;
+    int n = 0;
+    for (int i = 0; i < agent->message_count; i++)
+    {
+        for (int t = 0; t < agent->messages[i].trace_count; t++)
+        {
+            if (agent->messages[i].trace[t].is_tool)
+            {
+                if (!first)
+                {
+                    first = &agent->messages[i].trace[t];
+                }
+                n++;
+            }
+        }
+    }
+    if (count)
+    {
+        *count = n;
+    }
+    return first;
+}
+
+static void ReleaseBlock(void)
+{
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static int TestProvisionalToolRow(void)
+{
+    const char *name = "provisional tool row";
+    ResetTest(TEST_PROVIDER_TOOL_STREAM_BLOCK, 1);
+    PicoHost app;
+    InitApp(&app);
+    if (!TestAddTool(&app, "echo_test", "test", "{\"type\":\"object\"}", EchoTool, NULL))
+    {
+        return Fail(name, "echo tool did not register");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args), "{\"command\":\"echo hi\"}");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "write a file");
+    if (!WaitForBlock(&app))
+    {
+        return Fail(name, "provider did not stream the tool call");
+    }
+    PicoAgent_Pump(&app, TestAgent(&app));
+
+    PicoAgent *agent = TestAgent(&app);
+    int count = 0;
+    const PicoTraceLine *line = FirstToolLine(agent, &count);
+    bool ok = agent->state == PICO_AGENT_LLM_WAIT && count == 2 && line &&
+              line->tool_streaming && line->tool_name &&
+              strcmp(line->tool_name, "echo_test") == 0 && line->tool_call_id &&
+              strcmp(line->tool_call_id, "call-1-0") == 0 && line->tool_stream_bytes == 21 &&
+              (!line->tool_args || !line->tool_args[0]);
+    if (!ok)
+    {
+        return Fail(name, "provisional row did not show the streaming call");
+    }
+
+    ReleaseBlock();
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not finish the turn");
+    }
+    line = FirstToolLine(agent, &count);
+    pthread_mutex_lock(&g_test.mu);
+    int invocations = g_test.tool_invocations;
+    pthread_mutex_unlock(&g_test.mu);
+    ok = count == 1 && line && !line->tool_streaming && line->tool_call_id &&
+         strcmp(line->tool_call_id, "call-1-0") == 0 && line->tool_args_json &&
+         strcmp(line->tool_args_json, "{\"command\":\"echo hi\"}") == 0 &&
+         line->tool_output && strcmp(line->tool_output, "echo-out") == 0 && invocations == 1;
+    if (!ok)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "streamed rows did not reconcile with the completed call");
+    }
+    /* The final reasoning must not be appended again after the provisional tool. */
+    const PicoMessage *msg = &agent->messages[agent->message_count - 1];
+    ok = msg->trace_count == 2 && !msg->trace[0].is_tool &&
+         msg->trace[0].think_part_count == 2 && msg->trace[1].is_tool &&
+         g_test.logged_thinking_parts;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "streamed reasoning was duplicated or lost its logged summary parts");
+}
+
+static int TestProvisionalToolRowCancel(void)
+{
+    const char *name = "provisional tool row cancel";
+    ResetTest(TEST_PROVIDER_TOOL_STREAM_BLOCK, 1);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "write a file");
+    if (!WaitForBlock(&app))
+    {
+        return Fail(name, "provider did not stream the tool call");
+    }
+    PicoAgent_Pump(&app, TestAgent(&app));
+
+    PicoAgent *agent = TestAgent(&app);
+    int count = 0;
+    if (!FirstToolLine(agent, &count) || count != 2)
+    {
+        return Fail(name, "provisional row did not appear");
+    }
+    PicoAgent_Cancel(agent);
+    if (!WaitForIdle(&app))
+    {
+        return Fail(name, "agent did not cancel");
+    }
+    /* An interrupted call is not persisted, so its row must not linger. */
+    int remaining = 0;
+    FirstToolLine(agent, &remaining);
+    pthread_mutex_lock(&g_test.mu);
+    int invocations = g_test.tool_invocations;
+    pthread_mutex_unlock(&g_test.mu);
+    bool ok = remaining == 0 && invocations == 0 && agent->state == PICO_AGENT_IDLE;
+    bool reasoning_saved = g_test.logged_thinking_parts;
+    PicoHost_Shutdown(&app);
+    if (!ok)
+    {
+        return Fail(name, "interrupted provisional rows were not removed");
+    }
+    return reasoning_saved ? 0 : Fail(name, "interrupted reasoning summary parts were not logged");
 }
 
 static int TestStaleId(void)
@@ -4429,6 +4639,8 @@ int main(void)
     failed |= TestParallelResumeReservation();
     failed |= TestSequential();
     failed |= TestCancellation();
+    failed |= TestProvisionalToolRow();
+    failed |= TestProvisionalToolRowCancel();
     failed |= TestStaleId();
     failed |= TestToolSchemaValidation();
     failed |= TestToolRegistrationFailureWarns();

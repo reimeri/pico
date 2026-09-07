@@ -28,7 +28,8 @@ static int MyStream(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCance
     (void)state;
     if (on_delta)
     {
-        on_delta(user, PICO_LLM_DELTA_TEXT, "hello", 5);
+        PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TEXT, .text = "hello", .len = 5, .call_index = -1};
+        on_delta(user, &d);
     }
     pico_llm_result_add_text(out, "hello");
     return PICO_LLM_OK;
@@ -58,7 +59,9 @@ They come from context hooks, are not persisted in history, and must be mapped t
 
 `tools` is the retained effective catalog for this round after agent policy and `pico_add_llm_hook` exclusions. It may be empty or a subset of registered tools. Calls are authorized and resolved against this exact snapshot. Pointers inside each `PicoTool` stay extension-owned; reload of that workspace is deferred while a live/retired runtime retains them or has undrained events that can start follow-up work. Other workspaces keep accepting work.
 
-Call `on_delta(user, kind, s, n)` as tokens arrive (`PICO_LLM_DELTA_TEXT`, `_THINKING`, `_THINKING_SUMMARY`, `_STATUS`). Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
+Call `on_delta(user, &delta)` with a `PicoLlmDelta` as output streams. `PICO_LLM_DELTA_TEXT`, `_THINKING`, and `_THINKING_SUMMARY` carry their payload in `text`/`len` and set `call_index` to -1. Check `cancel(user)` and return `PICO_LLM_CANCEL` if it is true.
+
+A tool call can be announced while its arguments are still streaming. Emit `PICO_LLM_DELTA_TOOL_CALL_BEGIN` as soon as the call's `name` is known, with the provider's wire index in `call_index` and `call_id` when available; if the id only arrives later, emit BEGIN again — it is an upsert keyed by `call_index`. Emit `PICO_LLM_DELTA_TOOL_CALL_ARGS` for each raw arguments fragment (`text`/`len`, same `call_index`). Pico shows a provisional row with the tool name and received argument size immediately and swaps in the completed call when the result arrives. Provisional rows are presentational only: validation, session logging, and execution still gate on the full `PicoLlmResult`, and a streamed call the finished result never claims is dropped from the transcript. Providers that never emit these kinds keep the old behavior: the row appears when the result returns.
 
 If a non-compaction request fails or is cancelled after streaming output, Pico preserves partial text, raw thinking, and reasoning-summary steps in the session. Partial text and raw thinking remain in continuation history. Failed results do not execute tool calls or contribute usage. The SSE HTTP helper has a 600-second total request timeout.
 
@@ -82,7 +85,7 @@ HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_htt
 
 ## Contract
 
-- Stream runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, use Clay, mutate UI, or inspect agent state outside context accessors. Provider callbacks for different agents and workspaces may overlap. Status text goes through `on_delta(..., PICO_LLM_DELTA_STATUS, ...)`.
+- Stream runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, use Clay, mutate UI, or inspect agent state outside context accessors. Provider callbacks for different agents and workspaces may overlap.
 - Providers are workspace-scoped. Register with `pico_add_provider` during `workspace_init`. Look up a workspace's provider with `pico_workspace_find_provider`.
 - `name` must outlive the extension. Max 16 providers (`PICO_MAX_PROVIDERS`).
 - Set `map_context` if the stream maps canonical `type: "context"` items to a non-user role. Pico fails the turn when those items are present and the flag is false.

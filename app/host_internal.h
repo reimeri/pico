@@ -146,6 +146,7 @@ struct PicoHost {
     bool safe_mode;
     bool reload_queued;
     bool terminal_shutdown;
+    bool exit_requested; /* Main-thread request; main owns graphics teardown. */
     const char *hovered_link;
     bool hovered_tool;
     bool hovered_clickable;
@@ -199,6 +200,11 @@ struct PicoHost {
 
 bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
                                  bool had_complete, bool had_todo, bool had_modal);
+
+static inline bool PicoHost_ShouldExit(const PicoHost *host)
+{
+    return host && (host->exit_requested || host->terminal_shutdown);
+}
 
 static inline PicoWorkspace *PicoHost_PrimaryWorkspace(PicoHost *host)
 {

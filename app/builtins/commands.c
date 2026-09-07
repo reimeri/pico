@@ -272,7 +272,7 @@ static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void 
     (void)agent_id;
     ClearComposer(app);
     app->submit_cancel = true;
-    CloseWindow();
+    app->exit_requested = true;
 }
 
 static const char *const kDocTopics[] = {

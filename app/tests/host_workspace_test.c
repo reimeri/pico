@@ -26,10 +26,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static int g_presented_frames;
+
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
 {
     (void)renderCommands;
     (void)fonts;
+    g_presented_frames++;
 }
 
 _Static_assert((PicoWorkspaceId)0 == 0, "zero is an invalid workspace id");
@@ -8223,8 +8226,79 @@ done_host:
     return rc;
 }
 
+/* Drive the real slash command from the same callback phase as composer input.
+ * No graphics context is needed: an exiting frame must never reach drawing. */
+static void SubmitQuitOnFrame(PicoHost *host, void *state, float dt)
+{
+    (void)state;
+    (void)dt;
+    PicoComposer_SetText(host, "/quit");
+    PicoHost_Submit(host);
+}
+
+static void UnexpectedFrameAfterQuit(PicoHost *host, void *state, float dt)
+{
+    (void)host;
+    (void)state;
+    (void)dt;
+    Fail("/quit must stop subsequent host frame callbacks");
+}
+
+static int TestQuitDefersTeardownUntilFrameReturns(void)
+{
+    char dir[] = "/tmp/pico-quit-frame-XXXXXX";
+    PicoHost *host = NULL;
+    if (!mkdtemp(dir))
+    {
+        Fail("mkdtemp quit frame");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        rmdir(dir);
+        Fail("host init quit frame");
+        return 1;
+    }
+    PicoHost_Start(host, NULL, dir, true, PICO_SESSION_NONE, NULL);
+    WaitPluginLoad(host);
+    if (!PicoHost_SelectedAgent(host) || host->host_plugin_count + 2 > (int)(sizeof(host->host_plugins) / sizeof(host->host_plugins[0])))
+    {
+        pico_host_free(host);
+        rmdir(dir);
+        Fail("prepare quit frame");
+        return 1;
+    }
+    PicoModuleGeneration quit = {.ext = {.host_on_frame = SubmitQuitOnFrame}};
+    PicoModuleGeneration after = {.ext = {.host_on_frame = UnexpectedFrameAfterQuit}};
+    int slots = host->host_plugin_count;
+    host->host_plugins[host->host_plugin_count++] = (PicoPluginSlot){
+        .module = &quit, .initialized = true,
+    };
+    host->host_plugins[host->host_plugin_count++] = (PicoPluginSlot){
+        .module = &after, .initialized = true,
+    };
+    int presented = g_presented_frames;
+    PicoHost_Frame(host);
+    bool exited_without_present = PicoHost_ShouldExit(host) && g_presented_frames == presented;
+    /* Synthetic callback slots are stack-owned, not loader-owned. */
+    memset(&host->host_plugins[slots], 0, 2 * sizeof(host->host_plugins[0]));
+    host->host_plugin_count = slots;
+    PicoHostShutdownResult shutdown = pico_host_free(host);
+    rmdir(dir);
+    if (!exited_without_present || shutdown != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        Fail("/quit must return from the frame without presenting and allow clean host teardown");
+        return 1;
+    }
+    return g_failed ? 1 : 0;
+}
+
 int main(void)
 {
+    if (TestQuitDefersTeardownUntilFrameReturns() != 0)
+    {
+        return 1;
+    }
     if (TestFooterCacheTooltip() != 0)
     {
         return 1;

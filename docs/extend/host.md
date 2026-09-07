@@ -39,6 +39,10 @@ The normal CLI startup is this sequence, not a special lifecycle: init, open the
 
 `pico_host_free` applies the process-wide bounded shutdown deadline of about one second. It returns `PICO_HOST_SHUTDOWN_CLEAN` when every worker joins, or `PICO_HOST_SHUTDOWN_RETAINED` when a callback is still blocked. Retained shutdown detaches that callback and keeps every registration, auth store, builtin state, and user-extension `.so` it can reach. No extension `shutdown`, `dlclose`, auth destruction, or curl cleanup runs. Pico is then permanently retired in that process; later `pico_host_init` is rejected. Only `pico_host_free` uses this process deadline. Workspace close never does.
 
+## CLI shutdown
+
+`/quit` requests exit without a confirmation prompt rather than closing the window inside a callback. Subsequent host frame callbacks are skipped, and the shell returns before the remaining layout/render work. Main then runs the existing bounded host shutdown, unloads fonts, and closes the renderer/window exactly once. Normal window-close uses the same cleanup sequence. See [contracts](contracts.md#reload-and-workspace-quiescence) for extension ownership requirements.
+
 ## Limits
 
 - `PICO_MAX_WORKSPACES` (8) live workspaces

@@ -197,7 +197,7 @@ void PicoHostExtensions_OnFrame(PicoHost *host, float dt)
     {
         return;
     }
-    for (int i = 0; i < host->host_plugin_count; i++)
+    for (int i = 0; i < host->host_plugin_count && !PicoHost_ShouldExit(host); i++)
     {
         PicoPluginSlot *slot = &host->host_plugins[i];
         if (slot->initialized && slot->module && slot->module->ext.host_on_frame)

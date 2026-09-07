@@ -114,7 +114,7 @@ int main(int argc, char **argv)
     {
         PicoPlugins_Load(app);
     }
-    while (!WindowShouldClose())
+    while (!PicoHost_ShouldExit(app) && !WindowShouldClose())
     {
         if (Pico_NeedsClayReinit())
         {

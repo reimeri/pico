@@ -2092,7 +2092,7 @@ static void PicoHost_PumpLifecycle(PicoHost *host);
 
 void pico_host_pump(PicoHost *host)
 {
-    if (!host || host->terminal_shutdown || g_pico_process_retired)
+    if (!host || PicoHost_ShouldExit(host) || g_pico_process_retired)
     {
         return;
     }
@@ -3046,12 +3046,11 @@ void PicoHost_Frame(PicoHost *app)
     {
         return;
     }
-    SyncRaylibWindowSize();
-    if (app->terminal_shutdown)
+    if (PicoHost_ShouldExit(app))
     {
-        CloseWindow();
         return;
     }
+    SyncRaylibWindowSize();
     Vector2 mouse_delta = GetMouseWheelMoveV();
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
@@ -3078,6 +3077,11 @@ void PicoHost_Frame(PicoHost *app)
 
     PicoPlugins_Poll(app);
     pico_host_pump(app);
+    /* Commands run in frame callbacks. Leave graphics alive for main cleanup. */
+    if (PicoHost_ShouldExit(app))
+    {
+        return;
+    }
     PicoScrollbar_BeginFrame();
 
     bool had_warn = app->status_warn != NULL;
@@ -3162,6 +3166,10 @@ void PicoHost_Frame(PicoHost *app)
     app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
+    if (PicoHost_ShouldExit(app))
+    {
+        return;
+    }
 
     if (app->hovered_drag)
     {

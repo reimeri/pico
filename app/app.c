@@ -2776,6 +2776,22 @@ PicoHostShutdownResult pico_host_free(PicoHost *host)
     return result;
 }
 
+enum {
+    SHELL_ROOT_PADDING = 12,
+    SHELL_BODY_GAP = 12,
+    SHELL_SIDEBAR_WIDTH = 200,
+};
+
+float PicoHost_MainColumnWidth(const PicoHost *host)
+{
+    float width = Clay_GetLayoutDimensions().width - 2.0f * SHELL_ROOT_PADDING;
+    if (host && host->view_count[PICO_SLOT_SIDEBAR] > 0)
+    {
+        width -= SHELL_SIDEBAR_WIDTH + SHELL_BODY_GAP;
+    }
+    return width > 0.0f ? width : 0.0f;
+}
+
 static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_height, float delta_time)
 {
     Clay_BeginLayout();
@@ -2789,7 +2805,8 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                 .height = CLAY_SIZING_FIXED(viewport_height)},
-                     .padding = {12, 12, 12, 12},
+                     .padding = {SHELL_ROOT_PADDING, SHELL_ROOT_PADDING,
+                                 SHELL_ROOT_PADDING, SHELL_ROOT_PADDING},
                      .childGap = 6},
           .backgroundColor = COLOR_BG})
     {
@@ -2797,7 +2814,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
          * can retain Clay's compression residue and feed it back while pinned. */
         CLAY(CLAY_ID("Body"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                         .childGap = 12,
+                         .childGap = SHELL_BODY_GAP,
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)}}})
         {
             if (app->view_count[PICO_SLOT_SIDEBAR] > 0)
@@ -2806,7 +2823,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
                                  .padding = {8, 8, 8, 8},
-                                 .sizing = {.width = CLAY_SIZING_FIXED(200), .height = CLAY_SIZING_PERCENT(1)}},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(SHELL_SIDEBAR_WIDTH), .height = CLAY_SIZING_PERCENT(1)}},
                       .backgroundColor = COLOR_CONTENT_BG,
                       .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {

@@ -345,6 +345,63 @@ static void LayoutChatStabilityFrame(PicoHost *host, const Clay_Dimensions viewp
     PicoChat_HarvestVirtualHeights(host);
 }
 
+static int CheckChatViewportWrapping(PicoHost *host, PicoAgent *agent)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    const Clay_Dimensions narrow_viewport = {600, 800};
+    /* This paragraph wraps even in the wider pane. Check rendered geometry,
+     * without a Raylib window or a warm-up frame after allocation changes. */
+    PicoHost_ClearMessages(host, agent->id);
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_USER,
+                         "A long paragraph should use the space provided by the current chat pane. "
+                         "Resizing the viewport must change where its words wrap, and opening the "
+                         "sidebar must leave less room for those words even when the window size "
+                         "does not change. This paragraph is deliberately long enough to occupy "
+                         "multiple lines in each of the layouts exercised here. "
+                         "The same content should become taller in a narrower pane rather than "
+                         "keeping a wrap width from the previous frame or from the window backend.");
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    LayoutChatStabilityFrame(host, viewport);
+    Clay_ElementData wide = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    LayoutChatStabilityFrame(host, narrow_viewport);
+    Clay_ElementData narrow = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    if (!wide.found || !narrow.found || narrow.boundingBox.height <= wide.boundingBox.height)
+    {
+        Fail("chat text must wrap to the current Clay viewport on resize");
+        return 1;
+    }
+    ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    LayoutChatStabilityFrame(host, narrow_viewport);
+    Clay_ElementData sidebar_message = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    if (!sidebar_message.found || sidebar_message.boundingBox.height <= narrow.boundingBox.height)
+    {
+        Fail("opening the sidebar must rewrap chat text in the same frame");
+        return 1;
+    }
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    LayoutChatStabilityFrame(host, viewport);
+    Clay_ElementData restored = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    if (!restored.found || !ShellBoxStable(wide.boundingBox, restored.boundingBox))
+    {
+        Fail("restoring the viewport must restore chat message geometry");
+        return 1;
+    }
+    host->preferences.chat_width = 40;
+    LayoutChatStabilityFrame(host, viewport);
+    Clay_ElementData capped = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    LayoutChatStabilityFrame(host, (Clay_Dimensions){1500, 800});
+    Clay_ElementData capped_wider = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    if (!capped.found || !capped_wider.found ||
+        capped.boundingBox.width >= wide.boundingBox.width ||
+        fabsf(capped.boundingBox.width - capped_wider.boundingBox.width) > 0.001f ||
+        fabsf(capped.boundingBox.height - capped_wider.boundingBox.height) > 0.001f)
+    {
+        Fail("configured chat width must cap wrapping as the viewport grows");
+        return 1;
+    }
+    return 0;
+}
+
 /* Exercise the real chat rather than a shell stand-in. A group of completed
  * tool rows gives us a deterministic, product-level shrink: the visible rows
  * become one finished-trace header. The assertions intentionally compare the
@@ -602,9 +659,18 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
     {
         LayoutChatStabilityFrame(host, viewport);
     }
+    Clay_ElementData small_message = Clay_GetElementData(CLAY_IDI("MsgMain", agent->message_count - 1));
+    Clay_ElementData small_gap = Clay_GetElementData(CLAY_IDI("TranscriptGapMain", agent->message_count - 2));
+    float small_growth = small_message.boundingBox.height + small_gap.boundingBox.height;
+    if (!small_message.found || !small_gap.found || small_growth <= 0.0f ||
+        small_growth >= ended.stabilization.height)
+    {
+        Fail("small-growth case requires a rendered message that fits inside retained space");
+        goto done;
+    }
     if (!CaptureChatStabilitySnapshot(with_sidebar, &grown) ||
         !grown.stabilization_found ||
-        grown.stabilization.height >= ended.stabilization.height - 0.5f ||
+        fabsf(ended.stabilization.height - grown.stabilization.height - small_growth) > 0.5f ||
         fabsf(grown.content_height - ended.content_height) > 0.5f ||
         fabsf(grown.scroll_y - ended.scroll_y) > 0.5f)
     {
@@ -780,7 +846,7 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
         goto done;
     }
 
-    /* Clear and repopulate in one frame: agent/session identity is unchanged. */
+    /* Recreate retention for growth that exceeds it. */
     agent->messages[trace_message].trace_group_expanded = true;
     for (int frame = 0; frame < 3; frame++)
     {
@@ -791,6 +857,56 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
     {
         LayoutChatStabilityFrame(host, viewport);
     }
+    /* Growth larger than the retained amount must consume all of it and add
+     * only the excess. Measure the rendered bubble and gap, not fixture text
+     * length or configured spacer sizes. */
+    ChatStabilitySnapshot before_excess = {0};
+    if (!CaptureChatStabilitySnapshot(!with_sidebar, &before_excess) ||
+        before_excess.stabilization.height <= 0.5f)
+    {
+        Fail("excess-growth case requires retained space");
+        goto done;
+    }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_USER,
+                         "line\n\nline\n\nline\n\nline\n\nline\n\nline\n\n"
+                         "line\n\nline\n\nline\n\nline\n\nline\n\nline\n\n"
+                         "line\n\nline\n\nline\n\nline");
+    for (int frame = 0; frame < 8; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    ChatStabilitySnapshot after_excess = {0};
+    Clay_ElementData added = Clay_GetElementData(CLAY_IDI("MsgMain", agent->message_count - 1));
+    Clay_ElementData gap = Clay_GetElementData(CLAY_IDI("TranscriptGapMain", agent->message_count - 2));
+    float growth = added.boundingBox.height + gap.boundingBox.height;
+    float excess = growth - before_excess.stabilization.height;
+    if (!added.found || !gap.found || excess <= 0.5f ||
+        !CaptureChatStabilitySnapshot(!with_sidebar, &after_excess) ||
+        after_excess.stabilization.height > 0.5f ||
+        fabsf(after_excess.content_height - before_excess.content_height - excess) > 0.5f ||
+        fabsf(after_excess.scroll_y - before_excess.scroll_y + excess) > 0.5f)
+    {
+        Fail("growth beyond retained space must expand extent and follow only the excess");
+        goto done;
+    }
+
+    /* Re-establish retained space before testing transcript replacement. */
+    for (int phase = 0; phase < 2; phase++)
+    {
+        agent->messages[trace_message].trace_group_expanded = phase == 0;
+        for (int frame = 0; frame < 3; frame++)
+        {
+            LayoutChatStabilityFrame(host, viewport);
+        }
+    }
+    if (!CaptureChatStabilitySnapshot(!with_sidebar, &rebased) ||
+        rebased.stabilization.height <= 0.5f)
+    {
+        Fail("transcript replacement case requires retained space");
+        goto done;
+    }
+
+    /* Clear and repopulate in one frame: agent/session identity is unchanged. */
     PicoHost_ClearMessages(host, agent_id);
     PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, "replacement transcript");
     for (int frame = 0; frame < 4; frame++)
@@ -801,6 +917,11 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
         rebased.stabilization.height > 0.5f || fabsf(rebased.scroll_y) > 0.5f)
     {
         Fail("replaced transcript must not inherit old scroll extent");
+        goto done;
+    }
+
+    if (!with_sidebar && CheckChatViewportWrapping(host, agent) != 0)
+    {
         goto done;
     }
 

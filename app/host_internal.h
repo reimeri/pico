@@ -262,6 +262,8 @@ static inline void PicoHost_SetPath(PicoHost *host, const char *path)
 
 int PicoHost_ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap);
 bool PicoHost_ProcessRetired(void);
+/* Current-frame shell allocation; independent of previous layout bounds. */
+float PicoHost_MainColumnWidth(const PicoHost *host);
 Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *host, float viewport_height, float delta_time);
 PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source);
 PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id);

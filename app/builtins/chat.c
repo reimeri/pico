@@ -25,6 +25,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define CHAT_CONTENT_PAD_X 4
+#define CHAT_CONTENT_PAD_Y 8
+#define CHAT_USER_PAD_X 16
+
 #define TOOL_OUTPUT_MAX_LINES 100
 #define TOOL_WRAP_MAX_LINES PICO_WRAPPED_TEXT_LINE_CAPACITY
 #define THINK_SHEEN_PERIOD 1.4f
@@ -350,16 +354,21 @@ static void ViewWrappedToolArgs(const TranscriptView *view, Clay_String text,
     ViewWrappedTextWithCache(view, text, config, width, wrapped);
 }
 
+static float ChatContentWidth(PicoHost *app)
+{
+    return Pico_ClampChatWidth(PicoHost_MainColumnWidth(app), Pico_ChatColumnMaxPx(app));
+}
+
 static float ChatWidth(PicoHost *app)
 {
-    float width = (float)GetScreenWidth() - CONTENT_PADDING - 12;
-    width -= CHAT_WRAP_CHROME;
-    width = Pico_ClampChatWidth(width, Pico_ChatTextMaxPx(app));
-    if (width < 50)
-    {
-        width = 50;
-    }
-    return width;
+    /* Pre-wrapped markdown must fit inside the current column, including the
+     * widest message padding. Raylib's screen size is neither the pane width
+     * nor available in headless layouts; old Clay bounds lag resize/sidebar
+     * changes by a pass. */
+    float width = ChatContentWidth(app) - 2.0f * (CHAT_CONTENT_PAD_X + CHAT_USER_PAD_X);
+    /* Nested trace renderers reserve additional chrome; retain a usable
+     * minimum even when the viewport cannot accommodate the shell chrome. */
+    return width > 50.0f ? width : 50.0f;
 }
 
 static Clay_SizingAxis ChatColumnWidth(PicoHost *app)
@@ -1249,34 +1258,18 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
     ViewBreak(view);
 }
 
-#define CHAT_CONTENT_PAD_X 4
-#define CHAT_CONTENT_PAD_Y 8
 #define EMPTY_CARD_PADDING 16
 #define EMPTY_CARD_GAP 8
 #define EMPTY_CARD_COLUMN_GAP 8
 #define EMPTY_CARDS_GAP 12
 #define EMPTY_CARDS_NARROW_WIDTH 720.0f
 #define EMPTY_CARD_MAX_HEIGHT 192.0f
-/* Must match PicoHost_LayoutShell: Root padding, Body childGap, Sidebar width. */
-#define EMPTY_SHELL_ROOT_PAD_X 12.0f
-#define EMPTY_SHELL_BODY_GAP 12.0f
-#define EMPTY_SHELL_SIDEBAR_WIDTH 200.0f
 
 /* Text width available to each of the card's two columns, derived from this
  * frame's layout dimensions and shell chrome rather than last frame's bounds. */
 static float EmptyCardColumnWidth(PicoHost *app, bool narrow, bool overflow)
 {
-    float width = Clay_GetLayoutDimensions().width;
-    width -= 2.0f * EMPTY_SHELL_ROOT_PAD_X;
-    if (app && app->view_count[PICO_SLOT_SIDEBAR] > 0)
-    {
-        width -= EMPTY_SHELL_SIDEBAR_WIDTH + EMPTY_SHELL_BODY_GAP;
-    }
-    float column_max = Pico_ChatColumnMaxPx(app);
-    if (column_max > 0.0f && width > column_max)
-    {
-        width = column_max;
-    }
+    float width = ChatContentWidth(app);
     width -= 2.0f * CHAT_CONTENT_PAD_X;
     if (!narrow)
     {
@@ -1759,7 +1752,7 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
     bool user = msg->role == PICO_ROLE_USER;
     bool overlay = view->id_ns != 0;
     Clay_Color bg = user ? (overlay ? COLOR_USER_BG_OVERLAY : COLOR_USER_BG) : COLOR_ASSISTANT_BG;
-    Clay_Padding pad = user ? (Clay_Padding){16, 16, 12, 12} : (Clay_Padding){8, 8, 0, 0};
+    Clay_Padding pad = user ? (Clay_Padding){CHAT_USER_PAD_X, CHAT_USER_PAD_X, 12, 12} : (Clay_Padding){8, 8, 0, 0};
     float msg_max = available_width + (float)(pad.left + pad.right);
     if (msg_max < 50.0f)
     {

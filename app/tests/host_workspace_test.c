@@ -7672,6 +7672,150 @@ static bool WorkspaceLessToastRenders(PicoHost *host)
     return rendered;
 }
 
+static int FirstSidebarSessionRowId(void)
+{
+    int i;
+    for (i = 0; i < 512; i++)
+    {
+        if (Clay_GetElementData(CLAY_IDI("SidebarSess", i)).found)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool SidebarSessionDotVisible(Clay_RenderCommandArray *commands, int row_id,
+                                     Clay_BoundingBox *box)
+{
+    Clay_ElementId id = CLAY_IDI("SidebarSessDot", row_id);
+    int i;
+    for (i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!command || command->id != id.id ||
+            command->commandType != CLAY_RENDER_COMMAND_TYPE_RECTANGLE ||
+            command->renderData.rectangle.backgroundColor.a <= 0.0f)
+        {
+            continue;
+        }
+        if (box)
+        {
+            *box = command->boundingBox;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* Idle sidebar sessions show a visible status dot, smaller than attention dots. */
+static int TestIdleSidebarSessionDot(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-idle-dot-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-idle-dot-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent;
+    Clay_Arena arena;
+    Clay_RenderCommandArray commands;
+    Clay_BoundingBox idle_dot = {0};
+    Clay_BoundingBox running_dot = {0};
+    int row_id;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("idle session dot setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        RmRf(cfg);
+        RmRf(dir);
+        Fail("idle session dot host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    if (PicoCatalog_Ensure(dir) != 0)
+    {
+        Fail("idle session dot catalog workspace");
+        goto done_host;
+    }
+    pico_host_pump(host);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("idle session dot open workspace");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("idle session dot create agent");
+        goto done_host;
+    }
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("idle session dot Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    agent->state = PICO_AGENT_IDLE;
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    row_id = FirstSidebarSessionRowId();
+    if (row_id < 0 || !SidebarSessionDotVisible(&commands, row_id, &idle_dot))
+    {
+        Fail("idle session row must render a visible status dot");
+        goto done;
+    }
+
+    agent->state = PICO_AGENT_LLM_WAIT;
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!SidebarSessionDotVisible(&commands, row_id, &running_dot))
+    {
+        Fail("running session row must render a visible status dot");
+        goto done;
+    }
+    if (idle_dot.width >= running_dot.width || idle_dot.height >= running_dot.height)
+    {
+        fprintf(stderr, "idle session dot %.3fx%.3f running %.3fx%.3f\n",
+                idle_dot.width, idle_dot.height, running_dot.width, running_dot.height);
+        Fail("idle session dots must be smaller than attention dots");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    return rc;
+}
+
 static int TestSidebarCatalogChangeToken(void)
 {
     char dir[] = "/tmp/pico-sidebar-token-ws-XXXXXX";
@@ -7844,6 +7988,10 @@ int main(void)
         return 1;
     }
     if (TestChatToolStatusDotCentered() != 0)
+    {
+        return 1;
+    }
+    if (TestIdleSidebarSessionDot() != 0)
     {
         return 1;
     }

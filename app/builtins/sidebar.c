@@ -31,6 +31,7 @@ extern bool PicoSession_TestHook(const char *stage);
 #define SIDEBAR_ROW_GAP 6
 #define SIDEBAR_FOLDER_ICON 17
 #define SIDEBAR_SESSION_DOT 8
+#define SIDEBAR_SESSION_IDLE_DOT 4
 #define SIDEBAR_DRAG_THRESHOLD 4.0f
 
 typedef struct SidebarWsUi {
@@ -682,11 +683,13 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
 }
 
-static void RenderSessionDot(SidebarDotKind kind)
+static void RenderSessionDot(SidebarDotKind kind, int row_id)
 {
     float gutter = Pico_FontPx(SIDEBAR_FOLDER_ICON);
-    float size = Pico_FontPx(SIDEBAR_SESSION_DOT);
-    Clay_Color color = {0, 0, 0, 0};
+    float slot = Pico_FontPx(SIDEBAR_SESSION_DOT);
+    float size = Pico_FontPx(kind == SIDEBAR_DOT_IDLE ? SIDEBAR_SESSION_IDLE_DOT
+                                                     : SIDEBAR_SESSION_DOT);
+    Clay_Color color = COLOR_STATUS_OFF;
     switch (kind)
     {
         case SIDEBAR_DOT_ERROR:
@@ -709,14 +712,15 @@ static void RenderSessionDot(SidebarDotKind kind)
             break;
     }
     CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter),
-                                        .height = CLAY_SIZING_FIXED(size)},
+                                        .height = CLAY_SIZING_FIXED(slot)},
                              .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
                                                 .y = CLAY_ALIGN_Y_CENTER}}})
     {
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
-                                            .height = CLAY_SIZING_FIXED(size)}},
-                      .backgroundColor = color,
-                      .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
+        CLAY(CLAY_IDI("SidebarSessDot", row_id),
+             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                    .height = CLAY_SIZING_FIXED(size)}},
+              .backgroundColor = color,
+              .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
         {
         }
     }
@@ -931,7 +935,7 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderSessionDot(SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen));
+        RenderSessionDot(SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen), row_id);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {

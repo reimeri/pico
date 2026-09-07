@@ -8082,8 +8082,152 @@ static int TestWorkspaceLessHostTransition(void)
     return 0;
 }
 
+static int TestFooterCacheTooltip(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-cache-tip-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-cache-tip-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    Clay_RenderCommandArray commands;
+    Clay_ElementData chip;
+    int frame;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("cache tooltip setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("cache tooltip host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    /* Headless runs have no real fonts; keep chat on the unclamped width path
+     * and stub the composer, which measures text with raylib directly. */
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (host->view_count[PICO_SLOT_FOOTER] <= 0)
+    {
+        Fail("cache tooltip requires the builtin footer view");
+        goto done_host;
+    }
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("cache tooltip open workspace");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("cache tooltip create agent");
+        goto done_host;
+    }
+    agent->session_input_tokens = 250000;
+    agent->session_cached_tokens = 125000;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("cache tooltip Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+
+    chip = Clay_GetElementData(CLAY_ID("FooterCache"));
+    if (!chip.found || !FindCardText(&commands, "50% cache"))
+    {
+        Fail("footer must render the session cache rate");
+        goto done;
+    }
+    if (Clay_GetElementData(CLAY_ID("FooterCacheTip")).found)
+    {
+        Fail("cache tooltip must stay hidden without hover");
+        goto done;
+    }
+
+    Clay_SetPointerState((Clay_Vector2){chip.boundingBox.x + chip.boundingBox.width / 2.0f,
+                                        chip.boundingBox.y + chip.boundingBox.height / 2.0f},
+                         false);
+    for (frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    }
+    if (!Clay_GetElementData(CLAY_ID("FooterCacheTip")).found)
+    {
+        Fail("hovering the cache rate must show the tooltip");
+        goto done;
+    }
+    if (!FindCardText(&commands, "Total input: 250k") || !FindCardText(&commands, "Cached input: 125k"))
+    {
+        Fail("cache tooltip must show session totals formatted like the footer");
+        goto done;
+    }
+
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+    for (frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    }
+    if (Clay_GetElementData(CLAY_ID("FooterCacheTip")).found)
+    {
+        Fail("cache tooltip must hide once the pointer leaves");
+        goto done;
+    }
+
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 int main(void)
 {
+    if (TestFooterCacheTooltip() != 0)
+    {
+        return 1;
+    }
     if (TestBottomFollowShellGeometryStable() != 0)
     {
         return 1;

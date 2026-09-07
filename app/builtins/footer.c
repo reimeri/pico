@@ -36,6 +36,9 @@ typedef struct FooterState {
     char cwd[4096];
     char state_str[64];
     char tokens[128];
+    char cache[64];
+    char cache_input[64];
+    char cache_cached[64];
     char extra[64];
     char model[128];
     char effort[PICO_EFFORT_LEN];
@@ -58,6 +61,9 @@ static FooterState *ActiveFooterState(void)
 #define g_cwd (ActiveFooterState()->cwd)
 #define g_state (ActiveFooterState()->state_str)
 #define g_tokens (ActiveFooterState()->tokens)
+#define g_cache (ActiveFooterState()->cache)
+#define g_cache_input (ActiveFooterState()->cache_input)
+#define g_cache_cached (ActiveFooterState()->cache_cached)
 #define g_extra (ActiveFooterState()->extra)
 #define g_model (ActiveFooterState()->model)
 #define g_effort (ActiveFooterState()->effort)
@@ -177,12 +183,12 @@ static void FormatCwd(const char *workspace, char *out, size_t cap)
 }
 
 
-static const char *FormatTokens(int tokens)
+static const char *FormatTokens(uint64_t tokens)
 {
     static char buf[32];
     if (tokens < 1000)
     {
-        snprintf(buf, sizeof(buf), "%d", tokens);
+        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)tokens);
     }
     else if (tokens < 10000)
     {
@@ -194,11 +200,15 @@ static const char *FormatTokens(int tokens)
     }
     else if (tokens < 1000000)
     {
-        snprintf(buf, sizeof(buf), "%dk", (int)((tokens + 500) / 1000));
+        snprintf(buf, sizeof(buf), "%lluk", (unsigned long long)((tokens + 500) / 1000));
+    }
+    else if (tokens < 1000000000)
+    {
+        snprintf(buf, sizeof(buf), "%.2fM", tokens / 1000000.0);
     }
     else
     {
-        snprintf(buf, sizeof(buf), "%.2fM", tokens / 1000000.0);
+        snprintf(buf, sizeof(buf), "%.2fB", tokens / 1000000000.0);
     }
     return buf;
 }
@@ -550,6 +560,44 @@ static void Chip(Clay_ElementId id, const char *text, bool open, bool with_menu,
     }
 }
 
+static void RenderCacheChip(void)
+{
+    Clay_ElementId id = CLAY_ID("FooterCache");
+    CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
+    {
+        CLAY_TEXT(CStr(g_cache), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                  .fontSize = PICO_FONT_CAPTION,
+                                                  .textColor = COLOR_MUTED,
+                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        if (Clay_PointerOver(id))
+        {
+            CLAY(CLAY_ID("FooterCacheTip"),
+                 {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                               .zIndex = 26,
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                               .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_BOTTOM,
+                                                .parent = CLAY_ATTACH_POINT_LEFT_TOP},
+                               .offset = {.y = -6}},
+                  .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 2,
+                             .padding = {8, 8, 4, 4},
+                             .sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}},
+                  .backgroundColor = COLOR_CONTENT_BG,
+                  .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+                CLAY_TEXT(CStr(g_cache_input), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                .fontSize = PICO_FONT_CAPTION,
+                                                                .textColor = COLOR_TEXT,
+                                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                CLAY_TEXT(CStr(g_cache_cached), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                 .fontSize = PICO_FONT_CAPTION,
+                                                                 .textColor = COLOR_TEXT,
+                                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
+        }
+    }
+}
+
 static void RenderStatus(PicoHost *app)
 {
     FooterStatusKind kind = StatusKind(app);
@@ -646,16 +694,20 @@ void PicoFooter_Render(PicoHost *app, void *state)
     const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
     char used[32];
     char limit[32];
-    snprintf(used, sizeof(used), "%s", FormatTokens(agent->tokens_used));
-    snprintf(limit, sizeof(limit), "%s", FormatTokens(agent->context_limit));
+    snprintf(used, sizeof(used), "%s", FormatTokens((uint64_t)agent->tokens_used));
+    snprintf(limit, sizeof(limit), "%s", FormatTokens((uint64_t)agent->context_limit));
     int cache_percent = 0;
-    if (PicoUsage_SessionPercent(PicoHost_SelectedAgent(app), &cache_percent))
+    bool show_cache = PicoUsage_SessionPercent(agent, &cache_percent);
+    snprintf(g_tokens, sizeof(g_tokens), "%s / %s tokens", used, limit);
+    if (show_cache)
     {
-        snprintf(g_tokens, sizeof(g_tokens), "%s / %s tokens  ·  %d%% cache", used, limit, cache_percent);
-    }
-    else
-    {
-        snprintf(g_tokens, sizeof(g_tokens), "%s / %s tokens", used, limit);
+        char total_input[32];
+        char total_cached[32];
+        snprintf(total_input, sizeof(total_input), "%s", FormatTokens(agent->session_input_tokens));
+        snprintf(total_cached, sizeof(total_cached), "%s", FormatTokens(agent->session_cached_tokens));
+        snprintf(g_cache, sizeof(g_cache), "%d%% cache", cache_percent);
+        snprintf(g_cache_input, sizeof(g_cache_input), "Total input: %s", total_input);
+        snprintf(g_cache_cached, sizeof(g_cache_cached), "Cached input: %s", total_cached);
     }
 
     PicoModel *active = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
@@ -689,6 +741,11 @@ void PicoFooter_Render(PicoHost *app, void *state)
         PicoDiff_RenderChip(app);
         Sep();
         MutedText(g_tokens);
+        if (show_cache)
+        {
+            Sep();
+            RenderCacheChip();
+        }
         if (g_extra[0])
         {
             Sep();

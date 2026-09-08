@@ -389,6 +389,7 @@ if(BUILD_TESTING)
 
     add_executable(pico_ask_user_tests
         tests/ask_user_test.c
+        tests/clay_impl.c
         text_range.c
         json.c)
     target_include_directories(pico_ask_user_tests PRIVATE

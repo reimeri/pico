@@ -66,6 +66,29 @@ bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer)
     return false;
 }
 
+bool IsMouseButtonPressed(int button) { (void)button; return false; }
+bool IsMouseButtonDown(int button) { (void)button; return false; }
+Vector2 GetMousePosition(void) { return (Vector2){0, 0}; }
+bool PicoScrollbar_Overflows(Clay_String container_id)
+{
+    (void)container_id;
+    return false;
+}
+void *PicoPlugins_HostState(const PicoHost *host, const char *name)
+{
+    (void)host;
+    (void)name;
+    return NULL;
+}
+
+static Clay_Dimensions ClayMeasureStub(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
+{
+    (void)text;
+    (void)config;
+    (void)userData;
+    return (Clay_Dimensions){0, 0};
+}
+
 static int TestTextInput(void)
 {
     AskQuestion questions[2] = {0};
@@ -133,6 +156,92 @@ static int TestTextInput(void)
     return failed;
 }
 
+/* The modal's text field is an editing target: hovering it must request the
+ * I-beam cursor (hovered_text) rather than the link pointer
+ * (hovered_clickable); app.c maps those flags to cursor shapes. */
+static int TestHoverCursor(void)
+{
+    int failed = 0;
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    PicoHost *app = (PicoHost *)calloc(1, sizeof(PicoHost));
+    if (!memory || !app)
+    {
+        free(memory);
+        free(app);
+        fprintf(stderr, "hover cursor: allocation failed\n");
+        return 1;
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    Clay_Initialize(arena, (Clay_Dimensions){800, 600}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+
+    AskQuestion question = {0};
+    question.kind = ASK_QUESTION_TEXT;
+    AskUiState ui = {0};
+    ui.questions = &question;
+    ui.question_count = 1;
+    ui.current = 0;
+    ui.show = true;
+    s_active_ask_state = &ui;
+
+    /* Text box at (0,0)-(400,200) with the scrollbar handle along its left
+     * edge; the Next button sits right of the box at (400,0)-(500,40). */
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("AskUserTextBox"),
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(400), .height = CLAY_SIZING_FIXED(200)}}})
+    {
+        CLAY(CLAY_ID("AskUserTextScrollHandle"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(16), .height = CLAY_SIZING_FIXED(100)}}})
+        {
+        }
+    }
+    CLAY(CLAY_ID("AskUserNext"),
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(100), .height = CLAY_SIZING_FIXED(40)}}})
+    {
+    }
+    Clay_EndLayout(0);
+
+    /* Hovering the text field asks for the I-beam, not the link pointer. */
+    Clay_SetPointerState((Clay_Vector2){100, 100}, false);
+    AskUserAfterLayout(app, NULL, &ui);
+    if (!app->hovered_text || app->hovered_clickable)
+    {
+        fprintf(stderr, "hover cursor: text field must set hovered_text only\n");
+        failed = 1;
+    }
+
+    /* The scrollbar strip inside the field keeps the default cursor. */
+    app->hovered_text = false;
+    app->hovered_clickable = false;
+    Clay_SetPointerState((Clay_Vector2){8, 50}, false);
+    AskUserAfterLayout(app, NULL, &ui);
+    if (app->hovered_text || app->hovered_clickable)
+    {
+        fprintf(stderr, "hover cursor: scrollbar must keep the default cursor\n");
+        failed = 1;
+    }
+
+    /* Buttons keep the pointer cursor. */
+    app->hovered_text = false;
+    app->hovered_clickable = false;
+    char answer[] = "a";
+    question.text = answer;
+    question.text_len = 1;
+    Clay_SetPointerState((Clay_Vector2){450, 20}, false);
+    AskUserAfterLayout(app, NULL, &ui);
+    if (!app->hovered_clickable || app->hovered_text)
+    {
+        fprintf(stderr, "hover cursor: answered Next button must set hovered_clickable only\n");
+        failed = 1;
+    }
+
+    s_active_ask_state = NULL;
+    free(app);
+    free(memory);
+    return failed;
+}
+
 static int ExpectRequest(const char *name, const char *args, const char *expected)
 {
     char error[256] = {0};
@@ -186,6 +295,7 @@ static char *BuildQuestionList(int count)
 int main(void)
 {
     int failed = TestTextInput();
+    failed |= TestHoverCursor();
     failed |= ExpectRequest(
         "mixed questionnaire",
         "{\"questions\":[{\"id\":\"target\",\"question\":\"Which?\",\"kind\":\"select\","

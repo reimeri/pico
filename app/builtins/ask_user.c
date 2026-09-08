@@ -1807,9 +1807,15 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     bool over_text = PointerOver(CLAY_STRING("AskUserTextBox"));
     bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollHandle"))) ||
                     Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollTrack")));
-    if ((over_back && g_ui.current > 0) || (over_next && QuestionAnswered(q)) || over_text)
+    if ((over_back && g_ui.current > 0) || (over_next && QuestionAnswered(q)))
     {
         app->hovered_clickable = true;
+    }
+    /* The text field is an editing target: hovering it asks for the I-beam
+     * cursor, while its scrollbar strip keeps the default cursor. */
+    if (TextFieldOpen(q) && over_text && !over_bar)
+    {
+        app->hovered_text = true;
     }
     if (q->kind == ASK_QUESTION_SELECT)
     {

@@ -33,6 +33,14 @@ static int HelloInit(PicoHost *host, void **state_out)
 
 Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
+## Clay layout lifetime
+
+Pico owns the process-wide Clay context and its arena. Arena initialization, replacement, and destruction are host-internal; extensions emit layout through the normal Clay APIs and must not call `Clay_Initialize`, `Clay_SetCurrentContext`, or change Clay capacity limits.
+
+Capacity recovery can discard a completed layout, replace its arena, and invoke views again in the same frame. Pico copies scroll offsets before replacement and restores them against the rebuilt layout. If allocation or initialization fails, it keeps the previous context, skips unusable layout consumers and presentation, and retries recovery on a later frame. Final arena destruction happens after host shutdown callbacks, before graphics teardown.
+
+Treat Clay-owned pointers—including render-command storage and `Clay_ScrollContainerData.scrollPosition`—as borrowed for the current layout only. Keep element IDs and copied values across callbacks, and query fresh data when needed. Do not retain these pointers in extension state. View callbacks must remain declarative because a layout pass is not a promise that its output will be presented.
+
 ## Slots
 
 - `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**, full content height. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes; entries whose path is not an existing directory are omitted), with a muted Projects header whose `+` opens the native folder picker and a wait modal, expand/collapse (latest 10 sessions, More/Less to page by 10; the selected session stays visible when its workspace is collapsed), per-workspace `+` for a new main agent, click-to-resume or select, and a bottom-left settings button that opens `/settings`. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).

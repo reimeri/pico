@@ -437,6 +437,11 @@ void Pico_UnloadFonts(Font *fonts)
     }
 }
 
+static struct {
+    void *memory; /* Keep the malloc address: Clay aligns its arena internally. */
+    Clay_Context *context;
+} clay_arena;
+
 static bool needs_clay_reinit = false;
 
 #define PICO_CLAY_SCROLL_MAX 16
@@ -547,25 +552,74 @@ void Pico_ClearClayReinit(void)
     clay_capacity_grown = false;
 }
 
-void Pico_ReinitClay(Font *fonts, bool debug_enabled)
+/* Clay reads capacities from the previous current context during initialization.
+ * Keep it alive until the replacement is initialized and accepted. */
+static bool ReplaceClayArena(Clay_Dimensions dimensions)
 {
-    fprintf(stderr, "clay-scroll: reinit begin max=%d mem=%llu\n", (int)Clay_GetMaxElementCount(),
-            (unsigned long long)Clay_MinMemorySize());
-    Pico_CaptureClayScroll();
-    uint64_t size = Clay_MinMemorySize();
-    void *block = malloc(size);
-    if (!block)
+    Clay_Context *previous = Clay_GetCurrentContext();
+    uint32_t size = Clay_MinMemorySize();
+    void *memory = malloc(size);
+    if (!memory)
     {
-        fprintf(stderr, "clay-scroll: reinit malloc failed size=%llu\n", (unsigned long long)size);
-        return;
+        fprintf(stderr, "clay: arena allocation failed (%u bytes)\n", size);
+        return false;
     }
-    Clay_Arena memory = Clay_CreateArenaWithCapacityAndMemory(size, block);
-    if (!Clay_Initialize(memory, (Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()},
-                         (Clay_ErrorHandler){Pico_HandleClayErrors, 0}))
+    Clay_Context *context = Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(size, memory),
+                                            dimensions, (Clay_ErrorHandler){Pico_HandleClayErrors, 0});
+    if (!context)
     {
-        fprintf(stderr, "clay-scroll: reinit initialize failed\n");
-        free(block);
-        return;
+        /* Initialization may have changed the global context before failing. */
+        Clay_SetCurrentContext(previous);
+        free(memory);
+        fprintf(stderr, "clay: arena initialization failed\n");
+        return false;
+    }
+    void *old_memory = clay_arena.memory;
+    clay_arena.memory = memory;
+    clay_arena.context = context;
+    free(old_memory);
+    return true;
+}
+
+bool Pico_InitClay(Clay_Dimensions dimensions)
+{
+    if (clay_arena.memory || Clay_GetCurrentContext())
+    {
+        return false;
+    }
+    if (!ReplaceClayArena(dimensions))
+    {
+        return false;
+    }
+    Pico_ClearClayReinit();
+    return true;
+}
+
+void Pico_FreeClay(void)
+{
+    if (Clay_GetCurrentContext() == clay_arena.context)
+    {
+        Clay_SetCurrentContext(NULL);
+    }
+    free(clay_arena.memory);
+    memset(&clay_arena, 0, sizeof(clay_arena));
+    memset(clay_scroll_snaps, 0, sizeof(clay_scroll_snaps));
+    clay_scroll_snap_count = 0;
+    clay_scroll_restore_pending = false;
+    Pico_ClearClayReinit();
+}
+
+bool Pico_ReinitClay(Font *fonts, bool debug_enabled)
+{
+    needs_clay_reinit = true;
+    if (!clay_arena.context || Clay_GetCurrentContext() != clay_arena.context)
+    {
+        return false;
+    }
+    Pico_CaptureClayScroll();
+    if (!ReplaceClayArena(Clay_GetLayoutDimensions()))
+    {
+        return false;
     }
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
 #ifdef PICO_CLAY_DEBUG
@@ -574,8 +628,7 @@ void Pico_ReinitClay(Font *fonts, bool debug_enabled)
     (void)debug_enabled;
 #endif
     Pico_ClearClayReinit();
-    fprintf(stderr, "clay-scroll: reinit done max=%d size=%llu\n", (int)Clay_GetMaxElementCount(),
-            (unsigned long long)size);
+    return true;
 }
 
 static float ClampAxis(float value, float viewport, float content)

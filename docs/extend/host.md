@@ -41,7 +41,7 @@ The normal CLI startup is this sequence, not a special lifecycle: init, open the
 
 ## CLI shutdown
 
-`/quit` requests exit without a confirmation prompt rather than closing the window inside a callback. Subsequent host frame callbacks are skipped, and the shell returns before the remaining layout/render work. Main then runs the existing bounded host shutdown, unloads fonts, and closes the renderer/window exactly once. Normal window-close uses the same cleanup sequence. See [contracts](contracts.md#reload-and-workspace-quiescence) for extension ownership requirements.
+`/quit` requests exit without a confirmation prompt rather than closing the window inside a callback. Subsequent host frame callbacks are skipped, and the shell returns before the remaining layout/render work. Main then runs the existing bounded host shutdown, releases the Clay arena, unloads fonts, and closes the renderer/window exactly once. Normal window-close uses the same cleanup sequence. See [contracts](contracts.md#reload-and-workspace-quiescence) for extension ownership requirements.
 
 ## Limits
 

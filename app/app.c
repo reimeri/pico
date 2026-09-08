@@ -1,3 +1,4 @@
+#include "theme_internal.h"
 #include "pico/plugin.h"
 #include "pico/md_view.h"
 #include "agent.h"
@@ -3027,7 +3028,10 @@ static Clay_RenderCommandArray RecoverClayLayoutIfNeeded(PicoHost *app, Clay_Ren
             fprintf(stderr, "clay-scroll: overlay without handler, doubled %d -> %d\n", (int)before,
                     (int)Clay_GetMaxElementCount());
         }
-        Pico_ReinitClay(app->fonts, app->debug_enabled);
+        if (!Pico_ReinitClay(app->fonts, app->debug_enabled))
+        {
+            break; /* Keep the old arena intact; retry next frame, not this layout. */
+        }
         commands = PicoHost_LayoutShell(app, (float)GetScreenHeight(), 0.0f);
     }
     return commands;
@@ -3080,6 +3084,11 @@ void PicoHost_Frame(PicoHost *app)
     /* Commands run in frame callbacks. Leave graphics alive for main cleanup. */
     if (PicoHost_ShouldExit(app))
     {
+        return;
+    }
+    if (Pico_NeedsClayReinit() && !Pico_ReinitClay(app->fonts, app->debug_enabled))
+    {
+        SkipClayPresent((Clay_RenderCommandArray){0});
         return;
     }
     PicoScrollbar_BeginFrame();
@@ -3163,11 +3172,22 @@ void PicoHost_Frame(PicoHost *app)
     Clay_RenderCommandArray render_commands =
         RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), GetFrameTime()));
 
+    if (ClayLayoutUnusable(render_commands))
+    {
+        SkipClayPresent(render_commands);
+        return;
+    }
+
     app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
     if (PicoHost_ShouldExit(app))
     {
+        return;
+    }
+    if (ClayLayoutUnusable(render_commands))
+    {
+        SkipClayPresent(render_commands);
         return;
     }
 
@@ -3243,6 +3263,11 @@ void PicoHost_Frame(PicoHost *app)
          * Rebuild once so the corrected offset is visible this frame. */
         render_commands = RecoverClayLayoutIfNeeded(
             app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), 0.0f));
+        if (ClayLayoutUnusable(render_commands))
+        {
+            SkipClayPresent(render_commands);
+            return;
+        }
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
         {

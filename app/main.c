@@ -4,6 +4,7 @@
 #include "clay/clay.h"
 #include "../clay/renderers/raylib/clay_renderer_raylib.c"
 #include "host_internal.h"
+#include "theme_internal.h"
 
 #include "pico/app.h"
 #include "agent_internal.h"
@@ -82,9 +83,11 @@ int main(int argc, char **argv)
 
     Pico_PathsInit(GetApplicationDirectory());
 
-    uint64_t total_memory_size = Clay_MinMemorySize();
-    Clay_Arena clay_memory = Clay_CreateArenaWithCapacityAndMemory(total_memory_size, malloc(total_memory_size));
-    Clay_Initialize(clay_memory, (Clay_Dimensions){1100, 800}, (Clay_ErrorHandler){Pico_HandleClayErrors, 0});
+    if (!Pico_InitClay((Clay_Dimensions){1100, 800}))
+    {
+        fprintf(stderr, "Pico could not initialize Clay.\n");
+        return 1;
+    }
     Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     SetExitKey(KEY_NULL);
 
@@ -102,6 +105,7 @@ int main(int argc, char **argv)
     if (pico_host_init(&app, fonts, options.safe_mode) != PICO_OK || !app)
     {
         fprintf(stderr, "Pico could not initialize.\n");
+        Pico_FreeClay();
         Pico_UnloadFonts(fonts);
         Clay_Raylib_Close();
         return 1;
@@ -116,10 +120,6 @@ int main(int argc, char **argv)
     }
     while (!PicoHost_ShouldExit(app) && !WindowShouldClose())
     {
-        if (Pico_NeedsClayReinit())
-        {
-            Pico_ReinitClay(fonts, app->debug_enabled);
-        }
         PicoHost_Frame(app);
     }
 
@@ -132,6 +132,7 @@ int main(int argc, char **argv)
     }
     PicoHostShutdownResult shutdown = pico_host_free(app);
 
+    Pico_FreeClay();
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();
     if (shutdown == PICO_HOST_SHUTDOWN_RETAINED)

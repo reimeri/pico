@@ -1,6 +1,9 @@
 // Example host-scoped Pico extension (sidebar view). Copy to
 // ~/.config/pico/extensions/ (a subfolder is fine) then press F5.
 // Workspace-local sources must not set host callbacks.
+// Layout/ownership contracts: docs/extend/views.md#clay-layout-lifetime and
+// docs/extend/contracts.md. Views may run again before a frame is presented;
+// do not retain Clay-owned pointers between callbacks.
 //
 //   mkdir -p ~/.config/pico/extensions/hello
 //   cp examples/hello.c ~/.config/pico/extensions/hello/

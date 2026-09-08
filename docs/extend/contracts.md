@@ -40,6 +40,7 @@ Mailbox identity does not gain a call ID: same-agent/name posts still share a st
 
 ## Ownership
 
+- Pico owns Clay context/arena lifecycle. Extensions must not initialize or replace the context or change its capacity limits. Clay-owned pointers are valid only for the current layout; retain IDs or copied values instead. See [Clay layout lifetime](views.md#clay-layout-lifetime).
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
 - `PicoToolResult.output` / `details_json`: malloc if set; Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.

@@ -1,4 +1,4 @@
-#include "pico/theme.h"
+#include "theme_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,19 +15,41 @@ static void DropClay(void *memory)
     free(memory);
 }
 
+#ifdef PICO_CLAY_FAULT_TESTS
+static bool fail_allocation;
+static bool fail_initialization;
+
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size)
+{
+    if (fail_allocation)
+    {
+        fail_allocation = false;
+        return NULL;
+    }
+    return __real_malloc(size);
+}
+
+Clay_Context *__real_Clay_Initialize(Clay_Arena arena, Clay_Dimensions dimensions,
+                                    Clay_ErrorHandler handler);
+Clay_Context *__wrap_Clay_Initialize(Clay_Arena arena, Clay_Dimensions dimensions,
+                                    Clay_ErrorHandler handler)
+{
+    Clay_Context *context = __real_Clay_Initialize(arena, dimensions, handler);
+    if (fail_initialization)
+    {
+        fail_initialization = false;
+        /* Exercise rollback even if initialization already changed current context. */
+        return NULL;
+    }
+    return context;
+}
+#endif
+
 static int TestOverflowGrows(Clay_ErrorType error_type)
 {
-    uint32_t size = Clay_MinMemorySize();
-    void *memory = malloc(size);
-    if (!memory)
+    if (!Pico_InitClay((Clay_Dimensions){100, 100}))
     {
-        return Fail("could not allocate Clay arena");
-    }
-
-    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(size, memory);
-    if (!Clay_Initialize(arena, (Clay_Dimensions){100, 100}, (Clay_ErrorHandler){0}))
-    {
-        DropClay(memory);
         return Fail("could not initialize Clay");
     }
 
@@ -49,7 +71,7 @@ static int TestOverflowGrows(Clay_ErrorType error_type)
     }
 
     Pico_ClearClayReinit();
-    DropClay(memory);
+    Pico_FreeClay();
     return failed;
 }
 
@@ -79,6 +101,40 @@ static void LayoutClippedElements(Clay_String id_prefix, int32_t count)
         }
     }
     Clay_EndLayout(0.0f);
+}
+
+static Clay_Dimensions MeasureCapacityText(Clay_StringSlice text, Clay_TextElementConfig *config,
+                                           void *user_data)
+{
+    (void)user_data;
+    return (Clay_Dimensions){text.length * config->fontSize * 0.5f, config->fontSize};
+}
+
+static int TestLayoutRecoversAfterOverflow(void)
+{
+    if (!Pico_InitClay((Clay_Dimensions){200, 200}))
+    {
+        return Fail("could not initialize small arena for overflow recovery");
+    }
+    Clay_SetMaxElementCount(128);
+    if (!Pico_ReinitClay(NULL, false))
+    {
+        Pico_FreeClay();
+        return Fail("could not prepare small arena for overflow recovery");
+    }
+    int recoveries = 0;
+    for (int attempt = 0; attempt < 4; attempt++)
+    {
+        Clay_SetMeasureTextFunction(MeasureCapacityText, NULL);
+        LayoutClippedElements(CLAY_STRING("OverflowItem"), 200);
+        if (!Pico_NeedsClayReinit()) break;
+        if (!Pico_ReinitClay(NULL, false)) break;
+        recoveries++;
+    }
+    bool recovered = recoveries > 0 && !Pico_NeedsClayReinit() &&
+        Clay_GetScrollContainerData(Clay_GetElementIdWithIndex(CLAY_STRING("OverflowItem"), 199)).found;
+    Pico_FreeClay();
+    return recovered ? 0 : Fail("capacity recovery did not rebuild a complete usable layout");
 }
 
 static int TestManyClippedElements(void)
@@ -153,87 +209,120 @@ static void LayoutChat(float content_h)
 
 static int TestScrollSurvivesReinit(void)
 {
-    uint32_t size = Clay_MinMemorySize();
-    void *memory = malloc(size);
-    if (!memory)
+    if (!Pico_InitClay((Clay_Dimensions){200, 200}))
     {
-        return Fail("could not allocate Clay arena");
-    }
-
-    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(size, memory);
-    if (!Clay_Initialize(arena, (Clay_Dimensions){200, 200}, (Clay_ErrorHandler){0}))
-    {
-        DropClay(memory);
         return Fail("could not initialize Clay for scroll restore");
     }
-
-    LayoutChat(400.0f);
-    Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    if (!data.found || !data.scrollPosition)
+    /* Repeated production replacements must release every superseded arena.
+     * LeakSanitizer checks this once final teardown removes the current root. */
+    const Clay_ErrorType overflows[] = {
+        CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED,
+        CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED,
+        CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED,
+    };
+    int failed = 0;
+    for (size_t i = 0; i < sizeof(overflows) / sizeof(overflows[0]); i++)
     {
-        DropClay(memory);
-        return Fail("ChatScroll was not a scroll container");
+        LayoutChat(400.0f);
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!data.found || !data.scrollPosition)
+        {
+            failed = Fail("ChatScroll was not a scroll container");
+            break;
+        }
+        data.scrollPosition->y = -150.0f;
+        Pico_RememberClayScroll();
+        Pico_HandleClayErrors((Clay_ErrorData){.errorType = overflows[i],
+                                              .errorText = CLAY_STRING("capacity overflow")});
+        if (!Pico_ReinitClay(NULL, false))
+        {
+            failed = Fail("could not replace Clay arena");
+            break;
+        }
+        LayoutChat(400.0f);
+        Pico_RestoreClayScroll();
+        /* Never reuse the previous arena's scrollPosition pointer. */
+        data = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!data.found || !data.scrollPosition || data.scrollPosition->y != -150.0f)
+        {
+            failed = Fail("replacement did not preserve the chat scroll position");
+            break;
+        }
     }
+    Pico_FreeClay();
+    if (Clay_GetCurrentContext())
+    {
+        return Fail("final teardown left a dangling Clay context");
+    }
+    return failed;
+}
+
+#ifdef PICO_CLAY_FAULT_TESTS
+static int TestArenaFailure(bool allocation)
+{
+    if (allocation) fail_allocation = true;
+    else fail_initialization = true;
+    if (Pico_InitClay((Clay_Dimensions){200, 200}) || Clay_GetCurrentContext())
+    {
+        Pico_FreeClay();
+        return Fail("failed initial arena must leave no current context");
+    }
+    if (!Pico_InitClay((Clay_Dimensions){200, 200}))
+    {
+        return Fail("could not initialize Clay after a failed attempt");
+    }
+    LayoutChat(400.0f);
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     data.scrollPosition->y = -150.0f;
     Pico_RememberClayScroll();
-    Pico_CaptureClayScroll();
-
-    uint32_t new_size = Clay_MinMemorySize();
-    void *new_memory = malloc(new_size);
-    if (!new_memory)
+    Pico_HandleClayErrors((Clay_ErrorData){.errorType = CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED,
+                                          .errorText = CLAY_STRING("capacity overflow")});
+    if (allocation) fail_allocation = true;
+    else fail_initialization = true;
+    if (Pico_ReinitClay(NULL, false) || !Pico_NeedsClayReinit())
     {
-        DropClay(memory);
-        return Fail("could not allocate replacement Clay arena");
+        Pico_FreeClay();
+        return Fail("failed replacement must leave recovery pending");
     }
-    Clay_Arena new_arena = Clay_CreateArenaWithCapacityAndMemory(new_size, new_memory);
-    if (!Clay_Initialize(new_arena, (Clay_Dimensions){200, 200}, (Clay_ErrorHandler){0}))
+    /* The previous layout and its borrowed pointers remain valid on failure. */
+    Clay_ScrollContainerData retained = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!retained.found || !retained.scrollPosition ||
+        retained.scrollPosition->y != -150.0f || data.scrollPosition->y != -150.0f)
     {
-        free(new_memory);
-        DropClay(memory);
-        return Fail("could not reinitialize Clay");
+        Pico_FreeClay();
+        return Fail("failed replacement lost the previous layout");
     }
-    free(memory);
-    memory = new_memory;
-
+    if (!Pico_ReinitClay(NULL, false))
+    {
+        Pico_FreeClay();
+        return Fail("replacement did not recover after the allocation/initialization failure");
+    }
     LayoutChat(400.0f);
-    data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    if (!data.found || !data.scrollPosition)
-    {
-        DropClay(memory);
-        return Fail("ChatScroll missing after reinit");
-    }
-    if (data.scrollPosition->y != 0.0f)
-    {
-        DropClay(memory);
-        return Fail("reinit did not reset ChatScroll");
-    }
-    if (!Pico_RestoreClayScroll())
-    {
-        DropClay(memory);
-        return Fail("restore did not apply the captured ChatScroll offset");
-    }
-    if (data.scrollPosition->y != -150.0f)
-    {
-        DropClay(memory);
-        return Fail("ChatScroll offset was not restored");
-    }
-
-    DropClay(memory);
-    return 0;
+    Pico_RestoreClayScroll();
+    data = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    int failed = (!data.found || !data.scrollPosition || data.scrollPosition->y != -150.0f)
+                     ? Fail("retry lost the captured scroll position") : 0;
+    Pico_FreeClay();
+    return failed;
 }
+#endif
 
 int main(void)
 {
     int rc = TestOverflowGrows(CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED);
-    if (rc != 0)
-    {
-        return rc;
-    }
+    if (rc != 0) return rc;
     rc = TestOverflowGrows(CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE);
-    if (rc != 0)
-    {
-        return rc;
-    }
+    if (rc != 0) return rc;
+    rc = TestLayoutRecoversAfterOverflow();
+    if (rc != 0) return rc;
     rc = TestManyClippedElements();
-    return rc != 0 ? rc : TestScrollSurvivesReinit();
+    if (rc != 0) return rc;
+    rc = TestScrollSurvivesReinit();
+    if (rc != 0) return rc;
+#ifdef PICO_CLAY_FAULT_TESTS
+    rc = TestArenaFailure(true);
+    if (rc != 0) return rc;
+    rc = TestArenaFailure(false);
+#endif
+    return rc;
 }

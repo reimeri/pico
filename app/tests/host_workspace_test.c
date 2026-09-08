@@ -1,3 +1,4 @@
+#include "theme_internal.h"
 #include "pico/host.h"
 #include "pico/plugin.h"
 #include "host_internal.h"
@@ -26,6 +27,42 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static bool g_clay_frame_test;
+/* Do not let an unrelated persistence worker consume the UI allocation fault. */
+static __thread bool g_fail_frame_allocation;
+static int g_clay_failed_allocations;
+static int g_clay_layout_calls;
+static int g_clay_after_layout_calls;
+static int g_clay_after_render_calls;
+static bool g_clay_sentinel_presented;
+
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size)
+{
+    if (g_fail_frame_allocation)
+    {
+        g_fail_frame_allocation = false;
+        g_clay_failed_allocations++;
+        return NULL;
+    }
+    return __real_malloc(size);
+}
+
+int __real_GetScreenWidth(void);
+int __wrap_GetScreenWidth(void) { return g_clay_frame_test ? 1100 : __real_GetScreenWidth(); }
+int __real_GetScreenHeight(void);
+int __wrap_GetScreenHeight(void) { return g_clay_frame_test ? 800 : __real_GetScreenHeight(); }
+void __real_SetMouseCursor(int cursor);
+void __wrap_SetMouseCursor(int cursor) { if (!g_clay_frame_test) __real_SetMouseCursor(cursor); }
+void __real_BeginDrawing(void);
+void __wrap_BeginDrawing(void) { if (!g_clay_frame_test) __real_BeginDrawing(); }
+void __real_ClearBackground(Color color);
+void __wrap_ClearBackground(Color color) { if (!g_clay_frame_test) __real_ClearBackground(color); }
+void __real_EndDrawing(void);
+void __wrap_EndDrawing(void) { if (!g_clay_frame_test) __real_EndDrawing(); }
+#endif
+
 static int g_presented_frames;
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
@@ -33,6 +70,20 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
     (void)renderCommands;
     (void)fonts;
     g_presented_frames++;
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (g_clay_frame_test)
+    {
+        /* Consume the rebuilt arena's commands, rather than only counting draws. */
+        uint32_t sentinel = Clay_GetElementIdWithIndex(CLAY_STRING("RecoveryItem"), 199).id;
+        for (int32_t i = 0; i < renderCommands.length; i++)
+        {
+            if (renderCommands.internalArray[i].id == sentinel)
+            {
+                g_clay_sentinel_presented = true;
+            }
+        }
+    }
+#endif
 }
 
 _Static_assert((PicoWorkspaceId)0 == 0, "zero is an invalid workspace id");
@@ -948,8 +999,6 @@ static int RunShellStabilityCase(bool with_sidebar)
 {
     const Clay_Dimensions viewport = {1714, 1392};
     const int frames = 400;
-    uint32_t arena_size = Clay_MinMemorySize();
-    void *memory = malloc(arena_size);
     Clay_Context *previous = Clay_GetCurrentContext();
     PicoHost host;
     PicoWorkspace workspace;
@@ -964,15 +1013,9 @@ static int RunShellStabilityCase(bool with_sidebar)
     Clay_BoundingBox expected_composer = {0};
     Clay_BoundingBox expected_footer = {0};
     Clay_Vector2 expected_scroll = {0};
-    if (!memory)
+    Clay_SetCurrentContext(NULL);
+    if (!Pico_InitClay(viewport))
     {
-        Fail("shell stability arena allocation");
-        return 1;
-    }
-    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
-    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
-    {
-        free(memory);
         Clay_SetCurrentContext(previous);
         Fail("shell stability Clay initialization");
         return 1;
@@ -1005,9 +1048,26 @@ static int RunShellStabilityCase(bool with_sidebar)
         {
             state.composer_height = 56.003f;
         }
+        if (frame == frames / 2)
+        {
+            Pico_RememberClayScroll();
+            Pico_HandleClayErrors((Clay_ErrorData){
+                .errorType = CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED,
+                .errorText = CLAY_STRING("shell capacity recovery"),
+            });
+            if (!Pico_ReinitClay(NULL, false))
+            {
+                Fail("shell stability arena replacement");
+                break;
+            }
+        }
         Clay_SetLayoutDimensions(viewport);
         Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
         (void)PicoHost_LayoutShell(&host, viewport.height, 1.0f / 60.0f);
+        if (Pico_RestoreClayScroll())
+        {
+            (void)PicoHost_LayoutShell(&host, viewport.height, 0.0f);
+        }
         Clay_ScrollContainerData scroll =
             Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
         if (!scroll.found || !scroll.scrollPosition)
@@ -1089,8 +1149,8 @@ static int RunShellStabilityCase(bool with_sidebar)
         }
     }
 
+    Pico_FreeClay();
     Clay_SetCurrentContext(previous);
-    free(memory);
     return g_failed ? 1 : 0;
 }
 
@@ -8293,8 +8353,121 @@ static int TestQuitDefersTeardownUntilFrameReturns(void)
     return g_failed ? 1 : 0;
 }
 
-int main(void)
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static void RecoveryOverflowView(PicoHost *host, void *state)
 {
+    (void)host;
+    (void)state;
+    g_clay_layout_calls++;
+    CLAY(CLAY_ID("RecoveryItems"),
+         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                     .sizing = {.width = CLAY_SIZING_FIXED(200), .height = CLAY_SIZING_FIXED(1)}}})
+    {
+        for (int i = 0; i < 200; i++)
+        {
+            CLAY(Clay_GetElementIdWithIndex(CLAY_STRING("RecoveryItem"), (uint32_t)i),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(1), .height = CLAY_SIZING_FIXED(1)}},
+                  .backgroundColor = {255, 255, 255, 255}})
+            {
+            }
+        }
+    }
+    if (g_clay_layout_calls == 1) g_fail_frame_allocation = true;
+}
+
+static void RecoveryAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)host;
+    (void)event;
+    (void)state;
+    g_clay_after_layout_calls++;
+}
+
+static void RecoveryAfterRender(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)host;
+    (void)event;
+    (void)state;
+    g_clay_after_render_calls++;
+}
+
+static int TestFrameRetriesFailedArenaReplacement(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("frame recovery host initialization");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    if (!Pico_InitClay((Clay_Dimensions){1100, 800}))
+    {
+        pico_host_free(host);
+        Fail("frame recovery Clay initialization");
+        return 1;
+    }
+    Clay_SetMaxElementCount(128);
+    if (!Pico_ReinitClay(NULL, false))
+    {
+        pico_host_free(host);
+        Pico_FreeClay();
+        Fail("frame recovery small arena initialization");
+        return 1;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    memset(host->view_count, 0, sizeof(host->view_count));
+    host->hook_count = 0;
+    PicoHost_BeginRegistration(host, PICO_REG_HOST, NULL);
+    pico_host_add_view(host, PICO_SLOT_MAIN, 0, RecoveryOverflowView);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, RecoveryAfterLayout);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_RENDER, RecoveryAfterRender);
+    PicoHost_PublishRegistration(host, NULL);
+
+    g_clay_frame_test = true;
+    g_clay_layout_calls = g_clay_failed_allocations = 0;
+    g_clay_after_layout_calls = g_clay_after_render_calls = 0;
+    g_clay_sentinel_presented = false;
+    int presented = g_presented_frames;
+    PicoHost_Frame(host);
+    if (g_clay_failed_allocations != 1 || g_clay_layout_calls != 1 ||
+        g_clay_after_layout_calls != 0 || g_clay_after_render_calls != 0 ||
+        g_presented_frames != presented)
+    {
+        Fail("failed arena replacement must skip layout retries, UI hooks, and presentation");
+    }
+    if (!g_failed)
+    {
+        /* Drive the public frame entry point, not a manual reinit in the test. */
+        PicoHost_Frame(host);
+        if (g_clay_layout_calls != 2 || g_clay_after_layout_calls != 1 ||
+            g_clay_after_render_calls != 1 || !g_clay_sentinel_presented)
+        {
+            Fail("the next frame must retry recovery and consume a complete rebuilt layout");
+        }
+    }
+    g_fail_frame_allocation = false;
+    g_clay_frame_test = false;
+    pico_host_free(host);
+    Pico_FreeClay();
+    return g_failed ? 1 : 0;
+}
+#endif
+
+int main(int argc, char **argv)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--clay-recovery") == 0)
+    {
+        return TestFrameRetriesFailedArenaReplacement();
+    }
+    if (TestFrameRetriesFailedArenaReplacement() != 0)
+    {
+        return 1;
+    }
+#else
+    (void)argc;
+    (void)argv;
+#endif
     if (TestQuitDefersTeardownUntilFrameReturns() != 0)
     {
         return 1;

@@ -571,6 +571,11 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_clay_capacity_tests)
     target_compile_options(pico_clay_capacity_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_clay_capacity_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_clay_capacity_tests PRIVATE raylib)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_clay_capacity_tests PRIVATE PICO_CLAY_FAULT_TESTS=1)
+        target_link_options(pico_clay_capacity_tests PRIVATE -Wl,--wrap=malloc -Wl,--wrap=Clay_Initialize)
+    endif()
     add_test(NAME pico_clay_capacity_tests COMMAND pico_clay_capacity_tests)
 
     add_executable(pico_font_scale_tests
@@ -731,6 +736,13 @@ if(BUILD_TESTING)
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
     target_link_libraries(pico_host_workspace_tests PRIVATE raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_CLAY_FRAME_FAULT_TESTS=1)
+        target_link_options(pico_host_workspace_tests PRIVATE
+            -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
+            -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
+            -Wl,--wrap=SetMouseCursor)
+    endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()
 

@@ -104,6 +104,114 @@ static int TestClickSeq(void)
     return 0;
 }
 
+static int ExpectPos(const char *test, int got, int want)
+{
+    if (got != want)
+    {
+        fprintf(stderr, "%s: got %d want %d\n", test, got, want);
+        return 1;
+    }
+    return 0;
+}
+
+/* A word step consumes the word plus any adjacent punctuation run, matching
+ * the composer's Ctrl+Arrow / Ctrl+W behavior. */
+static int TestPrevWord(void)
+{
+    const char *test = "prev_word";
+    const char s[] = "foo...bar baz";
+    int len = (int)strlen(s);
+    if (ExpectPos(test, PicoText_PrevWord(s, len), 10))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_PrevWord(s, 9), 3))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_PrevWord(s, 6), 3))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_PrevWord(s, 3), 0))
+    {
+        return 1;
+    }
+    return ExpectPos(test, PicoText_PrevWord(s, 0), 0);
+}
+
+static int TestNextWord(void)
+{
+    const char *test = "next_word";
+    const char s[] = "foo...bar baz";
+    int len = (int)strlen(s);
+    if (ExpectPos(test, PicoText_NextWord(s, len, 0), 6))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_NextWord(s, len, 3), 6))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_NextWord(s, len, 6), 9))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_NextWord(s, len, 9), len))
+    {
+        return 1;
+    }
+    return ExpectPos(test, PicoText_NextWord(s, len, len), len);
+}
+
+static int TestWordStepEmpty(void)
+{
+    const char *test = "word_step_empty";
+    if (ExpectPos(test, PicoText_PrevWord("", 0), 0))
+    {
+        return 1;
+    }
+    return ExpectPos(test, PicoText_NextWord("", 0, 0), 0);
+}
+
+static int TestUtf8Step(void)
+{
+    const char *test = "utf8_step";
+    const char s[] = "h\xC3\xA9llo";
+    int len = (int)strlen(s);
+    if (ExpectPos(test, PicoText_Utf8Next(s, len, 0), 1))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_Utf8Next(s, len, 1), 3))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_Utf8Next(s, len, len), len))
+    {
+        return 1;
+    }
+    if (ExpectPos(test, PicoText_Utf8Prev(s, 3), 1))
+    {
+        return 1;
+    }
+    return ExpectPos(test, PicoText_Utf8Prev(s, 0), 0);
+}
+
+static int TestUtf8EncodeRoundTrip(void)
+{
+    const char *test = "utf8_encode_round_trip";
+    char encoded[4] = {0};
+    int n = PicoText_Utf8Encode(0x20AC, encoded);
+    if (n != 3 || memcmp(encoded, "\xE2\x82\xAC", 3) != 0)
+    {
+        return Fail(test, "euro sign did not encode to 3 expected bytes");
+    }
+    /* Encoding a code point reproduces the bytes that stepping walks over. */
+    const char s[] = "a\xE2\x82\xAC";
+    return ExpectPos(test, PicoText_Utf8Next(s, (int)strlen(s), 1), 4);
+}
+
 int main(void)
 {
     int failed = 0;
@@ -112,5 +220,10 @@ int main(void)
     failed |= TestWhitespaceRun();
     failed |= TestParagraph();
     failed |= TestClickSeq();
+    failed |= TestPrevWord();
+    failed |= TestNextWord();
+    failed |= TestWordStepEmpty();
+    failed |= TestUtf8Step();
+    failed |= TestUtf8EncodeRoundTrip();
     return failed;
 }

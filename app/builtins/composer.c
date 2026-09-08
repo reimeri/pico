@@ -13,7 +13,6 @@
 
 #include "clay/clay.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -68,84 +67,9 @@ static bool IsShiftDown(void)
     return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 }
 
-static int Utf8Next(const char *s, int length, int pos)
-{
-    if (pos >= length)
-    {
-        return length;
-    }
-    unsigned char c = (unsigned char)s[pos];
-    int step = 1;
-    if ((c & 0xE0) == 0xC0)
-    {
-        step = 2;
-    }
-    else if ((c & 0xF0) == 0xE0)
-    {
-        step = 3;
-    }
-    else if ((c & 0xF8) == 0xF0)
-    {
-        step = 4;
-    }
-    pos += step;
-    return pos > length ? length : pos;
-}
 
-static int Utf8Prev(const char *s, int pos)
-{
-    if (pos <= 0)
-    {
-        return 0;
-    }
-    pos--;
-    while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80)
-    {
-        pos--;
-    }
-    return pos;
-}
 
-static int PrevWord(const char *s, int pos)
-{
-    while (pos > 0 && isspace((unsigned char)s[pos - 1]))
-    {
-        pos--;
-    }
-    while (pos > 0 && PicoText_IsWordByte((unsigned char)s[pos - 1]))
-    {
-        pos--;
-    }
-    if (pos > 0 && !PicoText_IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
-    {
-        pos--;
-        while (pos > 0 && !PicoText_IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
-        {
-            pos--;
-        }
-    }
-    return pos;
-}
 
-static int NextWord(const char *s, int length, int pos)
-{
-    while (pos < length && isspace((unsigned char)s[pos]))
-    {
-        pos++;
-    }
-    while (pos < length && PicoText_IsWordByte((unsigned char)s[pos]))
-    {
-        pos++;
-    }
-    if (pos < length && !PicoText_IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
-    {
-        while (pos < length && !PicoText_IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
-        {
-            pos++;
-        }
-    }
-    return pos;
-}
 
 static int LineStart(const char *s, int pos)
 {
@@ -210,7 +134,7 @@ static int WrapComposer(const PicoComposer *c, Font font, float max_width, CompL
         int wrapped = 0;
         while (i < c->length && c->text[i] != '\n')
         {
-            int next = Utf8Next(c->text, c->length, i);
+            int next = PicoText_Utf8Next(c->text, c->length, i);
             float ch_w = MeasureSlice(font, c->text, i, next - i, ComposerPx());
             if (width + ch_w > max_width && i > line_start)
             {
@@ -1316,7 +1240,7 @@ static int OffsetAtXOnLine(Font font, const PicoComposer *c, CompLine line, floa
     int end = line.start + line.length;
     while (pos < end)
     {
-        int next = Utf8Next(c->text, c->length, pos);
+        int next = PicoText_Utf8Next(c->text, c->length, pos);
         float ch_w = MeasureSlice(font, c->text, pos, next - pos, ComposerPx());
         if (width + ch_w * 0.5f >= target_x)
         {
@@ -1411,7 +1335,7 @@ static int OffsetAtPoint(PicoHost *app, float x, float y)
     int end = line.start + line.length;
     while (pos < end)
     {
-        int next = Utf8Next(c->text, c->length, pos);
+        int next = PicoText_Utf8Next(c->text, c->length, pos);
         float ch_w = MeasureSlice(ComposerFont(), c->text, pos, next - pos, ComposerPx());
         if (width + ch_w * 0.5f >= local_x)
         {
@@ -1647,32 +1571,6 @@ static void MoveCursor(PicoComposer *c, int pos, bool extend)
     NoteCaretActivity();
 }
 
-static int Utf8Encode(int cp, char out[4])
-{
-    if (cp < 0x80)
-    {
-        out[0] = (char)cp;
-        return 1;
-    }
-    if (cp < 0x800)
-    {
-        out[0] = (char)(0xC0 | (cp >> 6));
-        out[1] = (char)(0x80 | (cp & 0x3F));
-        return 2;
-    }
-    if (cp < 0x10000)
-    {
-        out[0] = (char)(0xE0 | (cp >> 12));
-        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        out[2] = (char)(0x80 | (cp & 0x3F));
-        return 3;
-    }
-    out[0] = (char)(0xF0 | (cp >> 18));
-    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    out[3] = (char)(0x80 | (cp & 0x3F));
-    return 4;
-}
 
 void PicoComposer_Copy(PicoHost *app)
 {
@@ -1800,12 +1698,12 @@ void PicoComposer_HandleInput(PicoHost *app)
 
     if (repeat_left)
     {
-        int pos = ctrl ? PrevWord(text, c->cursor) : Utf8Prev(text, c->cursor);
+        int pos = ctrl ? PicoText_PrevWord(text, c->cursor) : PicoText_Utf8Prev(text, c->cursor);
         MoveCursor(c, pos, shift);
     }
     if (repeat_right)
     {
-        int pos = ctrl ? NextWord(text, c->length, c->cursor) : Utf8Next(text, c->length, c->cursor);
+        int pos = ctrl ? PicoText_NextWord(text, c->length, c->cursor) : PicoText_Utf8Next(text, c->length, c->cursor);
         MoveCursor(c, pos, shift);
     }
 
@@ -1828,7 +1726,7 @@ void PicoComposer_HandleInput(PicoHost *app)
         }
         else
         {
-            ComposerDeleteRange(c, PrevWord(text, c->cursor), c->cursor);
+            ComposerDeleteRange(c, PicoText_PrevWord(text, c->cursor), c->cursor);
         }
     }
     else if (repeat_back)
@@ -1839,11 +1737,11 @@ void PicoComposer_HandleInput(PicoHost *app)
         }
         else if (ctrl)
         {
-            ComposerDeleteRange(c, PrevWord(text, c->cursor), c->cursor);
+            ComposerDeleteRange(c, PicoText_PrevWord(text, c->cursor), c->cursor);
         }
         else
         {
-            ComposerDeleteRange(c, Utf8Prev(text, c->cursor), c->cursor);
+            ComposerDeleteRange(c, PicoText_Utf8Prev(text, c->cursor), c->cursor);
         }
     }
 
@@ -1855,7 +1753,7 @@ void PicoComposer_HandleInput(PicoHost *app)
         }
         else
         {
-            ComposerDeleteRange(c, c->cursor, Utf8Next(text, c->length, c->cursor));
+            ComposerDeleteRange(c, c->cursor, PicoText_Utf8Next(text, c->length, c->cursor));
         }
     }
 
@@ -1899,7 +1797,7 @@ void PicoComposer_HandleInput(PicoHost *app)
                 continue;
             }
             char bytes[4];
-            int n = Utf8Encode(cp, bytes);
+            int n = PicoText_Utf8Encode(cp, bytes);
             ComposerInsert(c, bytes, n);
         }
     }

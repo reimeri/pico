@@ -389,7 +389,7 @@ if(BUILD_TESTING)
 
     add_executable(pico_ask_user_tests
         tests/ask_user_test.c
-        builtins/ask_user.c
+        text_range.c
         json.c)
     target_include_directories(pico_ask_user_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -415,6 +415,7 @@ if(BUILD_TESTING)
         app.c
         ui.c
         scrollbar.c
+        text_range.c
         agent.c
         trace_group.c
         tool_args.c

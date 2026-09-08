@@ -27,6 +27,112 @@ static void ClampPos(int len, int *pos)
     }
 }
 
+int PicoText_Utf8Next(const char *s, int length, int pos)
+{
+    if (pos >= length)
+    {
+        return length;
+    }
+    unsigned char c = (unsigned char)s[pos];
+    int step = 1;
+    if ((c & 0xE0) == 0xC0)
+    {
+        step = 2;
+    }
+    else if ((c & 0xF0) == 0xE0)
+    {
+        step = 3;
+    }
+    else if ((c & 0xF8) == 0xF0)
+    {
+        step = 4;
+    }
+    pos += step;
+    return pos > length ? length : pos;
+}
+
+int PicoText_Utf8Prev(const char *s, int pos)
+{
+    if (pos <= 0)
+    {
+        return 0;
+    }
+    pos--;
+    while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80)
+    {
+        pos--;
+    }
+    return pos;
+}
+
+int PicoText_Utf8Encode(int cp, char out[4])
+{
+    if (cp < 0x80)
+    {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800)
+    {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000)
+    {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+int PicoText_PrevWord(const char *s, int pos)
+{
+    while (pos > 0 && isspace((unsigned char)s[pos - 1]))
+    {
+        pos--;
+    }
+    while (pos > 0 && PicoText_IsWordByte((unsigned char)s[pos - 1]))
+    {
+        pos--;
+    }
+    if (pos > 0 && !PicoText_IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
+    {
+        pos--;
+        while (pos > 0 && !PicoText_IsWordByte((unsigned char)s[pos - 1]) && !isspace((unsigned char)s[pos - 1]))
+        {
+            pos--;
+        }
+    }
+    return pos;
+}
+
+int PicoText_NextWord(const char *s, int length, int pos)
+{
+    while (pos < length && isspace((unsigned char)s[pos]))
+    {
+        pos++;
+    }
+    while (pos < length && PicoText_IsWordByte((unsigned char)s[pos]))
+    {
+        pos++;
+    }
+    if (pos < length && !PicoText_IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
+    {
+        while (pos < length && !PicoText_IsWordByte((unsigned char)s[pos]) && !isspace((unsigned char)s[pos]))
+        {
+            pos++;
+        }
+    }
+    return pos;
+}
+
 void PicoText_WordRange(const char *s, int len, int pos, int *from, int *to)
 {
     if (!from || !to)

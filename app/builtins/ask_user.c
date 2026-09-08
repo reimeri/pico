@@ -7,6 +7,7 @@
 #include "builtins/ask_user.h"
 #include "json.h"
 #include "scrollbar.h"
+#include "text_range.h"
 #include "host_internal.h"
 
 #include "clay/clay.h"
@@ -58,6 +59,12 @@ typedef struct AskQuestion {
     int text_len;
     int text_cap;
     int cursor;
+    int sel_anchor;
+    int granularity;
+    int unit_from;
+    int unit_to;
+    bool mouse_selecting;
+    PicoClickSeq click_seq;
 } AskQuestion;
 
 typedef struct AskLine {
@@ -86,6 +93,7 @@ typedef struct AskUiState {
     bool body_overflow;
     bool suppress_chars;
     float text_box_max;
+    float goal_x;
     PicoScrollbar scrollbar;
     PicoScrollbar body_scrollbar;
 } AskUiState;
@@ -95,6 +103,9 @@ static __thread AskUiState *s_active_ask_state = NULL;
 #define g_ui (*s_active_ask_state)
 
 static void MarkTextViewDirty(void);
+static bool CtrlDown(void);
+static bool ShiftDown(void);
+static void AskMoveCursor(AskQuestion *q, int pos, bool extend);
 
 static Clay_String CStr(const char *s)
 {
@@ -622,60 +633,8 @@ static void SetValidation(const char *message)
     snprintf(g_ui.validation, sizeof(g_ui.validation), "%s", message ? message : "");
 }
 
-static int Utf8Prev(const char *s, int pos)
-{
-    if (pos <= 0)
-    {
-        return 0;
-    }
-    pos--;
-    while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80)
-    {
-        pos--;
-    }
-    return pos;
-}
 
-static int Utf8Next(const char *s, int len, int pos)
-{
-    if (pos >= len)
-    {
-        return len;
-    }
-    pos++;
-    while (pos < len && ((unsigned char)s[pos] & 0xC0) == 0x80)
-    {
-        pos++;
-    }
-    return pos;
-}
 
-static int Utf8Encode(int cp, char out[4])
-{
-    if (cp <= 0x7F)
-    {
-        out[0] = (char)cp;
-        return 1;
-    }
-    if (cp <= 0x7FF)
-    {
-        out[0] = (char)(0xC0 | (cp >> 6));
-        out[1] = (char)(0x80 | (cp & 0x3F));
-        return 2;
-    }
-    if (cp <= 0xFFFF)
-    {
-        out[0] = (char)(0xE0 | (cp >> 12));
-        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        out[2] = (char)(0x80 | (cp & 0x3F));
-        return 3;
-    }
-    out[0] = (char)(0xF0 | (cp >> 18));
-    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    out[3] = (char)(0x80 | (cp & 0x3F));
-    return 4;
-}
 
 static float AskTextPx(void)
 {
@@ -696,6 +655,7 @@ static void MarkTextViewDirty(void)
 {
     g_ui.seen_cursor = -1;
     g_ui.seen_length = -1;
+    g_ui.goal_x = -1.0f;
     NoteCaretActivity();
 }
 
@@ -749,7 +709,7 @@ static int WrapAskText(const AskQuestion *q, Font font, float max_width, AskLine
         int wrapped = 0;
         while (i < q->text_len && q->text[i] != '\n')
         {
-            int next = Utf8Next(q->text, q->text_len, i);
+            int next = PicoText_Utf8Next(q->text, q->text_len, i);
             float ch_w = MeasureSlice(font, q->text, i, next - i, AskTextPx());
             if (width + ch_w > max_width && i > line_start)
             {
@@ -856,7 +816,7 @@ static int OffsetOnLine(const AskQuestion *q, AskLine line, float target_x)
     int end = line.start + line.length;
     while (pos < end)
     {
-        int next = Utf8Next(q->text, q->text_len, pos);
+        int next = PicoText_Utf8Next(q->text, q->text_len, pos);
         float ch_w = MeasureSlice(font, q->text, pos, next - pos, AskTextPx());
         if (width + ch_w * 0.5f >= target_x)
         {
@@ -868,26 +828,13 @@ static int OffsetOnLine(const AskQuestion *q, AskLine line, float target_x)
     return end;
 }
 
-static void MoveTextVertical(AskQuestion *q, int dir)
+static void MoveTextVertical(AskQuestion *q, int dir, bool extend)
 {
     if (!q || g_ui.line_count <= 0)
     {
         return;
     }
     int line_i = CaretLineIndex(q->cursor);
-    int next = line_i + dir;
-    if (next < 0)
-    {
-        q->cursor = 0;
-        NoteCaretActivity();
-        return;
-    }
-    if (next >= g_ui.line_count)
-    {
-        q->cursor = q->text_len;
-        NoteCaretActivity();
-        return;
-    }
     AskLine from = g_ui.lines[line_i];
     int take = q->cursor - from.start;
     if (take > from.length)
@@ -899,7 +846,136 @@ static void MoveTextVertical(AskQuestion *q, int dir)
         take = 0;
     }
     float x = MeasureSlice(AskTextFont(), q->text ? q->text : "", from.start, take, AskTextPx());
-    q->cursor = OffsetOnLine(q, g_ui.lines[next], x);
+    float goal = g_ui.goal_x >= 0.0f ? g_ui.goal_x : x;
+    int next = line_i + dir;
+    int pos;
+    if (next < 0)
+    {
+        pos = 0;
+    }
+    else if (next >= g_ui.line_count)
+    {
+        pos = q->text_len;
+    }
+    else
+    {
+        pos = OffsetOnLine(q, g_ui.lines[next], goal);
+    }
+    AskMoveCursor(q, pos, extend);
+    g_ui.goal_x = goal;
+}
+
+static bool AskHasSelection(const AskQuestion *q)
+{
+    return q->sel_anchor != q->cursor;
+}
+
+static int AskSelFrom(const AskQuestion *q)
+{
+    return q->sel_anchor < q->cursor ? q->sel_anchor : q->cursor;
+}
+
+static int AskSelTo(const AskQuestion *q)
+{
+    return q->sel_anchor > q->cursor ? q->sel_anchor : q->cursor;
+}
+
+static void AskMoveCursor(AskQuestion *q, int pos, bool extend)
+{
+    if (pos < 0)
+    {
+        pos = 0;
+    }
+    if (pos > q->text_len)
+    {
+        pos = q->text_len;
+    }
+    q->cursor = pos;
+    if (!extend)
+    {
+        q->sel_anchor = pos;
+    }
+    g_ui.goal_x = -1.0f;
+    NoteCaretActivity();
+}
+
+static void AskCopy(const AskQuestion *q)
+{
+    if (!AskHasSelection(q) || !q->text)
+    {
+        return;
+    }
+    int from = AskSelFrom(q);
+    int n = AskSelTo(q) - from;
+    char *copy = (char *)malloc((size_t)n + 1);
+    if (!copy)
+    {
+        return;
+    }
+    memcpy(copy, q->text + from, (size_t)n);
+    copy[n] = '\0';
+    SetClipboardText(copy);
+    free(copy);
+}
+
+static void AskUnitRange(const AskQuestion *q, int pos, int granularity, int *from, int *to)
+{
+    const char *text = q->text ? q->text : "";
+    if (granularity >= 3)
+    {
+        PicoText_ParaRange(text, q->text_len, pos, from, to);
+    }
+    else
+    {
+        PicoText_WordRange(text, q->text_len, pos, from, to);
+    }
+}
+
+static void AskSelectUnit(AskQuestion *q, int pos, int granularity)
+{
+    q->granularity = granularity;
+    if (granularity <= 1)
+    {
+        q->unit_from = pos;
+        q->unit_to = pos;
+        AskMoveCursor(q, pos, ShiftDown());
+        return;
+    }
+    int from = pos;
+    int to = pos;
+    AskUnitRange(q, pos, granularity, &from, &to);
+    q->unit_from = from;
+    q->unit_to = to;
+    q->sel_anchor = from;
+    q->cursor = to;
+    g_ui.goal_x = -1.0f;
+    NoteCaretActivity();
+}
+
+static void AskExtendUnit(AskQuestion *q, int pos)
+{
+    if (q->granularity <= 1)
+    {
+        AskMoveCursor(q, pos, true);
+        return;
+    }
+    int from = pos;
+    int to = pos;
+    AskUnitRange(q, pos, q->granularity, &from, &to);
+    int span_from = 0;
+    int span_to = 0;
+    PicoText_UnionRange(q->unit_from, q->unit_to, from, to, &span_from, &span_to);
+    if (pos >= q->unit_from)
+    {
+        q->sel_anchor = q->unit_from;
+        q->cursor = span_to;
+    }
+    else
+    {
+        q->sel_anchor = q->unit_to;
+        q->cursor = span_from;
+    }
+    g_ui.goal_x = -1.0f;
     NoteCaretActivity();
 }
 
@@ -924,9 +1000,19 @@ static bool EnsureTextCapacity(AskQuestion *q, int needed)
     return true;
 }
 
+static void AskTextDeleteRange(AskQuestion *q, int from, int to);
+
 static void AskTextInsert(AskQuestion *q, const char *s, int n)
 {
-    if (!q || !s || n <= 0 || q->text_len >= ASK_USER_MAX_TEXT)
+    if (!q || !s || n <= 0)
+    {
+        return;
+    }
+    if (AskHasSelection(q))
+    {
+        AskTextDeleteRange(q, AskSelFrom(q), AskSelTo(q));
+    }
+    if (q->text_len >= ASK_USER_MAX_TEXT)
     {
         return;
     }
@@ -946,7 +1032,9 @@ static void AskTextInsert(AskQuestion *q, const char *s, int n)
     memcpy(q->text + q->cursor, s, (size_t)n);
     q->cursor += n;
     q->text_len += n;
+    q->sel_anchor = q->cursor;
     g_ui.validation[0] = '\0';
+    g_ui.goal_x = -1.0f;
     NoteCaretActivity();
 }
 
@@ -959,7 +1047,17 @@ static void AskTextDeleteRange(AskQuestion *q, int from, int to)
     memmove(q->text + from, q->text + to, (size_t)(q->text_len - to + 1));
     q->text_len -= to - from;
     q->cursor = from;
+    q->sel_anchor = from;
+    g_ui.goal_x = -1.0f;
     NoteCaretActivity();
+}
+
+static void AskDeleteSelection(AskQuestion *q)
+{
+    if (AskHasSelection(q))
+    {
+        AskTextDeleteRange(q, AskSelFrom(q), AskSelTo(q));
+    }
 }
 
 static char *BuildAnswer(void)
@@ -1116,11 +1214,6 @@ static void HandleSelectKeys(PicoHost *app, AskQuestion *q)
     while (GetCharPressed() != 0)
     {
     }
-    if (IsKeyPressed(KEY_LEFT))
-    {
-        GoBack();
-        return;
-    }
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
     {
         if (q->selected < 0)
@@ -1151,53 +1244,97 @@ static void HandleTextKeys(PicoHost *app, AskQuestion *q)
     bool backspace = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
     bool del = IsKeyPressed(KEY_DELETE) || IsKeyPressedRepeat(KEY_DELETE);
 
+    if (ctrl && Pico_ShortcutPressed('c'))
+    {
+        AskCopy(q);
+        return;
+    }
+    if (ctrl && Pico_ShortcutPressed('x'))
+    {
+        AskCopy(q);
+        AskDeleteSelection(q);
+        return;
+    }
+    if (ctrl && Pico_ShortcutPressed('a'))
+    {
+        AskMoveCursor(q, 0, false);
+        AskMoveCursor(q, q->text_len, true);
+    }
     if (ctrl && Pico_ShortcutPressed('v'))
     {
         PasteText(q);
     }
+    /* Paste may allocate or move the answer buffer. */
+    const char *text = q->text ? q->text : "";
     if (IsKeyPressed(KEY_HOME))
     {
-        q->cursor = 0;
-        NoteCaretActivity();
+        int from = 0;
+        int to = 0;
+        PicoText_ParaRange(text, q->text_len, q->cursor, &from, &to);
+        AskMoveCursor(q, from, shift);
     }
     if (IsKeyPressed(KEY_END))
     {
-        q->cursor = q->text_len;
-        NoteCaretActivity();
+        int from = 0;
+        int to = 0;
+        PicoText_ParaRange(text, q->text_len, q->cursor, &from, &to);
+        AskMoveCursor(q, to, shift);
     }
     if (left)
     {
-        if (q->cursor > 0)
-        {
-            q->cursor = Utf8Prev(q->text, q->cursor);
-            NoteCaretActivity();
-        }
-        else if (IsKeyPressed(KEY_LEFT))
-        {
-            GoBack();
-            return;
-        }
+        int pos = ctrl ? PicoText_PrevWord(text, q->cursor) : PicoText_Utf8Prev(text, q->cursor);
+        AskMoveCursor(q, pos, shift);
     }
     if (right)
     {
-        q->cursor = Utf8Next(q->text, q->text_len, q->cursor);
-        NoteCaretActivity();
+        int pos = ctrl ? PicoText_NextWord(text, q->text_len, q->cursor)
+                       : PicoText_Utf8Next(text, q->text_len, q->cursor);
+        AskMoveCursor(q, pos, shift);
     }
     if (up)
     {
-        MoveTextVertical(q, -1);
+        MoveTextVertical(q, -1, shift);
     }
     if (down)
     {
-        MoveTextVertical(q, 1);
+        MoveTextVertical(q, 1, shift);
     }
-    if (backspace && q->cursor > 0)
+    if (ctrl && Pico_ShortcutRepeat('w'))
     {
-        AskTextDeleteRange(q, Utf8Prev(q->text, q->cursor), q->cursor);
+        if (AskHasSelection(q))
+        {
+            AskDeleteSelection(q);
+        }
+        else
+        {
+            AskTextDeleteRange(q, PicoText_PrevWord(text, q->cursor), q->cursor);
+        }
     }
-    if (del && q->cursor < q->text_len)
+    else if (backspace)
     {
-        AskTextDeleteRange(q, q->cursor, Utf8Next(q->text, q->text_len, q->cursor));
+        if (AskHasSelection(q))
+        {
+            AskDeleteSelection(q);
+        }
+        else if (ctrl)
+        {
+            AskTextDeleteRange(q, PicoText_PrevWord(text, q->cursor), q->cursor);
+        }
+        else if (q->cursor > 0)
+        {
+            AskTextDeleteRange(q, PicoText_Utf8Prev(text, q->cursor), q->cursor);
+        }
+    }
+    if (del)
+    {
+        if (AskHasSelection(q))
+        {
+            AskDeleteSelection(q);
+        }
+        else if (q->cursor < q->text_len)
+        {
+            AskTextDeleteRange(q, q->cursor, PicoText_Utf8Next(text, q->text_len, q->cursor));
+        }
     }
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
     {
@@ -1232,7 +1369,7 @@ static void HandleTextKeys(PicoHost *app, AskQuestion *q)
                 continue;
             }
             char bytes[4];
-            int n = Utf8Encode(cp, bytes);
+            int n = PicoText_Utf8Encode(cp, bytes);
             AskTextInsert(q, bytes, n);
         }
     }
@@ -1612,7 +1749,7 @@ static int OffsetAtPoint(const AskQuestion *q, float x, float y)
     int end = line.start + line.length;
     while (pos < end)
     {
-        int next = Utf8Next(q->text, q->text_len, pos);
+        int next = PicoText_Utf8Next(q->text, q->text_len, pos);
         float ch_w = MeasureSlice(font, q->text, pos, next - pos, AskTextPx());
         if (width + ch_w * 0.5f >= local_x)
         {
@@ -1668,7 +1805,8 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     bool over_back = PointerOver(CLAY_STRING("AskUserBack"));
     bool over_next = PointerOver(CLAY_STRING("AskUserNext"));
     bool over_text = PointerOver(CLAY_STRING("AskUserTextBox"));
-    bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollHandle")));
+    bool over_bar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollHandle"))) ||
+                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("AskUserTextScrollTrack")));
     if ((over_back && g_ui.current > 0) || (over_next && QuestionAnswered(q)) || over_text)
     {
         app->hovered_clickable = true;
@@ -1701,7 +1839,33 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     }
     g_ui.body_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserBody"));
 
-    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    bool pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (TextFieldOpen(q))
+    {
+        if (pressed && over_bar)
+        {
+            q->mouse_selecting = false;
+            PicoClickSeq_Reset(&q->click_seq);
+        }
+        else if (pressed && over_text)
+        {
+            Vector2 mouse = GetMousePosition();
+            int count = PicoClickSeq_Press(&q->click_seq, GetTime(), mouse.x, mouse.y);
+            AskSelectUnit(q, OffsetAtPoint(q, mouse.x, mouse.y), count);
+            q->mouse_selecting = true;
+        }
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            q->mouse_selecting = false;
+        }
+        else if (q->mouse_selecting)
+        {
+            Vector2 mouse = GetMousePosition();
+            AskExtendUnit(q, OffsetAtPoint(q, mouse.x, mouse.y));
+        }
+    }
+
+    if (!pressed)
     {
         return;
     }
@@ -1721,9 +1885,7 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     }
     if (TextFieldOpen(q) && over_text && !over_bar)
     {
-        Vector2 mouse = GetMousePosition();
-        q->cursor = OffsetAtPoint(q, mouse.x, mouse.y);
-        NoteCaretActivity();
+        /* Click handled by selection logic above. */
         return;
     }
 
@@ -1785,33 +1947,73 @@ static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *
     Clay_ScrollContainerData scroll =
         Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
     float scroll_y = (scroll.found && scroll.scrollPosition) ? scroll.scrollPosition->y : 0;
+    float line_height = g_ui.line_height > 1 ? g_ui.line_height : AskTextPx();
+    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+
+    if (AskHasSelection(q) && q->text)
+    {
+        int sel_from = AskSelFrom(q);
+        int sel_to = AskSelTo(q);
+        Color fill = {(unsigned char)COLOR_SELECTION.r, (unsigned char)COLOR_SELECTION.g,
+                      (unsigned char)COLOR_SELECTION.b, (unsigned char)COLOR_SELECTION.a};
+        for (int i = 0; i < g_ui.line_count; i++)
+        {
+            int start = g_ui.lines[i].start;
+            int end = start + g_ui.lines[i].length;
+            int range_lo = start;
+            int range_hi = end;
+            if (g_ui.lines[i].length == 0 && start > 0)
+            {
+                range_lo = start - 1;
+            }
+            if (sel_from >= range_hi || sel_to <= range_lo)
+            {
+                continue;
+            }
+            float y = scroll_box.boundingBox.y + (float)i * line_height + scroll_y;
+            if (g_ui.lines[i].length == 0)
+            {
+                DrawRectangle((int)scroll_box.boundingBox.x, (int)y, 6, (int)line_height, fill);
+                continue;
+            }
+            int a = sel_from > start ? sel_from : start;
+            int b = sel_to < end ? sel_to : end;
+            if (a > b)
+            {
+                a = b;
+            }
+            float x0 = MeasureSlice(AskTextFont(), q->text, start, a - start, AskTextPx());
+            float x1 = MeasureSlice(AskTextFont(), q->text, start, b - start, AskTextPx());
+            DrawRectangle((int)(scroll_box.boundingBox.x + x0), (int)y,
+                          (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)line_height, fill);
+        }
+    }
+
     double elapsed = GetTime() - g_ui.caret_blink_at;
     if (elapsed < 0)
     {
         elapsed = 0;
     }
-    if (((int)(elapsed * ASK_USER_CARET_BLINK_HZ) & 1) != 0)
+    if (((int)(elapsed * ASK_USER_CARET_BLINK_HZ) & 1) == 0)
     {
-        return;
+        int line_i = CaretLineIndex(q->cursor);
+        AskLine line = g_ui.line_count > 0 ? g_ui.lines[line_i] : (AskLine){0, 0};
+        int take = q->cursor - line.start;
+        if (take > line.length)
+        {
+            take = line.length;
+        }
+        if (take < 0)
+        {
+            take = 0;
+        }
+        float x = scroll_box.boundingBox.x +
+                  MeasureSlice(AskTextFont(), q->text ? q->text : "", line.start, take, AskTextPx());
+        float y = scroll_box.boundingBox.y + (float)line_i * line_height + scroll_y;
+        Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g, (unsigned char)COLOR_CURSOR.b,
+                       255};
+        DrawRectangle((int)x, (int)y, 2, (int)line_height, caret);
     }
-    int line_i = CaretLineIndex(q->cursor);
-    AskLine line = g_ui.line_count > 0 ? g_ui.lines[line_i] : (AskLine){0, 0};
-    int take = q->cursor - line.start;
-    if (take > line.length)
-    {
-        take = line.length;
-    }
-    if (take < 0)
-    {
-        take = 0;
-    }
-    float line_height = g_ui.line_height > 1 ? g_ui.line_height : AskTextPx();
-    float x = scroll_box.boundingBox.x +
-              MeasureSlice(AskTextFont(), q->text ? q->text : "", line.start, take, AskTextPx());
-    float y = scroll_box.boundingBox.y + (float)line_i * line_height + scroll_y;
-    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
-    Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g, (unsigned char)COLOR_CURSOR.b, 255};
-    DrawRectangle((int)x, (int)y, 2, (int)line_height, caret);
     EndScissorMode();
 }
 
@@ -1848,6 +2050,7 @@ static int AskUserHostInit(PicoHost *app, void **state_out)
     }
     s->seen_cursor = -1;
     s->seen_length = -1;
+    s->goal_x = -1.0f;
     s->text_box_max = 120.0f;
     if (state_out)
     {

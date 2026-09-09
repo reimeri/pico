@@ -137,7 +137,8 @@ static void *RejectTls(void *user)
     if (fd >= 0)
     {
         char hello[4096];
-        (void)read(fd, hello, sizeof(hello));
+        ssize_t n = read(fd, hello, sizeof(hello));
+        (void)n;
         const char reply[] = "HTTP/1.1 400 Bad Request\r\n\r\n";
         send(fd, reply, sizeof(reply) - 1, MSG_NOSIGNAL);
         close(fd);

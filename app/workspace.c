@@ -84,6 +84,7 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     {
         return;
     }
+    if (host->selected_agent_id != id) PicoChatFind_Reset(host);
     host->selected_agent_id = id;
     agent = PicoHost_FindAgent(host, id);
     if (agent)

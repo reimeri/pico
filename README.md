@@ -9,6 +9,7 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 ## Features
 
 - Markdown chat UI, composer, and footer
+- Find in the current conversation with Ctrl+F
 - Diff viewer
 - Native model support (api key or `/login {provider}`)
   - OpenAI
@@ -114,15 +115,36 @@ Authenticate in Pico with `/login openai`, `/login hyper`, or `/login xai`. You 
 
 Open `~/.config/pico/settings.json`, add or uncomment the models you want to use, and set the top-level `model` value to one of their IDs. The generated example includes entries for OpenAI, Charm Hyper, and xAI. Restart Pico after editing so new workspaces load the updated model catalog.
 
+## Find in chat
+
+Press **Ctrl+F** to open and focus the top-right search box. Search uses literal,
+case-insensitive Unicode substrings in the current main conversation's displayed
+text, including offscreen messages. Collapsed bodies and truncated-away tool
+output are excluded; expand a row to include its content. Markdown syntax is not
+searched, and phrases can span styling and visual line wraps, but not separate
+blocks or messages. Accents are not normalized.
+
+The box shows the active result and total count. Use **↑ / ↓** or
+**Shift+Enter / Enter** for previous/next, wrapping at the ends. Editing the query
+selects the match nearest the viewport center; navigation reveals offscreen
+matches, including horizontally scrolled code and tables. Streaming updates the
+results without moving your view.
+
+**Escape** closes search without cancelling the agent. Clicking the composer
+returns typing there while search stays visible; **Ctrl+F** refocuses and selects
+the query. Closing remembers the query until you switch conversations/workspaces
+or reset the conversation. Existing modals take priority; the subagent-inspect
+view is not searched.
+
 ## Build from source
 
-Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
+Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, utf8proc, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
 
 Debian/Ubuntu:
 
 ```bash
 sudo apt install build-essential ninja-build meson pkg-config git curl python3-venv \
-  libcurl4-openssl-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
+  libcurl4-openssl-dev libutf8proc-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
   libxcb1-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
   libxinerama-dev libxrandr-dev libxrender-dev libxkbcommon-dev \
   libwayland-dev wayland-protocols libffi-dev libexpat1-dev \

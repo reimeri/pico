@@ -6,36 +6,49 @@
 
 #include "raylib.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define SEL_MAX_WRAP_LINES 256
 
 typedef struct SelBuf {
     char *text;
     int len;
     int cap;
+    int first_hit;
+    int end_hit;
 } SelBuf;
-
-typedef struct SelHit {
-    int msg;
-    int start;
-    int length;
-    uint16_t font_id;
-    uint16_t font_size;
-    uint16_t line_height;
-    Clay_TextElementConfigWrapMode wrap;
-} SelHit;
 
 typedef struct WrapLine {
     int start;
     int length;
 } WrapLine;
 
+typedef struct SelHit {
+    int msg;
+    Clay_ElementId horizontal_clip;
+    bool temporary_clip;
+    int start;
+    int length;
+    uint16_t font_id;
+    uint16_t font_size;
+    uint16_t line_height;
+    Clay_TextElementConfigWrapMode wrap;
+    float *advances;
+    int advance_capacity;
+    WrapLine *lines;
+    int line_capacity;
+    int line_count;
+    Clay_BoundingBox box;
+    float line_height_px;
+} SelHit;
+
 static SelBuf *s_msgs;
 static int s_msg_n;
 static int s_msg_cap;
 static int s_cur_msg = -1;
+static PicoChatSearch *s_search;
+static Clay_ElementId s_horizontal_clip;
+static bool s_temporary_clip;
 
 static SelHit *s_hits;
 static int s_hit_count;
@@ -120,7 +133,7 @@ static void BufAppend(SelBuf *b, const char *s, int n)
         return;
     }
     BufReserve(b, n);
-    if (!b->text)
+    if (!b->text || b->cap < b->len + n + 1)
     {
         return;
     }
@@ -143,13 +156,23 @@ static Color ClayToRay(Clay_Color c)
     return (Color){(unsigned char)c.r, (unsigned char)c.g, (unsigned char)c.b, (unsigned char)c.a};
 }
 
-static int WrapRun(Font font, float font_size, const char *s, int len, float max_w, bool wrap,
-                   WrapLine *lines, int max_lines)
+static bool ReserveLines(WrapLine **lines, int *capacity, int needed)
 {
-    if (max_lines <= 0)
-    {
-        return 0;
-    }
+    if (needed <= *capacity) return true;
+    int cap = *capacity ? *capacity * 2 : 8;
+    while (cap < needed) cap *= 2;
+    WrapLine *next = realloc(*lines, (size_t)cap * sizeof(*next));
+    if (!next) return false;
+    *lines = next;
+    *capacity = cap;
+    return true;
+}
+
+static int WrapRun(const float *advances, const char *s, int len, float max_w, bool wrap,
+                   WrapLine **storage, int *capacity)
+{
+    if (!ReserveLines(storage, capacity, 1)) return 0;
+    WrapLine *lines = *storage;
     if (!s || len <= 0)
     {
         lines[0].start = 0;
@@ -165,8 +188,10 @@ static int WrapRun(Font font, float font_size, const char *s, int len, float max
 
     int n = 0;
     int i = 0;
-    while (i < len && n < max_lines)
+    while (i < len)
     {
+        if (!ReserveLines(storage, capacity, n + 1)) return 0;
+        lines = *storage;
         if (s[i] == '\n')
         {
             lines[n].start = i;
@@ -181,7 +206,7 @@ static int WrapRun(Font font, float font_size, const char *s, int len, float max
         while (i < len && s[i] != '\n')
         {
             int next = Utf8Next(s, len, i);
-            float cw = MeasureN(font, font_size, s + i, next - i);
+            float cw = advances[next] - advances[i];
             if (width + cw > max_w && i > line_start)
             {
                 int end = last_break > line_start ? last_break : i;
@@ -231,7 +256,7 @@ static float LineHeight(const SelHit *hit, Font font, float box_h, int nlines)
     return sample.y > 1 ? sample.y : Pico_FontPx(hit->font_size);
 }
 
-static int OffsetOnLine(Font font, float font_size, const char *s, int start, int length, float x)
+static int OffsetOnLine(const float *advances, const char *s, int start, int length, float x)
 {
     if (x <= 0 || length <= 0)
     {
@@ -243,7 +268,7 @@ static int OffsetOnLine(Font font, float font_size, const char *s, int start, in
     while (i < end)
     {
         int next = Utf8Next(s, end, i);
-        float cw = MeasureN(font, font_size, s + i, next - i);
+        float cw = advances[next] - advances[i];
         if (width + cw * 0.5f >= x)
         {
             return i;
@@ -252,6 +277,34 @@ static int OffsetOnLine(Font font, float font_size, const char *s, int start, in
         i = next;
     }
     return end;
+}
+
+void PicoChatSel_Free(void)
+{
+    for (int i = 0; i < s_msg_cap; i++) free(s_msgs[i].text);
+    for (int i = 0; i < s_hit_cap; i++)
+    {
+        free(s_hits[i].lines);
+        free(s_hits[i].advances);
+    }
+    free(s_msgs);
+    free(s_hits);
+    s_msgs = NULL;
+    s_hits = NULL;
+    s_msg_n = s_msg_cap = s_hit_count = s_hit_cap = 0;
+    s_cur_msg = -1;
+    s_search = NULL;
+}
+
+void PicoChatSel_SetSearch(PicoChatSearch *search)
+{
+    s_search = search;
+}
+
+void PicoChatSel_SetHorizontalClip(Clay_ElementId id, bool temporary)
+{
+    s_horizontal_clip = id;
+    s_temporary_clip = temporary;
 }
 
 void PicoChatSel_BeginFrame(int message_count)
@@ -278,18 +331,27 @@ void PicoChatSel_BeginFrame(int message_count)
     for (int i = 0; i < s_msg_n; i++)
     {
         s_msgs[i].len = 0;
+        s_msgs[i].first_hit = s_msgs[i].end_hit = 0;
         if (s_msgs[i].text)
         {
             s_msgs[i].text[0] = '\0';
         }
     }
+    s_search = NULL;
     s_hit_count = 0;
     s_cur_msg = -1;
+    s_horizontal_clip = (Clay_ElementId){0};
+    s_temporary_clip = false;
 }
 
 void PicoChatSel_SetMessage(int msg)
 {
+    if (s_search && s_cur_msg >= 0 && s_cur_msg < s_msg_n)
+    {
+        PicoChatSearch_SetText(s_search, s_cur_msg, s_msgs[s_cur_msg].text);
+    }
     s_cur_msg = (msg >= 0 && msg < s_msg_n) ? msg : -1;
+    if (s_cur_msg >= 0) s_msgs[s_cur_msg].first_hit = s_msgs[s_cur_msg].end_hit = s_hit_count;
 }
 
 void PicoChatSel_Break(void)
@@ -332,6 +394,7 @@ void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config)
             CLAY_TEXT(text, config);
             return;
         }
+        memset(next + s_hit_cap, 0, (size_t)(cap - s_hit_cap) * sizeof(*next));
         s_hits = next;
         s_hit_cap = cap;
     }
@@ -345,13 +408,17 @@ void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config)
 
     int id = s_hit_count;
     s_hits[id].msg = s_cur_msg;
+    s_hits[id].horizontal_clip = s_horizontal_clip;
+    s_hits[id].temporary_clip = s_temporary_clip;
     s_hits[id].start = start;
     s_hits[id].length = text.length;
     s_hits[id].font_id = config.fontId;
     s_hits[id].font_size = config.fontSize;
     s_hits[id].line_height = config.lineHeight;
     s_hits[id].wrap = config.wrapMode;
+    s_hits[id].line_count = 0;
     s_hit_count++;
+    if (b) b->end_hit = s_hit_count;
 
     CLAY(CLAY_IDI("ChatRun", id), {})
     {
@@ -541,37 +608,47 @@ void PicoChatSel_ExtendUnitTo(PicoHost *app, int pos)
     }
 }
 
-static int HitOffset(const SelHit *hit, Clay_BoundingBox box, float x, float y)
+static bool PrepareHit(SelHit *hit, Clay_BoundingBox box)
 {
-    SelBuf *b = (hit->msg >= 0 && hit->msg < s_msg_n) ? &s_msgs[hit->msg] : NULL;
-    if (!b || !b->text || hit->start < 0 || hit->start > b->len)
-    {
-        return hit->start;
-    }
-    int available = b->len - hit->start;
-    int len = hit->length < available ? hit->length : available;
-    const char *s = b->text + hit->start;
+    if (hit->line_count && memcmp(&box, &hit->box, sizeof(box)) == 0) return true;
+    SelBuf *b = &s_msgs[hit->msg];
     Font font = Pico_FontAt(hit->font_id, hit->font_size);
-    float size = Pico_FontPx(hit->font_size);
     bool wrap = hit->wrap != CLAY_TEXT_WRAP_NONE;
-    WrapLine lines[SEL_MAX_WRAP_LINES];
-    int nlines = WrapRun(font, size, s, len, wrap ? box.width : 0, wrap, lines, SEL_MAX_WRAP_LINES);
-    float lh = LineHeight(hit, font, box.height, nlines);
+    if (hit->length + 1 > hit->advance_capacity)
+    {
+        float *next = realloc(hit->advances, (size_t)(hit->length + 1) * sizeof(*next));
+        if (!next) return false;
+        hit->advances = next;
+        hit->advance_capacity = hit->length + 1;
+    }
+    const char *text = b->text + hit->start;
+    hit->advances[0] = 0;
+    for (int i = 0; i < hit->length;)
+    {
+        int next = Utf8Next(text, hit->length, i);
+        float width = MeasureN(font, Pico_FontPx(hit->font_size), text + i, next - i);
+        for (int j = i + 1; j < next; j++) hit->advances[j] = hit->advances[i];
+        hit->advances[next] = hit->advances[i] + width;
+        i = next;
+    }
+    /* Prefix advances make a dense one-character query linear in run length,
+     * instead of measuring each increasingly long prefix for every match. */
+    hit->line_count = WrapRun(hit->advances, text, hit->length, wrap ? box.width : 0, wrap,
+                              &hit->lines, &hit->line_capacity);
+    hit->box = box;
+    hit->line_height_px = LineHeight(hit, font, box.height, hit->line_count);
+    return hit->line_count > 0;
+}
 
-    int li = 0;
-    if (lh > 1)
-    {
-        li = (int)((y - box.y) / lh);
-    }
-    if (li < 0)
-    {
-        return hit->start;
-    }
-    if (li >= nlines)
-    {
-        return hit->start + len;
-    }
-    return hit->start + OffsetOnLine(font, size, s, lines[li].start, lines[li].length, x - box.x);
+static int HitOffset(SelHit *hit, Clay_BoundingBox box, float x, float y)
+{
+    if (!PrepareHit(hit, box)) return hit->start;
+    int li = hit->line_height_px > 1 ? (int)((y - box.y) / hit->line_height_px) : 0;
+    if (li < 0) return hit->start;
+    if (li >= hit->line_count) return hit->start + hit->length;
+    return hit->start + OffsetOnLine(hit->advances,
+                                     s_msgs[hit->msg].text + hit->start,
+                                     hit->lines[li].start, hit->lines[li].length, x - box.x);
 }
 
 int PicoChatSel_OffsetAtPoint(PicoHost *app, float x, float y, int lock_msg, int *out_msg)
@@ -652,80 +729,91 @@ bool PicoChatSel_PointerOverText(void)
     return false;
 }
 
-void PicoChatSel_DrawOverlay(PicoHost *app)
+void PicoChatSel_VisitRange(int msg, int from, int to, PicoChatRangeFn visit, void *user)
 {
-    if (!PicoChatSel_HasSelection(app) || !app->fonts)
+    if (!visit || msg < 0 || msg >= s_msg_n || !s_msgs[msg].text || to <= from) return;
+    SelBuf *buffer = &s_msgs[msg];
+    /* Runs are ordered by byte range. A common one-character query must not
+     * rescan the entire message for each match. */
+    int lo = buffer->first_hit, hi = buffer->end_hit;
+    while (lo < hi)
     {
-        return;
+        int mid = lo + (hi - lo) / 2;
+        if (s_hits[mid].start + s_hits[mid].length <= from) lo = mid + 1;
+        else hi = mid;
     }
-    int msg = app->chat_sel.msg;
-    if (msg < 0 || msg >= s_msg_n || !s_msgs[msg].text)
-    {
-        return;
-    }
-    int from = app->chat_sel.anchor < app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
-    int to = app->chat_sel.anchor > app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
-    Clay_ElementData scroll = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
-    if (scroll.found)
-    {
-        Clay_BoundingBox clip = scroll.boundingBox;
-        BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
-    }
-    Color fill = ClayToRay(COLOR_SELECTION);
-
-    for (int h = 0; h < s_hit_count; h++)
+    bool found = false;
+    for (int h = lo; h < buffer->end_hit && s_hits[h].start < to; h++)
     {
         SelHit *hit = &s_hits[h];
-        if (hit->msg != msg)
-        {
-            continue;
-        }
-        int hs = hit->start;
-        int he = hit->start + hit->length;
-        if (he <= from || hs >= to)
-        {
-            continue;
-        }
         Clay_ElementData el = Clay_GetElementData(CLAY_IDI("ChatRun", h));
-        if (!el.found)
-        {
-            continue;
-        }
+        if (!el.found || !PrepareHit(hit, el.boundingBox)) continue;
         Clay_BoundingBox box = el.boundingBox;
-        Font font = Pico_FontAt(hit->font_id, hit->font_size);
-        float size = Pico_FontPx(hit->font_size);
-        const char *s = s_msgs[msg].text + hit->start;
-        int len = hit->length;
-        bool wrap = hit->wrap != CLAY_TEXT_WRAP_NONE;
-        WrapLine lines[SEL_MAX_WRAP_LINES];
-        int nlines = WrapRun(font, size, s, len, wrap ? box.width : 0, wrap, lines, SEL_MAX_WRAP_LINES);
-        float lh = LineHeight(hit, font, box.height, nlines);
-        int local_from = from > hs ? from - hs : 0;
-        int local_to = to < he ? to - hs : len;
-
-        for (int li = 0; li < nlines; li++)
+        int local_from = from > hit->start ? from - hit->start : 0;
+        int local_to = to - hit->start;
+        /* Likewise skip preceding wrapped lines within a long Clay text run. */
+        int a = 0, b = hit->line_count;
+        while (a < b)
         {
-            int ls = lines[li].start;
-            int le = ls + lines[li].length;
-            if (le <= local_from || ls >= local_to)
-            {
-                continue;
-            }
-            int a = local_from > ls ? local_from : ls;
-            int b = local_to < le ? local_to : le;
-            float x0 = MeasureN(font, size, s + ls, a - ls);
-            float x1 = MeasureN(font, size, s + ls, b - ls);
-            float w = x1 - x0;
-            if (w < 2)
-            {
-                w = 2;
-            }
-            DrawRectangle((int)(box.x + x0), (int)(box.y + (float)li * lh), (int)w, (int)(lh > 2 ? lh : 2), fill);
+            int mid = a + (b - a) / 2;
+            if (hit->lines[mid].start + hit->lines[mid].length <= local_from) a = mid + 1;
+            else b = mid;
+        }
+        for (int li = a; li < hit->line_count && hit->lines[li].start < local_to; li++)
+        {
+            int ls = hit->lines[li].start;
+            int le = ls + hit->lines[li].length;
+            int start = local_from > ls ? local_from : ls;
+            int end = local_to < le ? local_to : le;
+            float x0 = hit->advances[start] - hit->advances[ls];
+            float x1 = hit->advances[end] - hit->advances[ls];
+            visit((Clay_BoundingBox){box.x + x0, box.y + (float)li * hit->line_height_px,
+                                    fmaxf(2, x1 - x0), hit->line_height_px}, hit->horizontal_clip, hit->temporary_clip, user);
+            found = true;
         }
     }
-
-    if (scroll.found)
+    /* A soft-wrap separator has no glyph. Give whitespace-only hits a caret
+     * at the neighboring run instead of counting an unreachable result. */
+    if (!found && buffer->first_hit < buffer->end_hit)
     {
-        EndScissorMode();
+        int h = lo > buffer->first_hit ? lo - 1 : lo;
+        if (h >= buffer->end_hit) h = buffer->end_hit - 1;
+        SelHit *hit = &s_hits[h];
+        Clay_ElementData el = Clay_GetElementData(CLAY_IDI("ChatRun", h));
+        if (el.found && PrepareHit(hit, el.boundingBox))
+        {
+            int li = from >= hit->start ? hit->line_count - 1 : 0;
+            WrapLine line = hit->lines[li];
+            float x = from >= hit->start ? hit->advances[line.start + line.length] - hit->advances[line.start] : 0;
+            visit((Clay_BoundingBox){el.boundingBox.x + x, el.boundingBox.y + li * hit->line_height_px,
+                                    2, hit->line_height_px}, hit->horizontal_clip, hit->temporary_clip, user);
+        }
     }
+}
+
+static void DrawSelectionRange(Clay_BoundingBox box, Clay_ElementId horizontal_clip, bool temporary, void *user)
+{
+    (void)user;
+    (void)temporary;
+    Clay_ElementData scroll = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    if (!scroll.found) return;
+    Clay_BoundingBox clip = scroll.boundingBox;
+    Clay_ElementData horizontal = Clay_GetElementData(horizontal_clip);
+    if (horizontal.found)
+    {
+        float right = fminf(clip.x + clip.width, horizontal.boundingBox.x + horizontal.boundingBox.width);
+        clip.x = fmaxf(clip.x, horizontal.boundingBox.x);
+        clip.width = fmaxf(0, right - clip.x);
+    }
+    BeginScissorMode((int)ceilf(clip.x), (int)ceilf(clip.y), (int)clip.width, (int)clip.height);
+    DrawRectangle((int)box.x, (int)box.y, (int)box.width, (int)box.height, ClayToRay(COLOR_SELECTION));
+    EndScissorMode();
+}
+
+void PicoChatSel_DrawOverlay(PicoHost *app)
+{
+    if (!PicoChatSel_HasSelection(app) || !app->fonts) return;
+    int from = app->chat_sel.anchor < app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
+    int to = app->chat_sel.anchor > app->chat_sel.cursor ? app->chat_sel.anchor : app->chat_sel.cursor;
+    PicoChatSel_VisitRange(app->chat_sel.msg, from, to, DrawSelectionRange, NULL);
 }

@@ -66,6 +66,13 @@ add_library(md4c STATIC
     md4c/entity.c)
 target_include_directories(md4c PUBLIC md4c)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(UTF8PROC REQUIRED IMPORTED_TARGET libutf8proc)
+add_library(pico_chat_search STATIC chat_search.c)
+target_include_directories(pico_chat_search PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pico_chat_search PUBLIC PkgConfig::UTF8PROC)
+pico_warnings_are_errors(pico_chat_search)
+
 add_executable(pico
     main.c
     cli.c
@@ -91,6 +98,7 @@ add_executable(pico
     subagent_config.c
     session.c
     usage.c
+    chat_find.c
     chat_sel.c
     text_range.c
     diff_lines.c
@@ -130,7 +138,7 @@ add_executable(pico
     builtins/diff.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
 
-set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON)
+set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON INSTALL_RPATH_USE_LINK_PATH TRUE)
 pico_warnings_are_errors(pico)
 
 find_package(CURL REQUIRED)
@@ -150,7 +158,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_CC=\"cc\""
     "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
-target_link_libraries(pico PUBLIC raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
 
 # GLFW dlopens Wayland/Xcursor instead of linking them. On Nix those .so files are
@@ -241,6 +249,11 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_http_capture_release_tests)
     add_test(NAME pico_http_capture_release_tests COMMAND pico_http_capture_release_tests)
 
+    add_executable(pico_chat_search_tests tests/chat_search_test.c)
+    target_link_libraries(pico_chat_search_tests PRIVATE pico_chat_search)
+    pico_warnings_are_errors(pico_chat_search_tests)
+    add_test(NAME pico_chat_search_tests COMMAND pico_chat_search_tests)
+
     add_executable(pico_text_range_tests
         tests/text_range_test.c
         text_range.c)
@@ -272,7 +285,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_md_scroll_layout_tests)
     target_compile_options(pico_md_scroll_layout_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_md_scroll_layout_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_md_scroll_layout_tests PRIVATE raylib md4c)
+    target_link_libraries(pico_md_scroll_layout_tests PRIVATE pico_chat_search raylib md4c)
     add_test(NAME pico_md_scroll_layout_tests COMMAND pico_md_scroll_layout_tests)
 
     add_executable(pico_diff_lines_tests
@@ -413,6 +426,7 @@ if(BUILD_TESTING)
         tests/subagent_test.c
         tests/parallel_tool_test.c
         tests/clay_impl.c
+        chat_find.c
         app.c
         ui.c
         scrollbar.c
@@ -444,7 +458,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_agent_behavior_tests)
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_agent_behavior_tests PRIVATE raylib CURL::libcurl Threads::Threads)
+    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads)
     add_test(NAME pico_agent_behavior_tests COMMAND pico_agent_behavior_tests)
 
     add_executable(pico_session_usage_tests
@@ -490,6 +504,7 @@ if(BUILD_TESTING)
         settings.c
         auth.c
         session.c
+        chat_find.c
         chat_sel.c
         text_range.c
         markdown.c)
@@ -501,7 +516,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_files_tests)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_files_tests PRIVATE raylib Threads::Threads md4c)
+    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c)
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
     add_executable(pico_composer_tests
@@ -528,6 +543,7 @@ if(BUILD_TESTING)
         settings.c
         auth.c
         session.c
+        chat_find.c
         chat_sel.c
         text_range.c
         markdown.c)
@@ -539,7 +555,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_composer_tests)
     target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_composer_tests PRIVATE raylib Threads::Threads md4c)
+    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
 
     add_executable(pico_settings_agent_tests
@@ -679,6 +695,7 @@ if(BUILD_TESTING)
         settings.c
         auth.c
         session.c
+        chat_find.c
         chat_sel.c
         builtins/ask_user.c
         builtins/subagent.c
@@ -737,13 +754,14 @@ if(BUILD_TESTING)
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
-    target_link_libraries(pico_host_workspace_tests PRIVATE raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_CLAY_FRAME_FAULT_TESTS=1)
         target_link_options(pico_host_workspace_tests PRIVATE
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
-            -Wl,--wrap=SetMouseCursor)
+            -Wl,--wrap=SetMouseCursor -Wl,--wrap=IsKeyDown -Wl,--wrap=IsKeyPressed
+            -Wl,--wrap=GetCharPressed -Wl,--wrap=IsMouseButtonPressed -Wl,--wrap=GetMousePosition)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()

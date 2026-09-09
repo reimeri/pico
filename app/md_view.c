@@ -480,6 +480,7 @@ static void RenderTable(MdDocument *doc, MdBlock *block, Clay_ElementId scroll_i
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
         TrackHorizontalScroller(scroll_id);
+        PicoChatSel_SetHorizontalClip(scroll_id, false);
         CLAY(scroll_id,
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .sizing = {.width = CLAY_SIZING_GROW(0)}},
@@ -628,6 +629,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
         {
             Clay_ElementId scroll_id = HorizontalScrollId(id_base, index);
             TrackHorizontalScroller(scroll_id);
+            PicoChatSel_SetHorizontalClip(scroll_id, false);
             CLAY(scroll_id,
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .sizing = {.width = CLAY_SIZING_GROW(0)}},
@@ -709,6 +711,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     }
                 }
             }
+            PicoChatSel_SetHorizontalClip((Clay_ElementId){0}, false);
             break;
         }
         case MDB_IMAGE:
@@ -771,6 +774,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
         {
             Clay_ElementId scroll_id = HorizontalScrollId(id_base, index);
             RenderTable(doc, block, scroll_id, available_width, emit);
+            PicoChatSel_SetHorizontalClip((Clay_ElementId){0}, false);
             break;
         }
     }

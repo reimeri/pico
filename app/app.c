@@ -1882,6 +1882,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
         PicoSessionPersist_Shutdown(host);
         pthread_mutex_destroy(&host->ask_id_mu);
         free(host->modules);
+        PicoChatFind_Reset(host);
         free(host->composer.text);
         free(host);
         return PICO_NO_MEMORY;
@@ -2672,6 +2673,7 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
     if (host && host->selected_agent_id == agent->id)
     {
         host->chat_transcript_revision++;
+        PicoChatFind_Reset(host);
     }
     for (int i = 0; i < agent->message_count; i++)
     {
@@ -2748,6 +2750,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     PicoHost_ClearMessages(host, host->selected_agent_id);
     free(host->modules);
     host->modules = NULL;
+    PicoChatFind_Reset(host);
     free(host->composer.text);
     free(host->status_warn);
     free(host->agent_input);
@@ -2795,6 +2798,7 @@ float PicoHost_MainColumnWidth(const PicoHost *host)
 
 static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_height, float delta_time)
 {
+    PicoChatFind_Sync(app);
     Clay_BeginLayout();
     MdView_BeginFrame();
     app->hovered_text = false;
@@ -2855,6 +2859,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
         }
     }
     RunSlot(app, PICO_SLOT_OVERLAY);
+    PicoChatFind_Render(app);
 
     app->hovered_link = MdView_HoveredLink();
     return Clay_EndLayout(delta_time);
@@ -3041,7 +3046,7 @@ bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
                                  bool had_complete, bool had_todo, bool had_modal)
 {
     return host && !had_warn && !had_complete && !had_todo && !had_modal &&
-           !host->ui_drag_active;
+           !PicoChatFind_BlocksInput(host) && !host->ui_drag_active;
 }
 
 void PicoHost_Frame(PicoHost *app)
@@ -3080,6 +3085,7 @@ void PicoHost_Frame(PicoHost *app)
     }
 
     PicoPlugins_Poll(app);
+    PicoChatFind_HandleInput(app);
     pico_host_pump(app);
     /* Commands run in frame callbacks. Leave graphics alive for main cleanup. */
     if (PicoHost_ShouldExit(app))
@@ -3121,7 +3127,7 @@ void PicoHost_Frame(PicoHost *app)
 
     Clay_Vector2 mouse_position = {.x = GetMousePosition().x, .y = GetMousePosition().y};
     bool over_composer = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")));
-    bool over_chat = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    bool over_chat = !PicoChatFind_PointerOver(app) && Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
     bool over_sidebar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll")));
     bool modal_open = PicoUi_ModalOpen(app);
     if (!modal_open)
@@ -3239,6 +3245,7 @@ void PicoHost_Frame(PicoHost *app)
         {
             relayout = true;
         }
+        if (PicoChatFind_Reveal(app)) relayout = true;
         if (app->chat_follow_bottom)
         {
             Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
@@ -3275,7 +3282,7 @@ void PicoHost_Frame(PicoHost *app)
         }
     }
 
-    if (app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
+    if (!PicoChatFind_PointerOver(app) && app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
         !PicoChatSel_HasSelection(app))
     {
         OpenURL(app->hovered_link);
@@ -3291,5 +3298,6 @@ void PicoHost_Frame(PicoHost *app)
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
     pico_run_hooks(app, PICO_HOOK_AFTER_RENDER, pico_agent_active(app));
+    PicoChatFind_DrawInput(app);
     EndDrawing();
 }

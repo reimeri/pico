@@ -4,9 +4,17 @@
 #include <stdbool.h>
 
 #include "pico/host.h"
+#include "chat_search.h"
 
 #include "clay/clay.h"
 
+
+/* Bind only during main-transcript rendering; offscreen messages retain text. */
+void PicoChatSel_Free(void);
+void PicoChatSel_SetSearch(PicoChatSearch *search);
+void PicoChatSel_SetHorizontalClip(Clay_ElementId id, bool temporary);
+typedef void (*PicoChatRangeFn)(Clay_BoundingBox box, Clay_ElementId horizontal_clip, bool temporary, void *user);
+void PicoChatSel_VisitRange(int message, int from, int to, PicoChatRangeFn visit, void *user);
 
 void PicoChatSel_BeginFrame(int message_count);
 void PicoChatSel_SetMessage(int msg);

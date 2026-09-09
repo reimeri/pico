@@ -179,6 +179,11 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
     }
 }
 
+void PicoTranscriptVirtual_ForceMount(PicoTranscriptVirtual *cache, int index)
+{
+    if (cache && index >= 0 && index < cache->count) cache->mounted[index] = 1;
+}
+
 bool PicoTranscriptVirtual_Mounted(const PicoTranscriptVirtual *cache, int index)
 {
     return cache && index >= 0 && index < cache->count && cache->mounted[index] != 0;

@@ -31,6 +31,7 @@
         let
           runtimeLibraries = with pkgs; [
             curl
+            utf8proc
             openssl
             glfw
             libGL

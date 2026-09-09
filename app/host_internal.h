@@ -2,6 +2,7 @@
 #define PICO_HOST_INTERNAL_H
 
 #include "pico/app.h"
+#include "chat_find.h"
 #include "pico/host.h"
 #include "pico/plugin.h"
 #include "workspace_internal.h"
@@ -116,6 +117,7 @@ struct PicoHost {
     PicoAgentId selected_agent_id;
 
     PicoComposer composer;
+    PicoChatFind find;
     PicoHostPreferences preferences;
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];

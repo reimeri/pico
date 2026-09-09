@@ -26,6 +26,7 @@ void PicoTranscriptVirtual_SetRevision(PicoTranscriptVirtual *cache, int index,
 void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
                                 float viewport_height, float overscan,
                                 int force_index, float message_gap);
+void PicoTranscriptVirtual_ForceMount(PicoTranscriptVirtual *cache, int index);
 bool PicoTranscriptVirtual_Mounted(const PicoTranscriptVirtual *cache, int index);
 float PicoTranscriptVirtual_SpanHeight(const PicoTranscriptVirtual *cache,
                                        int begin, int end, float message_gap);

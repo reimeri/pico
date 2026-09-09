@@ -71,6 +71,7 @@ typedef struct RtRun {
 } RtRun;
 
 typedef struct RtLine {
+    bool hard_break_before;
     RtRun *runs; // arena owned
     int run_count;
 } RtLine;
@@ -180,10 +181,11 @@ static void SplitChunksIntoWords(MdChunk *chunks, int chunk_count, bool force_bo
                     word.strike = chunk->strike;
                     word.link_url = chunk->link_url;
                     word.space_before = pending_space;
+                    pending_space = false;
                     PushWord(words, word);
                     start = NULL;
                 }
-                pending_space = true;
+                if (i < chunk->length) pending_space = true;
                 if (ch == '\n')
                 {
                     RtWord br = {0};
@@ -235,6 +237,7 @@ typedef struct ScratchRun {
 } ScratchRun;
 
 typedef struct ScratchLine {
+    bool hard_break_before;
     ScratchRun *runs;
     int run_count;
     int run_capacity;
@@ -395,7 +398,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
         if (word->hard_break)
         {
             PushLine(&scratch_lines, &scratch_line_count, &scratch_line_capacity, current_line);
-            ScratchLine empty = {0};
+            ScratchLine empty = {.hard_break_before = true};
             current_line = empty;
             line_x = 0;
             continue;
@@ -453,6 +456,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.code = place.code;
             new_run.strike = place.strike;
             new_run.link_url = place.link_url;
+            new_run.space_before = place.space_before;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], &place, false);
             line_x = WordAdvance(style, space_width, NULL, false, &place);
@@ -508,6 +512,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
     for (int l = 0; l < scratch_line_count; l++)
     {
         RtLine *line = &cache->lines[l];
+        line->hard_break_before = scratch_lines[l].hard_break_before;
         line->run_count = scratch_lines[l].run_count;
         line->runs = (RtRun *)MdArena_Alloc(arena, (size_t)line->run_count * sizeof(RtRun), 8);
         for (int r = 0; r < line->run_count; r++)
@@ -614,6 +619,8 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
         for (int l = 0; l < cache->line_count; l++)
         {
             RtLine *line = &cache->lines[l];
+            if (line->hard_break_before) PicoChatSel_Break();
+            else if (l > 0 && line->run_count && line->runs[0].space_before) PicoChatSel_Glue(" ");
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                                 .height = CLAY_SIZING_FIXED((float)row_h)},

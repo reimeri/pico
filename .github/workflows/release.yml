@@ -29,7 +29,7 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             build-essential ninja-build meson pkg-config git curl patchelf file imagemagick \
             appstream desktop-file-utils libfuse2 \
-            libcurl4-openssl-dev libgl1-mesa-dev \
+            libcurl4-openssl-dev libutf8proc-dev libgl1-mesa-dev \
             libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev libxext-dev \
             libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
             libxkbcommon-dev libwayland-dev wayland-protocols libffi-dev libexpat1-dev \

@@ -8,6 +8,7 @@
 #include "scrollbar.h"
 #include "trace_group.h"
 #include "richtext.h"
+#include "chat_sel.h"
 #include "builtins/chat.h"
 #include "builtins/background_model.h"
 #include "builtins/sidebar.h"
@@ -28,6 +29,38 @@
 #include <unistd.h>
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static bool g_find_input_test;
+static int g_find_key;
+static bool g_find_ctrl;
+static bool g_find_shift;
+static int g_find_character;
+static bool g_find_press;
+static Vector2 g_find_pointer;
+
+bool __real_IsKeyDown(int key);
+bool __wrap_IsKeyDown(int key)
+{
+    if (!g_find_input_test) return __real_IsKeyDown(key);
+    return (key == KEY_LEFT_CONTROL && g_find_ctrl) || (key == KEY_LEFT_SHIFT && g_find_shift);
+}
+bool __real_IsKeyPressed(int key);
+bool __wrap_IsKeyPressed(int key) { return g_find_input_test ? key == g_find_key : __real_IsKeyPressed(key); }
+int __real_GetCharPressed(void);
+int __wrap_GetCharPressed(void)
+{
+    if (!g_find_input_test) return __real_GetCharPressed();
+    int cp = g_find_character;
+    g_find_character = 0;
+    return cp;
+}
+bool __real_IsMouseButtonPressed(int button);
+bool __wrap_IsMouseButtonPressed(int button)
+{
+    return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_press : __real_IsMouseButtonPressed(button);
+}
+Vector2 __real_GetMousePosition(void);
+Vector2 __wrap_GetMousePosition(void) { return g_find_input_test ? g_find_pointer : __real_GetMousePosition(); }
+
 static bool g_clay_frame_test;
 /* Do not let an unrelated persistence worker consume the UI allocation fault. */
 static __thread bool g_fail_frame_allocation;
@@ -257,6 +290,8 @@ static void ShellTestComposer(PicoHost *host, void *state)
                          .duration = 0.18f,
                          .properties = CLAY_TRANSITION_PROPERTY_DIMENSIONS}})
     {
+        CLAY(CLAY_ID("Composer"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                           .height = CLAY_SIZING_PERCENT(1)}}}) {}
     }
 }
 
@@ -1048,6 +1083,8 @@ static int RunShellStabilityCase(bool with_sidebar)
         {
             state.composer_height = 56.003f;
         }
+        if (frame == 60 || frame == 220) PicoChatFind_Open(&host);
+        if (frame == 160 || frame == 320) PicoChatFind_Close(&host);
         if (frame == frames / 2)
         {
             Pico_RememberClayScroll();
@@ -1096,6 +1133,14 @@ static int RunShellStabilityCase(bool with_sidebar)
             break;
         }
 
+        Clay_ElementData find = Clay_GetElementData(CLAY_ID("ChatFind"));
+        if (find.found != host.find.open || (find.found &&
+            (find.boundingBox.x < 0 || find.boundingBox.y < 0 ||
+             find.boundingBox.x + find.boundingBox.width > viewport.width)))
+        {
+            Fail("floating chat find must remain within the viewport without resizing panes");
+            break;
+        }
         Clay_ElementData root = Clay_GetElementData(CLAY_ID("Root"));
         Clay_ElementData body = Clay_GetElementData(CLAY_ID("Body"));
         Clay_ElementData right = Clay_GetElementData(CLAY_ID("RightColumn"));
@@ -1149,6 +1194,7 @@ static int RunShellStabilityCase(bool with_sidebar)
         }
     }
 
+    PicoChatFind_Reset(&host);
     Pico_FreeClay();
     Clay_SetCurrentContext(previous);
     return g_failed ? 1 : 0;
@@ -1876,6 +1922,259 @@ static float TraceRowHeight(Clay_ElementId id, bool *found)
  * finished-trace group header replace each other as tools complete and the
  * agent starts thinking. The chat pins to the bottom, so if these rows do not
  * share one height every transition shifts the transcript by the difference. */
+/* Render through the actual shell/chat virtualizer, then apply the same bounded
+ * reveal correction as the host frame. No graphics context is needed. */
+static void FindLayoutFrame(PicoHost *host, Clay_Dimensions viewport)
+{
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0);
+    (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    PicoChat_HarvestVirtualHeights(host);
+    if (PicoChatFind_Reveal(host)) (void)PicoHost_LayoutShell(host, viewport.height, 0);
+}
+
+typedef struct FindTestRange {
+    bool found;
+    Clay_BoundingBox box;
+    Clay_ElementId horizontal;
+} FindTestRange;
+
+static void FindCaptureRange(Clay_BoundingBox box, Clay_ElementId horizontal, bool temporary, void *user)
+{
+    (void)temporary;
+    FindTestRange *range = user;
+    if (!range->found) { range->found = true; range->box = box; range->horizontal = horizontal; }
+}
+
+static int TestChatFindTranscript(void)
+{
+    const Clay_Dimensions viewport = {1000, 640};
+    char dir[] = "/tmp/pico-find-ws-XXXXXX", cfg[] = "/tmp/pico-find-cfg-XXXXXX";
+    Clay_Context *previous = Clay_GetCurrentContext();
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id;
+    PicoAgentId agent_id;
+    PicoAgent *agent;
+    ShellTestState shell = {.composer_height = 44};
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { Fail("find test setup"); free(memory); return 1; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host) { Fail("find host initialization"); goto done; }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &shell);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id))) { Fail("find agent setup"); goto done; }
+    char code[512] = "```\n";
+    memset(code + 4, 'x', 200);
+    strcpy(code + 204, " marker\n```\n");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, code);
+    for (int i = 1; i < 60; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT,
+                            i == 30 || i == 59 ? "marker" : "Ordinary transcript paragraph.\n\nAnother block.");
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0})) { Fail("find Clay initialization"); goto done; }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    RichText_SetMeasureFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    for (int i = 0; i < 4; i++) FindLayoutFrame(host, viewport);
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, "marker");
+    FindLayoutFrame(host, viewport);
+    PicoChatSearch *search = &host->find.search;
+    if (search->count != 3 || search->active < 0 || search->matches[search->active].message != 59)
+    { Fail("query must count offscreen text and select nearest bottom-view hit"); goto done; }
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    float y = scroll.scrollPosition->y;
+    PicoChatFind_SetQuery(host, "MARKER");
+    FindLayoutFrame(host, viewport);
+    if (fabsf(scroll.scrollPosition->y - y) > 0.01f)
+    { Fail("editing query must not move an already-visible match"); goto done; }
+    for (int i = 0; i < 40; i++) PicoAgent_AppendAssistant(host, agent, "\n\nLive content added below the visible hit.");
+    for (int i = 0; i < 4; i++) FindLayoutFrame(host, viewport);
+    if (fabsf(scroll.scrollPosition->y - y) > 0.01f || search->matches[search->active].message != 59)
+    { Fail("finding a visible bottom-follow hit must stop subsequent stream growth from moving the view"); goto done; }
+    PicoChatFind_Navigate(host, 1); /* Wrap to unmounted first message. */
+    for (int i = 0; i < 3; i++) FindLayoutFrame(host, viewport);
+    PicoChatMatch match = search->matches[search->active];
+    FindTestRange range = {0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    Clay_ElementData horizontal = Clay_GetElementData(range.horizontal);
+    if (match.message != 0 || !range.found || !ShellVerticallyContains(chat.boundingBox, range.box) ||
+        !horizontal.found || range.box.x < horizontal.boundingBox.x - 0.1f ||
+        range.box.x + range.box.width > horizontal.boundingBox.x + horizontal.boundingBox.width + 0.1f)
+    { Fail("navigation must mount offscreen text and reveal its vertical and horizontal range"); goto done; }
+    y = scroll.scrollPosition->y;
+    PicoAgent_AppendAssistant(host, agent, " marker");
+    FindLayoutFrame(host, viewport);
+    if (search->count != 4 || search->matches[search->active].message != 0 ||
+        fabsf(scroll.scrollPosition->y - y) > 0.01f)
+    { Fail("streaming must update offscreen results without stealing the viewport"); goto done; }
+
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    /* Drive the real handlers with a keyboard snapshot, in host frame order. */
+    g_find_input_test = true;
+    PicoComposer_SetText(host, "draft");
+    g_find_key = KEY_F; g_find_ctrl = true;
+    PicoChatFind_HandleInput(host);
+    g_find_key = 0; g_find_ctrl = false; g_find_character = 'm';
+    PicoChatFind_HandleInput(host);
+    PicoComposer_HandleInput(host);
+    if (strcmp(host->find.query, "m") != 0 || strcmp(host->composer.text, "draft") != 0)
+    { Fail("Ctrl+F must select the query and route subsequent typing away from the composer"); goto done; }
+    g_find_key = KEY_ENTER;
+    PicoChatFind_HandleInput(host);
+    PicoComposer_HandleInput(host);
+    if (agent->message_count != 60 || strcmp(host->composer.text, "draft") != 0)
+    { Fail("Enter in find must navigate rather than submit the composer"); goto done; }
+    g_find_key = KEY_ESCAPE;
+    PicoChatFind_HandleInput(host);
+    if (host->find.open || PicoHost_AgentEscapeEnabled(host, false, false, false, false))
+    { Fail("Escape closing find must remain claimed against agent cancellation"); goto done; }
+    g_find_key = 0;
+    PicoChatFind_HandleInput(host);
+    if (!PicoHost_AgentEscapeEnabled(host, false, false, false, false))
+    { Fail("closing find must not permanently disable agent Escape"); goto done; }
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, "marker");
+    FindLayoutFrame(host, viewport);
+    /* Existing modals own Ctrl+F and leave the find editor untouched. */
+    pico_ui_modal_push(host, "find-input-test");
+    g_find_key = KEY_F; g_find_ctrl = true; g_find_character = 'z';
+    PicoChatFind_HandleInput(host);
+    if (strcmp(host->find.query, "marker") != 0 || !g_find_character)
+    { Fail("find must not consume text belonging to a modal"); goto done; }
+    pico_ui_modal_pop(host, "find-input-test");
+    g_find_key = 0; g_find_ctrl = false; g_find_character = 0;
+    Clay_ElementData composer = Clay_GetElementData(CLAY_ID("Composer"));
+    /* The shell fixture wraps the real composer-sized pane with this ID. */
+    if (!composer.found) { Fail("find focus test needs composer bounds"); goto done; }
+    g_find_pointer = (Vector2){composer.boundingBox.x + 10, composer.boundingBox.y + 10};
+    g_find_press = true;
+    PicoChatFind_HandleInput(host);
+    g_find_press = false; g_find_character = '!';
+    PicoChatFind_HandleInput(host);
+    PicoComposer_HandleInput(host);
+    if (!host->find.open || strcmp(host->composer.text, "draft!") != 0 || strcmp(host->find.query, "marker") != 0)
+    { Fail("clicking the composer must return typing there without closing find"); goto done; }
+    g_find_input_test = false;
+    y = scroll.scrollPosition->y;
+#endif
+
+    /* A completed tool group is initially hidden. Expanded output respects the
+     * renderer's truncation, including when the tool message is offscreen. */
+    PicoAgent_AddToolCallWithId(host, agent, "find-tool", "sh", "echo output");
+    char output[8192] = "shown-find-token\n";
+    for (int i = 0; i < 300; i++) strcat(output, "filler\n");
+    strcat(output, "truncated-find-token");
+    PicoAgent_SetLastToolOutput(agent, output, false);
+    PicoMessage *last = &agent->messages[agent->message_count - 1];
+    last->trace[0].tool_done_t0 = 0;
+    PicoChatFind_SetQuery(host, "shown-find-token");
+    FindLayoutFrame(host, viewport);
+    if (search->count != 0) { Fail("collapsed tool body must not be searched"); goto done; }
+    last->trace_group_expanded = last->trace[0].expanded = true;
+    FindLayoutFrame(host, viewport);
+    if (search->count != 1 || fabsf(scroll.scrollPosition->y - y) > 0.01f)
+    { Fail("expanding offscreen tool output updates results without scrolling"); goto done; }
+    PicoChatFind_SetQuery(host, "truncated-find-token");
+    FindLayoutFrame(host, viewport);
+    if (search->count != 0) { Fail("truncated-away output must not be searched"); goto done; }
+    PicoChatFind_Close(host);
+    PicoChatFind_Open(host);
+    if (strcmp(host->find.query, "truncated-find-token") != 0)
+    { Fail("closing find must remember the query"); goto done; }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoMessage *thinking = &agent->messages[agent->message_count - 1];
+    thinking->trace = calloc(1, sizeof(*thinking->trace));
+    thinking->trace_count = 1;
+    char long_thought[2048];
+    memset(long_thought, 'w', 200);
+    strcpy(long_thought + 200, " suffix-to-reveal");
+    thinking->trace[0].text = strdup(long_thought);
+    thinking->trace[0].think_parts = calloc(1, sizeof(char *));
+    thinking->trace[0].think_parts[0] = strdup(long_thought);
+    thinking->trace[0].think_part_count = 1;
+    thinking->trace_group_expanded = true;
+    PicoChatFind_SetQuery(host, "suffix-to-reveal");
+    for (int i = 0; i < 3; i++) FindLayoutFrame(host, viewport);
+    if (!search->count) { Fail("long thinking label suffix should remain revealable"); goto done; }
+    match = search->matches[search->active];
+    range = (FindTestRange){0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    Clay_ScrollContainerData label_scroll = Clay_GetScrollContainerData(range.horizontal);
+    if (!label_scroll.found || !label_scroll.scrollPosition || label_scroll.scrollPosition->x >= 0)
+    { Fail("search should reveal the clipped thinking label suffix"); goto done; }
+    PicoChatFind_Close(host);
+    if (label_scroll.scrollPosition->x != 0)
+    { Fail("closing find must restore the non-user-scrollable thinking label"); goto done; }
+    /* A raw thinking body uses Clay wrapping rather than rich-text runs. A
+     * result near the end of a very long body must still have reveal geometry. */
+    free(thinking->trace[0].think_parts[0]);
+    free(thinking->trace[0].think_parts);
+    thinking->trace[0].think_parts = NULL;
+    thinking->trace[0].think_part_count = 0;
+    free(thinking->trace[0].text);
+    char *body = malloc(60032);
+    if (!body) { Fail("long thought fixture allocation"); goto done; }
+    for (int i = 0; i < 10000; i++) memcpy(body + i * 6, "words ", 6);
+    strcpy(body + 60000, "deep-thought-target");
+    thinking->trace[0].text = body;
+    thinking->trace[0].expanded = true;
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, "deep-thought-target");
+    for (int i = 0; i < 3; i++) FindLayoutFrame(host, viewport);
+    if (search->count != 1) { Fail("full expanded thought must be searchable"); goto done; }
+    match = search->matches[search->active];
+    range = (FindTestRange){0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    if (!range.found || !ShellVerticallyContains(chat.boundingBox, range.box))
+    { Fail("a match near the end of a long Clay-wrapped thought must be revealable"); goto done; }
+    PicoAgent_ClearMessages(agent);
+    if (host->find.open || host->find.length || host->find.search.count)
+    { Fail("session reset must clear search and pending navigation"); goto done; }
+    char separated[1202];
+    memset(separated, 'x', 600);
+    separated[600] = ' ';
+    memset(separated + 601, 'y', 600);
+    separated[1201] = 0;
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, separated);
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, " ");
+    for (int i = 0; i < 3; i++) FindLayoutFrame(host, viewport);
+    if (search->count != 1) { Fail("soft wrapping must retain a literal source space"); goto done; }
+    match = search->matches[search->active];
+    range = (FindTestRange){0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    if (!range.found || !ShellVerticallyContains(chat.boundingBox, range.box))
+    { Fail("a whitespace-only hit at a soft wrap must be reachable"); goto done; }
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, "remember only this conversation");
+    PicoAgentId other;
+    if (pico_main_agent_create(host, workspace_id, &options, &other) != PICO_OK || host->find.open || host->find.length)
+    { Fail("switching conversation must close and clear find"); goto done; }
+
+done:
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    g_find_input_test = false;
+    g_find_key = g_find_character = 0;
+    g_find_ctrl = g_find_press = false;
+#endif
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(dir); rmdir(cfg);
+    return g_failed ? 1 : 0;
+}
+
 static int TestChatTraceRowsShareHeight(void)
 {
     const Clay_Dimensions viewport = {1100, 800};
@@ -8492,6 +8791,7 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (TestChatFindTranscript() != 0) return 1;
     if (TestChatTraceRowsShareHeight() != 0)
     {
         return 1;

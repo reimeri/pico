@@ -48,6 +48,8 @@ static int Fail(const char *message)
     return 1;
 }
 
+static PicoChatSearch *s_search;
+
 static Clay_RenderCommandArray RenderDocument(MdDocument *doc, int id_base, float width,
                                                bool selectable)
 {
@@ -60,6 +62,7 @@ static Clay_RenderCommandArray RenderDocument(MdDocument *doc, int id_base, floa
     Clay_SetLayoutDimensions((Clay_Dimensions){width, 600.0f});
     MdView_BeginFrame();
     PicoChatSel_BeginFrame(selectable ? 1 : 0);
+    PicoChatSel_SetSearch(s_search);
     PicoChatSel_SetMessage(selectable ? 0 : -1);
     Clay_BeginLayout();
     CLAY(CLAY_ID("MdScrollTestRoot"),
@@ -344,6 +347,39 @@ static int TestLongUnspacedWordWrapsInsideWidth(void)
     return result;
 }
 
+static int TestSearchRenderedText(void)
+{
+    const char *source = "A **styled** phrase and an unbrokenverylongtoken. Adjacent**bold**text.\n\nSeparate block.";
+    MdDocument doc = MdDocument_Parse(source, strlen(source));
+    PicoChatSearch search = {0};
+    PicoChatSearch_Resize(&search, 1);
+    s_search = &search;
+    float widths[] = {800, 100};
+    const char *queries[] = {"styled phrase", "unbrokenverylongtoken", "Adjacentboldtext", "text. Separate", "**styled**"};
+    int expected[] = {1, 1, 1, 0, 0};
+    int result = 0;
+    for (int w = 0; w < 2; w++)
+    {
+        RenderDocument(&doc, 801, widths[w], true);
+        for (int q = 0; q < 5; q++)
+        {
+            PicoChatSearch_Query(&search, queries[q]);
+            PicoChatSearch_Refresh(&search);
+            if (search.count != expected[q])
+            {
+                fprintf(stderr, "query '%s', width %.0f, got %d\n", queries[q], widths[w], search.count);
+                result = Fail("search must follow rendered text independent of styling and soft wraps");
+                break;
+            }
+        }
+    }
+    s_search = NULL;
+    PicoChatSel_SetSearch(NULL);
+    PicoChatSearch_Free(&search);
+    MdDocument_Free(&doc);
+    return result;
+}
+
 int main(void)
 {
     uint32_t arena_size = Clay_MinMemorySize();
@@ -379,6 +415,7 @@ int main(void)
     {
         result = TestLongUnspacedWordWrapsInsideWidth();
     }
+    if (result == 0) result = TestSearchRenderedText();
     free(memory);
     return result;
 }

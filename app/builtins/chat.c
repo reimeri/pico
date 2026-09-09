@@ -298,15 +298,24 @@ static void EmitWrappedText(const TranscriptView *view, Clay_String text,
                                   ? (Clay_String){.length = line.length,
                                                   .chars = text.chars + line.start}
                                   : (Clay_String){.length = 1, .chars = " "};
+        if (i > 0)
+        {
+            PicoWrappedTextLine previous = wrapped->lines[i - 1];
+            int gap = line.start - (previous.start + previous.length);
+            for (int j = 0; j < gap; j++)
+            {
+                char separator[2] = {text.chars[previous.start + previous.length + j], 0};
+                ViewGlue(view, separator);
+            }
+        }
         ViewText(view, emitted, config);
-        ViewBreak(view);
     }
     if (wrapped->truncated)
     {
-        CLAY_TEXT(CLAY_STRING("…"), CLAY_TEXT_CONFIG({.fontId = config.fontId,
+        ViewText(view, CLAY_STRING("…"), (Clay_TextElementConfig){.fontId = config.fontId,
                                                      .fontSize = config.fontSize,
                                                      .textColor = COLOR_MUTED,
-                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                     .wrapMode = CLAY_TEXT_WRAP_NONE});
         ViewBreak(view);
     }
 }
@@ -690,15 +699,16 @@ static void RenderToolOutput(const TranscriptView *view, const char *output, flo
                                                               .lineHeight = Pico_FontPxU16(PICO_FONT_UI_LINE),
                                                               .textColor = COLOR_CODE_TEXT},
                             inner_w);
+            ViewBreak(view);
             line = newline ? newline + 1 : NULL;
             shown++;
         }
         if (line)
         {
-            CLAY_TEXT(CLAY_STRING("…"), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+            ViewText(view, CLAY_STRING("…"), (Clay_TextElementConfig){.fontId = FONT_MONO,
                                                          .fontSize = PICO_FONT_UI,
                                                          .textColor = COLOR_MUTED,
-                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                         .wrapMode = CLAY_TEXT_WRAP_NONE});
         }
     }
 }
@@ -710,11 +720,13 @@ static void RenderTitledToolBlock(const TranscriptView *view, const char *title,
                              .childGap = 2,
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
     {
-        CLAY_TEXT(ViewCStr(title),
-                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+        ViewBreak(view);
+        ViewText(view, ViewCStr(title),
+                  (Clay_TextElementConfig){.fontId = FONT_REGULAR,
                                     .fontSize = PICO_FONT_CAPTION,
                                     .textColor = COLOR_MUTED,
-                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                    .wrapMode = CLAY_TEXT_WRAP_NONE});
+        ViewBreak(view);
         RenderToolOutput(view, body, available_width);
     }
 }
@@ -752,7 +764,9 @@ static void RenderThinkMarkdown(const TranscriptView *view, const char *text, fl
         {
             continue;
         }
+        ViewBreak(view);
         RichText_RenderParagraph(block, &doc->arena, available_width, &style, &emit);
+        ViewBreak(view);
     }
     ViewBreak(view);
 }
@@ -827,19 +841,22 @@ static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int
                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                            .clip = {.horizontal = true, .vertical = true}})
+                            .clip = {.horizontal = true, .vertical = true, .childOffset = Clay_GetScrollOffset()}})
             {
+                PicoChatSel_SetHorizontalClip(label_id, true);
                 ViewText(view, ViewCStr(label),
                          (Clay_TextElementConfig){.fontId = FONT_ITALIC,
                                                   .fontSize = PICO_FONT_UI,
                                                   .textColor = color,
                                                   .wrapMode = CLAY_TEXT_WRAP_NONE});
             }
+            PicoChatSel_SetHorizontalClip((Clay_ElementId){0}, false);
             CLAY(ThinkChevronId(view, message_index, trace_index),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_GROW(0)}}})
             {
             }
         }
+        ViewBreak(view);
         if (line->expanded)
         {
             RenderThinkBody(view, line, available_width);
@@ -862,14 +879,16 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                            .clip = {.horizontal = true, .vertical = true}})
+                            .clip = {.horizontal = true, .vertical = true, .childOffset = Clay_GetScrollOffset()}})
             {
+                PicoChatSel_SetHorizontalClip(label_id, true);
                 ViewText(view, ViewCStr("Thinking…"),
                          (Clay_TextElementConfig){.fontId = FONT_ITALIC,
                                                   .fontSize = PICO_FONT_UI,
                                                   .textColor = COLOR_MUTED,
                                                   .wrapMode = CLAY_TEXT_WRAP_NONE});
             }
+            PicoChatSel_SetHorizontalClip((Clay_ElementId){0}, false);
             CLAY(ThinkSynthChevronId(view, message_index),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_GROW(0)}}})
             {
@@ -1067,14 +1086,16 @@ static void RenderTraceGroupHeader(const TranscriptView *view, PicoMessage *msg,
                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             CLAY(label_id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                            .clip = {.horizontal = true, .vertical = true}})
+                            .clip = {.horizontal = true, .vertical = true, .childOffset = Clay_GetScrollOffset()}})
             {
+                PicoChatSel_SetHorizontalClip(label_id, true);
                 ViewText(view, ViewCStr(ThinkLabelDup(title)),
                          (Clay_TextElementConfig){.fontId = FONT_ITALIC,
                                                   .fontSize = PICO_FONT_UI,
                                                   .textColor = color,
                                                   .wrapMode = CLAY_TEXT_WRAP_NONE});
             }
+            PicoChatSel_SetHorizontalClip((Clay_ElementId){0}, false);
             CLAY(TraceGroupChevronId(view, message_index),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(14), .height = CLAY_SIZING_GROW(0)}}})
             {
@@ -1262,6 +1283,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
             }
         }
+        ViewBreak(view);
         if (subagent && !line->tool_output && !line->tool_streaming)
         {
             const char *activity = ToolProgress(view, line) == PICO_TOOL_CALL_QUEUED
@@ -1712,6 +1734,8 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         hash = RevisionMix(hash, (uint64_t)line->child_id);
         hash = RevisionMix(hash, line->is_tool ? 1 : 0);
         hash = RevisionMix(hash, line->tool_error ? 1 : 0);
+        hash = RevisionMix(hash, line->tool_streaming ? 1 : 0);
+        hash = RevisionMix(hash, (uint64_t)line->tool_stream_bytes);
         hash = RevisionMix(hash, line->expanded ? 1 : 0);
         hash = RevisionMix(hash, (uint64_t)ToolProgress(view, line));
         /* Offscreen messages must be measured again when a completed row
@@ -1877,6 +1901,8 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
     PicoTranscriptVirtual_Plan(cache, scroll_top, viewport,
                                viewport * TRANSCRIPT_OVERSCAN_VIEWPORTS,
                                force_index, TRANSCRIPT_MESSAGE_GAP);
+
+    if (view->selectable) PicoChatFind_MountTargets(view->app, cache, TRANSCRIPT_MESSAGE_GAP);
 
     int skipped = -1;
     for (int i = 0; i < view->message_count; i++)
@@ -2104,7 +2130,9 @@ void PicoChat_Render(PicoHost *app, void *state)
     }
     app->hovered_tool = false;
     ThinkFrameReset();
+    PicoChatFind_Sync(app);
     PicoChatSel_BeginFrame(active ? active->message_count : 0);
+    PicoChatSel_SetSearch(&app->find.search);
     CLAY(CLAY_ID("ChatRow"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
@@ -2856,7 +2884,7 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
     InspectHandlePointer(app);
     InspectFollowScroll();
     PicoChatSel_Clamp(app);
-    if (app->status_warn || PicoUi_ModalOpen(app))
+    if (app->status_warn || PicoUi_ModalOpen(app) || PicoChatFind_PointerOver(app))
     {
         return;
     }
@@ -3497,6 +3525,7 @@ void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state
     }
     if (!PicoUi_ModalOpen(app))
     {
+        PicoChatFind_DrawMatches(app);
         PicoChatSel_DrawOverlay(app);
         PicoChat_DrawThinkSheen(app);
     }
@@ -3551,6 +3580,7 @@ static void ChatShutdown(PicoHost *app, void *state)
     }
     s_active_chat_state = s;
     ThinkFrameFree();
+    PicoChatSel_Free();
     PicoTranscriptVirtual_Free(&s->main_virtual);
     PicoTranscriptVirtual_Free(&s->inspect_virtual);
     ToolWrapCacheSet_Free(&s->main_tool_wrap);

@@ -1643,7 +1643,7 @@ static void PasteClipboard(PicoComposer *c)
 void PicoComposer_HandleInput(PicoHost *app)
 {
     s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || PicoUi_ModalOpen(app))
+    if (!s_active_composer_state || PicoUi_ModalOpen(app) || PicoChatFind_BlocksInput(app))
     {
         return;
     }
@@ -1918,6 +1918,7 @@ static bool ComposerHandleAttachPointer(void)
 
 void PicoComposer_HandlePointer(PicoHost *app)
 {
+    if (PicoChatFind_PointerOver(app)) return;
     s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
     if (!s_active_composer_state)
     {

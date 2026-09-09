@@ -7946,6 +7946,30 @@ static int TestSelectClearsUnseenComplete(void)
     return 0;
 }
 
+/* Restart checks run in the same process. Finish their asynchronous writes
+ * outside the production shutdown budget: slow build storage must not turn a
+ * persistence assertion into a terminal, retained-host shutdown. */
+static bool ShutdownAfterSessionPersist(PicoHost *host, PicoAgent *agent)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 10;
+    bool session_drained = PicoSession_DrainPersistBefore(host, agent, &deadline);
+    bool catalog_drained = PicoCatalog_DrainOrderPersistBefore(host, &deadline);
+    PicoHostShutdownResult shutdown = pico_host_free(host);
+    if (!session_drained || !catalog_drained)
+    {
+        Fail("restart test persistence must drain before shutdown");
+        return false;
+    }
+    if (shutdown != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        Fail("restart test shutdown must complete cleanly");
+        return false;
+    }
+    return true;
+}
+
 static int TestUnseenCompletePersistsAcrossRestart(void)
 {
     char dir[] = "/tmp/pico-ws-done-XXXXXX";
@@ -8009,7 +8033,12 @@ static int TestUnseenCompletePersistsAcrossRestart(void)
     }
     snprintf(session_id, sizeof(session_id), "%s", agent->session_id);
     PicoSession_SetUnseenComplete(host, agent, true);
-    pico_host_free(host);
+    if (!ShutdownAfterSessionPersist(host, agent))
+    {
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
     host = NULL;
 
     catalog_n = PicoCatalog_Scan(&catalog);
@@ -8090,7 +8119,13 @@ static int TestUnseenCompletePersistsAcrossRestart(void)
         unsetenv("XDG_CONFIG_HOME");
         return 1;
     }
-    pico_host_free(host);
+    if (!ShutdownAfterSessionPersist(host, agent))
+    {
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
+    }
+    host = NULL;
     catalog = NULL;
     catalog_done = false;
     catalog_n = PicoCatalog_Scan(&catalog);

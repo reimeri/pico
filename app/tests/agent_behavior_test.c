@@ -28,6 +28,7 @@ typedef enum TestMode {
     TEST_BATCH_TOOLS,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
+    TEST_PROVIDER_STATUS_BLOCK,
     TEST_PROVIDER_THINK_FAIL,
     TEST_PROVIDER_TEXT_FAIL,
     TEST_PROVIDER_TEXT_BLOCK,
@@ -452,11 +453,14 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         }
         return PICO_LLM_CANCEL;
     }
-    if (mode == TEST_PROVIDER_THINK_BLOCK)
+    if (mode == TEST_PROVIDER_THINK_BLOCK || mode == TEST_PROVIDER_STATUS_BLOCK)
     {
         if (on_delta)
         {
-            FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
+            if (mode == TEST_PROVIDER_STATUS_BLOCK)
+                FakeDelta(on_delta, user, PICO_LLM_DELTA_STATUS, "retry pending", 13);
+            else
+                FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "partial-think", 13);
         }
         pthread_mutex_lock(&g_test.mu);
         g_test.block_entered = true;
@@ -4249,6 +4253,33 @@ static int TestFailedStreamPersistence(TestMode mode)
     return logged && history ? 0 : Fail(name, "partial output was not saved exactly once and retained for continuation");
 }
 
+static int TestProviderStatus(void)
+{
+    const char *name = "ephemeral provider status";
+    ResetTest(TEST_PROVIDER_STATUS_BLOCK, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    bool ok = WaitForBlock(&app);
+    PicoAgent_Pump(&app, agent);
+    ok &= strcmp(agent->activity, "retry pending") == 0;
+    PicoAgent_Cancel(agent);
+    ok &= WaitForIdle(&app);
+    ok &= !agent->activity[0] && !strstr(g_test.logged_content, "retry pending") &&
+          !strstr(g_test.logged_thinking, "retry pending");
+    pthread_mutex_lock(&g_test.mu);
+    g_test.mode = TEST_SINGLE;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_StartTurn(&app, agent, "continue");
+    ok &= WaitForIdle(&app);
+    pthread_mutex_lock(&g_test.mu);
+    ok &= g_test.last_input && !strstr(g_test.last_input, "retry pending");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "status was not visible, cleared, or excluded from history");
+}
+
 static int TestCancelledThinkingPersistence(void)
 {
     const char *name = "cancelled thinking persistence";
@@ -4732,6 +4763,7 @@ int main(void)
     failed |= TestNonVisionMediaRejected();
     failed |= TestFailedStreamPersistence(TEST_PROVIDER_THINK_FAIL);
     failed |= TestFailedStreamPersistence(TEST_PROVIDER_TEXT_FAIL);
+    failed |= TestProviderStatus();
     failed |= TestCancelledThinkingPersistence();
     failed |= TestStreamingTextActivity();
     failed |= TestThinkSummaryCoalesce();

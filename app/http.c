@@ -13,6 +13,37 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
+#include <errno.h>
+
+/* Never replay after headers (including redirects/interim responses) or body. */
+static CURLcode PerformWithRetries(CURL *curl, bool *received, PicoHttpCancelFn cancel,
+                                   PicoHttpRetryFn notify, void *user, char *error)
+{
+    const int max_retries = 5;
+    for (int attempt = 0;; attempt++)
+    {
+        if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+        error[0] = '\0';
+        CURLcode rc = curl_easy_perform(curl);
+        if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+        bool transient = rc == CURLE_SSL_CONNECT_ERROR || rc == CURLE_COULDNT_RESOLVE_HOST ||
+                         rc == CURLE_COULDNT_RESOLVE_PROXY || rc == CURLE_COULDNT_CONNECT;
+        if (!transient || *received || attempt == max_retries) return rc;
+        int delay = 1 << attempt;
+        const char *reason = error[0] ? error : curl_easy_strerror(rc);
+        if (notify) notify(user, attempt + 1, max_retries, delay, reason);
+        for (int tick = 0; tick < delay * 10; tick++)
+        {
+            if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+            struct timespec remaining = {.tv_nsec = 100000000};
+            while (nanosleep(&remaining, &remaining) && errno == EINTR)
+                if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+        }
+        if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+        if (notify) notify(user, attempt + 1, max_retries, 0, reason);
+    }
+}
 
 typedef struct HttpCtx
 {
@@ -29,6 +60,7 @@ typedef struct HttpCtx
     bool json_abort;
     bool buffer_failed;
     PicoHttpCapture capture;
+    bool received;
 } HttpCtx;
 
 static bool Cancelled(HttpCtx *c)
@@ -101,6 +133,7 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     HttpCtx *c = userdata;
     size_t n = size * nmemb;
+    c->received |= n != 0;
     if (n >= 5 && memcmp(ptr, "HTTP/", 5) == 0)
     {
         /* A redirect or interim response must not determine the final framing. */
@@ -130,6 +163,7 @@ static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     HttpCtx *c = userdata;
     size_t n = size * nmemb;
+    c->received |= n != 0;
     PicoHttpCapture_Write(&c->capture, ptr, n);
     if (Cancelled(c))
         return 0;
@@ -259,7 +293,10 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
 
-    CURLcode rc = curl_easy_perform(curl);
+    char error[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
+    CURLcode rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
+                                     req->user, error);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -293,7 +330,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
         outcome = "http_error";
     }
     PicoHttpCapture_Finish(&ctx.capture, req->url, http, outcome, (int)rc,
-                           rc == CURLE_OK ? "" : curl_easy_strerror(rc));
+                           rc == CURLE_OK ? "" : (error[0] ? error : curl_easy_strerror(rc)));
     JsonBuf_Free(&ctx.acc);
     JsonBuf_Free(&ctx.data);
 
@@ -311,7 +348,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     {
         if (out_error)
         {
-            *out_error = JsonDup(curl_easy_strerror(rc));
+            *out_error = JsonDup(error[0] ? error : curl_easy_strerror(rc));
         }
         return PICO_HTTP_FAIL;
     }
@@ -323,6 +360,7 @@ typedef struct BodyCtx
     PicoHttpCancelFn cancel;
     void *user;
     JsonBuf acc;
+    bool received;
 } BodyCtx;
 
 static bool BodyCancelled(BodyCtx *c)
@@ -334,12 +372,22 @@ static size_t OnBody(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     BodyCtx *c = (BodyCtx *)userdata;
     size_t n = size * nmemb;
+    c->received |= n != 0;
     if (n == 0 || BodyCancelled(c))
     {
         return 0;
     }
     JsonBuf_Append(&c->acc, ptr, n);
     return BodyCancelled(c) ? 0 : n;
+}
+
+static size_t OnBodyHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    (void)ptr;
+    BodyCtx *c = userdata;
+    size_t n = size * nmemb;
+    c->received |= n != 0;
+    return n;
 }
 
 static int OnBodyXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
@@ -415,6 +463,8 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
     }
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, OnBodyHeader);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnBody);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnBodyXfer);
@@ -424,7 +474,10 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
 
-    CURLcode rc = curl_easy_perform(curl);
+    char error[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
+    CURLcode rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
+                                     req->user, error);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -446,7 +499,7 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
         JsonBuf_Free(&ctx.acc);
         if (out_error)
         {
-            *out_error = JsonDup(curl_easy_strerror(rc));
+            *out_error = JsonDup(error[0] ? error : curl_easy_strerror(rc));
         }
         return PICO_HTTP_FAIL;
     }

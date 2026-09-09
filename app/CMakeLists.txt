@@ -230,7 +230,7 @@ if(BUILD_TESTING)
     target_link_libraries(pico_http_tests PRIVATE CURL::libcurl Threads::Threads)
     pico_warnings_are_errors(pico_http_tests)
     add_test(NAME pico_http_tests COMMAND pico_http_tests)
-    set_tests_properties(pico_http_tests PROPERTIES TIMEOUT 15)
+    set_tests_properties(pico_http_tests PROPERTIES TIMEOUT 90)
 
     add_executable(pico_http_capture_tests
         tests/http_capture_test.c

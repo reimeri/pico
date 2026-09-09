@@ -319,6 +319,7 @@ typedef bool (*PicoLlmCancelFn)(void *user);
 
 typedef enum PicoLlmDeltaKind {
     PICO_LLM_DELTA_TEXT = 0,
+    PICO_LLM_DELTA_STATUS, /* replaces ephemeral activity; never transcript content */
     PICO_LLM_DELTA_THINKING,
     PICO_LLM_DELTA_THINKING_SUMMARY,
     PICO_LLM_DELTA_TOOL_CALL_BEGIN, /* tool name known; arguments still streaming */
@@ -327,7 +328,7 @@ typedef enum PicoLlmDeltaKind {
 
 typedef struct PicoLlmDelta {
     PicoLlmDeltaKind kind;
-    const char *text;     /* payload for TEXT/THINKING/THINKING_SUMMARY/TOOL_CALL_ARGS */
+    const char *text;     /* payload for STATUS/TEXT/THINKING/THINKING_SUMMARY/TOOL_CALL_ARGS */
     size_t len;
     int call_index;       /* tool-call deltas: provider wire index, -1 otherwise */
     const char *call_id;  /* TOOL_CALL_BEGIN: NULL until the provider sends it */

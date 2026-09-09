@@ -1261,6 +1261,21 @@ bool pico_responses_feed(PicoResponsesCtx *c, const char *json, size_t len)
     return HandleJson(c, NULL, json, len);
 }
 
+static void HandleRetry(void *user, int retry, int max_retries, int delay, const char *error)
+{
+    (void)error;
+    PicoResponsesCtx *c = user;
+    if (!c->on_delta) return;
+    char status[128];
+    if (delay)
+        snprintf(status, sizeof(status), "Connection failed — retry %d/%d in %ds", retry, max_retries, delay);
+    else
+        snprintf(status, sizeof(status), "Connecting — retry %d/%d…", retry, max_retries);
+    PicoLlmDelta delta = {.kind = PICO_LLM_DELTA_STATUS, .text = status,
+                          .len = strlen(status), .call_index = -1};
+    c->on_delta(c->user, &delta);
+}
+
 int pico_responses_post(const char *url, const char *body, const char *bearer,
                         const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoResponsesCtx *ctx)
@@ -1281,6 +1296,7 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
     req.body = body;
     req.cancel = HandleCancel;
     req.on_json = HandleJson;
+    req.on_retry = HandleRetry;
     req.user = ctx;
     req.headers[req.header_count++] = "Content-Type: application/json";
     req.headers[req.header_count++] = "Accept: text/event-stream";

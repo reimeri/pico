@@ -865,6 +865,12 @@ static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int
     ViewBreak(view);
 }
 
+static const char *LiveProviderLabel(const TranscriptView *view)
+{
+    const char *activity = view->owner ? view->owner->activity : view->activity;
+    return activity && activity[0] ? activity : "Thinking…";
+}
+
 static void RenderSyntheticThink(const TranscriptView *view, int message_index)
 {
     Clay_ElementId row_id = ThinkSynthRowId(view, message_index);
@@ -882,7 +888,7 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
                             .clip = {.horizontal = true, .vertical = true, .childOffset = Clay_GetScrollOffset()}})
             {
                 PicoChatSel_SetHorizontalClip(label_id, true);
-                ViewText(view, ViewCStr("Thinking…"),
+                ViewText(view, ViewCStr(LiveProviderLabel(view)),
                          (Clay_TextElementConfig){.fontId = FONT_ITALIC,
                                                   .fontSize = PICO_FONT_UI,
                                                   .textColor = COLOR_MUTED,
@@ -3465,7 +3471,7 @@ static void PicoChat_DrawThinkSheen(PicoHost *app)
                             ThinkHeaderText(line, true));
         return;
     }
-    DrawThinkSheenLabel(ThinkSynthId(&main, last), scroll.boundingBox, "Thinking…");
+    DrawThinkSheenLabel(ThinkSynthId(&main, last), scroll.boundingBox, LiveProviderLabel(&main));
 }
 
 static void PicoChat_DrawInspectSheen(PicoHost *app)
@@ -3512,7 +3518,7 @@ static void PicoChat_DrawInspectSheen(PicoHost *app)
                             ThinkHeaderText(&msg->trace[t], true));
         return;
     }
-    DrawThinkSheenLabel(ThinkSynthId(&view, last), clip, "Thinking…");
+    DrawThinkSheenLabel(ThinkSynthId(&view, last), clip, LiveProviderLabel(&view));
 }
 
 void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)

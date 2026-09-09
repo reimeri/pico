@@ -164,6 +164,8 @@ struct PicoAgentRt {
     void *work_stream_state;
 
     char *stream;
+    char provider_status[256];
+    bool provider_status_dirty;
     size_t stream_len;
     size_t stream_cap;
     char *think;
@@ -634,6 +636,20 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
     const char *s = delta->text;
     size_t n = delta->len;
     pthread_mutex_lock(&rt->mu);
+    if (kind == PICO_LLM_DELTA_STATUS)
+    {
+        size_t len = s ? (n < sizeof(rt->provider_status) - 1 ? n : sizeof(rt->provider_status) - 1) : 0;
+        if (len) memcpy(rt->provider_status, s, len);
+        rt->provider_status[len] = '\0';
+        rt->provider_status_dirty = true;
+        pthread_mutex_unlock(&rt->mu);
+        return;
+    }
+    if (rt->provider_status[0])
+    {
+        rt->provider_status[0] = '\0';
+        rt->provider_status_dirty = true;
+    }
     if (kind == PICO_LLM_DELTA_TOOL_CALL_BEGIN)
     {
         PicoProvStream *entry = ProvStreamFor(rt, delta->call_index);
@@ -1175,6 +1191,8 @@ static void *WorkerMain(void *arg)
         if (kind == PICO_WORK_LLM)
         {
             pthread_mutex_lock(&rt->mu);
+            rt->provider_status[0] = '\0';
+            rt->provider_status_dirty = false;
             free(rt->summary);
             rt->summary = NULL;
             rt->summary_len = 0;
@@ -4144,6 +4162,10 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     if (agent->runtime != rt) return;
 
     pthread_mutex_lock(&rt->mu);
+    char provider_status[256];
+    memcpy(provider_status, rt->provider_status, sizeof(provider_status));
+    bool status_dirty = rt->provider_status_dirty;
+    rt->provider_status_dirty = false;
     char *stream = rt->stream;
     size_t stream_len = rt->stream_len;
     rt->stream = NULL;
@@ -4228,6 +4250,9 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
         }
     }
     pthread_mutex_unlock(&rt->mu);
+
+    if (status_dirty && agent->state == PICO_AGENT_LLM_WAIT)
+        SetActivity(app, agent, provider_status[0] ? provider_status : "Thinking…");
 
     if (stream && stream_len && rt->stream_msg >= 0)
     {

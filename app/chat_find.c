@@ -330,7 +330,7 @@ void PicoChatFind_HandleInput(PicoHost *app)
 static void Button(const char *id, const char *label, bool enabled)
 {
     Clay_ElementId element = Clay_GetElementId(String(id));
-    Clay_Color background = enabled && Clay_PointerOver(element) ? COLOR_CODE_BG : COLOR_CONTENT_BG;
+    Clay_Color background = enabled && Clay_PointerOver(element) ? COLOR_CODE_BG : COLOR_COMPOSER_BG;
     CLAY(element, {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(28), .height = CLAY_SIZING_FIXED(28)},
                               .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
                    .backgroundColor = background, .cornerRadius = CLAY_CORNER_RADIUS(4)})
@@ -363,8 +363,7 @@ void PicoChatFind_Render(PicoHost *app)
           .layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .padding = CLAY_PADDING_ALL(6), .childGap = 4,
                      .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(40)},
                      .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}},
-          .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(6),
-          .border = {.color = COLOR_MUTED, .width = CLAY_BORDER_OUTSIDE(1)}})
+          .backgroundColor = COLOR_COMPOSER_BG, .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY(CLAY_ID("ChatFindInput"),
              {.layout = {.padding = {6, 6, 0, 0},

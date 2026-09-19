@@ -5,7 +5,7 @@
 #include "json.h"
 
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.2.4"
+#define PICO_VERSION "0.2.5"
 #endif
 
 #include <curl/curl.h>
@@ -23,25 +23,33 @@ static CURLcode PerformWithRetries(CURL *curl, bool *received, PicoHttpCancelFn 
     const int max_retries = 5;
     for (int attempt = 0;; attempt++)
     {
-        if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+        if (cancel && cancel(user))
+            return CURLE_ABORTED_BY_CALLBACK;
         error[0] = '\0';
         CURLcode rc = curl_easy_perform(curl);
-        if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+        if (cancel && cancel(user))
+            return CURLE_ABORTED_BY_CALLBACK;
         bool transient = rc == CURLE_SSL_CONNECT_ERROR || rc == CURLE_COULDNT_RESOLVE_HOST ||
                          rc == CURLE_COULDNT_RESOLVE_PROXY || rc == CURLE_COULDNT_CONNECT;
-        if (!transient || *received || attempt == max_retries) return rc;
+        if (!transient || *received || attempt == max_retries)
+            return rc;
         int delay = 1 << attempt;
         const char *reason = error[0] ? error : curl_easy_strerror(rc);
-        if (notify) notify(user, attempt + 1, max_retries, delay, reason);
+        if (notify)
+            notify(user, attempt + 1, max_retries, delay, reason);
         for (int tick = 0; tick < delay * 10; tick++)
         {
-            if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+            if (cancel && cancel(user))
+                return CURLE_ABORTED_BY_CALLBACK;
             struct timespec remaining = {.tv_nsec = 100000000};
             while (nanosleep(&remaining, &remaining) && errno == EINTR)
-                if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
+                if (cancel && cancel(user))
+                    return CURLE_ABORTED_BY_CALLBACK;
         }
-        if (cancel && cancel(user)) return CURLE_ABORTED_BY_CALLBACK;
-        if (notify) notify(user, attempt + 1, max_retries, 0, reason);
+        if (cancel && cancel(user))
+            return CURLE_ABORTED_BY_CALLBACK;
+        if (notify)
+            notify(user, attempt + 1, max_retries, 0, reason);
     }
 }
 

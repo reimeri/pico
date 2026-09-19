@@ -109,6 +109,10 @@ ARCH=x86_64 LDAI_OUTPUT="$output" LDAI_NO_APPSTREAM=1 \
     "${dependency_args[@]}" \
     --output appimage
 
+if ! find "$appdir/usr/lib" -maxdepth 1 -name 'libcrypto.so*' -print -quit | grep -q .; then
+    echo "AppImage is missing the OpenSSL Crypto runtime" >&2
+    exit 1
+fi
 for soname in "${required_sonames[@]}"; do
     if [[ ! -f "$appdir/usr/lib/$soname" ]]; then
         echo "AppImage is missing dlopen dependency $soname" >&2

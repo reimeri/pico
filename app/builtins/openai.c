@@ -5,9 +5,16 @@
 #include "pico/auth.h"
 #include "json.h"
 #include "builtins/responses.h"
+#include "builtins/openai_auth.h"
 #include "host_internal.h"
 
 #include <pthread.h>
+#include <errno.h>
+#include <openssl/crypto.h>
+#include <poll.h>
+#include <strings.h>
+#include <limits.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,105 +40,107 @@ static char *BuildRequest(const PicoLlmTurn *turn, bool codex)
     return pico_responses_build_request(turn, &opts);
 }
 
-/* Device-code polling runs on its own thread: every request is a blocking curl
- * call, and the render loop cannot afford to stall on the network. The thread
- * only touches the auth store (mutex-guarded) and this struct; user-visible text
- * is queued here and emitted by the render thread in OpenAiFrame. */
-#define PICO_DEVICE_MAX_NOTES 8
-#define PICO_DEVICE_TIMEOUT_SEC 900
+/* A host-tracked task owns each attempt independently of extension generations.
+ * Workers only touch their attempt; main-thread on_frame owns UI and auth writes. */
+#define PICO_LOGIN_MAX_NOTES 8
+#define PICO_LOGIN_TIMEOUT_SEC 900
 #define PICO_DEVICE_MAX_TRANSPORT_FAILS 5
 
-typedef struct DeviceLogin {
+typedef struct LoginAttempt {
     pthread_mutex_t mu;
-    pthread_t thread;
-    bool joinable;
-    bool running;
+    unsigned refs; /* Host registration + core-owned task. Guarded by mu. */
+    bool done;
     bool cancel;
+    bool browser;
+    double deadline;
+    int wake[2];
     PicoAgentId agent_id;
-    char *notes[PICO_DEVICE_MAX_NOTES];
+    char *notes[PICO_LOGIN_MAX_NOTES];
     int note_count;
-} DeviceLogin;
+    char *authorize_url;
+    char *token_body;
+} LoginAttempt;
 
 typedef struct HostAuthState {
     PicoHost *host;
-    DeviceLogin login;
+    LoginAttempt *login; /* Main-thread-only; NULL invalidates all pending events. */
 } HostAuthState;
 
-static void LoginNote(HostAuthState *s, const char *text)
+static void FreeSecret(char *value)
 {
-    if (!s || !text || !text[0])
+    if (value) OPENSSL_cleanse(value, strlen(value));
+    free(value);
+}
+
+static void ReleaseLogin(void *user)
+{
+    LoginAttempt *login = user;
+    pthread_mutex_lock(&login->mu);
+    bool last = --login->refs == 0;
+    pthread_mutex_unlock(&login->mu);
+    if (!last) return;
+    for (int i = 0; i < login->note_count; i++) free(login->notes[i]);
+    free(login->authorize_url);
+    FreeSecret(login->token_body);
+    close(login->wake[0]);
+    close(login->wake[1]);
+    pthread_mutex_destroy(&login->mu);
+    free(login);
+}
+
+static void LoginNote(LoginAttempt *login, const char *text)
+{
+    if (!text || !text[0]) return;
+    pthread_mutex_lock(&login->mu);
+    if (!login->cancel && login->note_count < PICO_LOGIN_MAX_NOTES)
     {
-        return;
+        char *copy = JsonDup(text);
+        if (copy) login->notes[login->note_count++] = copy;
     }
-    pthread_mutex_lock(&s->login.mu);
-    if (s->login.note_count < PICO_DEVICE_MAX_NOTES)
-    {
-        s->login.notes[s->login.note_count] = JsonDup(text);
-        if (s->login.notes[s->login.note_count])
-        {
-            s->login.note_count++;
-        }
-    }
-    pthread_mutex_unlock(&s->login.mu);
+    pthread_mutex_unlock(&login->mu);
 }
 
 static bool LoginCancelled(void *user)
 {
-    HostAuthState *s = (HostAuthState *)user;
-    if (!s)
-    {
-        return false;
-    }
-    pthread_mutex_lock(&s->login.mu);
-    bool c = s->login.cancel;
-    pthread_mutex_unlock(&s->login.mu);
-    return c;
+    LoginAttempt *login = user;
+    pthread_mutex_lock(&login->mu);
+    bool cancelled = login->cancel;
+    pthread_mutex_unlock(&login->mu);
+    return cancelled || pico_openai_monotonic() >= login->deadline;
 }
 
-static bool LoginActive(HostAuthState *s)
+static void CancelLogin(void *user)
 {
-    if (!s)
-    {
-        return false;
-    }
-    pthread_mutex_lock(&s->login.mu);
-    bool r = s->login.running;
-    pthread_mutex_unlock(&s->login.mu);
-    return r;
+    LoginAttempt *login = user;
+    pthread_mutex_lock(&login->mu);
+    login->cancel = true;
+    /* Pipe stays alive until both task and registration release the attempt. */
+    ssize_t rc;
+    do { rc = write(login->wake[1], "x", 1); } while (rc < 0 && errno == EINTR);
+    pthread_mutex_unlock(&login->mu);
 }
 
-/* Sleeps in short slices so `/login openai cancel` and shutdown are not held up by the
- * poll interval. */
-static bool LoginSleep(HostAuthState *s, int seconds)
+static bool LoginSleep(LoginAttempt *login, int seconds)
 {
-    for (int i = 0; i < seconds * 5; i++)
+    double until = pico_openai_monotonic() + seconds;
+    while (!LoginCancelled(login))
     {
-        if (LoginCancelled(s))
-        {
-            return false;
-        }
-        struct timespec ts = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
-        nanosleep(&ts, NULL);
+        double remaining = until - pico_openai_monotonic();
+        if (remaining <= 0) return true;
+        struct pollfd wake = {.fd = login->wake[0], .events = POLLIN};
+        int rc = poll(&wake, 1, remaining >= 0.1 ? 100 : (int)(remaining * 1000) + 1);
+        if (rc > 0 || (rc < 0 && errno != EINTR)) return false;
     }
-    return !LoginCancelled(s);
+    return false;
 }
 
-static void StopDeviceLogin(HostAuthState *s)
+static void StopLogin(HostAuthState *s)
 {
-    if (!s)
-    {
-        return;
-    }
-    pthread_mutex_lock(&s->login.mu);
-    s->login.cancel = true;
-    bool joinable = s->login.joinable;
-    pthread_t t = s->login.thread;
-    s->login.joinable = false;
-    pthread_mutex_unlock(&s->login.mu);
-    if (joinable)
-    {
-        pthread_join(t, NULL);
-    }
+    LoginAttempt *login = s->login;
+    s->login = NULL;
+    if (!login) return;
+    CancelLogin(login);
+    ReleaseLogin(login);
 }
 
 static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
@@ -323,34 +332,64 @@ static char *HttpDetail(const char *body, const char *err, long http)
     return JsonDup(buf);
 }
 
+static char *TokenString(const JsonDoc *doc, const char *key)
+{
+    int tok = JsonObjGet(doc, 0, key);
+    int start = JsonTokStart(doc, tok);
+    /* JsonObjStr also converts primitives; credentials must actually be strings. */
+    if (start <= 0 || doc->src[start - 1] != '"') return NULL;
+    char *value = JsonStrDup(doc, tok);
+    if (!value || !value[0]) { free(value); return NULL; }
+    return value;
+}
+
+static long TokenExpiry(const JsonDoc *doc)
+{
+    char *raw = JsonObjRaw(doc, 0, "expires_in");
+    if (!raw || !raw[0]) { free(raw); return 0; }
+    long value = 0;
+    for (const char *p = raw; *p; p++)
+    {
+        if (*p < '0' || *p > '9' || value > (LONG_MAX - (*p - '0')) / 10)
+        {
+            free(raw);
+            return 0;
+        }
+        value = value * 10 + (*p - '0');
+    }
+    free(raw);
+    long now = (long)time(NULL);
+    return value > 0 && value <= LONG_MAX - now ? now + value : 0;
+}
+
 static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *auth,
-                           const char *body)
+                           const char *body, PicoAgentId agent_id)
 {
     JsonDoc doc;
-    if (!body || JsonParse(&doc, body, strlen(body)) != 0)
+    if (!body || !JsonValidSyntax(body, strlen(body)) || JsonParse(&doc, body, strlen(body)) != 0)
     {
         return false;
     }
-    char *access = JsonObjStr(&doc, 0, "access_token");
-    char *refresh = JsonObjStr(&doc, 0, "refresh_token");
-    char *id_token = JsonObjStr(&doc, 0, "id_token");
-    int expires_in = JsonObjInt(&doc, 0, "expires_in", 3600);
-    if (expires_in < 1)
-    {
-        expires_in = 3600;
-    }
-    bool ok = access && access[0];
+    char *access = TokenString(&doc, "access_token");
+    char *refresh = TokenString(&doc, "refresh_token");
+    char *id_token = TokenString(&doc, "id_token");
+    char *token_type = TokenString(&doc, "token_type");
+    bool type_present = JsonObjGet(&doc, 0, "token_type") >= 0;
+    long expires_at = TokenExpiry(&doc);
+    /* An initial login must be refreshable. A refresh response may omit rotation.
+     * Validate everything before changing existing credentials. */
+    bool ok = JsonIsObject(&doc, 0) && access && access[0] && expires_at > 0 &&
+              (!type_present || (token_type && strcasecmp(token_type, "Bearer") == 0)) &&
+              ((refresh && refresh[0]) || (auth && auth->refresh_token && auth->refresh_token[0]));
     if (ok)
     {
         const char *use_refresh = (refresh && refresh[0]) ? refresh : (auth ? auth->refresh_token : NULL);
         char *account = PickAccountId(access, id_token, auth ? auth->account_id : NULL);
-        long expires_at = (long)time(NULL) + expires_in;
         bool saved = ctx ? pico_auth_set_oauth_ctx(ctx, "openai", access, use_refresh, account, expires_at)
                          : pico_auth_set_oauth(app, "openai", access, use_refresh, account, expires_at);
         if (!saved && !ctx)
         {
-            HostAuthState *s = (HostAuthState *)PicoPlugins_HostState(app, "openai");
-            LoginNote(s, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
+            Note(app, agent_id, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
                          "signed in, but the login will not survive a restart.");
         }
         if (auth)
@@ -370,6 +409,7 @@ static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *
     free(access);
     free(refresh);
     free(id_token);
+    free(token_type);
     JsonFree(&doc);
     return ok;
 }
@@ -411,7 +451,7 @@ static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel 
     int rc = PostRaw(url, form, "Content-Type: application/x-www-form-urlencoded",
                      tc ? TurnCancelled : NULL, tc, &http, &body, &err);
     free(form);
-    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(NULL, ctx, auth, body);
+    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(NULL, ctx, auth, body, 0);
     free(body);
     free(err);
 
@@ -435,36 +475,34 @@ static int IntervalOf(const JsonDoc *doc, int obj)
     return v < 1 ? 5 : v;
 }
 
-static bool ExchangeDeviceCode(HostAuthState *s, const char *code, const char *verifier)
+static bool ExchangeCode(LoginAttempt *login, const char *redirect, const char *code, const char *verifier)
 {
-    PicoHost *app = s ? s->host : NULL;
-    const char *keys[] = {"grant_type", "code", "redirect_uri", "client_id", "code_verifier"};
-    char redirect[256];
-    snprintf(redirect, sizeof(redirect), "%s/deviceauth/callback", kIssuer);
-    const char *vals[] = {"authorization_code", code, redirect, kClientId, verifier};
-    char *form = pico_http_form_encode(keys, vals, 5);
+    char *form = pico_openai_code_form(kClientId, redirect, code, verifier);
+    if (!form) { LoginNote(login, "Could not prepare token exchange."); return false; }
     char url[256];
     snprintf(url, sizeof(url), "%s/oauth/token", kIssuer);
     long http = 0;
-    char *body = NULL;
-    char *err = NULL;
+    char *body = NULL, *err = NULL;
     int rc = PostRaw(url, form, "Content-Type: application/x-www-form-urlencoded", LoginCancelled,
-                     s, &http, &body, &err);
-    free(form);
-    bool ok = rc == PICO_HTTP_OK && http < 400 && ApplyTokenBody(app, NULL, NULL, body);
+                     login, &http, &body, &err);
+    FreeSecret(form);
+    bool ok = rc == PICO_HTTP_OK && http >= 200 && http < 300 && body;
     if (ok)
     {
-        LoginNote(s, "Signed in with ChatGPT. Pico will use your Codex subscription.");
+        pthread_mutex_lock(&login->mu);
+        if (!login->cancel)
+        {
+            login->token_body = body;
+            body = NULL;
+        }
+        pthread_mutex_unlock(&login->mu);
     }
     else if (rc != PICO_HTTP_CANCEL)
     {
-        char *detail = HttpDetail(body, err, http);
-        char buf[512];
-        snprintf(buf, sizeof(buf), "Token exchange failed: %s", detail ? detail : "unknown error");
-        free(detail);
-        LoginNote(s, buf);
+        /* Never put a token endpoint response (which may contain secrets) in chat. */
+        LoginNote(login, "Token exchange failed. Run `/login openai` to try again.");
     }
-    free(body);
+    FreeSecret(body);
     free(err);
     return ok;
 }
@@ -487,7 +525,7 @@ static bool IsPendingError(const char *s)
 /* Anything short of an explicit failure counts as "not approved yet". Guessing
  * wrong that way only costs another poll, whereas treating an unfamiliar pending
  * response as fatal would drop the user out of the flow entirely. */
-static DevicePoll PollDeviceOnce(HostAuthState *s, const char *device_auth_id, const char *user_code,
+static DevicePoll PollDeviceOnce(LoginAttempt *s, const char *device_auth_id, const char *user_code,
                                  char **out_code, char **out_verifier, char **out_error)
 {
     char url[256];
@@ -556,7 +594,7 @@ static DevicePoll PollDeviceOnce(HostAuthState *s, const char *device_auth_id, c
     return state;
 }
 
-static bool RequestUserCode(HostAuthState *s, char *id, size_t id_cap, char *code, size_t code_cap,
+static bool RequestUserCode(LoginAttempt *s, char *id, size_t id_cap, char *code, size_t code_cap,
                             int *interval)
 {
     char url[256];
@@ -614,7 +652,8 @@ static bool RequestUserCode(HostAuthState *s, char *id, size_t id_cap, char *cod
         free(got_code);
         got_code = JsonObjStr(&doc, 0, "usercode");
     }
-    bool ok = got_id && got_id[0] && got_code && got_code[0];
+    bool ok = got_id && got_id[0] && strlen(got_id) < id_cap &&
+              got_code && got_code[0] && strlen(got_code) < code_cap;
     if (ok)
     {
         snprintf(id, id_cap, "%s", got_id);
@@ -623,7 +662,7 @@ static bool RequestUserCode(HostAuthState *s, char *id, size_t id_cap, char *cod
     }
     else
     {
-        LoginNote(s, "Could not start device login: missing user code.");
+        LoginNote(s, "Could not start device login: missing or oversized device code.");
     }
     free(got_id);
     free(got_code);
@@ -633,143 +672,182 @@ static bool RequestUserCode(HostAuthState *s, char *id, size_t id_cap, char *cod
     return ok;
 }
 
-static void *DeviceLoginMain(void *arg)
+static void DeviceLoginRun(LoginAttempt *login)
 {
-    HostAuthState *s = (HostAuthState *)arg;
-    if (!s)
-    {
-        return NULL;
-    }
     char device_auth_id[128] = {0};
     char user_code[64] = {0};
     int interval = 5;
-    if (RequestUserCode(s, device_auth_id, sizeof(device_auth_id), user_code, sizeof(user_code), &interval))
+    if (!RequestUserCode(login, device_auth_id, sizeof(device_auth_id), user_code, sizeof(user_code), &interval)) return;
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Sign in at %s/codex/device\nEnter code: `%s`\n\nThe code expires in %d minutes. "
+             "`/login openai cancel` to stop.", kIssuer, user_code, PICO_LOGIN_TIMEOUT_SEC / 60);
+    LoginNote(login, msg);
+    int fails = 0;
+    while (LoginSleep(login, interval))
     {
-        char msg[512];
-        snprintf(msg, sizeof(msg),
-                 "Sign in at %s/codex/device\nEnter code: `%s`\n\nThe code expires in %d minutes. "
-                 "`/login openai cancel` to stop.",
-                 kIssuer, user_code, PICO_DEVICE_TIMEOUT_SEC / 60);
-        LoginNote(s, msg);
-
-        time_t deadline = time(NULL) + PICO_DEVICE_TIMEOUT_SEC;
-        int fails = 0;
-        while (LoginSleep(s, interval))
+        char *code = NULL, *verifier = NULL, *error = NULL;
+        DevicePoll result = PollDeviceOnce(login, device_auth_id, user_code, &code, &verifier, &error);
+        bool keep_polling = result == DEVICE_PENDING;
+        if (result == DEVICE_READY)
         {
-            if (time(NULL) >= deadline)
-            {
-                LoginNote(s, "Device login timed out. Run `/login openai` to try again.");
-                break;
-            }
-            char *code = NULL;
-            char *verifier = NULL;
-            char *error = NULL;
-            DevicePoll state = PollDeviceOnce(s, device_auth_id, user_code, &code, &verifier, &error);
-            bool keep_polling = state == DEVICE_PENDING;
-            if (state == DEVICE_READY)
-            {
-                ExchangeDeviceCode(s, code, verifier);
-            }
-            else if (state == DEVICE_PENDING)
-            {
-                fails = 0;
-            }
-            else if (state == DEVICE_UNREACHABLE && ++fails < PICO_DEVICE_MAX_TRANSPORT_FAILS)
-            {
-                /* The user may already have entered the code, so ride out a few
-                 * dropped requests rather than abandoning the login. */
-                keep_polling = true;
-            }
-            else if (state == DEVICE_UNREACHABLE || state == DEVICE_FAILED)
-            {
-                char buf[512];
-                snprintf(buf, sizeof(buf), "Device login failed: %s", error ? error : "unknown error");
-                LoginNote(s, buf);
-            }
-            free(code);
-            free(verifier);
-            free(error);
-            if (!keep_polling)
-            {
-                break;
-            }
+            char redirect[256];
+            snprintf(redirect, sizeof(redirect), "%s/deviceauth/callback", kIssuer);
+            ExchangeCode(login, redirect, code, verifier);
         }
+        else if (result == DEVICE_PENDING) fails = 0;
+        else if (result == DEVICE_UNREACHABLE && ++fails < PICO_DEVICE_MAX_TRANSPORT_FAILS) keep_polling = true;
+        else if (result == DEVICE_UNREACHABLE || result == DEVICE_FAILED)
+        {
+            LoginNote(login, "Device login failed. Run `/login openai device` to try again.");
+        }
+        FreeSecret(code);
+        FreeSecret(verifier);
+        free(error);
+        if (!keep_polling) break;
     }
-    pthread_mutex_lock(&s->login.mu);
-    s->login.running = false;
-    pthread_mutex_unlock(&s->login.mu);
+}
+
+static void BrowserLoginRun(LoginAttempt *login)
+{
+    PicoOpenAiPkce pkce;
+    if (!pico_openai_pkce_generate(&pkce))
+    {
+        LoginNote(login, "Could not generate secure OAuth login material. Login was not started.");
+        return;
+    }
+    const unsigned short ports[] = {1455, 1457};
+    unsigned short port = 0;
+    int listener = pico_openai_listen(ports, sizeof(ports) / sizeof(ports[0]), &port);
+    if (listener < 0)
+    {
+        LoginNote(login, errno == EADDRINUSE ?
+                  "Browser login needs a local callback, but ports 1455 and 1457 are occupied. "
+                  "Close the other login attempt and retry, or use `/login openai device`." :
+                  "Could not start the local login callback listener. Retry or use `/login openai device`.");
+        OPENSSL_cleanse(&pkce, sizeof(pkce));
+        return;
+    }
+    char redirect[128];
+    snprintf(redirect, sizeof(redirect), "http://localhost:%u/auth/callback", (unsigned)port);
+    char *url = pico_openai_authorize_url(kIssuer, kClientId, redirect, &pkce);
+    if (!url)
+    {
+        LoginNote(login, "Could not prepare browser login.");
+        close(listener);
+        OPENSSL_cleanse(&pkce, sizeof(pkce));
+        return;
+    }
+    pthread_mutex_lock(&login->mu);
+    if (!login->cancel) { login->authorize_url = url; url = NULL; }
+    pthread_mutex_unlock(&login->mu);
+    free(url);
+    char *code = NULL;
+    PicoOpenAiCallback result = pico_openai_await_callback(listener, login->wake[0], login->deadline,
+                                                           pkce.state, LoginCancelled, login, &code);
+    close(listener);
+    if (result == PICO_OPENAI_CALLBACK_CODE && !LoginCancelled(login))
+        ExchangeCode(login, redirect, code, pkce.verifier);
+    else if (result == PICO_OPENAI_CALLBACK_DENIED)
+        LoginNote(login, "OpenAI did not authorize sign-in. Run `/login openai` to try again.");
+    else if (result == PICO_OPENAI_CALLBACK_FAILED)
+        LoginNote(login, "The local login callback failed. Retry or use `/login openai device`.");
+    FreeSecret(code);
+    OPENSSL_cleanse(&pkce, sizeof(pkce));
+}
+
+static void *LoginMain(void *user)
+{
+    LoginAttempt *login = user;
+    if (login->browser) BrowserLoginRun(login);
+    else DeviceLoginRun(login);
+    if (pico_openai_monotonic() >= login->deadline)
+        LoginNote(login, login->browser ? "Browser login timed out. Run `/login openai` to try again." :
+                                         "Device login timed out. Run `/login openai device` to try again.");
+    pthread_mutex_lock(&login->mu);
+    login->done = true;
+    pthread_mutex_unlock(&login->mu);
     return NULL;
 }
 
-static void StartDeviceLogin(HostAuthState *s, PicoAgentId agent_id)
+static void StartLogin(HostAuthState *s, PicoAgentId agent_id, bool browser)
 {
-    if (!s)
+    StopLogin(s);
+    LoginAttempt *login = calloc(1, sizeof(*login));
+    if (!login) { Note(s->host, agent_id, "Could not allocate login attempt."); return; }
+    if (pthread_mutex_init(&login->mu, NULL) != 0)
     {
+        free(login);
+        Note(s->host, agent_id, "Could not initialize login attempt.");
         return;
     }
-    PicoHost *app = s->host;
-    StopDeviceLogin(s);
-    pthread_mutex_lock(&s->login.mu);
-    /* Drop anything the previous attempt queued so it cannot mix into this flow. */
-    for (int i = 0; i < s->login.note_count; i++)
+    if (!pico_openai_wake_pipe(login->wake))
     {
-        free(s->login.notes[i]);
-        s->login.notes[i] = NULL;
+        pthread_mutex_destroy(&login->mu);
+        free(login);
+        Note(s->host, agent_id, "Could not initialize login cancellation.");
+        return;
     }
-    s->login.note_count = 0;
-    s->login.cancel = false;
-    s->login.running = true;
-    s->login.agent_id = agent_id;
-    bool spawned = pthread_create(&s->login.thread, NULL, DeviceLoginMain, s) == 0;
-    s->login.joinable = spawned;
-    if (!spawned)
+    login->agent_id = agent_id;
+    login->browser = browser;
+    login->deadline = pico_openai_monotonic() + PICO_LOGIN_TIMEOUT_SEC;
+    login->refs = 2;
+    s->login = login;
+    if (!PicoHost_StartTask(s->host, LoginMain, login, CancelLogin, ReleaseLogin))
     {
-        s->login.running = false;
-        s->login.agent_id = 0;
-    }
-    pthread_mutex_unlock(&s->login.mu);
-    if (!spawned)
-    {
-        Note(app, agent_id, "Could not start device login: thread creation failed.");
+        s->login = NULL;
+        ReleaseLogin(login);
+        ReleaseLogin(login);
+        Note(s->host, agent_id, "Could not start login worker. Try again when the previous login has stopped.");
     }
 }
 
-/* The render thread owns the message list, so queued login text surfaces here. */
 static void DrainLoginNotes(HostAuthState *s)
 {
-    if (!s)
+    LoginAttempt *login = s->login;
+    if (!login) return;
+    pthread_mutex_lock(&login->mu);
+    char *url = login->authorize_url;
+    login->authorize_url = NULL;
+    char *body = login->token_body;
+    login->token_body = NULL;
+    char *notes[PICO_LOGIN_MAX_NOTES];
+    int count = login->note_count;
+    memcpy(notes, login->notes, (size_t)count * sizeof(notes[0]));
+    login->note_count = 0;
+    bool done = login->done;
+    bool cancelled = login->cancel || pico_openai_monotonic() >= login->deadline;
+    pthread_mutex_unlock(&login->mu);
+    /* Only the currently attached attempt can reach here. StopLogin/reload drop
+     * its registration reference before any replacement is published. */
+    if (url && !cancelled && !done)
     {
-        return;
+        size_t cap = strlen(url) + 256;
+        char *message = malloc(cap);
+        if (message)
+        {
+            snprintf(message, cap, "[Sign in with OpenAI](%s)\n\nOpening your browser. "
+                     "If it does not open, use the link above. `/login openai cancel` to stop.", url);
+            Note(s->host, login->agent_id, message);
+            free(message);
+        }
+        if (!PicoHost_OpenBrowser(s->host, url))
+            Note(s->host, login->agent_id, "Could not open your browser automatically. Use the sign-in link above.");
     }
-    PicoHost *app = s->host;
-    for (;;)
+    for (int i = 0; i < count; i++)
     {
-        pthread_mutex_lock(&s->login.mu);
-        char *text = NULL;
-        PicoAgentId agent_id = s->login.agent_id;
-        if (s->login.note_count > 0)
-        {
-            text = s->login.notes[0];
-            for (int i = 1; i < s->login.note_count; i++)
-            {
-                s->login.notes[i - 1] = s->login.notes[i];
-            }
-            s->login.note_count--;
-        }
-        bool reap = !text && !s->login.running && s->login.joinable;
-        pthread_mutex_unlock(&s->login.mu);
-        if (text)
-        {
-            Note(app, agent_id, text);
-            free(text);
-            continue;
-        }
-        if (reap)
-        {
-            StopDeviceLogin(s);
-        }
-        return;
+        if (!login->cancel) Note(s->host, login->agent_id, notes[i]);
+        free(notes[i]);
     }
+    if (body && !cancelled)
+    {
+        if (ApplyTokenBody(s->host, NULL, NULL, body, login->agent_id))
+            Note(s->host, login->agent_id, "Signed in with ChatGPT. Pico will use your Codex subscription.");
+        else Note(s->host, login->agent_id, "OpenAI returned an invalid token response. Run `/login openai` to try again.");
+    }
+    free(url);
+    FreeSecret(body);
+    if (done) { s->login = NULL; ReleaseLogin(login); }
 }
 
 static int Fold(int c)
@@ -828,16 +906,16 @@ static void OpenAiLogin(PicoHost *app, PicoAgentId agent_id, const char *args, v
     {
         tail++;
     }
-    if (tail[0] || (verb[0] && !IsCancelArg(verb) && !IsKeyArg(verb)))
+    if (tail[0] || (verb[0] && !IsCancelArg(verb) && !IsKeyArg(verb) && !FoldEq(verb, "browser") && !FoldEq(verb, "device")))
     {
-        Note(app, agent_id, "Usage: `/login openai`, `/login openai key`, or `/login openai cancel`.");
+        Note(app, agent_id, "Usage: `/login openai [browser|device|key|cancel]`.");
         return;
     }
     if (IsCancelArg(verb))
     {
-        if (LoginActive(s))
+        if (s->login)
         {
-            StopDeviceLogin(s);
+            StopLogin(s);
             Note(app, agent_id, "Login cancelled.");
         }
         else
@@ -848,7 +926,7 @@ static void OpenAiLogin(PicoHost *app, PicoAgentId agent_id, const char *args, v
     }
     if (IsKeyArg(verb))
     {
-        StopDeviceLogin(s);
+        StopLogin(s);
         PicoAuthEntry e;
         pico_auth_copy(app, "openai", &e);
         if (!e.api_key || !e.api_key[0])
@@ -869,13 +947,13 @@ static void OpenAiLogin(PicoHost *app, PicoAgentId agent_id, const char *args, v
         pico_auth_entry_free(&e);
         return;
     }
-    StartDeviceLogin(s, agent_id);
+    StartLogin(s, agent_id, !FoldEq(verb, "device"));
 }
 
 static void OpenAiLogout(PicoHost *app, PicoAgentId agent_id, void *state)
 {
     HostAuthState *s = (HostAuthState *)state;
-    StopDeviceLogin(s);
+    StopLogin(s);
     bool saved = pico_auth_clear_oauth(app, "openai");
     PicoAuthEntry e;
     pico_auth_copy(app, "openai", &e);
@@ -1087,14 +1165,13 @@ static int OpenAiHostInit(PicoHost *app, void **state_out)
         return 1;
     }
     s->host = app;
-    pthread_mutex_init(&s->login.mu, NULL);
     if (state_out)
     {
         *state_out = s;
     }
     pico_add_auth(app, &(PicoAuth){.provider = "openai",
-                                   .help = "ChatGPT device-code or API key",
-                                   .verbs = "key cancel",
+                                   .help = "ChatGPT browser/device login or API key",
+                                   .verbs = "browser device key cancel",
                                    .login = OpenAiLogin,
                                    .logout = OpenAiLogout,
                                    .state = s});
@@ -1110,16 +1187,7 @@ static void OpenAiHostShutdown(PicoHost *app, void *state)
     {
         return;
     }
-    StopDeviceLogin(s);
-    pthread_mutex_lock(&s->login.mu);
-    for (int i = 0; i < s->login.note_count; i++)
-    {
-        free(s->login.notes[i]);
-        s->login.notes[i] = NULL;
-    }
-    s->login.note_count = 0;
-    pthread_mutex_unlock(&s->login.mu);
-    pthread_mutex_destroy(&s->login.mu);
+    StopLogin(s);
     free(s);
 }
 

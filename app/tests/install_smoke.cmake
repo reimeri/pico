@@ -33,6 +33,8 @@ foreach(required
         "${data_dir}/examples/settings.json"
         "${data_dir}/examples/hello.c"
         "${data_dir}/builtins/shell.c"
+        "${data_dir}/builtins/openai_auth.c"
+        "${data_dir}/builtins/openai_auth.h"
         "${sdk_dir}/pico/plugin.h"
         "${sdk_dir}/clay/clay.h"
         "${sdk_dir}/raylib.h"

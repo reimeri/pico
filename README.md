@@ -25,7 +25,6 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 
 ### 1. Install Pico
 
-
 On x86-64 Linux, the easiest option is to download the AppImage from the **[latest GitHub release](https://github.com/reimeri/pico/releases/latest)**. Then run it from your download directory:
 
 ```bash
@@ -88,6 +87,7 @@ sudo nixos-rebuild switch --flake .#hostname
 ```
 
 The flake supports `x86_64-linux` and `aarch64-linux`. Its package includes GCC on `PATH`, so C extensions compile out of the box.
+
 </details>
 
 ### 2. Start Pico
@@ -110,6 +110,10 @@ pico
 On first launch, Pico automatically copies its bundled example to `~/.config/pico/settings.json` (or `$XDG_CONFIG_HOME/pico/settings.json`). It never replaces an existing settings file.
 
 Authenticate in Pico with `/login openai`, `/login hyper`, or `/login xai`. You can also provide `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY` in the environment.
+
+Automatic browser launch uses `xdg-open` on Linux (usually provided by `xdg-utils`).
+If it is unavailable, open the displayed sign-in link in a browser on the same
+machine. SSH forwarding and pasted callback URLs are not supported by this flow.
 
 ### 3. Add or customize models
 
@@ -138,17 +142,17 @@ view is not searched.
 
 ## Build from source
 
-Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, utf8proc, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
+Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, utf8proc, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
 
 Debian/Ubuntu:
 
 ```bash
 sudo apt install build-essential ninja-build meson pkg-config git curl python3-venv \
-  libcurl4-openssl-dev libutf8proc-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
+  libcurl4-openssl-dev libssl-dev libutf8proc-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
   libxcb1-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
   libxinerama-dev libxrandr-dev libxrender-dev libxkbcommon-dev \
   libwayland-dev wayland-protocols libffi-dev libexpat1-dev \
-  libdecor-0-dev libasound2-dev libpulse-dev
+  libdecor-0-dev libasound2-dev libpulse-dev xdg-utils
 python3 -m venv "$HOME/.local/share/pico-build-tools"
 "$HOME/.local/share/pico-build-tools/bin/pip" install 'cmake>=3.27'
 export PATH="$HOME/.local/share/pico-build-tools/bin:$PATH"
@@ -198,4 +202,4 @@ F5 and `/reload` reload host extensions and the selected workspace. `/cd` opens 
 
 ## Stack
 
-C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl. Build: CMake 3.27+, Ninja.
+C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl, OpenSSL Crypto. Build: CMake 3.27+, Ninja.

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/types.h>
 
 enum {
     PICO_REG_NONE = 0,
@@ -133,6 +134,8 @@ struct PicoHost {
     PicoAuth auths[PICO_MAX_AUTH];
     int auth_count;
     struct PicoAuthStore *auth_store;
+    struct PicoHostTask *tasks; /* Compiled-in workers, including retired auth attempts. */
+    pid_t browser_children[16]; /* Independent processes; reap, never wait on the UI thread. */
     bool submit_cancel;
     char *agent_input;
     char *agent_parts;
@@ -335,5 +338,13 @@ void PicoHostExtensions_OnFrame(PicoHost *host, float dt);
 void *PicoHostExtensions_State(const PicoHost *host, const char *name);
 bool PicoHostExtensions_Reload(PicoHost *host);
 bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name);
+
+/* Main-thread-only builtin task ownership. On success the host owns state until
+ * run returns and calls destroy; on failure ownership remains with the caller.
+ * cancel must return promptly. Workers cannot touch host or extension/UI state.
+ * This is private to compiled-in code, NOT a user-extension worker API. */
+bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
+                        void (*cancel)(void *), void (*destroy)(void *));
+bool PicoHost_OpenBrowser(PicoHost *host, const char *url);
 
 #endif

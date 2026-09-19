@@ -90,7 +90,7 @@
 
           postFixup = ''
             wrapProgram "$out/bin/pico" \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gcc pkgs.git pkgs.libnotify ]} \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gcc pkgs.git pkgs.libnotify pkgs.xdg-utils ]} \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
                 pkgs.wayland
                 pkgs.libxkbcommon

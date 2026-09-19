@@ -63,7 +63,7 @@ These are the in-app implementations, shipped for reading. They are not loaded f
 
 - [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`
 - [`../../builtins/background.c`](../../builtins/background.c) — `run_background` / `kill_background` / `list_background` / `log_background` (uses [`../../builtins/background_model.c`](../../builtins/background_model.c))
-- [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c))
+- [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c) and [`../../builtins/openai_auth.c`](../../builtins/openai_auth.c))
 - [`../../builtins/hyper.c`](../../builtins/hyper.c) — Hyper provider (uses [`../../builtins/completions.c`](../../builtins/completions.c) plus [`../../builtins/hyper_auth.c`](../../builtins/hyper_auth.c))
 - [`../../builtins/xai.c`](../../builtins/xai.c) — xAI provider (uses [`../../builtins/completions.c`](../../builtins/completions.c) plus [`../../builtins/xai_auth.c`](../../builtins/xai_auth.c))
 

@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "theme_internal.h"
 #include "pico/plugin.h"
 #include "pico/md_view.h"
@@ -29,6 +33,11 @@
 #include <GLFW/glfw3.h>
 
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +56,156 @@ bool PicoHost_ProcessRetired(void)
 PicoHost *pico_workspace_host(PicoWorkspace *workspace)
 {
     return workspace ? workspace->host : NULL;
+}
+
+/* Compiled-in work only: a task may outlive its host-extension generation, but
+ * never curl cleanup. Its worker must not retain a host/UI pointer. */
+typedef struct PicoHostTask {
+    struct PicoHostTask *next;
+    pthread_t thread;
+    void *state;
+    void (*cancel)(void *);
+    void (*destroy)(void *);
+} PicoHostTask;
+
+bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
+                        void (*cancel)(void *), void (*destroy)(void *))
+{
+    if (!host || host->terminal_shutdown || g_pico_process_retired) return false;
+    int count = 0;
+    for (PicoHostTask *t = host->tasks; t; t = t->next) count++;
+    if (count >= 64) return false;
+    PicoHostTask *task = calloc(1, sizeof(*task));
+    if (!task) return false;
+    task->state = state;
+    task->cancel = cancel;
+    task->destroy = destroy;
+    if (pthread_create(&task->thread, NULL, run, state) != 0)
+    {
+        free(task);
+        return false;
+    }
+    task->next = host->tasks;
+    host->tasks = task;
+    return true;
+}
+
+static void PicoHost_PumpTasks(PicoHost *host)
+{
+    PicoHostTask **link = &host->tasks;
+    while (*link)
+    {
+        PicoHostTask *task = *link;
+        if (pthread_tryjoin_np(task->thread, NULL) == 0)
+        {
+            *link = task->next;
+            task->destroy(task->state);
+            free(task);
+        }
+        else link = &task->next;
+    }
+}
+
+static void PicoHost_ReapBrowsers(PicoHost *host)
+{
+    for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
+    {
+        pid_t pid = host->browser_children[i];
+        if (pid <= 0) continue;
+        pid_t result = waitpid(pid, NULL, WNOHANG);
+        if (result == pid || (result < 0 && errno == ECHILD)) host->browser_children[i] = 0;
+    }
+}
+
+/* A browser may keep its launcher alive. After host teardown, a reaper owns
+ * just the pids, never host/curl state, and does not terminate the user's browser. */
+typedef struct PicoBrowserReaper {
+    pid_t pids[16];
+} PicoBrowserReaper;
+
+static void *PicoHost_BrowserReaper(void *user)
+{
+    PicoBrowserReaper *reaper = user;
+    bool pending;
+    do
+    {
+        pending = false;
+        for (size_t i = 0; i < sizeof(reaper->pids) / sizeof(reaper->pids[0]); i++)
+        {
+            pid_t pid = reaper->pids[i];
+            if (pid <= 0) continue;
+            pid_t rc = waitpid(pid, NULL, WNOHANG);
+            if (rc == pid || (rc < 0 && errno == ECHILD)) reaper->pids[i] = 0;
+            else pending = true;
+        }
+        if (pending)
+        {
+            struct timespec pause = {.tv_nsec = 100000000};
+            nanosleep(&pause, NULL);
+        }
+    } while (pending);
+    free(reaper);
+    return NULL;
+}
+
+static bool PicoHost_DetachBrowsers(PicoHost *host)
+{
+    PicoHost_ReapBrowsers(host);
+    bool any = false;
+    for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
+        any |= host->browser_children[i] > 0;
+    if (!any) return true;
+    PicoBrowserReaper *reaper = calloc(1, sizeof(*reaper));
+    if (!reaper) return false;
+    memcpy(reaper->pids, host->browser_children, sizeof(reaper->pids));
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) { free(reaper); return false; }
+    pthread_t thread;
+    bool ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
+              pthread_create(&thread, &attr, PicoHost_BrowserReaper, reaper) == 0;
+    pthread_attr_destroy(&attr);
+    if (!ok) { free(reaper); return false; }
+    memset(host->browser_children, 0, sizeof(host->browser_children));
+    return true;
+}
+
+bool PicoHost_OpenBrowser(PicoHost *host, const char *url)
+{
+    if (!host || !url || host->terminal_shutdown || g_pico_process_retired) return false;
+    PicoHost_ReapBrowsers(host);
+    pid_t *slot = NULL;
+    for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
+        if (!host->browser_children[i]) { slot = &host->browser_children[i]; break; }
+    if (!slot) return false;
+    extern char **environ;
+    char *argv[] = {"xdg-open", (char *)url, NULL};
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    /* No shell, no blocking wait, and no URL-bearing browser diagnostics in logs. */
+    pid_t pid = 0;
+    bool ok = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0 &&
+              posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
+              posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
+              posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ) == 0;
+    posix_spawn_file_actions_destroy(&actions);
+    if (ok) *slot = pid;
+    return ok;
+}
+
+static bool PicoHost_TasksQuiesceBefore(PicoHost *host, const struct timespec *deadline)
+{
+    while (host->tasks)
+    {
+        PicoHost_PumpTasks(host);
+        if (!host->tasks) return true;
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > deadline->tv_sec ||
+            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) return false;
+        struct timespec pause = {.tv_nsec = 1000000};
+        nanosleep(&pause, NULL);
+    }
+    return true;
 }
 
 PicoWorkspace *PicoHost_SourceWorkspace(const PicoHost *host, const char *source)
@@ -2098,6 +2257,8 @@ void pico_host_pump(PicoHost *host)
     {
         return;
     }
+    PicoHost_PumpTasks(host);
+    PicoHost_ReapBrowsers(host);
     PicoHost_PumpLifecycle(host);
     PicoSessionPersist_Pump(host);
     float dt = GetFrameTime();
@@ -2715,6 +2876,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 1;
+    for (PicoHostTask *task = host->tasks; task; task = task->next) task->cancel(task->state);
     for (i = 0; i < host->workspace_count; i++)
     {
         if (host->workspaces[i])
@@ -2725,6 +2887,8 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
             }
         }
     }
+    if (!PicoHost_TasksQuiesceBefore(host, &deadline)) clean = false;
+    if (!PicoHost_DetachBrowsers(host)) clean = false;
     if (!PicoCatalog_DrainOrderPersistBefore(host, &deadline))
     {
         clean = false;

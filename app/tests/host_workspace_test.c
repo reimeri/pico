@@ -8787,8 +8787,19 @@ static int TestFrameRetriesFailedArenaReplacement(void)
 }
 #endif
 
+#ifdef PICO_OPENAI_LOGIN_TESTS
+#include "openai_login_test.c"
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef PICO_OPENAI_LOGIN_TESTS
+    if (argc == 2 && strcmp(argv[1], "--openai-retained-shutdown") == 0)
+        return TestOpenAiBlockedShutdownChild();
+    if (argc == 2 && strcmp(argv[1], "--openai-login") == 0)
+        return TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown();
+    if (TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown()) return 1;
+#endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--clay-recovery") == 0)
     {

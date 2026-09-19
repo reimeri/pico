@@ -126,6 +126,7 @@ add_executable(pico
     builtins/skills.c
     builtins/skill_load.c
     builtins/openai.c
+    builtins/openai_auth.c
     builtins/hyper.c
     builtins/hyper_auth.c
     builtins/xai.c
@@ -142,6 +143,7 @@ set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON INSTALL_RPATH_USE_LINK_P
 pico_warnings_are_errors(pico)
 
 find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
 
 target_include_directories(pico PUBLIC
@@ -158,7 +160,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_CC=\"cc\""
     "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
-target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
 
 # GLFW dlopens Wayland/Xcursor instead of linking them. On Nix those .so files are
@@ -372,6 +374,18 @@ if(BUILD_TESTING)
     target_compile_options(pico_completions_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_completions_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_completions_tests COMMAND pico_completions_tests)
+
+    add_executable(pico_openai_auth_tests
+        tests/openai_auth_test.c builtins/openai_auth.c http.c http_capture.c json.c)
+    target_include_directories(pico_openai_auth_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(pico_openai_auth_tests PRIVATE CURL::libcurl OpenSSL::Crypto Threads::Threads)
+    pico_warnings_are_errors(pico_openai_auth_tests)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_openai_auth_tests PRIVATE PICO_OPENAI_RANDOM_FAULT_TESTS=1)
+        target_link_options(pico_openai_auth_tests PRIVATE -Wl,--wrap=RAND_bytes)
+    endif()
+    add_test(NAME pico_openai_auth_tests COMMAND pico_openai_auth_tests)
 
     add_executable(pico_xai_auth_tests
         tests/xai_auth_test.c
@@ -716,6 +730,7 @@ if(BUILD_TESTING)
         builtins/skills.c
         builtins/skill_load.c
         builtins/openai.c
+        builtins/openai_auth.c
         builtins/hyper.c
         builtins/hyper_auth.c
         builtins/xai.c
@@ -754,9 +769,14 @@ if(BUILD_TESTING)
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
-    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_CLAY_FRAME_FAULT_TESTS=1)
+        target_compile_definitions(pico_host_workspace_tests PRIVATE
+            PICO_CLAY_FRAME_FAULT_TESTS=1 PICO_OPENAI_LOGIN_TESTS=1)
+        target_link_options(pico_host_workspace_tests PRIVATE
+            -Wl,--wrap=RAND_bytes -Wl,--wrap=PicoHost_OpenBrowser
+            -Wl,--wrap=pico_openai_listen -Wl,--wrap=pico_openai_await_callback
+            -Wl,--wrap=pico_http_post)
         target_link_options(pico_host_workspace_tests PRIVATE
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
@@ -767,7 +787,7 @@ if(BUILD_TESTING)
 endif()
 
 set(_pico_ref_builtins
-    shell.c background.c background_model.c background_model.h openai.c hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    shell.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
     completions.c completions.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory

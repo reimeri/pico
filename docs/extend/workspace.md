@@ -2,6 +2,8 @@
 
 `PicoWorkspace` is one canonical directory and its complete execution environment: agents, settings, instructions, extension instances, registration generation, sessions, asks, mailboxes, and workspace caches. It is opaque; include `pico/workspace.h` (or `pico/plugin.h`).
 
+A Git linked worktree is still a separate `PicoWorkspace`: its canonical checkout path remains the workspace identity and callback execution directory. The builtin sidebar may present checkout-root workspaces from one repository as a single project, but that presentation does not merge runtime ownership. Each checkout independently loads its own `AGENTS.md`, `.pico` settings/extensions, registrations, models, tools, caches, background table, and reload generation. Repository subdirectories are ordinary independent workspaces and are not grouped.
+
 A host may run several workspaces at once. Main agents in the same canonical directory share one workspace runtime. Different canonical directories are isolated.
 
 ## Open
@@ -38,13 +40,15 @@ If close is requested during a staged reload, Pico aborts the rollout: it does n
 
 A worker callback that never returns leaves **that** workspace in `CLOSING`. Other workspaces continue. Main-thread callbacks cannot be isolated: they must return promptly, and a violation blocks the host pump.
 
-Closing a workspace is backend-only (`pico_workspace_request_close`). The builtin sidebar is the workspace-management UX: it lists the **disk catalog** under `~/.config/pico/sessions/` (each encoded-key folder, with `.workspace.json` for `path` / display name / order / collapsed and a stat-generation-keyed session listing cache, while parent `*.jsonl` files remain authoritative sessions). Catalog mutations are serialized per workspace, and scans re-parse only new or changed JSONL files. Scan omits a catalog workspace whose `path` is not an existing directory. A catalog entry is not a live `PicoWorkspace` until the user opens it. Normal CLI startup opens cwd, creates one main agent, and ensures cwd has a catalog folder. The installed desktop launcher starts with zero live workspaces; opening a catalog workspace/session or using the sidebar Projects `+` creates the live workspace and its first main agent. Catalog size is not capped at 8; opening a ninth live workspace still returns `PICO_LIMIT` (“Too many workspaces are open.”). This pass has no close/remove control in the sidebar. `/cd` never closes the previous workspace.
+Closing a workspace is backend-only (`pico_workspace_request_close`). The builtin sidebar is the workspace-management UX: it lists the **disk catalog** under `~/.config/pico/sessions/` (each encoded-key folder, with `.workspace.json` for `path` / display name / order / collapsed and a stat-generation-keyed session listing cache, while parent `*.jsonl` files remain authoritative sessions). Catalog mutations are serialized per workspace, and scans re-parse only new or changed JSONL files. Scan omits an ordinary catalog workspace whose `path` is not an existing directory. A recorded linked-worktree catalog remains visible as unavailable so its sessions cannot silently route to the main checkout. A catalog entry is not a live `PicoWorkspace` until the user opens it. Normal CLI startup opens cwd, creates one main agent, and ensures cwd has a catalog folder. The installed desktop launcher starts with zero live workspaces; opening a catalog workspace/session or using the sidebar Projects `+` creates the live workspace and its first main agent. Catalog size is not capped at 8; opening a ninth live workspace still returns `PICO_LIMIT` (“Too many workspaces are open.”). This pass has no close/remove control in the sidebar. `/cd` never closes the previous workspace.
 
 ## `/cd`
 
 `/cd` canonicalizes and opens the target (or reuses an already-open canonical path), creates a main agent there if that workspace has none, and selects a main agent with `pico_agent_select`. Relative paths resolve against the command agent's workspace, never UI selection. A newly opened workspace is closed if creating its first main agent fails. `/cd` does not select into a closing workspace. The previous workspace stays open and keeps pumping.
 
 The folder picker (footer cwd and sidebar Projects `+`) uses the same open-or-select path. Sidebar Projects `+` also creates the catalog folder and `.workspace.json` before opening.
+
+Opening a linked-worktree root directly starts a fresh main session in that checkout (reusing only an untouched draft through the normal draft rules); selecting a durable sidebar row resumes that exact session instead. Project `+` targets the main/local checkout. `/new` in a linked worktree starts a fresh session in the main/local checkout; it never retargets an existing agent or removes the worktree.
 
 ## Agents
 
@@ -72,6 +76,8 @@ Host-wide `font_scale`, `chat_width`, and `disabled_host_extensions` come only f
 `AGENTS.md` and `.pico/SYSTEM.md` are read for the **target** workspace when building each turn's instruction snapshot. A turn keeps the snapshot it started with.
 
 Session directory resolution, file mentions, shell cwd (after `fork` in the child), media persistence, git diff, and settings paths all receive the target workspace explicitly. They never read UI selection or process CWD. Pico and its extensions never call `chdir()` in the host process.
+
+The footer's project path and local/worktree label are UI metadata only. `PicoWorkspaceInfo.path`, `pico_agent_context_workspace`, and every path-sensitive callback continue to expose the actual checkout directory. Worktree creation runs asynchronously and creates a new immutable workspace rather than changing the source workspace's path. The first version supports normal repositories whose common Git directory is `<main-checkout>/.git`; bare and separate-git-dir repositories remain ordinary workspaces.
 
 If the workspace directory is deleted after open, the workspace identity remains. Filesystem operations against it fail; Pico does not retarget to another path.
 

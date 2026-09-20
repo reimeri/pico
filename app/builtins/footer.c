@@ -11,6 +11,7 @@
 #include "scrollbar.h"
 #include "tinyfiledialogs.h"
 #include "usage.h"
+#include "worktree.h"
 
 #include "clay/clay.h"
 
@@ -19,20 +20,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum FooterMenu {
+typedef enum FooterMenu
+{
     FOOTER_MENU_NONE = 0,
     FOOTER_MENU_MODEL,
     FOOTER_MENU_EFFORT,
 } FooterMenu;
 
-typedef enum FooterStatusKind {
+typedef enum FooterStatusKind
+{
     FOOTER_STATUS_IDLE = 0,
     FOOTER_STATUS_RUNNING,
     FOOTER_STATUS_WAITING_USER,
     FOOTER_STATUS_ERROR,
 } FooterStatusKind;
 
-typedef struct FooterState {
+typedef struct FooterState
+{
     char cwd[4096];
     char state_str[64];
     char tokens[128];
@@ -47,6 +51,9 @@ typedef struct FooterState {
     int selected;
     bool want_folder;
     bool folder_painted;
+    bool worktree_open;
+    char worktree_name[129];
+    char worktree_error[256];
     bool esc_block;
     PicoScrollbar scrollbar;
 } FooterState;
@@ -72,12 +79,15 @@ static FooterState *ActiveFooterState(void)
 #define g_selected (ActiveFooterState()->selected)
 #define g_want_folder (ActiveFooterState()->want_folder)
 #define g_folder_painted (ActiveFooterState()->folder_painted)
+#define g_worktree_open (ActiveFooterState()->worktree_open)
+#define g_worktree_name (ActiveFooterState()->worktree_name)
+#define g_worktree_error (ActiveFooterState()->worktree_error)
 #define g_esc_block (ActiveFooterState()->esc_block)
 #define g_scrollbar (ActiveFooterState()->scrollbar)
 
 bool PicoFooter_MenuOpen(void)
 {
-    return g_menu != FOOTER_MENU_NONE || g_esc_block || g_want_folder;
+    return g_menu != FOOTER_MENU_NONE || g_esc_block || g_want_folder || g_worktree_open;
 }
 
 static bool UnclaimMenu(void)
@@ -107,18 +117,18 @@ static const char *AgentStateName(const PicoHost *app)
     const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
     switch (agent->state)
     {
-        case PICO_AGENT_IDLE:
-            return "idle";
-        case PICO_AGENT_LLM_WAIT:
-            return "waiting on model";
-        case PICO_AGENT_TOOL_WAIT:
-            return PicoAgent_AskUiOpen(agent) ? "waiting for you" : "running tool";
-        case PICO_AGENT_COMPACT_WAIT:
-            return "compacting";
-        case PICO_AGENT_ERROR:
-            return "error";
-        default:
-            return "unknown";
+    case PICO_AGENT_IDLE:
+        return "idle";
+    case PICO_AGENT_LLM_WAIT:
+        return "waiting on model";
+    case PICO_AGENT_TOOL_WAIT:
+        return PicoAgent_AskUiOpen(agent) ? "waiting for you" : "running tool";
+    case PICO_AGENT_COMPACT_WAIT:
+        return "compacting";
+    case PICO_AGENT_ERROR:
+        return "error";
+    default:
+        return "unknown";
     }
 }
 
@@ -127,16 +137,16 @@ static FooterStatusKind StatusKind(const PicoHost *app)
     const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
     switch (agent->state)
     {
-        case PICO_AGENT_ERROR:
-            return FOOTER_STATUS_ERROR;
-        case PICO_AGENT_TOOL_WAIT:
-            return PicoAgent_AskUiOpen(agent) ? FOOTER_STATUS_WAITING_USER : FOOTER_STATUS_RUNNING;
-        case PICO_AGENT_LLM_WAIT:
-        case PICO_AGENT_COMPACT_WAIT:
-            return FOOTER_STATUS_RUNNING;
-        case PICO_AGENT_IDLE:
-        default:
-            return FOOTER_STATUS_IDLE;
+    case PICO_AGENT_ERROR:
+        return FOOTER_STATUS_ERROR;
+    case PICO_AGENT_TOOL_WAIT:
+        return PicoAgent_AskUiOpen(agent) ? FOOTER_STATUS_WAITING_USER : FOOTER_STATUS_RUNNING;
+    case PICO_AGENT_LLM_WAIT:
+    case PICO_AGENT_COMPACT_WAIT:
+        return FOOTER_STATUS_RUNNING;
+    case PICO_AGENT_IDLE:
+    default:
+        return FOOTER_STATUS_IDLE;
     }
 }
 
@@ -144,15 +154,15 @@ static Clay_Color StatusDotColor(FooterStatusKind kind)
 {
     switch (kind)
     {
-        case FOOTER_STATUS_WAITING_USER:
-            return COLOR_STATUS_RUN;
-        case FOOTER_STATUS_ERROR:
-            return COLOR_STATUS_ERR;
-        case FOOTER_STATUS_RUNNING:
-            return COLOR_STATUS_ON;
-        case FOOTER_STATUS_IDLE:
-        default:
-            return COLOR_STATUS_OFF;
+    case FOOTER_STATUS_WAITING_USER:
+        return COLOR_STATUS_RUN;
+    case FOOTER_STATUS_ERROR:
+        return COLOR_STATUS_ERR;
+    case FOOTER_STATUS_RUNNING:
+        return COLOR_STATUS_ON;
+    case FOOTER_STATUS_IDLE:
+    default:
+        return COLOR_STATUS_OFF;
     }
 }
 
@@ -181,7 +191,6 @@ static void FormatCwd(const char *workspace, char *out, size_t cap)
     }
     snprintf(out, cap, "%s", real);
 }
-
 
 static const char *FormatTokens(uint64_t tokens)
 {
@@ -230,9 +239,9 @@ static bool Over(const char *id)
 static void MutedText(const char *s)
 {
     CLAY_TEXT(CStr(s), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = PICO_FONT_CAPTION,
-                                        .textColor = COLOR_MUTED,
-                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                         .fontSize = PICO_FONT_CAPTION,
+                                         .textColor = COLOR_MUTED,
+                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
 
 static void Sep(void)
@@ -453,6 +462,146 @@ static void RenderFolderModal(PicoHost *app, void *state)
     g_folder_painted = true;
 }
 
+static void CloseWorktreeModal(PicoHost *app)
+{
+    if (!g_worktree_open)
+        return;
+    if (app && !pico_ui_modal_pop(app, "worktree-create"))
+        return;
+    g_worktree_open = false;
+    g_worktree_error[0] = '\0';
+}
+
+static void OpenWorktreeModal(PicoHost *app)
+{
+    PicoAgent *agent = PicoHost_SelectedAgent(app);
+    PicoWorkspace *ws = agent ? agent->workspace : NULL;
+    if (!agent || !ws || !ws->checkout_root)
+        return;
+    if (!ws->can_create_worktree)
+    {
+        PicoOverlay_Notify(app, "Worktree creation requires a normal Git checkout with at least one commit.");
+        return;
+    }
+    if (agent->accepted_submit || agent->message_count > 0)
+    {
+        PicoOverlay_Notify(app, "A session's checkout is fixed after its first message.");
+        return;
+    }
+    if (PicoAgent_IsBusy(agent) || PicoWorktree_Pending(app))
+    {
+        PicoOverlay_Notify(app, "Wait for the current operation to finish.");
+        return;
+    }
+    if (!pico_ui_modal_push(app, "worktree-create"))
+        return;
+    g_worktree_open = true;
+    g_worktree_error[0] = '\0';
+    (void)PicoWorktree_SuggestName(g_worktree_name, sizeof(g_worktree_name));
+}
+
+static void StartWorktreeCreation(PicoHost *app)
+{
+    PicoAgent *agent = PicoHost_SelectedAgent(app);
+    if (!agent)
+        return;
+    char error[256] = {0};
+    PicoResult result = PicoWorktree_Request(app, agent->id, g_worktree_name, error, sizeof(error));
+    if (result == PICO_OK)
+    {
+        CloseWorktreeModal(app);
+        PicoOverlay_Notify(app, "Creating worktree…");
+    }
+    else
+    {
+        snprintf(g_worktree_error, sizeof(g_worktree_error), "%s",
+                 error[0] ? error : (result == PICO_BUSY ? "The session is busy or already locked." : "Could not start worktree creation."));
+    }
+}
+
+static void RenderWorktreeButton(Clay_ElementId id, const char *label, bool primary)
+{
+    bool hovered = Clay_PointerOver(id);
+    CLAY(id, {.layout = {.padding = {12, 12, 7, 7}},
+              .backgroundColor = primary ? (hovered ? (Clay_Color){80, 135, 240, 255}
+                                                    : (Clay_Color){65, 115, 220, 255})
+                                         : (hovered ? COLOR_CODE_BG : COLOR_CONTENT_BG),
+              .cornerRadius = CLAY_CORNER_RADIUS(5)})
+    {
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                 .fontSize = PICO_FONT_UI,
+                                                 .textColor = COLOR_TEXT,
+                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
+    }
+}
+
+static void RenderWorktreeModal(PicoHost *app, void *state)
+{
+    s_active_footer_state = state ? state : PicoPlugins_HostState(app, "footer");
+    if (!s_active_footer_state || !g_worktree_open)
+        return;
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
+    float sw = (float)GetScreenWidth();
+    float sh = (float)GetScreenHeight();
+    float card_w = sw < 580.0f ? sw - 48.0f : 500.0f;
+    CLAY(CLAY_ID("WorktreeModalDim"),
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 44, .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
+          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                     .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
+          .backgroundColor = {0, 0, 0, 140}})
+    {
+        CLAY(CLAY_ID("WorktreeModalCard"),
+             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .padding = {20, 20, 18, 18},
+                         .childGap = 10,
+                         .sizing = {.width = CLAY_SIZING_FIXED(card_w)}},
+              .backgroundColor = COLOR_CONTENT_BG,
+              .cornerRadius = CLAY_CORNER_RADIUS(8)})
+        {
+            CLAY_TEXT(CLAY_STRING("Session checkout"),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
+            CLAY_TEXT(CLAY_STRING("Create a new worktree for this session."),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+            CLAY(CLAY_ID("WorktreeName"),
+                 {.layout = {.padding = {10, 10, 8, 8},
+                             .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
+                  .backgroundColor = COLOR_CODE_BG,
+                  .cornerRadius = CLAY_CORNER_RADIUS(5),
+                  .border = {.width = {1, 1, 1, 1}, .color = COLOR_MUTED}})
+            {
+                CLAY_TEXT(CStr(g_worktree_name),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_MONO, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
+            CLAY(CLAY_ID("WorktreeUseLocal"),
+                 {.layout = {.padding = {10, 10, 7, 7},
+                             .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
+                  .backgroundColor = Clay_PointerOver(CLAY_ID("WorktreeUseLocal"))
+                                         ? COLOR_CODE_BG
+                                         : COLOR_CONTENT_BG,
+                  .cornerRadius = CLAY_CORNER_RADIUS(5)})
+            {
+                CLAY_TEXT(CStr(ws && ws->worktree ? "Local" : "✓ Local"),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+            }
+            if (g_worktree_error[0])
+                CLAY_TEXT(CStr(g_worktree_error), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                    .fontSize = PICO_FONT_CAPTION,
+                                                                    .textColor = COLOR_STATUS_ERR,
+                                                                    .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+            CLAY_AUTO_ID({.layout = {.sizing = {.height = CLAY_SIZING_FIXED(2)}}}) {}
+            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                     .childAlignment = {.x = CLAY_ALIGN_X_RIGHT},
+                                     .childGap = 8,
+                                     .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
+            {
+                RenderWorktreeButton(CLAY_ID("WorktreeCancel"), "Cancel", false);
+                RenderWorktreeButton(CLAY_ID("WorktreeCreate"), "Create worktree", true);
+            }
+        }
+    }
+}
+
 static void RenderMenu(PicoHost *app)
 {
     int n = MenuCount(app);
@@ -520,16 +669,16 @@ static void RenderMenu(PicoHost *app)
                           .cornerRadius = CLAY_CORNER_RADIUS(4)})
                     {
                         CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                                .fontSize = PICO_FONT_UI,
-                                                                .textColor = COLOR_TEXT,
-                                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                                 .fontSize = PICO_FONT_UI,
+                                                                 .textColor = COLOR_TEXT,
+                                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
                         if (detail[0])
                         {
                             CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                             CLAY_TEXT(CStr(detail), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                     .fontSize = PICO_FONT_CAPTION,
-                                                                     .textColor = COLOR_MUTED,
-                                                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                                      .fontSize = PICO_FONT_CAPTION,
+                                                                      .textColor = COLOR_MUTED,
+                                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
                         }
                     }
                 }
@@ -550,9 +699,9 @@ static void Chip(Clay_ElementId id, const char *text, bool open, bool with_menu,
     CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
         CLAY_TEXT(CStr(text), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                               .fontSize = PICO_FONT_CAPTION,
-                                               .textColor = color,
-                                               .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                .fontSize = PICO_FONT_CAPTION,
+                                                .textColor = color,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
         if (with_menu && open)
         {
             RenderMenu(app);
@@ -566,9 +715,9 @@ static void RenderCacheChip(void)
     CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
         CLAY_TEXT(CStr(g_cache), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                  .fontSize = PICO_FONT_CAPTION,
-                                                  .textColor = COLOR_MUTED,
-                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                   .fontSize = PICO_FONT_CAPTION,
+                                                   .textColor = COLOR_MUTED,
+                                                   .wrapMode = CLAY_TEXT_WRAP_NONE}));
         if (Clay_PointerOver(id))
         {
             CLAY(CLAY_ID("FooterCacheTip"),
@@ -586,13 +735,13 @@ static void RenderCacheChip(void)
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
                 CLAY_TEXT(CStr(g_cache_input), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                .fontSize = PICO_FONT_CAPTION,
-                                                                .textColor = COLOR_TEXT,
-                                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                CLAY_TEXT(CStr(g_cache_cached), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                                  .fontSize = PICO_FONT_CAPTION,
                                                                  .textColor = COLOR_TEXT,
                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                CLAY_TEXT(CStr(g_cache_cached), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                  .fontSize = PICO_FONT_CAPTION,
+                                                                  .textColor = COLOR_TEXT,
+                                                                  .wrapMode = CLAY_TEXT_WRAP_NONE}));
             }
         }
     }
@@ -652,9 +801,9 @@ static void RenderStatus(PicoHost *app)
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
                 CLAY_TEXT(CStr(g_state), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                          .fontSize = PICO_FONT_CAPTION,
-                                                          .textColor = COLOR_TEXT,
-                                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                           .fontSize = PICO_FONT_CAPTION,
+                                                           .textColor = COLOR_TEXT,
+                                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
             }
         }
     }
@@ -682,11 +831,12 @@ void PicoFooter_Render(PicoHost *app, void *state)
     }
 
     {
-        const char *root = PicoAgent_WorkspacePath(PicoHost_SelectedAgentConst(app));
+        const PicoWorkspace *selected_ws = PicoHost_SelectedWorkspaceConst(app);
+        const char *root = selected_ws && selected_ws->project_path[0]
+                               ? selected_ws->project_path
+                               : PicoAgent_WorkspacePath(PicoHost_SelectedAgentConst(app));
         if (!root[0])
-        {
             root = PicoWorkspace_Path(PicoHost_PrimaryWorkspaceConst(app));
-        }
         FormatCwd(root[0] ? root : ".", g_cwd, sizeof(g_cwd));
     }
     snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app));
@@ -738,6 +888,32 @@ void PicoFooter_Render(PicoHost *app, void *state)
         RenderStatus(app);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(10), .height = CLAY_SIZING_FIXED(1)}}}) {}
         Chip(CLAY_ID("FooterCwd"), g_cwd, false, false, app);
+        PicoWorkspace *footer_ws = PicoHost_SelectedWorkspace(app);
+        if (footer_ws && footer_ws->checkout_root)
+        {
+            Sep();
+            const PicoAgent *footer_agent = PicoHost_SelectedAgentConst(app);
+            const char *checkout = footer_agent && PicoWorktree_PendingFor(app, footer_agent->id)
+                                       ? "creating…"
+                                       : (footer_ws->worktree && footer_ws->checkout_name[0]
+                                              ? footer_ws->checkout_name
+                                              : "local");
+            Chip(CLAY_ID("FooterWorktree"), checkout, false, false, app);
+            if (Over("FooterWorktree"))
+            {
+                CLAY(CLAY_ID("FooterWorktreeTip"),
+                     {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .zIndex = 26, .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH, .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_BOTTOM, .parent = CLAY_ATTACH_POINT_LEFT_TOP}, .offset = {.y = -6}},
+                      .layout = {.padding = {8, 8, 4, 4}},
+                      .backgroundColor = COLOR_CONTENT_BG,
+                      .cornerRadius = CLAY_CORNER_RADIUS(4)})
+                {
+                    CLAY_TEXT(CStr(footer_ws->path), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                                                       .fontSize = PICO_FONT_CAPTION,
+                                                                       .textColor = COLOR_TEXT,
+                                                                       .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+            }
+        }
         PicoDiff_RenderChip(app);
         Sep();
         MutedText(g_tokens);
@@ -772,15 +948,47 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     }
     bool own_menu_top = g_menu != FOOTER_MENU_NONE &&
                         pico_ui_modal_is_top(app, "footer-menu");
+    bool own_worktree_top = g_worktree_open && pico_ui_modal_is_top(app, "worktree-create");
+    if (own_worktree_top)
+    {
+        app->hovered_text = Over("WorktreeName");
+        app->hovered_clickable = Over("WorktreeUseLocal") || Over("WorktreeCancel") ||
+                                 Over("WorktreeCreate");
+        if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            return;
+        if (Over("WorktreeCancel") || (Over("WorktreeModalDim") && !Over("WorktreeModalCard")))
+        {
+            CloseWorktreeModal(app);
+            return;
+        }
+        if (Over("WorktreeUseLocal"))
+        {
+            PicoAgent *agent = PicoHost_SelectedAgent(app);
+            PicoWorkspace *ws = agent ? agent->workspace : NULL;
+            if (ws && !ws->worktree)
+                CloseWorktreeModal(app);
+            else if (agent && PicoHost_StartLocalSession(app, agent->id))
+                CloseWorktreeModal(app);
+            else
+                snprintf(g_worktree_error, sizeof(g_worktree_error), "Could not start a local session.");
+            return;
+        }
+        if (Over("WorktreeCreate"))
+        {
+            StartWorktreeCreation(app);
+            return;
+        }
+        return;
+    }
     if (PicoAgent_AskUiOpen(PicoHost_SelectedAgent(app)) ||
-        (pico_ui_modal_claimed(app) && !own_menu_top) || g_want_folder)
+        (pico_ui_modal_claimed(app) && !own_menu_top && !own_worktree_top) || g_want_folder)
     {
         app->hovered_clickable = false;
         return;
     }
 
     int hovered = HoveredItem(app);
-    app->hovered_clickable = Over("FooterCwd") || Over("FooterModel") || Over("FooterEffort") || hovered >= 0 ||
+    app->hovered_clickable = Over("FooterCwd") || Over("FooterWorktree") || Over("FooterModel") || Over("FooterEffort") || hovered >= 0 ||
                              (g_menu != FOOTER_MENU_NONE && Over("FooterMenu"));
 
     if (g_menu != FOOTER_MENU_NONE)
@@ -828,6 +1036,10 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     {
         RequestFolder(app);
     }
+    else if (Over("FooterWorktree"))
+    {
+        OpenWorktreeModal(app);
+    }
     else if (Over("FooterModel"))
     {
         OpenMenu(app, FOOTER_MENU_MODEL);
@@ -850,12 +1062,37 @@ static void FooterOnFrame(PicoHost *app, void *state, float dt)
     {
         CloseMenu();
         if (g_want_folder)
-        {
             ClearFolderRequest();
-        }
+        if (g_worktree_open)
+            CloseWorktreeModal(app);
         return;
     }
     g_esc_block = false;
+    if (g_worktree_open && pico_ui_modal_is_top(app, "worktree-create"))
+    {
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            CloseWorktreeModal(app);
+            g_esc_block = true;
+            return;
+        }
+        size_t len = strlen(g_worktree_name);
+        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0)
+            g_worktree_name[len - 1] = '\0';
+        int cp;
+        while ((cp = GetCharPressed()) != 0)
+        {
+            len = strlen(g_worktree_name);
+            if (len + 1 < sizeof(g_worktree_name) && cp >= 32 && cp < 127)
+            {
+                g_worktree_name[len] = (char)cp;
+                g_worktree_name[len + 1] = '\0';
+            }
+        }
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
+            StartWorktreeCreation(app);
+        return;
+    }
     if (g_menu != FOOTER_MENU_NONE)
     {
         if (!pico_ui_modal_is_top(app, "footer-menu"))
@@ -928,6 +1165,7 @@ static int FooterInit(PicoHost *app, void **state_out)
     s_active_footer_state = s;
     pico_host_add_view(app, PICO_SLOT_FOOTER, 0, PicoFooter_Render);
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 40, RenderFolderModal);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 41, RenderWorktreeModal);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, FooterAfterLayout);
     return 0;
 }
@@ -943,6 +1181,7 @@ static void FooterShutdown(PicoHost *app, void *state)
     s_active_footer_state = s;
     (void)CloseMenu();
     (void)ClearFolderRequest();
+    CloseWorktreeModal(app);
     free(s);
     s_active_footer_state = NULL;
 }

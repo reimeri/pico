@@ -24,6 +24,7 @@
 #include "host_internal.h"
 #include "path.h"
 #include "trace_group.h"
+#include "worktree.h"
 
 #include <curl/curl.h>
 
@@ -1775,6 +1776,8 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
         return PICO_INVALID;
     }
     shown = display && display[0] ? display : (text ? text : "");
+    /* The checkout is fixed once a turn has passed all acceptance checks. */
+    agent->accepted_submit = true;
     PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, shown);
     PicoSession_LogUser(host, agent, text ? text : "", shown, parts);
     PicoAgent_StartTurnParts(host, agent, text, parts);
@@ -2123,6 +2126,21 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     workspace->host = host;
     workspace->id = host->next_workspace_id++;
     snprintf(workspace->path, sizeof(workspace->path), "%s", canonical);
+    {
+        PicoWorktreeInfo info;
+        if (PicoWorktree_Discover(canonical, &info))
+        {
+            snprintf(workspace->project_path, sizeof(workspace->project_path), "%s", info.project_path);
+            snprintf(workspace->checkout_name, sizeof(workspace->checkout_name), "%s", info.checkout_name);
+            workspace->checkout_root = info.checkout_root;
+            workspace->worktree = info.linked;
+            workspace->can_create_worktree = info.can_create;
+        }
+        else
+        {
+            snprintf(workspace->project_path, sizeof(workspace->project_path), "%s", canonical);
+        }
+    }
     workspace->state = PICO_WORKSPACE_OPEN;
     pthread_mutex_init(&workspace->settings_mu, NULL);
     pthread_mutex_init(&workspace->delegation_mu, NULL);
@@ -2258,6 +2276,56 @@ void pico_host_pump(PicoHost *host)
         return;
     }
     PicoHost_PumpTasks(host);
+    {
+        PicoWorktreeResult result;
+        if (PicoWorktree_TakeResult(host, &result))
+        {
+            if (!result.success)
+            {
+                PicoOverlay_Notify(host, result.error[0] ? result.error : "Could not create the worktree.");
+            }
+            else
+            {
+                PicoWorkspaceId target_id = 0;
+                PicoResult opened = pico_workspace_open(host, result.path, &target_id);
+                PicoWorkspace *target = (opened == PICO_OK || opened == PICO_ALREADY_OPEN)
+                                            ? PicoHost_FindWorkspace(host, target_id) : NULL;
+                PicoAgentCreateOptions options;
+                PicoAgentId created_id = 0;
+                memset(&options, 0, sizeof(options));
+                options.kind = PICO_AGENT_MAIN;
+                options.session_start = PICO_SESSION_NEW;
+                PicoAgent *source_before_create = PicoHost_FindAgent(host, result.source_agent_id);
+                options.select = result.source_selected &&
+                                 pico_agent_active(host) == result.source_agent_id &&
+                                 source_before_create && !source_before_create->accepted_submit &&
+                                 source_before_create->message_count == 0;
+                PicoResult created = target ? pico_main_agent_create(host, target_id, &options, &created_id)
+                                            : (opened == PICO_LIMIT ? PICO_LIMIT : PICO_INVALID);
+                if (created == PICO_OK)
+                {
+                    PicoCatalog_Ensure(result.path);
+                    PicoAgent *source = PicoHost_FindAgent(host, result.source_agent_id);
+                    if (source && !source->accepted_submit && source->message_count == 0 &&
+                        source->id != created_id)
+                        (void)pico_agent_close(host, source->id);
+                    char note[512];
+                    snprintf(note, sizeof(note), "Worktree `%s` created.", result.name);
+                    PicoOverlay_Notify(host, note);
+                }
+                else
+                {
+                    if (opened == PICO_OK && target)
+                        (void)pico_workspace_request_close(host, target_id);
+                    char note[1024];
+                    snprintf(note, sizeof(note),
+                             "Worktree created at `%.*s`, but Pico could not open it. Open that folder to retry.",
+                             900, result.path);
+                    PicoOverlay_Notify(host, note);
+                }
+            }
+        }
+    }
     PicoHost_ReapBrowsers(host);
     PicoHost_PumpLifecycle(host);
     PicoSessionPersist_Pump(host);
@@ -2343,7 +2411,8 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
         PicoSession_Reset(host, initial);
         PicoSession_Start(host, initial, session_start, session_file);
     }
-    else if (session_start == PICO_SESSION_RESUME || host->workspaces[0]->settings.resume_last)
+    else if (session_start == PICO_SESSION_RESUME ||
+             (host->workspaces[0]->settings.resume_last && !host->workspaces[0]->worktree))
     {
         PicoSession_Start(host, initial, session_start, NULL);
     }
@@ -2477,6 +2546,59 @@ static PicoAgent *FirstMainAgent(PicoWorkspace *workspace)
     return NULL;
 }
 
+static bool AgentTreeHasActiveWork(const PicoWorkspace *workspace, PicoAgentId root_id)
+{
+    if (!workspace || !root_id) return true;
+    for (int i = 0; i < workspace->count; i++)
+    {
+        PicoAgent *candidate = workspace->agents[i];
+        if (!candidate) continue;
+        PicoAgentId cursor = candidate->id;
+        bool in_tree = false;
+        for (int depth = 0; cursor && depth <= PICO_MAX_DELEGATION_DEPTH; depth++)
+        {
+            if (cursor == root_id) { in_tree = true; break; }
+            PicoAgent *parent = PicoWorkspace_FindAgent((PicoWorkspace *)workspace, cursor);
+            cursor = parent ? parent->parent_id : 0;
+        }
+        if (!in_tree) continue;
+        if (PicoAgent_IsBusy(candidate) || PicoAgent_RetiredReferences(workspace, candidate->id) ||
+            PicoWorkspace_JobReferences(workspace, candidate->id) ||
+            PicoBgTable_RunningCount(workspace->background, candidate->id) > 0)
+            return true;
+    }
+    return false;
+}
+
+bool PicoHost_StartLocalSession(PicoHost *host, PicoAgentId from_agent_id)
+{
+    PicoAgent *from_agent = PicoHost_FindAgent(host, from_agent_id);
+    PicoWorkspace *from = from_agent ? from_agent->workspace : NULL;
+    const char *local = from && from->project_path[0] ? from->project_path : NULL;
+    if (!host || !from_agent || !from || !local || !local[0]) return false;
+    if (AgentTreeHasActiveWork(from, from_agent_id)) return false;
+    PicoWorkspaceId id = 0;
+    PicoResult opened = pico_workspace_open(host, local, &id);
+    if (opened != PICO_OK && opened != PICO_ALREADY_OPEN) return false;
+    PicoAgentCreateOptions options;
+    PicoAgentId new_id = 0;
+    memset(&options, 0, sizeof(options));
+    options.kind = PICO_AGENT_MAIN;
+    options.session_start = PICO_SESSION_NEW;
+    options.select = true;
+    if (pico_main_agent_create(host, id, &options, &new_id) != PICO_OK)
+    {
+        if (opened == PICO_OK) (void)pico_workspace_request_close(host, id);
+        return false;
+    }
+    PicoCatalog_Ensure(local);
+    from_agent = PicoHost_FindAgent(host, from_agent_id);
+    if (from_agent && !from_agent->accepted_submit && from_agent->message_count == 0 &&
+        from_agent->id != new_id)
+        (void)pico_agent_close(host, from_agent->id);
+    return true;
+}
+
 bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const char *path)
 {
     PicoWorkspace *target;
@@ -2555,7 +2677,7 @@ bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const c
     }
 
     selected = PicoHost_SelectedAgent(host);
-    if (selected && selected->workspace == target)
+    if (selected && selected->workspace == target && !target->worktree)
     {
         FormatHomePath(resolved, pretty, sizeof(pretty));
         snprintf(line, sizeof(line), "Already in `%s`.", pretty);
@@ -2564,7 +2686,7 @@ bool PicoHost_ChangeWorkspace(PicoHost *host, const PicoWorkspace *from, const c
     }
 
     PicoChat_InspectClose();
-    main_agent = FirstMainAgent(target);
+    main_agent = target->worktree ? NULL : FirstMainAgent(target);
     if (!main_agent)
     {
         memset(&options, 0, sizeof(options));
@@ -2899,6 +3021,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         g_pico_process_retired = true;
         return PICO_HOST_SHUTDOWN_RETAINED;
     }
+    PicoWorktree_Cleanup(host);
     PicoPlugins_Shutdown(host);
     for (i = 0; i < host->workspace_count; i++)
     {

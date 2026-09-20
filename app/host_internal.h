@@ -111,6 +111,8 @@ typedef struct PicoSessionPersistFailure {
     char error[256];
 } PicoSessionPersistFailure;
 
+struct PicoWorktreeJob;
+
 struct PicoHost {
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;
@@ -135,6 +137,7 @@ struct PicoHost {
     int auth_count;
     struct PicoAuthStore *auth_store;
     struct PicoHostTask *tasks; /* Compiled-in workers, including retired auth attempts. */
+    struct PicoWorktreeJob *worktree_job;
     pid_t browser_children[16]; /* Independent processes; reap, never wait on the UI thread. */
     bool submit_cancel;
     char *agent_input;
@@ -345,6 +348,7 @@ bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name);
  * This is private to compiled-in code, NOT a user-extension worker API. */
 bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
                         void (*cancel)(void *), void (*destroy)(void *));
+bool PicoHost_StartLocalSession(PicoHost *host, PicoAgentId from_agent_id);
 bool PicoHost_OpenBrowser(PicoHost *host, const char *url);
 
 #endif

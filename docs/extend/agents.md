@@ -8,6 +8,8 @@ Include `pico/agent.h` directly, or include `pico/plugin.h`.
 
 `PicoAgentId` identifies one in-memory agent for the lifetime of its host. It is distinct from the durable JSONL `session_id`. Runtime generation identifies one worker generation inside that agent; force cancellation replaces the generation without changing the agent ID. An agent belongs to one workspace for its full lifetime. Independent hosts have separate ID spaces.
 
+For the builtin worktree UX, a fresh main-session draft may be replaced by a new agent in another checkout before its first accepted user turn. The original agent's workspace pointer is never mutated. Once submission passes validation and is accepted, the checkout binding is locked even if durable logging or the provider later fails. Durable resumes are always locked to the checkout recorded by their catalog route. Subagents inherit the parent agent's actual checkout because they belong to the same workspace.
+
 Use the main-thread host API; `PicoHost` is the process owner and does not expose a dereferenceable agent list:
 
 ```c

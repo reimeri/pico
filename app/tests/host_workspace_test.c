@@ -15,6 +15,7 @@
 #include "agent_internal.h"
 #include "agent.h"
 #include "overlay.h"
+#include "worktree.h"
 #include "clay/clay.h"
 
 #include <dirent.h>
@@ -8532,6 +8533,11 @@ static int TestFooterCacheTooltip(void)
         Fail("cache tooltip open workspace");
         goto done_host;
     }
+    /* Exercise the production footer's additional checkout chip without
+     * changing any full-height shell wrapper. */
+    PicoWorkspace *footer_workspace = PicoHost_FindWorkspace(host, workspace_id);
+    footer_workspace->checkout_root = true;
+    snprintf(footer_workspace->project_path, sizeof(footer_workspace->project_path), "%s", dir);
     memset(&opt, 0, sizeof(opt));
     opt.kind = PICO_AGENT_MAIN;
     opt.session_start = PICO_SESSION_NONE;
@@ -8560,9 +8566,11 @@ static int TestFooterCacheTooltip(void)
     commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
 
     chip = Clay_GetElementData(CLAY_ID("FooterCache"));
-    if (!chip.found || !FindCardText(&commands, "50% cache"))
+    Clay_ElementData worktree_chip = Clay_GetElementData(CLAY_ID("FooterWorktree"));
+    if (!chip.found || !worktree_chip.found || !FindCardText(&commands, "50% cache") ||
+        !FindCardText(&commands, "local"))
     {
-        Fail("footer must render the session cache rate");
+        Fail("footer must render cache rate and local checkout");
         goto done;
     }
     if (Clay_GetElementData(CLAY_ID("FooterCacheTip")).found)
@@ -8791,6 +8799,181 @@ static int TestFrameRetriesFailedArenaReplacement(void)
 #include "openai_login_test.c"
 #endif
 
+static bool WorktreeTestGit(const char *path, const char *a, const char *b,
+                            const char *c, const char *d)
+{
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0)
+    {
+        char *args[9];
+        int n = 0;
+        args[n++] = "git"; args[n++] = "-C"; args[n++] = (char *)path;
+        if (a) args[n++] = (char *)a;
+        if (b) args[n++] = (char *)b;
+        if (c) args[n++] = (char *)c;
+        if (d) args[n++] = (char *)d;
+        args[n] = NULL;
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
+        execvp("git", args);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool WorktreeTestAdd(const char *repo, const char *path)
+{
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0)
+    {
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
+        execlp("git", "git", "-C", repo, "worktree", "add", "--relative-paths",
+               "-b", "linked", path, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int TestWorktreeDiscoveryCreationAndGrouping(void)
+{
+    char repo[] = "/tmp/pico-worktree-repo-XXXXXX";
+    char linked[] = "/tmp/pico-worktree-linked-XXXXXX";
+    char cfg[] = "/tmp/pico-worktree-cfg-XXXXXX";
+    char data[] = "/tmp/pico-worktree-data-XXXXXX";
+    char file[4096], subdir[4096];
+    char *old_cfg = getenv("XDG_CONFIG_HOME") ? strdup(getenv("XDG_CONFIG_HOME")) : NULL;
+    char *old_data = getenv("XDG_DATA_HOME") ? strdup(getenv("XDG_DATA_HOME")) : NULL;
+    PicoHost *host = NULL;
+    int rc = 1;
+    if (!mkdtemp(repo) || !mkdtemp(linked) || !mkdtemp(cfg) || !mkdtemp(data))
+    {
+        Fail("worktree temporary directories");
+        goto done;
+    }
+    rmdir(linked);
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_DATA_HOME", data, 1);
+    snprintf(file, sizeof(file), "%s/file.txt", repo);
+    snprintf(subdir, sizeof(subdir), "%s/sub", repo);
+    mkdir(subdir, 0755);
+    if (!WorktreeTestGit(repo, "init", "-q", NULL, NULL) ||
+        !WorktreeTestGit(repo, "config", "user.email", "pico@example.test", NULL) ||
+        !WorktreeTestGit(repo, "config", "user.name", "Pico Test", NULL) ||
+        WriteFile(file, "committed\n") != 0 ||
+        !WorktreeTestGit(repo, "add", "file.txt", NULL, NULL) ||
+        !WorktreeTestGit(repo, "commit", "-qm", "initial", NULL) ||
+        !WorktreeTestAdd(repo, linked))
+    {
+        Fail("initialize repository and linked worktree");
+        goto done;
+    }
+    PicoWorktreeInfo local_info, linked_info, sub_info;
+    if (!PicoWorktree_Discover(repo, &local_info) || !local_info.checkout_root ||
+        local_info.linked || !local_info.can_create || strcmp(local_info.project_path, repo) != 0 ||
+        !PicoWorktree_Discover(linked, &linked_info) || !linked_info.checkout_root ||
+        !linked_info.linked || strcmp(linked_info.project_path, repo) != 0 ||
+        !PicoWorktree_Discover(subdir, &sub_info) || sub_info.checkout_root ||
+        strcmp(sub_info.project_path, subdir) != 0)
+    {
+        Fail("discover checkout project identities");
+        goto done;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("worktree host init");
+        goto done;
+    }
+    PicoWorkspaceId local_id = 0, linked_id = 0;
+    if (pico_workspace_open(host, repo, &local_id) != PICO_OK ||
+        pico_workspace_open(host, linked, &linked_id) != PICO_OK)
+    {
+        Fail("open checkout runtimes");
+        goto done;
+    }
+    PicoWorkspace *local_ws = PicoHost_FindWorkspace(host, local_id);
+    PicoWorkspace *linked_ws = PicoHost_FindWorkspace(host, linked_id);
+    if (!local_ws || !linked_ws || local_ws->worktree || !linked_ws->worktree ||
+        strcmp(linked_ws->project_path, repo) != 0 || PicoCatalog_Ensure(repo) != 0 ||
+        PicoCatalog_Ensure(linked) != 0)
+    {
+        Fail("checkout runtime and catalog metadata");
+        goto done;
+    }
+    PicoCatalogWorkspace *groups = NULL;
+    int group_count = PicoCatalog_ScanGrouped(&groups);
+    bool grouped = group_count == 1 && strcmp(groups[0].path, repo) == 0;
+    PicoCatalog_Free(groups, group_count);
+    if (!grouped)
+    {
+        Fail("linked checkout catalogs group under main checkout");
+        goto done;
+    }
+    PicoAgentCreateOptions options;
+    memset(&options, 0, sizeof(options));
+    options.kind = PICO_AGENT_MAIN;
+    options.session_start = PICO_SESSION_NEW;
+    options.select = true;
+    PicoAgentId source_id = 0;
+    if (pico_main_agent_create(host, local_id, &options, &source_id) != PICO_OK)
+    {
+        Fail("create worktree source draft");
+        goto done;
+    }
+    char dirty_file[4096];
+    snprintf(dirty_file, sizeof(dirty_file), "%s/untracked.txt", repo);
+    if (WriteFile(file, "dirty working tree\n") != 0 || WriteFile(dirty_file, "untracked\n") != 0)
+    {
+        Fail("prepare dirty local checkout");
+        goto done;
+    }
+    char error[256] = {0};
+    if (PicoWorktree_Request(host, source_id, "created", error, sizeof(error)) != PICO_OK)
+    {
+        Fail("request worktree creation");
+        goto done;
+    }
+    for (int i = 0; i < 10000 && PicoWorktree_Pending(host); i++)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    PicoAgent *selected = PicoHost_SelectedAgent(host);
+    PicoWorkspace *selected_ws = selected ? selected->workspace : NULL;
+    char created_file[8192], created_untracked[8192];
+    snprintf(created_file, sizeof(created_file), "%s/file.txt", selected_ws ? selected_ws->path : "");
+    snprintf(created_untracked, sizeof(created_untracked), "%s/untracked.txt",
+             selected_ws ? selected_ws->path : "");
+    size_t created_len = 0;
+    char *created_contents = Pico_ReadFile(created_file, &created_len);
+    if (PicoWorktree_Pending(host) || !selected_ws || !selected_ws->worktree ||
+        strcmp(selected_ws->checkout_name, "created") != 0 ||
+        strncmp(selected_ws->path, data, strlen(data)) != 0 ||
+        PicoHost_FindAgent(host, source_id) != NULL || !created_contents ||
+        strcmp(created_contents, "committed\n") != 0 || access(created_untracked, F_OK) == 0)
+    {
+        free(created_contents);
+        Fail("created worktree uses committed snapshot in selected checkout draft");
+        goto done;
+    }
+    free(created_contents);
+    rc = 0;
+done:
+    if (host) pico_host_free(host);
+    if (old_cfg) { setenv("XDG_CONFIG_HOME", old_cfg, 1); free(old_cfg); }
+    else unsetenv("XDG_CONFIG_HOME");
+    if (old_data) { setenv("XDG_DATA_HOME", old_data, 1); free(old_data); }
+    else unsetenv("XDG_DATA_HOME");
+    RmRf(linked); RmRf(repo); RmRf(cfg); RmRf(data);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
 #ifdef PICO_OPENAI_LOGIN_TESTS
@@ -8813,6 +8996,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 #endif
+    if (TestWorktreeDiscoveryCreationAndGrouping() != 0) return 1;
     if (TestQuitDefersTeardownUntilFrameReturns() != 0)
     {
         return 1;

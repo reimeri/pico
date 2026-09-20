@@ -95,6 +95,7 @@ add_executable(pico
     agent.c
     tool_args.c
     workspace.c
+    worktree.c
     subagent_config.c
     session.c
     usage.c
@@ -449,6 +450,7 @@ if(BUILD_TESTING)
         trace_group.c
         tool_args.c
         workspace.c
+        worktree.c
         host_extensions.c
         workspace_extensions.c
         subagent_config.c
@@ -472,12 +474,13 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_agent_behavior_tests)
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads)
+    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads OpenSSL::Crypto)
     add_test(NAME pico_agent_behavior_tests COMMAND pico_agent_behavior_tests)
 
     add_executable(pico_session_usage_tests
         tests/session_usage_test.c
         session.c
+        worktree.c
         tool_args.c
         canonical.c
         json.c
@@ -506,6 +509,7 @@ if(BUILD_TESTING)
         agent.c
         tool_args.c
         workspace.c
+        worktree.c
         host_extensions.c
         workspace_extensions.c
         subagent_config.c
@@ -530,7 +534,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_files_tests)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c)
+    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto)
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
     add_executable(pico_composer_tests
@@ -545,6 +549,7 @@ if(BUILD_TESTING)
         agent.c
         tool_args.c
         workspace.c
+        worktree.c
         host_extensions.c
         workspace_extensions.c
         subagent_config.c
@@ -569,7 +574,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_composer_tests)
     target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c)
+    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
 
     add_executable(pico_settings_agent_tests
@@ -692,6 +697,7 @@ if(BUILD_TESTING)
         tests/host_workspace_test.c
         tests/clay_impl.c
         app.c
+        worktree.c
         ui.c
         scrollbar.c
         agent.c

@@ -36,6 +36,7 @@ struct PicoAgent {
     char session_id[40];
     char session_path[4096];
     PicoSessionPersistence persistence;
+    bool accepted_submit;
     uint64_t session_input_tokens;
     uint64_t session_cached_tokens;
     int tokens_used;

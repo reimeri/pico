@@ -204,8 +204,21 @@ static void CmdNew(PicoWorkspace *workspace, PicoAgentId agent_id, const char *a
         }
         return;
     }
-    PicoSession_Reset(app, agent);
-    PicoOverlay_Notify(app, "New session.");
+    if (workspace && workspace->worktree)
+    {
+        if (!PicoHost_StartLocalSession(app, agent_id))
+        {
+            PicoOverlay_Notify(app, "Could not start a local session.");
+            ClearComposer(app);
+            if (app) app->submit_cancel = true;
+            return;
+        }
+    }
+    else
+    {
+        PicoSession_Reset(app, agent);
+    }
+    PicoOverlay_Notify(app, "New local session.");
     ClearComposer(app);
     if (app)
     {

@@ -11,6 +11,8 @@
 typedef struct PicoSessionInfo {
     char path[4096];
     char cwd[4096];
+    char project_path[4096];
+    bool worktree;
     char id[40];
     char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
     char model[128];
@@ -32,6 +34,10 @@ typedef struct PicoSessionInfo {
 
 typedef struct PicoCatalogSession {
     char id[40];
+    char checkout_path[4096];
+    char checkout_name[256];
+    bool worktree;
+    bool missing_checkout;
     char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
     char model[128];
     char effort[PICO_EFFORT_LEN];
@@ -48,6 +54,10 @@ typedef struct PicoCatalogSession {
 typedef struct PicoCatalogWorkspace {
     char key[4096];
     char path[4096];
+    char project_path[4096];
+    char checkout_name[256];
+    bool worktree;
+    bool missing;
     char name[PICO_CATALOG_NAME_MAX];
     int order;
     bool collapsed;
@@ -62,6 +72,8 @@ void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
  * .workspace.json caches listing rows keyed by id plus the JSONL stat generation
  * so unchanged jsonl is not re-parsed. Caller frees with PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
+/* Sidebar presentation: exact-checkout catalogs grouped by logical Git project. */
+int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out);
 /* Missing token files report a valid empty token. Read failures return false. */
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);

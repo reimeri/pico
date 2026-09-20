@@ -57,6 +57,7 @@ typedef struct SidebarState {
     Texture2D folder_expanded;
     Texture2D settings_icon;
     Texture2D settings_icon_hover;
+    Texture2D worktree_icon;
     bool icons_tried;
     bool drag_press_pending;
     int drag_source_index;
@@ -182,7 +183,7 @@ static void SidebarRefresh(SidebarState *s)
         return;
     }
     bool token_before_valid = PicoCatalog_ReadChangeToken(token_before);
-    n = PicoCatalog_Scan(&next);
+    n = PicoCatalog_ScanGrouped(&next);
     bool token_after_valid = PicoCatalog_ReadChangeToken(token_after);
     if (s->order_unsaved)
     {
@@ -361,7 +362,8 @@ static PicoAgentId LiveMainAgent(PicoHost *host, const char *ws_path, const char
     return 0;
 }
 
-static bool CatalogHasSession(const PicoCatalogWorkspace *ws, const char *session_id)
+static bool CatalogHasSession(const PicoCatalogWorkspace *ws, const char *checkout_path,
+                              const char *session_id)
 {
     int i;
     if (!ws || !session_id || !session_id[0])
@@ -370,7 +372,8 @@ static bool CatalogHasSession(const PicoCatalogWorkspace *ws, const char *sessio
     }
     for (i = 0; i < ws->session_count; i++)
     {
-        if (strcmp(ws->sessions[i].id, session_id) == 0)
+        if (strcmp(ws->sessions[i].id, session_id) == 0 && checkout_path &&
+            strcmp(ws->sessions[i].checkout_path, checkout_path) == 0)
         {
             return true;
         }
@@ -569,6 +572,7 @@ static void EnsureFolderIcons(SidebarState *s)
     s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png", COLOR_MUTED);
     s->settings_icon = LoadFolderIcon("resources/settings.png", COLOR_MUTED);
     s->settings_icon_hover = LoadFolderIcon("resources/settings.png", COLOR_TEXT);
+    s->worktree_icon = LoadFolderIcon("resources/worktree.png", COLOR_MUTED);
 }
 
 static void UnloadFolderIcons(SidebarState *s)
@@ -596,6 +600,11 @@ static void UnloadFolderIcons(SidebarState *s)
     {
         UnloadTexture(s->settings_icon_hover);
         memset(&s->settings_icon_hover, 0, sizeof(s->settings_icon_hover));
+    }
+    if (s->worktree_icon.id != 0)
+    {
+        UnloadTexture(s->worktree_icon);
+        memset(&s->worktree_icon, 0, sizeof(s->worktree_icon));
     }
 }
 
@@ -683,7 +692,7 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
 }
 
-static void RenderSessionDot(SidebarDotKind kind, int row_id)
+static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, bool worktree)
 {
     float gutter = Pico_FontPx(SIDEBAR_FOLDER_ICON);
     float slot = Pico_FontPx(SIDEBAR_SESSION_DOT);
@@ -716,12 +725,20 @@ static void RenderSessionDot(SidebarDotKind kind, int row_id)
                              .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
                                                 .y = CLAY_ALIGN_Y_CENTER}}})
     {
-        CLAY(CLAY_IDI("SidebarSessDot", row_id),
-             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
-                                    .height = CLAY_SIZING_FIXED(size)}},
-              .backgroundColor = color,
-              .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)})
+        if (worktree && kind == SIDEBAR_DOT_IDLE && s && s->worktree_icon.id != 0)
         {
+            CLAY(CLAY_IDI("SidebarSessDot", row_id),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter),
+                                        .height = CLAY_SIZING_FIXED(gutter)}},
+                  .image = {.imageData = &s->worktree_icon}}) {}
+        }
+        else
+        {
+            CLAY(CLAY_IDI("SidebarSessDot", row_id),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                        .height = CLAY_SIZING_FIXED(size)}},
+                  .backgroundColor = color,
+                  .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)}) {}
         }
     }
 }
@@ -750,7 +767,7 @@ static bool SessionIsSelected(PicoHost *host, const char *ws_path, const char *s
 
 static int SessionRowId(int ws_index, int session_index)
 {
-    return ws_index * 512 + session_index;
+    return ws_index * 20000 + session_index;
 }
 
 bool PicoSidebar_DragMoved(float press_x, float press_y, float mouse_x, float mouse_y)
@@ -920,9 +937,10 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
     (void)host;
 }
 
-static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *title,
-                             const char *session_id, PicoAgentId live_id, int row_id,
-                             bool catalog_unseen)
+static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_path,
+                             const char *title, const char *session_id, PicoAgentId live_id,
+                             int row_id, bool catalog_unseen, bool worktree,
+                             bool missing_checkout)
 {
     bool selected = SessionIsSelected(host, ws_path, session_id, live_id);
     Clay_ElementId id = CLAY_IDI("SidebarSess", row_id);
@@ -935,19 +953,22 @@ static void RenderSessionRow(PicoHost *host, const char *ws_path, const char *ti
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderSessionDot(SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen), row_id);
+        RenderSessionDot(s, SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen),
+                         row_id, worktree);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {
             CLAY_TEXT(CStr(title && title[0] ? title : "Untitled"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = PICO_FONT_UI,
-                                        .textColor = selected ? COLOR_TEXT : COLOR_MUTED,
+                                        .textColor = missing_checkout ? COLOR_STATUS_ERR
+                                                                          : (selected ? COLOR_TEXT : COLOR_MUTED),
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
     }
 }
 
+static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorkspace *ws);
 static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index);
 static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws);
 
@@ -957,6 +978,9 @@ typedef struct SidebarPin {
     int row_id;
     const char *title;
     const char *session_id;
+    const char *checkout_path;
+    bool worktree;
+    bool missing_checkout;
     bool unseen_complete;
 } SidebarPin;
 
@@ -978,7 +1002,8 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
         {
             continue;
         }
-        if (!SessionIsSelected(host, ws->path, info.session_id, extra))
+        PicoAgent *selected_agent = PicoHost_FindAgent(host, extra);
+        if (!SessionIsSelected(host, PicoAgent_WorkspacePath(selected_agent), info.session_id, extra))
         {
             continue;
         }
@@ -987,12 +1012,15 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
         pin.row_id = SessionRowId(ws_index, j);
         pin.title = info.session_id[0] ? "Untitled" : "New session";
         pin.session_id = "";
+        PicoAgent *live_agent = PicoHost_FindAgent(host, extra);
+        pin.checkout_path = PicoAgent_WorkspacePath(live_agent);
+        pin.worktree = live_agent && live_agent->workspace && live_agent->workspace->worktree;
         pin.unseen_complete = false;
         return pin;
     }
     for (j = 0; j < ws->session_count; j++)
     {
-        if (!SessionIsSelected(host, ws->path, ws->sessions[j].id, 0))
+        if (!SessionIsSelected(host, ws->sessions[j].checkout_path, ws->sessions[j].id, 0))
         {
             continue;
         }
@@ -1001,21 +1029,24 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
         pin.row_id = SessionRowId(ws_index, extras + j);
         pin.title = ws->sessions[j].title;
         pin.session_id = ws->sessions[j].id;
+        pin.checkout_path = ws->sessions[j].checkout_path;
+        pin.worktree = ws->sessions[j].worktree;
+        pin.missing_checkout = ws->sessions[j].missing_checkout;
         pin.unseen_complete = ws->sessions[j].unseen_complete;
         return pin;
     }
     return pin;
 }
 
-static void RenderPinnedSelected(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
+static void RenderPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws, int ws_index)
 {
     SidebarPin pin = FindSelectedSidebarRow(host, ws, ws_index);
     if (!pin.found)
     {
         return;
     }
-    RenderSessionRow(host, ws->path, pin.title, pin.session_id, pin.live_id, pin.row_id,
-                     pin.unseen_complete);
+    RenderSessionRow(host, s, pin.checkout_path, pin.title, pin.session_id, pin.live_id,
+                     pin.row_id, pin.unseen_complete, pin.worktree, pin.missing_checkout);
 }
 
 static bool OpenPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
@@ -1031,7 +1062,7 @@ static bool OpenPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalo
         SelectAgent(host, pin.live_id);
         return true;
     }
-    OpenCatalogSession(host, s, ws->path, pin.session_id);
+    OpenCatalogSession(host, s, pin.checkout_path, pin.session_id);
     return true;
 }
 
@@ -1078,8 +1109,8 @@ static void RenderMoreLessRow(int ws_index, int shown, int total)
     }
 }
 
-static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index,
-                             int max_extras)
+static void RenderLiveExtras(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
+                             int ws_index, int max_extras)
 {
     int n = pico_agent_count(host);
     int extra = 0;
@@ -1095,11 +1126,11 @@ static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int
         }
         agent = PicoHost_FindAgent(host, info.id);
         agent_ws = PicoAgent_WorkspacePath(agent);
-        if (!agent_ws || strcmp(agent_ws, ws->path) != 0)
+        if (!agent_ws || !AgentInCatalogProject(agent, ws))
         {
             continue;
         }
-        if (info.session_id[0] && CatalogHasSession(ws, info.session_id))
+        if (info.session_id[0] && CatalogHasSession(ws, agent_ws, info.session_id))
         {
             continue;
         }
@@ -1107,8 +1138,9 @@ static void RenderLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws, int
         {
             break;
         }
-        RenderSessionRow(host, ws->path, info.session_id[0] ? "Untitled" : "New session",
-                         info.session_id, info.id, SessionRowId(ws_index, extra), false);
+        RenderSessionRow(host, s, agent_ws, info.session_id[0] ? "Untitled" : "New session",
+                         info.session_id, info.id, SessionRowId(ws_index, extra), false,
+                         agent && agent->workspace && agent->workspace->worktree, false);
         extra++;
     }
 }
@@ -1175,18 +1207,20 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 RenderWorkspaceRow(host, s, ws, i);
                 if (ws->collapsed)
                 {
-                    RenderPinnedSelected(host, ws, i);
+                    RenderPinnedSelected(host, s, ws, i);
                 }
                 else
                 {
                     extras = CountLiveExtras(host, ws);
                     total = extras + ws->session_count;
                     shown = ShownForIndex(s, i, total);
-                    RenderLiveExtras(host, ws, i, shown < extras ? shown : extras);
+                    RenderLiveExtras(host, s, ws, i, shown < extras ? shown : extras);
                     for (j = 0; j < shown - extras && j < ws->session_count; j++)
                     {
-                        RenderSessionRow(host, ws->path, ws->sessions[j].title, ws->sessions[j].id, 0,
-                                         SessionRowId(i, extras + j), ws->sessions[j].unseen_complete);
+                        RenderSessionRow(host, s, ws->sessions[j].checkout_path, ws->sessions[j].title,
+                                         ws->sessions[j].id, 0, SessionRowId(i, extras + j),
+                                         ws->sessions[j].unseen_complete, ws->sessions[j].worktree,
+                                         ws->sessions[j].missing_checkout);
                     }
                     RenderMoreLessRow(i, shown, total);
                 }
@@ -1302,6 +1336,14 @@ static void RenderFolderModal(PicoHost *host, void *state)
     s->folder_painted = true;
 }
 
+static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorkspace *ws)
+{
+    if (!agent || !agent->workspace || !ws) return false;
+    const char *project = agent->workspace->project_path[0]
+                              ? agent->workspace->project_path : agent->workspace->path;
+    return strcmp(project, ws->path) == 0;
+}
+
 static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index)
 {
     int n = pico_agent_count(host);
@@ -1318,11 +1360,11 @@ static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, i
         }
         agent = PicoHost_FindAgent(host, info.id);
         agent_ws = PicoAgent_WorkspacePath(agent);
-        if (!agent_ws || strcmp(agent_ws, ws->path) != 0)
+        if (!agent_ws || !AgentInCatalogProject(agent, ws))
         {
             continue;
         }
-        if (info.session_id[0] && CatalogHasSession(ws, info.session_id))
+        if (info.session_id[0] && CatalogHasSession(ws, agent_ws, info.session_id))
         {
             continue;
         }
@@ -1553,7 +1595,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         {
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, extras + j))))
             {
-                OpenCatalogSession(host, s, ws->path, ws->sessions[j].id);
+                OpenCatalogSession(host, s, ws->sessions[j].checkout_path, ws->sessions[j].id);
                 return;
             }
         }

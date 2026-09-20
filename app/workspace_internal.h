@@ -114,6 +114,11 @@ struct PicoWorkspace {
     PicoHost *host;
     PicoWorkspaceId id;
     char path[4096];
+    char project_path[4096];
+    char checkout_name[256];
+    bool checkout_root;
+    bool worktree;
+    bool can_create_worktree;
     PicoWorkspaceState state;
     uint64_t registration_generation;
     PicoRegistrationGeneration *active_registration;

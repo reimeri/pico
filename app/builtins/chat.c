@@ -979,17 +979,86 @@ static bool MessageHasFinishedTrace(const TranscriptView *view, const PicoMessag
     return false;
 }
 
+static const PicoTool *OwnerTools(const TranscriptView *view, int *tool_count)
+{
+    PicoWorkspace *ws = (view && view->owner) ? view->owner->workspace : NULL;
+    if (tool_count)
+    {
+        *tool_count = ws ? ws->tool_count : 0;
+    }
+    return ws ? ws->tools : NULL;
+}
+
+static void GroupRememberLabel(PicoTraceGroupLabel *labels, int *label_count, int max_labels,
+                               const char *singular, const char *plural)
+{
+    if (!labels || !label_count || !singular || !singular[0] || !plural || !plural[0] || max_labels <= 0)
+    {
+        return;
+    }
+    for (int i = 0; i < *label_count; i++)
+    {
+        if (labels[i].singular && strcmp(labels[i].singular, singular) == 0)
+        {
+            return;
+        }
+    }
+    if (*label_count >= max_labels)
+    {
+        return;
+    }
+    labels[*label_count].singular = singular;
+    labels[*label_count].plural = plural;
+    labels[*label_count].count = 0;
+    (*label_count)++;
+}
+
+static void GroupBumpLabel(PicoTraceGroupLabel *labels, int label_count, const char *singular)
+{
+    if (!labels || !singular)
+    {
+        return;
+    }
+    for (int i = 0; i < label_count; i++)
+    {
+        if (labels[i].singular && strcmp(labels[i].singular, singular) == 0)
+        {
+            labels[i].count++;
+            return;
+        }
+    }
+}
+
 static void CountFinishedTraceGroup(const TranscriptView *view, const PicoMessage *msg,
-                                    int message_index, int *tool_calls, int *spawn_processes,
-                                    int *subagents, bool *has_thinking, int *think_ms)
+                                    int message_index, int *tool_calls, PicoTraceGroupLabel *labels,
+                                    int max_labels, int *label_count, bool *has_thinking, int *think_ms)
 {
     int tools = 0;
-    int spawns = 0;
-    int subs = 0;
+    int named = 0;
     bool thinking = false;
     int ms = 0;
+    int catalog_count = 0;
+    const PicoTool *catalog = OwnerTools(view, &catalog_count);
+    if (labels && max_labels > 0)
+    {
+        memset(labels, 0, (size_t)max_labels * sizeof(*labels));
+    }
     if (msg)
     {
+        for (int t = 0; t < msg->trace_count; t++)
+        {
+            const PicoTraceLine *line = &msg->trace[t];
+            const char *singular = NULL;
+            const char *plural = NULL;
+            if (!pico_trace_line_visible(line) || pico_trace_line_group_kind(line) != PICO_TRACE_GROUP_TOOL)
+            {
+                continue;
+            }
+            if (pico_trace_tool_group_label(catalog, catalog_count, line->tool_name, &singular, &plural))
+            {
+                GroupRememberLabel(labels, &named, max_labels, singular, plural);
+            }
+        }
         for (int t = 0; t < msg->trace_count; t++)
         {
             const PicoTraceLine *line = &msg->trace[t];
@@ -1000,14 +1069,20 @@ static void CountFinishedTraceGroup(const TranscriptView *view, const PicoMessag
             switch (pico_trace_line_group_kind(line))
             {
             case PICO_TRACE_GROUP_TOOL:
-                tools++;
+            {
+                const char *singular = NULL;
+                const char *plural = NULL;
+                if (pico_trace_tool_group_label(catalog, catalog_count, line->tool_name, &singular,
+                                                &plural))
+                {
+                    GroupBumpLabel(labels, named, singular);
+                }
+                else
+                {
+                    tools++;
+                }
                 break;
-            case PICO_TRACE_GROUP_SPAWN:
-                spawns++;
-                break;
-            case PICO_TRACE_GROUP_SUBAGENT:
-                subs++;
-                break;
+            }
             case PICO_TRACE_GROUP_THINK:
                 thinking = true;
                 if (line->think_ms > 0)
@@ -1024,13 +1099,9 @@ static void CountFinishedTraceGroup(const TranscriptView *view, const PicoMessag
     {
         *tool_calls = tools;
     }
-    if (spawn_processes)
+    if (label_count)
     {
-        *spawn_processes = spawns;
-    }
-    if (subagents)
-    {
-        *subagents = subs;
+        *label_count = named;
     }
     if (has_thinking)
     {
@@ -1064,8 +1135,8 @@ static void RenderTraceGroupHeader(const TranscriptView *view, PicoMessage *msg,
 {
     char title[160];
     int tool_calls = 0;
-    int spawn_processes = 0;
-    int subagents = 0;
+    PicoTraceGroupLabel labels[PICO_MAX_TOOLS];
+    int label_count = 0;
     bool has_thinking = false;
     int think_ms = 0;
     Clay_ElementId row_id = TraceGroupRowId(view, message_index);
@@ -1073,10 +1144,10 @@ static void RenderTraceGroupHeader(const TranscriptView *view, PicoMessage *msg,
     bool hovered = Clay_PointerOver(row_id);
     Clay_Color color = hovered ? COLOR_TOOL_NAME_HOVER : COLOR_MUTED;
 
-    CountFinishedTraceGroup(view, msg, message_index, &tool_calls, &spawn_processes, &subagents,
+    CountFinishedTraceGroup(view, msg, message_index, &tool_calls, labels, PICO_MAX_TOOLS, &label_count,
                             &has_thinking, &think_ms);
-    pico_trace_group_format_title(title, sizeof(title), tool_calls, spawn_processes, subagents,
-                                  has_thinking, think_ms);
+    pico_trace_group_format_title(title, sizeof(title), tool_calls, labels, label_count, has_thinking,
+                                  think_ms);
     if (hovered)
     {
         view->app->hovered_tool = true;

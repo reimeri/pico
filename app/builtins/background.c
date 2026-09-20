@@ -745,6 +745,7 @@ static int BackgroundWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                   "Output is only the latest 64 KiB; oldest lines are dropped. Use list_background, "
                   "log_background, and kill_background to inspect or stop it.",
                   kRunParams, RunBackground, NULL, PICO_TOOL_SEQUENTIAL);
+    pico_set_tool_group_title(workspace, "run_background", "spawn process", "spawn processes");
     pico_add_tool(workspace, "kill_background", "Stop a background job started with run_background.", kIdParams,
                   KillBackground, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_tool(workspace, "list_background",

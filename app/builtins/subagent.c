@@ -117,6 +117,7 @@ static int SubagentInit(PicoWorkspace *workspace, void **state_out)
     pico_add_tool(workspace, "subagent",
                   "Delegate a task synchronously to a discovered named subagent profile",
                   kSubagentParams, SubagentRun, NULL, PICO_TOOL_PARALLEL);
+    pico_set_tool_group_title(workspace, "subagent", "subagent", "subagents");
     pico_add_llm_hook(workspace, SubagentGuidance);
     pico_add_tool_row_hook(workspace, PicoChat_SubagentToolRow);
     return 0;

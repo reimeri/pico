@@ -238,6 +238,8 @@ typedef struct PicoTool {
     PicoToolFn run;
     PicoToolApplyFn apply; /* optional; main thread after success and during replay */
     PicoToolExecution execution;
+    const char *group_singular; /* NULL => generic "tool call(s)" bucket */
+    const char *group_plural;
     void *state;
 } PicoTool;
 
@@ -561,6 +563,12 @@ void pico_workspace_status_warn(PicoWorkspace *workspace, const char *msg);
  * Apply/after callbacks remain main-thread serialized, in completion order. */
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
                    const char *params_json, PicoToolFn run, PicoToolApplyFn apply, PicoToolExecution execution);
+/* Init-only. Assigns a counted transcript group bucket to a tool already staged
+ * by pico_add_tool in this workspace_init. Both singular and plural must be
+ * non-empty and outlive the generation. Omit the setter to keep the generic
+ * "tool call(s)" bucket. A second call for the same name replaces the labels. */
+bool pico_set_tool_group_title(PicoWorkspace *workspace, const char *name, const char *singular,
+                               const char *plural);
 /* Bind a child pid to the in-flight tool so force-cancel can kill its process
  * group. Each call has its own slot. Call from the tool (worker thread) after
  * fork; 0 clears. A positive PID bound after cancellation is killed immediately. */

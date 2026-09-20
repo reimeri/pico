@@ -37,15 +37,39 @@ PicoTraceGroupKind pico_trace_line_group_kind(const PicoTraceLine *line)
     {
         return PICO_TRACE_GROUP_THINK;
     }
-    if (line->tool_name && strcmp(line->tool_name, "run_background") == 0)
-    {
-        return PICO_TRACE_GROUP_SPAWN;
-    }
-    if (line->tool_name && strcmp(line->tool_name, "subagent") == 0)
-    {
-        return PICO_TRACE_GROUP_SUBAGENT;
-    }
     return PICO_TRACE_GROUP_TOOL;
+}
+
+bool pico_trace_tool_group_label(const PicoTool *tools, int tool_count, const char *tool_name,
+                                 const char **singular, const char **plural)
+{
+    if (!tools || tool_count <= 0 || !tool_name || !tool_name[0])
+    {
+        return false;
+    }
+    for (int i = 0; i < tool_count; i++)
+    {
+        const PicoTool *tool = &tools[i];
+        if (!tool->name || strcmp(tool->name, tool_name) != 0)
+        {
+            continue;
+        }
+        if (!tool->group_singular || !tool->group_singular[0] || !tool->group_plural ||
+            !tool->group_plural[0])
+        {
+            return false;
+        }
+        if (singular)
+        {
+            *singular = tool->group_singular;
+        }
+        if (plural)
+        {
+            *plural = tool->group_plural;
+        }
+        return true;
+    }
+    return false;
 }
 
 double pico_trace_now(void)
@@ -122,11 +146,12 @@ static void TitleAppend(char *buf, size_t cap, size_t *used, const char *part)
     *used += (size_t)n;
 }
 
-int pico_trace_group_format_title(char *buf, size_t cap, int tool_calls, int spawn_processes,
-                                  int subagents, bool has_thinking, int think_ms)
+int pico_trace_group_format_title(char *buf, size_t cap, int tool_calls,
+                                  const PicoTraceGroupLabel *labels, int label_count, bool has_thinking,
+                                  int think_ms)
 {
     size_t used = 0;
-    char part[64];
+    char part[96];
 
     if (!buf || cap == 0)
     {
@@ -137,17 +162,17 @@ int pico_trace_group_format_title(char *buf, size_t cap, int tool_calls, int spa
     {
         tool_calls = 0;
     }
-    if (spawn_processes < 0)
+    if (label_count < 0)
     {
-        spawn_processes = 0;
-    }
-    if (subagents < 0)
-    {
-        subagents = 0;
+        label_count = 0;
     }
     if (think_ms < 0)
     {
         think_ms = 0;
+    }
+    if (!labels)
+    {
+        label_count = 0;
     }
 
     if (tool_calls == 1)
@@ -159,22 +184,22 @@ int pico_trace_group_format_title(char *buf, size_t cap, int tool_calls, int spa
         snprintf(part, sizeof(part), "%d x tool calls", tool_calls);
         TitleAppend(buf, cap, &used, part);
     }
-    if (spawn_processes == 1)
+    for (int i = 0; i < label_count; i++)
     {
-        TitleAppend(buf, cap, &used, "1 x spawn process");
-    }
-    else if (spawn_processes > 1)
-    {
-        snprintf(part, sizeof(part), "%d x spawn processes", spawn_processes);
-        TitleAppend(buf, cap, &used, part);
-    }
-    if (subagents == 1)
-    {
-        TitleAppend(buf, cap, &used, "1 x subagent");
-    }
-    else if (subagents > 1)
-    {
-        snprintf(part, sizeof(part), "%d x subagents", subagents);
+        const PicoTraceGroupLabel *label = &labels[i];
+        int count = label->count;
+        if (count <= 0 || !label->singular || !label->singular[0] || !label->plural || !label->plural[0])
+        {
+            continue;
+        }
+        if (count == 1)
+        {
+            snprintf(part, sizeof(part), "1 x %s", label->singular);
+        }
+        else
+        {
+            snprintf(part, sizeof(part), "%d x %s", count, label->plural);
+        }
         TitleAppend(buf, cap, &used, part);
     }
     if (think_ms > 0)

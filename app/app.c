@@ -1094,6 +1094,48 @@ bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *descr
     return true;
 }
 
+bool pico_set_tool_group_title(PicoWorkspace *workspace, const char *name, const char *singular,
+                               const char *plural)
+{
+    PicoHost *host;
+    if (!workspace || !workspace->host)
+    {
+        return false;
+    }
+    host = workspace->host;
+    if (host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace)
+    {
+        ToolAddFail(host, name, "pico_set_tool_group_title is only valid during workspace extension init");
+        return false;
+    }
+    if (!name || !name[0])
+    {
+        ToolAddFail(host, name, "missing name");
+        return false;
+    }
+    if (!singular || !singular[0])
+    {
+        ToolAddFail(host, name, "missing singular");
+        return false;
+    }
+    if (!plural || !plural[0])
+    {
+        ToolAddFail(host, name, "missing plural");
+        return false;
+    }
+    for (int i = 0; i < host->staging.ws_tool_count; i++)
+    {
+        if (host->staging.ws_tools[i].name && strcmp(host->staging.ws_tools[i].name, name) == 0)
+        {
+            host->staging.ws_tools[i].group_singular = singular;
+            host->staging.ws_tools[i].group_plural = plural;
+            return true;
+        }
+    }
+    ToolAddFail(host, name, "not registered");
+    return false;
+}
+
 void pico_host_add_command(PicoHost *host, const char *name, const char *help, PicoHostCmdFn run)
 {
     if (!host)

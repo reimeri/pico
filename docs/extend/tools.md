@@ -159,6 +159,20 @@ pico_ui_post(ctx, "web_search", PICO_UI_POST_TEXT, chunk, n);
 - The snapshot outlives the tool call until `pico_agent_ui_clear`, force-cancel, generation retirement, or workspace close. Reload does not clear it. `pico_agent_ui_latest` pointers are valid until the next pump, clear of that agent and name, or those same drops. `pico_ui_latest` / `pico_ui_clear` target the UI-selected agent.
 - Copy the snapshot into your own display buffer in `on_frame` if Clay will hold the string. Popping the modal is the usual time to `pico_agent_ui_clear`.
 
+## Transcript group title
+
+Completed tool rows in one assistant message collapse under one header. Tools without a group title share the generic `1 x tool call` / `N x tool calls` bucket. To give a tool its own counted bucket, call `pico_set_tool_group_title` after `pico_add_tool` during `workspace_init`:
+
+```c
+pico_add_tool(workspace, "index", "Rebuild the workspace index", kParams, IndexRun, NULL,
+              PICO_TOOL_SEQUENTIAL);
+pico_set_tool_group_title(workspace, "index", "index rebuild", "index rebuilds");
+```
+
+The header uses `1 x <singular>` or `N x <plural>`. Named buckets follow the generic tool-call count, in first-appearance order in that message, then thinking. Tools that share the same singular merge into one bucket; the first appearance supplies the plural. Individual expanded rows still show the registered tool name. These strings are UI metadata and are not sent to the model.
+
+`pico_set_tool_group_title` is init-only, looks up a tool already staged in this `workspace_init`, and requires non-empty singular and plural that outlive the generation (literals). It returns `false` and appends a `status_warn` line on failure. A second call for the same name replaces the labels. Builtin `todo_update`, `run_background`, and `subagent` use this path.
+
 ## Tool-row click
 
 Register `pico_add_tool_row_hook` to open your own overlay when the user clicks a tool row. Set `event->handled` to skip the default expand/collapse. Builtin subagent inspect uses this path. See [hooks](hooks.md#tool-row-click) and [`../../examples/modal.c`](../../examples/modal.c).
@@ -222,7 +236,7 @@ The apply callback returns `false` to reject details. A live rejection converts 
 
 ## Contract
 
-- `name`, `description`, `params_json` must outlive the extension — use string literals.
+- `name`, `description`, `params_json`, and optional group-title strings must outlive the extension — use string literals.
 - `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration also rejects invalid execution policies. It returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay warning names the tool and the reason.
 - Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
@@ -231,7 +245,7 @@ The apply callback returns `false` to reject details. A live rejection converts 
 - No cancellation callback on the tool itself. Esc asks the in-flight LLM request to abort, and wakes `pico_tool_ask` with `PICO_ASK_CANCEL`. A tool that does not ask still runs until it returns.
 - A second Esc while that cancel is still outstanding **force-cancels**: the UI goes idle immediately and the worker is abandoned. The tool function may keep running in the background until it returns. Reload of that workspace still waits until that abandoned worker finishes so your code is not `dlclose`d underneath it. Other workspaces are not blocked. Do not use your own condition variable to wait for UI; Pico cannot wake it.
 - Each invocation owns its own child-process slot. If the tool forks a child, call `pico_tool_set_child(ctx, pid)` after spawn (and `pico_tool_set_child(ctx, 0)` when it exits) so force-cancel can kill the process group. Put the child in its own group (`setpgid`) first. Builtin `sh` does this. A positive PID bound while cancellation/retirement is racing with spawn is killed immediately instead of being left untracked.
-- Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. Failed registration also appends a `status_warn` line with the tool name and reason.
+- Max 64 tools (`PICO_MAX_TOOLS`). `pico_add_tool` returns `false` and keeps the first registration when a name is duplicated. Failed registration also appends a `status_warn` line with the tool name and reason. `pico_set_tool_group_title` fails the same way for calls outside init, unknown names, or missing singular/plural.
 - Pico applies agent policy before LLM-hook exclusions. Execution and apply resolve from the retained offered snapshot. Hidden/unoffered calls become controlled tool errors and invoke no before hook, tool, apply, or after hook. Malformed/duplicate/oversized call arrays fail the provider round.
 - A model response may include several tool calls. Execution follows the policy, per-agent limit, and barriers described above; each invocation owns its context, ask, and child-process slot.
 - A queued reload of that workspace refuses new external turns and `subagent` delegations there. Work already in a turn drains through its tool/model follow-ups before registrations change. Other workspaces keep accepting work. `/cd` does not pause or destroy the previous workspace.

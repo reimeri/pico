@@ -2261,6 +2261,74 @@ static int TestToolRegistrationFailureWarns(void)
     return 0;
 }
 
+static int TestToolGroupTitleRegistration(void)
+{
+    const char *name = "tool group title registration";
+    PicoHost app;
+    memset(&app, 0, sizeof(app));
+    (void)TestWs(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+
+    if (pico_set_tool_group_title(ws, "echo", "echo", "echoes") ||
+        !WarnMentions(&app, "\"echo\"", "only valid during workspace extension init"))
+    {
+        free(app.status_warn);
+        return Fail(name, "setter outside init did not warn");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    if (pico_set_tool_group_title(ws, "echo", "echo", "echoes") ||
+        !WarnMentions(&app, "\"echo\"", "not registered"))
+    {
+        free(app.status_warn);
+        return Fail(name, "unknown name did not warn");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+    if (!pico_add_tool(ws, "echo", "echo", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL))
+    {
+        free(app.status_warn);
+        return Fail(name, "tool registration failed");
+    }
+    if (pico_set_tool_group_title(ws, "echo", "", "echoes") ||
+        !WarnMentions(&app, "\"echo\"", "missing singular"))
+    {
+        free(app.status_warn);
+        return Fail(name, "empty singular did not warn");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+    if (pico_set_tool_group_title(ws, "echo", "echo", NULL) ||
+        !WarnMentions(&app, "\"echo\"", "missing plural"))
+    {
+        free(app.status_warn);
+        return Fail(name, "missing plural did not warn");
+    }
+    free(app.status_warn);
+    app.status_warn = NULL;
+    const char *singular = "ping";
+    const char *plural = "pings";
+    if (!pico_set_tool_group_title(ws, "echo", "echo", "echoes") || app.status_warn)
+    {
+        free(app.status_warn);
+        return Fail(name, "valid setter failed or warned");
+    }
+    if (!pico_set_tool_group_title(ws, "echo", singular, plural) || app.status_warn)
+    {
+        free(app.status_warn);
+        return Fail(name, "replacing labels failed");
+    }
+    PicoHost_PublishRegistration(&app, NULL);
+    if (ws->tool_count != 1 || ws->tools[0].group_singular != singular ||
+        ws->tools[0].group_plural != plural)
+    {
+        return Fail(name, "published tool did not keep group labels");
+    }
+    return 0;
+}
+
 static int TestProductionInit(void)
 {
     const char *name = "production app initialization";
@@ -4675,6 +4743,7 @@ int main(void)
     failed |= TestStaleId();
     failed |= TestToolSchemaValidation();
     failed |= TestToolRegistrationFailureWarns();
+    failed |= TestToolGroupTitleRegistration();
     failed |= TestProductionInit();
     failed |= TestReloadQuiescence();
     failed |= TestDeferredWorkspaceChange();

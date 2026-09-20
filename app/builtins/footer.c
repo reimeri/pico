@@ -929,9 +929,9 @@ static void RenderWorktreeButton(Clay_ElementId id, const char *label, bool prim
     CLAY(id, {.layout = {.padding = {14, 14, 8, 8}}, .backgroundColor = bg, .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                .fontSize = PICO_FONT_UI,
-                                                .textColor = COLOR_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                 .fontSize = PICO_FONT_UI,
+                                                 .textColor = COLOR_TEXT,
+                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
 }
 
@@ -959,7 +959,7 @@ static void RenderWorktreeModal(PicoHost *app, void *state)
               .backgroundColor = COLOR_CONTENT_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
-            CLAY_TEXT(CLAY_STRING("Session checkout"),
+            CLAY_TEXT(CLAY_STRING("New worktree"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
             CLAY_TEXT(CLAY_STRING("Create a new worktree for this session."),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_WORDS}));

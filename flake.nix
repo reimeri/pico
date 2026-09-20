@@ -81,6 +81,8 @@
             "-DBUILD_TESTING=ON"
           ];
 
+          nativeCheckInputs = [ pkgs.git ];
+
           doCheck = true;
           checkPhase = ''
             runHook preCheck

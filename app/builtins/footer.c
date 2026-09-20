@@ -497,7 +497,7 @@ static void OpenWorktreeModal(PicoHost *app)
         return;
     g_worktree_open = true;
     g_worktree_error[0] = '\0';
-    (void)PicoWorktree_SuggestName(g_worktree_name, sizeof(g_worktree_name));
+    (void)PicoWorktree_SuggestName(ws->project_path, g_worktree_name, sizeof(g_worktree_name));
 }
 
 static void StartWorktreeCreation(PicoHost *app)

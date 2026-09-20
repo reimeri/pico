@@ -8841,6 +8841,26 @@ static bool WorktreeTestAdd(const char *repo, const char *path)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+static int TestWorktreeSuggestNameUsesProjectFolder(void)
+{
+    char name[129];
+    char error[256] = {0};
+    if (!PicoWorktree_SuggestName("/tmp/my-app", name, sizeof(name)) ||
+        strncmp(name, "my-app-", 7) != 0 ||
+        !PicoWorktree_ValidateName(name, error, sizeof(error)))
+    {
+        Fail("suggested worktree name starts with the project folder");
+        return 1;
+    }
+    if (!PicoWorktree_SuggestName("/tmp/My App", name, sizeof(name)) ||
+        !PicoWorktree_ValidateName(name, error, sizeof(error)))
+    {
+        Fail("suggested worktree name stays valid for unsafe folder names");
+        return 1;
+    }
+    return 0;
+}
+
 static int TestWorktreeDiscoveryCreationAndGrouping(void)
 {
     char repo[] = "/tmp/pico-worktree-repo-XXXXXX";
@@ -8996,6 +9016,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 #endif
+    if (TestWorktreeSuggestNameUsesProjectFolder() != 0) return 1;
     if (TestWorktreeDiscoveryCreationAndGrouping() != 0) return 1;
     if (TestQuitDefersTeardownUntilFrameReturns() != 0)
     {

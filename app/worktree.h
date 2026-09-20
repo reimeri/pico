@@ -25,7 +25,7 @@ typedef struct PicoWorktreeResult {
 } PicoWorktreeResult;
 
 bool PicoWorktree_Discover(const char *path, PicoWorktreeInfo *out);
-bool PicoWorktree_SuggestName(char *out, size_t cap);
+bool PicoWorktree_SuggestName(const char *project_path, char *out, size_t cap);
 bool PicoWorktree_ValidateName(const char *name, char *error, size_t error_cap);
 PicoResult PicoWorktree_Request(PicoHost *host, PicoAgentId source_agent_id,
                                 const char *name, char *error, size_t error_cap);

@@ -340,12 +340,45 @@ bool PicoWorktree_Discover(const char *path, PicoWorktreeInfo *out)
     return true;
 }
 
-bool PicoWorktree_SuggestName(char *out, size_t cap)
+static bool SuggestPrefix(const char *project, char *out, size_t cap)
 {
+    char raw[256];
+    size_t n = 0;
+    if (!out || cap == 0) return false;
+    BaseName(project, raw, sizeof(raw));
+    for (size_t i = 0; raw[i] && n + 1 < cap; i++)
+    {
+        unsigned char c = (unsigned char)raw[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+            c = '-';
+        if ((c == '-' || c == '.') && n == 0) continue;
+        if (c == '-' && n > 0 && out[n - 1] == '-') continue;
+        if (c == '.' && n > 0 && out[n - 1] == '.') continue;
+        out[n++] = (char)c;
+    }
+    while (n > 0 && (out[n - 1] == '-' || out[n - 1] == '.')) n--;
+    if (n == 0)
+    {
+        if (cap < 5) return false;
+        memcpy(out, "pico", 5);
+        return true;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+bool PicoWorktree_SuggestName(const char *project_path, char *out, size_t cap)
+{
+    char prefix[113];
+    char stamp[17];
     time_t now = time(NULL);
     struct tm tmv;
     if (!out || cap == 0 || !localtime_r(&now, &tmv)) return false;
-    return strftime(out, cap, "pico-%Y%m%d-%H%M%S", &tmv) > 0;
+    if (!SuggestPrefix(project_path, prefix, sizeof(prefix))) return false;
+    if (strftime(stamp, sizeof(stamp), "-%Y%m%d-%H%M%S", &tmv) == 0) return false;
+    int n = snprintf(out, cap, "%s%s", prefix, stamp);
+    return n > 0 && (size_t)n < cap;
 }
 
 bool PicoWorktree_ValidateName(const char *name, char *error, size_t error_cap)

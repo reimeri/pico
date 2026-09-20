@@ -152,6 +152,8 @@ struct PicoAgentRt {
     char *work_model;
     char *work_base_url;
     char *work_effort;
+    bool turn_fast; /* main-thread snapshot at the start of an agent turn */
+    bool work_fast;
     char *work_instructions;
     char *work_cache_key;
     char **work_input;
@@ -481,7 +483,9 @@ static char *EncodeResult(const PicoLlmResult *r)
 {
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"items\":[");
+    JsonBuf_Puts(&b, "{\"service_tier\":");
+    JsonBuf_String(&b, r ? r->service_tier : "");
+    JsonBuf_Puts(&b, ",\"items\":[");
     int n = r ? r->item_count : 0;
     for (int i = 0; i < n; i++)
     {
@@ -1165,6 +1169,7 @@ static void *WorkerMain(void *arg)
         char *cache_key = rt->work_cache_key;
         char **input = rt->work_input;
         int input_count = rt->work_input_count;
+        bool fast = rt->work_fast;
         bool compact = rt->work_compact;
         bool include_tools = rt->work_include_tools;
         bool vision = rt->work_vision;
@@ -1208,6 +1213,7 @@ static void *WorkerMain(void *arg)
             turn.instructions = instructions;
             turn.cache_key = cache_key;
             turn.effort = effort;
+            turn.fast = fast;
             turn.compact = compact;
             turn.include_tools = include_tools;
             turn.vision = vision;
@@ -1434,6 +1440,13 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         return false;
     }
 
+    if (rt->turn_fast && (!m->supports_fast || !p->supports_fast ||
+                         !p->supports_fast(app, m, p->state)))
+    {
+        SetErrorState(app, agent, "Fast mode is unavailable for this model or authentication route. Use /fast off.");
+        return false;
+    }
+
     char **input = NULL;
     int input_count = rt->input_count;
     if (input_count > 0)
@@ -1524,6 +1537,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_model = Dup(m->id);
     rt->work_base_url = Dup(m->base_url);
     rt->work_effort = Dup(PicoSettings_ActiveEffort(agent));
+    rt->work_fast = rt->turn_fast;
     rt->work_instructions = instructions;
     rt->work_cache_key = Dup(rt->cache_key);
     rt->work_compact = compact;
@@ -2907,13 +2921,23 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
 static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
 {
     PicoAgentRt *rt = agent->runtime;
+    JsonDoc tier_doc;
+    agent->last_service_tier[0] = '\0';
+    if (ev->payload && JsonParse(&tier_doc, ev->payload, strlen(ev->payload)) == 0)
+    {
+        char *tier = JsonObjStr(&tier_doc, 0, "service_tier");
+        snprintf(agent->last_service_tier, sizeof(agent->last_service_tier), "%s", tier ? tier : "");
+        free(tier);
+        JsonFree(&tier_doc);
+    }
     if (rt->compacting)
     {
         SweepProvisionalRows(agent, rt);
         int normalized_cached = 0;
         if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
         {
-            PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached);
+            PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached,
+                                 rt->turn_fast, agent->last_service_tier);
         }
         if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
@@ -2950,7 +2974,8 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     int normalized_cached = 0;
     if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
     {
-        PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached);
+        PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached,
+                             rt->turn_fast, agent->last_service_tier);
     }
     if (rt->pending_count > 0)
     {
@@ -3602,6 +3627,7 @@ void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
     {
         return;
     }
+    agent->runtime->turn_fast = agent->fast;
     StartCompact(app, agent);
 }
 
@@ -3706,6 +3732,7 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
         return;
     }
     PicoAgent_DismissError(agent);
+    agent->runtime->turn_fast = agent->fast;
     int parallel = agent->max_parallel_tools_override ? agent->max_parallel_tools_override
                                                       : agent->workspace->settings.max_parallel_tools;
     agent->runtime->max_parallel_tools = parallel >= 1 && parallel <= PICO_MAX_PARALLEL_TOOLS
@@ -4681,6 +4708,8 @@ void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
     snprintf(out->purpose, sizeof(out->purpose), "%s", agent->purpose);
     snprintf(out->model, sizeof(out->model), "%s", agent->model);
     snprintf(out->effort, sizeof(out->effort), "%s", agent->effort);
+    out->fast = agent->fast;
+    snprintf(out->last_service_tier, sizeof(out->last_service_tier), "%s", agent->last_service_tier);
     snprintf(out->activity, sizeof(out->activity), "%s", agent->activity);
     out->persistence = agent->persistence;
     out->busy = PicoAgent_IsBusy(agent);

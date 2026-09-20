@@ -25,6 +25,14 @@ static const char kCodexResponses[] = "https://chatgpt.com/backend-api/codex/res
 static const char kClientId[] = "app_EMoamEEZ73f0CkXaXp7hrann";
 static const char kIssuer[] = "https://auth.openai.com";
 
+static bool FastAuthAvailable(const PicoAuthEntry *auth)
+{
+    if (strcmp(auth->active, PICO_AUTH_OAUTH) == 0)
+        return (auth->access_token && auth->access_token[0]) ||
+               (auth->refresh_token && auth->refresh_token[0]);
+    return strcmp(auth->active, PICO_AUTH_API_KEY) == 0 && auth->api_key && auth->api_key[0];
+}
+
 static char *BuildRequest(const PicoLlmTurn *turn, bool codex)
 {
     /* The ChatGPT Codex backend rejects stored responses, and with store off
@@ -33,6 +41,7 @@ static char *BuildRequest(const PicoLlmTurn *turn, bool codex)
      * gateways behind models[].base_url) may reject either field. */
     PicoResponsesBuildOpts opts = {
         .provider = "openai",
+        .service_tier = pico_responses_openai_service_tier(turn, codex),
         .store_false = codex,
         .include_encrypted_reasoning = codex,
         .reasoning_summary_auto = true,
@@ -1040,6 +1049,13 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     PicoAuthEntry auth;
     pico_auth_copy_ctx(agent_ctx, "openai", &auth);
     bool oauth = strcmp(auth.active, PICO_AUTH_OAUTH) == 0;
+    if (turn->fast && (!FastAuthAvailable(&auth) ||
+                       !pico_responses_openai_fast_route(turn->base_url, oauth)))
+    {
+        pico_auth_entry_free(&auth);
+        out->error = JsonDup("Fast mode requires an authenticated OpenAI API or Codex route.");
+        return PICO_LLM_FAIL;
+    }
     if (oauth)
     {
         if (OauthDue(&auth) || !auth.access_token || !auth.access_token[0])
@@ -1191,10 +1207,24 @@ static void OpenAiHostShutdown(PicoHost *app, void *state)
     free(s);
 }
 
+static bool OpenAiSupportsFast(PicoHost *host, const PicoModel *model, void *state)
+{
+    (void)state;
+    PicoAuthEntry auth;
+    pico_auth_copy(host, "openai", &auth);
+    bool supported = FastAuthAvailable(&auth) && pico_responses_openai_fast_route(model->base_url,
+                         strcmp(auth.active, PICO_AUTH_OAUTH) == 0);
+    pico_auth_entry_free(&auth);
+    return supported;
+}
+
 static int OpenAiWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_provider(workspace, &(PicoProvider){.name = "openai", .stream = OpenAiStream, .map_context = true});
+    pico_add_provider(workspace, &(PicoProvider){.name = "openai",
+                                                 .stream = OpenAiStream,
+                                                 .map_context = true,
+                                                 .supports_fast = OpenAiSupportsFast});
     return 0;
 }
 

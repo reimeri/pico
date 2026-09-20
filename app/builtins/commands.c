@@ -149,6 +149,32 @@ static void CmdEffort(PicoWorkspace *workspace, PicoAgentId agent_id, const char
     }
 }
 
+static void CmdFast(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
+{
+    (void)state;
+    PicoHost *app = workspace ? workspace->host : NULL;
+    PicoAgent *agent = PicoWorkspace_FindAgent(workspace, agent_id);
+    char action[32] = "";
+    char extra[2];
+    int count = args ? sscanf(args, "%31s %1s", action, extra) : 0;
+    if (agent && count <= 1 && (count <= 0 || FoldEq(action, "status")))
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "Fast mode %s%s. Last served tier: %s.",
+                 agent->fast ? "on" : "off",
+                 PicoSettings_FastAvailable(agent) ? "" : " (unavailable for this model/authentication route)",
+                 agent->last_service_tier[0] ? agent->last_service_tier : "unknown");
+        PicoOverlay_Notify(app, line);
+    }
+    else if (agent && count == 1 && (FoldEq(action, "on") || FoldEq(action, "off")))
+        PicoSettings_SetFast(agent, FoldEq(action, "on"));
+    else
+        PicoOverlay_Notify(app, "Usage: /fast on|off|status");
+    ClearComposer(app);
+    if (app)
+        app->submit_cancel = true;
+}
+
 static void CmdCompact(PicoWorkspace *workspace, PicoAgentId agent_id, const char *args, void *state)
 {
     PicoHost *app = workspace ? workspace->host : NULL;
@@ -882,6 +908,20 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
         }
         return n;
     }
+    if (FoldEq(cmd, "fast"))
+    {
+        static const char *actions[] = {"on", "off", "status"};
+        for (int i = 0; i < 3 && n < max; i++)
+        {
+            if (!FoldPrefix(actions[i], rest))
+                continue;
+            snprintf(out[n].label, sizeof(out[n].label), "%s", actions[i]);
+            out[n].detail[0] = '\0';
+            snprintf(out[n].insert, sizeof(out[n].insert), "/fast %s", actions[i]);
+            n++;
+        }
+        return n;
+    }
     if (FoldEq(cmd, "login") || FoldEq(cmd, "logout"))
     {
         return AuthQuery(app, FoldEq(cmd, "login"), rest, out, max);
@@ -1011,6 +1051,7 @@ static int CommandsWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     (void)state_out;
     pico_workspace_add_command(workspace, "model", "Switch model", CmdModel);
     pico_workspace_add_command(workspace, "effort", "Set reasoning effort for this model", CmdEffort);
+    pico_workspace_add_command(workspace, "fast", "Fast mode: on, off, or status", CmdFast);
     pico_workspace_add_command(workspace, "new", "Start a new session", CmdNew);
     pico_workspace_add_command(workspace, "resume", "Resume a previous session", CmdResume);
     pico_workspace_add_command(workspace, "cd", "Open or select a workspace", CmdCd);

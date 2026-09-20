@@ -43,11 +43,44 @@ static int MyInit(PicoWorkspace *workspace, void **state_out)
 }
 ```
 
-Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`) is used instead.
+Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`, `xai`) is used instead.
+
+## Fast mode
+
+A model must explicitly declare `"supports_fast": true` in `settings.json` (or enable **Supports Fast mode** in `/settings`). This is capability metadata, not the selected mode. Omission defaults to false. Configure it only for models for which the service supports priority processing. Pico also checks the provider and current authentication route (including the presence of credentials); the model flag cannot bypass those checks.
+
+Use `/fast on`, `/fast off`, or `/fast status` (`/fast` alone shows status). The reasoning-effort dropdown contains a **Fast mode** On/Off row when supported, and shows the Fast icon next to effort while enabled. Models without effort options use the slash command only. Fast is independent of reasoning effort and does not change the model.
+
+Fast defaults off for a new conversation. Selection is persisted in the session, retained across supported model changes, and cleared when switching to an unsupported model or removing its catalog capability. Changes during a busy turn apply to the next turn: all current tool follow-ups and automatic compaction keep the mode snapshotted at turn start. Manual compaction snapshots the current selection. Subagents default off and only opt in through their profile's `"fast": true`; see [subagents](../subagents.md).
+
+Builtin wire mappings:
+
+| Route | Fast on | Fast off |
+| --- | --- | --- |
+| OpenAI API, canonical `https://api.openai.com/v1` | `service_tier: "priority"` | `service_tier: "default"` |
+| OpenAI ChatGPT/Codex OAuth | `service_tier: "priority"` | Omit `service_tier` |
+| xAI API key, canonical endpoint | `service_tier: "priority"` | `service_tier: "default"` |
+| xAI OAuth, canonical endpoint (experimental) | `service_tier: "priority"` | Omit `service_tier` |
+
+OpenAI-compatible custom endpoints and Hyper do not advertise Fast support. xAI OAuth Fast is enabled experimentally: Pico sends priority requests, but backend acceptance and account eligibility have not been verified. OAuth credentials may be an access token or a refresh token; normal token refresh still runs before inference. Fast off preserves the existing OAuth request behavior by omitting the tier. Codex model eligibility is explicitly configured by the user rather than fetched from the backend. API/account/model rejection is surfaced as a request error; Pico does not retry without priority. Existing authentication/reasoning retries preserve the tier. OpenAI API off is explicit so a project's default tier cannot silently enable priority.
+
+### Provider capability contract
+
+Set `PicoProvider.supports_fast` to a callback with signature:
+
+```c
+bool SupportsFast(PicoHost *host, const PicoModel *model, void *state);
+```
+
+NULL means unsupported. Pico calls it only for explicitly opted-in models, on the main thread, both to gate controls and before queuing a Fast request. Arguments are borrowed for the callback only. It must be prompt, read-only, and nonblocking: no network calls, credential refresh, UI mutation, or retaining `model`. Reading a copied auth snapshot with `pico_auth_copy` is allowed. The callback uses the same workspace-instance state as `stream`; synchronize any shared state because another agent's stream can run concurrently.
+
+`PicoLlmTurn.fast` is an immutable boolean for this agent turn. Map it to your backend's priority option without altering effort. The worker must independently validate the authentication route it actually uses; it can change between the capability query and the request. Unsupported requests fail explicitly rather than silently downgrading. The callback belongs to its immutable registration generation, with the same reload/quiescence rules as `stream`.
+
+Populate `PicoLlmResult.service_tier` with the actual backend-reported tier as a NUL-terminated string, or leave its fixed-size array empty when unknown. Do not infer it from `turn->fast`: a provider can serve standard tier after priority was requested. It is copied with the result, needs no separate allocation/free, and is exposed as `PicoAgentInfo.last_service_tier` and `/fast status`. Successful usage records store requested `fast` and actual `service_tier` separately; this is not dollar-cost accounting. Failed/cancelled calls do not contribute usage.
 
 ## Turn
 
-`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`.
+`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `fast`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`.
 
 `input_json` uses Pico's provider-neutral item forms. `user` and `assistant` carry a `parts` array (`text`, `refusal`, `image`, `audio`). `tool_call` and `tool_result` use `call_id` / `name` / `arguments` or `output`. Request-only `context` items are:
 

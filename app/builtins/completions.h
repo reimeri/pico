@@ -39,6 +39,7 @@ typedef struct PicoCompletionsCtx {
     int call_count;
     int input_tokens;
     int cached_tokens;
+    char service_tier[32];
     char *error;
     bool failed;
     bool saw_text;
@@ -47,6 +48,7 @@ typedef struct PicoCompletionsCtx {
 
 typedef struct PicoCompletionsBuildOpts {
     const char *provider;
+    const char *service_tier; /* NULL omits the field; provider chooses wire policy */
     bool store_false;
     PicoCompletionsThinking thinking;
     bool requires_reasoning_content;

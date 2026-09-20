@@ -313,7 +313,12 @@ static bool ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     {
         return true;
     }
-    ok = DupOptionalModelField(doc, obj, "id", &id) &&
+    int fast_tok = JsonObjGet(doc, obj, "supports_fast");
+    int fast_start = JsonTokStart(doc, fast_tok);
+    bool fast_valid = fast_tok < 0 ||
+        (!(fast_start > 0 && doc->src[fast_start - 1] == '"') &&
+         (JsonEq(doc, fast_tok, "true") || JsonEq(doc, fast_tok, "false")));
+    ok = fast_valid && DupOptionalModelField(doc, obj, "id", &id) &&
          DupOptionalModelField(doc, obj, "name", &name) &&
          DupOptionalModelField(doc, obj, "provider", &provider) &&
          DupOptionalModelField(doc, obj, "base_url", &base_url) &&
@@ -345,6 +350,7 @@ static bool ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     m->context_limit = JsonObjInt(doc, obj, "context_limit", 0);
     int vis = JsonObjGet(doc, obj, "vision");
     m->vision = vis >= 0 && (JsonEq(doc, vis, "true") || JsonEq(doc, vis, "1"));
+    m->supports_fast = JsonEq(doc, JsonObjGet(doc, obj, "supports_fast"), "true");
     CopyField(m->default_effort, sizeof(m->default_effort), selected);
     int arr = JsonObjGet(doc, obj, "effort");
     int n = JsonIsArray(doc, arr) ? JsonArrayLen(doc, arr) : 0;
@@ -952,6 +958,44 @@ const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
     return agent && agent->effort[0] ? agent->effort : "none";
 }
 
+bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model)
+{
+    if (!workspace || !model || !model->supports_fast)
+        return false;
+    for (int i = 0; i < workspace->provider_count; i++)
+    {
+        const PicoProvider *p = &workspace->providers[i];
+        if (p->name && strcmp(p->name, model->provider) == 0)
+            return p->supports_fast && p->supports_fast(workspace->host, model, p->state);
+    }
+    return false;
+}
+
+bool PicoSettings_FastAvailable(const PicoAgent *agent)
+{
+    return agent && PicoSettings_ModelSupportsFast(agent->workspace,
+        PicoSettings_FindModelConst(agent->workspace, agent->model));
+}
+
+bool PicoSettings_SetFast(PicoAgent *agent, bool enabled)
+{
+    if (!agent || !agent->workspace)
+        return false;
+    PicoHost *host = agent->workspace->host;
+    if (enabled && !PicoSettings_FastAvailable(agent))
+    {
+        PicoOverlay_Notify(host, "Fast mode is unavailable for this model or authentication route.");
+        return false;
+    }
+    agent->fast = enabled;
+    PicoSession_EnqueueModelChange(host, agent);
+    char line[128];
+    snprintf(line, sizeof(line), "Fast mode %s%s", enabled ? "on" : "off",
+             PicoAgent_IsBusy(agent) ? " (applies next turn)" : "");
+    PicoOverlay_Notify(host, line);
+    return true;
+}
+
 void PicoSettings_SyncAgent(PicoAgent *agent)
 {
     if (!agent)
@@ -973,6 +1017,10 @@ void PicoSettings_SyncAgent(PicoAgent *agent)
     {
         agent->context_limit = 128000;
     }
+    const PicoModel *selected = agent->workspace
+                                    ? PicoSettings_FindModelConst(agent->workspace, agent->model) : NULL;
+    if (!selected || !selected->supports_fast)
+        agent->fast = false;
     if (!m || !PicoSettings_EffortAllowed(m, agent->effort))
     {
         const char *effort = m && PicoSettings_EffortAllowed(m, m->default_effort)
@@ -992,6 +1040,8 @@ void PicoSettings_InitAgent(PicoAgent *agent)
     agent->compact_enabled = agent->workspace->settings.compact_enabled;
     agent->compact_ratio = agent->workspace->settings.compact_ratio;
     agent->effort[0] = '\0';
+    agent->fast = false;
+    agent->last_service_tier[0] = '\0';
     agent->has_running_model = false;
     PicoSettings_SyncAgent(agent);
 }
@@ -1002,13 +1052,18 @@ void PicoSettings_ReconcileIdleAgent(PicoAgent *agent)
     {
         return;
     }
+    bool was_fast = agent->fast;
     agent->has_running_model = false;
     if (!PicoSettings_FindModel(agent->workspace, agent->model))
     {
         snprintf(agent->model, sizeof(agent->model), "%s", agent->workspace->settings.default_model);
         agent->effort[0] = '\0';
+        if (!PicoSettings_FastAvailable(agent))
+            agent->fast = false;
     }
     PicoSettings_SyncAgent(agent);
+    if (was_fast != agent->fast)
+        PicoSession_EnqueueModelChange(agent->workspace->host, agent);
 }
 
 static PicoModel *FindCatalog(PicoWorkspace *workspace, const char *q)
@@ -1045,6 +1100,8 @@ bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name)
         return false;
     }
     snprintf(agent->model, sizeof(agent->model), "%s", m->id);
+    if (!PicoSettings_ModelSupportsFast(workspace, m))
+        agent->fast = false;
     agent->effort[0] = '\0';
     PicoSettings_SyncAgent(agent);
     PicoSession_EnqueueModelChange(host, agent);
@@ -1562,6 +1619,8 @@ static void WriteModelValue(JsonBuf *b, const PicoModel *m)
     JsonBuf_Int(b, m->context_limit);
     JsonBuf_Puts(b, ",\"vision\":");
     JsonBuf_Bool(b, m->vision);
+    JsonBuf_Puts(b, ",\"supports_fast\":");
+    JsonBuf_Bool(b, m->supports_fast);
     JsonBuf_Puts(b, ",\"effort\":[");
     for (int i = 0; i < m->effort_count; i++)
     {
@@ -1814,7 +1873,8 @@ static bool ModelsEqual(const PicoModel *a, const PicoModel *b)
     if (!a || !b || strcmp(a->id, b->id) != 0 || strcmp(a->name, b->name) != 0 ||
         strcmp(a->provider, b->provider) != 0 || strcmp(a->base_url, b->base_url) != 0 ||
         a->context_limit != b->context_limit || a->vision != b->vision ||
-        a->effort_count != b->effort_count || strcmp(a->default_effort, b->default_effort) != 0)
+        a->supports_fast != b->supports_fast || a->effort_count != b->effort_count ||
+        strcmp(a->default_effort, b->default_effort) != 0)
     {
         return false;
     }
@@ -1972,6 +2032,7 @@ static char *PatchExistingModel(const char *src, size_t len, const PicoModel *mo
          PatchObjectValue(&out, &len, "base_url", base_url) &&
          PatchObjectValue(&out, &len, "context_limit", context) &&
          PatchObjectValue(&out, &len, "vision", model->vision ? "true" : "false") &&
+         PatchObjectValue(&out, &len, "supports_fast", model->supports_fast ? "true" : "false") &&
          PatchObjectValue(&out, &len, "effort", efforts) &&
          PatchObjectValue(&out, &len, "selected_effort", selected);
     free(name);

@@ -45,6 +45,8 @@ struct PicoAgent {
     char model[128];
     char model_name[128];
     char effort[PICO_EFFORT_LEN];
+    bool fast; /* selected mode for the next turn */
+    char last_service_tier[32];
     int context_limit;
     PicoModel running_model;
     bool has_running_model;

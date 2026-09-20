@@ -71,6 +71,9 @@ typedef struct TestState {
     bool block_saw_live_state;
     uint64_t block_registration_generation;
     int provider_entered_count;
+    bool fast_requests[32];
+    int fast_request_count;
+    bool child_fast;
     PicoAgentId first_provider_id;
     char issue_tool_name[64];
     char issue_tool_args[2048];
@@ -171,6 +174,8 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.block_saw_live_state = false;
     g_test.block_registration_generation = 0;
     g_test.provider_entered_count = 0;
+    g_test.fast_request_count = 0;
+    g_test.child_fast = false;
     g_test.first_provider_id = 0;
     snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "ask_test");
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args), "{}");
@@ -316,12 +321,23 @@ static void FakeToolArgs(PicoLlmDeltaFn on_delta, void *user, int call_index, co
     on_delta(user, &d);
 }
 
+static bool FakeSupportsFast(PicoHost *host, const PicoModel *model, void *state)
+{
+    (void)host;
+    (void)model;
+    (void)state;
+    return true;
+}
+
 static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
     (void)state;
     pthread_mutex_lock(&g_test.mu);
     SnapshotTurn(turn);
+    if (g_test.fast_request_count < 32)
+        g_test.fast_requests[g_test.fast_request_count++] = turn->fast;
+    snprintf(out->service_tier, sizeof(out->service_tier), "default");
     snprintf(g_test.context_workspace, sizeof(g_test.context_workspace), "%s",
              pico_agent_context_workspace(ctx));
     g_test.context_workspace_matches = !g_expected_context_workspace ||
@@ -329,6 +345,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     bool child_turn = pico_agent_context_profile(ctx)[0] != '\0';
     if (child_turn)
     {
+        g_test.child_fast = turn->fast;
         free(g_test.child_instructions);
         g_test.child_instructions = JsonDup(g_test.last_instructions ? g_test.last_instructions : "");
         free(g_test.child_input);
@@ -1160,6 +1177,20 @@ const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent)
     return (agent && agent->workspace && agent->workspace->model_count > 0) ? &agent->workspace->models[0] : NULL;
 }
 
+bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model)
+{
+    if (!workspace || !model || !model->supports_fast)
+        return false;
+    const PicoProvider *p = pico_workspace_find_provider(workspace, model->provider);
+    return p && p->supports_fast && p->supports_fast(workspace->host, model, p->state);
+}
+
+void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
+{
+    (void)app;
+    (void)agent;
+}
+
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort)
 {
     if (!model || !effort) return false;
@@ -1238,12 +1269,15 @@ void MdDocument_Free(MdDocument *doc)
 }
 
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
-                                            int input_tokens, int cached_tokens)
+                                            int input_tokens, int cached_tokens,
+                                            bool fast, const char *service_tier)
 {
     (void)app;
     (void)agent;
     (void)input_tokens;
     (void)cached_tokens;
+    (void)fast;
+    (void)service_tier;
     g_test.usage_log_count++;
     return PICO_SESSION_WRITE_OK;
 }
@@ -1415,7 +1449,7 @@ void PicoPlugins_Load(PicoHost *app)
         if (ws && ws->provider_count == 0)
         {
             PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
-            pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
+            pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast});
             pico_add_tool(ws, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
             PicoHost_PublishRegistration(app, NULL);
         }
@@ -1462,7 +1496,7 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
         return;
     }
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
-    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
+    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast});
     pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(host, NULL);
 }
@@ -1732,7 +1766,7 @@ static void InitApp(PicoHost *app)
     app->workspaces[0] = workspace;
     app->workspace_count = 1;
     PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, workspace);
-    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true});
+    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast});
     pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(app, NULL);
     PicoAgentCreateOptions options = {
@@ -3546,6 +3580,48 @@ static int TestSessionUsageAccumulation(void)
     return ok ? 0 : Fail(name, "latest or cumulative usage did not include every successful request");
 }
 
+static int TestFastTurnSnapshot(void)
+{
+    const char *name = "Fast applies to the next whole turn";
+    ResetTest(TEST_SINGLE, 1);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoHost_PrimaryWorkspace(&app)->models[0].supports_fast = true;
+    agent->fast = true;
+    agent->compact_enabled = true;
+    agent->compact_ratio = 0.5;
+    g_test.provider_tokens = agent->context_limit;
+    PicoAgent_StartTurn(&app, agent, "ask then continue");
+    PicoToolAsk ask;
+    bool ok = WaitForPending(&app, 0, &ask);
+    agent->fast = false; /* same selected-state mutation as /fast off while busy */
+    if (ok)
+        ok = pico_tool_answer(&app, ask.id, "{}") && WaitForIdle(&app);
+    if (ok)
+    {
+        agent->compact_enabled = false;
+        PicoAgent_StartTurn(&app, agent, "next turn");
+        ok = WaitForIdle(&app);
+    }
+    pthread_mutex_lock(&g_test.mu);
+    ok = ok && g_test.fast_request_count == 4 && g_test.fast_requests[0] &&
+         g_test.fast_requests[1] && g_test.fast_requests[2] && !g_test.fast_requests[3];
+    pthread_mutex_unlock(&g_test.mu);
+    ok = ok && strcmp(agent->last_service_tier, "default") == 0;
+    if (ok)
+    {
+        agent->fast = true;
+        PicoAgent_Compact(&app, agent);
+        ok = WaitForIdle(&app);
+        pthread_mutex_lock(&g_test.mu);
+        ok = ok && g_test.fast_request_count == 5 && g_test.fast_requests[4];
+        pthread_mutex_unlock(&g_test.mu);
+    }
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "toggle changed a follow-up or compaction lost the selected mode");
+}
+
 static int TestUsageNormalizationAndSaturation(void)
 {
     const char *name = "usage normalization and saturation";
@@ -4724,6 +4800,7 @@ int main(void)
 {
     int failed = 0;
     failed |= TestProfileParallelSafeValidation();
+    failed |= TestProfileFastValidation();
     failed |= TestSubagentProfileBarrier();
     failed |= TestSubagentIdentityRewrite();
     failed |= TestSubagentParallelSettingValidation();
@@ -4780,6 +4857,7 @@ int main(void)
     failed |= TestAskReplaceNotification();
     failed |= TestCancelledProviderUsage();
     failed |= TestSessionUsageAccumulation();
+    failed |= TestFastTurnSnapshot();
     failed |= TestUsageNormalizationAndSaturation();
     failed |= TestAfterCompact();
     failed |= TestToolTraceError();

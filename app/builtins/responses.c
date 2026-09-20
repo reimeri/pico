@@ -349,6 +349,22 @@ static bool ResponsesInputMediaValid(const char *json)
     return valid;
 }
 
+bool pico_responses_openai_fast_route(const char *base, bool codex)
+{
+    if (codex)
+        return true;
+    char url[1024];
+    pico_responses_resolve_url(base, "https://api.openai.com/v1", url, sizeof(url));
+    return strcmp(url, "https://api.openai.com/v1/responses") == 0;
+}
+
+const char *pico_responses_openai_service_tier(const PicoLlmTurn *turn, bool codex)
+{
+    if (!turn || !pico_responses_openai_fast_route(turn->base_url, codex))
+        return NULL;
+    return turn->fast ? "priority" : (codex ? NULL : "default");
+}
+
 char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesBuildOpts *opts)
 {
     if (!turn || !opts)
@@ -366,6 +382,11 @@ char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesB
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "{\"model\":");
     JsonBuf_String(&b, turn->model ? turn->model : "");
+    if (opts->service_tier)
+    {
+        JsonBuf_Puts(&b, ",\"service_tier\":");
+        JsonBuf_String(&b, opts->service_tier);
+    }
     JsonBuf_Puts(&b, ",\"prompt_cache_key\":");
     JsonBuf_String(&b, turn->cache_key ? turn->cache_key : "");
     if (opts->store_false)
@@ -552,6 +573,10 @@ static void HandleResponseObject(PicoResponsesCtx *c, const JsonDoc *doc, int ob
     {
         return;
     }
+    char *tier = JsonObjStr(doc, obj, "service_tier");
+    if (tier && tier[0])
+        snprintf(c->service_tier, sizeof(c->service_tier), "%s", tier);
+    free(tier);
     int usage = JsonObjGet(doc, obj, "usage");
     if (JsonIsObject(doc, usage))
     {
@@ -1143,6 +1168,7 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
 {
     out->input_tokens = c->input_tokens;
     out->cached_tokens = c->cached_tokens;
+    snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
     if (c->error)
     {
         out->error = c->error;

@@ -24,10 +24,19 @@ static const char kAcceptJson[] = "Accept: application/json";
 static const char kReferrer[] = "pico";
 static const char kDeviceGrant[] = "urn:ietf:params:oauth:grant-type:device_code";
 
-static char *BuildRequest(const PicoLlmTurn *turn)
+static bool FastAuthAvailable(const PicoAuthEntry *auth)
+{
+    if (strcmp(auth->active, PICO_AUTH_OAUTH) == 0)
+        return (auth->access_token && auth->access_token[0]) ||
+               (auth->refresh_token && auth->refresh_token[0]);
+    return strcmp(auth->active, PICO_AUTH_API_KEY) == 0 && auth->api_key && auth->api_key[0];
+}
+
+static char *BuildRequest(const PicoLlmTurn *turn, bool oauth)
 {
     PicoCompletionsBuildOpts opts = {
         .provider = "xai",
+        .service_tier = turn->fast ? "priority" : (oauth ? NULL : "default"),
         .store_false = true,
         .thinking = PICO_COMPLETIONS_THINKING_NONE,
     };
@@ -795,6 +804,12 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
     PicoAuthEntry auth;
     pico_auth_copy_ctx(agent_ctx, "xai", &auth);
     bool oauth = strcmp(auth.active, PICO_AUTH_OAUTH) == 0;
+    if (turn->fast && !FastAuthAvailable(&auth))
+    {
+        pico_auth_entry_free(&auth);
+        out->error = JsonDup("Fast mode requires xAI credentials. Run `/login xai`, set `XAI_API_KEY`, or use /fast off.");
+        return PICO_LLM_FAIL;
+    }
     if (oauth)
     {
         if (pico_xai_oauth_refresh_needed(auth.access_token, auth.expires_at, time(NULL), false))
@@ -826,7 +841,7 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
         out->error = JsonDup("xAI requests must use `https://api.x.ai/v1`.");
         return PICO_LLM_FAIL;
     }
-    char *body = BuildRequest(turn);
+    char *body = BuildRequest(turn, oauth);
     if (!body)
     {
         pico_auth_entry_free(&auth);
@@ -934,10 +949,25 @@ static void XaiHostShutdown(PicoHost *app, void *state)
     free(s);
 }
 
+static bool XaiSupportsFast(PicoHost *host, const PicoModel *model, void *state)
+{
+    (void)state;
+    char url[1024];
+    PicoAuthEntry auth;
+    pico_auth_copy(host, "xai", &auth);
+    bool supported = FastAuthAvailable(&auth) &&
+        pico_completions_resolve_canonical_url(model->base_url, kDefaultBase, url, sizeof(url));
+    pico_auth_entry_free(&auth);
+    return supported;
+}
+
 static int XaiWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_provider(workspace, &(PicoProvider){.name = "xai", .stream = XaiStream, .map_context = true});
+    pico_add_provider(workspace, &(PicoProvider){.name = "xai",
+                                                 .stream = XaiStream,
+                                                 .map_context = true,
+                                                 .supports_fast = XaiSupportsFast});
     return 0;
 }
 

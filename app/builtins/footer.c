@@ -8,6 +8,7 @@
 #include "agent.h"
 #include "overlay.h"
 #include "settings.h"
+#include "docs_path.h"
 #include "scrollbar.h"
 #include "tinyfiledialogs.h"
 #include "usage.h"
@@ -48,6 +49,8 @@ typedef struct FooterState
     char model[128];
     char effort[PICO_EFFORT_LEN];
     PicoHost *app;
+    Texture2D fast_icon;
+    bool fast_icon_tried;
     FooterMenu menu;
     int selected;
     bool want_folder;
@@ -654,7 +657,8 @@ static int MenuCount(const PicoHost *app)
     if (g_menu == FOOTER_MENU_EFFORT)
     {
         const PicoModel *m = PicoSettings_ActiveModelConst(PicoHost_SelectedAgentConst(app));
-        return m ? m->effort_count : 0;
+        bool fast = PicoSettings_FastAvailable(PicoHost_SelectedAgentConst(app));
+        return m ? m->effort_count + (fast ? 1 : 0) : 0;
     }
     return 0;
 }
@@ -770,6 +774,10 @@ static void Accept(PicoHost *app)
         if (m && g_selected >= 0 && g_selected < m->effort_count)
         {
             PicoSettings_SetEffort(agent, m->effort[g_selected]);
+        }
+        else if (m && g_selected == m->effort_count && PicoSettings_FastAvailable(agent))
+        {
+            PicoSettings_SetFast(agent, !agent->fast);
         }
     }
     CloseMenu();
@@ -1061,7 +1069,10 @@ static void RenderMenu(PicoHost *app)
                     else
                     {
                         PicoModel *m = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
-                        label = m ? m->effort[i] : "";
+                        bool fast_row = m && i == m->effort_count;
+                        label = fast_row ? "Fast mode" : (m ? m->effort[i] : "");
+                        if (fast_row)
+                            detail = PicoHost_SelectedAgent(app)->fast ? "On" : "Off";
                     }
                     Clay_Color bg = i == g_selected ? COLOR_CODE_BG : COLOR_CONTENT_BG;
                     CLAY(CLAY_IDI("FooterMenuItem", i),
@@ -1096,12 +1107,43 @@ static void RenderMenu(PicoHost *app)
     }
 }
 
+static void EnsureFastIcon(FooterState *s)
+{
+    if (!s || s->fast_icon_tried || !IsWindowReady())
+        return;
+    s->fast_icon_tried = true;
+    char path[4096];
+    if (!Pico_DataPath("resources/fast.png", path, sizeof(path)))
+        snprintf(path, sizeof(path), "resources/fast.png");
+    Image image = LoadImage(path);
+    if (!image.data)
+        return;
+    ImageColorTint(&image, (Color){(unsigned char)COLOR_TEXT.r, (unsigned char)COLOR_TEXT.g,
+                                   (unsigned char)COLOR_TEXT.b, (unsigned char)COLOR_TEXT.a});
+    s->fast_icon = LoadTextureFromImage(image);
+    UnloadImage(image);
+    if (s->fast_icon.id)
+        SetTextureFilter(s->fast_icon, TEXTURE_FILTER_BILINEAR);
+}
+
 static void Chip(Clay_ElementId id, const char *text, bool open, bool with_menu, PicoHost *app)
 {
     bool hovered = Clay_PointerOver(id) || open;
     Clay_Color color = hovered ? COLOR_TEXT : COLOR_MUTED;
-    CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
+    CLAY(id, {.layout = {.childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .childGap = 4,
+                         .sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
+        const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
+        if (id.id == CLAY_ID("FooterEffort").id && agent && agent->fast)
+        {
+            FooterState *s = ActiveFooterState();
+            EnsureFastIcon(s);
+            float size = Pico_FontPx(PICO_FONT_CAPTION);
+            CLAY(CLAY_ID("FooterFastIcon"),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                       .height = CLAY_SIZING_FIXED(size)}},
+                  .image = {.imageData = s->fast_icon.id ? &s->fast_icon : NULL}}) {}
+        }
         CLAY_TEXT(CStr(text), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                 .fontSize = PICO_FONT_CAPTION,
                                                 .textColor = color,
@@ -1588,6 +1630,8 @@ static void FooterShutdown(PicoHost *app, void *state)
     (void)CloseMenu();
     (void)ClearFolderRequest();
     CloseWorktreeModal(app);
+    if (s->fast_icon.id)
+        UnloadTexture(s->fast_icon);
     free(s);
     s_active_footer_state = NULL;
 }

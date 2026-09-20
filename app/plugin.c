@@ -308,8 +308,11 @@ static uint64_t FileHash(const char *src)
 static bool DependencyPath(const char *src, char *out, size_t cap)
 {
     char cache[4096];
+    char sdk_include[4096];
     return CacheDir(cache, sizeof(cache)) &&
-           PicoPath_Format(out, cap, "%s/%08x.deps", cache, PathHash(src));
+           Pico_SdkIncludeDir(sdk_include, sizeof(sdk_include)) &&
+           PicoPath_Format(out, cap, "%s/%08x-%08x.deps", cache,
+                           PathHash(src), PathHash(sdk_include));
 }
 
 static uint64_t MixDependency(uint64_t hash, const char *path,

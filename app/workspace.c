@@ -1816,7 +1816,7 @@ static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
                                     effort, sizeof(effort)))
     {
         PublishDelegation(job, PICO_DELEGATION_ERROR, "error", NULL,
-                          "profile model and effort could not be resolved", true);
+                          "profile model, effort, or Fast mode could not be resolved", true);
         return false;
     }
     pthread_mutex_lock(&job->mu);
@@ -1889,12 +1889,14 @@ static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
     snprintf(child->purpose, sizeof(child->purpose), "%s", profile->purpose);
     snprintf(child->model, sizeof(child->model), "%s", model);
     snprintf(child->effort, sizeof(child->effort), "%s", effort);
+    child->fast = profile->fast;
     if (!job->session_id[0])
     {
         snprintf(child->parent_session_id, sizeof(child->parent_session_id), "%s",
                  parent->persistence == PICO_SESSION_DURABLE ? parent->session_id : "");
     }
     PicoSettings_SyncAgent(child);
+    PicoSession_EnqueueModelChange(app, child);
     if (job->session_id[0] && replayed_model[0] && strcmp(replayed_model, model) != 0)
     {
         PicoAgent_RotateCacheKey(child);

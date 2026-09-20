@@ -283,3 +283,44 @@ static int TestProfileParallelSafeValidation(void)
     snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
     return ok ? 0 : Fail("parallel_safe validation", "default, opt-in, or boolean validation failed");
 }
+
+static int TestProfileFastValidation(void)
+{
+    const char *name = "profile Fast opt-in validation";
+    char temp[] = "/tmp/pico-profile-fast-XXXXXX";
+    if (!mkdtemp(temp)) return Fail(name, "temporary directory failed");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoWorkspace *ws = TestWs(&app);
+    PicoWorkspace_LoadProfiles(ws);
+    char dir[4096], path[4096];
+    snprintf(dir, sizeof(dir), "%s/subagents", temp);
+    snprintf(path, sizeof(path), "%s/subagents/probe.json", temp);
+    const char *fields[] = {"", ",\"fast\":false", ",\"fast\":true", ",\"fast\":\"true\""};
+    bool ok = true;
+    for (int i = 0; i < 4; i++)
+    {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"purpose\":\"probe\"%s}", fields[i]);
+        bool wrote = WriteConfigProfile(dir, "probe.json", json);
+        PicoWorkspace_LoadProfiles(ws);
+        PicoSubagentProfileInfo profile;
+        bool found = FindLoadedProfile(&app, "probe", &profile);
+        ok = wrote && (i < 3 ? found && profile.fast == (i == 2) : !found) && ok;
+        if (i == 2 && found)
+        {
+            char model[128], effort[PICO_EFFORT_LEN];
+            ok = !PicoSubagentConfig_Resolve(&app, TestAgent(&app), &profile,
+                       model, sizeof(model), effort, sizeof(effort)) && ok;
+            ws->models[0].supports_fast = true;
+            ok = PicoSubagentConfig_Resolve(&app, TestAgent(&app), &profile,
+                      model, sizeof(model), effort, sizeof(effort)) && ok;
+        }
+    }
+    PicoHost_Shutdown(&app);
+    unlink(path); rmdir(dir); rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return ok ? 0 : Fail(name, "profile accepted a malformed or unsupported Fast selection");
+}

@@ -28,6 +28,12 @@ void pico_status_warn(PicoHost *host, const char *message)
     host->status_warn = JsonDup(message);
 }
 
+void PicoSession_EnqueueModelChange(PicoHost *host, PicoAgent *agent)
+{
+    (void)host;
+    (void)agent;
+}
+
 bool PicoAgent_IsBusy(const PicoAgent *agent)
 {
     return agent && (agent->state == PICO_AGENT_LLM_WAIT || agent->state == PICO_AGENT_TOOL_WAIT ||
@@ -743,6 +749,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
         return Fail("empty models array did not seed from model");
     }
     draft.models[0].vision = true;
+    draft.models[0].supports_fast = true;
     draft.models[0].context_limit = 64000;
     snprintf(draft.models[0].effort[0], sizeof(draft.models[0].effort[0]), "high");
     draft.models[0].effort_count = 1;
@@ -774,7 +781,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     free(saved);
     memset(&loaded, 0, sizeof(loaded));
     if (!failed &&
-        (!PicoSettings_LoadUserDraft(&loaded) || loaded.model_count != 1 || !loaded.models[0].vision ||
+        (!PicoSettings_LoadUserDraft(&loaded) || loaded.model_count != 1 || !loaded.models[0].vision || !loaded.models[0].supports_fast ||
          loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
          loaded.max_parallel_tools != draft.max_parallel_tools || loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
          strcmp(loaded.models[0].default_effort, "high") != 0))
@@ -902,11 +909,17 @@ static int TestUserDraftValidationAndPreservation(void)
     {
         failed = 1;
     }
+    draft.models[0].supports_fast = true;
     draft.font_scale = 1.25;
     if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
     {
         failed = 1;
     }
+    PicoUserSettingsDraft patched = {0};
+    if (!PicoSettings_LoadUserDraft(&patched) || patched.model_count < 1 ||
+        !patched.models[0].supports_fast)
+        failed = 1;
+    PicoSettings_FreeUserDraft(&patched);
     after = Pico_ReadFile(path, &after_len);
     if (!after || !strstr(after, "keep catalog comment") || !strstr(after, "vendor_option"))
     {

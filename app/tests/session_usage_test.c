@@ -2157,6 +2157,7 @@ static int TestUnseenCompleteRoundTrip(void)
     writer_agent.workspace = &writer_ws;
     writer_agent.persistence = PICO_SESSION_DURABLE;
     writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.fast = true;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
     ephemeral.persistence = PICO_SESSION_EPHEMERAL;
     if (PicoSession_LogUnseenComplete(&writer, &ephemeral, true) != PICO_SESSION_WRITE_SKIPPED)
@@ -2570,6 +2571,7 @@ static int TestModelResumeReplay(void)
     writer_agent.workspace = &writer_ws;
     writer_agent.persistence = PICO_SESSION_DURABLE;
     writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.fast = true;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "%s", writer_ws.settings.default_model);
     if (PicoSession_LogUser(&writer, &writer_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
         PicoSession_LogModelChange(&writer, &writer_agent, "changed-model", "high") != PICO_SESSION_WRITE_OK)
@@ -2580,7 +2582,7 @@ static int TestModelResumeReplay(void)
     resumed.kind = PICO_AGENT_MAIN;
     snprintf(resumed.model, sizeof(resumed.model), "%s", writer_ws.settings.default_model);
     if (PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
-        strcmp(resumed.model, "changed-model") != 0 || strcmp(resumed.effort, "high") != 0)
+        strcmp(resumed.model, "changed-model") != 0 || strcmp(resumed.effort, "high") != 0 || !resumed.fast)
     {
         unlink(writer_agent.session_path);
         return Fail("resume must load the stored model and effort from jsonl");
@@ -2612,8 +2614,8 @@ int main(void)
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
     snprintf(writer_ws.settings.default_model, sizeof(writer_ws.settings.default_model), "default-model");
-    PicoSession_LogUsage(&writer, &writer_agent, 100, 20);
-    PicoSession_LogUsage(&writer, &writer_agent, 200, 150);
+    PicoSession_LogUsage(&writer, &writer_agent, 100, 20, false, "default");
+    PicoSession_LogUsage(&writer, &writer_agent, 200, 150, true, "priority");
     PicoSession_LogAssistant(&writer, &writer_agent, 0, "assistant response", NULL, NULL, NULL, NULL, 0);
     PicoSession_LogCompaction(&writer, &writer_agent, "brief", 200);
     PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
@@ -2627,7 +2629,8 @@ int main(void)
     size_t file_len = 0;
     char *file = Pico_ReadFile(writer_agent.session_path, &file_len);
     if (!file || !strstr(file, "\"version\":4") || !strstr(file, "\"kind\":\"normal\"") ||
-        !strstr(file, "\"type\":\"usage\"") || strstr(file, "\"usage\":{"))
+        !strstr(file, "\"type\":\"usage\"") || strstr(file, "\"usage\":{") ||
+        !strstr(file, "\"fast\":true,\"service_tier\":\"priority\""))
     {
         free(file);
         return Fail("session schema did not use version 4 headers and dedicated usage events");

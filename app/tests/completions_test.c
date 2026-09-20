@@ -606,9 +606,39 @@ static void TestToolCallDeltaEvents(void)
     pico_completions_ctx_free(&ctx);
 }
 
+static void TestServiceTier(void)
+{
+    PicoLlmTurn turn = {.model = "grok-test", .fast = true};
+    PicoCompletionsBuildOpts opts = {.provider = "xai", .service_tier = "priority"};
+    char *body = pico_completions_build_request(&turn, &opts);
+    CheckContains(body, "\"service_tier\":\"priority\"", true, "xAI priority request");
+    free(body);
+    opts.service_tier = "default";
+    body = pico_completions_build_request(&turn, &opts);
+    CheckContains(body, "\"service_tier\":\"default\"", true, "xAI standard request");
+    free(body);
+    opts = HyperOpts(false);
+    body = pico_completions_build_request(&turn, &opts);
+    CheckContains(body, "service_tier", false, "shared helper does not add tier to other providers");
+    free(body);
+
+    PicoCompletionsCtx ctx;
+    pico_completions_ctx_init(&ctx);
+    const char *chunk = "{\"service_tier\":\"priority\",\"choices\":[]}";
+    Check(pico_completions_feed(&ctx, chunk, strlen(chunk)), "priority chunk accepted");
+    chunk = "{\"choices\":[],\"usage\":{\"prompt_tokens\":12}}";
+    Check(pico_completions_feed(&ctx, chunk, strlen(chunk)), "usage-only chunk accepted");
+    PicoLlmResult result = {0};
+    pico_completions_fill_result(&ctx, &result);
+    Check(strcmp(result.service_tier, "priority") == 0, "later chunks without tier preserve served tier");
+    pico_llm_result_free(&result);
+    pico_completions_ctx_free(&ctx);
+}
+
 int main(void)
 {
     TestUrls();
+    TestServiceTier();
     TestRequestConversion();
     TestContextItemConversion();
     TestImageRequestConversion();

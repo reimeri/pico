@@ -1,6 +1,7 @@
 #include "theme_internal.h"
 #include "pico/host.h"
 #include "pico/plugin.h"
+#include "pico/auth.h"
 #include "host_internal.h"
 #include "workspace_internal.h"
 #include "settings.h"
@@ -16,6 +17,7 @@
 #include "agent.h"
 #include "overlay.h"
 #include "worktree.h"
+#include "docs_path.h"
 #include "clay/clay.h"
 
 #include <dirent.h>
@@ -1736,6 +1738,309 @@ done:
     return rc;
 }
 
+
+static int TestFastSelectionPersistence(void)
+{
+    char dir[] = "/tmp/pico-fast-session-XXXXXX";
+    char cfg[] = "/tmp/pico-fast-session-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId id = 0;
+    int rc = 1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("Fast persistence fixture");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+        goto done;
+    WaitPluginLoad(host);
+    if (pico_workspace_open(host, dir, &ws_id) != PICO_OK)
+        goto done;
+    pico_auth_set_env_key(host, "openai", "test-api-key");
+    pico_auth_set_active(host, "openai", PICO_AUTH_API_KEY);
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, ws_id);
+    PicoModel *models = realloc(ws->models, 2 * sizeof(PicoModel));
+    if (!models)
+        goto done;
+    ws->models = models;
+    ws->model_count = 2;
+    models[0].supports_fast = true;
+    snprintf(models[0].provider, sizeof(models[0].provider), "openai");
+    models[0].base_url[0] = '\0';
+    models[1] = models[0];
+    snprintf(models[1].id, sizeof(models[1].id), "second-fast-model");
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+    if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
+        goto done;
+    PicoAgent *writer = PicoHost_FindAgent(host, id);
+    if (!PicoSettings_SetFast(writer, true) ||
+        PicoSession_LogUser(host, writer, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUsage(host, writer, 10, 0, true, "default") != PICO_SESSION_WRITE_OK)
+        goto done;
+    PicoSession_DrainPersist(host, writer);
+    options.session_start = PICO_SESSION_NONE;
+    if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
+        goto done;
+    PicoAgent *resumed = PicoHost_FindAgent(host, id);
+    if (PicoSession_Replay(host, resumed, writer->session_path, false) != 0 || !resumed->fast ||
+        strcmp(resumed->last_service_tier, "default") != 0)
+    {
+        Fail("resume must distinguish selected Fast from actually served standard tier");
+        goto done;
+    }
+    PicoSession_Reset(host, resumed);
+    if (resumed->fast || resumed->last_service_tier[0])
+    {
+        Fail("new conversation must reset Fast and last served tier");
+        goto done;
+    }
+    if (!PicoSettings_SetModel(writer, models[1].id) || !writer->fast)
+    {
+        Fail("switching to another supported model must retain Fast");
+        goto done;
+    }
+    models[1].supports_fast = false;
+    PicoSettings_ReconcileIdleAgent(writer);
+    if (writer->fast)
+    {
+        Fail("removing model capability must clear Fast");
+        goto done;
+    }
+    PicoSession_DrainPersist(host, writer);
+    /* Restoring capability must not resurrect the old fast:true session event. */
+    models[1].supports_fast = true;
+    if (PicoSession_Replay(host, resumed, writer->session_path, false) != 0 || resumed->fast)
+    {
+        Fail("capability-removal Fast clear must survive session resume");
+        goto done;
+    }
+    if (!PicoSettings_SetFast(writer, true))
+        goto done;
+    models[0].supports_fast = false;
+    if (!PicoSettings_SetModel(writer, models[0].id) || writer->fast)
+    {
+        Fail("switching to an unsupported model must clear Fast");
+        goto done;
+    }
+    rc = 0;
+done:
+    if (rc && !g_failed) Fail("Fast persistence setup or session operation failed");
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
+static int RunFastFooterCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-fast-footer-XXXXXX";
+    char cfg[] = "/tmp/pico-fast-footer-cfg-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    ShellTestState state = {.composer_height = 44.0f};
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("Fast footer setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("Fast footer host init");
+        goto done;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    if (with_sidebar)
+        ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("Fast footer workspace");
+        goto done;
+    }
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                     .session_start = PICO_SESSION_NONE};
+    if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK)
+    {
+        Fail("Fast footer agent");
+        goto done;
+    }
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    for (int i = 0; i < 40; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Fast footer bottom-follow conversation content");
+    PicoModel *model = PicoSettings_ActiveModel(agent);
+    if (!model)
+    {
+        Fail("Fast footer model");
+        goto done;
+    }
+    pico_auth_set_env_key(host, "openai", "test-api-key");
+    pico_auth_set_active(host, "openai", PICO_AUTH_API_KEY);
+    snprintf(model->provider, sizeof(model->provider), "openai");
+    model->base_url[0] = '\0';
+    model->supports_fast = true;
+    model->effort_count = 1;
+    snprintf(model->effort[0], sizeof(model->effort[0]), "high");
+    PicoSettings_SyncAgent(agent);
+    if (agent->fast || !PicoSettings_FastAvailable(agent))
+    {
+        Fail("Fast defaults off and requires explicit capability");
+        goto done;
+    }
+    const PicoCommand *fast_command = NULL;
+    PicoWorkspace *ws = agent->workspace;
+    for (int i = 0; i < ws->command_count; i++)
+        if (strcmp(ws->commands[i].name, "fast") == 0)
+            fast_command = &ws->commands[i];
+    if (!fast_command)
+    {
+        Fail("/fast was not registered");
+        goto done;
+    }
+    fast_command->workspace_run(ws, agent_id, "on", fast_command->state);
+    if (!agent->fast || strcmp(agent->effort, "high") != 0)
+    {
+        Fail("/fast must enable Fast without changing effort");
+        goto done;
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Fail("Fast footer Clay initialization");
+        goto done;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
+                           "ComposerAlign", "Footer", "FooterEffort", "FooterFastIcon", "Sidebar"};
+    Clay_BoundingBox expected[10] = {0};
+    int pane_count = with_sidebar ? 10 : 9;
+    for (int frame = 0; frame < 120; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition ||
+            scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height)
+        {
+            Fail("Fast footer test must exercise overflowing bottom-follow chat");
+            goto done;
+        }
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                   scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        for (int i = 0; i < pane_count; i++)
+        {
+            Clay_String name = {.chars = panes[i], .length = (int32_t)strlen(panes[i])};
+            Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(name));
+            if (!box.found || (frame > 2 && !ShellBoxStable(expected[i], box.boundingBox)))
+            {
+                Fail("Fast icon caused repeated bottom-follow geometry to drift");
+                goto done;
+            }
+            expected[i] = box.boundingBox;
+        }
+    }
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    g_find_input_test = true;
+    /* Open the production effort menu and click its Fast row. */
+    Clay_ElementData chip = Clay_GetElementData(CLAY_ID("FooterEffort"));
+    g_find_pointer = (Vector2){chip.boundingBox.x + chip.boundingBox.width / 2,
+                               chip.boundingBox.y + chip.boundingBox.height / 2};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_press = true;
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
+    g_find_press = false;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    Clay_ElementData row = Clay_GetElementData(CLAY_IDI("FooterMenuItem", model->effort_count));
+    if (!row.found || !FindCardText(&commands, "Fast mode") || !FindCardText(&commands, "On"))
+    {
+        Fail("reasoning dropdown must include the Fast toggle state");
+        goto done;
+    }
+    g_find_pointer = (Vector2){row.boundingBox.x + row.boundingBox.width / 2,
+                               row.boundingBox.y + row.boundingBox.height / 2};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_press = true;
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
+    g_find_press = false;
+    (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    if (agent->fast || Clay_GetElementData(CLAY_ID("FooterFastIcon")).found ||
+        strcmp(agent->effort, "high") != 0)
+    {
+        Fail("Fast dropdown toggle must turn off the icon without changing effort");
+        goto done;
+    }
+    g_find_input_test = false;
+#endif
+    model->effort_count = 0;
+    PicoSettings_SyncAgent(agent);
+    fast_command->workspace_run(ws, agent_id, "on", fast_command->state);
+    (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    if (!agent->fast || Clay_GetElementData(CLAY_ID("FooterEffort")).found)
+    {
+        Fail("models without effort use /fast without introducing a dropdown");
+        goto done;
+    }
+    model->supports_fast = false;
+    fast_command->workspace_run(ws, agent_id, "off", fast_command->state);
+    fast_command->workspace_run(ws, agent_id, "on", fast_command->state);
+    if (agent->fast)
+    {
+        Fail("/fast on must reject models without explicit capability");
+        goto done;
+    }
+    model->supports_fast = true;
+    snprintf(model->provider, sizeof(model->provider), "xai");
+    pico_auth_set_env_key(host, "xai", NULL);
+    pico_auth_set_active(host, "xai", PICO_AUTH_API_KEY);
+    if (PicoSettings_FastAvailable(agent))
+    {
+        Fail("Fast requires credentials for the selected route");
+        goto done;
+    }
+    pico_auth_set_env_key(host, "xai", "test-api-key");
+    bool xai_key = PicoSettings_FastAvailable(agent);
+    pico_auth_set_env_key(host, "xai", NULL);
+    /* A refreshable OAuth session must enable Fast without an API key, even
+     * when the provider needs to refresh before sending the priority request. */
+    pico_auth_set_oauth(host, "xai", "", "test-refresh", NULL, 0);
+    pico_auth_set_active(host, "xai", PICO_AUTH_OAUTH);
+    if (!xai_key || !PicoSettings_FastAvailable(agent) || !PicoSettings_SetFast(agent, true) ||
+        !agent->fast)
+    {
+        Fail("xAI API-key and refreshable OAuth routes must both permit Fast");
+        goto done;
+    }
+    rc = 0;
+done:
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    g_find_input_test = false;
+    g_find_press = false;
+#endif
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -1754,6 +2059,8 @@ static int TestBottomFollowShellGeometryStable(void)
     {
         return 1;
     }
+    if (RunFastFooterCase(false) != 0 || RunFastFooterCase(true) != 0)
+        return 1;
     return RunWorkspaceLessShellCase();
 }
 
@@ -4953,6 +5260,198 @@ done:
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_CACHE_HOME");
     RmRf(cfg); RmRf(cache); RmRf(ws);
+    return failed;
+}
+
+static uint64_t HostSourceGeneration(const PicoHost *host, const char *source)
+{
+    if (!host || !source)
+    {
+        return 0;
+    }
+    for (int i = 0; i < host->host_plugin_count; i++)
+    {
+        const PicoPluginSlot *slot = &host->host_plugins[i];
+        if (slot->source && strcmp(slot->source, source) == 0 && slot->initialized)
+        {
+            return slot->active_generation;
+        }
+    }
+    return 0;
+}
+
+static bool RemoveCachedSharedObjects(const char *cache_root)
+{
+    char directory[4096];
+    DIR *dir;
+    struct dirent *entry;
+    if ((size_t)snprintf(directory, sizeof(directory), "%s/pico/ext", cache_root) >=
+        sizeof(directory))
+    {
+        return false;
+    }
+    dir = opendir(directory);
+    if (!dir)
+    {
+        return false;
+    }
+    while ((entry = readdir(dir)) != NULL)
+    {
+        size_t length = strlen(entry->d_name);
+        if (length < 3 || strcmp(entry->d_name + length - 3, ".so") != 0)
+        {
+            continue;
+        }
+        char path[8192];
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name) >=
+                sizeof(path) ||
+            unlink(path) != 0)
+        {
+            closedir(dir);
+            return false;
+        }
+    }
+    closedir(dir);
+    return true;
+}
+
+static int TestSdkDependencyManifestsDoNotCrossReloadHosts(void)
+{
+    static const char *extension =
+        "#include \"pico/plugin.h\"\n"
+        "#include <stdlib.h>\n"
+        "static int Init(PicoHost *host, void **state_out)\n"
+        "{\n"
+        "    (void)host;\n"
+        "    int *state = malloc(sizeof(*state));\n"
+        "    if (!state) return -1;\n"
+        "    *state = SDK_MARKER;\n"
+        "    *state_out = state;\n"
+        "    return 0;\n"
+        "}\n"
+        "static void Shutdown(PicoHost *host, void *state)\n"
+        "{\n"
+        "    (void)host;\n"
+        "    free(state);\n"
+        "}\n"
+        "PicoExt pico_ext(void)\n"
+        "{\n"
+        "    return (PicoExt){.abi=PICO_EXT_ABI, .name=\"manifest_probe\",\n"
+        "                     .host_init=Init, .host_shutdown=Shutdown};\n"
+        "}\n";
+    static const char *sdk_header_format =
+        "#ifndef PICO_PLUGIN_H\n"
+        "#define PICO_PLUGIN_H\n"
+        "#define PICO_EXT_ABI %d\n"
+        "#define SDK_MARKER %d\n"
+        "typedef struct PicoHost PicoHost;\n"
+        "typedef struct PicoWorkspace PicoWorkspace;\n"
+        "typedef int (*PicoHostExtInitFn)(PicoHost *, void **);\n"
+        "typedef void (*PicoHostExtShutdownFn)(PicoHost *, void *);\n"
+        "typedef void (*PicoHostExtFrameFn)(PicoHost *, void *, float);\n"
+        "typedef int (*PicoWorkspaceExtInitFn)(PicoWorkspace *, void **);\n"
+        "typedef void (*PicoWorkspaceExtShutdownFn)(PicoWorkspace *, void *);\n"
+        "typedef void (*PicoWorkspaceExtFrameFn)(PicoWorkspace *, void *, float);\n"
+        "typedef struct PicoExt {\n"
+        " int abi; const char *name; const char *description;\n"
+        " PicoHostExtInitFn host_init; PicoHostExtShutdownFn host_shutdown;\n"
+        " PicoHostExtFrameFn host_on_frame; PicoWorkspaceExtInitFn workspace_init;\n"
+        " PicoWorkspaceExtShutdownFn workspace_shutdown;\n"
+        " PicoWorkspaceExtFrameFn workspace_on_frame;\n"
+        "} PicoExt;\n"
+        "#endif\n";
+    char cfg[] = "/tmp/pico-manifest-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-manifest-cache-XXXXXX";
+    char sdk_a[] = "/tmp/pico-manifest-sdk-a-XXXXXX";
+    char sdk_b[] = "/tmp/pico-manifest-sdk-b-XXXXXX";
+    char ext_dir[4096];
+    char source[8192];
+    char include_a[8192];
+    char include_b[8192];
+    char header_a[16384];
+    char header_b[16384];
+    PicoHost *host_a = NULL;
+    PicoHost *host_b = NULL;
+    int failed = 1;
+
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(sdk_a) || !mkdtemp(sdk_b))
+    {
+        Fail("mkdtemp SDK dependency manifest isolation");
+        return 1;
+    }
+    snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
+    snprintf(source, sizeof(source), "%s/manifest_probe.c", ext_dir);
+    snprintf(include_a, sizeof(include_a), "%s/sdk/include/pico", sdk_a);
+    snprintf(include_b, sizeof(include_b), "%s/sdk/include/pico", sdk_b);
+    snprintf(header_a, sizeof(header_a), "%s/plugin.h", include_a);
+    snprintf(header_b, sizeof(header_b), "%s/plugin.h", include_b);
+    char sdk_contents_a[4096];
+    char sdk_contents_b[4096];
+    if ((size_t)snprintf(sdk_contents_a, sizeof(sdk_contents_a), sdk_header_format,
+                         PICO_EXT_ABI, 1) >= sizeof(sdk_contents_a) ||
+        (size_t)snprintf(sdk_contents_b, sizeof(sdk_contents_b), sdk_header_format,
+                         PICO_EXT_ABI, 2) >= sizeof(sdk_contents_b) ||
+        MkdirParents(ext_dir) != 0 || MkdirParents(include_a) != 0 ||
+        MkdirParents(include_b) != 0 || WriteFile(source, extension) != 0 ||
+        WriteFile(header_a, sdk_contents_a) != 0 ||
+        WriteFile(header_b, sdk_contents_b) != 0)
+    {
+        Fail("write SDK dependency manifest isolation fixture");
+        goto done;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    setenv("PICO_DATA_DIR", sdk_a, 1);
+    if (pico_host_init(&host_a, NULL, false) != PICO_OK || !host_a)
+    {
+        Fail("open first SDK dependency manifest host");
+        goto done;
+    }
+    WaitPluginLoad(host_a);
+    uint64_t generation = HostSourceGeneration(host_a, source);
+    int *state_a = PicoPlugins_HostState(host_a, "manifest_probe");
+    if (!generation || !state_a || *state_a != 1 || !RemoveCachedSharedObjects(cache))
+    {
+        Fail("load first SDK dependency manifest extension");
+        goto done;
+    }
+
+    setenv("PICO_DATA_DIR", sdk_b, 1);
+    if (pico_host_init(&host_b, NULL, false) != PICO_OK || !host_b)
+    {
+        Fail("open second SDK dependency manifest host");
+        goto done;
+    }
+    WaitPluginLoad(host_b);
+    int *state_b = PicoPlugins_HostState(host_b, "manifest_probe");
+    if (!HostSourceGeneration(host_b, source) || !state_b || *state_b != 2)
+    {
+        Fail("second SDK root must compile its own extension generation");
+        goto done;
+    }
+
+    setenv("PICO_DATA_DIR", sdk_a, 1);
+    Pico_PathsInit(NULL);
+    host_a->plugin_last_poll = -1.0;
+    WaitPluginPoll(host_a);
+    state_a = PicoPlugins_HostState(host_a, "manifest_probe");
+    if (HostSourceGeneration(host_a, source) != generation || !state_a || *state_a != 1)
+    {
+        Fail("another SDK root's dependency manifest must not reload this host");
+        goto done;
+    }
+    failed = 0;
+
+done:
+    pico_host_free(host_b);
+    pico_host_free(host_a);
+    unsetenv("PICO_DATA_DIR");
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg);
+    RmRf(cache);
+    RmRf(sdk_a);
+    RmRf(sdk_b);
     return failed;
 }
 
@@ -9206,6 +9705,8 @@ int main(int argc, char **argv)
         return 1;
     }
 #endif
+    if (TestFastSelectionPersistence() != 0)
+        return 1;
     if (TestBottomFollowShellGeometryStable() != 0)
     {
         return 1;
@@ -9348,6 +9849,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestHeaderReloadIsAsynchronous()) return 1;
+    if (TestSdkDependencyManifestsDoNotCrossReloadHosts() != 0)
+    {
+        return 1;
+    }
     if (TestWorkspaceLocalPollingReloadsOnlyOwner() != 0)
     {
         return 1;

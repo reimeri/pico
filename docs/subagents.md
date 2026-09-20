@@ -1,6 +1,6 @@
 # Subagents
 
-Pico can delegate a task to a child agent through the builtin `subagent` tool. Every child uses a named user profile; calls cannot supply ad-hoc purpose, model, effort, or tool overrides. Children are not selected as the main chat session. Click a `subagent` tool row to open a view-only nested chat of that child's session, both while it runs and after it finishes. The row also shows the child's live activity instead of a generic running placeholder.
+Pico can delegate a task to a child agent through the builtin `subagent` tool. Every child uses a named user profile; calls cannot supply ad-hoc purpose, model, effort, Fast, or tool overrides. Children are not selected as the main chat session. Click a `subagent` tool row to open a view-only nested chat of that child's session, both while it runs and after it finishes. The row also shows the child's live activity instead of a generic running placeholder.
 
 ## Profile directory
 
@@ -35,6 +35,9 @@ Profiles are parsed as JSONC, so line and block comments are allowed.
   "model": "gpt-5.6-sol",
   "effort": "low",
 
+  // Optional explicit Fast opt-in; never inherited from the parent.
+  "fast": false,
+
   // Optional exact-name tool allowlist.
   "tools": ["sh"],
 
@@ -46,11 +49,11 @@ Profiles are parsed as JSONC, so line and block comments are allowed.
 }
 ```
 
-`purpose` is required and non-empty. `description`, `model`, `effort`, `tools`, `parallel_safe`, and `max_parallel_tools` are optional. Unknown keys warn but do not invalidate the file. Wrong types, invalid or oversized values, duplicate or unknown tools, unknown models, and unsupported efforts make only that profile unavailable; other valid profiles still load.
+`purpose` is required and non-empty. `description`, `model`, `effort`, `fast`, `tools`, `parallel_safe`, and `max_parallel_tools` are optional. Unknown keys warn but do not invalidate the file. Wrong types, invalid or oversized values, duplicate or unknown tools, unknown models, and unsupported efforts make only that profile unavailable; other valid profiles still load.
 
 Omitting `tools` allows every registered tool. An empty array allows no tools. A non-empty array exposes only those exact tool names. This is authorization at Pico's tool-catalog and execution boundaries, **not a sandbox**. In particular, allowing `sh` does not restrict which files or commands the shell can access.
 
-## Model and effort resolution
+## Model, effort, and Fast resolution
 
 For a fresh child:
 
@@ -58,6 +61,9 @@ For a fresh child:
 2. Explicit `effort` wins.
 3. Without explicit effort, a child using the parent's model inherits the parent's current effort.
 4. When the profile changes model, effort uses that model's configured default, then its first supported effort, then `none`.
+5. `fast` defaults to false, regardless of the parent's selection. Explicit `true` requires the resolved model's `supports_fast` catalog capability and a supported provider/authentication route; otherwise delegation fails before starting a child.
+
+Fast follows these rules for both fresh children and continued sessions: the current profile overrides a replayed selection. See the [provider Fast contract](extend/providers.md#fast-mode).
 
 The resolved values must be supported before a child is created. Child selection never changes the parent, another live agent, or workspace defaults.
 

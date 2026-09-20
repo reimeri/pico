@@ -84,6 +84,7 @@ typedef struct PicoModel {
     char base_url[512];
     int context_limit;
     bool vision;
+    bool supports_fast; /* explicit model capability; provider/auth must also support it */
     char effort[PICO_MAX_EFFORTS][PICO_EFFORT_LEN];
     int effort_count;
     char default_effort[PICO_EFFORT_LEN];
@@ -387,6 +388,7 @@ typedef struct PicoLlmTurn {
     const char *instructions;
     const char *cache_key;
     const char *effort;
+    bool fast; /* immutable for an agent turn, including tool follow-ups/compaction */
     bool compact;
     bool include_tools;
     bool vision;
@@ -430,6 +432,7 @@ typedef struct PicoLlmItem {
 
 typedef struct PicoLlmResult {
     char *error;
+    char service_tier[32]; /* NUL-terminated actual reported tier; empty means unknown */
     int input_tokens;
     int cached_tokens;
     PicoLlmItem *items;
@@ -444,6 +447,10 @@ typedef struct PicoProvider {
     const char *name;
     PicoProviderStreamFn stream;
     bool map_context; /* stream maps type:context items to a non-user role */
+    /* Main-thread, nonblocking query. Borrowed arguments; no network or mutation.
+     * Called only for models explicitly configured with supports_fast.
+     * stream must independently validate the authentication route. NULL means unsupported. */
+    bool (*supports_fast)(PicoHost *host, const PicoModel *model, void *state);
     void *state;
 } PicoProvider;
 

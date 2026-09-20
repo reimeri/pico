@@ -517,9 +517,53 @@ static void TestToolCallDeltaEvents(void)
     pico_responses_ctx_free(&ctx);
 }
 
+static void TestFastServiceTier(void)
+{
+    PicoLlmTurn turn = {.model = "test-model", .effort = "high"};
+    PicoResponsesBuildOpts opts = {.provider = "openai"};
+    for (int codex = 0; codex < 2; codex++)
+    {
+        for (int fast = 0; fast < 2; fast++)
+        {
+            turn.fast = fast;
+            opts.service_tier = pico_responses_openai_service_tier(&turn, codex);
+            char *body = pico_responses_build_request(&turn, &opts);
+            JsonDoc doc;
+            Check(body && JsonParse(&doc, body, strlen(body)) == 0, "Fast request is JSON");
+            int tier = JsonObjGet(&doc, 0, "service_tier");
+            Check(fast ? JsonEq(&doc, tier, "priority") :
+                  (codex ? tier < 0 : JsonEq(&doc, tier, "default")),
+                  "API off forces standard; Codex off omits tier; on requests priority");
+            JsonFree(&doc);
+            char *retry = pico_responses_body_without_reasoning(body);
+            CheckContains(retry, "\"service_tier\":\"priority\"", fast,
+                          "reasoning retry preserves requested priority");
+            free(retry);
+            free(body);
+        }
+    }
+    turn.base_url = "https://gateway.example/v1";
+    Check(!pico_responses_openai_fast_route(turn.base_url, false),
+          "OpenAI-compatible gateways do not imply priority support");
+    opts.service_tier = pico_responses_openai_service_tier(&turn, false);
+    char *body = pico_responses_build_request(&turn, &opts);
+    CheckContains(body, "service_tier", false, "custom endpoints receive no tier controls");
+    free(body);
+
+    PicoResponsesCtx ctx = {0};
+    const char *event = "{\"type\":\"response.completed\",\"response\":{\"service_tier\":\"default\",\"output\":[]}}";
+    Check(pico_responses_feed(&ctx, event, strlen(event)), "served-tier event accepted");
+    PicoLlmResult result = {0};
+    pico_responses_fill_result(&ctx, &result);
+    Check(strcmp(result.service_tier, "default") == 0, "served tier comes from response, not request");
+    pico_llm_result_free(&result);
+    pico_responses_ctx_free(&ctx);
+}
+
 int main(void)
 {
     TestRequestOptions();
+    TestFastServiceTier();
     TestContextItemConversion();
     TestImageRequestConversion();
     TestReasoningRemoval();

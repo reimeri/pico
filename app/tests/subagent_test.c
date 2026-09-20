@@ -59,11 +59,13 @@ static int TestNamedSubagentDelegation(void)
     snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args),
              "{\"profile\":\"exploration\",\"task\":\"delegated question\"}");
     PicoAgent *parent = TestAgent(&app);
+    PicoHost_PrimaryWorkspace(&app)->models[0].supports_fast = true;
+    parent->fast = true;
     PicoAgent_StartTurn(&app, parent, "parent request");
     bool completed = WaitForManagerIdle(&app);
     PicoTraceLine *trace = LastToolTrace(&app);
     pthread_mutex_lock(&g_test.mu);
-    bool child_context = g_test.child_instructions &&
+    bool child_context = !g_test.child_fast && g_test.child_instructions &&
                          strstr(g_test.child_instructions, "Subagent profile: exploration") &&
                          strstr(g_test.child_instructions, "Inspect only") &&
                          g_test.child_input && strstr(g_test.child_input, "delegated question") &&
@@ -235,7 +237,7 @@ static int TestSubagentSessionContinuation(void)
     char dir[4096];
     char path[4096];
     if (!WriteSubagentProfile(temp,
-                              "{\"purpose\":\"Current profile purpose\"}",
+                              "{\"purpose\":\"Current profile purpose\",\"fast\":true}",
                               dir, sizeof(dir), path, sizeof(path)))
     {
         rmdir(temp);
@@ -246,6 +248,7 @@ static int TestSubagentSessionContinuation(void)
     ResetTest(TEST_DELEGATION, 1);
     PicoHost app;
     InitApp(&app);
+    PicoHost_PrimaryWorkspace(&app)->models[0].supports_fast = true;
     PicoExt extension = pico_ext_subagent();
     InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
     PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
@@ -265,7 +268,7 @@ static int TestSubagentSessionContinuation(void)
                             strstr(g_test.child_input, "previous delegated context") &&
                             strstr(g_test.child_input, "continue review") &&
                             !strstr(g_test.child_input, "parent continuation request");
-    bool refreshed_policy = g_test.child_instructions &&
+    bool refreshed_policy = g_test.child_fast && g_test.child_instructions &&
                             strstr(g_test.child_instructions, "Current profile purpose") &&
                             !strstr(g_test.child_instructions, "Old profile purpose") &&
                             strstr(g_test.child_tools, "ask_test") &&

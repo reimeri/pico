@@ -850,6 +850,8 @@ static char *BuildSessionHeaderJson(PicoHost *app, PicoAgent *agent)
     JsonBuf_Bool(&b, session_workspace && session_workspace->worktree);
     JsonBuf_Puts(&b, ",\"model\":");
     JsonBuf_String(&b, agent->model);
+    JsonBuf_Puts(&b, ",\"fast\":");
+    JsonBuf_Bool(&b, agent->fast);
     JsonBuf_Puts(&b, ",\"kind\":");
     JsonBuf_String(&b, agent->kind == PICO_AGENT_SUBAGENT ? "subagent" : "normal");
     if (agent->kind == PICO_AGENT_SUBAGENT)
@@ -874,7 +876,7 @@ static char *BuildSessionHeaderJson(PicoHost *app, PicoAgent *agent)
     return JsonBuf_Steal(&b);
 }
 
-static char *BuildModelChangeJson(const char *model, const char *effort)
+static char *BuildModelChangeJson(const char *model, const char *effort, bool fast)
 {
     char *pre = EventPrefix("model_change");
     JsonBuf b;
@@ -887,6 +889,8 @@ static char *BuildModelChangeJson(const char *model, const char *effort)
         JsonBuf_Puts(&b, ",\"effort\":");
         JsonBuf_String(&b, effort);
     }
+    JsonBuf_Puts(&b, ",\"fast\":");
+    JsonBuf_Bool(&b, fast);
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     free(pre);
@@ -1061,6 +1065,7 @@ static void ApplyHeader(PicoAgent *agent, const JsonDoc *doc, int obj)
     {
         snprintf(agent->model, sizeof(agent->model), "%s", model);
         agent->effort[0] = '\0';
+        agent->fast = JsonEq(doc, JsonObjGet(doc, obj, "fast"), "true");
         PicoSettings_SyncAgent(agent);
     }
     free(model);
@@ -1196,6 +1201,9 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         int input_tokens = JsonObjInt(doc, obj, "input_tokens", 0);
         int cached_tokens = JsonObjInt(doc, obj, "cached_tokens", 0);
         PicoUsage_Apply(agent, input_tokens, cached_tokens, NULL);
+        char *tier = JsonObjStr(doc, obj, "service_tier");
+        snprintf(agent->last_service_tier, sizeof(agent->last_service_tier), "%s", tier ? tier : "");
+        free(tier);
     }
     else if (strcmp(type, "message") == 0)
     {
@@ -1329,6 +1337,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     {
         char *model = JsonObjStr(doc, obj, "model");
         char *effort = JsonObjStr(doc, obj, "effort");
+        agent->fast = JsonEq(doc, JsonObjGet(doc, obj, "fast"), "true");
         if (model && model[0])
         {
             snprintf(agent->model, sizeof(agent->model), "%s", model);
@@ -2276,6 +2285,8 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->tokens_cached = 0;
     agent->session_input_tokens = 0;
     agent->session_cached_tokens = 0;
+    agent->fast = false;
+    agent->last_service_tier[0] = '\0';
     agent->activity[0] = '\0';
     free(agent->compact_summary);
     agent->compact_summary = NULL;
@@ -2318,7 +2329,8 @@ PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent,
 }
 
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
-                                            int input_tokens, int cached_tokens)
+                                            int input_tokens, int cached_tokens,
+                                            bool fast, const char *service_tier)
 {
     if (input_tokens <= 0)
     {
@@ -2332,6 +2344,10 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
     JsonBuf_Int(&b, input_tokens);
     JsonBuf_Puts(&b, ",\"cached_tokens\":");
     JsonBuf_Int(&b, cached_tokens);
+    JsonBuf_Puts(&b, ",\"fast\":");
+    JsonBuf_Bool(&b, fast);
+    JsonBuf_Puts(&b, ",\"service_tier\":");
+    JsonBuf_String(&b, service_tier ? service_tier : "");
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     PicoSessionWriteResult result = AppendLine(app, agent, line);
@@ -2486,7 +2502,7 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,
                                                   const char *model, const char *effort)
 {
-    char *line = BuildModelChangeJson(model, effort);
+    char *line = BuildModelChangeJson(model, effort, agent->fast);
     PicoSessionWriteResult result = AppendLine(app, agent, line);
     free(line);
     return result;
@@ -4928,7 +4944,7 @@ void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
                                          agent->effort[0] ? agent->effort : "none");
         return;
     }
-    json = BuildModelChangeJson(agent->model, agent->effort[0] ? agent->effort : "none");
+    json = BuildModelChangeJson(agent->model, agent->effort[0] ? agent->effort : "none", agent->fast);
     if (!json)
     {
         PersistenceFailed(app, agent, "out of memory while logging the model change");

@@ -303,6 +303,11 @@ char *pico_completions_build_request(const PicoLlmTurn *turn, const PicoCompleti
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "{\"model\":");
     JsonBuf_String(&b, turn->model ? turn->model : "");
+    if (opts->service_tier)
+    {
+        JsonBuf_Puts(&b, ",\"service_tier\":");
+        JsonBuf_String(&b, opts->service_tier);
+    }
     JsonBuf_Puts(&b, ",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
     if (opts->store_false)
     {
@@ -1093,6 +1098,10 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
         JsonFree(&doc);
         return false;
     }
+    char *tier = JsonObjStr(&doc, 0, "service_tier");
+    if (tier && tier[0])
+        snprintf(c->service_tier, sizeof(c->service_tier), "%s", tier);
+    free(tier);
     ApplyUsage(c, &doc, JsonObjGet(&doc, 0, "usage"));
     int choices = JsonObjGet(&doc, 0, "choices");
     if (JsonIsArray(&doc, choices) && JsonArrayLen(&doc, choices) > 0)
@@ -1195,6 +1204,7 @@ void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out)
     }
     out->input_tokens = c->input_tokens;
     out->cached_tokens = c->cached_tokens;
+    snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
     if (c->error)
     {
         out->error = c->error;

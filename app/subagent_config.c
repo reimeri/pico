@@ -120,6 +120,17 @@ static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char 
         error = "effort is not supported by the configured model";
     }
 
+    int fast_tok = JsonObjGet(&doc, 0, "fast");
+    if (!error && fast_tok >= 0)
+    {
+        int start = JsonTokStart(&doc, fast_tok);
+        bool quoted = start > 0 && doc.src[start - 1] == '"';
+        if (quoted || (!JsonEq(&doc, fast_tok, "true") && !JsonEq(&doc, fast_tok, "false")))
+            error = "fast must be a boolean";
+        else
+            out->fast = JsonEq(&doc, fast_tok, "true");
+    }
+
     int safe_tok = JsonObjGet(&doc, 0, "parallel_safe");
     if (!error && safe_tok >= 0)
     {
@@ -204,7 +215,8 @@ static bool ParseProfile(PicoWorkspace *workspace, const char *path, const char 
         }
         char *key = JsonStrDup(&doc, key_tok);
         if (key && strcmp(key, "purpose") != 0 && strcmp(key, "description") != 0 &&
-            strcmp(key, "model") != 0 && strcmp(key, "effort") != 0 && strcmp(key, "tools") != 0 &&
+            strcmp(key, "model") != 0 && strcmp(key, "effort") != 0 &&
+            strcmp(key, "fast") != 0 && strcmp(key, "tools") != 0 &&
             strcmp(key, "max_parallel_tools") != 0 && strcmp(key, "parallel_safe") != 0)
         {
             char reason[256];
@@ -336,6 +348,8 @@ bool PicoSubagentConfig_Resolve(const PicoHost *app, const PicoAgent *parent,
     {
         return false;
     }
+    if (profile->fast && !PicoSettings_ModelSupportsFast(parent->workspace, catalog))
+        return false;
     const char *resolved_effort = NULL;
     if (profile->has_effort)
     {

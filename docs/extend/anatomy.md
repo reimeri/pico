@@ -1,6 +1,6 @@
 # Anatomy
 
-Every user extension is one `.c` file that exports `pico_ext`. ABI 16 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
+Every user extension is one `.c` file that exports `pico_ext`. ABI 17 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
 
 ```c
 #include "pico/plugin.h"
@@ -31,7 +31,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 16). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 17). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.
@@ -108,7 +108,7 @@ cc -shared -fPIC -std=c99 -I<pico SDK>/include -I<source dir> -o <cache>.so <fil
 
 The packaged SDK is `share/pico/sdk/include` relative to Pico's install prefix and contains the public `pico/` headers plus the Clay, Raylib, JSON, markdown, and text-range headers those contracts expose. Development builds create the same `sdk/include` layout beside the executable. `PICO_DATA_DIR` can override the runtime data root when testing a staged package.
 
-The source directory is also on the include path, so local headers next to the `.c` file work. GCC/Clang dependency files record included project and SDK headers; their contents participate in the compiled-cache key and change detection, even when timestamps are unchanged. Compilation runs as a polled subprocess with a 30-second deadline. The frame loop keeps rendering and processing input while it builds; descriptor validation and activation run on the main thread after success. Compiler diagnostics are bounded and drained without blocking, and obsolete build outputs are discarded. Packaged archives and AppImages require a host C99 compiler; the Nix package supplies GCC. Compile failures, a missing compiler/SDK, and failed `pico_add_tool` registrations show in the overlay; the previous working module generation remains active when a replacement fails. Polling does not recompile an unchanged failed source; F5 and `/reload` still retry.
+The source directory is also on the include path, so local headers next to the `.c` file work. GCC/Clang dependency files record included project and SDK headers; their contents participate in the compiled-cache key and change detection, even when timestamps are unchanged. Dependency manifests are namespaced by SDK include root, so installed and development Pico builds can compile the same source through one cache without causing each other to reload. Compilation runs as a polled subprocess with a 30-second deadline. The frame loop keeps rendering and processing input while it builds; descriptor validation and activation run on the main thread after success. Compiler diagnostics are bounded and drained without blocking, and obsolete build outputs are discarded. Packaged archives and AppImages require a host C99 compiler; the Nix package supplies GCC. Compile failures, a missing compiler/SDK, and failed `pico_add_tool` registrations show in the overlay; the previous working module generation remains active when a replacement fails. Polling does not recompile an unchanged failed source; F5 and `/reload` still retry.
 
 ## Reload
 

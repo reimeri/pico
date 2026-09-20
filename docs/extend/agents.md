@@ -4,6 +4,12 @@ Each workspace can run up to `PICO_MAX_AGENTS` (16) independent agents concurren
 
 Include `pico/agent.h` directly, or include `pico/plugin.h`.
 
+## Fast selection and snapshots
+
+`PicoAgentInfo.fast` is the selected mode for the next agent turn, not a claim about an in-flight request. `last_service_tier` is the last successful provider result's actual reported tier (empty means unknown). These are copied fields; do not use selected UI state to infer billing for an earlier request. Session replay restores the selection and reported usage tier. A new conversation starts with Fast off.
+
+`PicoSubagentProfileInfo.fast` is an explicit profile opt-in, default false. It is never inherited from the parent, and continuation reapplies the current profile's value. Provider/model/authentication capability must allow Fast before such a child is started. See [providers](providers.md#fast-mode) and [subagents](../subagents.md).
+
 ## Identity and snapshots
 
 `PicoAgentId` identifies one in-memory agent for the lifetime of its host. It is distinct from the durable JSONL `session_id`. Runtime generation identifies one worker generation inside that agent; force cancellation replaces the generation without changing the agent ID. An agent belongs to one workspace for its full lifetime. Independent hosts have separate ID spaces.

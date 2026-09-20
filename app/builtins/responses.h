@@ -19,6 +19,7 @@ typedef struct PicoResponsesCtx {
     int item_count;
     int input_tokens;
     int cached_tokens;
+    char service_tier[32];
     char *error;
     bool failed;
     bool saw_text;
@@ -28,12 +29,15 @@ typedef struct PicoResponsesCtx {
 
 typedef struct PicoResponsesBuildOpts {
     const char *provider;
+    const char *service_tier; /* NULL omits the field; provider chooses wire policy */
     bool store_false;
     bool include_encrypted_reasoning;
     bool reasoning_summary_auto;
 } PicoResponsesBuildOpts;
 
 void pico_responses_resolve_url(const char *base, const char *fallback, char *out, size_t cap);
+bool pico_responses_openai_fast_route(const char *base, bool codex);
+const char *pico_responses_openai_service_tier(const PicoLlmTurn *turn, bool codex);
 char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesBuildOpts *opts);
 char *pico_responses_body_without_reasoning(const char *body);
 

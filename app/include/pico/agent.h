@@ -78,6 +78,7 @@ typedef struct PicoSubagentProfileInfo {
     char effort[PICO_EFFORT_LEN];
     bool has_model;
     bool has_effort;
+    bool fast; /* opt-in; never inherited from parent */
     bool parallel_safe; /* explicit opt-in to overlap sibling calls in the parent batch */
     int max_parallel_tools; /* zero inherits workspace settings */
     bool restricted_tools;
@@ -98,6 +99,8 @@ typedef struct PicoAgentInfo {
     char model[128];
     char effort[PICO_EFFORT_LEN];
     char activity[256];
+    bool fast; /* selected mode for the next turn */
+    char last_service_tier[32];
 
     PicoSessionPersistence persistence;
     bool busy;

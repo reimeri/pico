@@ -44,6 +44,9 @@ void PicoSettings_ReconcileIdleAgent(PicoAgent *agent);
 bool PicoSettings_EffortAllowed(const PicoModel *model, const char *effort);
 bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name);
 bool PicoSettings_SetEffort(PicoAgent *agent, const char *level);
+bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model);
+bool PicoSettings_FastAvailable(const PicoAgent *agent);
+bool PicoSettings_SetFast(PicoAgent *agent, bool enabled);
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
 bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
 

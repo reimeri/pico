@@ -922,17 +922,16 @@ static void StartWorktreeCreation(PicoHost *app)
 
 static void RenderWorktreeButton(Clay_ElementId id, const char *label, bool primary)
 {
-    bool hovered = Clay_PointerOver(id);
-    CLAY(id, {.layout = {.padding = {12, 12, 7, 7}},
-              .backgroundColor = primary ? (hovered ? (Clay_Color){80, 135, 240, 255}
-                                                    : (Clay_Color){65, 115, 220, 255})
-                                         : (hovered ? COLOR_CODE_BG : COLOR_CONTENT_BG),
-              .cornerRadius = CLAY_CORNER_RADIUS(5)})
+    bool hover = Clay_PointerOver(id);
+    Clay_Color bg = primary ? (Clay_Color){74, 104, 180, 255} : COLOR_FOOTER_BG;
+    if (hover)
+        bg = primary ? (Clay_Color){92, 126, 210, 255} : COLOR_CODE_BG;
+    CLAY(id, {.layout = {.padding = {14, 14, 8, 8}}, .backgroundColor = bg, .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                 .fontSize = PICO_FONT_UI,
-                                                 .textColor = COLOR_TEXT,
-                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                .fontSize = PICO_FONT_UI,
+                                                .textColor = COLOR_TEXT,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
 }
 
@@ -995,11 +994,12 @@ static void RenderWorktreeModal(PicoHost *app, void *state)
                                                                     .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             CLAY_AUTO_ID({.layout = {.sizing = {.height = CLAY_SIZING_FIXED(2)}}}) {}
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                     .childAlignment = {.x = CLAY_ALIGN_X_RIGHT},
+                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                                      .childGap = 8,
                                      .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
             {
                 RenderWorktreeButton(CLAY_ID("WorktreeCancel"), "Cancel", false);
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                 RenderWorktreeButton(CLAY_ID("WorktreeCreate"), "Create worktree", true);
             }
         }

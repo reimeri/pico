@@ -2,7 +2,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
-#include "diff_lines.h"
+#include "diff_model.h"
+#include "diff_virtual.h"
 #include "highlight.h"
 #include "hl_colors.h"
 #include "scrollbar.h"
@@ -20,240 +21,14 @@
 /* Model: parsed files and rows                                        */
 /* ------------------------------------------------------------------ */
 
-typedef enum DiffRowKind {
-    ROW_HEADER = 0, /* file section header */
-    ROW_HUNK,       /* @@ ... @@ */
-    ROW_CTX,
-    ROW_ADD,
-    ROW_DEL,
-    ROW_NOTE,       /* untracked file we could not render (empty/binary/oversized) */
-} DiffRowKind;
-
-typedef struct DiffRow {
-    DiffRowKind kind;
-    const char *text; /* borrowed from the owning model buffer */
-    int len;
-    /* Byte offset of this row in its syntax-highlight image: the post-image
-     * (context + added lines) for ROW_CTX/ROW_ADD, the pre-image (context +
-     * deleted lines) for ROW_DEL. -1 for non-source rows. */
-    int img_off;
-} DiffRow;
-
-typedef struct DiffFile {
-    const char *label; /* borrowed from the owning model buffer */
-    int label_len;
-    DiffRow *rows;     /* malloc'd */
-    int row_count;
-    int row_cap;
-    /* Lazily built syntax spans over the pre/post image (see DiffRow). */
-    bool hl_built;
-    PicoHlSpan *old_spans; /* malloc'd */
-    int old_count;
-    PicoHlSpan *new_spans; /* malloc'd */
-    int new_count;
-} DiffFile;
-
-/* Borrowed storage the model keeps alive for rows/labels outside `patch`. */
-typedef struct DiffStash {
-    char *buf;
-    struct DiffStash *next;
-} DiffStash;
-
-typedef struct DiffModel {
-    DiffFile *files;
-    int file_count;
-    int file_cap;
-    int adds;
-    int dels;
-    int untracked;  /* files with no tracked counterpart (empty/binary/oversized included) */
-    bool is_repo;
-    char workspace[4096]; /* captured from; AdoptPending drops models for other workspaces */
-    char *patch;    /* malloc'd; tracked file labels and rows borrow from this */
-    DiffStash *stash; /* malloc'd buffers for untracked file labels/rows */
-} DiffModel;
-
-static void DiffModel_Free(DiffModel *m)
-{
-    if (!m)
-    {
-        return;
-    }
-    for (int i = 0; i < m->file_count; i++)
-    {
-        free(m->files[i].rows);
-        free(m->files[i].old_spans);
-        free(m->files[i].new_spans);
-    }
-    free(m->files);
-    free(m->patch);
-    while (m->stash)
-    {
-        DiffStash *next = m->stash->next;
-        free(m->stash->buf);
-        free(m->stash);
-        m->stash = next;
-    }
-    free(m);
-}
-
-/* Takes ownership of `buf` on success. */
-static bool ModelStash(DiffModel *m, char *buf)
-{
-    DiffStash *s = malloc(sizeof(*s));
-    if (!s)
-    {
-        return false;
-    }
-    s->buf = buf;
-    s->next = m->stash;
-    m->stash = s;
-    return true;
-}
-
-static DiffFile *ModelAddFile(DiffModel *m)
-{
-    if (m->file_count == m->file_cap)
-    {
-        int cap = m->file_cap ? m->file_cap * 2 : 8;
-        DiffFile *next = realloc(m->files, (size_t)cap * sizeof(*next));
-        if (!next)
-        {
-            return NULL;
-        }
-        m->files = next;
-        m->file_cap = cap;
-    }
-    DiffFile *f = &m->files[m->file_count++];
-    memset(f, 0, sizeof(*f));
-    return f;
-}
-
-static void FilePushRow(DiffFile *f, DiffRowKind kind, const char *text, int len)
-{
-    if (f->row_count == f->row_cap)
-    {
-        int cap = f->row_cap ? f->row_cap * 2 : 64;
-        DiffRow *next = realloc(f->rows, (size_t)cap * sizeof(*next));
-        if (!next)
-        {
-            return;
-        }
-        f->rows = next;
-        f->row_cap = cap;
-    }
-    f->rows[f->row_count++] = (DiffRow){.kind = kind, .text = text, .len = len, .img_off = -1};
-}
-
-/* Rebuilds the file's pre-image (context + deleted) and post-image (context +
- * added) as temporary strings, highlights both, and keeps the span lists.
- * Runs once per file; spans index image offsets recorded in DiffRow.img_off.
- * Approximate by design: an image spliced from hunks is not the full file. */
-/* Highlighting is a visual aid: cap image size so a huge or generated diff
- * cannot turn it into a stall, and so image offsets always fit in int. */
-#define DIFF_HL_MAX_IMAGE (4 * 1024 * 1024)
-
-static void FileBuildHighlight(DiffFile *f)
-{
-    if (f->hl_built)
-    {
-        return;
-    }
-    f->hl_built = true;
-    if (!f->label || f->label_len <= 0)
-    {
-        return;
-    }
-    char label[1024];
-    int n = f->label_len < (int)sizeof(label) - 1 ? f->label_len : (int)sizeof(label) - 1;
-    memcpy(label, f->label, (size_t)n);
-    label[n] = '\0';
-    const PicoHlLang *lang = PicoHl_LangForPath(label);
-    if (!lang)
-    {
-        return;
-    }
-
-    size_t old_cap = 1, new_cap = 1;
-    for (int i = 0; i < f->row_count; i++)
-    {
-        DiffRowKind kind = f->rows[i].kind;
-        if (kind == ROW_CTX || kind == ROW_DEL)
-        {
-            old_cap += (size_t)f->rows[i].len + 1;
-        }
-        if (kind == ROW_CTX || kind == ROW_ADD)
-        {
-            new_cap += (size_t)f->rows[i].len + 1;
-        }
-    }
-    if (old_cap > DIFF_HL_MAX_IMAGE || new_cap > DIFF_HL_MAX_IMAGE)
-    {
-        return;
-    }
-    char *old_img = (char *)malloc(old_cap);
-    char *new_img = (char *)malloc(new_cap);
-    if (!old_img || !new_img)
-    {
-        free(old_img);
-        free(new_img);
-        return;
-    }
-    int old_off = 0, new_off = 0;
-    for (int i = 0; i < f->row_count; i++)
-    {
-        DiffRow *r = &f->rows[i];
-        if (r->kind == ROW_CTX || r->kind == ROW_DEL)
-        {
-            memcpy(old_img + old_off, r->text, (size_t)r->len);
-            old_img[old_off + r->len] = '\n';
-            if (r->kind == ROW_DEL)
-            {
-                r->img_off = old_off;
-            }
-            old_off += r->len + 1;
-        }
-        if (r->kind == ROW_CTX || r->kind == ROW_ADD)
-        {
-            memcpy(new_img + new_off, r->text, (size_t)r->len);
-            new_img[new_off + r->len] = '\n';
-            r->img_off = new_off;
-            new_off += r->len + 1;
-        }
-    }
-    old_img[old_off] = '\0';
-    new_img[new_off] = '\0';
-
-    f->old_count = PicoHl_Count(lang, old_img);
-    f->old_spans = (PicoHlSpan *)malloc((size_t)f->old_count * sizeof(PicoHlSpan));
-    if (f->old_spans)
-    {
-        f->old_count = PicoHl_Fill(lang, old_img, f->old_spans, f->old_count);
-    }
-    else
-    {
-        f->old_count = 0;
-    }
-    f->new_count = PicoHl_Count(lang, new_img);
-    f->new_spans = (PicoHlSpan *)malloc((size_t)f->new_count * sizeof(PicoHlSpan));
-    if (f->new_spans)
-    {
-        f->new_count = PicoHl_Fill(lang, new_img, f->new_spans, f->new_count);
-    }
-    else
-    {
-        f->new_count = 0;
-    }
-    free(old_img);
-    free(new_img);
-}
-
 /* ------------------------------------------------------------------ */
 /* Git capture (worker thread)                                         */
 /* ------------------------------------------------------------------ */
 
 #define DIFF_POLL_SECONDS 2
 
-typedef struct DiffWorkerCtx {
+typedef struct DiffWorkerCtx
+{
     int refcount; /* 1 for DiffState, 1 for worker thread */
     pthread_mutex_t lock;
     pthread_cond_t wake;
@@ -262,405 +37,25 @@ typedef struct DiffWorkerCtx {
     bool thread_started;
     bool thread_stop;
     pthread_t thread;
+    /* Worker-thread-only capture dedup: signature of the last published
+     * model. Unchanged captures are dropped before highlighting. */
+    uint64_t last_sig;
+    bool has_sig;
 } DiffWorkerCtx;
 
-typedef struct DiffState {
+typedef struct DiffState
+{
     PicoWorkspace *workspace;
     DiffWorkerCtx *worker;
-    DiffModel *model;   /* main thread only */
+    DiffModel *model; /* main thread only */
     bool open;
     PicoScrollbar scrollbar;
     bool overflow;
     char chip_adds[32];
     char chip_dels[32];
     char title[128];
+    float row_min_width; /* keeps horizontal scroll extent stable while virtualized */
 } DiffState;
-
-static char *ShellQuote(const char *path)
-{
-    size_t len = 2; /* surrounding quotes */
-    for (const char *p = path; *p; p++)
-    {
-        len += *p == '\'' ? 4 : 1;
-    }
-    char *out = malloc(len + 1);
-    if (!out)
-    {
-        return NULL;
-    }
-    char *w = out;
-    *w++ = '\'';
-    for (const char *p = path; *p; p++)
-    {
-        if (*p == '\'')
-        {
-            memcpy(w, "'\\''", 4);
-            w += 4;
-        }
-        else
-        {
-            *w++ = *p;
-        }
-    }
-    *w++ = '\'';
-    *w = '\0';
-    return out;
-}
-
-/* Runs `git -C <ws> <args>`; returns malloc'd NUL-terminated stdout or NULL. */
-static char *GitRun(const char *ws, const char *args)
-{
-    char *quoted = ShellQuote(ws);
-    if (!quoted)
-    {
-        return NULL;
-    }
-    size_t cap = strlen(quoted) + strlen(args) + 32;
-    char *cmd = malloc(cap);
-    if (!cmd)
-    {
-        free(quoted);
-        return NULL;
-    }
-    snprintf(cmd, cap, "git -C %s %s 2>/dev/null", quoted, args);
-    free(quoted);
-
-    FILE *fp = popen(cmd, "r");
-    free(cmd);
-    if (!fp)
-    {
-        return NULL;
-    }
-    size_t len = 0;
-    size_t buf_cap = 1 << 16;
-    char *buf = malloc(buf_cap);
-    if (!buf)
-    {
-        pclose(fp);
-        return NULL;
-    }
-    size_t n;
-    while ((n = fread(buf + len, 1, buf_cap - len, fp)) > 0)
-    {
-        len += n;
-        if (len == buf_cap)
-        {
-            buf_cap *= 2;
-            char *next = realloc(buf, buf_cap);
-            if (!next)
-            {
-                free(buf);
-                pclose(fp);
-                return NULL;
-            }
-            buf = next;
-        }
-    }
-    int status = pclose(fp);
-    if (status != 0)
-    {
-        free(buf);
-        return NULL;
-    }
-    buf[len] = '\0';
-    return buf;
-}
-
-static bool IsRepo(const char *ws)
-{
-    char *out = GitRun(ws, "rev-parse --is-inside-work-tree");
-    if (!out)
-    {
-        return false;
-    }
-    bool yes = strncmp(out, "true", 4) == 0;
-    free(out);
-    return yes;
-}
-
-/* Well-known empty tree; diff base when HEAD is unborn (no commits yet). */
-#define DIFF_EMPTY_TREE "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
-/* Ref to diff against: HEAD when it exists, else the empty tree. */
-static void DiffBase(const char *ws, char *out, size_t cap)
-{
-    char *head = GitRun(ws, "rev-parse --verify HEAD");
-    if (head)
-    {
-        free(head);
-        snprintf(out, cap, "HEAD");
-    }
-    else
-    {
-        snprintf(out, cap, "%s", DIFF_EMPTY_TREE);
-    }
-}
-
-/* One line of `git diff --numstat`; binary lines ("-") are skipped. */
-static void ParseNumstatLine(const char *line, int *adds, int *dels)
-{
-    if (*line == '-')
-    {
-        return;
-    }
-    char *end;
-    long a = strtol(line, &end, 10);
-    if (end == line)
-    {
-        return;
-    }
-    long d = strtol(end, &end, 10);
-    *adds += (int)a;
-    *dels += (int)d;
-}
-
-/* Parse `git diff -U3` output. File labels and rows borrow from `patch`. */
-static void ParseUnified(DiffModel *m, char *patch)
-{
-    DiffFile *cur = NULL;
-    const char *line = patch;
-    while (*line)
-    {
-        const char *nl = strchr(line, '\n');
-        int len = nl ? (int)(nl - line) : (int)strlen(line);
-
-        if (strncmp(line, "diff --git ", 11) == 0)
-        {
-            cur = ModelAddFile(m);
-        }
-        else if (cur && strncmp(line, "+++ b/", 6) == 0)
-        {
-            cur->label = line + 6;
-            cur->label_len = len - 6;
-        }
-        else if (cur && strncmp(line, "+++ /dev/null", 13) == 0)
-        {
-            /* Deleted file: label comes from the preceding "--- a/" line. */
-        }
-        else if (cur && !cur->label && strncmp(line, "--- a/", 6) == 0)
-        {
-            cur->label = line + 6;
-            cur->label_len = len - 6;
-        }
-        else if (cur && cur->label)
-        {
-            if (len >= 2 && line[0] == '@' && line[1] == '@')
-            {
-                FilePushRow(cur, ROW_HUNK, line, len);
-            }
-            else if (line[0] == '+')
-            {
-                FilePushRow(cur, ROW_ADD, line + 1, len - 1);
-            }
-            else if (line[0] == '-')
-            {
-                FilePushRow(cur, ROW_DEL, line + 1, len - 1);
-            }
-            else if (line[0] == ' ')
-            {
-                FilePushRow(cur, ROW_CTX, line + 1, len - 1);
-            }
-            else if (line[0] == '\\')
-            {
-                FilePushRow(cur, ROW_HUNK, line, len);
-            }
-        }
-        line += len + (nl ? 1 : 0);
-    }
-
-    /* Emit a header row per labeled file, before its first content row. */
-    for (int i = 0; i < m->file_count; i++)
-    {
-        DiffFile *f = &m->files[i];
-        if (!f->label || f->row_count == 0)
-        {
-            continue;
-        }
-        FilePushRow(f, ROW_HEADER, f->label, f->label_len);
-        memmove(f->rows + 1, f->rows, (size_t)(f->row_count - 1) * sizeof(*f->rows));
-        f->rows[0] = (DiffRow){.kind = ROW_HEADER, .text = f->label, .len = f->label_len};
-    }
-}
-
-static char *Strndup(const char *s, int len)
-{
-    char *out = malloc((size_t)len + 1);
-    if (!out)
-    {
-        return NULL;
-    }
-    memcpy(out, s, (size_t)len);
-    out[len] = '\0';
-    return out;
-}
-
-/* Untracked files appear as fully-added via a Myers diff against empty.
- * Empty, binary, and oversized files are listed with a note instead. */
-static void AddUntracked(DiffModel *m, const char *ws, const char *path, int path_len)
-{
-    m->untracked++;
-
-    char full[4096];
-    int wrote = snprintf(full, sizeof(full), "%s/%.*s", ws, path_len, path);
-    if (wrote <= 0 || (size_t)wrote >= sizeof(full))
-    {
-        return;
-    }
-    FILE *fp = fopen(full, "rb");
-    if (!fp)
-    {
-        return;
-    }
-    if (fseek(fp, 0, SEEK_END) != 0)
-    {
-        fclose(fp);
-        return;
-    }
-    long size = ftell(fp);
-    if (fseek(fp, 0, SEEK_SET) != 0)
-    {
-        fclose(fp);
-        return;
-    }
-
-    char *content = NULL;
-    const char *note = NULL;
-    if (size <= 0)
-    {
-        note = "(empty file)";
-    }
-    else if (size > (1 << 20))
-    {
-        note = "(file too large to diff)";
-    }
-    else
-    {
-        content = malloc((size_t)size + 1);
-        if (content)
-        {
-            size_t got = fread(content, 1, (size_t)size, fp);
-            content[got] = '\0';
-            if (memchr(content, '\0', got))
-            {
-                free(content);
-                content = NULL;
-                note = "(binary file)";
-            }
-        }
-    }
-    fclose(fp);
-
-    PicoDiffLines lines = {0};
-    if (content && !PicoDiff_Lines("", content, &lines))
-    {
-        free(content);
-        return;
-    }
-
-    char *label = Strndup(path, path_len);
-    DiffFile *f = ModelAddFile(m);
-    /* Stash before use so every published row borrows model-owned memory.
-     * Once stashed, the model owns the buffer; never free it locally. */
-    bool label_stashed = label && ModelStash(m, label);
-    bool content_stashed = !content || ModelStash(m, content);
-    if (!f || !label_stashed || !content_stashed)
-    {
-        PicoDiff_LinesFree(&lines);
-        if (!label_stashed)
-        {
-            free(label);
-        }
-        if (!content_stashed)
-        {
-            free(content);
-        }
-        return;
-    }
-    f->label = label;
-    f->label_len = path_len;
-    FilePushRow(f, ROW_HEADER, label, path_len);
-    if (note)
-    {
-        FilePushRow(f, ROW_NOTE, note, (int)strlen(note));
-        PicoDiff_LinesFree(&lines);
-        return;
-    }
-    for (int i = 0; i < lines.count; i++)
-    {
-        if (lines.lines[i].op == PICO_DIFF_ADD)
-        {
-            FilePushRow(f, ROW_ADD, lines.lines[i].text, lines.lines[i].len);
-            m->adds++;
-        }
-    }
-    PicoDiff_LinesFree(&lines);
-}
-
-static void AddUntrackedFiles(DiffModel *m, const char *ws)
-{
-    char *out = GitRun(ws, "ls-files --others --exclude-standard -z");
-    if (!out)
-    {
-        return;
-    }
-    const char *p = out;
-    while (*p)
-    {
-        int len = (int)strlen(p);
-        AddUntracked(m, ws, p, len);
-        p += len + 1;
-    }
-    free(out);
-}
-
-static DiffModel *Capture(const char *ws)
-{
-    DiffModel *m = calloc(1, sizeof(*m));
-    if (!m)
-    {
-        return NULL;
-    }
-    snprintf(m->workspace, sizeof(m->workspace), "%s", ws);
-    if (!IsRepo(ws))
-    {
-        m->is_repo = false;
-        return m;
-    }
-    m->is_repo = true;
-
-    char base[64];
-    DiffBase(ws, base, sizeof(base));
-    char args[128];
-
-    snprintf(args, sizeof(args), "diff --no-color --numstat %s", base);
-    char *numstat = GitRun(ws, args);
-    if (numstat)
-    {
-        const char *line = numstat;
-        while (*line)
-        {
-            const char *nl = strchr(line, '\n');
-            int len = nl ? (int)(nl - line) : (int)strlen(line);
-            ParseNumstatLine(line, &m->adds, &m->dels);
-            line += len + (nl ? 1 : 0);
-        }
-        free(numstat);
-    }
-
-    snprintf(args, sizeof(args), "diff --no-color -U3 %s", base);
-    m->patch = GitRun(ws, args);
-    if (m->patch)
-    {
-        ParseUnified(m, m->patch);
-    }
-
-    AddUntrackedFiles(m, ws);
-    for (int i = 0; i < m->file_count; i++)
-    {
-        FileBuildHighlight(&m->files[i]);
-    }
-    return m;
-}
 
 static void DiffWorkerCtx_Release(DiffWorkerCtx *w)
 {
@@ -673,7 +68,7 @@ static void DiffWorkerCtx_Release(DiffWorkerCtx *w)
     pthread_mutex_unlock(&w->lock);
     if (r == 0)
     {
-        DiffModel_Free(w->pending);
+        PicoDiffModel_Free(w->pending);
         pthread_mutex_destroy(&w->lock);
         pthread_cond_destroy(&w->wake);
         free(w);
@@ -695,14 +90,37 @@ static void *DiffThreadMain(void *arg)
             break;
         }
 
-        DiffModel *fresh = Capture(ws);
+        DiffModel *fresh = PicoDiffModel_Capture(ws);
+        if (fresh)
+        {
+            uint64_t sig = PicoDiffModel_Signature(fresh);
+            if (w->has_sig && sig == w->last_sig)
+            {
+                /* Nothing changed: keep the current model and skip the
+                 * highlight pass entirely. */
+                PicoDiffModel_Free(fresh);
+                fresh = NULL;
+            }
+            else
+            {
+                PicoDiffModel_HighlightAll(fresh);
+                w->last_sig = sig;
+                w->has_sig = true;
+            }
+        }
 
         pthread_mutex_lock(&w->lock);
         DiffModel *old = w->pending;
-        w->pending = fresh;
+        if (fresh)
+        {
+            w->pending = fresh;
+        }
         stop = w->thread_stop;
         pthread_mutex_unlock(&w->lock);
-        DiffModel_Free(old);
+        if (fresh)
+        {
+            PicoDiffModel_Free(old);
+        }
         if (stop)
         {
             break;
@@ -814,15 +232,43 @@ static void AdoptPending(DiffState *s)
      * even if it was published after the workspace switched back. */
     if (fresh && strncmp(fresh->workspace, root, sizeof(fresh->workspace)) != 0)
     {
-        DiffModel_Free(fresh);
+        PicoDiffModel_Free(fresh);
         return;
     }
     if (fresh)
     {
-        DiffModel_Free(s->model);
+        PicoDiffModel_Free(s->model);
         s->model = fresh;
+
+        int max_len = 0;
+        for (int fi = 0; fi < fresh->file_count; fi++)
+        {
+            for (int ri = 0; ri < fresh->files[fi].row_count; ri++)
+            {
+                if (fresh->files[fi].rows[ri].len > max_len)
+                {
+                    max_len = fresh->files[fi].rows[ri].len;
+                }
+            }
+        }
+        Clay_TextElementConfig cfg = {0};
+        cfg.fontId = FONT_MONO;
+        cfg.fontSize = PICO_FONT_UI;
+        Clay_Dimensions glyph = Pico_MeasureTextUtf8(
+            (Clay_StringSlice){.length = 1, .chars = "0", .baseChars = "0"}, &cfg, NULL);
+        float advance = glyph.width > 0.0f ? glyph.width : 8.0f;
+        /* +1 for the sign column; 6 childGap, 16 horizontal padding. */
+        s->row_min_width = (float)(max_len + 1) * advance + 6.0f + 16.0f;
     }
 }
+
+/* Rows are single-line WRAP_NONE text: height is exactly the font px plus
+ * the row's 1+1 vertical padding (raylib measures single-line height as the
+ * font size). childGap between rows in DiffScroll. */
+#define DIFF_ROW_GAP 2
+/* Extra rows mounted above/below the viewport to cover the one-frame lag of
+ * scroll container data and fast scrolls. */
+#define DIFF_ROW_OVERSCAN 8
 
 /* ------------------------------------------------------------------ */
 /* Footer chip                                                         */
@@ -861,9 +307,9 @@ void PicoDiff_RenderChip(PicoHost *app)
     bool hovered = Clay_PointerOver(CLAY_ID("FooterDiff"));
 
     CLAY_TEXT(CLAY_STRING("  ·  "), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = PICO_FONT_CAPTION,
-                                                        .textColor = COLOR_MUTED,
-                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                                      .fontSize = PICO_FONT_CAPTION,
+                                                      .textColor = COLOR_MUTED,
+                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
     CLAY(CLAY_ID("FooterDiff"),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                      .childGap = 6,
@@ -921,12 +367,12 @@ static Clay_Color RowBg(DiffRowKind kind)
 {
     switch (kind)
     {
-        case ROW_ADD:
-            return COLOR_DIFF_ADD_BG;
-        case ROW_DEL:
-            return COLOR_DIFF_DEL_BG;
-        default:
-            return (Clay_Color){0, 0, 0, 0};
+    case ROW_ADD:
+        return COLOR_DIFF_ADD_BG;
+    case ROW_DEL:
+        return COLOR_DIFF_DEL_BG;
+    default:
+        return (Clay_Color){0, 0, 0, 0};
     }
 }
 
@@ -934,15 +380,15 @@ static Clay_Color RowFg(DiffRowKind kind)
 {
     switch (kind)
     {
-        case ROW_HEADER:
-            return COLOR_TEXT;
-        case ROW_HUNK:
-            return COLOR_LINK;
-        /* Context, add, and delete rows share one text palette so syntax
-         * highlighting matches across the hunk. Add/delete only tint the
-         * background (see RowBg). */
-        default:
-            return COLOR_MUTED;
+    case ROW_HEADER:
+        return COLOR_TEXT;
+    case ROW_HUNK:
+        return COLOR_LINK;
+    /* Context, add, and delete rows share one text palette so syntax
+     * highlighting matches across the hunk. Add/delete only tint the
+     * background (see RowBg). */
+    default:
+        return COLOR_MUTED;
     }
 }
 
@@ -950,12 +396,12 @@ static Clay_Color RowSignFg(DiffRowKind kind)
 {
     switch (kind)
     {
-        case ROW_ADD:
-            return COLOR_DIFF_ADD_TEXT;
-        case ROW_DEL:
-            return COLOR_DIFF_DEL_TEXT;
-        default:
-            return RowFg(kind);
+    case ROW_ADD:
+        return COLOR_DIFF_ADD_TEXT;
+    case ROW_DEL:
+        return COLOR_DIFF_DEL_TEXT;
+    default:
+        return RowFg(kind);
     }
 }
 
@@ -986,10 +432,10 @@ static void RenderRowText(const DiffRow *row, const PicoHlSpan *spans, int span_
     if (row->img_off < 0 || span_count == 0 || row->len == 0)
     {
         CLAY_TEXT(Slice(row->text, row->len),
-                   CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                     .fontSize = PICO_FONT_UI,
-                                     .textColor = base,
-                                     .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                  CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                    .fontSize = PICO_FONT_UI,
+                                    .textColor = base,
+                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
         return;
     }
     int row_end = row->img_off + row->len;
@@ -1000,10 +446,10 @@ static void RenderRowText(const DiffRow *row, const PicoHlSpan *spans, int span_
         if (si >= span_count || spans[si].start >= row_end)
         {
             CLAY_TEXT(Slice(row->text + (cursor - row->img_off), row_end - cursor),
-                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                         .fontSize = PICO_FONT_UI,
-                                         .textColor = base,
-                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                        .fontSize = PICO_FONT_UI,
+                                        .textColor = base,
+                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
             break;
         }
         PicoHlSpan span = spans[si];
@@ -1012,18 +458,18 @@ static void RenderRowText(const DiffRow *row, const PicoHlSpan *spans, int span_
         if (s > cursor)
         {
             CLAY_TEXT(Slice(row->text + (cursor - row->img_off), s - cursor),
-                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                         .fontSize = PICO_FONT_UI,
-                                         .textColor = base,
-                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                        .fontSize = PICO_FONT_UI,
+                                        .textColor = base,
+                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
         if (e > s)
         {
             CLAY_TEXT(Slice(row->text + (s - row->img_off), e - s),
-                       CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                         .fontSize = PICO_FONT_UI,
-                                         .textColor = PicoHlClassColor(span.class),
-                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
+                                        .fontSize = PICO_FONT_UI,
+                                        .textColor = PicoHlClassColor(span.class),
+                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
         cursor = e;
         if (span.end <= row_end)
@@ -1033,7 +479,7 @@ static void RenderRowText(const DiffRow *row, const PicoHlSpan *spans, int span_
     }
 }
 
-static void RenderRow(int index, const DiffFile *f, const DiffRow *row)
+static void RenderRow(int index, const DiffFile *f, const DiffRow *row, float min_width)
 {
     const char *sign = " ";
     if (row->kind == ROW_ADD)
@@ -1044,20 +490,24 @@ static void RenderRow(int index, const DiffFile *f, const DiffRow *row)
     {
         sign = "-";
     }
+    /* min_width keeps the horizontal scroll extent anchored to the widest row
+     * in the model; otherwise it would shrink to the widest mounted row while
+     * virtualized. Monospace advance is an estimate: wide glyphs can exceed
+     * it, which only clips horizontal reach slightly. */
     CLAY(CLAY_IDI("DiffRow", index),
          {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                      .childGap = 6,
                      .padding = {8, 8, 1, 1},
-                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                     .sizing = {.width = CLAY_SIZING_GROW((int)min_width)}},
           .backgroundColor = RowBg(row->kind)})
     {
         if (row->kind == ROW_HEADER)
         {
             CLAY_TEXT(Slice(row->text, row->len),
-                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                         .fontSize = PICO_FONT_UI,
-                                         .textColor = RowFg(row->kind),
-                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                        .fontSize = PICO_FONT_UI,
+                                        .textColor = RowFg(row->kind),
+                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
         else
         {
@@ -1140,7 +590,7 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
             {
                 CLAY(CLAY_ID("DiffScroll"),
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = 2,
+                                 .childGap = DIFF_ROW_GAP,
                                  .sizing = {.width = CLAY_SIZING_GROW(0),
                                             .height = CLAY_SIZING_GROW(0)}},
                       .clip = {.vertical = true,
@@ -1157,13 +607,57 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
                     }
                     else
                     {
+                        /* Mount only the visible window. ow height is exact (single-line text at a
+                         * fixed px size + 2px row padding), and the pads keep
+                         * total content height identical to a mounted list so
+                         * scroll range and scrollbar thumb do not change. */
+                        int total_rows = 0;
+                        for (int fi = 0; fi < s->model->file_count; fi++)
+                        {
+                            total_rows += s->model->files[fi].row_count;
+                        }
+
+                        Clay_ScrollContainerData scroll =
+                            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("DiffScroll")));
+                        float viewport_h =
+                            scroll.found ? scroll.scrollContainerDimensions.height : card_h;
+                        float scroll_top =
+                            scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
+
+                        float row_h = Pico_FontPx(PICO_FONT_UI) + 2.0f;
+                        int first, end;
+                        float top_pad, bottom_pad;
+                        PicoDiffWindow_Range(total_rows, scroll_top, viewport_h,
+                                             row_h + (float)DIFF_ROW_GAP, (float)DIFF_ROW_GAP,
+                                             DIFF_ROW_OVERSCAN, &first, &end, &top_pad, &bottom_pad);
+
+                        if (first > 0)
+                        {
+                            CLAY(CLAY_ID("DiffTopPad"),
+                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                        .height = CLAY_SIZING_FIXED(top_pad)}}})
+                            {
+                            }
+                        }
                         int row_index = 0;
                         for (int fi = 0; fi < s->model->file_count; fi++)
                         {
                             DiffFile *f = &s->model->files[fi];
                             for (int ri = 0; ri < f->row_count; ri++)
                             {
-                                RenderRow(row_index++, f, &f->rows[ri]);
+                                if (row_index >= first && row_index < end)
+                                {
+                                    RenderRow(row_index, f, &f->rows[ri], s->row_min_width);
+                                }
+                                row_index++;
+                            }
+                        }
+                        if (end < total_rows)
+                        {
+                            CLAY(CLAY_ID("DiffBottomPad"),
+                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                        .height = CLAY_SIZING_FIXED(bottom_pad)}}})
+                            {
                             }
                         }
                     }
@@ -1291,7 +785,7 @@ static void DiffWorkspaceShutdown(PicoWorkspace *workspace, void *state)
         return;
     }
     StopThread(s);
-    DiffModel_Free(s->model);
+    PicoDiffModel_Free(s->model);
     s->model = NULL;
     (void)CloseModal(s);
     free(s);

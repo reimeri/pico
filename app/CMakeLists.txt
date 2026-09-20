@@ -103,6 +103,7 @@ add_executable(pico
     chat_sel.c
     text_range.c
     diff_lines.c
+    diff_model.c
     highlight.c
     scrollbar.c
     transcript_virtual.c
@@ -304,6 +305,21 @@ if(BUILD_TESTING)
     target_include_directories(pico_highlight_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_highlight_tests)
     add_test(NAME pico_highlight_tests COMMAND pico_highlight_tests)
+
+    add_executable(pico_diff_model_tests
+        tests/diff_model_test.c
+        diff_model.c
+        diff_lines.c
+        highlight.c)
+    target_include_directories(pico_diff_model_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_diff_model_tests)
+    add_test(NAME pico_diff_model_tests COMMAND pico_diff_model_tests)
+
+    add_executable(pico_diff_virtual_tests
+        tests/diff_virtual_test.c)
+    target_include_directories(pico_diff_virtual_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_diff_virtual_tests)
+    add_test(NAME pico_diff_virtual_tests COMMAND pico_diff_virtual_tests)
 
     add_executable(pico_scrollbar_tests
         tests/scrollbar_test.c
@@ -756,6 +772,7 @@ if(BUILD_TESTING)
         transcript_virtual.c
         trace_group.c
         diff_lines.c
+        diff_model.c
         http.c
         http_capture.c
         third_party/tinyfiledialogs/tinyfiledialogs.c)

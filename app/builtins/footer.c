@@ -1118,8 +1118,8 @@ static void EnsureFastIcon(FooterState *s)
     Image image = LoadImage(path);
     if (!image.data)
         return;
-    ImageColorTint(&image, (Color){(unsigned char)COLOR_TEXT.r, (unsigned char)COLOR_TEXT.g,
-                                   (unsigned char)COLOR_TEXT.b, (unsigned char)COLOR_TEXT.a});
+    ImageColorTint(&image, (Color){(unsigned char)COLOR_MUTED.r, (unsigned char)COLOR_MUTED.g,
+                                   (unsigned char)COLOR_MUTED.b, (unsigned char)COLOR_MUTED.a});
     s->fast_icon = LoadTextureFromImage(image);
     UnloadImage(image);
     if (s->fast_icon.id)

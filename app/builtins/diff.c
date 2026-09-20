@@ -53,7 +53,6 @@ typedef struct DiffState
     bool overflow;
     char chip_adds[32];
     char chip_dels[32];
-    char title[128];
     float row_min_width; /* keeps horizontal scroll extent stable while virtualized */
 } DiffState;
 
@@ -553,11 +552,8 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
 
     if (HasChanges(s))
     {
-        snprintf(s->title, sizeof(s->title), "Changes  ·  +%d -%d", s->model->adds, s->model->dels);
-    }
-    else
-    {
-        snprintf(s->title, sizeof(s->title), "Changes");
+        snprintf(s->chip_adds, sizeof(s->chip_adds), "+%d", s->model->adds);
+        snprintf(s->chip_dels, sizeof(s->chip_dels), "-%d", s->model->dels);
     }
 
     CLAY(CLAY_ID("DiffModalDim"),
@@ -579,8 +575,37 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
               .backgroundColor = COLOR_CONTENT_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
-            CLAY_TEXT(CStr(s->title),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
+            CLAY(CLAY_ID("DiffModalTitle"),
+                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                             .childGap = 6,
+                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                             .sizing = {.width = CLAY_SIZING_FIT(0),
+                                        .height = CLAY_SIZING_FIT(0)}}})
+            {
+                CLAY_TEXT(CLAY_STRING("Changes"),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                            .fontSize = PICO_FONT_TITLE,
+                                            .textColor = COLOR_TEXT,
+                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                if (HasChanges(s))
+                {
+                    CLAY_TEXT(CLAY_STRING("·"),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                .fontSize = PICO_FONT_TITLE,
+                                                .textColor = COLOR_TEXT,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    CLAY_TEXT(CStr(s->chip_adds),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                .fontSize = PICO_FONT_TITLE,
+                                                .textColor = COLOR_DIFF_ADD_TEXT,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    CLAY_TEXT(CStr(s->chip_dels),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                .fontSize = PICO_FONT_TITLE,
+                                                .textColor = COLOR_DIFF_DEL_TEXT,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+            }
 
             CLAY(CLAY_ID("DiffScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,

@@ -252,12 +252,18 @@ static int TestOpenAiLogin(void)
     auth->login(host, origin, "browser", auth->state);
     ok = OauthWait(host, &oauth_test.callbacks, callbacks + 1, true) && OauthSendCallback() &&
          OauthWait(host, &oauth_test.tokens, tokens + 1, false);
-    double before = pico_openai_monotonic();
+    if (!ok) Fail("logout fixture must reach the blocked token exchange");
+    /* Returning before we release the exchange proves logout does not wait for
+     * transport. Do not impose a latency budget: logout also persists credentials
+     * with fsync, whose duration depends on disk load in the build environment.
+     * The alarm is only a deadlock watchdog for a regressed synchronous wait. */
+    alarm(30);
     auth->logout(host, origin, auth->state);
-    ok &= pico_openai_monotonic() - before < 0.1;
+    alarm(0);
+    if (!OauthCredentials(host, false)) Fail("logout must clear OAuth credentials before transport completes");
     pthread_mutex_lock(&oauth_mu); oauth_test.hold_token = false; pthread_cond_broadcast(&oauth_cv); pthread_mutex_unlock(&oauth_mu);
-    ok &= OauthDrain(host) && OauthCredentials(host, false);
-    if (!ok) Fail("logout must not wait for transport or allow stale token completion to log back in");
+    if (!OauthDrain(host)) Fail("released token exchange must finish after logout");
+    if (!OauthCredentials(host, false)) Fail("stale token completion must not log back in after logout");
 
     /* Host replacement invalidates pending launches as well as old auth state. */
     callbacks = OauthCount(&oauth_test.callbacks); launches = OauthCount(&oauth_test.launches);

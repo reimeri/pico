@@ -8628,6 +8628,180 @@ done_host:
     return rc;
 }
 
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static void WorktreeNameLayout(PicoHost *host, Clay_Dimensions viewport)
+{
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+}
+
+static void WorktreeNamePump(PicoHost *host, int key, bool ctrl, int character)
+{
+    g_find_key = key;
+    g_find_ctrl = ctrl;
+    g_find_character = character;
+    pico_host_pump(host);
+    g_find_key = 0;
+    g_find_ctrl = false;
+    g_find_character = 0;
+}
+
+/* The worktree name field is an editing target: hovering it must request the
+ * I-beam (hovered_text), and Ctrl+Backspace must delete the previous word the
+ * same way composer and ask_user text fields do. */
+static int TestWorktreeNameField(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-worktree-name-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-worktree-name-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    Clay_RenderCommandArray commands;
+    Clay_ElementData chip;
+    Clay_ElementData field;
+    Clay_Vector2 pointer;
+    PicoWorkspace *workspace;
+    const char *typed = "alpha beta";
+    int i;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("worktree name field setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("worktree name field host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (host->view_count[PICO_SLOT_FOOTER] <= 0)
+    {
+        Fail("worktree name field requires the builtin footer view");
+        goto done_host;
+    }
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("worktree name field open workspace");
+        goto done_host;
+    }
+    workspace = PicoHost_FindWorkspace(host, workspace_id);
+    workspace->checkout_root = true;
+    workspace->can_create_worktree = true;
+    snprintf(workspace->project_path, sizeof(workspace->project_path), "%s", dir);
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("worktree name field create agent");
+        goto done_host;
+    }
+    (void)agent;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("worktree name field Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    WorktreeNameLayout(host, viewport);
+    chip = Clay_GetElementData(CLAY_ID("FooterWorktree"));
+    if (!chip.found)
+    {
+        Fail("worktree name field needs the checkout chip");
+        goto done;
+    }
+
+    g_find_input_test = true;
+    pointer = (Clay_Vector2){chip.boundingBox.x + chip.boundingBox.width / 2.0f,
+                             chip.boundingBox.y + chip.boundingBox.height / 2.0f};
+    g_find_pointer = (Vector2){pointer.x, pointer.y};
+    g_find_press = true;
+    Clay_SetPointerState(pointer, false);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
+    g_find_press = false;
+
+    WorktreeNameLayout(host, viewport);
+    field = Clay_GetElementData(CLAY_ID("WorktreeName"));
+    if (!field.found)
+    {
+        Fail("clicking checkout must open the worktree name field");
+        goto done;
+    }
+
+    host->hovered_text = false;
+    host->hovered_clickable = false;
+    pointer = (Clay_Vector2){field.boundingBox.x + field.boundingBox.width / 2.0f,
+                             field.boundingBox.y + field.boundingBox.height / 2.0f};
+    g_find_pointer = (Vector2){pointer.x, pointer.y};
+    Clay_SetPointerState(pointer, false);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
+    if (!host->hovered_text || host->hovered_clickable)
+    {
+        Fail("hovering the worktree name field must request the I-beam only");
+        goto done;
+    }
+
+    for (i = 0; i < 128; i++)
+        WorktreeNamePump(host, KEY_BACKSPACE, false, 0);
+    for (i = 0; typed[i]; i++)
+        WorktreeNamePump(host, 0, false, typed[i]);
+    WorktreeNamePump(host, KEY_BACKSPACE, true, 0);
+    WorktreeNameLayout(host, viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!FindCardText(&commands, "alpha "))
+    {
+        Fail("Ctrl+Backspace must delete the previous word in the worktree name field");
+        goto done;
+    }
+
+    rc = g_failed ? 1 : 0;
+
+done:
+    g_find_input_test = false;
+    g_find_press = false;
+    g_find_key = 0;
+    g_find_ctrl = false;
+    g_find_character = 0;
+    Clay_SetCurrentContext(previous);
+done_host:
+    g_find_input_test = false;
+    if (host)
+        pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+#endif
+
 /* Drive the real slash command from the same callback phase as composer input.
  * No graphics context is needed: an exiting frame must never reach drawing. */
 static void SubmitQuitOnFrame(PicoHost *host, void *state, float dt)
@@ -9026,6 +9200,12 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (TestWorktreeNameField() != 0)
+    {
+        return 1;
+    }
+#endif
     if (TestBottomFollowShellGeometryStable() != 0)
     {
         return 1;

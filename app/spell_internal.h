@@ -8,8 +8,10 @@
 /* App-internal seam between text fields and the spell builtin. A field
  * (composer today, ask_user text inputs later) describes its already-wrapped
  * geometry once per frame; the spell builtin re-checks the text when it
- * changed and draws squiggle underlines for misspelled ranges. The caller
- * must call this inside an active scissor matching clip. */
+ * changed and draws squiggle underlines for misspelled ranges. The word
+ * containing the caret is not underlined until the caret leaves it. Call
+ * this inside an active scissor matching clip, including when the field is
+ * empty, so clearing the text commits the word that was being typed. */
 
 typedef struct PicoSpellLine {
     int start;  /* byte offset of the wrapped line */
@@ -28,6 +30,7 @@ typedef struct PicoSpellView {
     Clay_BoundingBox clip; /* used to cull off-screen lines */
     Font font;
     float font_px;
+    int cursor; /* byte offset; -1 if the field has no caret */
 } PicoSpellView;
 
 /* Stable, unique address identifying the composer text field. */

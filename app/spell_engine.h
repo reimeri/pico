@@ -32,6 +32,31 @@ typedef struct PicoSpellRanges {
 void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, int length,
                            PicoSpellRanges *out);
 
+/* Word token containing a caret position, using the same spans
+ * pico_spell_check_text checks. The caret belongs to a token when
+ * start <= pos <= end, so either edge still counts. A caret sitting just
+ * after an apostrophe that has not yet joined a following letter still
+ * belongs to that token ("isn'" is "isn" until the next letter). Returns
+ * false on a separator or when pos is outside the text. */
+bool pico_spell_token_at(const char *text, int length, int pos, int *start, int *end);
+
+/* Word currently being typed. A text edit arms the token under the caret;
+ * the caret leaving that token disarms it. Moving back without an edit does
+ * not arm it again. Callers keep the misspelling in the cached ranges and
+ * only skip painting it while armed, so a caret move can reveal it without
+ * rechecking. */
+typedef struct PicoSpellPending {
+    bool active;
+    int start; /* token byte span, [start, end) */
+    int end;
+} PicoSpellPending;
+
+void pico_spell_pending_update(PicoSpellPending *pending, const char *text, int length, int cursor,
+                               bool text_changed);
+
+/* True when [start, end) is the armed in-progress word and should not be drawn. */
+bool pico_spell_pending_hides(const PicoSpellPending *pending, int start, int end);
+
 /* Derives dictionary tags to try from a locale string: "fi_FI.UTF-8" yields
  * full="fi_FI" and lang="fi". Returns the number of valid out params
  * (0 = nothing usable, 1 = full only, 2 = full and lang). Used by backend

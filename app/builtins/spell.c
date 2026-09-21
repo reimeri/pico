@@ -71,6 +71,9 @@ typedef struct SpellFieldCache {
     char *text; /* copy of the checked text, not NUL-terminated */
     int length;
     PicoSpellRanges ranges;
+    /* Not part of the text cache key. A caret move reveals a committed
+     * word without rechecking; only an edit arms a new span. */
+    PicoSpellPending pending;
 } SpellFieldCache;
 
 typedef struct SpellState {
@@ -371,6 +374,14 @@ static bool CacheMatches(const SpellFieldCache *cache, const void *key, const ch
 static void RecheckField(SpellState *s, const void *key, const char *text, int length)
 {
     pico_spell_check_text(&s->backend, text, length, &s->cache.ranges);
+    if (length <= 0)
+    {
+        free(s->cache.text);
+        s->cache.text = NULL;
+        s->cache.length = 0;
+        s->cache.key = key;
+        return;
+    }
     char *copy = (char *)realloc(s->cache.text, (size_t)length);
     if (copy)
     {
@@ -393,14 +404,27 @@ static void RecheckField(SpellState *s, const void *key, const char *text, int l
 void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSpellView *view)
 {
     SpellState *s = (SpellState *)PicoPlugins_HostState(host, "spell");
-    if (!s || s->status != SPELL_READY || !host || !host->preferences.spell || !view || !view->text ||
-        view->length <= 0)
+    if (!s || s->status != SPELL_READY || !host || !host->preferences.spell || !view)
     {
         return;
     }
-    if (!CacheMatches(&s->cache, field_key, view->text, view->length))
+    const char *text = view->text ? view->text : "";
+    int length = view->text ? view->length : 0;
+    if (length < 0)
     {
-        RecheckField(s, field_key, view->text, view->length);
+        length = 0;
+    }
+    bool text_changed = !CacheMatches(&s->cache, field_key, text, length);
+    if (text_changed)
+    {
+        RecheckField(s, field_key, text, length);
+    }
+    /* Filter at draw time. The cached ranges still include the in-progress
+     * word so leaving it can show the underline without another check. */
+    pico_spell_pending_update(&s->cache.pending, text, length, view->cursor, text_changed);
+    if (length <= 0 || !view->lines)
+    {
+        return;
     }
     Color miss = {(unsigned char)COLOR_SPELL_MISS.r, (unsigned char)COLOR_SPELL_MISS.g,
                   (unsigned char)COLOR_SPELL_MISS.b, (unsigned char)COLOR_SPELL_MISS.a};
@@ -418,6 +442,10 @@ void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSp
         {
             int rs = s->cache.ranges.items[r].start;
             int re = s->cache.ranges.items[r].end;
+            if (pico_spell_pending_hides(&s->cache.pending, rs, re))
+            {
+                continue;
+            }
             int a = rs > line_start ? rs : line_start;
             int b = re < line_end ? re : line_end;
             if (a >= b)

@@ -246,6 +246,103 @@ static void TestDictTags(void)
     ExpectTags("null locale", NULL, 0, NULL, NULL);
 }
 
+static void Edit(PicoSpellPending *pending, const char *text, int cursor)
+{
+    pico_spell_pending_update(pending, text, (int)strlen(text), cursor, true);
+}
+
+static void Move(PicoSpellPending *pending, const char *text, int cursor)
+{
+    pico_spell_pending_update(pending, text, (int)strlen(text), cursor, false);
+}
+
+static void TestActiveWordIsHiddenWhileOthersStay(void)
+{
+    const char *text = "qqq teh";
+    PicoSpellRanges r = CheckText("active word", text, 2);
+    PicoSpellPending pending = {0};
+    Edit(&pending, text, (int)strlen(text));
+    if (pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("active word", "an earlier typo was hidden");
+    }
+    if (!pico_spell_pending_hides(&pending, r.items[1].start, r.items[1].end))
+    {
+        Fail("active word", "the word being typed was marked");
+    }
+    pico_spell_ranges_free(&r);
+}
+
+static void TestSeparatorCommitsTheWord(void)
+{
+    const char *text = "qqq teh ";
+    PicoSpellRanges r = CheckText("separator commits", text, 2);
+    PicoSpellPending pending = {0};
+    Edit(&pending, text, (int)strlen(text));
+    if (pico_spell_pending_hides(&pending, r.items[1].start, r.items[1].end))
+    {
+        Fail("separator commits", "a word followed by a space was still hidden");
+    }
+    pico_spell_ranges_free(&r);
+}
+
+static void TestCaretLeaveCommitsUntilEditedAgain(void)
+{
+    const char *text = "qqq teh";
+    PicoSpellRanges r = CheckText("caret leave", text, 2);
+    PicoSpellPending pending = {0};
+    Edit(&pending, text, 2);
+    Move(&pending, text, 1);
+    if (!pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("caret leave", "moving within the word committed it");
+    }
+    Move(&pending, text, 5);
+    if (pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("caret leave", "the word stayed hidden after the caret left");
+    }
+    Move(&pending, text, 1);
+    if (pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("caret leave", "moving back hid a word that was already checked");
+    }
+    pico_spell_ranges_free(&r);
+
+    const char *edited = "qqqx teh";
+    r = CheckText("edit again", edited, 2);
+    Edit(&pending, edited, 4);
+    if (!pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("caret leave", "editing a checked word did not hide it");
+    }
+    pico_spell_ranges_free(&r);
+}
+
+static void TestUnfinishedApostropheStaysInProgress(void)
+{
+    const char *text = "isn'";
+    PicoSpellRanges r = CheckText("unfinished apostrophe", text, 1);
+    PicoSpellPending pending = {0};
+    Edit(&pending, text, (int)strlen(text));
+    Move(&pending, text, 2);
+    Move(&pending, text, (int)strlen(text));
+    if (!pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("unfinished apostrophe", "typing an apostrophe marked the unfinished word");
+    }
+    pico_spell_ranges_free(&r);
+
+    text = "isn\xe2\x80\x99";
+    r = CheckText("unfinished unicode apostrophe", text, 1);
+    Edit(&pending, text, (int)strlen(text));
+    if (!pico_spell_pending_hides(&pending, r.items[0].start, r.items[0].end))
+    {
+        Fail("unfinished apostrophe", "a trailing right-quote marked the unfinished word");
+    }
+    pico_spell_ranges_free(&r);
+}
+
 int main(void)
 {
     TestCleanText();
@@ -266,6 +363,10 @@ int main(void)
     TestIdentifierSplit();
     TestSentenceFinalPeriodStillChecks();
     TestDictTags();
+    TestActiveWordIsHiddenWhileOthersStay();
+    TestSeparatorCommitsTheWord();
+    TestCaretLeaveCommitsUntilEditedAgain();
+    TestUnfinishedApostropheStaysInProgress();
     if (g_failed)
     {
         return 1;

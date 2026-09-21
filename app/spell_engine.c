@@ -22,12 +22,16 @@
 
 typedef struct Token {
     int start; /* byte offset, -1 when no token is open */
+    int end;   /* byte offset, exclusive; valid when start >= 0 */
     int letters;
     bool has_digit;
     bool has_dot;
     bool has_lower;
     bool has_upper;
+    bool in_code;
 } Token;
+
+typedef void (*TokenFn)(void *ctx, const char *text, int length, Token tok);
 
 static bool IsLetter(utf8proc_int32_t cp)
 {
@@ -87,44 +91,23 @@ static void PushRange(PicoSpellRanges *out, int start, int end)
     out->items[out->count++] = (PicoSpellRange){start, end};
 }
 
-static void EmitToken(const PicoSpellBackend *backend, const char *text, int length, bool in_code, Token tok,
-                      int end, PicoSpellRanges *out)
+static void CloseToken(Token *tok, int end, bool in_code, TokenFn fn, void *ctx, const char *text, int length)
 {
-    if (in_code || tok.letters < 2 || tok.has_digit || tok.has_dot)
+    if (tok->start < 0)
     {
         return;
     }
-    if (tok.has_upper && !tok.has_lower)
-    {
-        return; /* acronym */
-    }
-    if (tok.start > 0 && SkippedNeighborBefore((unsigned char)text[tok.start - 1]))
-    {
-        return;
-    }
-    if (end < length && SkippedNeighborAfter((unsigned char)text[end]))
-    {
-        return;
-    }
-    if (!backend->check(backend->ctx, text + tok.start, end - tok.start))
-    {
-        PushRange(out, tok.start, end);
-    }
+    tok->end = end;
+    tok->in_code = in_code;
+    fn(ctx, text, length, *tok);
+    *tok = (Token){.start = -1};
 }
 
-void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, int length,
-                           PicoSpellRanges *out)
+/* Walks the same token spans the checker uses. fn is not called for empty
+ * gaps; skipped tokens (code, digits, acronyms) are still reported so a
+ * caret query can see them. */
+static void WalkTokens(const char *text, int length, TokenFn fn, void *ctx)
 {
-    if (!out)
-    {
-        return;
-    }
-    out->count = 0;
-    if (!backend || !backend->check || !text || length <= 0)
-    {
-        return;
-    }
-
     bool in_code = false;
     Token tok = {.start = -1};
     int pos = 0;
@@ -135,8 +118,7 @@ void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, in
 
         if (cp == '`')
         {
-            EmitToken(backend, text, length, in_code, tok, pos, out);
-            tok = (Token){.start = -1};
+            CloseToken(&tok, pos, in_code, fn, ctx, text, length);
             while (pos < length && text[pos] == '`')
             {
                 pos++;
@@ -180,11 +162,162 @@ void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, in
             }
         }
 
-        EmitToken(backend, text, length, in_code, tok, pos, out);
-        tok = (Token){.start = -1};
+        CloseToken(&tok, pos, in_code, fn, ctx, text, length);
         pos += adv;
     }
-    EmitToken(backend, text, length, in_code, tok, pos, out);
+    CloseToken(&tok, pos, in_code, fn, ctx, text, length);
+}
+
+typedef struct CheckCtx {
+    const PicoSpellBackend *backend;
+    PicoSpellRanges *out;
+} CheckCtx;
+
+static void EmitToken(void *ctx, const char *text, int length, Token tok)
+{
+    CheckCtx *c = (CheckCtx *)ctx;
+    if (tok.in_code || tok.letters < 2 || tok.has_digit || tok.has_dot)
+    {
+        return;
+    }
+    if (tok.has_upper && !tok.has_lower)
+    {
+        return; /* acronym */
+    }
+    if (tok.start > 0 && SkippedNeighborBefore((unsigned char)text[tok.start - 1]))
+    {
+        return;
+    }
+    if (tok.end < length && SkippedNeighborAfter((unsigned char)text[tok.end]))
+    {
+        return;
+    }
+    if (!c->backend->check(c->backend->ctx, text + tok.start, tok.end - tok.start))
+    {
+        PushRange(c->out, tok.start, tok.end);
+    }
+}
+
+void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, int length,
+                           PicoSpellRanges *out)
+{
+    if (!out)
+    {
+        return;
+    }
+    out->count = 0;
+    if (!backend || !backend->check || !text || length <= 0)
+    {
+        return;
+    }
+    CheckCtx ctx = {backend, out};
+    WalkTokens(text, length, EmitToken, &ctx);
+}
+
+typedef struct AtCtx {
+    int pos;
+    int start;
+    int end;
+    bool found;
+} AtCtx;
+
+static void FindToken(void *ctx, const char *text, int length, Token tok)
+{
+    (void)text;
+    (void)length;
+    AtCtx *a = (AtCtx *)ctx;
+    if (a->found)
+    {
+        return;
+    }
+    if (tok.start <= a->pos && a->pos <= tok.end)
+    {
+        a->found = true;
+        a->start = tok.start;
+        a->end = tok.end;
+    }
+}
+
+/* Byte length of an apostrophe ending at pos, or 0. U+2019 is the same
+ * apostrophe the tokenizer keeps inside a word once a letter follows. */
+static int ApostropheLenBefore(const char *text, int pos)
+{
+    if (pos >= 1 && text[pos - 1] == '\'')
+    {
+        return 1;
+    }
+    if (pos >= 3 && (unsigned char)text[pos - 3] == 0xE2 && (unsigned char)text[pos - 2] == 0x80 &&
+        (unsigned char)text[pos - 1] == 0x99)
+    {
+        return 3;
+    }
+    return 0;
+}
+
+bool pico_spell_token_at(const char *text, int length, int pos, int *start, int *end)
+{
+    if (!text || length <= 0 || pos < 0 || pos > length || !start || !end)
+    {
+        return false;
+    }
+    AtCtx at = {.pos = pos};
+    WalkTokens(text, length, FindToken, &at);
+    if (!at.found)
+    {
+        int apo = ApostropheLenBefore(text, pos);
+        if (apo > 0)
+        {
+            at.pos = pos - apo;
+            WalkTokens(text, length, FindToken, &at);
+            if (at.found && at.end != pos - apo)
+            {
+                at.found = false;
+            }
+        }
+    }
+    if (!at.found)
+    {
+        return false;
+    }
+    *start = at.start;
+    *end = at.end;
+    return true;
+}
+
+void pico_spell_pending_update(PicoSpellPending *pending, const char *text, int length, int cursor,
+                               bool text_changed)
+{
+    if (!pending)
+    {
+        return;
+    }
+    int start = 0;
+    int end = 0;
+    bool in_token = cursor >= 0 && text && length > 0 &&
+                    pico_spell_token_at(text, length, cursor, &start, &end);
+    if (text_changed)
+    {
+        pending->active = in_token;
+        if (in_token)
+        {
+            pending->start = start;
+            pending->end = end;
+        }
+        return;
+    }
+    if (!pending->active)
+    {
+        return;
+    }
+    if (!in_token || start != pending->start || end != pending->end)
+    {
+        pending->active = false;
+    }
+}
+
+bool pico_spell_pending_hides(const PicoSpellPending *pending, int start, int end)
+{
+    return pending && pending->active && pending->start == start && pending->end == end;
 }
 
 int pico_spell_dict_tags(const char *locale, char full[32], char lang[32])

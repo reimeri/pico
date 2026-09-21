@@ -2281,19 +2281,25 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
         }
     }
 
-    if (c->text && c->length > 0)
     {
         PicoSpellLine spell_lines[COMPOSER_MAX_LINES];
-        for (int i = 0; i < v.line_count; i++)
+        int spell_line_count = 0;
+        if (c->text && c->length > 0)
         {
-            spell_lines[i].start = v.lines[i].start;
-            spell_lines[i].length = v.lines[i].length;
+            spell_line_count = v.line_count;
+            for (int i = 0; i < v.line_count; i++)
+            {
+                spell_lines[i].start = v.lines[i].start;
+                spell_lines[i].length = v.lines[i].length;
+            }
         }
+        /* Empty text is still reported so clearing the field commits the
+         * word that was being typed. */
         PicoSpellView view = {
-            .text = c->text,
-            .length = c->length,
+            .text = c->text ? c->text : "",
+            .length = c->text ? c->length : 0,
             .lines = spell_lines,
-            .line_count = v.line_count,
+            .line_count = spell_line_count,
             .origin_x = v.origin_x,
             .origin_y = v.origin_y,
             .line_height = v.line_height,
@@ -2301,6 +2307,7 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
             .clip = v.clip,
             .font = ComposerFont(),
             .font_px = ComposerPx(),
+            .cursor = c->cursor,
         };
         PicoSpell_DrawSquiggles(app, PICO_SPELL_FIELD_COMPOSER, &view);
     }

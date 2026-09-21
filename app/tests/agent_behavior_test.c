@@ -113,6 +113,7 @@ typedef struct TestState {
     int life_after_compact;
     int life_ask;
     int life_ask_end;
+    int ask_entered;
     PicoAgentId tool_ctx_id;
     PicoAgentId after_agent_id;
     PicoAgentId apply_agent_id;
@@ -221,6 +222,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.life_after_compact = 0;
     g_test.life_ask = 0;
     g_test.life_ask_end = 0;
+    g_test.ask_entered = 0;
     g_test.tool_ctx_id = 0;
     g_test.after_agent_id = 0;
     g_test.apply_agent_id = 0;
@@ -3495,10 +3497,34 @@ static int TestAskForceCancelNotification(void)
     return ok ? 0 : Fail(name, "force-cancelled ask did not fire ON_ASK_END");
 }
 
+extern void (*PicoAgent_TestAskWaiting)(void);
+
+static void NoteAskWaiting(void)
+{
+    pthread_mutex_lock(&g_test.mu);
+    g_test.ask_entered++;
+    pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static int FinishAskReplace(PicoHost *app, const char *message)
+{
+    PicoAgent *agent = TestAgent(app);
+    if (agent && PicoAgent_IsBusy(agent))
+    {
+        PicoAgent_Cancel(agent);
+        (void)WaitForIdle(app);
+    }
+    /* The worker has left pico_tool_ask, so clearing the hook cannot race a call. */
+    PicoAgent_TestAskWaiting = NULL;
+    PicoHost_Shutdown(app);
+    return message ? Fail("ask replace notification", message) : 0;
+}
+
 static int TestAskReplaceNotification(void)
 {
-    const char *name = "ask replace notification";
     ResetTest(TEST_SEQUENTIAL, 1);
+    PicoAgent_TestAskWaiting = NoteAskWaiting;
     PicoHost app;
     InitApp(&app);
     AddLifeHooks(&app);
@@ -3506,18 +3532,15 @@ static int TestAskReplaceNotification(void)
     PicoToolAsk first;
     if (!WaitForPending(&app, 0, &first) || !strstr(first.request_json, "first"))
     {
-        PicoHost_Shutdown(&app);
-        return Fail(name, "first request was not published");
+        return FinishAskReplace(&app, "first request was not published");
     }
     if (g_test.life_ask != 1 || g_test.life_ask_end != 0)
     {
-        PicoHost_Shutdown(&app);
-        return Fail(name, "first ask did not fire ON_ASK once");
+        return FinishAskReplace(&app, "first ask did not fire ON_ASK once");
     }
     if (!pico_tool_answer(&app, first.id, "{\"step\":1}"))
     {
-        PicoHost_Shutdown(&app);
-        return Fail(name, "first answer was rejected");
+        return FinishAskReplace(&app, "first answer was rejected");
     }
     bool first_done = false;
     for (int i = 0; i < 3000; i++)
@@ -3533,34 +3556,44 @@ static int TestAskReplaceNotification(void)
     }
     if (!first_done)
     {
-        PicoHost_Shutdown(&app);
-        return Fail(name, "first ask was not answered");
+        return FinishAskReplace(&app, "first ask was not answered");
     }
-    /* The next pico_tool_ask is entered immediately after the first returns.
-     * Do not pump until then, so one snapshot pass replaces old-id → new-id. */
-    for (int i = 0; i < 50; i++)
+    /* The next pico_tool_ask is entered as soon as the first returns. Wait for
+     * that entry, then pump once, so one snapshot pass replaces old-id → new-id. */
+    bool second_entered = false;
+    for (int i = 0; i < 3000; i++)
     {
+        pthread_mutex_lock(&g_test.mu);
+        second_entered = g_test.ask_entered >= 2;
+        pthread_mutex_unlock(&g_test.mu);
+        if (second_entered)
+        {
+            break;
+        }
         SleepOneMs();
+    }
+    if (!second_entered)
+    {
+        return FinishAskReplace(&app, "second ask was not entered");
     }
     PicoAgent_Pump(&app, TestAgent(&app));
     PicoToolAsk second;
     if (!pico_tool_pending_ask(&app, &second) || second.id == first.id ||
         !strstr(second.request_json, "second"))
     {
-        PicoHost_Shutdown(&app);
-        return Fail(name, "second request was not published on the replacement pump");
+        return FinishAskReplace(&app, "second request was not published on the replacement pump");
     }
     bool replaced = g_test.life_ask == 2 && g_test.life_ask_end == 1 &&
                     g_test.hook_agent_id == pico_agent_id(TestAgent(&app));
     if (!pico_tool_answer(&app, second.id, "{\"step\":2}") || !WaitForIdle(&app))
     {
-        PicoHost_Shutdown(&app);
-        return Fail(name, "second ask did not finish");
+        return FinishAskReplace(&app, "second ask did not finish");
     }
+    PicoAgent_TestAskWaiting = NULL;
     PicoHost_Shutdown(&app);
     return replaced && g_test.life_ask == 2 && g_test.life_ask_end == 2
                ? 0
-               : Fail(name, "ask replacement did not fire ON_ASK_END then ON_ASK");
+               : Fail("ask replace notification", "ask replacement did not fire ON_ASK_END then ON_ASK");
 }
 
 static int TestCancelledProviderUsage(void)

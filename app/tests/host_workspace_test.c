@@ -8053,6 +8053,7 @@ static int TestPersistenceShutdownUsesSharedDeadline(void)
     if (child < 0)
     {
         Fail("persist shutdown fork");
+        close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
         return 1;
     }
     if (child == 0)
@@ -8087,28 +8088,73 @@ static int TestPersistenceShutdownUsesSharedDeadline(void)
         g_persist_ready_fd = ready[1];
         g_persist_continue_fd = proceed[0];
         PicoSession_EnqueueModelChange(host, agent);
+        /* Ready means the persist hook is blocked on proceed. Leave it blocked
+         * until shutdown returns: the parent must not release it on a timer. */
         if (!TransferTestByte(ready[0], false))
         {
             _exit(5);
         }
+        /* Watchdog only. A regressed shutdown that waits for the blocked worker
+         * never reaches the release below. */
+        alarm(30);
         struct timespec start;
         struct timespec end;
         clock_gettime(CLOCK_MONOTONIC, &start);
         PicoHostShutdownResult result = PicoHost_Shutdown(host);
         clock_gettime(CLOCK_MONOTONIC, &end);
+        alarm(0);
         (void)TransferTestByte(proceed[1], true);
         double elapsed = ElapsedSeconds(&start, &end);
-        _exit(result == PICO_HOST_SHUTDOWN_RETAINED && elapsed >= 0.75 && elapsed < 1.7 ? 0 : 6);
+        /* Retained proves the blocked write was not drained. The blocker stays
+         * held for the whole call, so a slow machine cannot make the wait look
+         * short. The lower bound rejects an immediate return. There is no upper
+         * bound: delay after the shared deadline is not a product failure. */
+        if (result != PICO_HOST_SHUTDOWN_RETAINED)
+        {
+            _exit(6);
+        }
+        if (elapsed < 0.75)
+        {
+            _exit(7);
+        }
+        _exit(0);
     }
 
-    sleep(2);
-    (void)TransferTestByte(proceed[1], true);
     int status = 0;
-    waitpid(child, &status, 0);
-    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    alarm(60);
+    pid_t waited = -1;
+    do
     {
-        Fail("blocked persistence must consume the process-wide shutdown deadline");
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    alarm(0);
+    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+    if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        char message[160];
+        if (waited != child)
+        {
+            snprintf(message, sizeof(message),
+                     "blocked persistence must consume the process-wide shutdown deadline (wait failed)");
+        }
+        else if (WIFEXITED(status))
+        {
+            snprintf(message, sizeof(message),
+                     "blocked persistence must consume the process-wide shutdown deadline (exit %d)",
+                     WEXITSTATUS(status));
+        }
+        else if (WIFSIGNALED(status))
+        {
+            snprintf(message, sizeof(message),
+                     "blocked persistence must consume the process-wide shutdown deadline (signal %d)",
+                     WTERMSIG(status));
+        }
+        else
+        {
+            snprintf(message, sizeof(message),
+                     "blocked persistence must consume the process-wide shutdown deadline");
+        }
+        Fail(message);
         return 1;
     }
     return 0;

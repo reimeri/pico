@@ -3186,6 +3186,10 @@ bool PicoAgent_AskUiOpen(const PicoAgent *agent)
     return false;
 }
 
+/* Tests may set this to observe that pico_tool_ask is waiting, without pumping.
+ * Invoked with the runtime mutex held; must not re-enter the agent. */
+void (*PicoAgent_TestAskWaiting)(void);
+
 static void PublishJobAskSnapshot(PicoHost *app, PicoAgent *agent, PicoToolJob *job)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
@@ -4049,6 +4053,11 @@ int pico_tool_ask(PicoAgentContext *ctx, const char *request_json, char **answer
     job->ask_answer = NULL;
     job->ask_waiting = true;
     job->ask_done = false;
+    void (*ask_waiting_hook)(void) = PicoAgent_TestAskWaiting;
+    if (ask_waiting_hook)
+    {
+        ask_waiting_hook();
+    }
     while (!job->ask_done && !rt->cancel && !rt->stop)
     {
         pthread_cond_wait(&rt->cv, &rt->mu);

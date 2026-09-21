@@ -173,10 +173,16 @@ static void RenderThumb(Clay_String handle_id, PicoScrollbarThumb thumb)
 void PicoScrollbar_Render(Clay_String container_id, Clay_String track_id, Clay_String handle_id)
 {
     PicoScrollbarThumb thumb = ThumbFor(container_id);
+    /* The spacer above the thumb has a FIXED height proportional to the scroll offset. Without
+     * clipping, Clay folds that fixed height into the track's minimum content height, which then
+     * propagates to the parent row and stops a GROW scroll pane from compressing when siblings
+     * (e.g. a settings error line) appear while scrolled down. Clipping keeps the track's minimum
+     * height at zero so the pane can always shrink. */
     CLAY(CLAY_SID(track_id),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .sizing = {.width = CLAY_SIZING_FIXED((float)SCROLLBAR_WIDTH),
-                                .height = CLAY_SIZING_GROW(0)}}})
+                                .height = CLAY_SIZING_GROW(0)}},
+          .clip = {.vertical = true, .horizontal = false}})
     {
         RenderThumb(handle_id, thumb);
     }

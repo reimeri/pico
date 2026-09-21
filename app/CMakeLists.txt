@@ -325,6 +325,7 @@ if(BUILD_TESTING)
 
     add_executable(pico_scrollbar_tests
         tests/scrollbar_test.c
+        tests/clay_impl.c
         scrollbar.c)
     target_include_directories(pico_scrollbar_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

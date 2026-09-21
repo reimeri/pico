@@ -65,6 +65,15 @@
   // body font). Default 90. 0 = no cap. Range 40-200. `/settings` applies it immediately.
   "chat_width": 90,
 
+  // User-global only: spell checking in the composer. dlopen()s the host's
+  // libenchant-2 at startup; silently stays off when no library or matching
+  // dictionary is installed. Default true. `/settings` applies it immediately.
+  // "spell": true,
+
+  // User-global only: dictionary tag override (e.g. "en_US", "de_DE").
+  // Default derives from LC_ALL/LANG. Applies at startup.
+  // "spell_lang": "en_US",
+
   // Host extension names disabled globally; `/extensions` or F2 updates this.
   // Ignored in workspace .pico/settings.json.
   // "disabled_host_extensions": ["footer"],

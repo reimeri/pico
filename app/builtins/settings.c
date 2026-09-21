@@ -1078,6 +1078,9 @@ static void RenderGeneral(SettingsState *s)
         RenderToggle(CLAY_ID("SettingsResumeLast"), "Resume last session", s->draft.resume_last);
     }
     SETTINGS_ROW_BEGIN
+        RenderToggle(CLAY_ID("SettingsSpell"), "Spell checking", s->draft.spell);
+    }
+    SETTINGS_ROW_BEGIN
         RenderLabel("Font scale (0.5–3.0)");
         RenderField(CLAY_ID("SettingsFontScale"), s->font_scale, "1.0", s->focus_kind == FOCUS_FONT_SCALE);
     }
@@ -1459,7 +1462,8 @@ static bool HoveredClickable(SettingsState *s)
     const PicoWorkspace *ws;
     if (OverId(CLAY_STRING("SettingsDefaultModel")) || OverId(CLAY_STRING("SettingsContextLimit")) ||
         OverId(CLAY_STRING("SettingsMaxParallelTools")) || OverId(CLAY_STRING("SettingsCompactAt")) ||
-        OverId(CLAY_STRING("SettingsResumeLast")) || OverId(CLAY_STRING("SettingsFontScale")) ||
+        OverId(CLAY_STRING("SettingsResumeLast")) || OverId(CLAY_STRING("SettingsSpell")) ||
+        OverId(CLAY_STRING("SettingsFontScale")) ||
         OverId(CLAY_STRING("SettingsChatWidth")) ||
         OverId(CLAY_STRING("SettingsAddModel")) || OverId(CLAY_STRING("SettingsCancel")) ||
         OverId(CLAY_STRING("SettingsApply")))
@@ -1637,6 +1641,11 @@ static bool HandleClicks(SettingsState *s)
     if (OverId(CLAY_STRING("SettingsResumeLast")))
     {
         s->draft.resume_last = !s->draft.resume_last;
+        return true;
+    }
+    if (OverId(CLAY_STRING("SettingsSpell")))
+    {
+        s->draft.spell = !s->draft.spell;
         return true;
     }
     if (OverId(CLAY_STRING("SettingsDefaultModel")))

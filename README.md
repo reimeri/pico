@@ -72,6 +72,9 @@ For a declarative NixOS install, add Pico as an input and package in your system
         ({ pkgs, ... }: {
           environment.systemPackages = [
             pico.packages.${pkgs.system}.default
+
+            # For en_US spell checking use this instead
+            # inputs.pico.packages.${system}.pico-spellcheck
           ];
         })
       ];
@@ -118,6 +121,42 @@ machine. SSH forwarding and pasted callback URLs are not supported by this flow.
 ### 3. Add or customize models
 
 Open `~/.config/pico/settings.json`, add or uncomment the models you want to use, and set the top-level `model` value to one of their IDs. The generated example includes entries for OpenAI, Charm Hyper, and xAI. Restart Pico after editing so new workspaces load the updated model catalog.
+
+## Spell checking
+
+Pico can check for misspelled words when the host provides spell
+checking: Pico probes for `libenchant-2` at startup and uses whatever
+backends and dictionaries it fronts (hunspell, aspell, nuspell). When no
+library or matching dictionary is found, spell checking silently stays off.
+The dictionary comes from `LC_ALL`/`LANG` (override with `"spell_lang"` in
+settings.json, e.g. `"de_DE"`); disable the feature with `"spell": false` or
+the `/settings` toggle.
+
+On NixOS the library is not in the default linker path. When using the
+flake, enable the `withSpellcheck` variant instead — it extends the wrapper's
+search paths so the probe finds enchant and the en_US dictionary (Pico still
+never links enchant; the base package is unchanged):
+
+```sh
+nix profile install github:reimeri/pico#pico-spellcheck
+```
+
+For other dictionaries, call the exposed package function:
+
+```nix
+pico.legacyPackages.x86_64-linux.mkPico {
+  withSpellcheck = true;
+  spellDictionaries = [ pkgs.hunspellDicts.de_DE ];
+}
+```
+
+Without the flake, point Pico at the library and a dictionary manually:
+
+```sh
+LD_LIBRARY_PATH=$(nix-build '<nixpkgs>' -A enchant --no-out-link)/lib \
+DICPATH=$(nix-build '<nixpkgs>' -A hunspellDicts.en_US --no-out-link)/share/hunspell \
+pico
+```
 
 ## Find in chat
 

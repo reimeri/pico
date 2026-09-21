@@ -72,6 +72,8 @@ typedef struct PicoUserSettingsDraft {
     double compact_ratio;
     bool compact_enabled;
     bool resume_last;
+    bool spell;
+    char spell_lang[32];
     double font_scale;
     int chat_width;
     PicoModel *models;

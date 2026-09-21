@@ -471,6 +471,8 @@ typedef struct PicoAuth {
 typedef struct PicoHostPreferences {
     double font_scale;
     int chat_width;
+    bool spell;
+    char spell_lang[32];
     char disabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
     int disabled_host_extension_count;
 } PicoHostPreferences;

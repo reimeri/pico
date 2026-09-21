@@ -26,8 +26,15 @@
         (throw "Pico version is missing from app/CMakeLists.txt")
         (nixpkgs.lib.splitString "\n" (builtins.readFile ./app/CMakeLists.txt));
       version = builtins.elemAt (nixpkgs.lib.splitString " " projectLine) 2;
+      # withSpellcheck: keep Pico dlopen-only, but extend the wrapper's search
+      # paths so the runtime probe finds enchant and the given dictionaries.
+      # spellDictionaries: hunspellDicts.* packages to put on DICPATH.
       picoFor =
         pkgs:
+        {
+          withSpellcheck ? false,
+          spellDictionaries ? [ pkgs.hunspellDicts.en_US ],
+        }:
         let
           runtimeLibraries = with pkgs; [
             curl
@@ -93,12 +100,18 @@
           postFixup = ''
             wrapProgram "$out/bin/pico" \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gcc pkgs.git pkgs.libnotify pkgs.xdg-utils ]} \
-              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
-                pkgs.wayland
-                pkgs.libxkbcommon
-                pkgs.libxcursor
-                pkgs.libdecor
-              ]}
+              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (
+                [
+                  pkgs.wayland
+                  pkgs.libxkbcommon
+                  pkgs.libxcursor
+                  pkgs.libdecor
+                ]
+                ++ pkgs.lib.optionals withSpellcheck [ pkgs.enchant ]
+              )} \
+              ${pkgs.lib.optionalString withSpellcheck "--prefix DICPATH : ${
+                pkgs.lib.makeSearchPath "share/hunspell" spellDictionaries
+              }"}
           '';
 
           meta = {
@@ -112,30 +125,37 @@
     in
     {
       packages = forEachSystem (pkgs: {
-        pico = picoFor pkgs;
-        default = picoFor pkgs;
+        pico = picoFor pkgs { };
+        pico-spellcheck = picoFor pkgs { withSpellcheck = true; };
+        default = picoFor pkgs { };
       });
 
       apps = forEachSystem (pkgs: {
         pico = {
           type = "app";
-          program = "${picoFor pkgs}/bin/pico";
+          program = "${picoFor pkgs { }}/bin/pico";
         };
         default = {
           type = "app";
-          program = "${picoFor pkgs}/bin/pico";
+          program = "${picoFor pkgs { }}/bin/pico";
         };
       });
 
       checks = forEachSystem (pkgs: {
-        pico = picoFor pkgs;
-        default = picoFor pkgs;
+        pico = picoFor pkgs { };
+        default = picoFor pkgs { };
+      });
+
+      # Function form for custom dictionary sets, e.g.:
+      #   mkPico { withSpellcheck = true; spellDictionaries = [ pkgs.hunspellDicts.de_DE ]; }
+      legacyPackages = forEachSystem (pkgs: {
+        mkPico = picoFor pkgs;
       });
 
       devShells = forEachSystem (
         pkgs:
         let
-          pico = picoFor pkgs;
+          pico = picoFor pkgs { };
         in
         {
           default = pkgs.mkShell {

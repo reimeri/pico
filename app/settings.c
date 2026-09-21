@@ -490,6 +490,17 @@ static void ApplyPreferencesObject(PicoHostPreferences *p, const JsonDoc *doc, i
         }
         free(chat_width);
     }
+    int spell = JsonObjGet(doc, obj, "spell");
+    if (spell >= 0)
+    {
+        p->spell = JsonEq(doc, spell, "true") || JsonEq(doc, spell, "1");
+    }
+    char *spell_lang = JsonObjStr(doc, obj, "spell_lang");
+    if (spell_lang)
+    {
+        snprintf(p->spell_lang, sizeof(p->spell_lang), "%s", spell_lang);
+        free(spell_lang);
+    }
 }
 
 static bool DisabledNameListed(const char list[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME], int count,
@@ -698,6 +709,7 @@ void PicoHostPreferences_Load(PicoHost *host)
     memset(p, 0, sizeof(*p));
     p->font_scale = 1.0;
     p->chat_width = PICO_CHAT_WIDTH_DEFAULT;
+    p->spell = true;
 
     char dir[4096];
     if (Pico_ConfigDir(dir, sizeof(dir)))
@@ -1677,6 +1689,7 @@ void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft)
     draft->compact_ratio = 0.9;
     draft->font_scale = 1.0;
     draft->chat_width = PICO_CHAT_WIDTH_DEFAULT;
+    draft->spell = true;
 }
 
 void PicoSettings_FreeUserDraft(PicoUserSettingsDraft *draft)
@@ -1743,6 +1756,8 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     memset(&preferences, 0, sizeof(preferences));
     preferences.font_scale = next.font_scale;
     preferences.chat_width = next.chat_width;
+    preferences.spell = next.spell;
+    snprintf(preferences.spell_lang, sizeof(preferences.spell_lang), "%s", next.spell_lang);
     if (UserSettingsPath(path, sizeof(path)))
     {
         src = Pico_ReadFile(path, &len);
@@ -1776,6 +1791,8 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     next.resume_last = workspace.resume_last;
     next.font_scale = preferences.font_scale;
     next.chat_width = preferences.chat_width;
+    next.spell = preferences.spell;
+    snprintf(next.spell_lang, sizeof(next.spell_lang), "%s", preferences.spell_lang);
     if (next.model_count == 0 && !SeedUserDraftCatalog(&next))
     {
         return false;
@@ -2276,6 +2293,7 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     char *src = NULL;
     char *models = NULL;
     char *model = NULL;
+    char *lang = NULL;
     size_t len = 0;
     int lock_fd;
     bool catalog_matches;
@@ -2305,6 +2323,12 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     model = JsonQuoted(draft->default_model);
     if (!model)
     {
+        return false;
+    }
+    lang = JsonQuoted(draft->spell_lang);
+    if (!lang)
+    {
+        free(model);
         return false;
     }
     if (host)
@@ -2344,7 +2368,9 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
         !PatchObjectValue(&src, &len, "compact_at", compact_buf) ||
         !PatchObjectValue(&src, &len, "resume_last", draft->resume_last ? "true" : "false") ||
         !PatchObjectValue(&src, &len, "font_scale", font_buf) ||
-        !PatchObjectValue(&src, &len, "chat_width", width_buf))
+        !PatchObjectValue(&src, &len, "chat_width", width_buf) ||
+        !PatchObjectValue(&src, &len, "spell", draft->spell ? "true" : "false") ||
+        !PatchObjectValue(&src, &len, "spell_lang", lang))
     {
         goto unlock;
     }
@@ -2363,6 +2389,7 @@ done:
     free(src);
     free(models);
     free(model);
+    free(lang);
     return ok;
 }
 

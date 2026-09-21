@@ -838,7 +838,8 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     setenv("XDG_CONFIG_HOME", temp, 1);
     memset(&draft, 0, sizeof(draft));
     if (!PicoSettings_LoadUserDraft(&draft) || draft.model_count != 1 ||
-        strcmp(draft.models[0].id, "gpt-test") != 0 || strcmp(draft.models[0].provider, "openai") != 0)
+        strcmp(draft.models[0].id, "gpt-test") != 0 || strcmp(draft.models[0].provider, "openai") != 0 ||
+        !draft.spell)
     {
         PicoSettings_FreeUserDraft(&draft);
         unsetenv("XDG_CONFIG_HOME");
@@ -857,6 +858,8 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     draft.chat_width = 100;
     draft.resume_last = true;
     draft.compact_enabled = false;
+    draft.spell = false;
+    snprintf(draft.spell_lang, sizeof(draft.spell_lang), "de_DE");
     const char *err = PicoSettings_ValidateUserDraft(&draft);
     memset(&host, 0, sizeof(host));
     pthread_mutex_init(&host.settings_mu, NULL);
@@ -881,6 +884,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
         (!PicoSettings_LoadUserDraft(&loaded) || loaded.model_count != 1 || !loaded.models[0].vision || !loaded.models[0].supports_fast ||
          loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
          loaded.max_parallel_tools != draft.max_parallel_tools || loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
+         loaded.spell || strcmp(loaded.spell_lang, "de_DE") != 0 ||
          strcmp(loaded.models[0].default_effort, "high") != 0))
     {
         failed = 1;

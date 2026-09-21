@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
+#include "host_internal.h"
 #include "spell_engine.h"
 #include "spell_internal.h"
 
@@ -53,6 +54,7 @@ typedef struct SpellLoader {
     bool done;
     SpellBackendImpl *result; /* NULL on failure; see error */
     char error[160];
+    char lang_override[32];   /* settings spell_lang; empty = derive from env */
 } SpellLoader;
 
 typedef enum SpellStatus {
@@ -168,15 +170,22 @@ static void *SpellLoaderMain(void *arg)
     }
     if (b && b->broker)
     {
-        char full[32];
-        char lang[32];
-        int tags = pico_spell_dict_tags(LocaleEnv(), full, lang);
+        char full[32] = {0};
+        char lang[32] = {0};
+        if (loader->lang_override[0])
+        {
+            snprintf(full, sizeof(full), "%s", loader->lang_override);
+        }
+        else
+        {
+            pico_spell_dict_tags(LocaleEnv(), full, lang);
+        }
         const char *tag = NULL;
-        if (tags >= 1 && dict_exists(b->broker, full))
+        if (full[0] && dict_exists(b->broker, full))
         {
             tag = full;
         }
-        else if (tags == 2 && dict_exists(b->broker, lang))
+        else if (lang[0] && dict_exists(b->broker, lang))
         {
             tag = lang;
         }
@@ -214,7 +223,6 @@ static void *SpellLoaderMain(void *arg)
 
 static int SpellHostInit(PicoHost *host, void **state_out)
 {
-    (void)host;
     SpellState *s = (SpellState *)calloc(1, sizeof(*s));
     SpellLoader *loader = (SpellLoader *)calloc(1, sizeof(*loader));
     if (!s || !loader)
@@ -224,6 +232,10 @@ static int SpellHostInit(PicoHost *host, void **state_out)
         return -1;
     }
     pthread_mutex_init(&loader->lock, NULL);
+    if (host)
+    {
+        snprintf(loader->lang_override, sizeof(loader->lang_override), "%s", host->preferences.spell_lang);
+    }
     s->status = SPELL_LOADING;
     s->loader = loader;
 
@@ -381,7 +393,8 @@ static void RecheckField(SpellState *s, const void *key, const char *text, int l
 void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSpellView *view)
 {
     SpellState *s = (SpellState *)PicoPlugins_HostState(host, "spell");
-    if (!s || s->status != SPELL_READY || !view || !view->text || view->length <= 0)
+    if (!s || s->status != SPELL_READY || !host || !host->preferences.spell || !view || !view->text ||
+        view->length <= 0)
     {
         return;
     }

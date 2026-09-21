@@ -520,6 +520,8 @@ if(BUILD_TESTING)
         tests/clay_impl.c
         builtins/complete.c
         builtins/composer.c
+        builtins/spell.c
+        spell_engine.c
         builtins/files.c
         app.c
         ui.c
@@ -560,6 +562,8 @@ if(BUILD_TESTING)
         tests/clay_impl.c
         builtins/complete.c
         builtins/composer.c
+        builtins/spell.c
+        spell_engine.c
         builtins/files.c
         app.c
         ui.c

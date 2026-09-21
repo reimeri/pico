@@ -2,6 +2,7 @@
 
 #include "pico/plugin.h"
 #include "spell_engine.h"
+#include "spell_internal.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -60,10 +61,21 @@ typedef enum SpellStatus {
     SPELL_UNAVAILABLE,
 } SpellStatus;
 
+/* Last-checked text and misspelling ranges for one text field. A single
+ * slot is enough: fields that share the screen (composer behind the ask
+ * modal) never draw in the same frame, and a key mismatch just rechecks. */
+typedef struct SpellFieldCache {
+    const void *key;
+    char *text; /* copy of the checked text, not NUL-terminated */
+    int length;
+    PicoSpellRanges ranges;
+} SpellFieldCache;
+
 typedef struct SpellState {
     SpellStatus status;
     SpellLoader *loader;        /* non-NULL until the load resolves */
     PicoSpellBackend backend;   /* valid when status == SPELL_READY */
+    SpellFieldCache cache;
 } SpellState;
 
 static bool EnchantCheck(void *ctx, const char *word, int length)
@@ -297,8 +309,115 @@ static void SpellHostShutdown(PicoHost *host, void *state)
         /* Otherwise the loader frees its own partial work; the box is
          * intentionally leaked because builtin shutdown is process exit. */
     }
+    free(s->cache.text);
+    pico_spell_ranges_free(&s->cache.ranges);
     FreeBackend(s->backend.ctx);
     free(s);
+}
+
+/* Same temporarily-NUL-terminate measuring trick as the composer; the view
+ * text is the caller's live editable buffer. */
+static float MeasureSlice(Font font, const char *s, int start, int length, float font_size)
+{
+    if (length <= 0)
+    {
+        return 0;
+    }
+    char saved = ((char *)s)[start + length];
+    ((char *)s)[start + length] = '\0';
+    Vector2 size = MeasureTextEx(font, s + start, font_size, 0);
+    ((char *)s)[start + length] = saved;
+    return size.x;
+}
+
+static void DrawSquiggle(float x0, float x1, float y, Color color)
+{
+    const float half_period = 2.0f;
+    const float amplitude = 1.5f;
+    float px = x0;
+    float py = y;
+    bool up = true;
+    float x = x0;
+    while (x < x1)
+    {
+        float nx = x + half_period < x1 ? x + half_period : x1;
+        float ny = up ? y - amplitude : y;
+        DrawLineEx((Vector2){px, py}, (Vector2){nx, ny}, 1.0f, color);
+        px = nx;
+        py = ny;
+        up = !up;
+        x = nx;
+    }
+}
+
+static bool CacheMatches(const SpellFieldCache *cache, const void *key, const char *text, int length)
+{
+    return cache->key == key && cache->length == length &&
+           (length == 0 || (cache->text && memcmp(cache->text, text, (size_t)length) == 0));
+}
+
+static void RecheckField(SpellState *s, const void *key, const char *text, int length)
+{
+    pico_spell_check_text(&s->backend, text, length, &s->cache.ranges);
+    char *copy = (char *)realloc(s->cache.text, (size_t)length);
+    if (copy)
+    {
+        memcpy(copy, text, (size_t)length);
+        s->cache.text = copy;
+        s->cache.length = length;
+        s->cache.key = key;
+    }
+    else
+    {
+        /* OOM: drop the copy so the next frame rechecks instead of trusting
+         * ranges computed from text the cache can no longer identify. */
+        free(s->cache.text);
+        s->cache.text = NULL;
+        s->cache.length = 0;
+        s->cache.key = NULL;
+    }
+}
+
+void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSpellView *view)
+{
+    SpellState *s = (SpellState *)PicoPlugins_HostState(host, "spell");
+    if (!s || s->status != SPELL_READY || !view || !view->text || view->length <= 0)
+    {
+        return;
+    }
+    if (!CacheMatches(&s->cache, field_key, view->text, view->length))
+    {
+        RecheckField(s, field_key, view->text, view->length);
+    }
+    Color miss = {(unsigned char)COLOR_SPELL_MISS.r, (unsigned char)COLOR_SPELL_MISS.g,
+                  (unsigned char)COLOR_SPELL_MISS.b, (unsigned char)COLOR_SPELL_MISS.a};
+    for (int i = 0; i < view->line_count; i++)
+    {
+        float line_y = view->origin_y + (float)i * view->line_height + view->scroll_y;
+        if (line_y + view->line_height < view->clip.y || line_y > view->clip.y + view->clip.height)
+        {
+            continue;
+        }
+        int line_start = view->lines[i].start;
+        int line_end = line_start + view->lines[i].length;
+        float y = line_y + view->line_height - 2.0f;
+        for (int r = 0; r < s->cache.ranges.count; r++)
+        {
+            int rs = s->cache.ranges.items[r].start;
+            int re = s->cache.ranges.items[r].end;
+            int a = rs > line_start ? rs : line_start;
+            int b = re < line_end ? re : line_end;
+            if (a >= b)
+            {
+                continue;
+            }
+            float x0 = view->origin_x + MeasureSlice(view->font, view->text, line_start, a - line_start,
+                                                     view->font_px);
+            float x1 = view->origin_x + MeasureSlice(view->font, view->text, line_start, b - line_start,
+                                                     view->font_px);
+            DrawSquiggle(x0, x1, y, miss);
+        }
+    }
 }
 
 PicoExt pico_ext_spell(void)

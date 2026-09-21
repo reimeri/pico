@@ -66,6 +66,7 @@ enum {
 #define COLOR_STATUS_DONE (Clay_Color){110, 160, 230, 255}
 #define COLOR_CURSOR (Clay_Color){200, 210, 255, 255}
 #define COLOR_SELECTION (Clay_Color){90, 130, 210, 110}
+#define COLOR_SPELL_MISS (Clay_Color){220, 90, 90, 255}
 
 #define CONTENT_PADDING 20
 #define SCROLLBAR_WIDTH 6

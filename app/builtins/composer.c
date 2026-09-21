@@ -8,6 +8,7 @@
 #include "path.h"
 #include "settings.h"
 #include "text_range.h"
+#include "spell_internal.h"
 #include "scrollbar.h"
 #include "host_internal.h"
 
@@ -2278,6 +2279,30 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
             float x1 = MeasureSlice(ComposerFont(), c->text, start, b - start, ComposerPx());
             DrawRectangle((int)(v.origin_x + x0), (int)y, (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)v.line_height, fill);
         }
+    }
+
+    if (c->text && c->length > 0)
+    {
+        PicoSpellLine spell_lines[COMPOSER_MAX_LINES];
+        for (int i = 0; i < v.line_count; i++)
+        {
+            spell_lines[i].start = v.lines[i].start;
+            spell_lines[i].length = v.lines[i].length;
+        }
+        PicoSpellView view = {
+            .text = c->text,
+            .length = c->length,
+            .lines = spell_lines,
+            .line_count = v.line_count,
+            .origin_x = v.origin_x,
+            .origin_y = v.origin_y,
+            .line_height = v.line_height,
+            .scroll_y = v.scroll_y,
+            .clip = v.clip,
+            .font = ComposerFont(),
+            .font_px = ComposerPx(),
+        };
+        PicoSpell_DrawSquiggles(app, PICO_SPELL_FIELD_COMPOSER, &view);
     }
 
     double elapsed = GetTime() - s_caret_blink_at;

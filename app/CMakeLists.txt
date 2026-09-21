@@ -102,6 +102,7 @@ add_executable(pico
     chat_find.c
     chat_sel.c
     text_range.c
+    spell_engine.c
     diff_lines.c
     diff_model.c
     highlight.c
@@ -592,6 +593,17 @@ if(BUILD_TESTING)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
+
+    add_executable(pico_spell_tests
+        tests/spell_test.c
+        spell_engine.c)
+    target_include_directories(pico_spell_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_spell_tests)
+    target_compile_options(pico_spell_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_spell_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_spell_tests PRIVATE PkgConfig::UTF8PROC)
+    add_test(NAME pico_spell_tests COMMAND pico_spell_tests)
 
     add_executable(pico_settings_agent_tests
         tests/settings_agent_test.c

@@ -112,6 +112,7 @@ add_executable(pico
     trace_group.c
     builtins/chat.c
     builtins/composer.c
+    builtins/spell.c
     builtins/footer.c
     builtins/sidebar.c
     builtins/overlay.c
@@ -753,6 +754,8 @@ if(BUILD_TESTING)
         builtins/background_model.c
         builtins/chat.c
         builtins/composer.c
+        builtins/spell.c
+        spell_engine.c
         builtins/footer.c
         builtins/sidebar.c
         builtins/overlay.c

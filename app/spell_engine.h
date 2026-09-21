@@ -32,6 +32,12 @@ typedef struct PicoSpellRanges {
 void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, int length,
                            PicoSpellRanges *out);
 
+/* Derives dictionary tags to try from a locale string: "fi_FI.UTF-8" yields
+ * full="fi_FI" and lang="fi". Returns the number of valid out params
+ * (0 = nothing usable, 1 = full only, 2 = full and lang). Used by backend
+ * probes; kept here because it is pure text handling. */
+int pico_spell_dict_tags(const char *locale, char full[32], char lang[32]);
+
 void pico_spell_ranges_free(PicoSpellRanges *ranges);
 
 #endif

@@ -213,6 +213,39 @@ static void TestSentenceFinalPeriodStillChecks(void)
     pico_spell_ranges_free(&r);
 }
 
+static void ExpectTags(const char *test, const char *locale, int want_count, const char *want_full,
+                       const char *want_lang)
+{
+    char full[32] = {0};
+    char lang[32] = {0};
+    int count = pico_spell_dict_tags(locale, full, lang);
+    if (count != want_count)
+    {
+        fprintf(stderr, "FAIL: %s: got %d tags, want %d\n", test, count, want_count);
+        g_failed = 1;
+        return;
+    }
+    if (want_count >= 1 && strcmp(full, want_full) != 0)
+    {
+        fprintf(stderr, "FAIL: %s: full tag is \"%s\", want \"%s\"\n", test, full, want_full);
+        g_failed = 1;
+    }
+    if (want_count == 2 && strcmp(lang, want_lang) != 0)
+    {
+        fprintf(stderr, "FAIL: %s: lang tag is \"%s\", want \"%s\"\n", test, lang, want_lang);
+        g_failed = 1;
+    }
+}
+
+static void TestDictTags(void)
+{
+    ExpectTags("locale with codeset", "en_US.UTF-8", 2, "en_US", "en");
+    ExpectTags("locale with modifier", "de_DE@euro", 2, "de_DE", "de");
+    ExpectTags("bare language", "en", 1, "en", NULL);
+    ExpectTags("C locale", "C", 0, NULL, NULL);
+    ExpectTags("null locale", NULL, 0, NULL, NULL);
+}
+
 int main(void)
 {
     TestCleanText();
@@ -232,6 +265,7 @@ int main(void)
     TestApostropheWord();
     TestIdentifierSplit();
     TestSentenceFinalPeriodStillChecks();
+    TestDictTags();
     if (g_failed)
     {
         return 1;

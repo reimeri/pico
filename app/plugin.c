@@ -54,6 +54,7 @@ static bool ModuleAppliesToWorkspace(const PicoHost *host,
 
 static PicoExt (*kBuiltins[])(void) = {
     pico_ext_chat,
+    pico_ext_spell,
     pico_ext_composer,
     pico_ext_footer,
     pico_ext_sidebar,

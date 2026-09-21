@@ -3,6 +3,7 @@
 #include <utf8proc.h>
 
 #include <stdlib.h>
+#include <string.h>
 
 /* Tokenizer contract (the "obvious non-prose" skip rules):
  * - A token is a run of Unicode letters/digits. An apostrophe (' or U+2019)
@@ -184,6 +185,33 @@ void pico_spell_check_text(const PicoSpellBackend *backend, const char *text, in
         pos += adv;
     }
     EmitToken(backend, text, length, in_code, tok, pos, out);
+}
+
+int pico_spell_dict_tags(const char *locale, char full[32], char lang[32])
+{
+    if (!locale || !full || !lang)
+    {
+        return 0;
+    }
+    size_t n = 0;
+    for (const char *p = locale; *p && *p != '.' && *p != '@' && n < 31; p++)
+    {
+        full[n++] = *p;
+    }
+    full[n] = '\0';
+    if (n == 0 || strcmp(full, "C") == 0 || strcmp(full, "POSIX") == 0)
+    {
+        return 0;
+    }
+    char *underscore = strchr(full, '_');
+    if (!underscore || underscore == full)
+    {
+        return 1;
+    }
+    size_t lang_len = (size_t)(underscore - full);
+    memcpy(lang, full, lang_len);
+    lang[lang_len] = '\0';
+    return 2;
 }
 
 void pico_spell_ranges_free(PicoSpellRanges *ranges)

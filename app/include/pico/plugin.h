@@ -30,6 +30,7 @@ typedef struct PicoExt {
 
 PicoExt pico_ext_chat(void);
 PicoExt pico_ext_composer(void);
+PicoExt pico_ext_spell(void);
 PicoExt pico_ext_footer(void);
 PicoExt pico_ext_sidebar(void);
 PicoExt pico_ext_overlay(void);

@@ -953,9 +953,35 @@ const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent)
     return PicoSettings_ActiveModel(agent);
 }
 
+PicoModel *PicoSettings_SelectedModel(PicoAgent *agent)
+{
+    return agent ? PicoSettings_FindModel(agent->workspace, agent->model) : NULL;
+}
+
+const PicoModel *PicoSettings_SelectedModelConst(const PicoAgent *agent)
+{
+    return agent ? PicoSettings_FindModel(agent->workspace, agent->model) : NULL;
+}
+
 const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
 {
     return agent && agent->effort[0] ? agent->effort : "none";
+}
+
+void PicoSettings_PinTurnModel(PicoAgent *agent)
+{
+    if (!agent)
+    {
+        return;
+    }
+    const PicoModel *m = PicoSettings_SelectedModelConst(agent);
+    agent->has_running_model = m != NULL;
+    if (m)
+    {
+        agent->running_model = *m;
+    }
+    snprintf(agent->running_effort, sizeof(agent->running_effort), "%s",
+             PicoSettings_ActiveEffort(agent));
 }
 
 bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model)
@@ -1002,7 +1028,7 @@ void PicoSettings_SyncAgent(PicoAgent *agent)
     {
         return;
     }
-    const PicoModel *m = PicoSettings_ActiveModelConst(agent);
+    const PicoModel *m = PicoSettings_SelectedModelConst(agent);
     snprintf(agent->model_name, sizeof(agent->model_name), "%s",
              m && m->name[0] ? m->name : agent->model);
     if (m && m->context_limit > 0)
@@ -1017,9 +1043,7 @@ void PicoSettings_SyncAgent(PicoAgent *agent)
     {
         agent->context_limit = 128000;
     }
-    const PicoModel *selected = agent->workspace
-                                    ? PicoSettings_FindModelConst(agent->workspace, agent->model) : NULL;
-    if (!selected || !selected->supports_fast)
+    if (!m || !m->supports_fast)
         agent->fast = false;
     if (!m || !PicoSettings_EffortAllowed(m, agent->effort))
     {
@@ -1054,6 +1078,7 @@ void PicoSettings_ReconcileIdleAgent(PicoAgent *agent)
     }
     bool was_fast = agent->fast;
     agent->has_running_model = false;
+    agent->running_effort[0] = '\0';
     if (!PicoSettings_FindModel(agent->workspace, agent->model))
     {
         snprintf(agent->model, sizeof(agent->model), "%s", agent->workspace->settings.default_model);
@@ -1106,8 +1131,9 @@ bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name)
     PicoSettings_SyncAgent(agent);
     PicoSession_EnqueueModelChange(host, agent);
     char line[256];
-    snprintf(line, sizeof(line), "Model `%s` · effort `%s`", m->name[0] ? m->name : m->id,
-             PicoSettings_ActiveEffort(agent));
+    snprintf(line, sizeof(line), "Model `%s` · effort `%s`%s", m->name[0] ? m->name : m->id,
+             PicoSettings_ActiveEffort(agent),
+             PicoAgent_IsBusy(agent) ? " (applies next turn)" : "");
     PicoOverlay_Notify(host, line);
     return true;
 }
@@ -1120,7 +1146,7 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
     }
     PicoWorkspace *workspace = agent->workspace;
     PicoHost *host = workspace->host;
-    PicoModel *m = PicoSettings_ActiveModel(agent);
+    PicoModel *m = PicoSettings_SelectedModel(agent);
     if (!m)
     {
         PicoOverlay_Notify(host, "No model in the catalog. Add one in settings.json.");
@@ -1140,7 +1166,9 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
     snprintf(agent->effort, sizeof(agent->effort), "%s", level);
     PicoSession_EnqueueModelChange(host, agent);
     char line[256];
-    snprintf(line, sizeof(line), "Effort `%s` for `%s`", agent->effort, m->name[0] ? m->name : m->id);
+    snprintf(line, sizeof(line), "Effort `%s` for `%s`%s", agent->effort,
+             m->name[0] ? m->name : m->id,
+             PicoAgent_IsBusy(agent) ? " (applies next turn)" : "");
     PicoOverlay_Notify(host, line);
     return true;
 }

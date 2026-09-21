@@ -1536,7 +1536,8 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_stream_state = p->state;
     rt->work_model = Dup(m->id);
     rt->work_base_url = Dup(m->base_url);
-    rt->work_effort = Dup(PicoSettings_ActiveEffort(agent));
+    rt->work_effort = Dup(agent->has_running_model ? agent->running_effort
+                                                   : PicoSettings_ActiveEffort(agent));
     rt->work_fast = rt->turn_fast;
     rt->work_instructions = instructions;
     rt->work_cache_key = Dup(rt->cache_key);
@@ -3628,6 +3629,7 @@ void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
         return;
     }
     agent->runtime->turn_fast = agent->fast;
+    PicoSettings_PinTurnModel(agent);
     StartCompact(app, agent);
 }
 
@@ -3733,6 +3735,7 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
     }
     PicoAgent_DismissError(agent);
     agent->runtime->turn_fast = agent->fast;
+    PicoSettings_PinTurnModel(agent);
     int parallel = agent->max_parallel_tools_override ? agent->max_parallel_tools_override
                                                       : agent->workspace->settings.max_parallel_tools;
     agent->runtime->max_parallel_tools = parallel >= 1 && parallel <= PICO_MAX_PARALLEL_TOOLS

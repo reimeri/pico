@@ -884,7 +884,7 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
     }
     if (FoldEq(cmd, "effort"))
     {
-        PicoModel *m = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
+        PicoModel *m = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
         if (!m)
         {
             return 0;

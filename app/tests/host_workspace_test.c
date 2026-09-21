@@ -6810,9 +6810,12 @@ typedef enum MatrixProviderMode {
     MATRIX_PROVIDER_BLOCK,
     MATRIX_PROVIDER_STREAM,
     MATRIX_PROVIDER_COMPLETE,
+    MATRIX_PROVIDER_TOOL,
 } MatrixProviderMode;
 
 static struct MatrixProviderState *g_matrix_states[PICO_MAX_WORKSPACES + 1];
+
+#define MATRIX_RECORD_MAX 8
 
 typedef struct MatrixProviderState {
     pthread_mutex_t mu;
@@ -6823,6 +6826,12 @@ typedef struct MatrixProviderState {
     bool exited;
     int calls;
     char *answer;
+    bool tool_entered;
+    bool tool_release;
+    int recorded;
+    char models_seen[MATRIX_RECORD_MAX][128];
+    char efforts_seen[MATRIX_RECORD_MAX][PICO_EFFORT_LEN];
+    bool fasts_seen[MATRIX_RECORD_MAX];
 } MatrixProviderState;
 
 static void MatrixStateInit(MatrixProviderState *state, MatrixProviderMode mode)
@@ -6861,7 +6870,6 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
                           void *user, PicoLlmResult *out, void *opaque)
 {
     (void)ctx;
-    (void)turn;
     (void)cancel;
     (void)user;
     MatrixProviderState *state = (MatrixProviderState *)opaque;
@@ -6877,6 +6885,15 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
     pthread_mutex_lock(&state->mu);
     int call = state->calls++;
     state->entered = true;
+    if (state->recorded < MATRIX_RECORD_MAX)
+    {
+        int slot = state->recorded++;
+        snprintf(state->models_seen[slot], sizeof(state->models_seen[slot]), "%s",
+                 turn && turn->model ? turn->model : "");
+        snprintf(state->efforts_seen[slot], sizeof(state->efforts_seen[slot]), "%s",
+                 turn && turn->effort ? turn->effort : "");
+        state->fasts_seen[slot] = turn && turn->fast;
+    }
     pthread_cond_broadcast(&state->cv);
     MatrixProviderMode mode = state->mode;
     if (mode == MATRIX_PROVIDER_BLOCK)
@@ -6910,6 +6927,10 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
     if (mode == MATRIX_PROVIDER_ASK && call == 0)
     {
         pico_llm_result_add_tool_call(out, "matrix-ask", "matrix_ask", "{}", NULL);
+    }
+    else if (mode == MATRIX_PROVIDER_TOOL && call == 0)
+    {
+        pico_llm_result_add_tool_call(out, "matrix-call-1", "matrix_block", "{}", NULL);
     }
     else
     {
@@ -6956,6 +6977,46 @@ static void MatrixAskTool(PicoAgentContext *ctx, const char *args_json,
     }
 }
 
+static void MatrixBlockTool(PicoAgentContext *ctx, const char *args_json,
+                            PicoToolResult *out, void *opaque)
+{
+    (void)args_json;
+    MatrixProviderState *state = (MatrixProviderState *)opaque;
+    PicoWorkspaceId workspace_id = pico_agent_context_workspace_id(ctx);
+    if (!state && workspace_id <= PICO_MAX_WORKSPACES)
+    {
+        state = g_matrix_states[workspace_id];
+    }
+    if (out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    if (!state)
+    {
+        return;
+    }
+    pthread_mutex_lock(&state->mu);
+    state->tool_entered = true;
+    pthread_cond_broadcast(&state->cv);
+    while (!state->tool_release)
+    {
+        pthread_cond_wait(&state->cv, &state->mu);
+    }
+    pthread_mutex_unlock(&state->mu);
+    if (out)
+    {
+        out->output = DupStr("tool done");
+    }
+}
+
+static bool MatrixSupportsFast(PicoHost *host, const PicoModel *model, void *opaque)
+{
+    (void)host;
+    (void)model;
+    (void)opaque;
+    return true;
+}
+
 static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
                                      MatrixProviderState *state, bool add_ask_tool)
 {
@@ -6975,12 +7036,22 @@ static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
     snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model),
              "matrix-model");
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
-    pico_add_provider(workspace, &(PicoProvider){
+    PicoProvider provider = {
         .name = "matrix", .stream = MatrixProvider, .map_context = true, .state = state,
-    });
+    };
+    if (state->mode == MATRIX_PROVIDER_TOOL)
+    {
+        provider.supports_fast = MatrixSupportsFast;
+    }
+    pico_add_provider(workspace, &provider);
     bool tool_ok = !add_ask_tool ||
                    pico_add_tool(workspace, "matrix_ask", "matrix ask", "{}",
                                  MatrixAskTool, NULL, PICO_TOOL_SEQUENTIAL);
+    if (state->mode == MATRIX_PROVIDER_TOOL)
+    {
+        tool_ok = tool_ok && pico_add_tool(workspace, "matrix_block", "matrix block", "{}",
+                                           MatrixBlockTool, NULL, PICO_TOOL_SEQUENTIAL);
+    }
     PicoHost_PublishRegistration(host, state);
     return tool_ok && pico_workspace_find_provider(workspace, "matrix") != NULL;
 }
@@ -6997,6 +7068,213 @@ static bool PumpUntilIdle(PicoHost *host, PicoAgent *agent, int attempts)
         usleep(1000);
     }
     return false;
+}
+
+
+static bool ConfigureMatrixTwoModels(PicoWorkspace *workspace)
+{
+    PicoModel *models = realloc(workspace->models, 2 * sizeof(*workspace->models));
+    if (!models)
+    {
+        return false;
+    }
+    memset(&models[1], 0, sizeof(models[1]));
+    workspace->models = models;
+    workspace->model_count = 2;
+    snprintf(models[0].id, sizeof(models[0].id), "matrix-a");
+    snprintf(models[0].name, sizeof(models[0].name), "matrix-a");
+    models[0].supports_fast = true;
+    snprintf(models[0].effort[0], sizeof(models[0].effort[0]), "low");
+    snprintf(models[0].effort[1], sizeof(models[0].effort[1]), "high");
+    models[0].effort_count = 2;
+    snprintf(models[0].default_effort, sizeof(models[0].default_effort), "low");
+    snprintf(models[1].id, sizeof(models[1].id), "matrix-b");
+    snprintf(models[1].name, sizeof(models[1].name), "matrix-b");
+    snprintf(models[1].provider, sizeof(models[1].provider), "matrix");
+    snprintf(models[1].effort[0], sizeof(models[1].effort[0]), "medium");
+    models[1].effort_count = 1;
+    snprintf(models[1].default_effort, sizeof(models[1].default_effort), "medium");
+    snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model),
+             "matrix-a");
+    return true;
+}
+
+static bool MatrixWaitToolEntered(PicoHost *host, MatrixProviderState *state)
+{
+    for (int i = 0; i < 3000; i++)
+    {
+        pico_host_pump(host);
+        pthread_mutex_lock(&state->mu);
+        bool entered = state->tool_entered;
+        pthread_mutex_unlock(&state->mu);
+        if (entered)
+        {
+            return true;
+        }
+        usleep(1000);
+    }
+    return false;
+}
+
+static void MatrixReleaseTool(MatrixProviderState *state)
+{
+    pthread_mutex_lock(&state->mu);
+    state->tool_release = true;
+    pthread_cond_broadcast(&state->cv);
+    pthread_mutex_unlock(&state->mu);
+}
+
+static bool MatrixRecordedIs(const MatrixProviderState *state, int slot, const char *model,
+                             const char *effort)
+{
+    return state->recorded > slot && strcmp(state->models_seen[slot], model) == 0 &&
+           strcmp(state->efforts_seen[slot], effort) == 0;
+}
+
+/* Switching the model mid-turn must not reroute the running turn: every
+ * request of the turn (tool follow-ups included) keeps the model and effort
+ * pinned at turn start; the new selection applies from the next turn. */
+static int TestTurnKeepsPinnedModelAndEffort(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init pinned turn");
+        return 1;
+    }
+    char dir[] = "/tmp/pico-ws-pinturn-XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Fail("mkdtemp pinned turn");
+        pico_host_free(host);
+        return 1;
+    }
+    PicoWorkspaceId id = 0;
+    pico_workspace_open(host, dir, &id);
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, id);
+    MatrixProviderState state;
+    MatrixStateInit(&state, MATRIX_PROVIDER_TOOL);
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId agent_id = 0;
+    bool ok = ws && ConfigureMatrixWorkspace(host, ws, &state, false) &&
+              ConfigureMatrixTwoModels(ws) &&
+              pico_main_agent_create(host, id, &opt, &agent_id) == PICO_OK;
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    if (ok && agent)
+    {
+        ok = PicoSettings_SetEffort(agent, "high");
+    }
+    if (ok)
+    {
+        PicoAgent_StartTurn(host, agent, "first");
+        ok = MatrixWaitToolEntered(host, &state);
+    }
+    bool first_pinned = ok && MatrixRecordedIs(&state, 0, "matrix-a", "high");
+
+    /* Mid-turn switch: selection changes immediately... */
+    bool switched = first_pinned && PicoSettings_SetModel(agent, "matrix-b") &&
+                    strcmp(agent->model, "matrix-b") == 0;
+
+    MatrixReleaseTool(&state);
+    bool completed = switched && PumpUntilIdle(host, agent, 3000);
+    /* ...but the running turn's follow-up keeps the pinned model and effort. */
+    bool turn_pinned = completed && agent->error == NULL &&
+                       MatrixRecordedIs(&state, 1, "matrix-a", "high");
+
+    bool next_ok = turn_pinned;
+    if (next_ok)
+    {
+        PicoAgent_StartTurn(host, agent, "next");
+        next_ok = PumpUntilIdle(host, agent, 3000);
+    }
+    bool next_applied = next_ok && MatrixRecordedIs(&state, 2, "matrix-b", "medium");
+
+    pico_host_free(host);
+    MatrixStateDestroy(&state);
+    rmdir(dir);
+    if (!turn_pinned)
+    {
+        Fail("busy turn must keep the model and effort pinned at turn start");
+        return 1;
+    }
+    if (!next_applied)
+    {
+        Fail("selected model and effort must apply from the next turn");
+        return 1;
+    }
+    return 0;
+}
+
+/* With Fast on, switching to a non-Fast model mid-turn must not fail the
+ * running turn: the turn keeps its pinned Fast-capable model; the selection
+ * (Fast cleared) applies from the next turn. */
+static int TestFastSurvivesMidTurnModelSwitch(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init fast pin");
+        return 1;
+    }
+    char dir[] = "/tmp/pico-ws-fastpin-XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Fail("mkdtemp fast pin");
+        pico_host_free(host);
+        return 1;
+    }
+    PicoWorkspaceId id = 0;
+    pico_workspace_open(host, dir, &id);
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, id);
+    MatrixProviderState state;
+    MatrixStateInit(&state, MATRIX_PROVIDER_TOOL);
+    PicoAgentCreateOptions opt = { .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE };
+    PicoAgentId agent_id = 0;
+    bool ok = ws && ConfigureMatrixWorkspace(host, ws, &state, false) &&
+              ConfigureMatrixTwoModels(ws) &&
+              pico_main_agent_create(host, id, &opt, &agent_id) == PICO_OK;
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    if (ok && agent)
+    {
+        ok = PicoSettings_SetFast(agent, true);
+    }
+    if (ok)
+    {
+        PicoAgent_StartTurn(host, agent, "first");
+        ok = MatrixWaitToolEntered(host, &state);
+    }
+    bool first_fast = ok && state.fasts_seen[0] && MatrixRecordedIs(&state, 0, "matrix-a", "low");
+
+    bool switched = first_fast && PicoSettings_SetModel(agent, "matrix-b") && !agent->fast;
+
+    MatrixReleaseTool(&state);
+    bool completed = switched && PumpUntilIdle(host, agent, 3000);
+    bool turn_fast = completed && agent->error == NULL && state.fasts_seen[1] &&
+                     MatrixRecordedIs(&state, 1, "matrix-a", "low");
+
+    bool next_ok = turn_fast;
+    if (next_ok)
+    {
+        PicoAgent_StartTurn(host, agent, "next");
+        next_ok = PumpUntilIdle(host, agent, 3000);
+    }
+    bool next_standard = next_ok && !state.fasts_seen[2] &&
+                         MatrixRecordedIs(&state, 2, "matrix-b", "medium");
+
+    pico_host_free(host);
+    MatrixStateDestroy(&state);
+    rmdir(dir);
+    if (!turn_fast)
+    {
+        Fail("mid-turn switch to a non-Fast model must not fail the pinned turn");
+        return 1;
+    }
+    if (!next_standard)
+    {
+        Fail("next turn must run the selected model without Fast");
+        return 1;
+    }
+    return 0;
 }
 
 static int TestMultiWorkspaceAskOrderingAndRouting(void)
@@ -9914,6 +10192,14 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestMultiWorkspaceMailboxIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestTurnKeepsPinnedModelAndEffort() != 0)
+    {
+        return 1;
+    }
+    if (TestFastSurvivesMidTurnModelSwitch() != 0)
     {
         return 1;
     }

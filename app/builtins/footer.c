@@ -656,7 +656,7 @@ static int MenuCount(const PicoHost *app)
     }
     if (g_menu == FOOTER_MENU_EFFORT)
     {
-        const PicoModel *m = PicoSettings_ActiveModelConst(PicoHost_SelectedAgentConst(app));
+        const PicoModel *m = PicoSettings_SelectedModelConst(PicoHost_SelectedAgentConst(app));
         bool fast = PicoSettings_FastAvailable(PicoHost_SelectedAgentConst(app));
         return m ? m->effort_count + (fast ? 1 : 0) : 0;
     }
@@ -715,7 +715,7 @@ static void OpenMenu(PicoHost *app, FooterMenu which)
     }
     if (which == FOOTER_MENU_EFFORT)
     {
-        PicoModel *m = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
+        PicoModel *m = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
         if (!m || m->effort_count <= 0)
         {
             return;
@@ -744,7 +744,7 @@ static void OpenMenu(PicoHost *app, FooterMenu which)
     }
     else
     {
-        PicoModel *m = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
+        PicoModel *m = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
         const char *cur = PicoSettings_ActiveEffort(PicoHost_SelectedAgent(app));
         if (m && cur)
         {
@@ -770,7 +770,7 @@ static void Accept(PicoHost *app)
     }
     else if (g_menu == FOOTER_MENU_EFFORT)
     {
-        PicoModel *m = PicoSettings_ActiveModel(agent);
+        PicoModel *m = PicoSettings_SelectedModel(agent);
         if (m && g_selected >= 0 && g_selected < m->effort_count)
         {
             PicoSettings_SetEffort(agent, m->effort[g_selected]);
@@ -1068,7 +1068,7 @@ static void RenderMenu(PicoHost *app)
                     }
                     else
                     {
-                        PicoModel *m = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
+                        PicoModel *m = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
                         bool fast_row = m && i == m->effort_count;
                         label = fast_row ? "Fast mode" : (m ? m->effort[i] : "");
                         if (fast_row)
@@ -1306,7 +1306,7 @@ void PicoFooter_Render(PicoHost *app, void *state)
         snprintf(g_cache_cached, sizeof(g_cache_cached), "Cached input: %s", total_cached);
     }
 
-    PicoModel *active = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
+    PicoModel *active = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
     bool show_effort = active && active->effort_count > 0;
     const char *model = PicoHost_SelectedAgent(app)->model_name;
     snprintf(g_model, sizeof(g_model), "%s", model);

@@ -1845,7 +1845,7 @@ void PicoHost_Submit(PicoHost *app)
 
     PicoComposer *c = &app->composer;
     bool has_attach = PicoComposer_HasAttachments(app);
-    PicoModel *model = PicoSettings_ActiveModel(active);
+    PicoModel *model = PicoSettings_SelectedModel(active);
     if (has_attach && model && !model->vision)
     {
         free(app->agent_input);

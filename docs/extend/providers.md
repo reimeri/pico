@@ -80,7 +80,7 @@ Populate `PicoLlmResult.service_tier` with the actual backend-reported tier as a
 
 ## Turn
 
-`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `fast`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`.
+`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `fast`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`. `model`, `base_url`, `effort`, and `fast` are pinned at turn start: every request of a turn — tool follow-ups and compaction included — carries the same values, so a provider never observes a mid-turn model, effort, or Fast change. Selecting another model or effort while a turn is busy updates the selection for the next turn only.
 
 `input_json` uses Pico's provider-neutral item forms. `user` and `assistant` carry a `parts` array (`text`, `refusal`, `image`, `audio`). `tool_call` and `tool_result` use `call_id` / `name` / `arguments` or `output`. Request-only `context` items are:
 

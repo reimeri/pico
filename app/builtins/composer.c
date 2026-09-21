@@ -1961,7 +1961,7 @@ void PicoComposer_HandlePointer(PicoHost *app)
 static bool ComposerVision(PicoHost *app)
 {
     bool vision = true;
-    PicoModel *model = PicoSettings_ActiveModel(PicoHost_SelectedAgent(app));
+    PicoModel *model = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
     if (model)
     {
         vision = model->vision;

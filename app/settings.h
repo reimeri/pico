@@ -35,9 +35,22 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPro
 int PicoSettings_LoadedContext(const PicoWorkspace *workspace, const char **labels, int max);
 PicoModel *PicoSettings_FindModel(PicoWorkspace *workspace, const char *id);
 const PicoModel *PicoSettings_FindModelConst(const PicoWorkspace *workspace, const char *id);
+/* The model the agent's in-flight or next request uses: the turn's pinned
+ * snapshot while busy, otherwise the selected catalog model. */
 PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent);
 const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent);
+/* The catalog model the agent's selection resolves to: what the next turn will
+ * use. Differs from PicoSettings_ActiveModel while a busy turn keeps its
+ * pinned snapshot. */
+PicoModel *PicoSettings_SelectedModel(PicoAgent *agent);
+const PicoModel *PicoSettings_SelectedModelConst(const PicoAgent *agent);
+/* The selected effort for the next turn (the running turn keeps its pinned
+ * effort; see PicoSettings_PinTurnModel). */
 const char *PicoSettings_ActiveEffort(const PicoAgent *agent);
+/* Pin the selected model and resolved effort as the agent's running snapshot;
+ * call at turn start. The pin holds for the whole turn and is released by
+ * PicoSettings_ReconcileIdleAgent once the agent is idle. */
+void PicoSettings_PinTurnModel(PicoAgent *agent);
 void PicoSettings_InitAgent(PicoAgent *agent);
 void PicoSettings_SyncAgent(PicoAgent *agent);
 void PicoSettings_ReconcileIdleAgent(PicoAgent *agent);

@@ -48,8 +48,12 @@ struct PicoAgent {
     bool fast; /* selected mode for the next turn */
     char last_service_tier[32];
     int context_limit;
+    /* Turn-scoped snapshot of the selected model and effort: pinned at turn
+     * start and used for every request of the turn (tool follow-ups and
+     * compaction included). Released when the agent goes idle. */
     PicoModel running_model;
     bool has_running_model;
+    char running_effort[PICO_EFFORT_LEN];
     double compact_ratio;
     bool compact_enabled;
     int max_parallel_tools_override; /* zero uses workspace setting */

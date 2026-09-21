@@ -40,6 +40,12 @@ bool PicoAgent_IsBusy(const PicoAgent *agent)
                      agent->state == PICO_AGENT_COMPACT_WAIT);
 }
 
+void PicoOverlay_Notify(PicoHost *host, const char *text)
+{
+    (void)host;
+    (void)text;
+}
+
 static int TestModelContextBeatsFallback(void)
 {
     PicoWorkspace ws;
@@ -140,6 +146,97 @@ static int TestPerAgentSelection(void)
         strcmp(models[1].default_effort, "low") != 0)
     {
         return Fail("one agent mutated another agent or the immutable catalog");
+    }
+    return 0;
+}
+
+
+static int TestSelectionTracksWhileTurnPinned(void)
+{
+    PicoWorkspace ws;
+    PicoAgent agent;
+    PicoModel models[2];
+    memset(&ws, 0, sizeof(ws));
+    memset(&agent, 0, sizeof(agent));
+    memset(models, 0, sizeof(models));
+
+    snprintf(models[0].id, sizeof(models[0].id), "model-a");
+    snprintf(models[0].name, sizeof(models[0].name), "Model A");
+    models[0].context_limit = 100;
+    snprintf(models[0].effort[0], sizeof(models[0].effort[0]), "low");
+    snprintf(models[0].effort[1], sizeof(models[0].effort[1]), "high");
+    models[0].effort_count = 2;
+    snprintf(models[0].default_effort, sizeof(models[0].default_effort), "low");
+
+    snprintf(models[1].id, sizeof(models[1].id), "model-b");
+    snprintf(models[1].name, sizeof(models[1].name), "Model B");
+    models[1].context_limit = 200;
+    snprintf(models[1].effort[0], sizeof(models[1].effort[0]), "medium");
+    models[1].effort_count = 1;
+    snprintf(models[1].default_effort, sizeof(models[1].default_effort), "medium");
+
+    ws.models = models;
+    ws.model_count = 2;
+    snprintf(ws.settings.default_model, sizeof(ws.settings.default_model), "model-a");
+    agent.workspace = &ws;
+
+    PicoSettings_InitAgent(&agent);
+    if (!PicoSettings_SetEffort(&agent, "high"))
+    {
+        return Fail("effort `high` must validate against the selected model");
+    }
+
+    /* Turn start pins the running snapshot. */
+    agent.state = PICO_AGENT_LLM_WAIT;
+    PicoSettings_PinTurnModel(&agent);
+    if (!agent.has_running_model || strcmp(agent.running_model.id, "model-a") != 0 ||
+        strcmp(agent.running_effort, "high") != 0)
+    {
+        return Fail("turn start must pin the selected model and effort");
+    }
+
+    /* A mid-turn switch updates the selection immediately... */
+    if (!PicoSettings_SetModel(&agent, "model-b"))
+    {
+        return Fail("mid-turn model switch must be accepted");
+    }
+    if (strcmp(agent.model, "model-b") != 0 || strcmp(agent.model_name, "Model B") != 0 ||
+        strcmp(agent.effort, "medium") != 0 || agent.context_limit != 200)
+    {
+        return Fail("selection must track the new model while the turn is busy");
+    }
+    /* ...while the pinned turn keeps the old model and effort. */
+    const PicoModel *active = PicoSettings_ActiveModelConst(&agent);
+    if (!agent.has_running_model || !active || strcmp(active->id, "model-a") != 0 ||
+        strcmp(agent.running_effort, "high") != 0)
+    {
+        return Fail("pinned turn must keep its model and effort snapshot");
+    }
+    if (PicoSettings_SelectedModelConst(&agent) != &models[1])
+    {
+        return Fail("selected model must resolve the pending switch");
+    }
+    /* Mid-turn effort changes validate against the selected (next turn) model. */
+    if (PicoSettings_SetEffort(&agent, "high"))
+    {
+        return Fail("effort of the old model must not validate for the new selection");
+    }
+    if (!PicoSettings_SetEffort(&agent, "medium"))
+    {
+        return Fail("effort must validate against the selected model");
+    }
+
+    /* Once idle, the pin releases and the new selection takes over. */
+    agent.state = PICO_AGENT_IDLE;
+    PicoSettings_ReconcileIdleAgent(&agent);
+    if (agent.has_running_model || agent.running_effort[0])
+    {
+        return Fail("idle reconcile must release the turn snapshot");
+    }
+    if (PicoSettings_ActiveModelConst(&agent) != &models[1] ||
+        strcmp(PicoSettings_ActiveEffort(&agent), "medium") != 0)
+    {
+        return Fail("idle agent must run on the selected model and effort");
     }
     return 0;
 }
@@ -1145,6 +1242,11 @@ int main(void)
         return rc;
     }
     rc = TestFallbackWhenModelHasNoLimit();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestSelectionTracksWhileTurnPinned();
     if (rc)
     {
         return rc;

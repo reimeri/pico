@@ -1169,12 +1169,47 @@ const PicoModel *PicoSettings_FindModelConst(const PicoWorkspace *workspace, con
 
 PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent)
 {
+    if (agent && agent->has_running_model)
+    {
+        return (PicoModel *)&agent->running_model;
+    }
     return (agent && agent->workspace && agent->workspace->model_count > 0) ? &agent->workspace->models[0] : NULL;
 }
 
 const PicoModel *PicoSettings_ActiveModelConst(const PicoAgent *agent)
 {
-    return (agent && agent->workspace && agent->workspace->model_count > 0) ? &agent->workspace->models[0] : NULL;
+    return PicoSettings_ActiveModel(agent);
+}
+
+PicoModel *PicoSettings_SelectedModel(PicoAgent *agent)
+{
+    PicoModel *m = agent ? PicoSettings_FindModel(agent->workspace, agent->model) : NULL;
+    if (!m && agent && agent->workspace && agent->workspace->model_count > 0)
+    {
+        m = &agent->workspace->models[0];
+    }
+    return m;
+}
+
+const PicoModel *PicoSettings_SelectedModelConst(const PicoAgent *agent)
+{
+    return PicoSettings_SelectedModel((PicoAgent *)agent);
+}
+
+void PicoSettings_PinTurnModel(PicoAgent *agent)
+{
+    PicoModel *m = agent ? PicoSettings_FindModel(agent->workspace, agent->model) : NULL;
+    if (!agent)
+    {
+        return;
+    }
+    agent->has_running_model = m != NULL;
+    if (m)
+    {
+        agent->running_model = *m;
+    }
+    snprintf(agent->running_effort, sizeof(agent->running_effort), "%s",
+             PicoSettings_ActiveEffort(agent));
 }
 
 bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model)
@@ -1209,8 +1244,7 @@ void PicoSettings_SyncAgent(PicoAgent *agent)
 
 const char *PicoSettings_ActiveEffort(const PicoAgent *agent)
 {
-    (void)agent;
-    return "none";
+    return agent && agent->effort[0] ? agent->effort : "none";
 }
 
 void PicoSettings_InitAgent(PicoAgent *agent)

@@ -1739,6 +1739,20 @@ done:
 }
 
 
+/* The UI drain is capped so a stalled disk cannot freeze the host. Contract
+ * tests must outwait slow sandboxed build storage before reading the file. */
+static bool DrainSessionForAssertion(PicoHost *host, PicoAgent *agent)
+{
+    struct timespec deadline;
+    if (!host || !agent)
+    {
+        return false;
+    }
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 10;
+    return PicoSession_DrainPersistBefore(host, agent, &deadline);
+}
+
 static int TestFastSelectionPersistence(void)
 {
     char dir[] = "/tmp/pico-fast-session-XXXXXX";
@@ -1777,9 +1791,9 @@ static int TestFastSelectionPersistence(void)
     PicoAgent *writer = PicoHost_FindAgent(host, id);
     if (!PicoSettings_SetFast(writer, true) ||
         PicoSession_LogUser(host, writer, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
-        PicoSession_LogUsage(host, writer, 10, 0, true, "default") != PICO_SESSION_WRITE_OK)
+        PicoSession_LogUsage(host, writer, 10, 0, true, "default") != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, writer))
         goto done;
-    PicoSession_DrainPersist(host, writer);
     options.session_start = PICO_SESSION_NONE;
     if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
         goto done;
@@ -1808,7 +1822,8 @@ static int TestFastSelectionPersistence(void)
         Fail("removing model capability must clear Fast");
         goto done;
     }
-    PicoSession_DrainPersist(host, writer);
+    if (!DrainSessionForAssertion(host, writer))
+        goto done;
     /* Restoring capability must not resurrect the old fast:true session event. */
     models[1].supports_fast = true;
     if (PicoSession_Replay(host, resumed, writer->session_path, false) != 0 || resumed->fast)

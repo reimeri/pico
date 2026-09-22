@@ -1641,38 +1641,41 @@ bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *na
 
 static void WriteModelValue(JsonBuf *b, const PicoModel *m)
 {
-    JsonBuf_Puts(b, "{\"name\":");
+    /* The caller places the opening brace at a 4-space indent inside the
+       "models" array; fields sit at 6 and the closing brace back at 4,
+       matching the layout of examples/settings.json. */
+    JsonBuf_Puts(b, "{\n      \"name\": ");
     JsonBuf_String(b, m->name);
-    JsonBuf_Puts(b, ",\"id\":");
+    JsonBuf_Puts(b, ",\n      \"id\": ");
     JsonBuf_String(b, m->id);
     if (m->provider[0])
     {
-        JsonBuf_Puts(b, ",\"provider\":");
+        JsonBuf_Puts(b, ",\n      \"provider\": ");
         JsonBuf_String(b, m->provider);
     }
     if (m->base_url[0])
     {
-        JsonBuf_Puts(b, ",\"base_url\":");
+        JsonBuf_Puts(b, ",\n      \"base_url\": ");
         JsonBuf_String(b, m->base_url);
     }
-    JsonBuf_Puts(b, ",\"context_limit\":");
+    JsonBuf_Puts(b, ",\n      \"context_limit\": ");
     JsonBuf_Int(b, m->context_limit);
-    JsonBuf_Puts(b, ",\"vision\":");
+    JsonBuf_Puts(b, ",\n      \"vision\": ");
     JsonBuf_Bool(b, m->vision);
-    JsonBuf_Puts(b, ",\"supports_fast\":");
+    JsonBuf_Puts(b, ",\n      \"supports_fast\": ");
     JsonBuf_Bool(b, m->supports_fast);
-    JsonBuf_Puts(b, ",\"effort\":[");
+    JsonBuf_Puts(b, ",\n      \"effort\": [");
     for (int i = 0; i < m->effort_count; i++)
     {
         if (i)
         {
-            JsonBuf_Putc(b, ',');
+            JsonBuf_Puts(b, ", ");
         }
         JsonBuf_String(b, m->effort[i]);
     }
-    JsonBuf_Puts(b, "],\"selected_effort\":");
+    JsonBuf_Puts(b, "],\n      \"selected_effort\": ");
     JsonBuf_String(b, m->default_effort[0] ? m->default_effort : "none");
-    JsonBuf_Putc(b, '}');
+    JsonBuf_Puts(b, "\n    }");
 }
 
 void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft)
@@ -2037,7 +2040,7 @@ static char *EffortsJson(const PicoModel *model)
     {
         if (i)
         {
-            JsonBuf_Putc(&b, ',');
+            JsonBuf_Puts(&b, ", ");
         }
         JsonBuf_String(&b, model->effort[i]);
     }

@@ -874,7 +874,8 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     pthread_mutex_destroy(&host.settings_mu);
     saved = Pico_ReadFile(path, &len);
     if (!saved || !strstr(saved, "disabled_host_extensions") || !strstr(saved, "footer") ||
-        !strstr(saved, "\"vision\":true") || !strstr(saved, "gpt-test") || !strstr(saved, "models"))
+        !strstr(saved, "\"vision\": true") || !strstr(saved, "\"id\": \"gpt-test\",\n") ||
+        !strstr(saved, "models"))
     {
         failed = 1;
     }

@@ -1,5 +1,6 @@
 #include "chat_find.h"
 #include "host_internal.h"
+#include "text_field_ui.h"
 #include "agent_internal.h"
 #include "chat_sel.h"
 #include "text_range.h"
@@ -17,15 +18,7 @@ static Clay_String String(const char *s)
 
 static Clay_TextElementConfig InputConfig(void)
 {
-    return (Clay_TextElementConfig){.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
-                                    .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE};
-}
-
-static float TextWidth(const char *s, int n)
-{
-    Clay_TextElementConfig config = InputConfig();
-    return Pico_MeasureTextUtf8((Clay_StringSlice){.chars = s, .length = n, .baseChars = s},
-                               &config, NULL).width;
+    return PicoTextField_Config(FONT_REGULAR);
 }
 
 typedef struct PicoFindScrollRestore {
@@ -64,7 +57,7 @@ void PicoChatFind_Reset(PicoHost *app)
     if (!app) return;
     RestoreTemporaryScrolls(&app->find);
     PicoChatSearch_Free(&app->find.search);
-    free(app->find.query);
+    PicoTextField_Free(&app->find.field);
     memset(&app->find, 0, sizeof(app->find));
     app->find.search.active = -1;
 }
@@ -92,14 +85,17 @@ void PicoChatFind_Open(PicoHost *app)
     PicoChatFind_Sync(app);
     PicoChatFind *f = &app->find;
     bool was_open = f->open;
+    if (!f->field.bound)
+    {
+        PicoTextField_BindGrowable(&f->field);
+    }
     f->open = f->focused = f->claimed_input = true;
-    f->anchor = 0;
-    f->cursor = f->length;
+    PicoTextField_SelectAll(&f->field);
     if (!was_open)
     {
-        PicoChatSearch_Query(&f->search, f->query);
+        PicoChatSearch_Query(&f->search, f->field.text ? f->field.text : "");
         PicoChatSearch_Refresh(&f->search);
-        f->nearest = f->length > 0;
+        f->nearest = f->field.length > 0;
     }
 }
 
@@ -107,51 +103,33 @@ void PicoChatFind_Close(PicoHost *app)
 {
     PicoChatFind *f = &app->find;
     RestoreTemporaryScrolls(f);
-    f->open = f->focused = f->dragging = f->nearest = f->reveal = false;
+    f->open = f->focused = f->nearest = f->reveal = false;
+    f->field.dragging = false;
     f->pressed_button = 0;
     f->claimed_input = true; /* Closing must not leak Escape/Enter this frame. */
     PicoChatSearch_Query(&f->search, "");
     PicoChatSearch_Refresh(&f->search);
 }
 
-static bool Reserve(PicoChatFind *f, int length)
-{
-    if (length + 1 <= f->capacity) return true;
-    int capacity = f->capacity ? f->capacity : 64;
-    while (capacity <= length) capacity *= 2;
-    char *next = realloc(f->query, (size_t)capacity);
-    if (!next) return false;
-    f->query = next;
-    f->capacity = capacity;
-    return true;
-}
-
 static void QueryChanged(PicoChatFind *f)
 {
     RestoreTemporaryScrolls(f);
-    PicoChatSearch_Query(&f->search, f->open ? f->query : "");
-    f->nearest = f->open && f->length > 0;
+    PicoChatSearch_Query(&f->search, f->open && f->field.text ? f->field.text : "");
+    f->nearest = f->open && f->field.length > 0;
     f->reveal = false;
 }
 
 void PicoChatFind_SetQuery(PicoHost *app, const char *query)
 {
     PicoChatFind *f = &app->find;
-    if (!query) query = "";
-    /* This is a single-line editor. Pasted line/control separators become
-     * spaces, so a query can never cross a logical block boundary. */
-    int n = (int)strlen(query);
-    char *copy = malloc((size_t)n + 1);
-    if (!copy) return;
-    for (int i = 0; i < n; i++) copy[i] = (unsigned char)query[i] < 32 ? ' ' : query[i];
-    copy[n] = 0;
-    if (Reserve(f, n))
+    if (!f->field.bound)
     {
-        memcpy(f->query, copy, (size_t)n + 1);
-        f->length = f->cursor = f->anchor = n;
-        QueryChanged(f);
+        PicoTextField_BindGrowable(&f->field);
     }
-    free(copy);
+    /* Single-line field: the helper turns line/control separators into
+     * spaces, so a query can never cross a logical block boundary. */
+    PicoTextField_SetText(&f->field, query);
+    QueryChanged(f);
 }
 
 void PicoChatFind_Navigate(PicoHost *app, int direction)
@@ -184,52 +162,13 @@ bool PicoChatFind_PointerOver(const PicoHost *app)
            (app->find.claimed_pointer || (app->find.open && PointerOverId(CLAY_ID("ChatFind"))));
 }
 
-static void ReplaceSelection(PicoChatFind *f, const char *text, int length)
-{
-    int from = f->cursor < f->anchor ? f->cursor : f->anchor;
-    int to = f->cursor > f->anchor ? f->cursor : f->anchor;
-    int next_length = f->length - (to - from) + length;
-    if (!Reserve(f, next_length)) return;
-    memmove(f->query + from + length, f->query + to, (size_t)(f->length - to));
-    if (length) memcpy(f->query + from, text, (size_t)length);
-    f->query[next_length] = 0;
-    f->length = next_length;
-    f->cursor = f->anchor = from + length;
-    QueryChanged(f);
-}
-
-static void Move(PicoChatFind *f, int position, bool shift)
-{
-    f->cursor = position;
-    if (!shift) f->anchor = position;
-}
-
-static bool Key(int key)
-{
-    return IsKeyPressed(key) || IsKeyPressedRepeat(key);
-}
-
-static int PointerOffset(PicoChatFind *f, float x)
-{
-    Clay_ElementData input = Clay_GetElementData(CLAY_ID("ChatFindInput"));
-    x -= input.boundingBox.x + 6 - f->input_scroll;
-    const char *s = f->query ? f->query : "";
-    for (int i = 0; i < f->length;)
-    {
-        int next = PicoText_Utf8Next(s, f->length, i);
-        if (x < (TextWidth(s, i) + TextWidth(s, next)) * 0.5f) return i;
-        i = next;
-    }
-    return f->length;
-}
-
 void PicoChatFind_HandleInput(PicoHost *app)
 {
     PicoChatFind_Sync(app);
     PicoChatFind *f = &app->find;
     f->claimed_input = false;
     f->claimed_pointer = false;
-    if (PicoUi_ModalOpen(app)) { f->dragging = false; f->pressed_button = 0; return; }
+    if (PicoUi_ModalOpen(app)) { f->field.dragging = false; f->pressed_button = 0; return; }
     bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (ctrl && Pico_ShortcutPressed('f')) PicoChatFind_Open(app);
@@ -244,16 +183,15 @@ void PicoChatFind_HandleInput(PicoHost *app)
         if (PointerOverId(CLAY_ID("ChatFindPrevious"))) f->pressed_button = -1;
         else if (PointerOverId(CLAY_ID("ChatFindNext"))) f->pressed_button = 1;
         else if (PointerOverId(CLAY_ID("ChatFindClose"))) f->pressed_button = 2;
-        if (PointerOverId(CLAY_ID("ChatFindInput")))
-        {
-            f->focused = f->dragging = true;
-            Move(f, PointerOffset(f, GetMousePosition().x), shift);
-        }
+        if (PicoTextField_HandlePointer(&f->field, CLAY_ID("ChatFindInput"), 6.0f, FONT_REGULAR))
+            f->focused = true;
         else if (PointerOverId(CLAY_ID("Composer"))) f->focused = false;
         else if (f->pressed_button) f->focused = true;
     }
-    if (f->dragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-        f->cursor = PointerOffset(f, GetMousePosition().x);
+    else
+    {
+        PicoTextField_HandlePointer(&f->field, CLAY_ID("ChatFindInput"), 6.0f, FONT_REGULAR);
+    }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         if (f->pressed_button == 2 && PointerOverId(CLAY_ID("ChatFindClose")))
@@ -262,69 +200,13 @@ void PicoChatFind_HandleInput(PicoHost *app)
                  (f->pressed_button == 1 && PointerOverId(CLAY_ID("ChatFindNext"))))
             PicoChatFind_Navigate(app, f->pressed_button);
         f->pressed_button = 0;
-        f->dragging = false;
     }
     if (!f->open || !f->focused) return;
     f->claimed_input = true;
-    const char *s = f->query ? f->query : "";
-    if (ctrl && Pico_ShortcutPressed('a')) { f->anchor = 0; f->cursor = f->length; }
-    if (ctrl && (Pico_ShortcutPressed('c') || Pico_ShortcutPressed('x')))
-    {
-        int from = f->cursor < f->anchor ? f->cursor : f->anchor;
-        int to = f->cursor > f->anchor ? f->cursor : f->anchor;
-        if (to > from)
-        {
-            char *copy = malloc((size_t)(to - from) + 1);
-            if (copy)
-            {
-                memcpy(copy, s + from, (size_t)(to - from)); copy[to - from] = 0;
-                SetClipboardText(copy); free(copy);
-                if (Pico_ShortcutPressed('x')) ReplaceSelection(f, "", 0);
-            }
-        }
-    }
-    if (ctrl && Pico_ShortcutPressed('v'))
-    {
-        const char *clip = GetClipboardText();
-        if (clip)
-        {
-            char *copy = strdup(clip);
-            if (copy)
-            {
-                for (char *p = copy; *p; p++) if ((unsigned char)*p < 32) *p = ' ';
-                ReplaceSelection(f, copy, (int)strlen(copy)); free(copy);
-            }
-        }
-    }
-    s = f->query ? f->query : "";
-    if (Key(KEY_LEFT))
-        Move(f, !shift && f->cursor != f->anchor ? (f->cursor < f->anchor ? f->cursor : f->anchor) :
-                ctrl ? PicoText_PrevWord(s, f->cursor) : PicoText_Utf8Prev(s, f->cursor), shift);
-    if (Key(KEY_RIGHT))
-        Move(f, !shift && f->cursor != f->anchor ? (f->cursor > f->anchor ? f->cursor : f->anchor) :
-                ctrl ? PicoText_NextWord(s, f->length, f->cursor) : PicoText_Utf8Next(s, f->length, f->cursor), shift);
-    if (Key(KEY_HOME)) Move(f, 0, shift);
-    if (Key(KEY_END)) Move(f, f->length, shift);
-    if (Key(KEY_BACKSPACE))
-    {
-        if (f->cursor == f->anchor) f->anchor = ctrl ? PicoText_PrevWord(s, f->cursor) : PicoText_Utf8Prev(s, f->cursor);
-        ReplaceSelection(f, "", 0);
-    }
-    if (Key(KEY_DELETE))
-    {
-        s = f->query ? f->query : "";
-        if (f->cursor == f->anchor) f->anchor = ctrl ? PicoText_NextWord(s, f->length, f->cursor) : PicoText_Utf8Next(s, f->length, f->cursor);
-        ReplaceSelection(f, "", 0);
-    }
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) PicoChatFind_Navigate(app, shift ? -1 : 1);
-    int cp;
-    while ((cp = GetCharPressed()) != 0)
-    {
-        if (ctrl || cp < 32 || cp == 127) continue;
-        char bytes[4];
-        int n = PicoText_Utf8Encode(cp, bytes);
-        if (n) ReplaceSelection(f, bytes, n);
-    }
+    unsigned revision = f->field.revision;
+    PicoTextField_HandleKeys(&f->field);
+    if (f->field.revision != revision) QueryChanged(f);
 }
 
 static void Button(const char *id, const char *label, bool enabled)
@@ -347,15 +229,12 @@ void PicoChatFind_Render(PicoHost *app)
     if (!f->open || PicoUi_ModalOpen(app)) return;
     PicoChatSearch_Refresh(&f->search);
     if (f->search.failed) snprintf(f->counter, sizeof(f->counter), "Unavailable");
-    else if (f->length) snprintf(f->counter, sizeof(f->counter), "%d of %d", f->search.active + 1, f->search.count);
+    else if (f->field.length) snprintf(f->counter, sizeof(f->counter), "%d of %d", f->search.active + 1, f->search.count);
     else snprintf(f->counter, sizeof(f->counter), "0 of 0");
     float width = fminf(440, fmaxf(160, Clay_GetLayoutDimensions().width - 24));
     float field_width = fmaxf(20, width - 200);
-    const char *query = f->query ? f->query : "";
-    float caret = TextWidth(query, f->cursor);
-    if (caret < f->input_scroll) f->input_scroll = caret;
-    if (caret > f->input_scroll + field_width - 14) f->input_scroll = caret - field_width + 14;
-    f->input_scroll = fmaxf(0, fminf(f->input_scroll, TextWidth(query, f->length)));
+    const char *query = f->field.text ? f->field.text : "";
+    PicoTextField_KeepCaretVisible(&f->field, field_width - 14.0f, FONT_REGULAR);
     CLAY(CLAY_ID("ChatFind"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 30,
                        .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP, .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
@@ -369,12 +248,12 @@ void PicoChatFind_Render(PicoHost *app)
              {.layout = {.padding = {6, 6, 0, 0},
                          .sizing = {.width = CLAY_SIZING_GROW(20), .height = CLAY_SIZING_FIXED(28)},
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}},
-              .clip = {.horizontal = true, .vertical = true, .childOffset = {.x = -f->input_scroll}},
+              .clip = {.horizontal = true, .vertical = true, .childOffset = {.x = -f->field.scroll_x}},
               .backgroundColor = COLOR_CODE_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
             Clay_TextElementConfig config = InputConfig();
-            if (!f->length) config.textColor = COLOR_MUTED;
-            CLAY_TEXT(String(f->length ? query : "Find in chat"), CLAY_TEXT_CONFIG(config));
+            if (!f->field.length) config.textColor = COLOR_MUTED;
+            CLAY_TEXT(String(f->field.length ? query : "Find in chat"), CLAY_TEXT_CONFIG(config));
         }
         CLAY(CLAY_ID("ChatFindCount"), {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(88)}}})
         {
@@ -393,19 +272,7 @@ void PicoChatFind_DrawInput(PicoHost *app)
 {
     PicoChatFind *f = &app->find;
     if (!f->open || !f->focused || PicoUi_ModalOpen(app)) return;
-    Clay_ElementData input = Clay_GetElementData(CLAY_ID("ChatFindInput"));
-    if (!input.found) return;
-    Clay_BoundingBox box = input.boundingBox;
-    BeginScissorMode((int)box.x, (int)box.y, (int)box.width, (int)box.height);
-    const char *s = f->query ? f->query : "";
-    float x = box.x + 6 - f->input_scroll;
-    float a = TextWidth(s, f->anchor), b = TextWidth(s, f->cursor);
-    if (a != b) DrawRectangle((int)(x + fminf(a, b)), (int)box.y + 3, (int)fabsf(a - b), (int)box.height - 6,
-                              (Color){100, 150, 240, 90});
-    if (fmod(GetTime(), 1.0) < 0.6) DrawRectangle((int)(x + b), (int)box.y + 4, 1, (int)box.height - 8,
-                                                (Color){(unsigned char)COLOR_TEXT.r, (unsigned char)COLOR_TEXT.g,
-                                                        (unsigned char)COLOR_TEXT.b, 255});
-    EndScissorMode();
+    PicoTextField_Draw(&f->field, CLAY_ID("ChatFindInput"), 6.0f, 3.0f, FONT_REGULAR);
 }
 
 typedef struct RangeBounds {

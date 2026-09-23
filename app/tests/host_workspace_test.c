@@ -2353,7 +2353,7 @@ static int TestChatFindTranscript(void)
     g_find_key = 0; g_find_ctrl = false; g_find_character = 'm';
     PicoChatFind_HandleInput(host);
     PicoComposer_HandleInput(host);
-    if (strcmp(host->find.query, "m") != 0 || strcmp(host->composer.text, "draft") != 0)
+    if (strcmp(host->find.field.text, "m") != 0 || strcmp(host->composer.text, "draft") != 0)
     { Fail("Ctrl+F must select the query and route subsequent typing away from the composer"); goto done; }
     g_find_key = KEY_ENTER;
     PicoChatFind_HandleInput(host);
@@ -2375,7 +2375,7 @@ static int TestChatFindTranscript(void)
     pico_ui_modal_push(host, "find-input-test");
     g_find_key = KEY_F; g_find_ctrl = true; g_find_character = 'z';
     PicoChatFind_HandleInput(host);
-    if (strcmp(host->find.query, "marker") != 0 || !g_find_character)
+    if (strcmp(host->find.field.text, "marker") != 0 || !g_find_character)
     { Fail("find must not consume text belonging to a modal"); goto done; }
     pico_ui_modal_pop(host, "find-input-test");
     g_find_key = 0; g_find_ctrl = false; g_find_character = 0;
@@ -2388,7 +2388,7 @@ static int TestChatFindTranscript(void)
     g_find_press = false; g_find_character = '!';
     PicoChatFind_HandleInput(host);
     PicoComposer_HandleInput(host);
-    if (!host->find.open || strcmp(host->composer.text, "draft!") != 0 || strcmp(host->find.query, "marker") != 0)
+    if (!host->find.open || strcmp(host->composer.text, "draft!") != 0 || strcmp(host->find.field.text, "marker") != 0)
     { Fail("clicking the composer must return typing there without closing find"); goto done; }
     g_find_input_test = false;
     y = scroll.scrollPosition->y;
@@ -2415,7 +2415,7 @@ static int TestChatFindTranscript(void)
     if (search->count != 0) { Fail("truncated-away output must not be searched"); goto done; }
     PicoChatFind_Close(host);
     PicoChatFind_Open(host);
-    if (strcmp(host->find.query, "truncated-find-token") != 0)
+    if (strcmp(host->find.field.text, "truncated-find-token") != 0)
     { Fail("closing find must remember the query"); goto done; }
     PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
     PicoMessage *thinking = &agent->messages[agent->message_count - 1];
@@ -2465,7 +2465,7 @@ static int TestChatFindTranscript(void)
     if (!range.found || !ShellVerticallyContains(chat.boundingBox, range.box))
     { Fail("a match near the end of a long Clay-wrapped thought must be revealable"); goto done; }
     PicoAgent_ClearMessages(agent);
-    if (host->find.open || host->find.length || host->find.search.count)
+    if (host->find.open || host->find.field.length || host->find.search.count)
     { Fail("session reset must clear search and pending navigation"); goto done; }
     char separated[1202];
     memset(separated, 'x', 600);
@@ -2486,7 +2486,7 @@ static int TestChatFindTranscript(void)
     PicoChatFind_Open(host);
     PicoChatFind_SetQuery(host, "remember only this conversation");
     PicoAgentId other;
-    if (pico_main_agent_create(host, workspace_id, &options, &other) != PICO_OK || host->find.open || host->find.length)
+    if (pico_main_agent_create(host, workspace_id, &options, &other) != PICO_OK || host->find.open || host->find.field.length)
     { Fail("switching conversation must close and clear find"); goto done; }
 
 done:

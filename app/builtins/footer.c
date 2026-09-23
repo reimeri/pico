@@ -14,6 +14,7 @@
 #include "usage.h"
 #include "worktree.h"
 #include "text_range.h"
+#include "text_field_ui.h"
 
 #include "clay/clay.h"
 
@@ -58,14 +59,7 @@ typedef struct FooterState
     bool worktree_open;
     char worktree_name[129];
     char worktree_error[256];
-    int worktree_cursor;
-    int worktree_sel_anchor;
-    int worktree_granularity;
-    int worktree_unit_from;
-    int worktree_unit_to;
-    bool worktree_mouse_selecting;
-    PicoClickSeq worktree_click_seq;
-    double worktree_caret_blink_at;
+    PicoTextField worktree_field;
     bool esc_block;
     PicoScrollbar scrollbar;
 } FooterState;
@@ -94,14 +88,7 @@ static FooterState *ActiveFooterState(void)
 #define g_worktree_open (ActiveFooterState()->worktree_open)
 #define g_worktree_name (ActiveFooterState()->worktree_name)
 #define g_worktree_error (ActiveFooterState()->worktree_error)
-#define g_worktree_cursor (ActiveFooterState()->worktree_cursor)
-#define g_worktree_sel_anchor (ActiveFooterState()->worktree_sel_anchor)
-#define g_worktree_granularity (ActiveFooterState()->worktree_granularity)
-#define g_worktree_unit_from (ActiveFooterState()->worktree_unit_from)
-#define g_worktree_unit_to (ActiveFooterState()->worktree_unit_to)
-#define g_worktree_mouse_selecting (ActiveFooterState()->worktree_mouse_selecting)
-#define g_worktree_click_seq (ActiveFooterState()->worktree_click_seq)
-#define g_worktree_caret_blink_at (ActiveFooterState()->worktree_caret_blink_at)
+#define g_worktree_field (ActiveFooterState()->worktree_field)
 #define g_esc_block (ActiveFooterState()->esc_block)
 #define g_scrollbar (ActiveFooterState()->scrollbar)
 
@@ -260,234 +247,6 @@ static bool Over(const char *id)
 
 #define WORKTREE_NAME_PAD_X 10
 #define WORKTREE_NAME_PAD_Y 8
-#define WORKTREE_CARET_BLINK_HZ 2.0
-
-static bool IsCtrlDown(void)
-{
-    return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-}
-
-static bool IsShiftDown(void)
-{
-    return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-}
-
-static void WorktreeNoteCaret(void)
-{
-    g_worktree_caret_blink_at = GetTime();
-}
-
-static int WorktreeLen(void)
-{
-    return (int)strlen(g_worktree_name);
-}
-
-static bool WorktreeHasSelection(void)
-{
-    return g_worktree_sel_anchor != g_worktree_cursor;
-}
-
-static int WorktreeSelFrom(void)
-{
-    return g_worktree_sel_anchor < g_worktree_cursor ? g_worktree_sel_anchor : g_worktree_cursor;
-}
-
-static int WorktreeSelTo(void)
-{
-    return g_worktree_sel_anchor > g_worktree_cursor ? g_worktree_sel_anchor : g_worktree_cursor;
-}
-
-static void WorktreeMoveCursor(int pos, bool extend)
-{
-    int len = WorktreeLen();
-    if (pos < 0)
-        pos = 0;
-    if (pos > len)
-        pos = len;
-    g_worktree_cursor = pos;
-    if (!extend)
-        g_worktree_sel_anchor = pos;
-    WorktreeNoteCaret();
-}
-
-static void WorktreeDeleteRange(int from, int to)
-{
-    int len = WorktreeLen();
-    if (from < 0)
-        from = 0;
-    if (to > len)
-        to = len;
-    if (from >= to)
-        return;
-    memmove(g_worktree_name + from, g_worktree_name + to, (size_t)(len - to + 1));
-    WorktreeMoveCursor(from, false);
-}
-
-static void WorktreeDeleteSelection(void)
-{
-    if (WorktreeHasSelection())
-        WorktreeDeleteRange(WorktreeSelFrom(), WorktreeSelTo());
-}
-
-static void WorktreeInsert(const char *s, int n)
-{
-    int len;
-    int cap;
-    if (!s || n <= 0)
-        return;
-    if (WorktreeHasSelection())
-        WorktreeDeleteRange(WorktreeSelFrom(), WorktreeSelTo());
-    len = WorktreeLen();
-    cap = (int)sizeof(g_worktree_name) - 1;
-    if (n > cap - len)
-    {
-        n = cap - len;
-        while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80)
-            n--;
-    }
-    if (n <= 0)
-        return;
-    memmove(g_worktree_name + g_worktree_cursor + n,
-            g_worktree_name + g_worktree_cursor,
-            (size_t)(len - g_worktree_cursor + 1));
-    memcpy(g_worktree_name + g_worktree_cursor, s, (size_t)n);
-    WorktreeMoveCursor(g_worktree_cursor + n, false);
-}
-
-static void WorktreeCopy(void)
-{
-    int from;
-    int n;
-    char *copy;
-    if (!WorktreeHasSelection())
-        return;
-    from = WorktreeSelFrom();
-    n = WorktreeSelTo() - from;
-    copy = (char *)malloc((size_t)n + 1);
-    if (!copy)
-        return;
-    memcpy(copy, g_worktree_name + from, (size_t)n);
-    copy[n] = '\0';
-    SetClipboardText(copy);
-    free(copy);
-}
-
-static void WorktreePaste(void)
-{
-    const char *clip = GetClipboardText();
-    char filtered[129];
-    int n = 0;
-    if (!clip || !clip[0])
-        return;
-    for (const char *p = clip; *p && n < (int)sizeof(filtered) - 1; p++)
-    {
-        unsigned char c = (unsigned char)*p;
-        if (c == '\n' || c == '\r')
-            continue;
-        filtered[n++] = (char)c;
-    }
-    filtered[n] = '\0';
-    WorktreeInsert(filtered, n);
-}
-
-static Font WorktreeFont(void)
-{
-    return Pico_FontAt(FONT_MONO, PICO_FONT_UI);
-}
-
-static float WorktreePx(void)
-{
-    return Pico_FontPx(PICO_FONT_UI);
-}
-
-static float WorktreeMeasureSlice(const char *s, int start, int length)
-{
-    char saved;
-    Vector2 size;
-    if (length <= 0)
-        return 0;
-    saved = ((char *)s)[start + length];
-    ((char *)s)[start + length] = '\0';
-    size = MeasureTextEx(WorktreeFont(), s + start, WorktreePx(), 0);
-    ((char *)s)[start + length] = saved;
-    return size.x;
-}
-
-static int WorktreeOffsetAtPoint(float x)
-{
-    Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("WorktreeName")));
-    int len = WorktreeLen();
-    float local;
-    float width = 0;
-    int pos = 0;
-    if (!box.found)
-        return g_worktree_cursor;
-    local = x - box.boundingBox.x - (float)WORKTREE_NAME_PAD_X;
-    if (local <= 0 || len <= 0)
-        return 0;
-    while (pos < len)
-    {
-        int next = PicoText_Utf8Next(g_worktree_name, len, pos);
-        float ch_w = WorktreeMeasureSlice(g_worktree_name, pos, next - pos);
-        if (width + ch_w * 0.5f >= local)
-            return pos;
-        width += ch_w;
-        pos = next;
-    }
-    return len;
-}
-
-static void WorktreeSelectUnit(int pos, int granularity)
-{
-    int from = pos;
-    int to = pos;
-    g_worktree_granularity = granularity;
-    if (granularity <= 1)
-    {
-        g_worktree_unit_from = pos;
-        g_worktree_unit_to = pos;
-        WorktreeMoveCursor(pos, IsShiftDown());
-        return;
-    }
-    if (granularity >= 3)
-        PicoText_ParaRange(g_worktree_name, WorktreeLen(), pos, &from, &to);
-    else
-        PicoText_WordRange(g_worktree_name, WorktreeLen(), pos, &from, &to);
-    g_worktree_unit_from = from;
-    g_worktree_unit_to = to;
-    g_worktree_sel_anchor = from;
-    g_worktree_cursor = to;
-    WorktreeNoteCaret();
-}
-
-static void WorktreeExtendUnit(int pos)
-{
-    int from = pos;
-    int to = pos;
-    int span_from = 0;
-    int span_to = 0;
-    if (g_worktree_granularity <= 1)
-    {
-        WorktreeMoveCursor(pos, true);
-        return;
-    }
-    if (g_worktree_granularity >= 3)
-        PicoText_ParaRange(g_worktree_name, WorktreeLen(), pos, &from, &to);
-    else
-        PicoText_WordRange(g_worktree_name, WorktreeLen(), pos, &from, &to);
-    PicoText_UnionRange(g_worktree_unit_from, g_worktree_unit_to, from, to, &span_from, &span_to);
-    if (pos >= g_worktree_unit_from)
-    {
-        g_worktree_sel_anchor = g_worktree_unit_from;
-        g_worktree_cursor = span_to;
-    }
-    else
-    {
-        g_worktree_sel_anchor = g_worktree_unit_to;
-        g_worktree_cursor = span_from;
-    }
-    WorktreeNoteCaret();
-}
 
 static bool WorktreeNameHovered(void)
 {
@@ -507,131 +266,22 @@ static bool WorktreeNameHovered(void)
 
 static void HandleWorktreeKeys(PicoHost *app)
 {
-    bool ctrl = IsCtrlDown();
-    bool shift = IsShiftDown();
-    bool left = IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT);
-    bool right = IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT);
-    bool backspace = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
-    bool del = IsKeyPressed(KEY_DELETE) || IsKeyPressedRepeat(KEY_DELETE);
-    const char *text = g_worktree_name;
-
-    if (ctrl && Pico_ShortcutPressed('c'))
-    {
-        WorktreeCopy();
-        return;
-    }
-    if (ctrl && Pico_ShortcutPressed('x'))
-    {
-        WorktreeCopy();
-        WorktreeDeleteSelection();
-        return;
-    }
-    if (ctrl && Pico_ShortcutPressed('a'))
-    {
-        WorktreeMoveCursor(0, false);
-        WorktreeMoveCursor(WorktreeLen(), true);
-    }
-    if (ctrl && Pico_ShortcutPressed('v'))
-        WorktreePaste();
-    if (IsKeyPressed(KEY_HOME))
-        WorktreeMoveCursor(0, shift);
-    if (IsKeyPressed(KEY_END))
-        WorktreeMoveCursor(WorktreeLen(), shift);
-    if (left)
-        WorktreeMoveCursor(ctrl ? PicoText_PrevWord(text, g_worktree_cursor)
-                                : PicoText_Utf8Prev(text, g_worktree_cursor),
-                           shift);
-    if (right)
-        WorktreeMoveCursor(ctrl ? PicoText_NextWord(text, WorktreeLen(), g_worktree_cursor)
-                                : PicoText_Utf8Next(text, WorktreeLen(), g_worktree_cursor),
-                           shift);
-    if (ctrl && Pico_ShortcutRepeat('w'))
-    {
-        if (WorktreeHasSelection())
-            WorktreeDeleteSelection();
-        else
-            WorktreeDeleteRange(PicoText_PrevWord(text, g_worktree_cursor), g_worktree_cursor);
-    }
-    else if (backspace)
-    {
-        if (WorktreeHasSelection())
-            WorktreeDeleteSelection();
-        else if (ctrl)
-            WorktreeDeleteRange(PicoText_PrevWord(text, g_worktree_cursor), g_worktree_cursor);
-        else if (g_worktree_cursor > 0)
-            WorktreeDeleteRange(PicoText_Utf8Prev(text, g_worktree_cursor), g_worktree_cursor);
-    }
-    if (del)
-    {
-        if (WorktreeHasSelection())
-            WorktreeDeleteSelection();
-        else if (g_worktree_cursor < WorktreeLen())
-            WorktreeDeleteRange(g_worktree_cursor, PicoText_Utf8Next(text, WorktreeLen(), g_worktree_cursor));
-    }
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
     {
         StartWorktreeCreation(app);
         return;
     }
-    if (!ctrl)
-    {
-        int cp;
-        while ((cp = GetCharPressed()) != 0)
-        {
-            char bytes[4];
-            int n;
-            if (cp < 32)
-                continue;
-            n = PicoText_Utf8Encode(cp, bytes);
-            WorktreeInsert(bytes, n);
-        }
-    }
+    PicoTextField_HandleKeys(&g_worktree_field);
 }
 
 static void FooterDrawWorktreeOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
-    Clay_ElementData box;
-    float inner_h;
-    float origin_x;
-    float origin_y;
     (void)event;
     s_active_footer_state = state ? (FooterState *)state : (FooterState *)PicoPlugins_HostState(app, "footer");
     if (!s_active_footer_state || !g_worktree_open || !pico_ui_modal_is_top(app, "worktree-create"))
         return;
-    box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("WorktreeName")));
-    if (!box.found)
-        return;
-    inner_h = box.boundingBox.height - 2.0f * (float)WORKTREE_NAME_PAD_Y;
-    if (inner_h < 1.0f)
-        inner_h = WorktreePx();
-    origin_x = box.boundingBox.x + (float)WORKTREE_NAME_PAD_X;
-    origin_y = box.boundingBox.y + (float)WORKTREE_NAME_PAD_Y;
-    BeginScissorMode((int)box.boundingBox.x, (int)box.boundingBox.y,
-                     (int)box.boundingBox.width, (int)box.boundingBox.height);
-    if (WorktreeHasSelection())
-    {
-        int from = WorktreeSelFrom();
-        int to = WorktreeSelTo();
-        float x0 = WorktreeMeasureSlice(g_worktree_name, 0, from);
-        float x1 = WorktreeMeasureSlice(g_worktree_name, 0, to);
-        Color fill = {(unsigned char)COLOR_SELECTION.r, (unsigned char)COLOR_SELECTION.g,
-                      (unsigned char)COLOR_SELECTION.b, (unsigned char)COLOR_SELECTION.a};
-        DrawRectangle((int)(origin_x + x0), (int)origin_y,
-                      (int)(x1 - x0 < 2 ? 2 : x1 - x0), (int)inner_h, fill);
-    }
-    {
-        double elapsed = GetTime() - g_worktree_caret_blink_at;
-        if (elapsed < 0)
-            elapsed = 0;
-        if (((int)(elapsed * WORKTREE_CARET_BLINK_HZ) & 1) == 0)
-        {
-            float x = origin_x + WorktreeMeasureSlice(g_worktree_name, 0, g_worktree_cursor);
-            Color caret = {(unsigned char)COLOR_CURSOR.r, (unsigned char)COLOR_CURSOR.g,
-                           (unsigned char)COLOR_CURSOR.b, 255};
-            DrawRectangle((int)x, (int)origin_y, 2, (int)inner_h, caret);
-        }
-    }
-    EndScissorMode();
+    PicoTextField_Draw(&g_worktree_field, CLAY_ID("WorktreeName"), (float)WORKTREE_NAME_PAD_X,
+                       (float)WORKTREE_NAME_PAD_Y, FONT_MONO);
 }
 
 static void MutedText(const char *s)
@@ -873,6 +523,7 @@ static void CloseWorktreeModal(PicoHost *app)
         return;
     g_worktree_open = false;
     g_worktree_error[0] = '\0';
+    PicoTextField_Unbind(&g_worktree_field);
 }
 
 static void OpenWorktreeModal(PicoHost *app)
@@ -901,12 +552,8 @@ static void OpenWorktreeModal(PicoHost *app)
     g_worktree_open = true;
     g_worktree_error[0] = '\0';
     (void)PicoWorktree_SuggestName(ws->project_path, g_worktree_name, sizeof(g_worktree_name));
-    g_worktree_cursor = g_worktree_sel_anchor = (int)strlen(g_worktree_name);
-    g_worktree_granularity = 1;
-    g_worktree_unit_from = g_worktree_unit_to = g_worktree_cursor;
-    g_worktree_mouse_selecting = false;
-    PicoClickSeq_Reset(&g_worktree_click_seq);
-    WorktreeNoteCaret();
+    PicoTextField_Bind(&g_worktree_field, g_worktree_name, sizeof(g_worktree_name));
+    g_worktree_field.blink_at = GetTime();
 }
 
 static void StartWorktreeCreation(PicoHost *app)
@@ -976,13 +623,14 @@ static void RenderWorktreeModal(PicoHost *app, void *state)
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .sizing = {.width = CLAY_SIZING_GROW(0),
                                         .height = CLAY_SIZING_FIT((float)PICO_FONT_UI_LINE)}},
-                  .clip = {.horizontal = true, .vertical = true},
+                  .clip = {.horizontal = true, .vertical = true,
+                           .childOffset = {.x = -g_worktree_field.scroll_x}},
                   .backgroundColor = COLOR_CODE_BG,
                   .cornerRadius = CLAY_CORNER_RADIUS(5),
                   .border = {.width = {1, 1, 1, 1}, .color = COLOR_MUTED}})
             {
                 CLAY_TEXT(CStr(g_worktree_name),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_MONO, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                          CLAY_TEXT_CONFIG(PicoTextField_Config(FONT_MONO)));
             }
             CLAY(CLAY_ID("WorktreeUseLocal"),
                  {.layout = {.padding = {10, 10, 7, 7},
@@ -1398,21 +1046,18 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     if (own_worktree_top)
     {
         bool over_name = WorktreeNameHovered();
-        Vector2 mouse = GetMousePosition();
         app->hovered_text = over_name;
         app->hovered_clickable = Over("WorktreeUseLocal") || Over("WorktreeCancel") ||
                                  Over("WorktreeCreate");
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over_name)
+        PicoTextField_HandlePointer(&g_worktree_field, CLAY_ID("WorktreeName"),
+                                    (float)WORKTREE_NAME_PAD_X, FONT_MONO);
         {
-            int pos = WorktreeOffsetAtPoint(mouse.x);
-            int count = PicoClickSeq_Press(&g_worktree_click_seq, GetTime(), mouse.x, mouse.y);
-            WorktreeSelectUnit(pos, count);
-            g_worktree_mouse_selecting = true;
+            Clay_ElementData name_box = Clay_GetElementData(CLAY_ID("WorktreeName"));
+            if (name_box.found)
+                PicoTextField_KeepCaretVisible(&g_worktree_field,
+                                               name_box.boundingBox.width - 2.0f * (float)WORKTREE_NAME_PAD_X,
+                                               FONT_MONO);
         }
-        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-            g_worktree_mouse_selecting = false;
-        else if (g_worktree_mouse_selecting)
-            WorktreeExtendUnit(WorktreeOffsetAtPoint(mouse.x));
         if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             return;
         if (over_name)

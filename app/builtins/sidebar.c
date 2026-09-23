@@ -13,6 +13,7 @@
 #include "builtins/sidebar.h"
 #include "tinyfiledialogs.h"
 #include "text_range.h"
+#include "text_field_ui.h"
 
 #include "clay/clay.h"
 
@@ -65,6 +66,7 @@ typedef struct SidebarState
     bool edit_pointer_latched;
     char edit_path[4096];
     char edit_name[PICO_CATALOG_NAME_MAX];
+    PicoTextField edit_field;
     char delete_label[384];
     Texture2D settings_icon;
     Texture2D settings_icon_hover;
@@ -1372,6 +1374,7 @@ static bool CloseWorkspaceEdit(SidebarState *s)
         return false; /* buried under another modal; retry once it is top again */
     s->edit_open = false;
     s->delete_confirm = false;
+    PicoTextField_Unbind(&s->edit_field);
     return true;
 }
 
@@ -1385,6 +1388,7 @@ static void OpenWorkspaceEdit(SidebarState *s, int index)
     s->edit_pointer_latched = true; /* opening press must not close the new popup */
     snprintf(s->edit_path, sizeof(s->edit_path), "%s", s->workspaces[index].path);
     snprintf(s->edit_name, sizeof(s->edit_name), "%s", s->workspaces[index].name);
+    PicoTextField_Bind(&s->edit_field, s->edit_name, sizeof(s->edit_name));
     snprintf(s->delete_label, sizeof(s->delete_label),
              "Delete saved sessions from %s and ALL its checkouts and worktrees? Project folders remain untouched.",
              s->workspaces[index].name);
@@ -1447,15 +1451,14 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .padding = {7, 7, 6, 6},
                          .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
-              .clip = {.horizontal = true},
+              .clip = {.horizontal = true, .childOffset = {.x = -s->edit_field.scroll_x}},
               .backgroundColor = (Clay_Color){35, 35, 42, 255},
               .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
+            Clay_TextElementConfig field_config = PicoTextField_Config(FONT_REGULAR);
+            if (!s->edit_name[0]) field_config.textColor = COLOR_MUTED;
             CLAY_TEXT(CStr(s->edit_name[0] ? s->edit_name : " "),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
-            CLAY_TEXT(CLAY_STRING("|"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                          .fontSize = PICO_FONT_UI,
-                                                          .textColor = COLOR_MUTED}));
+                      CLAY_TEXT_CONFIG(field_config));
         }
         RenderEditAction(CLAY_ID("SidebarEditSave"), "Save name", false);
         RenderEditAction(CLAY_ID("SidebarEditStash"), s->workspaces[i].stashed ? "Restore to Projects" : "Stash project", false);
@@ -1488,24 +1491,7 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
     }
     if (!s->delete_confirm)
     {
-        if (IsKeyPressed(KEY_BACKSPACE))
-        {
-            size_t len = strlen(s->edit_name);
-            if (len)
-                s->edit_name[PicoText_Utf8Prev(s->edit_name, len)] = 0;
-        }
-        int cp;
-        while ((cp = GetCharPressed()) != 0)
-        {
-            char bytes[4];
-            int n = PicoText_Utf8Encode(cp, bytes);
-            size_t len = strlen(s->edit_name);
-            if (cp >= 32 && cp != 127 && n > 0 && len + (size_t)n < sizeof(s->edit_name))
-            {
-                memcpy(s->edit_name + len, bytes, (size_t)n);
-                s->edit_name[len + (size_t)n] = 0;
-            }
-        }
+        PicoTextField_HandleKeys(&s->edit_field);
     }
     else
     {
@@ -1513,15 +1499,24 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
         {
         } /* the queue is global; discard typing while confirming */
     }
+    {
+        Clay_ElementData name_box = Clay_GetElementData(CLAY_ID("SidebarEditName"));
+        if (name_box.found)
+            PicoTextField_KeepCaretVisible(&s->edit_field, name_box.boundingBox.width - 14.0f,
+                                           FONT_REGULAR);
+    }
     if (s->edit_pointer_latched)
     {
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
             s->edit_pointer_latched = false;
         return;
     }
+    PicoTextField_HandlePointer(&s->edit_field, CLAY_ID("SidebarEditName"), 7.0f, FONT_REGULAR);
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         return;
     s->edit_pointer_latched = true;
+    if (Clay_PointerOver(CLAY_ID("SidebarEditName")))
+        return; /* the field consumed the press */
     if (Clay_PointerOver(CLAY_ID("SidebarEditSave")) && !s->delete_confirm)
     {
         if (PicoCatalog_SetProjectName(s->edit_path, s->edit_name) != 0)
@@ -1568,6 +1563,15 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
     }
     else if (!Clay_PointerOver(CLAY_ID("SidebarEditPopup")))
         CloseWorkspaceEdit(s);
+}
+
+static void SidebarDrawEditOverlay(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
+    (void)event;
+    if (!s || !s->edit_open || !pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
+        return;
+    PicoTextField_Draw(&s->edit_field, CLAY_ID("SidebarEditName"), 7.0f, 6.0f, FONT_REGULAR);
 }
 
 static void RenderFolderModal(PicoHost *host, void *state)
@@ -2001,6 +2005,7 @@ static int SidebarInit(PicoHost *host, void **state_out)
     pico_host_add_view(host, PICO_SLOT_OVERLAY, 41, RenderFolderModal);
     pico_host_add_view(host, PICO_SLOT_OVERLAY, 42, RenderWorkspaceEdit);
     pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, SidebarAfterLayout);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_RENDER, SidebarDrawEditOverlay);
     return 0;
 }
 

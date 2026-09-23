@@ -102,6 +102,8 @@ add_executable(pico
     chat_find.c
     chat_sel.c
     text_range.c
+    text_field.c
+    text_field_ui.c
     spell_engine.c
     diff_lines.c
     diff_model.c
@@ -266,6 +268,14 @@ if(BUILD_TESTING)
     target_include_directories(pico_text_range_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_text_range_tests)
     add_test(NAME pico_text_range_tests COMMAND pico_text_range_tests)
+
+    add_executable(pico_text_field_tests
+        tests/text_field_test.c
+        text_field.c
+        text_range.c)
+    target_include_directories(pico_text_field_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_text_field_tests)
+    add_test(NAME pico_text_field_tests COMMAND pico_text_field_tests)
 
     add_executable(pico_markdown_tests
         tests/markdown_test.c
@@ -465,6 +475,8 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         text_range.c
+        text_field.c
+        text_field_ui.c
         agent.c
         trace_group.c
         tool_args.c
@@ -546,6 +558,8 @@ if(BUILD_TESTING)
         chat_find.c
         chat_sel.c
         text_range.c
+        text_field.c
+        text_field_ui.c
         markdown.c)
     target_include_directories(pico_files_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -588,6 +602,8 @@ if(BUILD_TESTING)
         chat_find.c
         chat_sel.c
         text_range.c
+        text_field.c
+        text_field_ui.c
         markdown.c)
     target_include_directories(pico_composer_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -788,6 +804,8 @@ if(BUILD_TESTING)
         highlight.c
         richtext.c
         text_range.c
+        text_field.c
+        text_field_ui.c
         wrapped_text.c
         transcript_virtual.c
         trace_group.c

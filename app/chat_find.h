@@ -2,6 +2,7 @@
 #define PICO_CHAT_FIND_H
 
 #include "chat_search.h"
+#include "text_field.h"
 #include "transcript_virtual.h"
 #include "clay/clay.h"
 
@@ -9,17 +10,11 @@ struct PicoHost;
 typedef struct PicoChatFind {
     PicoChatSearch search;
     struct PicoFindScrollRestore *temporary_scrolls;
-    char *query;
-    int length;
-    int capacity;
-    int cursor;
-    int anchor;
-    float input_scroll;
+    PicoTextField field;
     bool open;
     bool focused;
     bool claimed_input;
     bool claimed_pointer;
-    bool dragging;
     bool nearest;
     bool reveal;
     int pressed_button;

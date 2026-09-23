@@ -6,6 +6,7 @@
 
 #include "clay/clay.h"
 #include "docs_path.h"
+#include "text_field_ui.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +45,7 @@ typedef struct SettingsState {
     char error[256];
     int focus_kind;
     int focus_model;
+    PicoTextField field;
     bool model_dropdown;
     int model_dropdown_selected;
     bool model_dropdown_click_block;
@@ -54,7 +56,9 @@ typedef struct SettingsState {
 } SettingsState;
 
 static __thread SettingsState *s_active_settings_state = NULL;
-static char s_caret[520];
+
+static char *FocusBuf(SettingsState *s, size_t *cap);
+static void SetFocus(SettingsState *s, int kind, int model);
 
 #define g_host (s_active_settings_state->host)
 #define g_open (s_active_settings_state->open)
@@ -84,12 +88,6 @@ static Clay_String CStr(const char *s)
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
 }
 
-static Clay_String CaretText(const char *s)
-{
-    snprintf(s_caret, sizeof(s_caret), "%s|", s ? s : "");
-    return CStr(s_caret);
-}
-
 static bool CompactOff(const char *s)
 {
     return !s || !s[0] || strcmp(s, "null") == 0 || strcmp(s, "off") == 0 || strcmp(s, "false") == 0 ||
@@ -106,6 +104,7 @@ static void ClearFocus(SettingsState *s)
     s->focus_model = -1;
     s->model_dropdown = false;
     s->custom_effort[0] = '\0';
+    PicoTextField_Unbind(&s->field);
 }
 
 static bool ResetExpanded(SettingsState *s)
@@ -440,6 +439,10 @@ static bool AddCustomEffort(SettingsState *s, int model_index)
         ToggleEffort(m, s->custom_effort);
     }
     s->custom_effort[0] = '\0';
+    if (s->focus_kind == FOCUS_CUSTOM_EFFORT)
+    {
+        PicoTextField_Refresh(&s->field);
+    }
     return true;
 }
 
@@ -491,9 +494,8 @@ static bool AddModel(SettingsState *s)
     s->expanded[s->draft.model_count] = true;
     s->draft.model_count = n;
     snprintf(s->model_contexts[n - 1], sizeof(s->model_contexts[n - 1]), "%d", m->context_limit);
-    s->focus_kind = FOCUS_MODEL_ID;
-    s->focus_model = n - 1;
     s->error[0] = '\0';
+    SetFocus(s, FOCUS_MODEL_ID, n - 1);
     return true;
 }
 
@@ -532,7 +534,18 @@ static void RemoveModel(SettingsState *s, int index)
     }
     else if (s->focus_model > index)
     {
+        size_t cap = 0;
+        char *buf;
         s->focus_model--;
+        buf = FocusBuf(s, &cap);
+        if (buf)
+        {
+            PicoTextField_Bind(&s->field, buf, (int)cap);
+        }
+        else
+        {
+            PicoTextField_Unbind(&s->field);
+        }
     }
     s->error[0] = '\0';
 }
@@ -621,10 +634,14 @@ static void FlushModelContext(SettingsState *s)
 static void SetFocus(SettingsState *s, int kind, int model)
 {
     PicoModel *m;
+    int prev_kind;
+    int prev_model;
     if (!s)
     {
         return;
     }
+    prev_kind = s->focus_kind;
+    prev_model = s->focus_model;
     FlushModelContext(s);
     s->focus_kind = kind;
     s->focus_model = model;
@@ -641,37 +658,66 @@ static void SetFocus(SettingsState *s, int kind, int model)
             snprintf(s->model_contexts[model], sizeof(s->model_contexts[model]), "%d", m->context_limit);
         }
     }
+    if (kind == FOCUS_NONE)
+    {
+        PicoTextField_Unbind(&s->field);
+    }
+    else if (kind != prev_kind || model != prev_model || !s->field.bound)
+    {
+        size_t cap = 0;
+        char *buf = FocusBuf(s, &cap);
+        if (buf)
+        {
+            PicoTextField_Bind(&s->field, buf, (int)cap);
+        }
+        else
+        {
+            PicoTextField_Unbind(&s->field);
+        }
+    }
+    else if (kind == FOCUS_MODEL_CONTEXT)
+    {
+        /* The context buffer was rewritten above without a rebind. */
+        PicoTextField_Refresh(&s->field);
+    }
 }
 
-static void InsertAscii(char *buf, size_t cap, int cp)
+static Clay_ElementId FocusElementId(const SettingsState *s)
 {
-    size_t n;
-    if (!buf || cp < 32 || cp > 126)
+    switch (s->focus_kind)
     {
-        return;
+    case FOCUS_CONTEXT_LIMIT:
+        return CLAY_ID("SettingsContextLimit");
+    case FOCUS_MAX_PARALLEL_TOOLS:
+        return CLAY_ID("SettingsMaxParallelTools");
+    case FOCUS_COMPACT_AT:
+        return CLAY_ID("SettingsCompactAt");
+    case FOCUS_FONT_SCALE:
+        return CLAY_ID("SettingsFontScale");
+    case FOCUS_CHAT_WIDTH:
+        return CLAY_ID("SettingsChatWidth");
+    case FOCUS_MODEL_ID:
+        return CLAY_IDI("SettingsModelId", s->focus_model);
+    case FOCUS_MODEL_NAME:
+        return CLAY_IDI("SettingsModelName", s->focus_model);
+    case FOCUS_MODEL_PROVIDER:
+        return CLAY_IDI("SettingsModelProvider", s->focus_model);
+    case FOCUS_MODEL_BASE_URL:
+        return CLAY_IDI("SettingsModelBaseUrl", s->focus_model);
+    case FOCUS_MODEL_CONTEXT:
+        return CLAY_IDI("SettingsModelContext", s->focus_model);
+    case FOCUS_CUSTOM_EFFORT:
+        return CLAY_IDI("SettingsCustomEffort", s->focus_model);
+    default:
+        return (Clay_ElementId){0};
     }
-    n = strlen(buf);
-    if (n + 1 >= cap)
-    {
-        return;
-    }
-    buf[n] = (char)cp;
-    buf[n + 1] = '\0';
 }
 
-static void Backspace(char *buf)
+/* Focus a field and let the click that focused it place the caret. */
+static void FocusField(SettingsState *s, int kind, int model, Clay_ElementId id)
 {
-    size_t n;
-    if (!buf)
-    {
-        return;
-    }
-    n = strlen(buf);
-    if (n == 0)
-    {
-        return;
-    }
-    buf[n - 1] = '\0';
+    SetFocus(s, kind, model);
+    PicoTextField_HandlePointer(&s->field, id, 8.0f, FONT_REGULAR);
 }
 
 static bool OverId(Clay_String id)
@@ -687,35 +733,25 @@ static void RenderLabel(const char *label)
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
 
-static void RenderField(Clay_ElementId id, const char *value, const char *placeholder, bool focused)
+static void RenderField(SettingsState *s, Clay_ElementId id, const char *value, const char *placeholder,
+                        bool focused)
 {
     bool hover = Clay_PointerOver(id);
     Clay_Color bg = focused ? (Clay_Color){54, 54, 66, 255} : (hover ? COLOR_CODE_BG : COLOR_COMPOSER_BG);
     CLAY(id, {.layout = {.padding = {8, 8, 6, 6}, .sizing = {.width = CLAY_SIZING_GROW(0)}},
+              .clip = {.horizontal = true, .childOffset = {.x = focused ? -s->field.scroll_x : 0.0f}},
               .backgroundColor = bg,
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        if (focused)
+        Clay_TextElementConfig config = PicoTextField_Config(FONT_REGULAR);
+        if (value && value[0])
         {
-            CLAY_TEXT(CaretText(value), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                         .fontSize = PICO_FONT_UI,
-                                                         .textColor = COLOR_TEXT,
-                                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        }
-        else if (value && value[0])
-        {
-            CLAY_TEXT(CStr(value), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                    .fontSize = PICO_FONT_UI,
-                                                    .textColor = COLOR_TEXT,
-                                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            CLAY_TEXT(CStr(value), CLAY_TEXT_CONFIG(config));
         }
         else
         {
-            CLAY_TEXT(CStr(placeholder ? placeholder : ""),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                        .fontSize = PICO_FONT_UI,
-                                        .textColor = COLOR_MUTED,
-                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            config.textColor = COLOR_MUTED;
+            CLAY_TEXT(CStr(placeholder ? placeholder : ""), CLAY_TEXT_CONFIG(config));
         }
     }
 }
@@ -1062,17 +1098,17 @@ static void RenderGeneral(SettingsState *s)
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Fallback context limit");
-        RenderField(CLAY_ID("SettingsContextLimit"), s->context_limit, "128000",
+        RenderField(s, CLAY_ID("SettingsContextLimit"), s->context_limit, "128000",
                     s->focus_kind == FOCUS_CONTEXT_LIMIT);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Max parallel tools (1–16)");
-        RenderField(CLAY_ID("SettingsMaxParallelTools"), s->max_parallel_tools, "4",
+        RenderField(s, CLAY_ID("SettingsMaxParallelTools"), s->max_parallel_tools, "4",
                     s->focus_kind == FOCUS_MAX_PARALLEL_TOOLS);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Compact at (0–1, or off)");
-        RenderField(CLAY_ID("SettingsCompactAt"), s->compact_at, "0.9 or off", s->focus_kind == FOCUS_COMPACT_AT);
+        RenderField(s, CLAY_ID("SettingsCompactAt"), s->compact_at, "0.9 or off", s->focus_kind == FOCUS_COMPACT_AT);
     }
     SETTINGS_ROW_BEGIN
         RenderToggle(CLAY_ID("SettingsResumeLast"), "Resume last session", s->draft.resume_last);
@@ -1082,11 +1118,11 @@ static void RenderGeneral(SettingsState *s)
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Font scale (0.5–3.0)");
-        RenderField(CLAY_ID("SettingsFontScale"), s->font_scale, "1.0", s->focus_kind == FOCUS_FONT_SCALE);
+        RenderField(s, CLAY_ID("SettingsFontScale"), s->font_scale, "1.0", s->focus_kind == FOCUS_FONT_SCALE);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Chat width (0 = no cap, else 40–200)");
-        RenderField(CLAY_ID("SettingsChatWidth"), s->chat_width, "90", s->focus_kind == FOCUS_CHAT_WIDTH);
+        RenderField(s, CLAY_ID("SettingsChatWidth"), s->chat_width, "90", s->focus_kind == FOCUS_CHAT_WIDTH);
     }
 }
 
@@ -1098,17 +1134,17 @@ static void RenderModelEditor(SettingsState *s, int index, PicoModel *m)
     bool context_focus = s->focus_kind == FOCUS_MODEL_CONTEXT && s->focus_model == index;
     SETTINGS_ROW_BEGIN
         RenderLabel("Id");
-        RenderField(CLAY_IDI("SettingsModelId", index), m->id, "id",
+        RenderField(s, CLAY_IDI("SettingsModelId", index), m->id, "id",
                     s->focus_kind == FOCUS_MODEL_ID && s->focus_model == index);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Name");
-        RenderField(CLAY_IDI("SettingsModelName", index), m->name, "display name",
+        RenderField(s, CLAY_IDI("SettingsModelName", index), m->name, "display name",
                     s->focus_kind == FOCUS_MODEL_NAME && s->focus_model == index);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Provider");
-        RenderField(CLAY_IDI("SettingsModelProvider", index), m->provider, "openai",
+        RenderField(s, CLAY_IDI("SettingsModelProvider", index), m->provider, "openai",
                     s->focus_kind == FOCUS_MODEL_PROVIDER && s->focus_model == index);
         ws = PicoHost_SelectedWorkspaceConst(s->host);
         if (ws && ws->provider_count > 0)
@@ -1131,12 +1167,12 @@ static void RenderModelEditor(SettingsState *s, int index, PicoModel *m)
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Base URL (optional; hyper/xAI reject non-canonical URLs)");
-        RenderField(CLAY_IDI("SettingsModelBaseUrl", index), m->base_url, "https://…",
+        RenderField(s, CLAY_IDI("SettingsModelBaseUrl", index), m->base_url, "https://…",
                     s->focus_kind == FOCUS_MODEL_BASE_URL && s->focus_model == index);
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Context limit (0 = fallback)");
-        RenderField(CLAY_IDI("SettingsModelContext", index), context_value, "0", context_focus);
+        RenderField(s, CLAY_IDI("SettingsModelContext", index), context_value, "0", context_focus);
     }
     SETTINGS_ROW_BEGIN
         RenderToggle(CLAY_IDI("SettingsModelVision", index), "Vision", m->vision);
@@ -1184,7 +1220,7 @@ static void RenderModelEditor(SettingsState *s, int index, PicoModel *m)
     }
     SETTINGS_ROW_BEGIN
         RenderLabel("Add custom effort");
-        RenderField(CLAY_IDI("SettingsCustomEffort", index), s->custom_effort, "xhigh",
+        RenderField(s, CLAY_IDI("SettingsCustomEffort", index), s->custom_effort, "xhigh",
                     s->focus_kind == FOCUS_CUSTOM_EFFORT && s->focus_model == index);
         RenderButton(CLAY_IDI("SettingsAddEffort", index), "Add effort", s->custom_effort[0] != '\0', false);
     }
@@ -1566,31 +1602,16 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
 
 static void HandleKeys(SettingsState *s)
 {
-    char *buf;
-    size_t cap = 0;
-    int cp;
-    if (!s || s->focus_kind == FOCUS_NONE)
+    if (!s || s->focus_kind == FOCUS_NONE || !s->field.bound)
     {
         return;
-    }
-    buf = FocusBuf(s, &cap);
-    if (!buf)
-    {
-        return;
-    }
-    if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE))
-    {
-        Backspace(buf);
     }
     if (s->focus_kind == FOCUS_CUSTOM_EFFORT && IsKeyPressed(KEY_ENTER))
     {
         AddCustomEffort(s, s->focus_model);
         return;
     }
-    while ((cp = GetCharPressed()) != 0)
-    {
-        InsertAscii(buf, cap, cp);
-    }
+    PicoTextField_HandleKeys(&s->field);
 }
 
 static bool HandleClicks(SettingsState *s)
@@ -1655,27 +1676,27 @@ static bool HandleClicks(SettingsState *s)
     }
     if (OverId(CLAY_STRING("SettingsContextLimit")))
     {
-        SetFocus(s, FOCUS_CONTEXT_LIMIT, -1);
+        FocusField(s, FOCUS_CONTEXT_LIMIT, -1, CLAY_ID("SettingsContextLimit"));
         return true;
     }
     if (OverId(CLAY_STRING("SettingsMaxParallelTools")))
     {
-        SetFocus(s, FOCUS_MAX_PARALLEL_TOOLS, -1);
+        FocusField(s, FOCUS_MAX_PARALLEL_TOOLS, -1, CLAY_ID("SettingsMaxParallelTools"));
         return true;
     }
     if (OverId(CLAY_STRING("SettingsCompactAt")))
     {
-        SetFocus(s, FOCUS_COMPACT_AT, -1);
+        FocusField(s, FOCUS_COMPACT_AT, -1, CLAY_ID("SettingsCompactAt"));
         return true;
     }
     if (OverId(CLAY_STRING("SettingsFontScale")))
     {
-        SetFocus(s, FOCUS_FONT_SCALE, -1);
+        FocusField(s, FOCUS_FONT_SCALE, -1, CLAY_ID("SettingsFontScale"));
         return true;
     }
     if (OverId(CLAY_STRING("SettingsChatWidth")))
     {
-        SetFocus(s, FOCUS_CHAT_WIDTH, -1);
+        FocusField(s, FOCUS_CHAT_WIDTH, -1, CLAY_ID("SettingsChatWidth"));
         return true;
     }
     for (i = 0; i < s->draft.model_count; i++)
@@ -1694,27 +1715,27 @@ static bool HandleClicks(SettingsState *s)
         {
             if (Clay_PointerOver(CLAY_IDI("SettingsModelId", i)))
             {
-                SetFocus(s, FOCUS_MODEL_ID, i);
+                FocusField(s, FOCUS_MODEL_ID, i, CLAY_IDI("SettingsModelId", i));
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsModelName", i)))
             {
-                SetFocus(s, FOCUS_MODEL_NAME, i);
+                FocusField(s, FOCUS_MODEL_NAME, i, CLAY_IDI("SettingsModelName", i));
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsModelProvider", i)))
             {
-                SetFocus(s, FOCUS_MODEL_PROVIDER, i);
+                FocusField(s, FOCUS_MODEL_PROVIDER, i, CLAY_IDI("SettingsModelProvider", i));
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsModelBaseUrl", i)))
             {
-                SetFocus(s, FOCUS_MODEL_BASE_URL, i);
+                FocusField(s, FOCUS_MODEL_BASE_URL, i, CLAY_IDI("SettingsModelBaseUrl", i));
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsModelContext", i)))
             {
-                SetFocus(s, FOCUS_MODEL_CONTEXT, i);
+                FocusField(s, FOCUS_MODEL_CONTEXT, i, CLAY_IDI("SettingsModelContext", i));
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsModelVision", i)))
@@ -1729,7 +1750,7 @@ static bool HandleClicks(SettingsState *s)
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsCustomEffort", i)))
             {
-                SetFocus(s, FOCUS_CUSTOM_EFFORT, i);
+                FocusField(s, FOCUS_CUSTOM_EFFORT, i, CLAY_IDI("SettingsCustomEffort", i));
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsAddEffort", i)))
@@ -1795,6 +1816,21 @@ static bool HandleClicks(SettingsState *s)
     return false;
 }
 
+static void SettingsDrawFieldOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
+{
+    SettingsState *s = state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
+    (void)event;
+    if (!s || !s->open || !pico_ui_modal_is_top(app, "settings"))
+    {
+        return;
+    }
+    if (s->focus_kind == FOCUS_NONE || !s->field.bound)
+    {
+        return;
+    }
+    PicoTextField_Draw(&s->field, FocusElementId(s), 8.0f, 6.0f, FONT_REGULAR);
+}
+
 static void SettingsOnFrame(PicoHost *app, void *state, float dt)
 {
     SettingsState *s;
@@ -1843,6 +1879,20 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
         return;
     }
     HandleKeys(s);
+    if (s->focus_kind != FOCUS_NONE && s->field.bound && !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        /* Presses are routed through FocusField in HandleClicks; between
+         * presses the pointer only drags or releases. */
+        PicoTextField_HandlePointer(&s->field, FocusElementId(s), 8.0f, FONT_REGULAR);
+    }
+    if (s->focus_kind != FOCUS_NONE && s->field.bound)
+    {
+        Clay_ElementData element = Clay_GetElementData(FocusElementId(s));
+        if (element.found)
+        {
+            PicoTextField_KeepCaretVisible(&s->field, element.boundingBox.width - 16.0f, FONT_REGULAR);
+        }
+    }
     HandleClicks(s);
 }
 
@@ -1873,6 +1923,7 @@ static int SettingsInit(PicoHost *app, void **state_out)
     pico_host_add_command(app, "settings", "Edit user settings", CmdSettings);
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 12, SettingsRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, SettingsAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, SettingsDrawFieldOverlay);
     return 0;
 }
 

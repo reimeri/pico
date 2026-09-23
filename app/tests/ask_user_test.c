@@ -64,11 +64,13 @@ Font Pico_FontAt(uint16_t id, uint16_t size)
     (void)size;
     return (Font){0};
 }
+static float test_glyph_width = 1.0f;
+
 Vector2 MeasureTextEx(Font font, const char *text, float size, float spacing)
 {
     (void)font;
     (void)spacing;
-    return (Vector2){(float)strlen(text), size};
+    return (Vector2){(float)strlen(text) * test_glyph_width, size};
 }
 bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer)
 {
@@ -134,7 +136,7 @@ void PicoScrollbar_RenderOverlay(Clay_String container, Clay_String track, Clay_
 static Clay_Dimensions ClayMeasureStub(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
 {
     (void)userData;
-    return (Clay_Dimensions){(float)text.length, (float)config->fontSize};
+    return (Clay_Dimensions){(float)text.length * test_glyph_width, (float)config->fontSize};
 }
 
 static int TestTextInput(void)
@@ -467,6 +469,59 @@ static int TestLongQuestionScroll(void)
     return failed;
 }
 
+/* Long prompts and choices must remain inside the panel, with later rows
+ * pushed down rather than overlapping a wrapped label. */
+static int TestWrappedQuestionPanel(void)
+{
+    const char *request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"power\",\"question\":\"What base command power generation rate per second should apply without any portal? For reference: max-command-power-stays-below-the-maximum-at-all-times-even-without-any-portals\","
+        "\"kind\":\"select\",\"options\":[\"A long option describing the rate and the amount of power gained each second without a portal: commandpowergenerationratewithnoportalactiveatall\",\"Second option\"]}]}";
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *app = calloc(1, sizeof(*app));
+    AskUiState *ui = calloc(1, sizeof(*ui));
+    AskHostState *host_ui = calloc(1, sizeof(*host_ui));
+    if (!memory || !app || !ui || !host_ui) abort();
+    test_glyph_width = 7.0f;
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                    (Clay_Dimensions){500, 600}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+    s_active_ask_state = ui;
+    host_ui->requests = host_ui->active = ui;
+    char error[192];
+    int failed = LoadUiRequest(request, error, sizeof(error)) != 1;
+    Clay_RenderCommandArray commands = PanelLayout(app, host_ui);
+    Clay_BoundingBox body = Clay_GetElementData(CLAY_ID("AskUserBody")).boundingBox;
+    Clay_BoundingBox first = Clay_GetElementData(CLAY_IDI("AskUserOption", 0)).boundingBox;
+    Clay_BoundingBox second = Clay_GetElementData(CLAY_IDI("AskUserOption", 1)).boundingBox;
+    int prompt_lines = 0, option_lines = 0;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, i);
+        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+        Clay_StringSlice label = cmd->renderData.text.stringContents;
+        const char *prompt = ui->questions[0].prompt;
+        const char *choice = ui->questions[0].options[0];
+        bool is_prompt = (uintptr_t)label.chars >= (uintptr_t)prompt &&
+                         (uintptr_t)label.chars < (uintptr_t)(prompt + strlen(prompt));
+        bool is_choice = (uintptr_t)label.chars >= (uintptr_t)choice &&
+                         (uintptr_t)label.chars < (uintptr_t)(choice + strlen(choice));
+        if (is_prompt) prompt_lines++;
+        if (is_choice) option_lines++;
+        if ((is_prompt || is_choice) &&
+            cmd->boundingBox.x + cmd->boundingBox.width > body.x + body.width + .01f) failed = 1;
+    }
+    failed |= prompt_lines < 2 || option_lines < 2 || first.y + first.height > second.y;
+    if (failed)
+        fprintf(stderr, "wrapped question: prompt=%d option=%d body width=%.1f first=%.1f second=%.1f\n",
+                prompt_lines, option_lines, body.width, first.height, second.y - first.y);
+    AskUserHostShutdown(app, host_ui);
+    test_glyph_width = 1.0f;
+    free(app);
+    Clay_SetCurrentContext(NULL);
+    free(memory);
+    return failed;
+}
+
 static int ExpectRequest(const char *name, const char *args, const char *expected)
 {
     char error[256] = {0};
@@ -523,6 +578,7 @@ int main(void)
     failed |= TestHoverCursor();
     failed |= TestQuestionPanel();
     failed |= TestLongQuestionScroll();
+    failed |= TestWrappedQuestionPanel();
     failed |= ExpectRequest(
         "mixed questionnaire",
         "{\"questions\":[{\"id\":\"target\",\"question\":\"Which?\",\"kind\":\"select\","

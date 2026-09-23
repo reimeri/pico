@@ -858,6 +858,39 @@ static float LabelHeight(const char *text, uint16_t size, float width)
     return (float)count * height;
 }
 
+/* Clay wraps only at spaces; long URLs or unspaced answers would still
+ * overrun the panel. Use the same character-aware lines as panel sizing. */
+static void RenderAskLabel(const char *text, uint16_t font, uint16_t size,
+                           Clay_Color color, float width)
+{
+    char *copy = JsonDup(text);
+    if (!copy) return;
+    AskQuestion label = {.text = copy, .text_len = (int)strlen(copy)};
+    AskLine lines[ASK_USER_MAX_LINES];
+    float line_height;
+    int count = WrapTextAtSize(&label, Pico_FontAt(font, size), Pico_FontPx(size),
+                               width > 1 ? width : 1, lines, ASK_USER_MAX_LINES, &line_height);
+    free(copy);
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_FIXED(width),
+                                        .height = CLAY_SIZING_FIXED(count * line_height)}}})
+    {
+        for (int i = 0; i < count; i++)
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(width),
+                                                .height = CLAY_SIZING_FIXED(line_height)}}})
+            {
+                if (lines[i].length)
+                {
+                    Clay_String line = {.chars = text + lines[i].start, .length = lines[i].length};
+                    CLAY_TEXT(line, CLAY_TEXT_CONFIG({.fontId = font, .fontSize = size, .textColor = color,
+                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
+            }
+        }
+    }
+}
+
 static int CaretLineIndex(int cursor)
 {
     int line_i = 0;
@@ -1568,9 +1601,10 @@ static void RenderButton(Clay_String id, const char *label, bool enabled, bool p
 
 static void RenderTextQuestion(const AskQuestion *q);
 
-static void RenderSelectQuestion(const AskQuestion *q)
+static void RenderSelectQuestion(const AskQuestion *q, float body_width)
 {
     int choice_count = q->option_count + 1;
+    float label_width = body_width > 55 ? body_width - 54 : 1;
     CLAY(CLAY_ID("AskUserOptions"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 8,
@@ -1599,10 +1633,7 @@ static void RenderSelectQuestion(const AskQuestion *q)
                           CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                             .fontSize = PICO_FONT_UI,
                                             .textColor = selected ? COLOR_LINK : COLOR_MUTED}));
-                CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                         .fontSize = PICO_FONT_UI,
-                                                         .textColor = COLOR_TEXT,
-                                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                RenderAskLabel(label, FONT_REGULAR, PICO_FONT_UI, COLOR_TEXT, label_width);
             }
         }
     }
@@ -1700,7 +1731,8 @@ static void AskUserRender(PicoHost *app, void *state)
     float width = PicoHost_MainColumnWidth(app);
     float column_max = Pico_ChatColumnMaxPx(app);
     if (column_max > 0 && width > column_max) width = column_max;
-    float body_width = width - 24 - SCROLLBAR_GAP - SCROLLBAR_WIDTH;
+    float row_width = width > 24 ? width - 24 : 1;
+    float body_width = row_width - SCROLLBAR_GAP - SCROLLBAR_WIDTH;
     if (body_width < 1) body_width = 1;
     float control_h = Pico_FontPx(PICO_FONT_UI) + 12;
     float header_h = control_h;
@@ -1717,7 +1749,7 @@ static void AskUserRender(PicoHost *app, void *state)
     {
         for (int i = 0; i <= q->option_count; i++)
             body_h += LabelHeight(i < q->option_count ? q->options[i] : "Other…",
-                                  PICO_FONT_UI, body_width - 54) + 16 + (i ? 8 : 0);
+                                  PICO_FONT_UI, body_width > 55 ? body_width - 54 : 1) + 16 + (i ? 8 : 0);
         body_h += 12;
     }
     if (TextFieldOpen(q)) body_h += g_ui.text_box_max + 12;
@@ -1781,7 +1813,7 @@ static void AskUserRender(PicoHost *app, void *state)
                 CLAY(CLAY_ID("AskUserBodyRow"),
                      {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                  .childGap = SCROLLBAR_GAP,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(body_view_h)}}})
+                                 .sizing = {.width = CLAY_SIZING_FIXED(row_width), .height = CLAY_SIZING_FIXED(body_view_h)}}})
                 {
                     CLAY(CLAY_ID("AskUserBody"),
                          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -1789,13 +1821,10 @@ static void AskUserRender(PicoHost *app, void *state)
                                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)}},
                           .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                     {
-                        CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                     .fontSize = PICO_FONT_BODY,
-                                                                     .textColor = COLOR_TEXT,
-                                                                     .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                        RenderAskLabel(q->prompt, FONT_REGULAR, PICO_FONT_BODY, COLOR_TEXT, body_width);
                         if (q->kind == ASK_QUESTION_SELECT)
                         {
-                            RenderSelectQuestion(q);
+                            RenderSelectQuestion(q, body_width);
                         }
                         else
                         {

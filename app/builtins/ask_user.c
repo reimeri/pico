@@ -1,6 +1,6 @@
 // Pico extension: structured, multi-step clarifying questions.
 // The ask_user tool accepts all questions in one call and presents a custom
-// modal with required single-select and free-form answers.
+// composer-area panel with required single-select and free-form answers.
 
 #include "pico/plugin.h"
 #include "pico/theme.h"
@@ -9,6 +9,8 @@
 #include "scrollbar.h"
 #include "text_range.h"
 #include "host_internal.h"
+#include "agent.h"
+#include "chat_sel.h"
 
 #include "clay/clay.h"
 
@@ -74,7 +76,12 @@ typedef struct AskLine {
 
 typedef struct AskUiState {
     uint64_t id;
-    uint64_t answered_id;
+    bool answered;
+    bool collapsed;
+    bool focused;
+    bool reveal_input;
+    bool reset_body_scroll;
+    struct AskUiState *next;
     AskQuestion *questions;
     int question_count;
     int current;
@@ -98,9 +105,31 @@ typedef struct AskUiState {
     PicoScrollbar body_scrollbar;
 } AskUiState;
 
+typedef struct AskHostState {
+    AskUiState *requests;
+    AskUiState *active;
+} AskHostState;
+
 static __thread AskUiState *s_active_ask_state = NULL;
 
+static AskUiState *ActiveUi(PicoHost *app, void *state)
+{
+    AskHostState *host = state ? state : PicoPlugins_HostState(app, "ask-user");
+    return host ? host->active : NULL;
+}
+
 #define g_ui (*s_active_ask_state)
+
+static void ResetQuestionScroll(void)
+{
+    g_ui.reset_body_scroll = true;
+    g_ui.reveal_input = false;
+    if (!Clay_GetCurrentContext()) return;
+    Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+    Clay_ScrollContainerData text = Clay_GetScrollContainerData(CLAY_ID("AskUserTextScroll"));
+    if (body.found && body.scrollPosition) body.scrollPosition->y = 0;
+    if (text.found && text.scrollPosition) text.scrollPosition->y = 0;
+}
 
 static void MarkTextViewDirty(void);
 static bool CtrlDown(void);
@@ -565,6 +594,8 @@ static int LoadUiRequest(const char *request_json, char *error, size_t error_cap
     g_ui.question_count = count;
     g_ui.current = 0;
     g_ui.show = true;
+    g_ui.focused = true;
+    ResetQuestionScroll();
     MarkTextViewDirty();
     return 1;
 }
@@ -583,35 +614,78 @@ static void AnswerUiError(PicoHost *app, uint64_t id, const char *message)
     }
     if (answer && pico_tool_answer(app, id, answer))
     {
-        g_ui.answered_id = id;
+        g_ui.answered = true;
     }
     free(answer);
 }
 
-static void SyncPendingAsk(PicoHost *app)
+/* Own only parsed drafts, never a borrowed request or agent pointer. Prune
+ * completed/cancelled asks even when their session is not selected. */
+static bool AskStillPending(PicoHost *app, uint64_t id)
 {
-    PicoToolAsk ask;
-    if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
+    for (int w = 0; w < app->workspace_count; w++)
     {
-        ClearQuestions();
-        g_ui.answered_id = 0;
-        return;
+        PicoWorkspace *ws = app->workspaces[w];
+        for (int i = 0; ws && i < ws->count; i++)
+        {
+            PicoToolAsk ask;
+            if (PicoAgent_PendingAsk(ws->agents[i], &ask) && ask.id == id) return true;
+        }
     }
-    if ((g_ui.show && g_ui.id == ask.id) || g_ui.answered_id == ask.id)
-    {
-        return;
-    }
+    return false;
+}
 
-    ClearQuestions();
+static void SyncPendingAsk(PicoHost *app, AskHostState *host)
+{
+    uint64_t previous = host->active ? host->active->id : 0;
+    host->active = NULL;
+    for (AskUiState **link = &host->requests; *link;)
+    {
+        AskUiState *ui = *link;
+        if (!AskStillPending(app, ui->id))
+        {
+            *link = ui->next;
+            s_active_ask_state = ui;
+            ClearQuestions();
+            free(ui);
+        }
+        else link = &ui->next;
+    }
+    s_active_ask_state = NULL;
+    PicoToolAsk ask;
+    if (!pico_tool_pending_ask(app, &ask) || !ask.request_json) return;
+    for (AskUiState *ui = host->requests; ui; ui = ui->next)
+    {
+        if (ui->id != ask.id) continue;
+        host->active = s_active_ask_state = ui;
+        if (previous != ask.id)
+        {
+            /* Scroll/drag state belongs to the visible Clay containers, not
+             * the draft that was parked when its session lost selection. */
+            ui->scrollbar = (PicoScrollbar){0};
+            ui->body_scrollbar = (PicoScrollbar){0};
+            ResetQuestionScroll();
+            if (ui->question_count > 0) ui->questions[ui->current].mouse_selecting = false;
+            MarkTextViewDirty();
+        }
+        return;
+    }
+    AskUiState *ui = calloc(1, sizeof(*ui));
+    if (!ui) return;
+    s_active_ask_state = ui;
     char error[192] = "invalid questionnaire payload";
     int rc = LoadUiRequest(ask.request_json, error, sizeof(error));
-    if (rc > 0)
+    if (rc != 0)
     {
-        g_ui.id = ask.id;
+        ui->id = ask.id;
+        ui->next = host->requests;
+        host->requests = host->active = ui;
+        if (rc < 0) AnswerUiError(app, ask.id, error);
     }
-    else if (rc < 0)
+    else
     {
-        AnswerUiError(app, ask.id, error);
+        free(ui);
+        s_active_ask_state = NULL;
     }
 }
 
@@ -677,11 +751,11 @@ static float MeasureSlice(Font font, const char *s, int start, int length, float
     return size.x;
 }
 
-static int WrapAskText(const AskQuestion *q, Font font, float max_width, AskLine *lines, int max_lines,
-                       float *line_height)
+static int WrapTextAtSize(const AskQuestion *q, Font font, float font_size, float max_width,
+                          AskLine *lines, int max_lines, float *line_height)
 {
-    Vector2 sample = MeasureTextEx(font, "Hg", AskTextPx(), 0);
-    *line_height = sample.y > 1 ? sample.y : AskTextPx();
+    Vector2 sample = MeasureTextEx(font, "Hg", font_size, 0);
+    *line_height = sample.y > 1 ? sample.y : font_size;
     if (!q->text || q->text_len == 0)
     {
         lines[0].start = 0;
@@ -710,7 +784,7 @@ static int WrapAskText(const AskQuestion *q, Font font, float max_width, AskLine
         while (i < q->text_len && q->text[i] != '\n')
         {
             int next = PicoText_Utf8Next(q->text, q->text_len, i);
-            float ch_w = MeasureSlice(font, q->text, i, next - i, AskTextPx());
+            float ch_w = MeasureSlice(font, q->text, i, next - i, font_size);
             if (width + ch_w > max_width && i > line_start)
             {
                 if (break_at > line_start)
@@ -761,6 +835,27 @@ static int WrapAskText(const AskQuestion *q, Font font, float max_width, AskLine
         return 1;
     }
     return line_count;
+}
+
+static int WrapAskText(const AskQuestion *q, Font font, float width, AskLine *lines, int count,
+                       float *height)
+{
+    return WrapTextAtSize(q, font, AskTextPx(), width, lines, count, height);
+}
+
+/* Size from the current content and viewport, not the previous compressed
+ * layout. The alignment wrapper and its panel always share an exact height. */
+static float LabelHeight(const char *text, uint16_t size, float width)
+{
+    char *copy = JsonDup(text);
+    if (!copy) return Pico_FontPx(size);
+    AskQuestion label = {.text = copy, .text_len = (int)strlen(copy)};
+    AskLine lines[ASK_USER_MAX_LINES];
+    float height;
+    int count = WrapTextAtSize(&label, Pico_FontAt(FONT_REGULAR, size), Pico_FontPx(size),
+                              width > 1 ? width : 1, lines, ASK_USER_MAX_LINES, &height);
+    free(copy);
+    return (float)count * height;
 }
 
 static int CaretLineIndex(int cursor)
@@ -1115,8 +1210,10 @@ static void SubmitAnswers(PicoHost *app)
     if (pico_tool_answer(app, id, answer))
     {
         free(answer);
-        ClearQuestions();
-        g_ui.answered_id = id;
+        /* AFTER_LAYOUT can submit while Clay still borrows these strings.
+         * Retire the draft on the next pump, not while presenting this frame. */
+        g_ui.show = false;
+        g_ui.answered = true;
         return;
     }
     free(answer);
@@ -1128,6 +1225,7 @@ static void GoBack(void)
     if (g_ui.current > 0)
     {
         g_ui.current--;
+        ResetQuestionScroll();
         g_ui.validation[0] = '\0';
         MarkTextViewDirty();
     }
@@ -1145,6 +1243,7 @@ static void GoForward(PicoHost *app)
     if (g_ui.current + 1 < g_ui.question_count)
     {
         g_ui.current++;
+        ResetQuestionScroll();
         MarkTextViewDirty();
     }
     else
@@ -1176,6 +1275,7 @@ static void HandleSelectKeys(PicoHost *app, AskQuestion *q)
     bool up = IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP);
     bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN);
     int choice_count = q->option_count + 1;
+    if (up || down) g_ui.reveal_input = true;
     if (up)
     {
         q->focus = q->selected < 0 ? 0 : q->selected;
@@ -1201,6 +1301,7 @@ static void HandleSelectKeys(PicoHost *app, AskQuestion *q)
     {
         q->selected = digit;
         q->focus = digit;
+        g_ui.reveal_input = true;
         g_ui.validation[0] = '\0';
         while (GetCharPressed() != 0)
         {
@@ -1386,17 +1487,27 @@ static void UpdateAskScrollbarDrag(void)
 static void AskUserOnFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
-    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
-    if (!s_active_ask_state)
+    AskHostState *host = state ? state : PicoPlugins_HostState(app, "ask-user");
+    if (!host) return;
+    SyncPendingAsk(app, host);
+    if (!s_active_ask_state || !g_ui.show || g_ui.answered ||
+        g_ui.current < 0 || g_ui.current >= g_ui.question_count) return;
+    if (PicoUi_ModalOpen(app)) return;
+    /* A click outside yields focus before any queued keyboard input is read. */
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        !Clay_PointerOver(CLAY_ID("Composer"))) g_ui.focused = false;
+    if (PicoChatFind_BlocksInput(app))
     {
+        g_ui.focused = false;
         return;
     }
-    SyncPendingAsk(app);
-    if (!g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    if (!g_ui.collapsed) UpdateAskScrollbarDrag();
+    if (!g_ui.focused || g_ui.collapsed)
     {
+        if (CtrlDown() && Pico_ShortcutPressed('c') && PicoChatSel_HasSelection(app))
+            PicoChatSel_Copy(app);
         return;
     }
-    UpdateAskScrollbarDrag();
     /* Esc is deliberately left to Pico, which cancels the ask and turn. */
     if (IsKeyPressed(KEY_ESCAPE))
     {
@@ -1418,6 +1529,9 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
     }
 
     AskQuestion *q = &g_ui.questions[g_ui.current];
+    int question = g_ui.current;
+    int cursor = q->cursor;
+    int length = q->text_len;
     if (q->kind == ASK_QUESTION_SELECT)
     {
         HandleSelectKeys(app, q);
@@ -1426,6 +1540,8 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
     {
         HandleTextKeys(app, q);
     }
+    if (g_ui.show && g_ui.current == question && (q->cursor != cursor || q->text_len != length))
+        g_ui.reveal_input = true;
 }
 
 static void RenderButton(Clay_String id, const char *label, bool enabled, bool primary)
@@ -1442,11 +1558,11 @@ static void RenderButton(Clay_String id, const char *label, bool enabled, bool p
         bg = primary ? (Clay_Color){92, 126, 210, 255} : COLOR_CODE_BG;
     }
     Clay_Color text = enabled ? COLOR_TEXT : COLOR_MUTED;
-    CLAY(eid, {.layout = {.padding = {14, 14, 9, 9}}, .backgroundColor = bg,
+    CLAY(eid, {.layout = {.padding = {10, 10, 6, 6}}, .backgroundColor = bg,
                .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = text,
-                                                .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
 }
 
@@ -1465,7 +1581,7 @@ static void RenderSelectQuestion(const AskQuestion *q)
             Clay_ElementId eid = CLAY_IDI("AskUserOption", i);
             bool hover = Clay_PointerOver(eid);
             bool selected = q->selected == i;
-            bool focused = q->focus == i;
+            bool focused = g_ui.focused && q->focus == i;
             const char *label = i < q->option_count ? q->options[i] : "Other…";
             snprintf(g_ui.option_nums[i], sizeof(g_ui.option_nums[i]), "%d", i + 1);
             Clay_Color bg = selected ? (Clay_Color){62, 78, 124, 255}
@@ -1474,7 +1590,7 @@ static void RenderSelectQuestion(const AskQuestion *q)
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childGap = 10,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .padding = {12, 12, 10, 10},
+                             .padding = {10, 10, 8, 8},
                              .sizing = {.width = CLAY_SIZING_GROW(0)}},
                   .backgroundColor = bg,
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
@@ -1516,7 +1632,7 @@ static void RenderTextQuestion(const AskQuestion *q)
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .padding = {ASK_USER_TEXT_PAD_X, ASK_USER_TEXT_PAD_X, ASK_USER_TEXT_PAD_Y, ASK_USER_TEXT_PAD_Y},
                      .sizing = {.width = CLAY_SIZING_GROW(0),
-                                .height = CLAY_SIZING_GROW(120, g_ui.text_box_max)}},
+                                .height = CLAY_SIZING_FIXED(g_ui.text_box_max)}},
           .backgroundColor = COLOR_COMPOSER_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
@@ -1572,136 +1688,149 @@ static void RenderTextQuestion(const AskQuestion *q)
 
 static void AskUserRender(PicoHost *app, void *state)
 {
-    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
-    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = ActiveUi(app, state);
+    if (!s_active_ask_state || !g_ui.show || g_ui.answered || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
 
     AskQuestion *q = &g_ui.questions[g_ui.current];
-    snprintf(g_ui.progress, sizeof(g_ui.progress), "Question %d of %d", g_ui.current + 1, g_ui.question_count);
+    snprintf(g_ui.progress, sizeof(g_ui.progress), "%d / %d", g_ui.current + 1, g_ui.question_count);
 
-    float sw = (float)GetScreenWidth();
-    float sh = (float)GetScreenHeight();
-    float card_w = sw < 760.0f ? sw - 40.0f : 680.0f;
-    if (card_w < 280.0f)
+    float width = PicoHost_MainColumnWidth(app);
+    float column_max = Pico_ChatColumnMaxPx(app);
+    if (column_max > 0 && width > column_max) width = column_max;
+    float body_width = width - 24 - SCROLLBAR_GAP - SCROLLBAR_WIDTH;
+    if (body_width < 1) body_width = 1;
+    float control_h = Pico_FontPx(PICO_FONT_UI) + 12;
+    float header_h = control_h;
+    float text_width = body_width - 2 * ASK_USER_TEXT_PAD_X;
+    g_ui.wrap_width = text_width > 1 ? text_width : 1;
+    float text_h = LabelHeight(q->text ? q->text : "", ASK_USER_TEXT_FONT, g_ui.wrap_width) +
+                   2 * ASK_USER_TEXT_PAD_Y;
+    float text_min = 3 * AskTextPx() + 2 * ASK_USER_TEXT_PAD_Y;
+    g_ui.text_box_max = text_h > text_min ? text_h : text_min;
+    float text_max = 6 * AskTextPx() + 2 * ASK_USER_TEXT_PAD_Y;
+    if (g_ui.text_box_max > text_max) g_ui.text_box_max = text_max;
+    float body_h = LabelHeight(q->prompt, PICO_FONT_BODY, body_width) + 12;
+    if (q->kind == ASK_QUESTION_SELECT)
     {
-        card_w = 280.0f;
+        for (int i = 0; i <= q->option_count; i++)
+            body_h += LabelHeight(i < q->option_count ? q->options[i] : "Other…",
+                                  PICO_FONT_UI, body_width - 54) + 16 + (i ? 8 : 0);
+        body_h += 12;
     }
-    float card_h = sh * 0.76f;
-    if (card_h < 320.0f)
-    {
-        card_h = 320.0f;
-    }
-    if (card_h > 700.0f)
-    {
-        card_h = 700.0f;
-    }
+    if (TextFieldOpen(q)) body_h += g_ui.text_box_max + 12;
+    body_h += LabelHeight(TextFieldOpen(q) ? "Enter next  •  Shift+Enter newline  •  Shift+Tab back" :
+                          "Up/Down or 1-N select  •  Enter next", PICO_FONT_CAPTION, body_width);
+    if (g_ui.validation[0]) body_h += LabelHeight(g_ui.validation, PICO_FONT_CAPTION, body_width) + 12;
+    float chrome_h = 24 + header_h + control_h + 16;
+    /* Approximately 40% of the main pane, reserving shell/footer space. Never
+     * size from retained Clay bounds: same-frame relayout must be idempotent. */
+    float viewport_h = Clay_GetLayoutDimensions().height;
+    float available_h = viewport_h - 24 - 6 - Pico_FontPx(PICO_FONT_UI) - 16;
+    if (available_h < 0) available_h = 0;
+    float max_h = available_h * 0.4f;
+    float minimum = chrome_h + Pico_FontPx(PICO_FONT_BODY);
+    if (max_h < minimum) max_h = minimum;
+    if (max_h > viewport_h * 0.6f) max_h = viewport_h * 0.6f;
+    float panel_h = chrome_h + body_h;
+    if (panel_h > max_h) panel_h = max_h;
+    if (g_ui.collapsed) panel_h = 24 + header_h;
+    if (panel_h > available_h) panel_h = available_h;
+    float body_view_h = panel_h > chrome_h ? panel_h - chrome_h : 0;
 
-    float body_max = card_h - 18.0f * 2.0f - 12.0f * 2.0f - 28.0f - 42.0f;
-    if (g_ui.validation[0])
+    CLAY(CLAY_ID("ComposerAlign"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER},
+                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(panel_h)}}})
     {
-        body_max -= 32.0f;
-    }
-    if (body_max < 160.0f)
-    {
-        body_max = 160.0f;
-    }
-    float text_max = body_max - 22.0f - 18.0f - 12.0f * 2.0f;
-    if (q->kind == ASK_QUESTION_SELECT && q->selected == q->option_count)
-    {
-        int n = q->option_count + 1;
-        text_max -= (float)n * 44.0f + (float)(n > 0 ? n - 1 : 0) * 8.0f + 12.0f;
-    }
-    if (text_max < 120.0f)
-    {
-        text_max = 120.0f;
-    }
-    g_ui.text_box_max = text_max;
-
-    CLAY(CLAY_ID("AskUserModalDim"),
-         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
-                       .zIndex = 55,
-                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
-                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
-          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                     .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
-          .backgroundColor = {0, 0, 0, 160}})
-    {
-        CLAY(CLAY_ID("AskUserModalCard"),
+        CLAY(CLAY_ID("Composer"),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .padding = {22, 22, 18, 18},
-                         .childGap = 12,
-                         .sizing = {.width = CLAY_SIZING_FIXED(card_w), .height = CLAY_SIZING_FIXED(card_h)}},
-              .clip = {.vertical = true, .horizontal = false},
-              .backgroundColor = COLOR_CONTENT_BG,
-              .cornerRadius = CLAY_CORNER_RADIUS(9)})
+                         .padding = {12, 12, 12, 12},
+                         .childGap = 8,
+                         .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(panel_h)}},
+              .clip = {.vertical = true, .horizontal = true},
+              .backgroundColor = COLOR_COMPOSER_BG,
+              .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
             CLAY(CLAY_ID("AskUserHeader"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                             .childGap = 8,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(header_h)}}})
             {
-                CLAY_TEXT(CLAY_STRING("Clarifying questions"),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT,
-                                            .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                float header_width = MeasureTextEx(Pico_FontAt(FONT_REGULAR, PICO_FONT_UI),
+                                                   "Answer needed  24 / 24  Collapse",
+                                                   Pico_FontPx(PICO_FONT_UI), 0).x + 64;
+                if (width >= header_width)
+                {
+                    CLAY_TEXT(CLAY_STRING("Answer needed"),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
                 CLAY_TEXT(CStr(g_ui.progress),
                           CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED,
                                             .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                RenderButton(CLAY_STRING("AskUserToggle"), g_ui.collapsed ? "Resume" : "Collapse", true, false);
             }
 
-            CLAY(CLAY_ID("AskUserBodyRow"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = SCROLLBAR_GAP,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0, body_max)}}})
+            if (!g_ui.collapsed)
             {
-                CLAY(CLAY_ID("AskUserBody"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = 12,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+                CLAY(CLAY_ID("AskUserBodyRow"),
+                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = SCROLLBAR_GAP,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(body_view_h)}}})
                 {
-                    CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                 .fontSize = PICO_FONT_BODY,
-                                                                 .textColor = COLOR_TEXT,
-                                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                    if (q->kind == ASK_QUESTION_SELECT)
+                    CLAY(CLAY_ID("AskUserBody"),
+                         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .childGap = 12,
+                                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)}},
+                          .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                     {
-                        RenderSelectQuestion(q);
+                        CLAY_TEXT(CStr(q->prompt), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                     .fontSize = PICO_FONT_BODY,
+                                                                     .textColor = COLOR_TEXT,
+                                                                     .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                        if (q->kind == ASK_QUESTION_SELECT)
+                        {
+                            RenderSelectQuestion(q);
+                        }
+                        else
+                        {
+                            RenderTextQuestion(q);
+                        }
+                        if (g_ui.validation[0])
+                        {
+                            CLAY_TEXT(CStr(g_ui.validation),
+                                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                                        .textColor = (Clay_Color){235, 140, 140, 255},
+                                                        .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                        }
                     }
-                    else
+                    CLAY(CLAY_ID("AskUserScrollbarGutter"),
+                         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(SCROLLBAR_WIDTH),
+                                                .height = CLAY_SIZING_PERCENT(1)}}})
                     {
-                        RenderTextQuestion(q);
+                        if (g_ui.body_overflow)
+                            PicoScrollbar_Render(CLAY_STRING("AskUserBody"), CLAY_STRING("AskUserBodyTrack"),
+                                                 CLAY_STRING("AskUserBodyHandle"));
                     }
                 }
-                if (g_ui.body_overflow)
+
+                CLAY(CLAY_ID("AskUserButtons"),
+                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .childGap = 8,
+                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(control_h)}}})
                 {
-                    PicoScrollbar_Render(CLAY_STRING("AskUserBody"), CLAY_STRING("AskUserBodyTrack"),
-                                         CLAY_STRING("AskUserBodyHandle"));
+                    RenderButton(CLAY_STRING("AskUserBack"), "Back", g_ui.current > 0, false);
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+                    bool answered = QuestionAnswered(q);
+                    RenderButton(CLAY_STRING("AskUserNext"),
+                                 g_ui.current + 1 == g_ui.question_count ? "Submit" : "Next", answered, true);
                 }
-            }
-
-            if (g_ui.validation[0])
-            {
-                CLAY_TEXT(CStr(g_ui.validation),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
-                                            .textColor = (Clay_Color){235, 140, 140, 255},
-                                            .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            }
-
-            CLAY(CLAY_ID("AskUserButtons"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = 8,
-                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
-            {
-                RenderButton(CLAY_STRING("AskUserBack"), "Back", g_ui.current > 0, false);
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
-                bool answered = QuestionAnswered(q);
-                RenderButton(CLAY_STRING("AskUserNext"),
-                             g_ui.current + 1 == g_ui.question_count ? "Submit" : "Next", answered, true);
             }
         }
     }
@@ -1761,7 +1890,7 @@ static int OffsetAtPoint(const AskQuestion *q, float x, float y)
     return end;
 }
 
-static void EnsureAskCaretVisible(const AskQuestion *q)
+static void EnsureAskCaretVisible(PicoHost *app, const AskQuestion *q)
 {
     if (q->cursor == g_ui.seen_cursor && q->text_len == g_ui.seen_length)
     {
@@ -1777,6 +1906,7 @@ static void EnsureAskCaretVisible(const AskQuestion *q)
         return;
     }
     int line_i = CaretLineIndex(q->cursor);
+    float before = scroll.scrollPosition->y;
     float caret_top = (float)line_i * g_ui.line_height;
     float caret_bot = caret_top + g_ui.line_height;
     float view_h = scroll.scrollContainerDimensions.height;
@@ -1790,16 +1920,83 @@ static void EnsureAskCaretVisible(const AskQuestion *q)
     {
         scroll.scrollPosition->y = -(caret_bot - view_h);
     }
+    if (before != scroll.scrollPosition->y) app->ui_relayout_requested = true;
+}
+
+static void UpdateQuestionScroll(PicoHost *app, const AskQuestion *q)
+{
+    Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+    if (!body.found || !body.scrollPosition) return;
+    if (g_ui.reset_body_scroll)
+    {
+        if (body.scrollPosition->y != 0) app->ui_relayout_requested = true;
+        body.scrollPosition->y = 0;
+        Clay_ScrollContainerData text = Clay_GetScrollContainerData(CLAY_ID("AskUserTextScroll"));
+        if (text.found && text.scrollPosition)
+        {
+            if (text.scrollPosition->y != 0) app->ui_relayout_requested = true;
+            text.scrollPosition->y = 0;
+        }
+        g_ui.reset_body_scroll = false;
+        g_ui.reveal_input = false;
+    }
+    if (!g_ui.reveal_input) return;
+    Clay_ElementData view = Clay_GetElementData(CLAY_ID("AskUserBody"));
+    Clay_ElementData target = Clay_GetElementData(TextFieldOpen(q) ? CLAY_ID("AskUserTextBox") :
+                                                 CLAY_IDI("AskUserOption", q->selected));
+    if (!target.found) return; /* Other's editor is created by the next layout. */
+    if (TextFieldOpen(q) && target.boundingBox.height > view.boundingBox.height)
+    {
+        Clay_ElementData text = Clay_GetElementData(CLAY_ID("AskUserTextScroll"));
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("AskUserTextScroll"));
+        if (text.found && scroll.found && scroll.scrollPosition)
+        {
+            target.boundingBox.y = text.boundingBox.y + (float)CaretLineIndex(q->cursor) * g_ui.line_height +
+                                   scroll.scrollPosition->y;
+            target.boundingBox.height = g_ui.line_height;
+        }
+    }
+    float before = body.scrollPosition->y;
+    float top = target.boundingBox.y - view.boundingBox.y;
+    float bottom = top + target.boundingBox.height;
+    if (top < 0) body.scrollPosition->y -= top;
+    else if (bottom > view.boundingBox.height)
+        body.scrollPosition->y -= target.boundingBox.height > view.boundingBox.height ? top :
+                                  bottom - view.boundingBox.height;
+    if (body.scrollPosition->y != before) app->ui_relayout_requested = true;
+    g_ui.reveal_input = false;
 }
 
 static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
-    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
-    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = ActiveUi(app, state);
+    if (!s_active_ask_state || !g_ui.show || g_ui.answered || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
+    if (PicoUi_ModalOpen(app) || PicoChatFind_PointerOver(app)) return;
+    bool pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    bool over_panel = PointerOver(CLAY_STRING("Composer"));
+    bool over_toggle = PointerOver(CLAY_STRING("AskUserToggle"));
+    if (over_toggle) app->hovered_clickable = true;
+    if (pressed)
+    {
+        g_ui.focused = over_panel;
+        if (over_panel)
+        {
+            PicoChatSel_Clear(app);
+            app->ui_relayout_requested = true;
+        }
+        if (over_toggle)
+        {
+            g_ui.collapsed = !g_ui.collapsed;
+            g_ui.focused = !g_ui.collapsed;
+            g_ui.questions[g_ui.current].mouse_selecting = false;
+            return;
+        }
+    }
+    if (g_ui.collapsed) return;
     AskQuestion *q = &g_ui.questions[g_ui.current];
 
     bool over_back = PointerOver(CLAY_STRING("AskUserBack"));
@@ -1829,6 +2026,7 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
         }
     }
 
+    UpdateQuestionScroll(app, q);
     if (TextFieldOpen(q))
     {
         Clay_ElementData scroll_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
@@ -1837,7 +2035,7 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
             g_ui.wrap_width = scroll_box.boundingBox.width;
         }
         g_ui.text_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserTextScroll"));
-        EnsureAskCaretVisible(q);
+        EnsureAskCaretVisible(app, q);
     }
     else
     {
@@ -1845,7 +2043,6 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     }
     g_ui.body_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserBody"));
 
-    bool pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (TextFieldOpen(q))
     {
         if (pressed && over_bar)
@@ -1884,6 +2081,7 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
             {
                 q->selected = i;
                 q->focus = i;
+                g_ui.reveal_input = q->selected == q->option_count;
                 g_ui.validation[0] = '\0';
                 return;
             }
@@ -1908,18 +2106,19 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
 static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
-    s_active_ask_state = state ? (AskUiState *)state : (AskUiState *)PicoPlugins_HostState(app, "ask-user");
-    if (!s_active_ask_state || !g_ui.show || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
+    s_active_ask_state = ActiveUi(app, state);
+    if (!s_active_ask_state || !g_ui.show || g_ui.answered || g_ui.current < 0 || g_ui.current >= g_ui.question_count)
     {
         return;
     }
     AskQuestion *q = &g_ui.questions[g_ui.current];
-    if (!TextFieldOpen(q))
+    if (!TextFieldOpen(q) || g_ui.collapsed || !g_ui.focused || PicoUi_ModalOpen(app) ||
+        PicoChatFind_BlocksInput(app))
     {
         return;
     }
     Clay_ElementData scroll_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
-    Clay_ElementData card = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("AskUserModalCard")));
+    Clay_ElementData card = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("AskUserBody")));
     if (!scroll_box.found)
     {
         return;
@@ -2049,21 +2248,10 @@ static void AskUserLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEv
 
 static int AskUserHostInit(PicoHost *app, void **state_out)
 {
-    AskUiState *s = (AskUiState *)calloc(1, sizeof(AskUiState));
-    if (!s)
-    {
-        return 1;
-    }
-    s->seen_cursor = -1;
-    s->seen_length = -1;
-    s->goal_x = -1.0f;
-    s->text_box_max = 120.0f;
-    if (state_out)
-    {
-        *state_out = s;
-    }
-    s_active_ask_state = s;
-    pico_host_add_view(app, PICO_SLOT_OVERLAY, 30, AskUserRender);
+    AskHostState *s = calloc(1, sizeof(*s));
+    if (!s) return 1;
+    if (state_out) *state_out = s;
+    pico_host_add_view(app, PICO_SLOT_COMPOSER, 30, AskUserRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, AskUserAfterLayout);
     pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, AskUserDrawOverlay);
     return 0;
@@ -2072,14 +2260,16 @@ static int AskUserHostInit(PicoHost *app, void **state_out)
 static void AskUserHostShutdown(PicoHost *app, void *state)
 {
     (void)app;
-    AskUiState *s = (AskUiState *)state;
-    if (!s)
+    AskHostState *s = state;
+    if (!s) return;
+    while (s->requests)
     {
-        return;
+        AskUiState *ui = s->requests;
+        s->requests = ui->next;
+        s_active_ask_state = ui;
+        ClearQuestions();
+        free(ui);
     }
-    s_active_ask_state = s;
-    ClearQuestions();
-    s->answered_id = 0;
     free(s);
     s_active_ask_state = NULL;
 }

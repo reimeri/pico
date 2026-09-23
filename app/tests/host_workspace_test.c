@@ -2056,6 +2056,8 @@ done:
     return rc;
 }
 
+static int RunQuestionPanelShellCase(bool with_sidebar);
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -2074,6 +2076,8 @@ static int TestBottomFollowShellGeometryStable(void)
     {
         return 1;
     }
+    if (RunQuestionPanelShellCase(false) != 0 || RunQuestionPanelShellCase(true) != 0)
+        return 1;
     if (RunFastFooterCase(false) != 0 || RunFastFooterCase(true) != 0)
         return 1;
     return RunWorkspaceLessShellCase();
@@ -6841,6 +6845,7 @@ typedef struct MatrixProviderState {
     bool exited;
     int calls;
     char *answer;
+    const char *ask_request;
     bool tool_entered;
     bool tool_release;
     int recorded;
@@ -6974,8 +6979,8 @@ static void MatrixAskTool(PicoAgentContext *ctx, const char *args_json,
         return;
     }
     char *answer = NULL;
-    int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"matrix ask\"}",
-                           &answer);
+    int rc = pico_tool_ask(ctx, state->ask_request ? state->ask_request :
+                           "{\"type\":\"confirm\",\"message\":\"matrix ask\"}", &answer);
     pthread_mutex_lock(&state->mu);
     if (rc == PICO_ASK_OK)
     {
@@ -7290,6 +7295,182 @@ static int TestFastSurvivesMidTurnModelSwitch(void)
         return 1;
     }
     return 0;
+}
+
+/* Real chat/composer/questionnaire views in the production shell. The tool
+ * waits normally; sidebar/footer content is simplified for geometry. */
+static int RunQuestionPanelShellCase(bool with_sidebar)
+{
+#ifndef PICO_CLAY_FRAME_FAULT_TESTS
+    (void)with_sidebar;
+    return 0;
+#else
+    Clay_Context *previous = Clay_GetCurrentContext();
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *host = NULL;
+    char dir[] = "/tmp/pico-question-shell-XXXXXX";
+    char cfg[] = "/tmp/pico-question-config-XXXXXX";
+    MatrixProviderState state;
+    MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
+    state.ask_request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"target\",\"question\":\"Which target?\",\"kind\":\"select\","
+        "\"options\":[\"one\",\"two\",\"three\",\"four\",\"five\",\"six\",\"seven\",\"eight\"]}]}";
+    int result = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    PicoWorkspaceId workspace_id;
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, workspace_id);
+    if (!ConfigureMatrixWorkspace(host, ws, &state, true)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    PicoAgentId agent_id;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    for (int i = 0; i < 28; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Earlier conversation to read while answering.");
+    PicoAgent_StartTurn(host, agent, "ask");
+    PicoToolAsk ask = {0};
+    for (int i = 0; i < 3000 && !ask.id; i++)
+    {
+        pico_host_pump(host);
+        pico_tool_pending_ask(host, &ask);
+        if (!ask.id) usleep(1000);
+    }
+    if (!ask.id || PicoUi_ModalOpen(host)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    /* Registration refreshes rebuild the effective slot lists. */
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_OVERLAY] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    ShellTestAddView(host, PICO_SLOT_MAIN, PicoChat_Render, NULL);
+    ShellTestAddView(host, PICO_SLOT_FOOTER, ShellTestFooter, NULL);
+    strcpy(host->composer.text, "unsent draft");
+    host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+    int message_count = agent->message_count;
+    const Clay_Dimensions viewport = {1100, 800};
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                         viewport, (Clay_ErrorHandler){0})) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_find_input_test = true;
+    PicoExt ext = pico_ext_ask_user();
+    void *ui = PicoPlugins_HostState(host, "ask-user");
+    const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
+                           "ComposerAlign", "Composer", "Footer", "Sidebar"};
+    Clay_BoundingBox expected[9];
+    float expanded_height = 0;
+    for (int phase = 0; phase < 3; phase++)
+    {
+        for (int frame = 0; frame < 100; frame++)
+        {
+            Clay_SetLayoutDimensions(viewport);
+            Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0);
+            PicoHost_LayoutShell(host, viewport.height, 0);
+            Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+            if (!chat.found || !chat.scrollPosition) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            if (PicoScrollbar_PinToBottom(chat.scrollContainerDimensions.height, chat.contentDimensions.height,
+                                         &chat.scrollPosition->y)) PicoHost_LayoutShell(host, viewport.height, 0);
+            if (fabsf(chat.scrollPosition->y + chat.contentDimensions.height - chat.scrollContainerDimensions.height) > .01f)
+                { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            for (int pane = 0; pane < (with_sidebar ? 9 : 8); pane++)
+            {
+                Clay_ElementData box = Clay_GetElementData(Clay_GetElementId((Clay_String){
+                    .chars = panes[pane], .length = (int32_t)strlen(panes[pane])}));
+                if (!box.found) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+                if (frame == 0) expected[pane] = box.boundingBox;
+                else if (!ShellBoxStable(expected[pane], box.boundingBox)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            }
+            Clay_ElementData panel = Clay_GetElementData(CLAY_ID("Composer"));
+            Clay_ElementData body = Clay_GetElementData(CLAY_ID("AskUserBody"));
+            Clay_ElementData next = Clay_GetElementData(CLAY_ID("AskUserNext"));
+            if (Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||
+                !ShellVerticallyContains(expected[3], panel.boundingBox) ||
+                expected[4].y + expected[4].height > panel.boundingBox.y) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            if (phase != 1)
+            {
+                if (!body.found || !next.found || !ShellVerticallyContains(panel.boundingBox, next.boundingBox)) { fprintf(stderr, "question navigation escaped the panel\n"); goto done; }
+                if (phase == 0) expanded_height = panel.boundingBox.height;
+                else if (fabsf(panel.boundingBox.height - expanded_height) > .001f) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            }
+            else if (body.found || next.found || panel.boundingBox.height >= expanded_height) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            /* Search is genuinely available without claiming the questionnaire's keys. */
+            if (frame == 20) PicoChatFind_Open(host);
+            if (frame == 40) PicoChatFind_Close(host);
+            ext.host_on_frame(host, ui, 0);
+        }
+        if (phase < 2)
+        {
+            Clay_BoundingBox toggle = Clay_GetElementData(CLAY_ID("AskUserToggle")).boundingBox;
+            g_find_pointer = (Vector2){toggle.x + toggle.width / 2, toggle.y + toggle.height / 2};
+            g_find_press = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+            g_find_press = false;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        }
+    }
+    /* Reading history is independent of the panel's height changes. */
+    host->chat_follow_bottom = false;
+    Clay_ScrollContainerData history = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    history.scrollPosition->y = -200;
+    PicoHost_LayoutShell(host, viewport.height, 0);
+    float reading_y = Clay_GetElementData(CLAY_IDI("MsgMain", 0)).boundingBox.y;
+    Clay_BoundingBox toggle = Clay_GetElementData(CLAY_ID("AskUserToggle")).boundingBox;
+    g_find_pointer = (Vector2){toggle.x + toggle.width / 2, toggle.y + toggle.height / 2};
+    g_find_press = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    g_find_press = false;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    PicoHost_LayoutShell(host, viewport.height, 0);
+    if (fabsf(Clay_GetElementData(CLAY_IDI("MsgMain", 0)).boundingBox.y - reading_y) > .01f)
+    { Fail("collapsing questions must not move the conversation being read"); goto done; }
+    if (agent->message_count != message_count || strcmp(host->composer.text, "unsent draft")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    if (!pico_ui_modal_push(host, "question-test") || !PicoUi_ModalOpen(host) ||
+        !pico_ui_modal_pop(host, "question-test")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    /* The real footer remains interactive; its menu then takes modal priority. */
+    ShellTestAddView(host, PICO_SLOT_FOOTER, PicoFooter_Render, NULL);
+    PicoHost_LayoutShell(host, viewport.height, 0);
+    Clay_BoundingBox model = Clay_GetElementData(CLAY_ID("FooterModel")).boundingBox;
+    g_find_pointer = (Vector2){model.x + model.width / 2, model.y + model.height / 2};
+    g_find_press = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    g_find_press = false;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    if (!pico_ui_modal_is_top(host, "footer-menu"))
+    { Fail("questionnaire must not block footer controls"); goto done; }
+    g_find_key = KEY_ESCAPE;
+    g_clay_frame_test = true;
+    PicoHost_Frame(host);
+    g_clay_frame_test = false;
+    g_find_key = 0;
+    if (pico_ui_modal_claimed(host) || PicoAgent_CancelRequested(agent) ||
+        !pico_tool_pending_ask(host, &ask))
+    { Fail("Escape closing a footer menu must not cancel the pending questionnaire"); goto done; }
+    /* Cancelling restores the existing composer rather than clearing its draft. */
+    pico_agent_cancel(host, agent_id);
+    if (!PumpUntilIdle(host, agent, 3000)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    PicoHost_LayoutShell(host, viewport.height, 0);
+    if (!Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||
+        Clay_GetElementData(CLAY_ID("AskUserHeader")).found || strcmp(host->composer.text, "unsent draft")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    result = 0;
+done:
+    g_find_input_test = g_find_press = false;
+    g_find_key = g_find_character = 0;
+    if (host) pico_host_free(host);
+    MatrixStateDestroy(&state);
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    if (result) Fail(with_sidebar ? "question panel shell geometry/input with sidebar" :
+                                   "question panel shell geometry/input without sidebar");
+    return result;
+#endif
 }
 
 static int TestMultiWorkspaceAskOrderingAndRouting(void)

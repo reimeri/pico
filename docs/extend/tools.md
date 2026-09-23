@@ -105,11 +105,11 @@ Only asks owned by the open session surface this way: the selected agent or a tr
 
 Builtin overlay handles `{"type":"confirm","message":"…"}` (Approve/Deny → `{"ok":true}` / `{"ok":false}`) and scrolls long messages without truncating them. Set `"ui":"custom"` or use another `type` to render your own overlay. Custom UIs may read characters from `on_frame` while a pending ask is open (`PicoUi_ModalOpen` skips the composer). Invalid JSON and invalid builtin confirmations return the immediate error answer instead of opening UI.
 
-Pico does not model questionnaire steps. Preferred: one `pico_tool_ask` with the full schema; the overlay keeps Next/Back and answers once. Sequential `pico_tool_ask` calls work too — drop widgets bound to a previous `id`.
+Pico does not model questionnaire steps. Preferred: one `pico_tool_ask` with the full schema; the UI keeps Next/Back and answers once. Sequential `pico_tool_ask` calls work too — drop widgets bound to a previous `id`.
 
 ### Builtin `ask_user` questionnaire
 
-The `ask-user` builtin registers the model-facing `ask_user` tool and a custom questionnaire overlay. It accepts all questions in one call:
+The `ask-user` builtin registers the model-facing `ask_user` tool and a non-modal questionnaire panel in place of the composer. It accepts all questions in one call:
 
 ```json
 {
@@ -131,7 +131,7 @@ The `ask-user` builtin registers the model-facing `ask_user` tool and a custom q
 
 Every question is required. A call contains 1–24 questions with unique, non-empty IDs of at most 128 UTF-8 bytes. `kind` is `select` or `text`. Select questions contain 1–20 non-empty options and always include **Other…**, which offers free-form input. Text questions accept up to 16 KiB and ignore `options`. The complete request and answer remain subject to the 64 KiB ask limits.
 
-The modal preserves answers while moving Next/Back and returns them in question order:
+The panel preserves answers while moving Next/Back and returns them in question order:
 
 ```json
 {
@@ -142,7 +142,24 @@ The modal preserves answers while moving Next/Back and returns them in question 
 }
 ```
 
-Controls: Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button or Shift+Tab goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Arrow keys never change questions. Text fields support the same editing shortcuts as the composer: Ctrl+Left/Right word moves, Home/End line start/end, Shift+arrows/Home/End selection, Ctrl+A select all, Ctrl+C/X copy/cut, Ctrl+V paste, Ctrl+W or Ctrl+Backspace delete word, plus drag, double-click word, and triple-click paragraph selection. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
+Controls (while the expanded panel is focused): Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button or Shift+Tab goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Arrow keys never change questions. Text fields support the same editing shortcuts as the composer: Ctrl+Left/Right word moves, Home/End line start/end, Shift+arrows/Home/End selection, Ctrl+A select all, Ctrl+C/X copy/cut, Ctrl+V paste, Ctrl+W or Ctrl+Backspace delete word, plus drag, double-click word, and triple-click paragraph selection. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
+
+### Builtin questionnaire presentation
+
+The builtin `ask_user` displays one question at a time in a bounded, content-sized
+panel replacing the composer. Collapse/Resume hides or restores the question
+without answering or cancelling it. Escape retains normal turn cancellation
+(unless a higher-priority UI, such as chat search or a named modal, handles it).
+Chat scrolling, selection/copy, search, and session switching remain available;
+question keyboard input belongs only to the focused, expanded panel. The existing
+composer draft is not submitted or cleared.
+
+The host owns parsed in-progress answers, current question, and collapsed state
+per globally unique ask ID. Switching sessions/workspaces preserves these drafts;
+completion, cancellation, owner close, or host-extension replacement releases them.
+This is in-memory UI state, not session persistence. Submission still returns one
+ordered `answers` array as the tool result. No separate answer summary or synthetic
+chat message is added; the expanded tool call remains the place to inspect answers.
 
 ## Streaming into a modal
 

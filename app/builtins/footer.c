@@ -1441,8 +1441,7 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
         }
         return;
     }
-    if (PicoAgent_AskUiOpen(PicoHost_SelectedAgent(app)) ||
-        (pico_ui_modal_claimed(app) && !own_menu_top && !own_worktree_top) || g_want_folder)
+    if ((PicoUi_ModalOpen(app) && !own_menu_top && !own_worktree_top) || g_want_folder)
     {
         app->hovered_clickable = false;
         return;

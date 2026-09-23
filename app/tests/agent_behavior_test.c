@@ -1677,6 +1677,10 @@ void PicoAuth_Free(PicoHost *app)
     g_auth_frees++;
 }
 
+float Pico_ChatColumnMaxPx(const PicoHost *app) { (void)app; return 0; }
+bool PicoChatSel_HasSelection(const PicoHost *app) { (void)app; return false; }
+void PicoChatSel_Copy(PicoHost *app) { (void)app; }
+
 void PicoChatSel_Clear(PicoHost *app)
 {
     if (app)
@@ -3940,8 +3944,7 @@ static bool AskUserRegistered(const PicoHost *app)
     const PicoWorkspace *ws = PicoHost_PrimaryWorkspaceConst(app);
     return app && ws && ws->tool_count == 1 && ws->tools[0].name &&
            strcmp(ws->tools[0].name, "ask_user") == 0 && ws->tools[0].run &&
-           ws->llm_hook_count == 1 && app->view_count[PICO_SLOT_OVERLAY] == 1 &&
-           app->hook_count == 2;
+           ws->llm_hook_count == 1;
 }
 
 static int TestAskUserHiddenOmitsGuidance(void)

@@ -26,6 +26,18 @@ static void *MovingRealloc(void *ptr, size_t size)
 #include "builtins/ask_user.c"
 #undef realloc
 
+bool PicoUi_ModalOpen(const PicoHost *app) { (void)app; return false; }
+bool PicoChatFind_PointerOver(const PicoHost *app) { (void)app; return false; }
+void PicoChatSel_Clear(PicoHost *app) { (void)app; }
+
+static bool mouse_pressed;
+static Vector2 mouse_position;
+static bool find_focused;
+static PicoToolAsk pending_asks[2];
+static int visible_ask;
+static char *submitted_answer;
+static uint64_t submitted_id;
+static int typed_character;
 static int pressed_key;
 static bool control_down;
 static bool shift_down;
@@ -39,7 +51,7 @@ bool IsKeyDown(int key)
 }
 bool IsKeyPressed(int key) { return key == pressed_key; }
 bool IsKeyPressedRepeat(int key) { (void)key; return false; }
-int GetCharPressed(void) { return 0; }
+int GetCharPressed(void) { int cp = typed_character; typed_character = 0; return cp; }
 double GetTime(void) { return 0; }
 const char *GetClipboardText(void) { return clipboard_text; }
 void SetClipboardText(const char *text) { (void)text; }
@@ -61,14 +73,16 @@ Vector2 MeasureTextEx(Font font, const char *text, float size, float spacing)
 bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer)
 {
     (void)host;
-    (void)id;
-    (void)answer;
-    return false;
+    if (!id) return false;
+    free(submitted_answer);
+    submitted_answer = JsonDup(answer);
+    submitted_id = id;
+    return true;
 }
 
-bool IsMouseButtonPressed(int button) { (void)button; return false; }
+bool IsMouseButtonPressed(int button) { (void)button; return mouse_pressed; }
 bool IsMouseButtonDown(int button) { (void)button; return false; }
-Vector2 GetMousePosition(void) { return (Vector2){0, 0}; }
+Vector2 GetMousePosition(void) { return mouse_position; }
 bool PicoScrollbar_Overflows(Clay_String container_id)
 {
     (void)container_id;
@@ -81,12 +95,46 @@ void *PicoPlugins_HostState(const PicoHost *host, const char *name)
     return NULL;
 }
 
+void pico_host_add_view(PicoHost *app, PicoUiSlot slot, int z, PicoHostViewFn fn)
+{ (void)app; (void)slot; (void)z; (void)fn; }
+void pico_host_add_hook(PicoHost *app, PicoHook kind, PicoHostHookFn fn)
+{ (void)app; (void)kind; (void)fn; }
+void BeginScissorMode(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+void EndScissorMode(void) {}
+void DrawRectangle(int x, int y, int w, int h, Color c) { (void)x; (void)y; (void)w; (void)h; (void)c; }
+
+bool PicoChatFind_BlocksInput(const PicoHost *app) { (void)app; return find_focused; }
+bool PicoChatSel_HasSelection(const PicoHost *app) { (void)app; return false; }
+void PicoChatSel_Copy(PicoHost *app) { (void)app; }
+float PicoHost_MainColumnWidth(const PicoHost *host) { (void)host; return Clay_GetLayoutDimensions().width; }
+float Pico_ChatColumnMaxPx(const PicoHost *host) { (void)host; return 0; }
+bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
+{
+    (void)app;
+    if (!pending_asks[visible_ask].id) return false;
+    *out = pending_asks[visible_ask];
+    return true;
+}
+bool PicoAgent_PendingAsk(const PicoAgent *agent, PicoToolAsk *out)
+{
+    /* The fixture uses two distinct opaque agent identities. */
+    int i = agent == (const PicoAgent *)&pending_asks[0] ? 0 : 1;
+    *out = pending_asks[i];
+    return out->id != 0;
+}
+void PicoScrollbar_UpdateDrag(PicoScrollbar *bar, Clay_String container, Clay_String handle)
+{ (void)bar; (void)container; (void)handle; }
+void PicoScrollbar_UpdateDragOverlay(PicoScrollbar *bar, Clay_String container, Clay_String handle)
+{ (void)bar; (void)container; (void)handle; }
+void PicoScrollbar_Render(Clay_String container, Clay_String track, Clay_String handle)
+{ (void)container; (void)track; (void)handle; }
+void PicoScrollbar_RenderOverlay(Clay_String container, Clay_String track, Clay_String handle)
+{ (void)container; (void)track; (void)handle; }
+
 static Clay_Dimensions ClayMeasureStub(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
 {
-    (void)text;
-    (void)config;
     (void)userData;
-    return (Clay_Dimensions){0, 0};
+    return (Clay_Dimensions){(float)text.length, (float)config->fontSize};
 }
 
 static int TestTextInput(void)
@@ -156,7 +204,7 @@ static int TestTextInput(void)
     return failed;
 }
 
-/* The modal's text field is an editing target: hovering it must request the
+/* The panel's text field is an editing target: hovering it must request the
  * I-beam cursor (hovered_text) rather than the link pointer
  * (hovered_clickable); app.c maps those flags to cursor shapes. */
 static int TestHoverCursor(void)
@@ -183,6 +231,7 @@ static int TestHoverCursor(void)
     ui.question_count = 1;
     ui.current = 0;
     ui.show = true;
+    AskHostState host_ui = {.active = &ui};
     s_active_ask_state = &ui;
 
     /* Text box at (0,0)-(400,200) with the scrollbar handle along its left
@@ -204,7 +253,7 @@ static int TestHoverCursor(void)
 
     /* Hovering the text field asks for the I-beam, not the link pointer. */
     Clay_SetPointerState((Clay_Vector2){100, 100}, false);
-    AskUserAfterLayout(app, NULL, &ui);
+    AskUserAfterLayout(app, NULL, &host_ui);
     if (!app->hovered_text || app->hovered_clickable)
     {
         fprintf(stderr, "hover cursor: text field must set hovered_text only\n");
@@ -215,7 +264,7 @@ static int TestHoverCursor(void)
     app->hovered_text = false;
     app->hovered_clickable = false;
     Clay_SetPointerState((Clay_Vector2){8, 50}, false);
-    AskUserAfterLayout(app, NULL, &ui);
+    AskUserAfterLayout(app, NULL, &host_ui);
     if (app->hovered_text || app->hovered_clickable)
     {
         fprintf(stderr, "hover cursor: scrollbar must keep the default cursor\n");
@@ -229,7 +278,7 @@ static int TestHoverCursor(void)
     question.text = answer;
     question.text_len = 1;
     Clay_SetPointerState((Clay_Vector2){450, 20}, false);
-    AskUserAfterLayout(app, NULL, &ui);
+    AskUserAfterLayout(app, NULL, &host_ui);
     if (!app->hovered_clickable || app->hovered_text)
     {
         fprintf(stderr, "hover cursor: answered Next button must set hovered_clickable only\n");
@@ -238,7 +287,183 @@ static int TestHoverCursor(void)
 
     s_active_ask_state = NULL;
     free(app);
+    Clay_SetCurrentContext(NULL);
     free(memory);
+    return failed;
+}
+
+static Clay_RenderCommandArray PanelLayout(PicoHost *app, AskHostState *ui)
+{
+    Clay_BeginLayout();
+    AskUserRender(app, ui);
+    return Clay_EndLayout(0);
+}
+
+static bool PanelHasText(Clay_RenderCommandArray commands, const char *text)
+{
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, i);
+        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+        Clay_StringSlice label = cmd->renderData.text.stringContents;
+        if (label.length == (int)strlen(text) && !memcmp(label.chars, text, (size_t)label.length)) return true;
+    }
+    return false;
+}
+
+static void PanelClick(PicoHost *app, AskHostState *ui, Clay_ElementId id)
+{
+    Clay_BoundingBox box = Clay_GetElementData(id).boundingBox;
+    mouse_position = (Vector2){box.x + box.width / 2, box.y + box.height / 2};
+    mouse_pressed = true;
+    Clay_SetPointerState((Clay_Vector2){mouse_position.x, mouse_position.y}, true);
+    AskUserAfterLayout(app, NULL, ui);
+    mouse_pressed = false;
+    Clay_SetPointerState((Clay_Vector2){mouse_position.x, mouse_position.y}, false);
+}
+
+static int TestQuestionPanel(void)
+{
+    const char *request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"target\",\"question\":\"Choose target\",\"kind\":\"select\",\"options\":[\"CLI\",\"GUI\"]},"
+        "{\"id\":\"notes\",\"question\":\"Any notes?\",\"kind\":\"text\"}]}";
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *app = calloc(1, sizeof(*app));
+    PicoWorkspace *ws = calloc(1, sizeof(*ws));
+    AskHostState *ui = calloc(1, sizeof(*ui));
+    if (!memory || !app || !ws || !ui) abort();
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                    (Clay_Dimensions){800, 800}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+    app->workspaces[0] = ws;
+    app->workspace_count = 1;
+    ws->count = 2;
+    for (int i = 0; i < 2; i++)
+    {
+        pending_asks[i] = (PicoToolAsk){.id = (uint64_t)i + 1, .request_json = request};
+        ws->agents[i] = (PicoAgent *)&pending_asks[i];
+    }
+    visible_ask = 0;
+    AskUserOnFrame(app, ui, 0);
+    Clay_RenderCommandArray commands = PanelLayout(app, ui);
+    int failed = !PanelHasText(commands, "Choose target") || PanelHasText(commands, "Any notes?");
+    float expanded = Clay_GetElementData(CLAY_ID("Composer")).boundingBox.height;
+    pressed_key = KEY_TWO;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Any notes?") || PanelHasText(commands, "Choose target");
+    typed_character = 'A';
+    AskUserOnFrame(app, ui, 0);
+    PanelLayout(app, ui);
+    PanelClick(app, ui, CLAY_ID("AskUserToggle"));
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Resume") || PanelHasText(commands, "Any notes?") ||
+              Clay_GetElementData(CLAY_ID("Composer")).boundingBox.height >= expanded || submitted_id != 0;
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    failed |= submitted_id != 0; /* Collapse is not submit, nor is Enter while collapsed. */
+    pressed_key = 0;
+    visible_ask = 1;
+    AskUserOnFrame(app, ui, 0);
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Choose target");
+    visible_ask = 0;
+    AskUserOnFrame(app, ui, 0);
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Resume");
+    PanelClick(app, ui, CLAY_ID("AskUserToggle"));
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Any notes?") || !PanelHasText(commands, "A");
+    /* Search takes keyboard ownership, and does not return it implicitly. */
+    find_focused = true;
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    find_focused = false;
+    pressed_key = 0;
+    visible_ask = 1;
+    AskUserOnFrame(app, ui, 0);
+    visible_ask = 0;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    failed |= submitted_id != 0;
+    pressed_key = 0;
+    PanelClick(app, ui, CLAY_ID("AskUserTextBox"));
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    failed |= submitted_id != 1 || !submitted_answer || strcmp(submitted_answer,
+        "{\"answers\":[{\"id\":\"target\",\"answer\":\"GUI\"},{\"id\":\"notes\",\"answer\":\"A\"}]}") != 0;
+    /* A still-visible snapshot after submit must not reopen the questionnaire. */
+    AskUserOnFrame(app, ui, 0);
+    commands = PanelLayout(app, ui);
+    failed |= PanelHasText(commands, "Choose target");
+    memset(pending_asks, 0, sizeof(pending_asks));
+    AskUserOnFrame(app, ui, 0);
+    failed |= PanelHasText(PanelLayout(app, ui), "Any notes?");
+    AskUserHostShutdown(app, ui);
+    free(submitted_answer);
+    submitted_answer = NULL;
+    submitted_id = 0;
+    free(ws);
+    free(app);
+    Clay_SetCurrentContext(NULL);
+    free(memory);
+    if (failed) fprintf(stderr, "question panel: navigation, collapse, draft retention, focus, or submission failed\n");
+    return failed;
+}
+
+static int TestLongQuestionScroll(void)
+{
+    const char *request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"target\",\"question\":\"Which target?\",\"kind\":\"select\","
+        "\"options\":[\"one\",\"two\",\"three\",\"four\",\"five\",\"six\",\"seven\",\"eight\"]},"
+        "{\"id\":\"next\",\"question\":\"Next question\",\"kind\":\"text\"}]}";
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *app = calloc(1, sizeof(*app));
+    AskUiState *ui = calloc(1, sizeof(*ui));
+    AskHostState *host_ui = calloc(1, sizeof(*host_ui));
+    if (!memory || !app || !ui || !host_ui) abort();
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                    (Clay_Dimensions){500, 700}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+    s_active_ask_state = ui;
+    host_ui->requests = host_ui->active = ui;
+    char error[192];
+    int failed = LoadUiRequest(request, error, sizeof(error)) != 1;
+    PanelLayout(app, host_ui);
+    AskUserAfterLayout(app, NULL, host_ui);
+    /* Keyboard-select Other below the fold; its free-form editor must become
+     * visible without hiding the fixed Next/Back controls. */
+    pressed_key = KEY_NINE;
+    HandleSelectKeys(app, &ui->questions[0]);
+    pressed_key = 0;
+    PanelLayout(app, host_ui);
+    AskUserAfterLayout(app, NULL, host_ui);
+    PanelLayout(app, host_ui);
+    Clay_BoundingBox body = Clay_GetElementData(CLAY_ID("AskUserBody")).boundingBox;
+    Clay_BoundingBox editor = Clay_GetElementData(CLAY_ID("AskUserTextBox")).boundingBox;
+    failed |= editor.y < body.y || editor.y + editor.height > body.y + body.height + .01f;
+    AskTextInsert(&ui->questions[0], "Custom target", 13);
+    pressed_key = KEY_ENTER;
+    HandleTextKeys(app, &ui->questions[0]);
+    pressed_key = 0;
+    Clay_RenderCommandArray commands = PanelLayout(app, host_ui);
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+    failed |= !PanelHasText(commands, "Next question") || !scroll.found || scroll.scrollPosition->y != 0;
+    AskTextInsert(&ui->questions[1], "Notes", 5);
+    char *answer = BuildAnswer();
+    failed |= !answer || strcmp(answer,
+        "{\"answers\":[{\"id\":\"target\",\"answer\":\"Custom target\"},{\"id\":\"next\",\"answer\":\"Notes\"}]}");
+    free(answer);
+    AskUserHostShutdown(app, host_ui);
+    free(app);
+    Clay_SetCurrentContext(NULL);
+    free(memory);
+    if (failed) fprintf(stderr, "long question: Other editor visibility or next-question scroll reset failed\n");
     return failed;
 }
 
@@ -296,6 +521,8 @@ int main(void)
 {
     int failed = TestTextInput();
     failed |= TestHoverCursor();
+    failed |= TestQuestionPanel();
+    failed |= TestLongQuestionScroll();
     failed |= ExpectRequest(
         "mixed questionnaire",
         "{\"questions\":[{\"id\":\"target\",\"question\":\"Which?\",\"kind\":\"select\","

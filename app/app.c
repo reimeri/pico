@@ -1983,10 +1983,23 @@ void PicoHost_Cancel(PicoHost *app)
     pico_agent_cancel(app, id);
 }
 
+bool PicoUi_QuestionnaireOpen(const PicoHost *app)
+{
+    PicoToolAsk ask;
+    if (!pico_tool_pending_ask(app, &ask) || !ask.request_json) return false;
+    JsonDoc doc;
+    if (JsonParse(&doc, ask.request_json, strlen(ask.request_json)) != 0) return false;
+    bool questionnaire = JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "questionnaire") &&
+                         JsonEq(&doc, JsonObjGet(&doc, 0, "ui"), "custom");
+    JsonFree(&doc);
+    return questionnaire;
+}
+
 bool PicoUi_ModalOpen(const PicoHost *app)
 {
     PicoToolAsk ask;
-    return pico_ui_modal_claimed(app) || pico_tool_pending_ask(app, &ask);
+    return pico_ui_modal_claimed(app) ||
+           (pico_tool_pending_ask(app, &ask) && !PicoUi_QuestionnaireOpen(app));
 }
 
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
@@ -3196,6 +3209,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
 
 Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_height, float delta_time)
 {
+    app->ui_relayout_requested = false;
     PicoChat_BeginScrollLayout(app);
     Clay_RenderCommandArray commands = LayoutShellPass(app, viewport_height, delta_time);
     /* Correct shrink-induced clamping before presenting. A second correction
@@ -3413,6 +3427,9 @@ void PicoHost_Frame(PicoHost *app)
         PicoHost_RequestReload(app);
     }
 
+    /* A modal may consume Escape and pop its claim during host_on_frame.
+     * Remember ownership before callbacks so that same key cannot cancel a turn. */
+    bool had_modal = pico_ui_modal_claimed(app);
     PicoPlugins_Poll(app);
     PicoChatFind_HandleInput(app);
     pico_host_pump(app);
@@ -3431,7 +3448,7 @@ void PicoHost_Frame(PicoHost *app)
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
-    bool had_modal = pico_ui_modal_claimed(app);
+    had_modal = had_modal || pico_ui_modal_claimed(app);
     if (PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_todo, had_modal) &&
         IsKeyPressed(KEY_ESCAPE))
     {
@@ -3550,7 +3567,8 @@ void PicoHost_Frame(PicoHost *app)
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }
-    else if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer"))) || PicoChatSel_PointerOverText() ||
+    else if ((!PicoUi_QuestionnaireOpen(app) && Clay_PointerOver(Clay_GetElementId(CLAY_STRING("Composer")))) ||
+             PicoChatSel_PointerOverText() ||
              app->chat_sel.mouse_selecting)
     {
         SetMouseCursor(MOUSE_CURSOR_IBEAM);
@@ -3560,7 +3578,7 @@ void PicoHost_Frame(PicoHost *app)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
 
-    bool relayout = false;
+    bool relayout = app->ui_relayout_requested;
     if (ClayLayoutUnusable(render_commands))
     {
         (void)PicoChat_TakeVirtualRelayout();
@@ -3569,7 +3587,7 @@ void PicoHost_Frame(PicoHost *app)
     else
     {
         PicoChat_HarvestVirtualHeights(app);
-        relayout = PicoChat_TakeVirtualRelayout();
+        if (PicoChat_TakeVirtualRelayout()) relayout = true;
         if (Pico_RestoreClayScroll())
         {
             relayout = true;

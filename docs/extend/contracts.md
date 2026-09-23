@@ -30,7 +30,7 @@ Builtin OpenAI browser/device login is core-tracked compiled-in work, not a user
 
 Worker thread: `PicoToolFn`, `PicoToolBeforeFn`, `PicoProviderStreamFn`. They receive a callback-scoped opaque `PicoAgentContext *`, never `PicoHost *`. Do not retain it. Parallel-eligible tool callbacks and before-tool hooks may overlap within the same agent; callbacks from different agents and workspaces also overlap. They must be reentrant. Main-thread apply and after-tool callbacks are serialized with each other, not with sibling workers. Use context accessors, `pico_tool_ask`, `pico_ui_post`, `pico_tool_set_child`, and `pico_auth_copy_ctx`; do not touch UI, transcript, session, settings, model catalog, or unsynchronized agent-scoped extension state. `pico_agent_context_workspace` / `pico_agent_context_workspace_id` are the immutable path and ID copied when the turn was accepted, not the UI-selected workspace. `pico_agent_context_registration_generation` is the workspace registration generation copied for that same accepted turn. `pico_tool_ask` and `pico_ui_post` may be called only from a tool or before-tool callback. Builtin `run_background` does not call `pico_tool_set_child`: jobs belong to the workspace table, survive extension reload, and are killed on session reset, agent destroy, workspace free, or host shutdown. Children set `PR_SET_PDEATHSIG` on Linux as a retained-shutdown backstop. Do not block on your own condition variable — Esc, force-cancel, reload, and shutdown cannot wake it.
 
-Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a `PicoToolResult` with malloc'd fields; providers use `on_delta` / `PicoLlmResult`. Overlay code answers a pending ask from the main thread with `pico_tool_answer`. `PICO_LLM_DELTA_THINKING` appends; `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current summary (zero-length starts the next step). Pico coalesces consecutive summaries until a tool call. The widget title is the latest step; expanding shows every step.
+Do not use Clay, Raylib drawing, or composer/chat mutation from the worker. Tools return a `PicoToolResult` with malloc'd fields; providers use `on_delta` / `PicoLlmResult`. UI code answers a pending ask from the main thread with `pico_tool_answer`. `PICO_LLM_DELTA_THINKING` appends; `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current summary (zero-length starts the next step). Pico coalesces consecutive summaries until a tool call. The widget title is the latest step; expanding shows every step.
 
 Reload of a workspace is deferred while any of its live workers is busy, and while any force-cancelled worker in that workspace is still in a tool or provider call, so those pointers stay valid until the call returns. That includes a worker blocked in `pico_tool_ask` or the builtin `subagent` tool. Other workspaces are not blocked. A worker callback that never returns leaves only its workspace in `CLOSING`.
 
@@ -136,3 +136,19 @@ Delegation jobs and child/session ownership survive force cancellation until eve
 ## Tool authorization
 
 Each request starts from registered tools, applies the agent policy, then LLM-hook exclusions. For a named child, the policy is the current profile's exact allowlist snapshot; omission allows all tools and an empty array allows none. Continued sessions refresh this policy instead of restoring an old catalog. Context hooks inspect the final effective catalog. The provider receives a retained snapshot, and tool execution/apply resolve only from that snapshot—not from the live registry. A hidden or unoffered call becomes a logged tool error and bypasses before hooks, tool code, apply, and after hooks. Empty/duplicate call IDs, malformed call arrays, and calls beyond the pending-call limit fail the provider round explicitly. Pending calls follow their retained execution policies: eligible calls overlap up to the turn's limit, sequential calls act as ordering barriers, and excess calls remain queued.
+
+## Questionnaire UI ownership
+
+The builtin custom questionnaire (`type: "questionnaire", ui: "custom"`) is a
+non-modal composer replacement. `PicoUi_ModalOpen` excludes this surfaced ask,
+but still includes named modal claims, confirmation asks, and other custom asks.
+No worker, ask ID, answer ownership, ordering, or cancellation contract changes.
+The ordinary composer yields rendering and input while a questionnaire is pending;
+extension views still stack in their registered slots.
+
+Questionnaire drafts are host-owned copies keyed by ask ID, retained across
+session/workspace selection, and discarded after the ask ends, its owner closes,
+or host extensions are replaced. Borrowed `request_json` is never retained across
+pumps. Collapsing does not answer or cancel; only the focused expanded panel
+consumes question keyboard input, and named modals/chat search take precedence.
+Questionnaire submission creates no extra transcript message beyond the tool result.

@@ -598,7 +598,8 @@ bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer_json);
  * the next pump, transcript mutation, agent close, or workspace close. */
 int pico_agent_message_count(const PicoHost *host, PicoAgentId id);
 const PicoMessage *pico_agent_message(const PicoHost *host, PicoAgentId id, int index);
-/* True while the named modal stack is non-empty or a tool ask is showing. */
+/* True for a named modal or a surfaced modal tool ask. The builtin custom
+ * questionnaire is non-modal: it replaces the composer without blocking chat. */
 bool PicoUi_ModalOpen(const PicoHost *host);
 void pico_host_add_command(PicoHost *host, const char *name, const char *help, PicoHostCmdFn run);
 void pico_workspace_add_command(PicoWorkspace *workspace, const char *name, const char *help,

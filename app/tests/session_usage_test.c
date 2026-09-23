@@ -1682,7 +1682,124 @@ static int TestCatalog(void)
         return Fail("listing cache must trust overlay when the jsonl stat generation matches");
     }
     PicoCatalog_Free(list, n);
+
+    /* Group presentation must survive a rescan without changing checkout identity. */
+    if (PicoCatalog_SetProjectName(ws, "My project") != 0 ||
+        PicoCatalog_SetProjectStashed(ws, true) != 0)
+        return Fail("project rename and stash");
+    if (PicoCatalog_Ensure(ws) != 0) return Fail("reopen stashed workspace");
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || strcmp(found->name, "My project") || !found->stashed ||
+        strcmp(found->path, ws) || found->session_count != 1)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("renamed stashed project keeps exact session routing");
+    }
+    PicoCatalog_Free(list, n);
+    if (PicoCatalog_SetProjectStashed(ws, false) != 0)
+        return Fail("restore project");
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->stashed || strcmp(found->name, "My project"))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("restored project keeps its display name");
+    }
+    PicoCatalog_Free(list, n);
     return 0;
+}
+
+static int TestCatalogProjectDelete(void)
+{
+    char ws[] = "/tmp/pico-cat-delete-XXXXXX";
+    char file[4096], artifact[4096], media_dir[4096], other[4096];
+    char residue[4096], residue_meta[4096], decoy[4096];
+    PicoCatalogWorkspace *list = NULL;
+    const PicoCatalogWorkspace *found;
+    int n;
+    PicoHost host = {0};
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0)
+        return Fail("delete catalog setup");
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || !PicoPath_Format(file, sizeof(file), "%s/sessions/%s/deleted.jsonl", g_config_dir, found->key) ||
+        !PicoPath_Format(other, sizeof(other), "%s/sessions/%s/notes.txt", g_config_dir, found->key) ||
+        !PicoPath_Format(residue, sizeof(residue), "%s/sessions/%s/deleted.jsonl.tmp.a1b2c3", g_config_dir, found->key) ||
+        !PicoPath_Format(residue_meta, sizeof(residue_meta), "%s/sessions/%s/.workspace.json.tmp.z9y8x7", g_config_dir, found->key) ||
+        !PicoPath_Format(decoy, sizeof(decoy), "%s/sessions/%s/scratch.tmp.note", g_config_dir, found->key) ||
+        !PicoPath_Format(media_dir, sizeof(media_dir), "%s/.pico/media/deleted", ws) ||
+        !PicoPath_Format(artifact, sizeof(artifact), "%s/image.bin", media_dir))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("delete catalog paths");
+    }
+    PicoCatalog_Free(list, n);
+    Pico_MkdirP(media_dir);
+    /* Unknown files block deletion before anything is touched; Pico atomic-write
+     * residue is tolerated and cleaned up, but a ".tmp." infix alone is not enough. */
+    if (!AppendRaw(file, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"deleted\"}") ||
+        !AppendRaw(artifact, "artifact") || !AppendRaw(other, "unrelated") ||
+        !AppendRaw(residue, "partial") || !AppendRaw(residue_meta, "partial") || !AppendRaw(decoy, "decoy") ||
+        PicoCatalog_DeleteProject(&host, ws) == 0 || access(other, F_OK) != 0 ||
+        access(decoy, F_OK) != 0 || access(residue, F_OK) != 0 ||
+        unlink(other) != 0 || unlink(decoy) != 0 ||
+        PicoCatalog_DeleteProject(&host, ws) != 0)
+        return Fail("delete all catalog history");
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (found || access(file, F_OK) == 0 || access(artifact, F_OK) == 0 ||
+        access(residue, F_OK) == 0 || access(residue_meta, F_OK) == 0 || access(ws, F_OK) != 0)
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("delete keeps project directory but clears Pico data");
+    }
+    PicoCatalog_Free(list, n);
+    return 0;
+}
+
+static int TestCatalogProjectDeleteBeyondScanLimit(void)
+{
+    enum { PAD_COUNT = PICO_MAX_CATALOG_WORKSPACES + 8 };
+    char ws[] = "/tmp/pico-cat-delete-many-XXXXXX";
+    char pads[PAD_COUNT][sizeof("/tmp/pico-cat-pad-XXXXXX")];
+    PicoCatalogWorkspace *list = NULL;
+    PicoHost host = {0};
+    int created = 0;
+    const char *failure = NULL;
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0)
+        return Fail("delete-beyond-limit setup");
+    for (int i = 0; i < PAD_COUNT; i++)
+    {
+        snprintf(pads[i], sizeof(pads[i]), "/tmp/pico-cat-pad-XXXXXX");
+        if (!mkdtemp(pads[i]) || PicoCatalog_Ensure(pads[i]) != 0)
+        {
+            failure = "delete-beyond-limit pad catalogs";
+            goto done;
+        }
+        created++;
+    }
+    /* More cataloged projects than the sidebar scan limit must not block deletion. */
+    if (PicoCatalog_DeleteProject(&host, ws) != 0)
+    {
+        failure = "delete project beyond the catalog scan limit";
+        goto done;
+    }
+    for (int i = 0; i < created; i++)
+    {
+        if (PicoCatalog_DeleteProject(&host, pads[i]) != 0)
+        {
+            failure = "delete-beyond-limit pad cleanup";
+            goto done;
+        }
+    }
+    /* Back under the limit the deleted project must stay gone. */
+    int n = PicoCatalog_ScanGrouped(&list);
+    if (FindCatalogPath(list, n, ws))
+        failure = "deleted project stays gone after rescan";
+    PicoCatalog_Free(list, n);
+done:
+    return failure ? Fail(failure) : 0;
 }
 
 static int TestCatalogWorkspaceReorder(void)
@@ -2948,7 +3065,8 @@ int main(void)
         TestSessionDisplayTitle() != 0 ||
         TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
         TestConcurrentAppendDuringTitle() != 0 || TestConcurrentDoneCatalog() != 0 ||
-        TestCatalogChangeToken() != 0 || TestCatalog() != 0 ||
+        TestCatalogChangeToken() != 0 || TestCatalog() != 0 || TestCatalogProjectDelete() != 0 ||
+        TestCatalogProjectDeleteBeyondScanLimit() != 0 ||
         TestCatalogWorkspaceReorder() != 0 ||
         TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
         TestUnseenCompleteRoundTrip() != 0 ||

@@ -61,6 +61,7 @@ typedef struct PicoCatalogWorkspace {
     char name[PICO_CATALOG_NAME_MAX];
     int order;
     bool collapsed;
+    bool stashed; /* logical project group presentation state */
     PicoCatalogSession *sessions;
     int session_count;
 } PicoCatalogWorkspace;
@@ -78,6 +79,12 @@ int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out);
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
+/* Project identity is the canonical main checkout path, not a session checkout. */
+int PicoCatalog_SetProjectName(const char *project_path, const char *name);
+int PicoCatalog_SetProjectStashed(const char *project_path, bool stashed);
+/* Removes Pico session data for the group, never checkout directories.
+ * Refuses while any agent in the project is live. */
+int PicoCatalog_DeleteProject(PicoHost *host, const char *project_path);
 int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_id,
                                 const char *model, const char *effort);
 

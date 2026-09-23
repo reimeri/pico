@@ -12,6 +12,7 @@
 #include "session.h"
 #include "builtins/sidebar.h"
 #include "tinyfiledialogs.h"
+#include "text_range.h"
 
 #include "clay/clay.h"
 
@@ -34,12 +35,14 @@ extern bool PicoSession_TestHook(const char *stage);
 #define SIDEBAR_SESSION_IDLE_DOT 4
 #define SIDEBAR_DRAG_THRESHOLD 4.0f
 
-typedef struct SidebarWsUi {
+typedef struct SidebarWsUi
+{
     char path[4096];
     int shown;
 } SidebarWsUi;
 
-typedef struct SidebarState {
+typedef struct SidebarState
+{
     PicoHost *host;
     PicoCatalogWorkspace *workspaces;
     int workspace_count;
@@ -55,6 +58,14 @@ typedef struct SidebarState {
     bool catalog_change_token_valid;
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
+    Texture2D pen_icon;
+    bool stash_expanded;
+    bool edit_open;
+    bool delete_confirm;
+    bool edit_pointer_latched;
+    char edit_path[4096];
+    char edit_name[PICO_CATALOG_NAME_MAX];
+    char delete_label[384];
     Texture2D settings_icon;
     Texture2D settings_icon_hover;
     Texture2D worktree_icon;
@@ -570,6 +581,7 @@ static void EnsureFolderIcons(SidebarState *s)
     s->icons_tried = true;
     s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png", COLOR_MUTED);
     s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png", COLOR_MUTED);
+    s->pen_icon = LoadFolderIcon("resources/pen.png", COLOR_TEXT);
     s->settings_icon = LoadFolderIcon("resources/settings.png", COLOR_MUTED);
     s->settings_icon_hover = LoadFolderIcon("resources/settings.png", COLOR_TEXT);
     s->worktree_icon = LoadFolderIcon("resources/worktree.png", COLOR_MUTED);
@@ -591,6 +603,8 @@ static void UnloadFolderIcons(SidebarState *s)
         UnloadTexture(s->folder_expanded);
         memset(&s->folder_expanded, 0, sizeof(s->folder_expanded));
     }
+    if (s->pen_icon.id != 0)
+        UnloadTexture(s->pen_icon);
     if (s->settings_icon.id != 0)
     {
         UnloadTexture(s->settings_icon);
@@ -611,9 +625,9 @@ static void UnloadFolderIcons(SidebarState *s)
 static void RenderGlyph(const char *glyph, Clay_Color color)
 {
     CLAY_TEXT(CStr(glyph), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                            .fontSize = PICO_FONT_UI,
-                                            .textColor = color,
-                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                             .fontSize = PICO_FONT_UI,
+                                             .textColor = color,
+                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
 
 static void RenderFolderIcon(Texture2D *tex, const char *fallback)
@@ -648,7 +662,8 @@ static void RenderSettingsIcon(SidebarState *s, bool hovered)
     RenderGlyph("*", hovered ? COLOR_TEXT : COLOR_MUTED);
 }
 
-typedef enum SidebarDotKind {
+typedef enum SidebarDotKind
+{
     SIDEBAR_DOT_IDLE = 0,
     SIDEBAR_DOT_RUNNING,
     SIDEBAR_DOT_WAITING_USER,
@@ -675,20 +690,20 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
     switch (agent->state)
     {
-        case PICO_AGENT_ERROR:
-            return SIDEBAR_DOT_ERROR;
-        case PICO_AGENT_TOOL_WAIT:
-            if (PicoAgent_AskUiOpen(agent))
-            {
-                return SIDEBAR_DOT_WAITING_USER;
-            }
-            return SIDEBAR_DOT_RUNNING;
-        case PICO_AGENT_LLM_WAIT:
-        case PICO_AGENT_COMPACT_WAIT:
-            return SIDEBAR_DOT_RUNNING;
-        case PICO_AGENT_IDLE:
-        default:
-            return agent->unseen_complete ? SIDEBAR_DOT_DONE : SIDEBAR_DOT_IDLE;
+    case PICO_AGENT_ERROR:
+        return SIDEBAR_DOT_ERROR;
+    case PICO_AGENT_TOOL_WAIT:
+        if (PicoAgent_AskUiOpen(agent))
+        {
+            return SIDEBAR_DOT_WAITING_USER;
+        }
+        return SIDEBAR_DOT_RUNNING;
+    case PICO_AGENT_LLM_WAIT:
+    case PICO_AGENT_COMPACT_WAIT:
+        return SIDEBAR_DOT_RUNNING;
+    case PICO_AGENT_IDLE:
+    default:
+        return agent->unseen_complete ? SIDEBAR_DOT_DONE : SIDEBAR_DOT_IDLE;
     }
 }
 
@@ -697,28 +712,29 @@ static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, b
     float gutter = Pico_FontPx(SIDEBAR_FOLDER_ICON);
     float slot = Pico_FontPx(SIDEBAR_SESSION_DOT);
     float size = Pico_FontPx(kind == SIDEBAR_DOT_IDLE ? SIDEBAR_SESSION_IDLE_DOT
-                                                     : SIDEBAR_SESSION_DOT);
+                                                      : SIDEBAR_SESSION_DOT);
     Clay_Color color = COLOR_STATUS_OFF;
     switch (kind)
     {
-        case SIDEBAR_DOT_ERROR:
-            color = COLOR_STATUS_ERR;
-            break;
-        case SIDEBAR_DOT_WAITING_USER:
-            color = COLOR_STATUS_RUN;
-            break;
-        case SIDEBAR_DOT_RUNNING: {
-            float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.28318530718f * 1.25f);
-            color = COLOR_STATUS_ON;
-            color.a = 90.0f + 165.0f * pulse;
-            break;
-        }
-        case SIDEBAR_DOT_DONE:
-            color = COLOR_STATUS_DONE;
-            break;
-        case SIDEBAR_DOT_IDLE:
-        default:
-            break;
+    case SIDEBAR_DOT_ERROR:
+        color = COLOR_STATUS_ERR;
+        break;
+    case SIDEBAR_DOT_WAITING_USER:
+        color = COLOR_STATUS_RUN;
+        break;
+    case SIDEBAR_DOT_RUNNING:
+    {
+        float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.28318530718f * 1.25f);
+        color = COLOR_STATUS_ON;
+        color.a = 90.0f + 165.0f * pulse;
+        break;
+    }
+    case SIDEBAR_DOT_DONE:
+        color = COLOR_STATUS_DONE;
+        break;
+    case SIDEBAR_DOT_IDLE:
+    default:
+        break;
     }
     CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter),
                                         .height = CLAY_SIZING_FIXED(slot)},
@@ -806,35 +822,40 @@ int PicoSidebar_DropTarget(const float *midpoints, int count, int source, float 
                            bool pointer_over_list)
 {
     return pointer_over_list
-        ? PicoSidebar_DragTarget(midpoints, count, source, mouse_y)
-        : -1;
+               ? PicoSidebar_DragTarget(midpoints, count, source, mouse_y)
+               : -1;
 }
 
-static int SidebarComputeDragTarget(SidebarState *s, float mouse_y,
-                                    bool pointer_over_list)
+/* Reorderable (non-stashed) workspace indices in display order. */
+static int SidebarDraggableSlots(const SidebarState *s, int *slots)
 {
-    int n = s ? s->workspace_count : 0;
+    int n = 0;
+    for (int i = 0; i < s->workspace_count && n < PICO_MAX_CATALOG_WORKSPACES; i++)
+        if (!s->workspaces[i].stashed)
+            slots[n++] = i;
+    return n;
+}
+
+static int SidebarComputeDragTarget(SidebarState *s, float mouse_y, bool pointer_over_list)
+{
     float mids[PICO_MAX_CATALOG_WORKSPACES];
-    int k;
-    if (!s || s->drag_source_index < 0 || s->drag_source_index >= n)
-    {
+    int slots[PICO_MAX_CATALOG_WORKSPACES];
+    int n, source = -1;
+    if (!s || s->drag_source_index < 0 || s->drag_source_index >= s->workspace_count ||
+        s->workspaces[s->drag_source_index].stashed)
         return -1;
-    }
-    if (n > PICO_MAX_CATALOG_WORKSPACES)
+    n = SidebarDraggableSlots(s, slots);
+    for (int k = 0; k < n; k++)
     {
-        n = PICO_MAX_CATALOG_WORKSPACES;
-    }
-    for (k = 0; k < n; k++)
-    {
-        Clay_ElementData el = Clay_GetElementData(CLAY_IDI("SidebarWs", k));
+        Clay_ElementData el = Clay_GetElementData(CLAY_IDI("SidebarWs", slots[k]));
         if (!el.found)
-        {
             return s->drag_source_index;
-        }
         mids[k] = el.boundingBox.y + el.boundingBox.height * 0.5f;
+        if (slots[k] == s->drag_source_index)
+            source = k;
     }
-    return PicoSidebar_DropTarget(mids, n, s->drag_source_index, mouse_y,
-                                  pointer_over_list);
+    int target = PicoSidebar_DropTarget(mids, n, source, mouse_y, pointer_over_list);
+    return target < 0 ? -1 : slots[target];
 }
 
 static void SidebarReorderWorkspaces(SidebarState *s, int from, int to)
@@ -847,40 +868,52 @@ static void SidebarReorderWorkspaces(SidebarState *s, int from, int to)
     {
         return;
     }
+    if (s->workspaces[from].stashed || s->workspaces[to].stashed)
+        return;
+    int slots[PICO_MAX_CATALOG_WORKSPACES];
+    int n = SidebarDraggableSlots(s, slots);
+    int from_slot = -1, to_slot = -1;
+    for (int i = 0; i < n; i++)
+    {
+        if (slots[i] == from)
+            from_slot = i;
+        if (slots[i] == to)
+            to_slot = i;
+    }
+    if (from_slot < 0 || to_slot < 0)
+        return;
     moved_ws = s->workspaces[from];
     memset(&moved_ui, 0, sizeof(moved_ui));
     has_ui = s->ui && from < s->ui_count && to < s->ui_count;
     if (has_ui)
-    {
         moved_ui = s->ui[from];
-    }
-    if (from < to)
+    if (from_slot < to_slot)
     {
-        memmove(&s->workspaces[from], &s->workspaces[from + 1], sizeof(PicoCatalogWorkspace) * (size_t)(to - from));
-        if (has_ui)
+        for (int i = from_slot; i < to_slot; i++)
         {
-            memmove(&s->ui[from], &s->ui[from + 1], sizeof(SidebarWsUi) * (size_t)(to - from));
+            s->workspaces[slots[i]] = s->workspaces[slots[i + 1]];
+            if (has_ui)
+                s->ui[slots[i]] = s->ui[slots[i + 1]];
         }
     }
     else
     {
-        memmove(&s->workspaces[to + 1], &s->workspaces[to], sizeof(PicoCatalogWorkspace) * (size_t)(from - to));
-        if (has_ui)
+        for (int i = from_slot; i > to_slot; i--)
         {
-            memmove(&s->ui[to + 1], &s->ui[to], sizeof(SidebarWsUi) * (size_t)(from - to));
+            s->workspaces[slots[i]] = s->workspaces[slots[i - 1]];
+            if (has_ui)
+                s->ui[slots[i]] = s->ui[slots[i - 1]];
         }
     }
     s->workspaces[to] = moved_ws;
     if (has_ui)
-    {
         s->ui[to] = moved_ui;
-    }
     for (k = 0; k < s->workspace_count; k++)
     {
         s->workspaces[k].order = k;
     }
     s->order_persist_generation = PicoCatalog_EnqueueOrder(s->host, s->workspaces,
-                                                            s->workspace_count);
+                                                           s->workspace_count);
     if (s->order_persist_generation == 0)
     {
         s->order_unsaved = true;
@@ -901,6 +934,8 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
 {
     Clay_ElementId row_id = CLAY_IDI("SidebarWs", index);
     Clay_ElementId plus_id = CLAY_IDI("SidebarPlus", index);
+    Clay_ElementId edit_id = CLAY_IDI("SidebarEdit", index);
+    bool edit_hovered = Clay_PointerOver(edit_id);
     bool is_dragged = s && s->is_dragging && s->drag_source_index == index;
     bool plus_hovered = !is_dragged && Clay_PointerOver(plus_id);
     bool hovered = !is_dragged && (Clay_PointerOver(row_id) || plus_hovered);
@@ -915,8 +950,14 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
                   .backgroundColor = fill,
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderFolderIcon(ws->collapsed ? &s->folder_collapsed : &s->folder_expanded,
-                         ws->collapsed ? ">" : "v");
+        CLAY(edit_id, {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
+                                             .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}}})
+        {
+            RenderFolderIcon(edit_hovered ? &s->pen_icon : ws->collapsed ? &s->folder_collapsed
+                                                                         : &s->folder_expanded,
+                             edit_hovered ? "*" : ws->collapsed ? ">"
+                                                                : "v");
+        }
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {
@@ -962,7 +1003,7 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = PICO_FONT_UI,
                                         .textColor = missing_checkout ? COLOR_STATUS_ERR
-                                                                          : (selected ? COLOR_TEXT : COLOR_MUTED),
+                                                                      : (selected ? COLOR_TEXT : COLOR_MUTED),
                                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
     }
@@ -972,7 +1013,8 @@ static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorks
 static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index);
 static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws);
 
-typedef struct SidebarPin {
+typedef struct SidebarPin
+{
     bool found;
     PicoAgentId live_id;
     int row_id;
@@ -1074,9 +1116,9 @@ static void RenderMoreLessLabel(Clay_ElementId id, Clay_String label)
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                          .fontSize = PICO_FONT_CAPTION,
-                                          .textColor = COLOR_MUTED,
-                                          .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                           .fontSize = PICO_FONT_CAPTION,
+                                           .textColor = COLOR_MUTED,
+                                           .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
 }
 
@@ -1194,41 +1236,64 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                          .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
-            for (i = 0; i < s->workspace_count; i++)
+            for (int section = 0; section < 2; section++)
             {
-                if (s->is_dragging && s->drag_target_index != s->drag_source_index)
+                if (section == 1)
                 {
-                    if (s->drag_target_index < s->drag_source_index && s->drag_target_index == i)
+                    bool any = false;
+                    for (int k = 0; k < s->workspace_count; k++)
+                        if (s->workspaces[k].stashed)
+                            any = true;
+                    if (!any)
+                        break;
+                    Clay_ElementId stash_id = CLAY_ID("SidebarStashedHeader");
+                    CLAY(stash_id, {.layout = {.padding = {SIDEBAR_ROW_PAD_X, 4, 8, 4},
+                                               .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
                     {
-                        RenderDropIndicator();
+                        CLAY_TEXT(s->stash_expanded ? CLAY_STRING("v  Stashed") : CLAY_STRING(">  Stashed"),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = Clay_PointerOver(stash_id) ? COLOR_TEXT : COLOR_MUTED}));
                     }
+                    if (!s->stash_expanded)
+                        break;
                 }
-                const PicoCatalogWorkspace *ws = &s->workspaces[i];
-                RenderWorkspaceRow(host, s, ws, i);
-                if (ws->collapsed)
+                for (i = 0; i < s->workspace_count; i++)
                 {
-                    RenderPinnedSelected(host, s, ws, i);
-                }
-                else
-                {
-                    extras = CountLiveExtras(host, ws);
-                    total = extras + ws->session_count;
-                    shown = ShownForIndex(s, i, total);
-                    RenderLiveExtras(host, s, ws, i, shown < extras ? shown : extras);
-                    for (j = 0; j < shown - extras && j < ws->session_count; j++)
+                    if (s->workspaces[i].stashed != (section == 1))
+                        continue;
+                    if (s->is_dragging && s->drag_target_index != s->drag_source_index)
                     {
-                        RenderSessionRow(host, s, ws->sessions[j].checkout_path, ws->sessions[j].title,
-                                         ws->sessions[j].id, 0, SessionRowId(i, extras + j),
-                                         ws->sessions[j].unseen_complete, ws->sessions[j].worktree,
-                                         ws->sessions[j].missing_checkout);
+                        if (s->drag_target_index < s->drag_source_index && s->drag_target_index == i)
+                        {
+                            RenderDropIndicator();
+                        }
                     }
-                    RenderMoreLessRow(i, shown, total);
-                }
-                if (s->is_dragging && s->drag_target_index != s->drag_source_index)
-                {
-                    if (s->drag_target_index > s->drag_source_index && s->drag_target_index == i)
+                    const PicoCatalogWorkspace *ws = &s->workspaces[i];
+                    RenderWorkspaceRow(host, s, ws, i);
+                    if (ws->collapsed)
                     {
-                        RenderDropIndicator();
+                        RenderPinnedSelected(host, s, ws, i);
+                    }
+                    else
+                    {
+                        extras = CountLiveExtras(host, ws);
+                        total = extras + ws->session_count;
+                        shown = ShownForIndex(s, i, total);
+                        RenderLiveExtras(host, s, ws, i, shown < extras ? shown : extras);
+                        for (j = 0; j < shown - extras && j < ws->session_count; j++)
+                        {
+                            RenderSessionRow(host, s, ws->sessions[j].checkout_path, ws->sessions[j].title,
+                                             ws->sessions[j].id, 0, SessionRowId(i, extras + j),
+                                             ws->sessions[j].unseen_complete, ws->sessions[j].worktree,
+                                             ws->sessions[j].missing_checkout);
+                        }
+                        RenderMoreLessRow(i, shown, total);
+                    }
+                    if (s->is_dragging && s->drag_target_index != s->drag_source_index)
+                    {
+                        if (s->drag_target_index > s->drag_source_index && s->drag_target_index == i)
+                        {
+                            RenderDropIndicator();
+                        }
                     }
                 }
             }
@@ -1280,13 +1345,229 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                                  .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                                  .padding = {6, 6, 4, 4},
                                  .sizing = {.width = CLAY_SIZING_FIXED(icon + 12.0f),
-                                             .height = CLAY_SIZING_FIXED(icon + 8.0f)}}})
+                                            .height = CLAY_SIZING_FIXED(icon + 8.0f)}}})
                 {
                     RenderSettingsIcon(s, settings_hover);
                 }
             }
         }
     }
+}
+
+static int EditWorkspaceIndex(const SidebarState *s)
+{
+    if (!s || !s->edit_open)
+        return -1;
+    for (int i = 0; i < s->workspace_count; i++)
+        if (!strcmp(s->workspaces[i].path, s->edit_path))
+            return i;
+    return -1;
+}
+
+static bool CloseWorkspaceEdit(SidebarState *s)
+{
+    if (!s || !s->edit_open)
+        return true;
+    if (!pico_ui_modal_pop(s->host, "sidebar-workspace-edit"))
+        return false; /* buried under another modal; retry once it is top again */
+    s->edit_open = false;
+    s->delete_confirm = false;
+    return true;
+}
+
+static void OpenWorkspaceEdit(SidebarState *s, int index)
+{
+    if (!s || index < 0 || index >= s->workspace_count ||
+        !pico_ui_modal_push(s->host, "sidebar-workspace-edit"))
+        return;
+    s->edit_open = true;
+    s->delete_confirm = false;
+    s->edit_pointer_latched = true; /* opening press must not close the new popup */
+    snprintf(s->edit_path, sizeof(s->edit_path), "%s", s->workspaces[index].path);
+    snprintf(s->edit_name, sizeof(s->edit_name), "%s", s->workspaces[index].name);
+    snprintf(s->delete_label, sizeof(s->delete_label),
+             "Delete saved sessions from %s and ALL its checkouts and worktrees? Project folders remain untouched.",
+             s->workspaces[index].name);
+}
+
+static void RenderEditAction(Clay_ElementId id, const char *label, bool danger)
+{
+    CLAY(id, {.layout = {.padding = {7, 7, 5, 5},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
+              .backgroundColor = Clay_PointerOver(id) ? (Clay_Color){52, 52, 62, 255} : (Clay_Color){0, 0, 0, 0},
+              .cornerRadius = CLAY_CORNER_RADIUS(4)})
+    {
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                 .fontSize = PICO_FONT_UI,
+                                                 .textColor = danger ? (Clay_Color){235, 105, 105, 255} : COLOR_TEXT,
+                                                 .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+    }
+}
+
+static void RenderWorkspaceEdit(PicoHost *host, void *state)
+{
+    SidebarState *s = state ? state : PicoPlugins_HostState(host, "sidebar");
+    int i = EditWorkspaceIndex(s);
+    Clay_ElementData row;
+    float x, y, height, expected;
+    bool short_view;
+    if (i < 0 || !pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
+        return;
+    row = Clay_GetElementData(CLAY_IDI("SidebarWs", i));
+    if (!row.found)
+        return;
+    x = row.boundingBox.x;
+    y = row.boundingBox.y + row.boundingBox.height + 3;
+    if (x + 244 > GetScreenWidth())
+        x = GetScreenWidth() - 244;
+    if (x < 4)
+        x = 4;
+    /* The confirmation is taller and fonts can be scaled by the user. */
+    expected = (s->delete_confirm ? 300.0f : 200.0f) * Pico_FontPx(PICO_FONT_UI) / PICO_FONT_UI;
+    height = expected;
+    short_view = height > GetScreenHeight() - 8;
+    if (short_view)
+        height = GetScreenHeight() - 8;
+    if (y + height > GetScreenHeight())
+        y = row.boundingBox.y - height - 3;
+    if (y < 4)
+        y = 4;
+    CLAY(CLAY_ID("SidebarEditPopup"),
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .offset = {.x = x, .y = y}, .zIndex = 55},
+          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 5, .padding = {10, 10, 10, 10}, .sizing = {.width = CLAY_SIZING_FIXED(240), .height = short_view ? CLAY_SIZING_FIXED(height) : CLAY_SIZING_FIT(0)}},
+          .clip = {.vertical = short_view, .childOffset = Clay_GetScrollOffset()},
+          .backgroundColor = COLOR_CONTENT_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(7),
+          .border = {.width = {1, 1, 1, 1}, .color = COLOR_MUTED}})
+    {
+        CLAY_TEXT(CLAY_STRING("Project name "), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                  .fontSize = PICO_FONT_UI,
+                                                                  .textColor = COLOR_MUTED}));
+        CLAY(CLAY_ID("SidebarEditName"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .padding = {7, 7, 6, 6},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
+              .clip = {.horizontal = true},
+              .backgroundColor = (Clay_Color){35, 35, 42, 255},
+              .cornerRadius = CLAY_CORNER_RADIUS(4)})
+        {
+            CLAY_TEXT(CStr(s->edit_name[0] ? s->edit_name : " "),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            CLAY_TEXT(CLAY_STRING("|"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                          .fontSize = PICO_FONT_UI,
+                                                          .textColor = COLOR_MUTED}));
+        }
+        RenderEditAction(CLAY_ID("SidebarEditSave"), "Save name", false);
+        RenderEditAction(CLAY_ID("SidebarEditStash"), s->workspaces[i].stashed ? "Restore to Projects" : "Stash project", false);
+        if (!s->delete_confirm)
+            RenderEditAction(CLAY_ID("SidebarEditDelete"), "Delete saved history...", true);
+        else
+        {
+            CLAY_TEXT(CStr(s->delete_label),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+            RenderEditAction(CLAY_ID("SidebarEditConfirm"), "Delete all saved history", true);
+            RenderEditAction(CLAY_ID("SidebarEditCancelDelete"), "Cancel", false);
+        }
+    }
+}
+
+static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
+{
+    int i = EditWorkspaceIndex(s);
+    if (i < 0)
+    {
+        CloseWorkspaceEdit(s);
+        return;
+    }
+    if (!pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
+        return;
+    if (IsKeyPressed(KEY_ESCAPE))
+    {
+        CloseWorkspaceEdit(s);
+        return;
+    }
+    if (!s->delete_confirm)
+    {
+        if (IsKeyPressed(KEY_BACKSPACE))
+        {
+            size_t len = strlen(s->edit_name);
+            if (len)
+                s->edit_name[PicoText_Utf8Prev(s->edit_name, len)] = 0;
+        }
+        int cp;
+        while ((cp = GetCharPressed()) != 0)
+        {
+            char bytes[4];
+            int n = PicoText_Utf8Encode(cp, bytes);
+            size_t len = strlen(s->edit_name);
+            if (cp >= 32 && cp != 127 && n > 0 && len + (size_t)n < sizeof(s->edit_name))
+            {
+                memcpy(s->edit_name + len, bytes, (size_t)n);
+                s->edit_name[len + (size_t)n] = 0;
+            }
+        }
+    }
+    else
+    {
+        while (GetCharPressed() != 0)
+        {
+        } /* the queue is global; discard typing while confirming */
+    }
+    if (s->edit_pointer_latched)
+    {
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+            s->edit_pointer_latched = false;
+        return;
+    }
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        return;
+    s->edit_pointer_latched = true;
+    if (Clay_PointerOver(CLAY_ID("SidebarEditSave")) && !s->delete_confirm)
+    {
+        if (PicoCatalog_SetProjectName(s->edit_path, s->edit_name) != 0)
+            PicoOverlay_Notify(host, "Enter a name to rename the project.");
+        else
+        {
+            s->dirty = true;
+            CloseWorkspaceEdit(s);
+        }
+    }
+    else if (Clay_PointerOver(CLAY_ID("SidebarEditStash")) && !s->delete_confirm)
+    {
+        if (PicoCatalog_SetProjectStashed(s->edit_path, !s->workspaces[i].stashed) != 0)
+            PicoOverlay_Notify(host, "Could not update the project.");
+        else
+        {
+            s->dirty = true;
+            CloseWorkspaceEdit(s);
+        }
+    }
+    else if (Clay_PointerOver(CLAY_ID("SidebarEditDelete")) && !s->delete_confirm)
+        s->delete_confirm = true;
+    else if (Clay_PointerOver(CLAY_ID("SidebarEditCancelDelete")))
+        s->delete_confirm = false;
+    else if (Clay_PointerOver(CLAY_ID("SidebarEditConfirm")) && s->delete_confirm)
+    {
+        bool live = false;
+        for (int k = 0; k < pico_agent_count(host); k++)
+        {
+            PicoAgentInfo info;
+            if (pico_agent_info(host, k, &info) &&
+                AgentInCatalogProject(PicoHost_FindAgent(host, info.id), &s->workspaces[i]))
+                live = true;
+        }
+        if (live)
+            PicoOverlay_Notify(host, "Close all agents in this project before deleting its history.");
+        else if (PicoCatalog_DeleteProject(host, s->edit_path) != 0)
+            PicoOverlay_Notify(host, "Could not delete all saved project history.");
+        else
+        {
+            s->dirty = true;
+            CloseWorkspaceEdit(s);
+        }
+    }
+    else if (!Clay_PointerOver(CLAY_ID("SidebarEditPopup")))
+        CloseWorkspaceEdit(s);
 }
 
 static void RenderFolderModal(PicoHost *host, void *state)
@@ -1338,9 +1619,11 @@ static void RenderFolderModal(PicoHost *host, void *state)
 
 static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorkspace *ws)
 {
-    if (!agent || !agent->workspace || !ws) return false;
+    if (!agent || !agent->workspace || !ws)
+        return false;
     const char *project = agent->workspace->project_path[0]
-                              ? agent->workspace->project_path : agent->workspace->path;
+                              ? agent->workspace->project_path
+                              : agent->workspace->path;
     return strcmp(project, ws->path) == 0;
 }
 
@@ -1394,7 +1677,8 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
     int extras;
     int total;
     int shown;
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))) ||
+    if (Clay_PointerOver(CLAY_ID("SidebarStashedHeader")) ||
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))) ||
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings"))))
     {
         return true;
@@ -1402,7 +1686,8 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
     for (i = 0; i < s->workspace_count; i++)
     {
         const PicoCatalogWorkspace *ws = &s->workspaces[i];
-        if (Clay_PointerOver(CLAY_IDI("SidebarPlus", i)) || Clay_PointerOver(CLAY_IDI("SidebarWs", i)))
+        if (Clay_PointerOver(CLAY_IDI("SidebarEdit", i)) ||
+            Clay_PointerOver(CLAY_IDI("SidebarPlus", i)) || Clay_PointerOver(CLAY_IDI("SidebarWs", i)))
         {
             return true;
         }
@@ -1451,6 +1736,11 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     (void)event;
     if (!s)
     {
+        return;
+    }
+    if (s->edit_open)
+    {
+        WorkspaceEditInput(host, s);
         return;
     }
     if (s->want_folder || PicoUi_ModalOpen(host) || IsKeyPressed(KEY_ESCAPE))
@@ -1543,9 +1833,19 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         PicoSettingsUi_Open(host);
         return;
     }
+    if (Clay_PointerOver(CLAY_ID("SidebarStashedHeader")))
+    {
+        s->stash_expanded = !s->stash_expanded;
+        return;
+    }
     for (i = 0; i < s->workspace_count; i++)
     {
         PicoCatalogWorkspace *ws = &s->workspaces[i];
+        if (Clay_PointerOver(CLAY_IDI("SidebarEdit", i)))
+        {
+            OpenWorkspaceEdit(s, i);
+            return;
+        }
         if (Clay_PointerOver(CLAY_IDI("SidebarPlus", i)))
         {
             NewSessionInWorkspace(host, s, i);
@@ -1553,6 +1853,11 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         }
         if (Clay_PointerOver(CLAY_IDI("SidebarWs", i)))
         {
+            if (ws->stashed)
+            {
+                ToggleCollapsed(s, i);
+                return;
+            }
             s->drag_press_pending = true;
             s->drag_source_index = i;
             s->drag_press_pos = GetMousePosition();
@@ -1694,6 +1999,7 @@ static int SidebarInit(PicoHost *host, void **state_out)
     }
     pico_host_add_view(host, PICO_SLOT_SIDEBAR, 0, PicoSidebar_Render);
     pico_host_add_view(host, PICO_SLOT_OVERLAY, 41, RenderFolderModal);
+    pico_host_add_view(host, PICO_SLOT_OVERLAY, 42, RenderWorkspaceEdit);
     pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, SidebarAfterLayout);
     return 0;
 }
@@ -1706,6 +2012,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
         return;
     }
     (void)ClearFolderRequest(s);
+    (void)CloseWorkspaceEdit(s);
     if (host)
     {
         host->ui_drag_active = false;

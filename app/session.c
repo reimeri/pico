@@ -29,6 +29,8 @@
 
 static bool CatalogMetaPath(const char *dir, char *out, size_t cap);
 static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out);
+static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap);
+static void CatalogProjectLoad(const char *project, PicoCatalogWorkspace *group);
 static int CmpCatalogOrder(const void *a, const void *b);
 static void CatalogClearSessions(PicoCatalogWorkspace *ws);
 static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
@@ -3194,6 +3196,87 @@ static bool CatalogWriteChanged(const PicoCatalogWorkspace *ws, const char *dir)
     return true;
 }
 
+/* Project-level presentation survives even when only linked worktrees have catalogs. */
+static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
+{
+    char root[4096], key[4096];
+    return project && project[0] && SessionsRoot(root, sizeof(root)) &&
+           CatalogKeyFromPath(project, key, sizeof(key)) &&
+           PicoPath_Format(out, cap, "%s/.project-%s.json", root, key);
+}
+
+static void CatalogProjectLoad(const char *project, PicoCatalogWorkspace *group)
+{
+    char path[4096];
+    size_t len = 0;
+    char *raw;
+    JsonDoc doc;
+    if (!CatalogProjectMetaPath(project, path, sizeof(path)) || !(raw = Pico_ReadFile(path, &len))) return;
+    if (JsonParse(&doc, raw, len) == 0)
+    {
+        if (JsonIsObject(&doc, 0))
+        {
+            char *name = JsonObjStr(&doc, 0, "name");
+            char *identity = JsonObjStr(&doc, 0, "path");
+            if (identity && strcmp(identity, project) == 0)
+            {
+                if (name && name[0]) snprintf(group->name, sizeof(group->name), "%s", name);
+                group->stashed = JsonEq(&doc, JsonObjGet(&doc, 0, "stashed"), "true");
+            }
+            free(name);
+            free(identity);
+        }
+        JsonFree(&doc);
+    }
+    free(raw);
+}
+
+static int CatalogProjectUpdate(const char *project, const char *name, int stash)
+{
+    char path[4096], canonical[4096], root[4096];
+    char error[256];
+    PicoCatalogWorkspace group = {0};
+    JsonBuf b;
+    int fd;
+    bool ok;
+    if (!project || project[0] != '/' ||
+        (CanonicalWorkspacePath(project, canonical, sizeof(canonical)) && strcmp(project, canonical) != 0) ||
+        !CatalogProjectMetaPath(project, path, sizeof(path)) ||
+        !SessionsRoot(root, sizeof(root))) return -1;
+    Pico_MkdirP(root);
+    fd = CatalogFileLockAcquire(path, error, sizeof(error));
+    if (fd < 0) return -1;
+    CatalogProjectLoad(project, &group);
+    if (name) snprintf(group.name, sizeof(group.name), "%s", name);
+    if (stash >= 0) group.stashed = stash != 0;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"path\":");
+    JsonBuf_String(&b, project);
+    JsonBuf_Puts(&b, ",\"name\":");
+    JsonBuf_String(&b, group.name);
+    JsonBuf_Puts(&b, ",\"stashed\":");
+    JsonBuf_Bool(&b, group.stashed);
+    JsonBuf_Puts(&b, "}\n");
+    ok = b.data && CatalogAtomicWrite(path, b.data, b.len);
+    JsonBuf_Free(&b);
+    if (ok) CatalogMarkChanged();
+    CatalogLockRelease(fd);
+    return ok ? 0 : -1;
+}
+
+int PicoCatalog_SetProjectName(const char *project, const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    if (!n || n >= PICO_CATALOG_NAME_MAX) return -1;
+    for (size_t i = 0; i < n; i++) if ((unsigned char)name[i] < 32) return -1;
+    return CatalogProjectUpdate(project, name, -1);
+}
+
+int PicoCatalog_SetProjectStashed(const char *project, bool stashed)
+{
+    return CatalogProjectUpdate(project, NULL, stashed ? 1 : 0);
+}
+
 static bool CatalogOrderPath(char *out, size_t cap)
 {
     char root[4096];
@@ -4068,7 +4151,8 @@ done:
     return result;
 }
 
-int PicoCatalog_Scan(PicoCatalogWorkspace **out)
+/* limit <= 0 enumerates every catalog; project deletion must not truncate. */
+static int CatalogScanN(PicoCatalogWorkspace **out, int limit)
 {
 #ifdef PICO_SESSION_TEST_HOOKS
     (void)PicoSession_TestHook("catalog_scan");
@@ -4091,7 +4175,7 @@ int PicoCatalog_Scan(PicoCatalogWorkspace **out)
     {
         return 0;
     }
-    while ((ent = readdir(d)) && n < PICO_MAX_CATALOG_WORKSPACES)
+    while ((ent = readdir(d)) && (limit <= 0 || n < limit))
     {
         char dir[4096];
         struct stat st;
@@ -4121,6 +4205,198 @@ int PicoCatalog_Scan(PicoCatalogWorkspace **out)
     }
     *out = list;
     return n;
+}
+
+int PicoCatalog_Scan(PicoCatalogWorkspace **out)
+{
+    return CatalogScanN(out, PICO_MAX_CATALOG_WORKSPACES);
+}
+
+/* Pico-owned catalog root files: meta, sessions, and atomic-write residue
+ * ("<name>.tmp.XXXXXX") left behind by an interrupted write. */
+static bool CatalogOwnedRootName(const char *name, size_t len)
+{
+    const char *tmp;
+    size_t base;
+    if (!strcmp(name, ".workspace.json")) return true;
+    if (len >= 6 && !strcmp(name + len - 6, ".jsonl")) return true;
+    tmp = strstr(name, ".tmp.");
+    if (!tmp || tmp == name) return false;
+    base = (size_t)(tmp - name);
+    return (base >= 6 && !memcmp(tmp - 6, ".jsonl", 6)) ||
+           (base == strlen(".workspace.json") && !memcmp(name, ".workspace.json", base));
+}
+
+/* Keep lock inodes stable; never traverse symlinks, including a swapped parent. */
+static bool CatalogOwnedData(int dirfd, bool root, bool remove_files)
+{
+    DIR *d = fdopendir(dup(dirfd));
+    struct dirent *ent;
+    bool ok = d != NULL;
+    if (!d) return false;
+    while ((ent = readdir(d)))
+    {
+        struct stat st;
+        const char *name = ent->d_name;
+        size_t len = strlen(name);
+        if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+        if (root && len >= 5 && !strcmp(name + len - 5, ".lock")) continue;
+        if (root && !CatalogOwnedRootName(name, len))
+        {
+            ok = false; /* unknown files are not Pico session data */
+            continue;
+        }
+        if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) { ok = false; continue; }
+        if (S_ISDIR(st.st_mode) && !root)
+        {
+            int child = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (child < 0) { ok = false; continue; }
+            if (!CatalogOwnedData(child, false, remove_files)) ok = false;
+            close(child);
+            if (remove_files && unlinkat(dirfd, name, AT_REMOVEDIR) != 0) ok = false;
+        }
+        else if (S_ISDIR(st.st_mode)) ok = false;
+        else if (remove_files && unlinkat(dirfd, name, 0) != 0) ok = false;
+    }
+    closedir(d);
+    return ok;
+}
+
+static bool CatalogRemoveDataTree(const char *dir, bool root)
+{
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    bool ok;
+    if (fd < 0) return false;
+    /* Reject unexpected entries before modifying a catalog. */
+    ok = !root || CatalogOwnedData(fd, true, false);
+    if (ok && lseek(fd, 0, SEEK_SET) < 0) ok = false;
+    if (ok) ok = CatalogOwnedData(fd, root, true);
+    close(fd);
+    if (ok && !root) ok = rmdir(dir) == 0;
+    return ok;
+}
+
+static bool CatalogValidateDataTree(const char *dir)
+{
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool ok = CatalogOwnedData(fd, true, false);
+    close(fd);
+    return ok;
+}
+
+static bool CatalogRemoveSessionMedia(const char *checkout, const char *id)
+{
+    int pico = -1, media = -1, session = -1;
+    bool ok = false;
+    if (!id || !id[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)id; *p; p++)
+        if (!isalnum(*p) && *p != '-' && *p != '_') return false;
+    pico = open(checkout, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (pico < 0) return errno == ENOENT; /* a removed worktree has no media */
+    int pico_dir = openat(pico, ".pico", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (pico_dir < 0) { ok = errno == ENOENT; goto done; }
+    media = openat(pico_dir, "media", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int media_error = errno;
+    close(pico_dir);
+    if (media < 0)
+    {
+        ok = media_error == ENOENT;
+        goto done;
+    }
+    session = openat(media, id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (session < 0)
+    {
+        ok = errno == ENOENT;
+        goto done;
+    }
+    ok = CatalogOwnedData(session, false, true) && unlinkat(media, id, AT_REMOVEDIR) == 0;
+done:
+    if (session >= 0) close(session);
+    if (media >= 0) close(media);
+    close(pico);
+    return ok;
+}
+
+int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
+{
+    PicoCatalogWorkspace *leaves = NULL;
+    char project_meta[4096];
+    char canonical[4096];
+    int count, matched = 0;
+    bool ok = true;
+    if (!host || !project || project[0] != '/' ||
+        (CanonicalWorkspacePath(project, canonical, sizeof(canonical)) && strcmp(project, canonical) != 0) ||
+        !CatalogProjectMetaPath(project, project_meta, sizeof(project_meta))) return -1;
+    for (int w = 0; w < host->workspace_count; w++)
+    {
+        const PicoWorkspace *workspace = host->workspaces[w];
+        if (!workspace) continue;
+        const char *identity = workspace->project_path[0] ? workspace->project_path : workspace->path;
+        if (workspace->count > 0 && !strcmp(identity, project)) return -1;
+    }
+    /* Agent close can precede completion of its queued persist job. Never
+     * remove a catalog while this host still has a writer in flight. */
+    if (host->persist_ready)
+    {
+        bool busy;
+        pthread_mutex_lock(&host->persist_mu);
+        busy = host->persist_flight_agent_id != 0;
+        for (int i = 0; i < host->persist_pending_count; i++)
+            if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_SESSION) busy = true;
+        pthread_mutex_unlock(&host->persist_mu);
+        if (busy) return -1;
+    }
+    count = CatalogScanN(&leaves, 0); /* deletion must see every checkout in the group */
+    for (int i = 0; i < count; i++)
+        if ((!strcmp(leaves[i].project_path[0] ? leaves[i].project_path : leaves[i].path, project)) &&
+            leaves[i].session_count >= PICO_MAX_CATALOG_SESSIONS)
+        {
+            PicoCatalog_Free(leaves, count);
+            return -1;
+        }
+    /* Fail before touching any checkout if a catalog contains unknown data. */
+    for (int i = 0; i < count; i++)
+    {
+        const PicoCatalogWorkspace *ws = &leaves[i];
+        char dir[4096];
+        const char *group = ws->project_path[0] ? ws->project_path : ws->path;
+        if (strcmp(group, project)) continue;
+        if (!CatalogDirForPath(ws->path, dir, sizeof(dir)) || !CatalogValidateDataTree(dir))
+        {
+            PicoCatalog_Free(leaves, count);
+            return -1;
+        }
+    }
+    for (int i = 0; i < count; i++)
+    {
+        const PicoCatalogWorkspace *ws = &leaves[i];
+        char dir[4096];
+        const char *group = ws->project_path[0] ? ws->project_path : ws->path;
+        if (strcmp(group, project)) continue;
+        matched++;
+        if (!CatalogRemoveSessionMedia(ws->path, "composer")) ok = false;
+        for (int j = 0; j < ws->session_count; j++)
+            if (!CatalogRemoveSessionMedia(ws->path, ws->sessions[j].id)) ok = false;
+        if (!CatalogDirForPath(ws->path, dir, sizeof(dir)) ||
+            !CatalogRemoveDataTree(dir, true)) ok = false;
+    }
+    PicoCatalog_Free(leaves, count);
+    if (matched) CatalogMarkChanged(); /* also publish partially deleted catalogs */
+    if (!matched) return -1;
+    if (ok)
+    {
+        char error[256];
+        int lock = CatalogFileLockAcquire(project_meta, error, sizeof(error));
+        if (lock < 0) ok = false;
+        else
+        {
+            if (unlink(project_meta) != 0 && errno != ENOENT) ok = false;
+            if (ok) CatalogMarkChanged();
+            CatalogLockRelease(lock);
+        }
+    }
+    return ok ? 0 : -1;
 }
 
 static bool CatalogCopyGroupedSession(PicoCatalogWorkspace *ws,
@@ -4198,6 +4474,8 @@ int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out)
         }
     }
     PicoCatalog_Free(leaves, leaf_count);
+    for (int i = 0; i < group_count; i++)
+        CatalogProjectLoad(groups[i].path, &groups[i]);
     for (int i = 0; i < group_count; i++)
     {
         if (groups[i].session_count > 1)

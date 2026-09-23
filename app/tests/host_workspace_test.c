@@ -6,6 +6,7 @@
 #include "workspace_internal.h"
 #include "settings.h"
 #include "session.h"
+#include "path.h"
 #include "scrollbar.h"
 #include "trace_group.h"
 #include "richtext.h"
@@ -10128,6 +10129,28 @@ static int TestWorktreeDiscoveryCreationAndGrouping(void)
         Fail("linked checkout catalogs group under main checkout");
         goto done;
     }
+    /* A project-level deletion covers exact checkout catalogs, never Git trees. */
+    char local_history[4096] = {0}, linked_history[4096] = {0};
+    PicoCatalogWorkspace *leaves = NULL;
+    int leaves_count = PicoCatalog_Scan(&leaves);
+    for (int i = 0; i < leaves_count; i++)
+    {
+        char *out = !strcmp(leaves[i].path, repo) ? local_history :
+                    !strcmp(leaves[i].path, linked) ? linked_history : NULL;
+        if (out && !PicoPath_Format(out, 4096, "%s/pico/sessions/%s/fixture.jsonl", cfg, leaves[i].key)) out[0] = 0;
+    }
+    PicoCatalog_Free(leaves, leaves_count);
+    if (!local_history[0] || !linked_history[0] ||
+        WriteFile(local_history, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"fixture\"}\n") != 0 ||
+        WriteFile(linked_history, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"fixture\"}\n") != 0 ||
+        PicoCatalog_DeleteProject(host, repo) != 0 ||
+        access(local_history, F_OK) == 0 || access(linked_history, F_OK) == 0 ||
+        access(repo, F_OK) != 0 || access(linked, F_OK) != 0 ||
+        PicoCatalog_Ensure(repo) != 0 || PicoCatalog_Ensure(linked) != 0)
+    {
+        Fail("delete project histories across both checkouts without deleting folders");
+        goto done;
+    }
     PicoAgentCreateOptions options;
     memset(&options, 0, sizeof(options));
     options.kind = PICO_AGENT_MAIN;
@@ -10137,6 +10160,11 @@ static int TestWorktreeDiscoveryCreationAndGrouping(void)
     if (pico_main_agent_create(host, local_id, &options, &source_id) != PICO_OK)
     {
         Fail("create worktree source draft");
+        goto done;
+    }
+    if (PicoCatalog_DeleteProject(host, repo) == 0)
+    {
+        Fail("cannot delete a project with a live agent");
         goto done;
     }
     char dirty_file[4096];

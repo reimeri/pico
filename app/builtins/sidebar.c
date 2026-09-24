@@ -59,6 +59,8 @@ typedef struct SidebarState
     bool catalog_change_token_valid;
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
+    Texture2D archive_open;
+    Texture2D archive_closed;
     Texture2D pen_icon;
     bool stash_expanded;
     bool edit_open;
@@ -587,6 +589,8 @@ static void EnsureFolderIcons(SidebarState *s)
     s->settings_icon = LoadFolderIcon("resources/settings.png", COLOR_MUTED);
     s->settings_icon_hover = LoadFolderIcon("resources/settings.png", COLOR_TEXT);
     s->worktree_icon = LoadFolderIcon("resources/worktree.png", COLOR_MUTED);
+    s->archive_open = LoadFolderIcon("resources/archive_open.png", COLOR_MUTED);
+    s->archive_closed = LoadFolderIcon("resources/archive_closed.png", COLOR_MUTED);
 }
 
 static void UnloadFolderIcons(SidebarState *s)
@@ -621,6 +625,16 @@ static void UnloadFolderIcons(SidebarState *s)
     {
         UnloadTexture(s->worktree_icon);
         memset(&s->worktree_icon, 0, sizeof(s->worktree_icon));
+    }
+    if (s->archive_open.id != 0)
+    {
+        UnloadTexture(s->archive_open);
+        memset(&s->archive_open, 0, sizeof(s->archive_open));
+    }
+    if (s->archive_closed.id != 0)
+    {
+        UnloadTexture(s->archive_closed);
+        memset(&s->archive_closed, 0, sizeof(s->archive_closed));
     }
 }
 
@@ -1249,10 +1263,15 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                     if (!any)
                         break;
                     Clay_ElementId stash_id = CLAY_ID("SidebarStashedHeader");
-                    CLAY(stash_id, {.layout = {.padding = {SIDEBAR_ROW_PAD_X, 4, 8, 4},
+                    CLAY(stash_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                               .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                               .childGap = SIDEBAR_ROW_GAP,
+                                               .padding = {SIDEBAR_ROW_PAD_X, 4, 8, 4},
                                                .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
                     {
-                        CLAY_TEXT(s->stash_expanded ? CLAY_STRING("v  Stashed") : CLAY_STRING(">  Stashed"),
+                        RenderFolderIcon(s->stash_expanded ? &s->archive_open : &s->archive_closed,
+                                         s->stash_expanded ? "v" : ">");
+                        CLAY_TEXT(CLAY_STRING("Stashed"),
                                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = Clay_PointerOver(stash_id) ? COLOR_TEXT : COLOR_MUTED}));
                     }
                     if (!s->stash_expanded)

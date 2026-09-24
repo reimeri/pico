@@ -897,6 +897,106 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     return failed ? Fail("user draft did not round-trip models or preserved disabled_host_extensions") : 0;
 }
 
+static int TestUserDraftModelOrder(void)
+{
+    static const char fixture[] =
+        "{\n  \"model\":\"alpha\",\n  \"models\":[\n"
+        "    {\"id\":\"alpha\",\"provider\":\"openai\",\"vendor_tag\":\"A\"},\n"
+        "    // beta's metadata belongs to beta, not to its index\n"
+        "    {\"id\":\"beta\",\"provider\":\"openai\",\"vendor_tag\":\"B\"},\n"
+        "    {\"id\":\"gamma\",\"provider\":\"openai\",\"vendor_tag\":\"C\"}\n"
+        "    // gamma trailing metadata\n"
+        "  ]\n}\n";
+    char temp[] = "/tmp/pico-model-order-XXXXXX";
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    PicoUserSettingsDraft draft = {0};
+    PicoUserSettingsDraft reloaded = {0};
+    PicoHost host = {0};
+    char *saved = NULL;
+    size_t len = 0;
+    int failed = 0;
+    if (!mkdtemp(temp))
+    {
+        return Fail("could not create model order directory");
+    }
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    if (WriteFile(path, fixture))
+    {
+        CleanupDraftTemp(path, pico, temp);
+        return Fail("could not write model order fixture");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    pthread_mutex_init(&host.settings_mu, NULL);
+
+    /* A modal drop is draft-only until Apply; cancelling must leave disk untouched. */
+    if (!PicoSettings_LoadUserDraft(&draft) || !PicoSettings_MoveUserDraftModel(&draft, 1, 0))
+    {
+        failed = 1;
+    }
+    PicoSettings_FreeUserDraft(&draft);
+    saved = Pico_ReadFile(path, &len);
+    if (!saved || len != strlen(fixture) || memcmp(saved, fixture, len) != 0)
+    {
+        failed = 1;
+    }
+    free(saved);
+    saved = NULL;
+    if (!failed && (!PicoSettings_LoadUserDraft(&draft) || draft.model_count != 3 ||
+                    strcmp(draft.models[0].id, "alpha") != 0))
+    {
+        failed = 1;
+    }
+    if (!failed)
+    {
+        /* A renamed card must carry its original source ID into the save path. */
+        snprintf(draft.models[1].id, sizeof(draft.models[1].id), "%s", "beta-renamed");
+        if (!PicoSettings_MoveUserDraftModel(&draft, 1, 0) ||
+            !PicoSettings_MoveUserDraftModel(&draft, 2, 1) ||
+            strcmp(draft.source_model_ids[0], "beta") != 0 ||
+            PicoSettings_ValidateUserDraft(&draft) || !PicoSettings_SaveUserDraft(&host, &draft))
+        {
+            failed = 1;
+        }
+    }
+    if (!failed && (!PicoSettings_LoadUserDraft(&reloaded) || reloaded.model_count != 3 ||
+                    strcmp(reloaded.models[0].id, "beta-renamed") != 0 ||
+                    strcmp(reloaded.models[1].id, "gamma") != 0 ||
+                    strcmp(reloaded.models[2].id, "alpha") != 0 ||
+                    strcmp(reloaded.default_model, "alpha") != 0))
+    {
+        failed = 1;
+    }
+    saved = Pico_ReadFile(path, &len);
+    if (!saved)
+    {
+        failed = 1;
+    }
+    else
+    {
+        const char *renamed = strstr(saved, "beta-renamed");
+        const char *vendor = strstr(saved, "\"vendor_tag\":\"B\"");
+        const char *alpha = strstr(saved, "\"id\":\"alpha\"");
+        const char *gamma = strstr(saved, "\"id\":\"gamma\"");
+        const char *trailing = strstr(saved, "gamma trailing metadata");
+        if (!renamed || !vendor || !alpha || !gamma || !trailing ||
+            renamed >= vendor || vendor >= gamma || gamma >= trailing || trailing >= alpha ||
+            !strstr(saved, "beta's metadata belongs to beta"))
+        {
+            failed = 1;
+        }
+    }
+    free(saved);
+    PicoSettings_FreeUserDraft(&draft);
+    PicoSettings_FreeUserDraft(&reloaded);
+    pthread_mutex_destroy(&host.settings_mu);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("model order was not draft-only or persisted with its original metadata") : 0;
+}
+
 static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
 {
     char temp[] = "/tmp/pico-settings-ws-XXXXXX";
@@ -1302,6 +1402,11 @@ int main(void)
         return rc;
     }
     rc = TestUserDraftSeedsEmptyModelsAndPreservesDisabled();
+    if (rc)
+    {
+        return rc;
+    }
+    rc = TestUserDraftModelOrder();
     if (rc)
     {
         return rc;

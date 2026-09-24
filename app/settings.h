@@ -84,6 +84,7 @@ typedef struct PicoUserSettingsDraft {
 void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft);
 void PicoSettings_FreeUserDraft(PicoUserSettingsDraft *draft);
 bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft);
+bool PicoSettings_MoveUserDraftModel(PicoUserSettingsDraft *draft, int from, int to);
 bool PicoSettings_ParseModelContextLimit(const char *text, int *out);
 const char *PicoSettings_ValidateUserDraft(const PicoUserSettingsDraft *draft);
 bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *draft);

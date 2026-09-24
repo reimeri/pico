@@ -3506,9 +3506,15 @@ void PicoHost_Frame(PicoHost *app)
         }
     }
     PicoChat_UpdateInspectFollowFromUserScroll(app, over_inspect ? wheel.y : 0.0f);
+    /* Model headers use press-and-drag to reorder. Do not let Clay drag-scroll
+     * the settings content underneath them. The floating default-model menu
+     * keeps its own drag scrolling; wheel and the custom scrollbar are separate. */
+    bool over_settings_content = pico_ui_modal_is_top(app, "settings") &&
+                                 Clay_PointerOver(CLAY_ID("SettingsModalScroll")) &&
+                                 !Clay_PointerOver(CLAY_ID("SettingsDefaultMenu"));
     Clay_UpdateScrollContainers(
-        !bar_drag && (modal_open ||
-                      (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
+        !bar_drag && !over_settings_content &&
+            (modal_open || (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
         (pane_wheel || sidebar_wheel) ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
     if (pane_wheel)
     {

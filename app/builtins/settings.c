@@ -45,6 +45,11 @@ typedef struct SettingsState {
     char error[256];
     int focus_kind;
     int focus_model;
+    bool drag_press_pending;
+    bool is_dragging;
+    int drag_source;
+    int drag_target;
+    Vector2 drag_press_pos;
     PicoTextField field;
     bool model_dropdown;
     int model_dropdown_selected;
@@ -59,6 +64,8 @@ static __thread SettingsState *s_active_settings_state = NULL;
 
 static char *FocusBuf(SettingsState *s, size_t *cap);
 static void SetFocus(SettingsState *s, int kind, int model);
+static void CancelModelDrag(SettingsState *s);
+static void RenderModelDropIndicator(bool before);
 
 #define g_host (s_active_settings_state->host)
 #define g_open (s_active_settings_state->open)
@@ -172,6 +179,7 @@ static void DiscardDraft(SettingsState *s)
     {
         return;
     }
+    CancelModelDrag(s);
     PicoSettings_FreeUserDraft(&s->draft);
     free(s->expanded);
     s->expanded = NULL;
@@ -548,6 +556,135 @@ static void RemoveModel(SettingsState *s, int index)
         }
     }
     s->error[0] = '\0';
+}
+
+static void CancelModelDrag(SettingsState *s)
+{
+    if (!s)
+    {
+        return;
+    }
+    if (s->drag_press_pending && s->host)
+    {
+        s->host->ui_drag_active = false;
+    }
+    s->drag_press_pending = false;
+    s->is_dragging = false;
+    s->drag_source = -1;
+    s->drag_target = -1;
+}
+
+static void MoveModel(SettingsState *s, int from, int to)
+{
+    bool expanded;
+    char context[sizeof(s->model_contexts[0])];
+    int step;
+    if (!s || !s->expanded || from < 0 || to < 0 ||
+        from >= s->draft.model_count || to >= s->draft.model_count || from == to)
+    {
+        return;
+    }
+    /* End editing before moving its bound buffer or its indexed context text. */
+    SetFocus(s, FOCUS_NONE, -1);
+    expanded = s->expanded[from];
+    memcpy(context, s->model_contexts[from], sizeof(context));
+    if (!PicoSettings_MoveUserDraftModel(&s->draft, from, to))
+    {
+        return;
+    }
+    step = from < to ? 1 : -1;
+    for (int i = from; i != to; i += step)
+    {
+        s->expanded[i] = s->expanded[i + step];
+        memcpy(s->model_contexts[i], s->model_contexts[i + step], sizeof(context));
+    }
+    s->expanded[to] = expanded;
+    memcpy(s->model_contexts[to], context, sizeof(context));
+}
+
+static int ModelDragTarget(const SettingsState *s, float y)
+{
+    float mids[PICO_SETTINGS_MODEL_MAX];
+    int source;
+    int target;
+    Clay_ElementData list = Clay_GetElementData(CLAY_ID("SettingsModelList"));
+    if (!s || !s->is_dragging || !Clay_PointerOver(CLAY_ID("SettingsModalScroll")) ||
+        !list.found || y < list.boundingBox.y)
+    {
+        return -1;
+    }
+    source = s->drag_source;
+    if (source < 0 || source >= s->draft.model_count)
+    {
+        return -1;
+    }
+    for (int i = 0; i < s->draft.model_count; i++)
+    {
+        Clay_ElementData card = Clay_GetElementData(CLAY_IDI("SettingsModelCard", i));
+        if (!card.found)
+        {
+            return -1;
+        }
+        mids[i] = card.boundingBox.y + card.boundingBox.height * 0.5f;
+    }
+    target = source;
+    if (y < mids[source])
+    {
+        for (int i = source - 1; i >= 0 && y < mids[i]; i--)
+        {
+            target = i;
+        }
+    }
+    else
+    {
+        for (int i = source + 1; i < s->draft.model_count && y > mids[i]; i++)
+        {
+            target = i;
+        }
+    }
+    return target;
+}
+
+static void ScrollModelDrag(float mouse_y, float mouse_x, float dt)
+{
+    Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("SettingsModalScroll"));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    const float edge = 32.0f;
+    const float speed = 420.0f;
+    float bottom;
+    float min_y;
+    if (!viewport.found || !scroll.found || !scroll.scrollPosition || dt <= 0.0f ||
+        mouse_x < viewport.boundingBox.x || mouse_x > viewport.boundingBox.x + viewport.boundingBox.width ||
+        mouse_y < viewport.boundingBox.y || mouse_y > viewport.boundingBox.y + viewport.boundingBox.height)
+    {
+        return;
+    }
+    bottom = viewport.boundingBox.y + viewport.boundingBox.height;
+    min_y = viewport.boundingBox.height - scroll.contentDimensions.height;
+    if (min_y >= 0.0f)
+    {
+        return;
+    }
+    if (dt > 0.05f)
+    {
+        dt = 0.05f;
+    }
+    if (mouse_y < viewport.boundingBox.y + edge)
+    {
+        scroll.scrollPosition->y += speed * dt;
+    }
+    else if (mouse_y > bottom - edge)
+    {
+        scroll.scrollPosition->y -= speed * dt;
+    }
+    if (scroll.scrollPosition->y < min_y)
+    {
+        scroll.scrollPosition->y = min_y;
+    }
+    if (scroll.scrollPosition->y > 0.0f)
+    {
+        scroll.scrollPosition->y = 0.0f;
+    }
 }
 
 static char *FocusBuf(SettingsState *s, size_t *cap)
@@ -1264,9 +1401,15 @@ static void RenderModelRow(SettingsState *s, int index)
                      .childGap = 8,
                      .padding = {10, 10, 8, 8},
                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
-          .backgroundColor = hover ? (Clay_Color){54, 54, 66, 255} : COLOR_CODE_BG,
+          .backgroundColor = s->is_dragging && s->drag_source == index ?
+                                (Clay_Color){42, 42, 50, 160} :
+                                (hover ? (Clay_Color){54, 54, 66, 255} : COLOR_CODE_BG),
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
+        if (s->is_dragging && s->drag_target == index && s->drag_target != s->drag_source)
+        {
+            RenderModelDropIndicator(index < s->drag_source);
+        }
         CLAY(CLAY_IDI("SettingsModelRow", index),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = 8,
@@ -1305,6 +1448,49 @@ static void RenderModelRow(SettingsState *s, int index)
         {
             RenderModelEditor(s, index, m);
         }
+    }
+}
+
+static void RenderModelDropIndicator(bool before)
+{
+    CLAY_AUTO_ID({.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                               .zIndex = 41,
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                               .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT,
+                               .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
+                                                .parent = before ? CLAY_ATTACH_POINT_LEFT_TOP :
+                                                                   CLAY_ATTACH_POINT_LEFT_BOTTOM}},
+                  .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                        .height = CLAY_SIZING_FIXED(2)}},
+                  .backgroundColor = (Clay_Color){80, 140, 255, 255},
+                  .cornerRadius = CLAY_CORNER_RADIUS(1)})
+    {
+    }
+}
+
+static void RenderModelDragPreview(SettingsState *s)
+{
+    PicoModel *m;
+    Vector2 mouse;
+    if (!s->is_dragging || !(m = ModelAt(s, s->drag_source)))
+    {
+        return;
+    }
+    mouse = GetMousePosition();
+    CLAY(CLAY_ID("SettingsModelDragPreview"),
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+                       .offset = {.x = mouse.x + 12.0f, .y = mouse.y - 12.0f},
+                       .zIndex = 50,
+                       .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+          .layout = {.padding = {10, 10, 8, 8},
+                     .sizing = {.width = CLAY_SIZING_FIXED(190)}},
+          .backgroundColor = (Clay_Color){42, 42, 50, 230},
+          .cornerRadius = CLAY_CORNER_RADIUS(6),
+          .border = {.width = {1, 1, 1, 1}, .color = (Clay_Color){80, 140, 255, 200}}})
+    {
+        CLAY_TEXT(CStr(m->name[0] ? m->name : (m->id[0] ? m->id : "New model")),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
+                                    .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
     }
 }
 
@@ -1373,10 +1559,11 @@ static void SettingsRender(PicoHost *app, void *state)
                     CLAY_TEXT(CLAY_STRING("Models"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
                                                                       .fontSize = PICO_FONT_UI,
                                                                       .textColor = COLOR_TEXT}));
-                    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                             .childGap = 14,
-                                             .padding = {.bottom = 8},
-                                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    CLAY(CLAY_ID("SettingsModelList"),
+                         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .childGap = 14,
+                                     .padding = {.bottom = 8},
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                     {
                         for (i = 0; i < g_draft.model_count; i++)
                         {
@@ -1385,6 +1572,7 @@ static void SettingsRender(PicoHost *app, void *state)
                     }
                     RenderButton(CLAY_ID("SettingsAddModel"), "Add model", true, false);
                 }
+                RenderModelDragPreview(s_active_settings_state);
                 if (g_overflow)
                 {
                     PicoScrollbar_Render(CLAY_STRING("SettingsModalScroll"), CLAY_STRING("SettingsModalScrollTrack"),
@@ -1577,6 +1765,10 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     if (HoveredTextField(s_active_settings_state))
     {
         app->hovered_text = true;
+    }
+    if (s_active_settings_state->is_dragging)
+    {
+        app->hovered_drag = true;
     }
     if (HoveredClickable(s_active_settings_state))
     {
@@ -1799,11 +1991,12 @@ static bool HandleClicks(SettingsState *s)
         }
         if (Clay_PointerOver(CLAY_IDI("SettingsModelRow", i)))
         {
-            if (s->expanded)
-            {
-                s->expanded[i] = !s->expanded[i];
-            }
-            SetFocus(s, FOCUS_NONE, -1);
+            s->drag_press_pending = true;
+            s->is_dragging = false;
+            s->drag_source = i;
+            s->drag_target = i;
+            s->drag_press_pos = GetMousePosition();
+            s->host->ui_drag_active = true;
             return true;
         }
     }
@@ -1834,14 +2027,18 @@ static void SettingsDrawFieldOverlay(PicoHost *app, const PicoHookEvent *event, 
 static void SettingsOnFrame(PicoHost *app, void *state, float dt)
 {
     SettingsState *s;
-    (void)dt;
     s_active_settings_state =
         state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
-    if (!s_active_settings_state || !g_open || !pico_ui_modal_is_top(app, "settings"))
+    if (!s_active_settings_state || !g_open)
     {
         return;
     }
     s = s_active_settings_state;
+    if (!pico_ui_modal_is_top(app, "settings"))
+    {
+        CancelModelDrag(s);
+        return;
+    }
     s->model_dropdown_click_block = false;
     PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("SettingsModalScroll"),
                              CLAY_STRING("SettingsModalScrollHandle"));
@@ -1872,6 +2069,48 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
             (void)AcceptDefaultModel(s);
             return;
         }
+    }
+    if (s->drag_press_pending)
+    {
+        Vector2 mouse = GetMousePosition();
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            CancelModelDrag(s);
+            return;
+        }
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            float dx = mouse.x - s->drag_press_pos.x;
+            float dy = mouse.y - s->drag_press_pos.y;
+            if (!s->is_dragging && dx * dx + dy * dy >= 16.0f)
+            {
+                s->is_dragging = true;
+                SetFocus(s, FOCUS_NONE, -1);
+            }
+            if (s->is_dragging)
+            {
+                ScrollModelDrag(mouse.y, mouse.x, dt);
+                s->drag_target = ModelDragTarget(s, mouse.y);
+                app->hovered_drag = true;
+            }
+            return;
+        }
+        if (s->is_dragging)
+        {
+            int target = ModelDragTarget(s, mouse.y);
+            if (target >= 0)
+            {
+                MoveModel(s, s->drag_source, target);
+            }
+        }
+        else if (s->drag_source >= 0 && s->drag_source < s->draft.model_count &&
+                 Clay_PointerOver(CLAY_IDI("SettingsModelRow", s->drag_source)))
+        {
+            s->expanded[s->drag_source] = !s->expanded[s->drag_source];
+            SetFocus(s, FOCUS_NONE, -1);
+        }
+        CancelModelDrag(s);
+        return;
     }
     if (IsKeyPressed(KEY_ESCAPE))
     {

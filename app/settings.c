@@ -1815,6 +1815,38 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     return true;
 }
 
+bool PicoSettings_MoveUserDraftModel(PicoUserSettingsDraft *draft, int from, int to)
+{
+    PicoModel model;
+    char source_id[128];
+    int step;
+    if (!draft || !draft->models || from < 0 || to < 0 ||
+        from >= draft->model_count || to >= draft->model_count || from == to)
+    {
+        return false;
+    }
+    model = draft->models[from];
+    if (draft->source_model_ids)
+    {
+        memcpy(source_id, draft->source_model_ids[from], sizeof(source_id));
+    }
+    step = from < to ? 1 : -1;
+    for (int i = from; i != to; i += step)
+    {
+        draft->models[i] = draft->models[i + step];
+        if (draft->source_model_ids)
+        {
+            memcpy(draft->source_model_ids[i], draft->source_model_ids[i + step], sizeof(source_id));
+        }
+    }
+    draft->models[to] = model;
+    if (draft->source_model_ids)
+    {
+        memcpy(draft->source_model_ids[to], source_id, sizeof(source_id));
+    }
+    return true;
+}
+
 bool PicoSettings_ParseModelContextLimit(const char *text, int *out)
 {
     char *end = NULL;
@@ -2178,6 +2210,8 @@ static char *ModelsJsonPreserving(const char *src, size_t len, const PicoUserSet
     bool parsed = false;
     JsonBuf b;
     int i;
+    int original_last = -1;
+    bool last_trivia_moved = false;
     stripped = src ? (char *)malloc(len + 1) : NULL;
     if (stripped)
     {
@@ -2187,6 +2221,10 @@ static char *ModelsJsonPreserving(const char *src, size_t len, const PicoUserSet
         if (parsed)
         {
             arr = JsonObjGet(&doc, 0, "models");
+            if (JsonIsArray(&doc, arr) && JsonArrayLen(&doc, arr) > 0)
+            {
+                original_last = JsonArrayLen(&doc, arr) - 1;
+            }
         }
     }
     JsonBuf_Init(&b);
@@ -2245,10 +2283,15 @@ static char *ModelsJsonPreserving(const char *src, size_t len, const PicoUserSet
             WriteModelValue(&b, model);
         }
         free(object);
+        if (source_index == original_last && i + 1 < draft->model_count)
+        {
+            AppendTriviaWithoutComma(&b, src, JsonTokEnd(&doc, tok), JsonTokEnd(&doc, arr) - 1);
+            last_trivia_moved = true;
+        }
     }
-    if (parsed && JsonIsArray(&doc, arr) && JsonArrayLen(&doc, arr) > 0)
+    if (original_last >= 0 && !last_trivia_moved)
     {
-        int last = JsonArrayAt(&doc, arr, JsonArrayLen(&doc, arr) - 1);
+        int last = JsonArrayAt(&doc, arr, original_last);
         AppendTriviaWithoutComma(&b, src, JsonTokEnd(&doc, last), JsonTokEnd(&doc, arr) - 1);
     }
     else if (draft->model_count > 0)

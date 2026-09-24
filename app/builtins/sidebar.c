@@ -1484,6 +1484,7 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
     }
     if (!pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
         return;
+    host->hovered_text = Clay_PointerOver(CLAY_ID("SidebarEditName"));
     if (IsKeyPressed(KEY_ESCAPE))
     {
         CloseWorkspaceEdit(s);

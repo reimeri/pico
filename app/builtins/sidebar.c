@@ -1456,14 +1456,15 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
               .cornerRadius = CLAY_CORNER_RADIUS(4)})
         {
             Clay_TextElementConfig field_config = PicoTextField_Config(FONT_REGULAR);
-            if (!s->edit_name[0]) field_config.textColor = COLOR_MUTED;
+            if (!s->edit_name[0])
+                field_config.textColor = COLOR_MUTED;
             CLAY_TEXT(CStr(s->edit_name[0] ? s->edit_name : " "),
                       CLAY_TEXT_CONFIG(field_config));
         }
         RenderEditAction(CLAY_ID("SidebarEditSave"), "Save name", false);
         RenderEditAction(CLAY_ID("SidebarEditStash"), s->workspaces[i].stashed ? "Restore to Projects" : "Stash project", false);
         if (!s->delete_confirm)
-            RenderEditAction(CLAY_ID("SidebarEditDelete"), "Delete saved history...", true);
+            RenderEditAction(CLAY_ID("SidebarEditDelete"), "Delete workspace...", true);
         else
         {
             CLAY_TEXT(CStr(s->delete_label),

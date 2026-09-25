@@ -47,6 +47,84 @@ set_property(SOURCE "${raylib_SOURCE_DIR}/src/rcore.c"
     TARGET_DIRECTORY raylib
     PROPERTY COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/pico_glfw_scale.h")
 
+# GLFW 3.4 (bundled in raylib 5.5) aborts on Wayland file drag-over: dataOfferListener
+# only implements `offer`, so wl_data_offer.source_actions/action dispatch through a
+# NULL listener and libwayland calls wl_abort(). Nix builds use a read-only raylib
+# source, so patch a copy in the build dir and compile that instead.
+if(UNIX AND NOT APPLE AND TARGET glfw)
+    set(_pico_glfw_wl_src "${raylib_SOURCE_DIR}/src/external/glfw/src/wl_window.c")
+    if(EXISTS "${_pico_glfw_wl_src}")
+        file(READ "${_pico_glfw_wl_src}" _pico_glfw_wl_txt)
+        if(NOT _pico_glfw_wl_txt MATCHES "dataOfferHandleSourceActions")
+            set(_pico_glfw_wl_old [=[static const struct wl_data_offer_listener dataOfferListener =
+{
+    dataOfferHandleOffer
+};]=])
+            set(_pico_glfw_wl_new [=[static void dataOfferHandleSourceActions(void* userData,
+                                         struct wl_data_offer* offer,
+                                         uint32_t sourceActions)
+{
+}
+
+static void dataOfferHandleAction(void* userData,
+                                  struct wl_data_offer* offer,
+                                  uint32_t dndAction)
+{
+}
+
+static const struct wl_data_offer_listener dataOfferListener =
+{
+    dataOfferHandleOffer,
+    dataOfferHandleSourceActions,
+    dataOfferHandleAction
+};]=])
+            string(REPLACE "${_pico_glfw_wl_old}" "${_pico_glfw_wl_new}" _pico_glfw_wl_txt "${_pico_glfw_wl_txt}")
+            if(NOT _pico_glfw_wl_txt MATCHES "dataOfferHandleSourceActions")
+                message(FATAL_ERROR "Pico failed to patch GLFW Wayland dataOfferListener")
+            endif()
+            string(REPLACE
+                "            if (surface == window->wl.surface && _glfw.wl.offers[i].text_uri_list)"
+                "            if (window && surface == window->wl.surface && _glfw.wl.offers[i].text_uri_list)"
+                _pico_glfw_wl_txt "${_pico_glfw_wl_txt}")
+            set(_pico_glfw_wl_tag_old [=[    if (wl_proxy_get_tag((struct wl_proxy*) surface) != &_glfw.wl.tag)
+        return;
+
+    if (_glfw.wl.dragOffer)]=])
+            set(_pico_glfw_wl_tag_new [=[    if (!surface || wl_proxy_get_tag((struct wl_proxy*) surface) != &_glfw.wl.tag)
+        return;
+
+    if (_glfw.wl.dragOffer)]=])
+            string(REPLACE "${_pico_glfw_wl_tag_old}" "${_pico_glfw_wl_tag_new}" _pico_glfw_wl_txt "${_pico_glfw_wl_txt}")
+            if(NOT _pico_glfw_wl_txt MATCHES "window && surface == window->wl.surface")
+                message(FATAL_ERROR "Pico failed to patch GLFW Wayland drop enter NULL window check")
+            endif()
+            if(NOT _pico_glfw_wl_txt MATCHES "if \\(!surface")
+                message(FATAL_ERROR "Pico failed to patch GLFW Wayland drop enter NULL surface check")
+            endif()
+            set(_pico_glfw_wl_dst "${CMAKE_CURRENT_BINARY_DIR}/pico_glfw_wl_window.c")
+            set(_pico_glfw_wl_prev "")
+            if(EXISTS "${_pico_glfw_wl_dst}")
+                file(READ "${_pico_glfw_wl_dst}" _pico_glfw_wl_prev)
+            endif()
+            if(NOT _pico_glfw_wl_prev STREQUAL _pico_glfw_wl_txt)
+                file(WRITE "${_pico_glfw_wl_dst}" "${_pico_glfw_wl_txt}")
+            endif()
+            set_source_files_properties("${_pico_glfw_wl_src}"
+                TARGET_DIRECTORY glfw
+                PROPERTIES HEADER_FILE_ONLY TRUE)
+            target_sources(glfw PRIVATE "${_pico_glfw_wl_dst}")
+        endif()
+        unset(_pico_glfw_wl_txt)
+        unset(_pico_glfw_wl_prev)
+        unset(_pico_glfw_wl_old)
+        unset(_pico_glfw_wl_new)
+        unset(_pico_glfw_wl_tag_old)
+        unset(_pico_glfw_wl_tag_new)
+        unset(_pico_glfw_wl_dst)
+    endif()
+    unset(_pico_glfw_wl_src)
+endif()
+
 if(MSVC)
     set(PICO_WARNINGS_AS_ERRORS_OPTION /WX)
 elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")

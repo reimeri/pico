@@ -2384,11 +2384,36 @@ static void UpdateComposerScrollbarDrag(PicoHost *app)
                              CLAY_STRING("CompScrollBarHandle"));
 }
 
+/* Drain OS file drops every frame so a later drop cannot pile onto an ignored
+ * one. Image paths attach like clipboard paste; other files are ignored. */
+static void ConsumeDroppedFiles(PicoHost *app)
+{
+    if (!IsFileDropped())
+    {
+        return;
+    }
+    FilePathList files = LoadDroppedFiles();
+    bool attach = app && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
+    if (attach && files.paths)
+    {
+        for (unsigned int i = 0; i < files.count; i++)
+        {
+            pico_composer_attach_path(files.paths[i], false);
+        }
+    }
+    UnloadDroppedFiles(files);
+}
+
 static void ComposerFrame(PicoHost *app, void *state, float dt)
 {
     (void)dt;
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || !PicoHost_SelectedAgent(app) || PicoUi_QuestionnaireOpen(app))
+    if (!s_active_composer_state)
+    {
+        return;
+    }
+    ConsumeDroppedFiles(app);
+    if (!PicoHost_SelectedAgent(app) || PicoUi_QuestionnaireOpen(app))
     {
         return;
     }

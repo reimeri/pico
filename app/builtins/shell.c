@@ -3,6 +3,7 @@
 #include "pico/plugin.h"
 #include "json.h"
 #include "posix_io.h"
+#include "sh_timeout.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -225,14 +226,13 @@ static void LargeOutputMessage(JsonBuf *output, const char *path, uint64_t size)
     JsonBuf_Puts(output, line);
 }
 
-#define SH_DEFAULT_TIMEOUT 180
-
 static const char *kShParams =
     "{\"type\":\"object\",\"properties\":{"
     "\"description\":{\"type\":\"string\",\"description\":\"Succinct 2-10 word summary of what the "
     "command achieves\"},"
     "\"command\":{\"type\":\"string\",\"description\":\"Shell command to run in the workspace\"},"
-    "\"timeout\":{\"type\":\"integer\",\"description\":\"Optional command timeout in seconds (default 180)\"}},"
+    "\"timeout\":{\"type\":\"integer\",\"description\":\"Optional command timeout in seconds (default "
+    PICO_SH_DEFAULT_TIMEOUT_SECONDS_STR ")\"}},"
     "\"required\":[\"description\",\"command\"]}";
 
 static double MonotonicSeconds(void)
@@ -258,7 +258,7 @@ static char *ExtractArgs(const char *args_json, int *timeout_seconds)
 {
     if (timeout_seconds)
     {
-        *timeout_seconds = SH_DEFAULT_TIMEOUT;
+        *timeout_seconds = PICO_SH_DEFAULT_TIMEOUT_SECONDS;
     }
     if (!args_json || !args_json[0])
     {
@@ -272,8 +272,7 @@ static char *ExtractArgs(const char *args_json, int *timeout_seconds)
     char *cmd = JsonObjStr(&doc, 0, "command");
     if (timeout_seconds)
     {
-        int t = JsonObjInt(&doc, 0, "timeout", SH_DEFAULT_TIMEOUT);
-        *timeout_seconds = t > 0 ? t : SH_DEFAULT_TIMEOUT;
+        *timeout_seconds = PicoSh_TimeoutFromDoc(&doc);
     }
     JsonFree(&doc);
     return cmd;
@@ -286,7 +285,7 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
     {
         memset(out, 0, sizeof(*out));
     }
-    int timeout_seconds = SH_DEFAULT_TIMEOUT;
+    int timeout_seconds = PICO_SH_DEFAULT_TIMEOUT_SECONDS;
     char *command = ExtractArgs(args_json, &timeout_seconds);
     if (!command || !command[0])
     {

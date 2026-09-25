@@ -1,6 +1,8 @@
 #include "agent.h"
 #include "json.h"
+#include "sh_timeout.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -124,4 +126,15 @@ char *PicoAgent_FormatToolCommand(const char *name, const char *args_json)
         return NULL;
     }
     return command;
+}
+
+char *PicoAgent_FormatToolTimeout(const char *name, const char *args_json)
+{
+    if (!name || strcmp(name, "sh") != 0)
+    {
+        return NULL;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Command · timeout %ds", PicoSh_TimeoutSeconds(args_json));
+    return JsonDup(buf);
 }

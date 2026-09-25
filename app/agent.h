@@ -77,6 +77,8 @@ void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *ca
 char *PicoAgent_FormatToolArgs(const char *name, const char *args_json);
 /* Malloc'd exact sh command from tool args, NULL when unavailable. Caller frees. */
 char *PicoAgent_FormatToolCommand(const char *name, const char *args_json);
+/* Malloc'd "Command · timeout Ns" for sh, NULL when the tool has no timeout limit. Caller frees. */
+char *PicoAgent_FormatToolTimeout(const char *name, const char *args_json);
 void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_error);
 void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                                    const char *args);

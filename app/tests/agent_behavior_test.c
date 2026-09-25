@@ -4315,6 +4315,39 @@ static int TestShToolCallCommandExtraction(void)
     return ok ? 0 : Fail(name, "exact command was not recovered from sh args");
 }
 
+static int TestShToolCallTimeoutLabel(void)
+{
+    const char *name = "sh expanded row shows effective timeout limit";
+    PicoHost app;
+    InitApp(&app);
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "sh",
+                         "{\"description\":\"listing all folders in /tmp\","
+                         "\"command\":\"ls -la /tmp\",\"timeout\":30}");
+    PicoTraceLine *line = LastToolTrace(&app);
+    char *label = line ? PicoAgent_FormatToolTimeout(line->tool_name, line->tool_args_json) : NULL;
+    bool ok = label && strcmp(label, "Command · timeout 30s") == 0;
+    free(label);
+
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "sh",
+                         "{\"description\":\"listing all folders in /tmp\","
+                         "\"command\":\"ls -la /tmp\"}");
+    line = LastToolTrace(&app);
+    label = line ? PicoAgent_FormatToolTimeout(line->tool_name, line->tool_args_json) : NULL;
+    int seconds = 0;
+    ok = ok && label && sscanf(label, "Command · timeout %ds", &seconds) == 1 && seconds > 0;
+    free(label);
+
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "run_background",
+                         "{\"description\":\"serving the site on port 8000\","
+                         "\"command\":\"python3 -m http.server 8000\",\"timeout\":30}");
+    line = LastToolTrace(&app);
+    label = line ? PicoAgent_FormatToolTimeout(line->tool_name, line->tool_args_json) : NULL;
+    ok = ok && !label;
+    free(label);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "expanded sh row did not show the effective timeout limit");
+}
+
 static int TestToolActivityDescriptionScope(void)
 {
     const char *name = "tool activity description is sh-only";
@@ -5069,6 +5102,7 @@ int main(void)
     failed |= TestBackgroundToolCallDescriptionArgs();
     failed |= TestBackgroundToolCallCommandExtraction();
     failed |= TestShToolCallCommandExtraction();
+    failed |= TestShToolCallTimeoutLabel();
     failed |= TestToolActivityDescriptionScope();
     failed |= TestToolCallListArgs();
     failed |= TestManagerProfileRegistry();

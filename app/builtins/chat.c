@@ -1381,7 +1381,10 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
                 /* Clay draws text after the layout pass, so the string must
                    outlive the frame; copy it into the per-frame label arena. */
-                RenderTitledToolBlock(view, "Command", ThinkLabelDup(command), available_width);
+                char *title = PicoAgent_FormatToolTimeout(line->tool_name, line->tool_args_json);
+                RenderTitledToolBlock(view, title ? ThinkLabelDup(title) : "Command",
+                                      ThinkLabelDup(command), available_width);
+                free(title);
                 free(command);
             }
             const char *output = line->tool_output;

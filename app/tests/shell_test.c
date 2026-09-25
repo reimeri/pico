@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
+#include "json.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -379,7 +380,7 @@ static bool TestCommandFailure(void)
 
 static bool TestTimeoutSchema(void)
 {
-    if (!g_shell_params_json)
+    if (!g_shell_params_json || !JsonValidSyntax(g_shell_params_json, strlen(g_shell_params_json)))
     {
         return false;
     }

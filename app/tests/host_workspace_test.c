@@ -4553,6 +4553,134 @@ static int TestHostPluginIsolation(void)
     return 0;
 }
 
+static int TestSettingsModalWheelOverField(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char cfg[] = "/tmp/pico-cfg-settings-wheel-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    char config_dir[512];
+    char settings_path[512];
+    char json[4096];
+    size_t n = 0;
+    int i;
+    int rc = 1;
+    Clay_Arena arena;
+    Clay_ElementData field;
+    Clay_ScrollContainerData scroll;
+    float before_y;
+
+    if (!memory || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("settings field wheel test setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    snprintf(config_dir, sizeof(config_dir), "%s/pico", cfg);
+    snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", cfg);
+    Pico_MkdirP(config_dir);
+    n += (size_t)snprintf(json + n, sizeof(json) - n,
+                          "{\n  \"model\": \"model-00\",\n  \"models\": [\n");
+    for (i = 0; i < 24; i++)
+    {
+        n += (size_t)snprintf(json + n, sizeof(json) - n,
+                              "    {\"id\": \"model-%02d\", \"name\": \"Model %02d\", \"provider\": \"openai\"}%s\n",
+                              i, i, i == 23 ? "" : ",");
+    }
+    n += (size_t)snprintf(json + n, sizeof(json) - n, "  ]\n}\n");
+    if (n >= sizeof(json) || WriteFile(settings_path, json) != 0)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        RmRf(cfg);
+        Fail("write settings field wheel fixture");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        RmRf(cfg);
+        Fail("settings field wheel host initialization");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        pico_host_free(host);
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        RmRf(cfg);
+        Clay_SetCurrentContext(previous);
+        Fail("settings field wheel Clay initialization");
+        return 1;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    g_clay_frame_test = true;
+#endif
+    PicoSettingsUi_Open(host);
+    if (!PicoSettingsUi_IsOpen(host) || !pico_ui_modal_is_top(host, "settings"))
+    {
+        Fail("settings modal must open");
+        goto done;
+    }
+
+    Clay_SetLayoutDimensions(viewport);
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+
+    field = Clay_GetElementData(CLAY_ID("SettingsContextLimit"));
+    scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    if (!field.found || !scroll.found || !scroll.scrollPosition)
+    {
+        Fail("settings modal field and scroller were not laid out");
+        goto done;
+    }
+    if (scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height + 0.5f)
+    {
+        Fail("settings modal must overflow so a wheel can move it");
+        goto done;
+    }
+
+    Clay_SetPointerState((Clay_Vector2){field.boundingBox.x + field.boundingBox.width / 2.0f,
+                                        field.boundingBox.y + field.boundingBox.height / 2.0f},
+                         false);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    if (!scroll.found || !scroll.scrollPosition)
+    {
+        Fail("settings scroller disappeared after hover layout");
+        goto done;
+    }
+    before_y = scroll.scrollPosition->y;
+    if (!PicoSettingsUi_ScrollHovered(host, -3.0f) ||
+        scroll.scrollPosition->y >= before_y - 0.5f)
+    {
+        Fail("hovering a settings text field must still scroll the modal");
+        goto done;
+    }
+    rc = 0;
+
+done:
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    g_clay_frame_test = false;
+#endif
+    Clay_SetCurrentContext(previous);
+    pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    return rc;
+}
+
 static int TestHostSettingsPersistence(void)
 {
     static const char legacy_settings[] =
@@ -10369,6 +10497,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestHostPluginIsolation() != 0)
+    {
+        return 1;
+    }
+    if (TestSettingsModalWheelOverField() != 0)
     {
         return 1;
     }

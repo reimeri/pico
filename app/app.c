@@ -3507,15 +3507,15 @@ void PicoHost_Frame(PicoHost *app)
     }
     PicoChat_UpdateInspectFollowFromUserScroll(app, over_inspect ? wheel.y : 0.0f);
     /* Model headers use press-and-drag to reorder. Do not let Clay drag-scroll
-     * the settings content underneath them. The floating default-model menu
-     * keeps its own drag scrolling; wheel and the custom scrollbar are separate. */
-    bool over_settings_content = pico_ui_modal_is_top(app, "settings") &&
-                                 Clay_PointerOver(CLAY_ID("SettingsModalScroll")) &&
-                                 !Clay_PointerOver(CLAY_ID("SettingsDefaultMenu"));
+     * the settings content underneath them. Text fields clip horizontally, which
+     * Clay treats as nested scrollers that would eat the wheel; route it to the
+     * settings pane instead. The floating default-model menu keeps its own drag
+     * scrolling; wheel and the custom scrollbar are separate. */
+    bool over_settings_content = PicoSettingsUi_ScrollHovered(app, wheel.y);
     Clay_UpdateScrollContainers(
         !bar_drag && !over_settings_content &&
             (modal_open || (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
-        (pane_wheel || sidebar_wheel) ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
+        (pane_wheel || sidebar_wheel || over_settings_content) ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
     if (pane_wheel)
     {
         ApplyPaneWheel(over_inspect ? CLAY_STRING("SubagentChatScroll") : CLAY_STRING("ChatScroll"),

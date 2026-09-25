@@ -723,6 +723,7 @@ bool PicoExts_IsOpen(const PicoHost *host);
 void PicoSettingsUi_Open(PicoHost *host);
 void PicoSettingsUi_Close(PicoHost *host);
 bool PicoSettingsUi_IsOpen(const PicoHost *host);
+bool PicoSettingsUi_ScrollHovered(PicoHost *host, float wheel_y);
 void PicoPrompt_Close(PicoHost *host);
 bool PicoPrompt_IsOpen(const PicoHost *host);
 

@@ -260,6 +260,42 @@ bool PicoSettingsUi_IsOpen(const PicoHost *host)
     return s && s->open;
 }
 
+bool PicoSettingsUi_ScrollHovered(PicoHost *host, float wheel_y)
+{
+    Clay_ScrollContainerData data;
+    float overflow;
+    float min_y;
+    float y;
+    if (!host || !pico_ui_modal_is_top(host, "settings") ||
+        !Clay_PointerOver(CLAY_ID("SettingsModalScroll")) ||
+        Clay_PointerOver(CLAY_ID("SettingsDefaultMenu")))
+    {
+        return false;
+    }
+    if (wheel_y == 0.0f)
+    {
+        return true;
+    }
+    data = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    if (!data.found || !data.scrollPosition || !data.config.vertical)
+    {
+        return true;
+    }
+    overflow = data.contentDimensions.height - data.scrollContainerDimensions.height;
+    min_y = overflow > 0.0f ? -overflow : 0.0f;
+    y = data.scrollPosition->y + wheel_y * 10.0f;
+    if (y > 0.0f)
+    {
+        y = 0.0f;
+    }
+    else if (y < min_y)
+    {
+        y = min_y;
+    }
+    data.scrollPosition->y = y;
+    return true;
+}
+
 static bool ParseFieldsIntoDraft(SettingsState *s)
 {
     char *end = NULL;

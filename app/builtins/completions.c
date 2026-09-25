@@ -914,6 +914,22 @@ static void EmitToolArgs(PicoCompletionsCtx *c, const PicoCompletionsCall *call,
     c->on_delta(c->user, &d);
 }
 
+static void EmitToolDone(PicoCompletionsCtx *c, const PicoCompletionsCall *call)
+{
+    if (!c->on_delta || !call)
+    {
+        return;
+    }
+    const char *args = call->arguments.data ? call->arguments.data : "";
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_DONE,
+                      .text = args,
+                      .len = call->arguments.len,
+                      .call_index = call->index,
+                      .call_id = call->id,
+                      .name = call->name};
+    c->on_delta(c->user, &d);
+}
+
 static PicoCompletionsCall *EnsureCall(PicoCompletionsCtx *c, int index)
 {
     if (index < 0)
@@ -1017,7 +1033,18 @@ static void ApplyToolCallDelta(PicoCompletionsCtx *c, const JsonDoc *doc, int tc
         if (args)
         {
             JsonBuf_Puts(&call->arguments, args);
-            EmitToolArgs(c, call, args, strlen(args));
+            /* Chat Completions has no per-call done event. A complete JSON
+             * value is this call's arguments; later fragments reopen it. */
+            bool complete = call->arguments.data &&
+                            JsonValidSyntax(call->arguments.data, call->arguments.len);
+            if (complete)
+            {
+                EmitToolDone(c, call);
+            }
+            else
+            {
+                EmitToolArgs(c, call, args, strlen(args));
+            }
             free(args);
         }
     }

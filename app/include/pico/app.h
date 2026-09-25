@@ -99,7 +99,7 @@ typedef struct PicoTraceLine {
     char *tool_args_json; /* original JSON supplied by the provider */
     char *tool_output;
     bool tool_error;
-    bool tool_streaming;      /* provisional row: arguments still streaming */
+    bool tool_streaming;      /* provisional until the finished result claims this call */
     size_t tool_stream_bytes; /* argument bytes received so far */
     double tool_done_t0;
     bool expanded;
@@ -327,15 +327,16 @@ typedef enum PicoLlmDeltaKind {
     PICO_LLM_DELTA_THINKING_SUMMARY,
     PICO_LLM_DELTA_TOOL_CALL_BEGIN, /* tool name known; arguments still streaming */
     PICO_LLM_DELTA_TOOL_CALL_ARGS,  /* text carries a raw arguments fragment */
+    PICO_LLM_DELTA_TOOL_CALL_DONE,  /* arguments complete; text is the full arguments JSON */
 } PicoLlmDeltaKind;
 
 typedef struct PicoLlmDelta {
     PicoLlmDeltaKind kind;
-    const char *text;     /* payload for STATUS/TEXT/THINKING/THINKING_SUMMARY/TOOL_CALL_ARGS */
+    const char *text;     /* payload for STATUS/TEXT/THINKING/THINKING_SUMMARY/TOOL_CALL_ARGS/TOOL_CALL_DONE */
     size_t len;
     int call_index;       /* tool-call deltas: provider wire index, -1 otherwise */
-    const char *call_id;  /* TOOL_CALL_BEGIN: NULL until the provider sends it */
-    const char *name;     /* TOOL_CALL_BEGIN only, NULL otherwise */
+    const char *call_id;  /* TOOL_CALL_BEGIN/DONE: NULL until the provider sends it */
+    const char *name;     /* TOOL_CALL_BEGIN/DONE: NULL until the provider sends it */
 } PicoLlmDelta;
 
 typedef void (*PicoLlmDeltaFn)(void *user, const PicoLlmDelta *delta);

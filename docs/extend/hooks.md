@@ -156,8 +156,8 @@ Chat calls `pico_tool_row_activate` when the user activates a tool row (main tra
 `PicoToolRowEvent` fields are borrowed from the trace line and valid only during the callback:
 
 - `agent_id`, `name`, `call_id`
-- `args_json` — the original provider arguments, not the formatted transcript label
-- `output` — NULL while the call is still running
+- `args_json` — the original provider arguments, not the formatted transcript label. It may already be set on a provisional row once that call's arguments have finished streaming, before the result claims the call or it executes. Presence is not proof the call ran: a streamed call the finished result never claims is dropped.
+- `output` — NULL while the call is still running or still provisional
 - `child_id`, `child_session_id` — linked subagent identity when available
 - `is_error`
 - `handled`

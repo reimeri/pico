@@ -733,6 +733,23 @@ static void EmitToolArgs(PicoResponsesCtx *c, int output_index, const char *s, s
     c->on_delta(c->user, &d);
 }
 
+static void EmitToolDone(PicoResponsesCtx *c, int output_index, const char *call_id,
+                         const char *name, const char *arguments)
+{
+    if (!c->on_delta)
+    {
+        return;
+    }
+    const char *args = arguments ? arguments : "";
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_DONE,
+                      .text = args,
+                      .len = strlen(args),
+                      .call_index = output_index,
+                      .call_id = call_id,
+                      .name = name};
+    c->on_delta(c->user, &d);
+}
+
 static void BeginSummaryStep(PicoResponsesCtx *c, int output_index, int summary_index)
 {
     if (c->summary_output_index == output_index && c->summary_index == summary_index)
@@ -942,11 +959,38 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             free(delta);
         }
     }
+    else if (type && strcmp(type, "response.function_call_arguments.done") == 0)
+    {
+        char *arguments = JsonObjStr(&doc, 0, "arguments");
+        /* Missing arguments must not announce an empty completion. */
+        if (arguments)
+        {
+            int output_index = JsonObjInt(&doc, 0, "output_index", -1);
+            EmitToolDone(c, output_index, NULL, NULL, arguments);
+        }
+        free(arguments);
+    }
     else if (type && strcmp(type, "response.output_item.done") == 0)
     {
-        char *item = JsonObjRaw(&doc, 0, "item");
-        AppendItem(c, item);
-        free(item);
+        int item = JsonObjGet(&doc, 0, "item");
+        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "function_call"))
+        {
+            char *arguments = JsonObjStr(&doc, item, "arguments");
+            /* Missing arguments must not clobber an earlier arguments.done. */
+            if (arguments)
+            {
+                char *call_id = JsonObjStr(&doc, item, "call_id");
+                char *name = JsonObjStr(&doc, item, "name");
+                int output_index = JsonObjInt(&doc, 0, "output_index", -1);
+                EmitToolDone(c, output_index, call_id, name, arguments);
+                free(call_id);
+                free(name);
+            }
+            free(arguments);
+        }
+        char *raw = JsonObjRaw(&doc, 0, "item");
+        AppendItem(c, raw);
+        free(raw);
     }
     else if (type && strcmp(type, "response.completed") == 0)
     {

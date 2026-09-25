@@ -459,10 +459,15 @@ static void TestParallelResultsReplay(void)
 typedef struct DeltaCapture {
     int begin_count;
     int args_count;
+    int done_count;
     size_t args_bytes;
     int last_call_index;
+    int done_call_index;
     char last_call_id[64];
     char last_name[64];
+    char done_args[128];
+    char done_call_id[64];
+    char done_name[64];
 } DeltaCapture;
 
 static void CaptureDelta(void *user, const PicoLlmDelta *d)
@@ -480,6 +485,14 @@ static void CaptureDelta(void *user, const PicoLlmDelta *d)
         cap->args_count++;
         cap->args_bytes += d->len;
         cap->last_call_index = d->call_index;
+    }
+    else if (d->kind == PICO_LLM_DELTA_TOOL_CALL_DONE)
+    {
+        cap->done_count++;
+        cap->done_call_index = d->call_index;
+        snprintf(cap->done_args, sizeof(cap->done_args), "%s", d->text ? d->text : "");
+        snprintf(cap->done_call_id, sizeof(cap->done_call_id), "%s", d->call_id ? d->call_id : "");
+        snprintf(cap->done_name, sizeof(cap->done_name), "%s", d->name ? d->name : "");
     }
 }
 
@@ -514,6 +527,35 @@ static void TestToolCallDeltaEvents(void)
           "arguments delta is accepted");
     Check(cap.args_count == 1 && cap.args_bytes == 7 && cap.last_call_index == 2,
           "arguments deltas stream with the call's output index");
+
+    const char *message_done =
+        "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}";
+    Check(pico_responses_feed(&ctx, message_done, strlen(message_done)),
+          "message item-done is accepted");
+    Check(cap.done_count == 0, "non-function item-done does not finish a tool call");
+
+    const char *args_done =
+        "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc1\",\"output_index\":2,\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}";
+    Check(pico_responses_feed(&ctx, args_done, strlen(args_done)),
+          "arguments done is accepted");
+    Check(cap.done_count == 1 && cap.done_call_index == 2 &&
+              strcmp(cap.done_args, "{\"cmd\":\"ls\"}") == 0 && cap.done_call_id[0] == '\0',
+          "arguments done finishes that call before the response completes");
+
+    const char *args_done_missing =
+        "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc1\",\"output_index\":2}";
+    Check(pico_responses_feed(&ctx, args_done_missing, strlen(args_done_missing)),
+          "arguments done without arguments is accepted");
+    Check(cap.done_count == 1, "a done event without arguments does not announce an empty call");
+
+    const char *item_done =
+        "{\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"id\":\"fc1\",\"call_id\":\"call_9\",\"name\":\"sh\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}";
+    Check(pico_responses_feed(&ctx, item_done, strlen(item_done)),
+          "function-call item-done is accepted");
+    Check(cap.done_count == 2 && cap.done_call_index == 2 &&
+              strcmp(cap.done_args, "{\"cmd\":\"ls\"}") == 0 &&
+              strcmp(cap.done_call_id, "call_9") == 0 && strcmp(cap.done_name, "sh") == 0,
+          "function-call item-done finishes that call with its arguments");
     pico_responses_ctx_free(&ctx);
 }
 

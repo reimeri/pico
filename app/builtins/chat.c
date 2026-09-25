@@ -1239,9 +1239,11 @@ static Clay_Color ToolStatusColor(const TranscriptView *view, const PicoTraceLin
 static const char *ToolPendingLabel(const TranscriptView *view, const PicoTraceLine *line,
                                     int message_index, int trace_index)
 {
+    /* Arguments may already be formatted while the result has not claimed the
+     * call. That is not execution, so do not fall through to Running…. */
     if (line->tool_streaming)
     {
-        return "Receiving…";
+        return line->tool_args_json ? NULL : "Receiving…";
     }
     PicoToolCallProgress progress = ToolProgress(view, line);
     if (progress == PICO_TOOL_CALL_QUEUED)
@@ -1338,7 +1340,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
                                         message_index, trace_index);
                 }
             }
-            else if (line->tool_streaming)
+            else if (line->tool_streaming && !line->tool_args_json)
             {
                 ViewText(view, ViewCStr(StreamBytesLabel(line->tool_stream_bytes)),
                          (Clay_TextElementConfig){.fontId = FONT_ITALIC,
@@ -1387,7 +1389,12 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             {
                 output = ToolPendingLabel(view, line, message_index, trace_index);
             }
-            RenderTitledToolBlock(view, "Output", output, available_width);
+            /* A received call that has not started has no output yet. Skip the
+             * block instead of rendering "(empty)" or a false Running state. */
+            if (output || !line->tool_streaming)
+            {
+                RenderTitledToolBlock(view, "Output", output, available_width);
+            }
         }
     }
     ViewBreak(view);
@@ -1803,6 +1810,7 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         hash = RevisionPointer(hash, line->text);
         hash = RevisionPointer(hash, line->tool_name);
         hash = RevisionPointer(hash, line->tool_args);
+        hash = RevisionPointer(hash, line->tool_args_json);
         hash = RevisionPointer(hash, line->tool_output);
         hash = RevisionPointer(hash, line->think_parts);
         hash = RevisionMix(hash, (uint64_t)line->think_part_count);

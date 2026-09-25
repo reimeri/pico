@@ -539,10 +539,13 @@ static void TestRefusalAndImage(void)
 typedef struct DeltaCapture {
     int begin_count;
     int args_count;
+    int done_count;
     size_t args_bytes;
     int last_call_index;
+    int done_call_index;
     char last_call_id[64];
     char last_name[64];
+    char done_args[128];
 } DeltaCapture;
 
 static void CaptureDelta(void *user, const PicoLlmDelta *d)
@@ -560,6 +563,12 @@ static void CaptureDelta(void *user, const PicoLlmDelta *d)
         cap->args_count++;
         cap->args_bytes += d->len;
         cap->last_call_index = d->call_index;
+    }
+    else if (d->kind == PICO_LLM_DELTA_TOOL_CALL_DONE)
+    {
+        cap->done_count++;
+        cap->done_call_index = d->call_index;
+        snprintf(cap->done_args, sizeof(cap->done_args), "%s", d->text ? d->text : "");
     }
 }
 
@@ -583,7 +592,32 @@ static void TestToolCallDeltaEvents(void)
     Check(cap.args_count == 1 && cap.args_bytes == 1, "arguments fragment streams");
     Check(pico_completions_feed(&ctx, tool2, strlen(tool2)), "second chunk is accepted");
     Check(cap.begin_count == 1, "arguments-only chunks do not re-announce the call");
-    Check(cap.args_count == 2 && cap.args_bytes == 2, "arguments fragments accumulate");
+    Check(cap.args_count == 1 && cap.done_count == 1 && cap.done_call_index == 0 &&
+              strcmp(cap.done_args, "{}") == 0,
+          "a completed arguments value finishes that call");
+    pico_completions_ctx_free(&ctx);
+
+    pico_completions_ctx_init(&ctx);
+    memset(&cap, 0, sizeof(cap));
+    ctx.on_delta = CaptureDelta;
+    ctx.user = &cap;
+    const char *first =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\","
+        "\"function\":{\"name\":\"sh\",\"arguments\":\"{\\\"command\\\":\\\"echo\"}}]}}]}";
+    const char *first_done =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" hi\\\"}\"}}]}}]}";
+    const char *second =
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\","
+        "\"function\":{\"name\":\"sh\",\"arguments\":\"{\\\"command\\\":\"}}]}}]}";
+    Check(pico_completions_feed(&ctx, first, strlen(first)), "first call fragment is accepted");
+    Check(cap.done_count == 0, "an open arguments value does not finish the call");
+    Check(pico_completions_feed(&ctx, first_done, strlen(first_done)), "closing fragment is accepted");
+    Check(cap.done_count == 1 && cap.done_call_index == 0 &&
+              strcmp(cap.done_args, "{\"command\":\"echo hi\"}") == 0,
+          "the first call finishes when its arguments JSON closes");
+    Check(pico_completions_feed(&ctx, second, strlen(second)), "second call fragment is accepted");
+    Check(cap.done_count == 1 && cap.begin_count == 2,
+          "a later incomplete call does not finish or reopen the first");
     pico_completions_ctx_free(&ctx);
 
     /* A call id that only arrives after the name re-announces the call so the

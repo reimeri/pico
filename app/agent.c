@@ -46,7 +46,9 @@ typedef struct PicoProvStream {
     int call_index; /* provider wire index */
     char *call_id;  /* NULL until the provider sends it */
     char *name;     /* NULL until known */
+    char *args;     /* completed arguments JSON; NULL while still streaming */
     size_t args_bytes;
+    bool args_done;
     bool dirty;
 } PicoProvStream;
 
@@ -54,9 +56,11 @@ typedef struct PicoProvRow {
     int call_index;
     char *call_id;
     char *name;
+    char *args; /* completed arguments JSON copied to the main thread */
     size_t args_bytes;
     int msg_idx;   /* -1 until the trace row exists */
     int trace_idx;
+    bool args_done;
     bool reconciled;
 } PicoProvRow;
 
@@ -241,6 +245,25 @@ static void KillToolChildren(PicoAgentRt *rt);
 static char *Dup(const char *s)
 {
     return JsonDup(s ? s : "");
+}
+
+static char *DupLen(const char *s, size_t n)
+{
+    if (!s)
+    {
+        n = 0;
+    }
+    char *out = (char *)malloc(n + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    if (n)
+    {
+        memcpy(out, s, n);
+    }
+    out[n] = '\0';
+    return out;
 }
 
 static void PushInput(PicoAgentRt *rt, char *json)
@@ -682,7 +705,48 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
         PicoProvStream *entry = ProvStreamFor(rt, delta->call_index);
         if (entry)
         {
+            /* A fragment after DONE means this call was not finished. */
+            if (entry->args_done)
+            {
+                free(entry->args);
+                entry->args = NULL;
+                entry->args_done = false;
+            }
             entry->args_bytes += n;
+            ProvStreamDirty(entry);
+            rt->prov_dirty = true;
+        }
+        pthread_mutex_unlock(&rt->mu);
+        return;
+    }
+    if (kind == PICO_LLM_DELTA_TOOL_CALL_DONE)
+    {
+        PicoProvStream *entry = ProvStreamFor(rt, delta->call_index);
+        if (entry)
+        {
+            if (delta->call_id && delta->call_id[0] &&
+                (!entry->call_id || strcmp(entry->call_id, delta->call_id) != 0))
+            {
+                free(entry->call_id);
+                entry->call_id = Dup(delta->call_id);
+            }
+            if (delta->name && delta->name[0] &&
+                (!entry->name || strcmp(entry->name, delta->name) != 0))
+            {
+                free(entry->name);
+                entry->name = Dup(delta->name);
+            }
+            if (!s)
+            {
+                n = 0;
+            }
+            free(entry->args);
+            entry->args = DupLen(s, n);
+            entry->args_done = entry->args != NULL;
+            if (n > entry->args_bytes)
+            {
+                entry->args_bytes = n;
+            }
             ProvStreamDirty(entry);
             rt->prov_dirty = true;
         }
@@ -2543,6 +2607,7 @@ static void ClearProvStream(PicoAgentRt *rt)
     {
         free(rt->prov[i].call_id);
         free(rt->prov[i].name);
+        free(rt->prov[i].args);
     }
     rt->prov_count = 0;
     rt->prov_dirty = false;
@@ -2577,6 +2642,71 @@ static PicoProvRow *ProvRowFor(PicoAgentRt *rt, int call_index)
     return row;
 }
 
+static void SetProvisionalArgs(PicoTraceLine *line, const char *args_json)
+{
+    const char *json = args_json ? args_json : "";
+    if (line->tool_args_json && strcmp(line->tool_args_json, json) == 0)
+    {
+        return;
+    }
+    free(line->tool_args);
+    line->tool_args = PicoAgent_FormatToolArgs(line->tool_name, json);
+    free(line->tool_args_json);
+    line->tool_args_json = Dup(json);
+}
+
+static void ClearProvisionalArgs(PicoTraceLine *line)
+{
+    if (!line->tool_args && !line->tool_args_json)
+    {
+        return;
+    }
+    free(line->tool_args);
+    line->tool_args = NULL;
+    free(line->tool_args_json);
+    line->tool_args_json = NULL;
+}
+
+static void RememberProvArgs(PicoProvRow *row, const PicoProvStream *update)
+{
+    if (update->args_done)
+    {
+        const char *json = update->args ? update->args : "";
+        if (!row->args_done || !row->args || strcmp(row->args, json) != 0)
+        {
+            free(row->args);
+            row->args = Dup(json);
+        }
+        row->args_done = row->args != NULL;
+        return;
+    }
+    if (!row->args_done)
+    {
+        return;
+    }
+    free(row->args);
+    row->args = NULL;
+    row->args_done = false;
+}
+
+/* Formatted args are presentation only. tool_streaming stays set until the
+ * finished result claims the row, so reconcile and sweep still match it. */
+static void ApplyProvArgs(PicoTraceLine *line, const PicoProvRow *row)
+{
+    if (!line->tool_streaming)
+    {
+        return;
+    }
+    if (row->args_done)
+    {
+        SetProvisionalArgs(line, row->args);
+    }
+    else
+    {
+        ClearProvisionalArgs(line);
+    }
+}
+
 /* Main thread, from the pump: create or refresh the provisional trace row for
  * a tool call whose arguments are still streaming. */
 static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
@@ -2599,6 +2729,7 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
         row->call_id = Dup(update->call_id);
     }
     row->args_bytes = update->args_bytes;
+    RememberProvArgs(row, update);
     if (row->msg_idx >= 0)
     {
         if (row->msg_idx < agent->message_count)
@@ -2617,6 +2748,7 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
                     free(line->tool_name);
                     line->tool_name = Dup(row->name);
                 }
+                ApplyProvArgs(line, row);
             }
         }
         return;
@@ -2638,6 +2770,7 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
     PicoTraceLine *line = &m->trace[m->trace_count - 1];
     line->tool_streaming = true;
     line->tool_stream_bytes = row->args_bytes;
+    ApplyProvArgs(line, row);
     row->msg_idx = agent->message_count - 1;
     row->trace_idx = m->trace_count - 1;
 }
@@ -2747,6 +2880,7 @@ static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt)
     {
         free(rt->prov_rows[i].call_id);
         free(rt->prov_rows[i].name);
+        free(rt->prov_rows[i].args);
     }
     rt->prov_row_count = 0;
     ClearProvStream(rt);
@@ -3397,12 +3531,14 @@ static void FreeRt(PicoAgentRt *rt)
     {
         free(rt->prov[i].call_id);
         free(rt->prov[i].name);
+        free(rt->prov[i].args);
     }
     free(rt->prov);
     for (int i = 0; i < rt->prov_row_count; i++)
     {
         free(rt->prov_rows[i].call_id);
         free(rt->prov_rows[i].name);
+        free(rt->prov_rows[i].args);
     }
     free(rt->prov_rows);
     ClearSummaryParts(rt);
@@ -4252,7 +4388,9 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
                 prov_updates[prov_update_count].call_index = e->call_index;
                 prov_updates[prov_update_count].call_id = e->call_id ? Dup(e->call_id) : NULL;
                 prov_updates[prov_update_count].name = e->name ? Dup(e->name) : NULL;
+                prov_updates[prov_update_count].args = e->args_done && e->args ? Dup(e->args) : NULL;
                 prov_updates[prov_update_count].args_bytes = e->args_bytes;
+                prov_updates[prov_update_count].args_done = e->args_done && prov_updates[prov_update_count].args;
                 prov_update_count++;
                 e->dirty = false;
             }
@@ -4346,6 +4484,7 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     {
         free(prov_updates[i].call_id);
         free(prov_updates[i].name);
+        free(prov_updates[i].args);
     }
     free(prov_updates);
 

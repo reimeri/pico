@@ -53,6 +53,7 @@ typedef enum TestMode {
     TEST_UI_POST_CAP,
     TEST_UI_POST_LIMIT,
     TEST_PROVIDER_TOOL_STREAM_BLOCK,
+    TEST_PROVIDER_TOOL_STREAM_DONE,
 } TestMode;
 
 typedef struct TestState {
@@ -323,6 +324,22 @@ static void FakeToolArgs(PicoLlmDeltaFn on_delta, void *user, int call_index, co
     on_delta(user, &d);
 }
 
+static void FakeToolDone(PicoLlmDeltaFn on_delta, void *user, int call_index, const char *call_id,
+                         const char *name, const char *args)
+{
+    if (!on_delta)
+    {
+        return;
+    }
+    PicoLlmDelta d = {.kind = PICO_LLM_DELTA_TOOL_CALL_DONE,
+                      .text = args ? args : "",
+                      .len = args ? strlen(args) : 0,
+                      .call_index = call_index,
+                      .call_id = call_id,
+                      .name = name};
+    on_delta(user, &d);
+}
+
 static bool FakeSupportsFast(PicoHost *host, const PicoModel *model, void *state)
 {
     (void)host;
@@ -538,6 +555,34 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
             return PICO_LLM_CANCEL;
         }
     }
+    if (mode == TEST_PROVIDER_TOOL_STREAM_DONE && issue_tool)
+    {
+        const char *done_args = "{\"command\":\"echo hi\"}";
+        FakeToolBegin(on_delta, user, 0, "call-1-0", tool_name);
+        FakeToolArgs(on_delta, user, 0, done_args);
+        FakeToolDone(on_delta, user, 0, "call-1-0", tool_name, done_args);
+        FakeToolBegin(on_delta, user, 1, "call-1-1", tool_name);
+        FakeToolArgs(on_delta, user, 1, "{\"command\":");
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_entered = true;
+        pthread_cond_broadcast(&g_test.cv);
+        pthread_mutex_unlock(&g_test.mu);
+        for (;;)
+        {
+            pthread_mutex_lock(&g_test.mu);
+            bool released = g_test.block_release;
+            pthread_mutex_unlock(&g_test.mu);
+            if (released || cancel(user))
+            {
+                break;
+            }
+            SleepOneMs();
+        }
+        if (cancel(user))
+        {
+            return PICO_LLM_CANCEL;
+        }
+    }
     if (mode == TEST_CONCURRENT_REVERSE)
     {
         pthread_mutex_lock(&g_test.mu);
@@ -618,7 +663,10 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     }
 
     int emitted = mode == TEST_TOO_MANY_CALLS ? 17 :
-                  (mode == TEST_DUPLICATE_CALLS || mode == TEST_BATCH_TOOLS ? 2 : 1);
+                  (mode == TEST_DUPLICATE_CALLS || mode == TEST_BATCH_TOOLS ||
+                           mode == TEST_PROVIDER_TOOL_STREAM_DONE
+                       ? 2
+                       : 1);
     for (int i = 0; i < emitted; i++)
     {
         char call_id[32];
@@ -2149,6 +2197,83 @@ static int TestProvisionalToolRow(void)
          g_test.logged_thinking_parts;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "streamed reasoning was duplicated or lost its logged summary parts");
+}
+
+static const PicoTraceLine *ToolLineAt(PicoAgent *agent, int nth)
+{
+    int n = 0;
+    for (int i = 0; agent && i < agent->message_count; i++)
+    {
+        for (int t = 0; t < agent->messages[i].trace_count; t++)
+        {
+            if (!agent->messages[i].trace[t].is_tool)
+            {
+                continue;
+            }
+            if (n == nth)
+            {
+                return &agent->messages[i].trace[t];
+            }
+            n++;
+        }
+    }
+    return NULL;
+}
+
+static int TestProvisionalToolRowBatchDone(void)
+{
+    const char *name = "provisional tool row batch done";
+    ResetTest(TEST_PROVIDER_TOOL_STREAM_DONE, 1);
+    PicoHost app;
+    InitApp(&app);
+    if (!TestAddTool(&app, "echo_test", "test", "{\"type\":\"object\"}", EchoTool, NULL))
+    {
+        return Fail(name, "echo tool did not register");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args), "{\"command\":\"echo hi\"}");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "write a file");
+    if (!WaitForBlock(&app))
+    {
+        return Fail(name, "provider did not stream the batch");
+    }
+    PicoAgent_Pump(&app, TestAgent(&app));
+
+    PicoAgent *agent = TestAgent(&app);
+    int count = 0;
+    FirstToolLine(agent, &count);
+    const PicoTraceLine *done = ToolLineAt(agent, 0);
+    const PicoTraceLine *pending = ToolLineAt(agent, 1);
+    bool ok = agent->state == PICO_AGENT_LLM_WAIT && count == 2 && done && pending &&
+              done->tool_streaming && done->tool_args &&
+              strcmp(done->tool_args, "command: echo hi") == 0 && done->tool_args_json &&
+              strcmp(done->tool_args_json, "{\"command\":\"echo hi\"}") == 0 &&
+              pending->tool_streaming && !pending->tool_args_json &&
+              pending->tool_stream_bytes == 11;
+    if (!ok)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "finished call stayed on Receiving until the rest of the batch");
+    }
+
+    ReleaseBlock();
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "agent did not finish the turn");
+    }
+    FirstToolLine(agent, &count);
+    done = ToolLineAt(agent, 0);
+    pending = ToolLineAt(agent, 1);
+    pthread_mutex_lock(&g_test.mu);
+    int invocations = g_test.tool_invocations;
+    pthread_mutex_unlock(&g_test.mu);
+    ok = count == 2 && done && pending && !done->tool_streaming && !pending->tool_streaming &&
+         done->tool_output && pending->tool_output && invocations == 2;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "early details duplicated or dropped the finished call");
 }
 
 static int TestProvisionalToolRowCancel(void)
@@ -4886,6 +5011,7 @@ int main(void)
     failed |= TestSequential();
     failed |= TestCancellation();
     failed |= TestProvisionalToolRow();
+    failed |= TestProvisionalToolRowBatchDone();
     failed |= TestProvisionalToolRowCancel();
     failed |= TestStaleId();
     failed |= TestToolSchemaValidation();

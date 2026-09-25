@@ -9,6 +9,7 @@
 #include "chat.h"
 #include "json.h"
 #include "richtext.h"
+#include "theme_internal.h"
 #include "settings.h"
 #include "skill_load.h"
 #include "skills.h"
@@ -92,12 +93,53 @@ typedef struct InspectFrame {
     char *fallback;
 } InspectFrame;
 
+/* One cached parse of a rendered thinking body. Entries outlive the frame so
+ * the markdown parse and the per-block wrap caches (which live in the document
+ * arena) are reused while the content, wrapping width, and font scale are
+ * unchanged. Keyed by transcript part identity plus a content hash so
+ * reallocating a streaming string does not discard its saved word widths. */
+typedef struct ThinkDocEntry {
+    const void *owner;
+    int message_index;
+    int trace_index;
+    int part_index;
+    bool word_cache_pending;
+    size_t length;
+    uint64_t hash;
+    int view_ns;
+    float wrap_width;
+    float font_scale;
+    uint64_t font_generation;
+    uint64_t stamp;
+    MdDocument doc;
+    RichTextWordCache word_cache;
+} ThinkDocEntry;
+
+/* Cached flattened preview label for a thinking summary. Replaces the full
+ * markdown parse that used to run twice per frame for every think row. */
+typedef struct ThinkLabelEntry {
+    const char *text;
+    size_t length;
+    uint64_t hash;
+    uint64_t stamp;
+    char flat[512];
+} ThinkLabelEntry;
+
+#define THINK_DOC_CACHE_MAX 12
+#define THINK_LABEL_CACHE_MAX 8
+/* Layout passes can run several times per frame, so stale counts are in
+ * stamps rather than frames; ~256 stamps is well under a second of idling. */
+#define THINK_CACHE_STALE_STAMPS 256
+
 typedef struct ChatState {
     ThinkLabelBlock *think_label_blocks;
     ThinkLabelBlock *think_label_block;
-    MdDocument *think_docs;
+    ThinkDocEntry *think_docs;
     int think_doc_count;
     int think_doc_cap;
+    uint64_t think_doc_stamp;
+    ThinkLabelEntry think_labels[THINK_LABEL_CACHE_MAX];
+    int think_label_count;
     PicoHost *app;
     InspectFrame inspect[PICO_MAX_DELEGATION_DEPTH + 1];
     int inspect_n;
@@ -134,9 +176,6 @@ static __thread ChatState *s_active_chat_state = NULL;
 
 #define g_think_label_blocks (s_active_chat_state->think_label_blocks)
 #define g_think_label_block (s_active_chat_state->think_label_block)
-#define g_think_docs (s_active_chat_state->think_docs)
-#define g_think_doc_count (s_active_chat_state->think_doc_count)
-#define g_think_doc_cap (s_active_chat_state->think_doc_cap)
 #define g_app (s_active_chat_state->app)
 #define g_inspect (s_active_chat_state->inspect)
 #define g_inspect_n (s_active_chat_state->inspect_n)
@@ -470,6 +509,17 @@ static Clay_ElementId TraceGroupChevronId(const TranscriptView *view, int messag
     return ToolElementId(view, message_index, 0, CLAY_STRING("TraceGroupChevron"));
 }
 
+static uint64_t ThinkHashText(const char *text, size_t length)
+{
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (size_t i = 0; i < length; i++)
+    {
+        hash ^= (unsigned char)text[i];
+        hash *= UINT64_C(0x100000001b3);
+    }
+    return hash ? hash : 1;
+}
+
 static void ThinkFrameReset(void)
 {
     for (ThinkLabelBlock *block = g_think_label_blocks; block; block = block->next)
@@ -477,11 +527,35 @@ static void ThinkFrameReset(void)
         block->len = 0;
     }
     g_think_label_block = g_think_label_blocks;
-    for (int i = 0; i < g_think_doc_count; i++)
+    if (!s_active_chat_state)
     {
-        MdDocument_Free(&g_think_docs[i]);
+        return;
     }
-    g_think_doc_count = 0;
+    ChatState *state = s_active_chat_state;
+    state->think_doc_stamp++;
+    uint64_t now = state->think_doc_stamp;
+    for (int i = 0; i < state->think_doc_count;)
+    {
+        if (now - state->think_docs[i].stamp > THINK_CACHE_STALE_STAMPS)
+        {
+            MdDocument_Free(&state->think_docs[i].doc);
+            RichTextWordCache_Free(&state->think_docs[i].word_cache);
+            state->think_docs[i] = state->think_docs[state->think_doc_count - 1];
+            state->think_doc_count--;
+            continue;
+        }
+        i++;
+    }
+    for (int i = 0; i < state->think_label_count;)
+    {
+        if (now - state->think_labels[i].stamp > THINK_CACHE_STALE_STAMPS)
+        {
+            state->think_labels[i] = state->think_labels[state->think_label_count - 1];
+            state->think_label_count--;
+            continue;
+        }
+        i++;
+    }
 }
 
 static void ThinkFrameFree(void)
@@ -494,9 +568,20 @@ static void ThinkFrameFree(void)
         g_think_label_blocks = next;
     }
     g_think_label_block = NULL;
-    free(g_think_docs);
-    g_think_docs = NULL;
-    g_think_doc_cap = 0;
+    if (s_active_chat_state)
+    {
+        ChatState *state = s_active_chat_state;
+        for (int i = 0; i < state->think_doc_count; i++)
+        {
+            MdDocument_Free(&state->think_docs[i].doc);
+            RichTextWordCache_Free(&state->think_docs[i].word_cache);
+        }
+        free(state->think_docs);
+        state->think_docs = NULL;
+        state->think_doc_count = 0;
+        state->think_doc_cap = 0;
+        state->think_label_count = 0;
+    }
 }
 
 static char *ThinkLabelAlloc(size_t need)
@@ -557,22 +642,108 @@ static const char *ThinkLabelDup(const char *s)
     return out;
 }
 
-static MdDocument *ThinkDocumentPush(const char *text)
+/* Returns the parsed document for a rendered thinking part. Identify the
+ * part by its transcript row, not the string address (which reallocates on
+ * streaming deltas), and validate the content before reusing the parse. */
+static MdDocument *ThinkDocumentFor(const TranscriptView *view, int message_index,
+                                    int trace_index, int part_index, const char *text,
+                                    float wrap_width)
 {
-    if (g_think_doc_count >= g_think_doc_cap)
+    ChatState *state = s_active_chat_state;
+    if (!state || !text || !text[0])
     {
-        int cap = g_think_doc_cap == 0 ? 8 : g_think_doc_cap * 2;
-        MdDocument *next = (MdDocument *)realloc(g_think_docs, (size_t)cap * sizeof(MdDocument));
-        if (!next)
-        {
-            return NULL;
-        }
-        g_think_docs = next;
-        g_think_doc_cap = cap;
+        return NULL;
     }
-    MdDocument *doc = &g_think_docs[g_think_doc_count++];
-    *doc = MdDocument_ParseEx(text, strlen(text), MD_PARSE_DEFAULT);
-    return doc;
+    size_t length = strlen(text);
+    uint64_t hash = ThinkHashText(text, length);
+    int view_ns = view ? view->id_ns : 0;
+    const void *owner = view ? (view->owner ? (const void *)view->owner :
+                                            (const void *)view->messages) : NULL;
+    float font_scale = Pico_FontScale();
+    uint64_t font_generation = Pico_FontGeneration();
+
+    for (int i = 0; i < state->think_doc_count; i++)
+    {
+        ThinkDocEntry *entry = &state->think_docs[i];
+        if (entry->owner != owner || entry->view_ns != view_ns ||
+            entry->message_index != message_index || entry->trace_index != trace_index ||
+            entry->part_index != part_index)
+        {
+            continue;
+        }
+        if (entry->length == length && entry->hash == hash && entry->wrap_width == wrap_width &&
+            entry->font_scale == font_scale && entry->font_generation == font_generation)
+        {
+            entry->stamp = state->think_doc_stamp;
+            return &entry->doc;
+        }
+        if (entry->stamp == state->think_doc_stamp)
+        {
+            /* This layout already emitted text from the old document. Keep
+             * its arena alive until the next layout and allocate a new slot. */
+            break;
+        }
+        MdDocument_Free(&entry->doc);
+        entry->length = length;
+        entry->hash = hash;
+        entry->wrap_width = wrap_width;
+        entry->font_scale = font_scale;
+        entry->font_generation = font_generation;
+        entry->stamp = state->think_doc_stamp;
+        entry->word_cache_pending = true;
+        entry->doc = MdDocument_ParseEx(text, length, MD_PARSE_DEFAULT);
+        return &entry->doc;
+    }
+
+    ThinkDocEntry *slot = NULL;
+    if (state->think_doc_count >= THINK_DOC_CACHE_MAX)
+    {
+        for (int i = 0; i < state->think_doc_count; i++)
+        {
+            /* Clay keeps pointers to emitted run text until presentation.
+             * Only entries from earlier layout passes may be evicted. */
+            if (state->think_docs[i].stamp != state->think_doc_stamp &&
+                (!slot || state->think_docs[i].stamp < slot->stamp))
+            {
+                slot = &state->think_docs[i];
+            }
+        }
+    }
+    if (slot)
+    {
+        MdDocument_Free(&slot->doc);
+        RichTextWordCache_Free(&slot->word_cache);
+    }
+    else
+    {
+        if (state->think_doc_count == state->think_doc_cap)
+        {
+            int cap = state->think_doc_cap ? state->think_doc_cap * 2 : THINK_DOC_CACHE_MAX;
+            ThinkDocEntry *next = realloc(state->think_docs, (size_t)cap * sizeof(*next));
+            if (!next)
+            {
+                return NULL;
+            }
+            state->think_docs = next;
+            state->think_doc_cap = cap;
+        }
+        slot = &state->think_docs[state->think_doc_count++];
+        memset(slot, 0, sizeof(*slot));
+    }
+    slot->owner = owner;
+    slot->message_index = message_index;
+    slot->trace_index = trace_index;
+    slot->part_index = part_index;
+    slot->word_cache_pending = true;
+    slot->length = length;
+    slot->hash = hash;
+    slot->view_ns = view_ns;
+    slot->wrap_width = wrap_width;
+    slot->font_scale = font_scale;
+    slot->font_generation = font_generation;
+    slot->stamp = state->think_doc_stamp;
+    slot->doc = MdDocument_ParseEx(text, length, MD_PARSE_DEFAULT);
+    return &slot->doc;
 }
 
 static const char *ThoughtLabel(int think_ms)
@@ -658,12 +829,66 @@ static bool ThinkHasBody(const PicoTraceLine *line)
     return line->text && line->text[0];
 }
 
+/* Flattened preview label for a thinking summary, cached by content so the
+ * header (and the live sheen that re-derives it) does not re-parse the entire
+ * thinking text every frame. */
+static const char *ThinkFlatSummary(const char *md)
+{
+    ChatState *state = s_active_chat_state;
+    if (!state)
+    {
+        return "";
+    }
+    size_t length = md ? strlen(md) : 0;
+    uint64_t hash = length ? ThinkHashText(md, length) : 1;
+    for (int i = 0; i < state->think_label_count; i++)
+    {
+        ThinkLabelEntry *entry = &state->think_labels[i];
+        if (entry->text != md)
+        {
+            continue;
+        }
+        if (entry->length == length && entry->hash == hash)
+        {
+            entry->stamp = state->think_doc_stamp;
+            return entry->flat;
+        }
+        FlattenSummary(md, entry->flat, sizeof(entry->flat));
+        entry->length = length;
+        entry->hash = hash;
+        entry->stamp = state->think_doc_stamp;
+        return entry->flat;
+    }
+    ThinkLabelEntry *slot = NULL;
+    if (state->think_label_count < THINK_LABEL_CACHE_MAX)
+    {
+        slot = &state->think_labels[state->think_label_count++];
+    }
+    else
+    {
+        int oldest = 0;
+        for (int i = 1; i < state->think_label_count; i++)
+        {
+            if (state->think_labels[i].stamp < state->think_labels[oldest].stamp)
+            {
+                oldest = i;
+            }
+        }
+        slot = &state->think_labels[oldest];
+    }
+    slot->text = md;
+    slot->length = length;
+    slot->hash = hash;
+    slot->stamp = state->think_doc_stamp;
+    FlattenSummary(md, slot->flat, sizeof(slot->flat));
+    return slot->flat;
+}
+
 static const char *ThinkHeaderText(const PicoTraceLine *line, bool live)
 {
-    char flat[512];
     if (ThinkHasSummary(line))
     {
-        FlattenSummary(LatestSummary(line), flat, sizeof(flat));
+        const char *flat = ThinkFlatSummary(LatestSummary(line));
         if (flat[0])
         {
             return ThinkLabelDup(flat);
@@ -731,13 +956,15 @@ static void RenderTitledToolBlock(const TranscriptView *view, const char *title,
     }
 }
 
-static void RenderThinkMarkdown(const TranscriptView *view, const char *text, float available_width)
+static void RenderThinkMarkdown(const TranscriptView *view, int message_index, int trace_index,
+                                int part_index, const char *text, float available_width)
 {
     if (!text || !text[0])
     {
         return;
     }
-    MdDocument *doc = ThinkDocumentPush(text);
+    MdDocument *doc = ThinkDocumentFor(view, message_index, trace_index, part_index,
+                                       text, available_width);
     if (!doc)
     {
         return;
@@ -756,6 +983,14 @@ static void RenderThinkMarkdown(const TranscriptView *view, const char *text, fl
         .link_color = COLOR_MUTED,
         .link_hover_color = COLOR_MUTED,
     };
+    /* Every rebuild walks blocks in source order. Unchanged prefix words
+     * reuse their previous measured widths, even after a streaming append
+     * discards the old document and its wrap cache. */
+    ThinkDocEntry *entry = (ThinkDocEntry *)((char *)doc - offsetof(ThinkDocEntry, doc));
+    if (entry->word_cache_pending)
+    {
+        RichTextWordCache_Begin(&entry->word_cache);
+    }
     RichTextEmitState emit = {0};
     for (int b = 0; b < doc->block_count; b++)
     {
@@ -765,13 +1000,20 @@ static void RenderThinkMarkdown(const TranscriptView *view, const char *text, fl
             continue;
         }
         ViewBreak(view);
-        RichText_RenderParagraph(block, &doc->arena, available_width, &style, &emit);
+        RichText_RenderParagraphCached(block, &doc->arena, available_width, &style, &emit,
+                                       entry->word_cache_pending ? &entry->word_cache : NULL);
         ViewBreak(view);
+    }
+    if (entry->word_cache_pending)
+    {
+        RichTextWordCache_End(&entry->word_cache);
+        entry->word_cache_pending = false;
     }
     ViewBreak(view);
 }
 
-static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, float available_width)
+static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, int message_index,
+                            int trace_index, float available_width)
 {
     CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .padding = {12, 12, 10, 10},
@@ -784,7 +1026,8 @@ static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, flo
         {
             for (int i = 0; i < line->think_part_count; i++)
             {
-                RenderThinkMarkdown(view, line->think_parts[i], available_width - 24.0f);
+                RenderThinkMarkdown(view, message_index, trace_index, i, line->think_parts[i],
+                                    available_width - 24.0f);
             }
         }
         else if (line->text && line->text[0])
@@ -859,7 +1102,7 @@ static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int
         ViewBreak(view);
         if (line->expanded)
         {
-            RenderThinkBody(view, line, available_width);
+            RenderThinkBody(view, line, message_index, trace_index, available_width);
         }
     }
     ViewBreak(view);

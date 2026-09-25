@@ -369,10 +369,98 @@ Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
     return font;
 }
 
+/* Short-string measurement cache.
+ *
+ * Rebuilding a text layout re-measures every word of a paragraph: streaming
+ * into an expanded thinking block re-wraps the whole body every frame, and
+ * raylib's MeasureTextEx scans the entire glyph table per codepoint. Words
+ * repeat across frames and within a frame, so identical (text, font, size,
+ * spacing) lookups are served from this bounded exact-match table. Longer
+ * strings bypass the cache; entries are validated by full byte comparison so
+ * a hash collision can only cost a probe, never a wrong width. */
+#define PICO_MEASURE_CACHE_SLOTS 4096
+#define PICO_MEASURE_CACHE_MAX_TEXT 48
+#define PICO_MEASURE_CACHE_PROBES 4
+
+typedef struct PicoMeasureCacheEntry {
+    uint64_t hash; /* 0 = empty slot */
+    int32_t length;
+    uint16_t font_id;
+    uint16_t font_size;
+    uint16_t letter_spacing;
+    float font_scale;
+    float width;
+    float height;
+    char bytes[PICO_MEASURE_CACHE_MAX_TEXT];
+} PicoMeasureCacheEntry;
+
+static PicoMeasureCacheEntry s_measure_cache[PICO_MEASURE_CACHE_SLOTS];
+static uint64_t s_font_generation = 1;
+
+uint64_t Pico_FontGeneration(void)
+{
+    return s_font_generation;
+}
+static char *s_measure_scratch;
+static size_t s_measure_scratch_cap;
+
+static uint64_t MeasureCacheHash(const char *text, int32_t length,
+                                 const Clay_TextElementConfig *config)
+{
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (int32_t i = 0; i < length; i++)
+    {
+        hash ^= (unsigned char)text[i];
+        hash *= UINT64_C(0x100000001b3);
+    }
+    hash ^= (uint64_t)config->fontId;
+    hash *= UINT64_C(0x100000001b3);
+    hash ^= (uint64_t)config->fontSize;
+    hash *= UINT64_C(0x100000001b3);
+    hash ^= (uint64_t)config->letterSpacing;
+    hash *= UINT64_C(0x100000001b3);
+    {
+        float scale = Pico_FontScale();
+        uint32_t bits;
+        memcpy(&bits, &scale, sizeof(bits));
+        hash ^= bits;
+        hash *= UINT64_C(0x100000001b3);
+    }
+    return hash ? hash : 1;
+}
+
+void Pico_MeasureCacheReset(void)
+{
+    memset(s_measure_cache, 0, sizeof(s_measure_cache));
+}
+
+static Clay_Dimensions MeasureWithFont(const char *text, int32_t length,
+                                       const Clay_TextElementConfig *config, Font font)
+{
+    if ((size_t)length + 1 > s_measure_scratch_cap)
+    {
+        size_t new_capacity = s_measure_scratch_cap == 0 ? 256 : s_measure_scratch_cap;
+        while (new_capacity < (size_t)length + 1)
+        {
+            new_capacity *= 2;
+        }
+        free(s_measure_scratch);
+        s_measure_scratch = (char *)malloc(new_capacity);
+        s_measure_scratch_cap = s_measure_scratch ? new_capacity : 0;
+        if (!s_measure_scratch)
+        {
+            return (Clay_Dimensions){0};
+        }
+    }
+    memcpy(s_measure_scratch, text, (size_t)length);
+    s_measure_scratch[length] = '\0';
+    Vector2 size = MeasureTextEx(font, s_measure_scratch, Pico_FontPx(config->fontSize),
+                                 Pico_FontPx(config->letterSpacing));
+    return (Clay_Dimensions){.width = size.x, .height = size.y};
+}
+
 Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData)
 {
-    static char *buffer = NULL;
-    static size_t buffer_capacity = 0;
     (void)userData;
 
     Font font = Pico_FontAt(config->fontId, config->fontSize);
@@ -381,22 +469,44 @@ Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConf
         font = GetFontDefault();
     }
 
-    if ((size_t)text.length + 1 > buffer_capacity)
+    if (text.length > 0 && text.length <= PICO_MEASURE_CACHE_MAX_TEXT)
     {
-        size_t new_capacity = buffer_capacity == 0 ? 256 : buffer_capacity;
-        while (new_capacity < (size_t)text.length + 1)
+        uint64_t hash = MeasureCacheHash(text.chars, text.length, config);
+        uint32_t mask = PICO_MEASURE_CACHE_SLOTS - 1;
+        uint32_t index = (uint32_t)hash & mask;
+        uint32_t insert = index;
+        for (int probe = 0; probe < PICO_MEASURE_CACHE_PROBES; probe++, index = (index + 1) & mask)
         {
-            new_capacity *= 2;
+            PicoMeasureCacheEntry *entry = &s_measure_cache[index];
+            if (entry->hash == 0)
+            {
+                insert = index;
+                break;
+            }
+            if (entry->hash == hash && entry->length == text.length &&
+                entry->font_id == config->fontId && entry->font_size == config->fontSize &&
+                entry->letter_spacing == config->letterSpacing &&
+                entry->font_scale == Pico_FontScale() &&
+                memcmp(entry->bytes, text.chars, (size_t)text.length) == 0)
+            {
+                return (Clay_Dimensions){.width = entry->width, .height = entry->height};
+            }
         }
-        free(buffer);
-        buffer = (char *)malloc(new_capacity);
-        buffer_capacity = new_capacity;
+        Clay_Dimensions measured = MeasureWithFont(text.chars, text.length, config, font);
+        PicoMeasureCacheEntry *entry = &s_measure_cache[insert];
+        entry->hash = hash;
+        entry->length = text.length;
+        entry->font_id = config->fontId;
+        entry->font_size = config->fontSize;
+        entry->letter_spacing = config->letterSpacing;
+        entry->font_scale = Pico_FontScale();
+        entry->width = measured.width;
+        entry->height = measured.height;
+        memcpy(entry->bytes, text.chars, (size_t)text.length);
+        return measured;
     }
-    memcpy(buffer, text.chars, (size_t)text.length);
-    buffer[text.length] = '\0';
 
-    Vector2 size = MeasureTextEx(font, buffer, Pico_FontPx(config->fontSize), Pico_FontPx(config->letterSpacing));
-    return (Clay_Dimensions){.width = size.x, .height = size.y};
+    return MeasureWithFont(text.chars, text.length, config, font);
 }
 
 void Pico_LoadFonts(Font *fonts)
@@ -414,6 +524,8 @@ void Pico_LoadFonts(Font *fonts)
 
 void Pico_UnloadFonts(Font *fonts)
 {
+    Pico_MeasureCacheReset();
+    s_font_generation++;
     for (int face = 0; face < FONT_COUNT; face++)
     {
         for (int i = 0; i < PICO_FONT_SIZE_SLOTS; i++)

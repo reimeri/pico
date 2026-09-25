@@ -4,6 +4,9 @@
 #include "pico/theme.h"
 
 void Pico_SetFontScale(float scale);
+/* Invalidate cached widths when fonts are unloaded (also used by tests). */
+void Pico_MeasureCacheReset(void);
+uint64_t Pico_FontGeneration(void);
 
 /* Main-thread, process-owned arena. Replace only between completed layouts;
  * all Clay-owned pointers become invalid after successful replacement. */

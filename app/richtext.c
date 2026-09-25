@@ -4,6 +4,7 @@
 #include "richtext.h"
 #include "chat_sel.h"
 #include "pico/theme.h"
+#include "theme_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,6 +81,7 @@ typedef struct RtCache {
     float width;
     uint16_t font_size;
     float font_scale;
+    uint64_t font_generation;
     RtLine *lines; // arena owned
     int line_count;
 } RtCache;
@@ -207,7 +209,91 @@ static bool SameStyle(RtWord a, RtWord b)
            a.strike == b.strike && a.link_url == b.link_url;
 }
 
-static void MeasureWords(WordArray *words, const RichTextStyle *style)
+void RichTextWordCache_Begin(RichTextWordCache *cache)
+{
+    if (cache->font_generation != Pico_FontGeneration())
+    {
+        cache->count = 0;
+        cache->bytes_len = 0;
+        cache->font_generation = Pico_FontGeneration();
+    }
+    cache->cursor = 0;
+}
+
+void RichTextWordCache_End(RichTextWordCache *cache)
+{
+    cache->count = cache->cursor;
+    cache->bytes_len = cache->count
+                           ? cache->words[cache->count - 1].offset +
+                                 (size_t)cache->words[cache->count - 1].length
+                           : 0;
+}
+
+void RichTextWordCache_Free(RichTextWordCache *cache)
+{
+    free(cache->words);
+    free(cache->bytes);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static float CachedWordWidth(RichTextWordCache *cache, RtWord *word,
+                             Clay_TextElementConfig *config)
+{
+    float scale = Pico_FontScale();
+    if (cache->cursor < cache->count)
+    {
+        RichTextWordWidth *prior = &cache->words[cache->cursor];
+        if (prior->length == word->length && prior->font_id == config->fontId &&
+            prior->font_size == config->fontSize && prior->letter_spacing == config->letterSpacing &&
+            prior->scale == scale &&
+            memcmp(cache->bytes + prior->offset, word->text, (size_t)word->length) == 0)
+        {
+            cache->cursor++;
+            return prior->width;
+        }
+        cache->count = cache->cursor;
+        cache->bytes_len = prior->offset;
+    }
+    float width = Measure(word->text, word->length, config).width;
+    if (cache->count == cache->capacity)
+    {
+        int capacity = cache->capacity ? cache->capacity * 2 : 256;
+        RichTextWordWidth *next = realloc(cache->words, (size_t)capacity * sizeof(*next));
+        if (!next)
+        {
+            return width;
+        }
+        cache->words = next;
+        cache->capacity = capacity;
+    }
+    if (cache->bytes_len + (size_t)word->length > cache->bytes_cap)
+    {
+        size_t capacity = cache->bytes_cap ? cache->bytes_cap * 2 : 4096;
+        while (capacity < cache->bytes_len + (size_t)word->length)
+        {
+            capacity *= 2;
+        }
+        char *next = realloc(cache->bytes, capacity);
+        if (!next)
+        {
+            return width;
+        }
+        cache->bytes = next;
+        cache->bytes_cap = capacity;
+    }
+    size_t offset = cache->bytes_len;
+    memcpy(cache->bytes + offset, word->text, (size_t)word->length);
+    cache->bytes_len += (size_t)word->length;
+    cache->words[cache->count++] = (RichTextWordWidth){
+        .offset = offset, .length = word->length, .font_id = config->fontId,
+        .font_size = config->fontSize, .letter_spacing = config->letterSpacing,
+        .scale = scale, .width = width};
+    cache->cursor++;
+    return width;
+}
+
+static void MeasureWords(WordArray *words, const RichTextStyle *style,
+                         RichTextWordCache *word_cache)
 {
     for (int i = 0; i < words->count; i++)
     {
@@ -218,7 +304,8 @@ static void MeasureWords(WordArray *words, const RichTextStyle *style)
         }
         Clay_TextElementConfig config =
             TextConfigFor(style, word->bold, word->italic, word->code, word->link_url != NULL);
-        word->width = Measure(word->text, word->length, &config).width;
+        word->width = word_cache ? CachedWordWidth(word_cache, word, &config)
+                                 : Measure(word->text, word->length, &config).width;
     }
 }
 
@@ -369,7 +456,7 @@ static void FreeScratch(ScratchLine *lines, int line_count)
 }
 
 static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_width,
-                               const RichTextStyle *style)
+                               const RichTextStyle *style, RichTextWordCache *word_cache)
 {
     if (available_width < 10.0f)
     {
@@ -379,7 +466,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
     WordArray words = {0};
     bool force_bold = style->force_bold || block->type == MDB_HEADING;
     SplitChunksIntoWords(block->chunks, block->chunk_count, force_bold, &words);
-    MeasureWords(&words, style);
+    MeasureWords(&words, style, word_cache);
 
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
     float space_width = Measure(" ", 1, &space_config).width;
@@ -435,6 +522,9 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
                 word->text += prefix;
                 word->length -= prefix;
                 word->space_before = false;
+                /* Fragments are generated after all source words have been
+                 * cached. Inserting them into the source-word sequence would
+                 * invalidate every subsequent word on the next rebuild. */
                 word->width = Measure(word->text, word->length, &config).width;
                 continue_remainder = true;
             }
@@ -507,6 +597,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
     cache->width = available_width;
     cache->font_size = style->font_size;
     cache->font_scale = Pico_FontScale();
+    cache->font_generation = Pico_FontGeneration();
     cache->line_count = scratch_line_count;
     cache->lines = (RtLine *)MdArena_Alloc(arena, (size_t)scratch_line_count * sizeof(RtLine), 8);
     for (int l = 0; l < scratch_line_count; l++)
@@ -650,17 +741,25 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
 // ---------------------------------------------------------------------------
 // Public API
 
-void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_width,
-                              const RichTextStyle *style, RichTextEmitState *emit)
+void RichText_RenderParagraphCached(MdBlock *block, MdArena *arena, float available_width,
+                                    const RichTextStyle *style, RichTextEmitState *emit,
+                                    RichTextWordCache *word_cache)
 {
     RtCache *cache = (RtCache *)block->wrap_cache;
     if (!cache || cache->width != available_width || cache->font_size != style->font_size ||
-        cache->font_scale != Pico_FontScale())
+        cache->font_scale != Pico_FontScale() ||
+        cache->font_generation != Pico_FontGeneration())
     {
-        cache = BuildWrapCache(block, arena, available_width, style);
+        cache = BuildWrapCache(block, arena, available_width, style, word_cache);
         block->wrap_cache = cache;
     }
     EmitLines(cache, style, emit);
+}
+
+void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_width,
+                              const RichTextStyle *style, RichTextEmitState *emit)
+{
+    RichText_RenderParagraphCached(block, arena, available_width, style, emit, NULL);
 }
 
 void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextStyle *style,
@@ -670,7 +769,7 @@ void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextS
     float min = 0;
     WordArray words = {0};
     SplitChunksIntoWords(chunks, chunk_count, style->force_bold, &words);
-    MeasureWords(&words, style);
+    MeasureWords(&words, style, NULL);
 
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
     float space_width = Measure(" ", 1, &space_config).width;

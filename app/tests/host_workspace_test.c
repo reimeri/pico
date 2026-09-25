@@ -10343,6 +10343,397 @@ done:
     return rc;
 }
 
+
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+/* Wraps used to observe the durable rendering contract below: an unchanged
+ * expanded thinking body must not be re-parsed or re-measured on later
+ * frames, and a streaming append must only measure the new words. */
+static long g_think_parse_calls;
+static long g_think_measure_calls;
+
+MdDocument __real_MdDocument_ParseEx(const char *src, size_t length, int flags);
+MdDocument __wrap_MdDocument_ParseEx(const char *src, size_t length, int flags)
+{
+    g_think_parse_calls++;
+    return __real_MdDocument_ParseEx(src, length, flags);
+}
+
+Vector2 __real_MeasureTextEx(Font font, const char *text, float fontSize, float spacing);
+Vector2 __wrap_MeasureTextEx(Font font, const char *text, float fontSize, float spacing)
+{
+    g_think_measure_calls++;
+    return __real_MeasureTextEx(font, text, fontSize, spacing);
+}
+#endif
+
+/* Emulates the production host frame: layout, capacity recovery, harvest,
+ * pin-to-bottom, and the post-correction relayout. */
+static Clay_RenderCommandArray CachedThinkRecover(PicoHost *host, Clay_RenderCommandArray commands,
+                                                   const Clay_Dimensions viewport)
+{
+    for (int attempt = 0; Pico_NeedsClayReinit() && attempt < 4; attempt++)
+    {
+        if (!Pico_ReinitClay(NULL, false))
+        {
+            break;
+        }
+        Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+        RichText_SetMeasureFunction(Pico_MeasureTextUtf8, NULL);
+        commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    }
+    return commands;
+}
+
+static Clay_RenderCommandArray CachedThinkFrame(PicoHost *host, const Clay_Dimensions viewport)
+{
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+    Clay_RenderCommandArray commands =
+        CachedThinkRecover(host, PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f),
+                           viewport);
+    PicoChat_HarvestVirtualHeights(host);
+    bool relayout = PicoChat_TakeVirtualRelayout();
+    if (host->chat_follow_bottom)
+    {
+        Clay_ScrollContainerData data =
+            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+        if (data.found && data.scrollPosition &&
+            PicoScrollbar_PinToBottom(data.scrollContainerDimensions.height,
+                                      data.contentDimensions.height,
+                                      &data.scrollPosition->y))
+        {
+            relayout = true;
+        }
+    }
+    if (relayout)
+    {
+        commands = CachedThinkRecover(host, PicoHost_LayoutShell(host, viewport.height, 0.0f), viewport);
+        PicoChat_HarvestVirtualHeights(host);
+        (void)PicoChat_TakeVirtualRelayout();
+    }
+    return commands;
+}
+
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+/* Expanded thinking bodies used to be re-parsed and re-measured from scratch
+ * on every frame, so a long thinking block pegged one core and froze the UI.
+ * The durable contract: unchanged content costs no per-frame parsing or font
+ * measurement, and a streaming append only measures the appended words. */
+static int TestExpandedThinkRenderingIsCached(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-think-cache-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-think-cache-XXXXXX";
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    PicoMessage *think_msg;
+    enum { THINK_TEST_WORDS = 6200, THINK_TEST_APPEND = 24 };
+    size_t body_cap = (size_t)THINK_TEST_WORDS * 11 + 2;
+    char *body = malloc(body_cap);
+    int rc = 1;
+
+    if (!body || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(body);
+        Fail("think cache setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("think cache host init");
+        goto done;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("think cache open workspace");
+        goto done;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("think cache create agent");
+        goto done;
+    }
+    for (int i = 0; i < 8; i++)
+    {
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "think cache history message");
+    }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    think_msg = &agent->messages[agent->message_count - 1];
+    think_msg->trace = calloc(1, sizeof(PicoTraceLine));
+    think_msg->trace_count = 1;
+    /* Distinct words so every cached measurement is an exact-content match. */
+    size_t body_len = 0;
+    for (int i = 0; i < THINK_TEST_WORDS; i++)
+    {
+        if (i == 1)
+        {
+            /* A wide early token exercises richtext's split-word path;
+             * its fragments must not displace the cached source words. */
+            memset(body + body_len, 'x', 160);
+            body_len += 160;
+            body[body_len++] = ' ';
+        }
+        else
+        {
+            body_len += (size_t)snprintf(body + body_len, body_cap - body_len, "word%05d ", i);
+        }
+    }
+    body[body_len] = '\0';
+    think_msg->trace[0].text = strdup(body);
+    think_msg->trace[0].think_steps = 1;
+    think_msg->trace[0].think_parts = calloc(1, sizeof(char *));
+    think_msg->trace[0].think_parts[0] = strdup(body);
+    think_msg->trace[0].think_part_count = 1;
+    think_msg->trace[0].expanded = true;
+    agent->state = PICO_AGENT_LLM_WAIT;
+
+    if (!Pico_InitClay(viewport))
+    {
+        Fail("think cache Clay initialization");
+        goto done;
+    }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    RichText_SetMeasureFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    Pico_MeasureCacheReset();
+
+    host->chat_follow_bottom = true;
+    PicoChat_ResetBottomSpace(host);
+    CachedThinkFrame(host, viewport);
+    long initial_measures = g_think_measure_calls;
+    if (g_think_parse_calls == 0 || initial_measures == 0)
+    {
+        Fail("think cache warm-up must parse and measure the body once");
+        goto done;
+    }
+
+    /* Unchanged content: later frames must not re-parse or re-measure. */
+    g_think_parse_calls = 0;
+    g_think_measure_calls = 0;
+    for (int frame = 0; frame < 3; frame++)
+    {
+        CachedThinkFrame(host, viewport);
+    }
+    if (g_think_parse_calls != 0 || g_think_measure_calls != 0)
+    {
+        Fail("unchanged expanded thinking body must not be re-parsed or re-measured per frame");
+        goto done;
+    }
+    Clay_ElementData msg_el = Clay_GetElementData(CLAY_IDI("MsgMain", agent->message_count - 1));
+    Clay_ElementData think_row =
+        Clay_GetElementData(MainTraceRowId(agent->message_count - 1, 0, "ThinkRow"));
+    float body_height = msg_el.found ? msg_el.boundingBox.height : 0.0f;
+    if (!msg_el.found || !think_row.found || body_height <= viewport.height)
+    {
+        Fail("expanded thinking body must render tall enough to overflow the viewport");
+        goto done;
+    }
+
+    /* More distinct words than a small shared cache can hold: the active
+     * thinking part still reuses all prior prefix measurements. */
+    /* Streaming append: the part buffer is replaced with the grown text, as
+     * the agent does on every summary delta. Only new words may be measured. */
+    size_t grown_cap = (size_t)(THINK_TEST_WORDS + THINK_TEST_APPEND) * 11 + 2;
+    char *grown = malloc(grown_cap);
+    if (!grown)
+    {
+        Fail("think cache grown body allocation");
+        goto done;
+    }
+    memcpy(grown, body, body_len + 1);
+    size_t grown_len = body_len;
+    for (int i = 0; i < THINK_TEST_APPEND; i++)
+    {
+        grown_len += (size_t)snprintf(grown + grown_len, grown_cap - grown_len, "word%05d ",
+                                      THINK_TEST_WORDS + i);
+    }
+    grown[grown_len] = '\0';
+    free(think_msg->trace[0].think_parts[0]);
+    think_msg->trace[0].think_parts[0] = grown;
+    free(think_msg->trace[0].text);
+    think_msg->trace[0].text = strdup(grown);
+    g_think_parse_calls = 0;
+    g_think_measure_calls = 0;
+    CachedThinkFrame(host, viewport);
+    if (g_think_measure_calls >= initial_measures / 4)
+    {
+        Fail("streaming append must not remeasure the long unchanged prefix");
+        goto done;
+    }
+    msg_el = Clay_GetElementData(CLAY_IDI("MsgMain", agent->message_count - 1));
+    if (!msg_el.found || msg_el.boundingBox.height <= body_height)
+    {
+        Fail("grown thinking body must render taller than before");
+        goto done;
+    }
+
+    /* The AI stops thinking: the live row folds into the collapsed group on
+     * the first idle frame. The bottom-follow layout then retains the old
+     * extent and unmounts the shrunken message, so geometry is read from the
+     * transition frame itself. */
+    agent->state = PICO_AGENT_IDLE;
+    pico_run_hooks(host, PICO_HOOK_ON_TURN_END, agent->id);
+    g_think_parse_calls = 0;
+    g_think_measure_calls = 0;
+    CachedThinkFrame(host, viewport);
+    if (!Clay_GetElementData(MainTraceRowId(agent->message_count - 1, 0, "TraceGroupRow")).found ||
+        Clay_GetElementData(MainTraceRowId(agent->message_count - 1, 0, "ThinkRow")).found)
+    {
+        Fail("finished thinking must fold into the trace group header");
+        goto done;
+    }
+    msg_el = Clay_GetElementData(CLAY_IDI("MsgMain", agent->message_count - 1));
+    if (!msg_el.found || msg_el.boundingBox.height >= body_height)
+    {
+        Fail("collapsed thinking body must shrink the message");
+        goto done;
+    }
+    /* The newly rendered group header is new content; steady collapsed
+     * frames must do no further work. */
+    g_think_parse_calls = 0;
+    g_think_measure_calls = 0;
+    for (int frame = 0; frame < 2; frame++)
+    {
+        CachedThinkFrame(host, viewport);
+    }
+    if (g_think_parse_calls != 0 || g_think_measure_calls != 0)
+    {
+        Fail("collapsed thinking body must not be parsed or measured");
+        goto done;
+    }
+
+    /* Direct measurement-cache contract: identical short text is served from
+     * the cache, different text or a reset forces a fresh measurement. */
+    {
+        Clay_StringSlice slice = {.length = 9, .chars = "cached abc"};
+        Clay_TextElementConfig config = {.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI};
+        Clay_Dimensions first = Pico_MeasureTextUtf8(slice, &config, NULL);
+        g_think_measure_calls = 0;
+        Clay_Dimensions again = Pico_MeasureTextUtf8(slice, &config, NULL);
+        if (g_think_measure_calls != 0 || first.width != again.width ||
+            first.height != again.height)
+        {
+            Fail("identical short text must be served from the measurement cache");
+            goto done;
+        }
+        Clay_StringSlice other = {.length = 9, .chars = "cached xyz"};
+        Pico_MeasureTextUtf8(other, &config, NULL);
+        if (g_think_measure_calls != 1)
+        {
+            Fail("different text with the same length must miss the measurement cache");
+            goto done;
+        }
+        Pico_MeasureCacheReset();
+        g_think_measure_calls = 0;
+        Pico_MeasureTextUtf8(slice, &config, NULL);
+        if (g_think_measure_calls != 1)
+        {
+            Fail("cache reset must force a fresh measurement");
+            goto done;
+        }
+        config.fontSize = PICO_FONT_CAPTION;
+        g_think_measure_calls = 0;
+        Pico_MeasureTextUtf8(slice, &config, NULL);
+        if (g_think_measure_calls != 1)
+        {
+            Fail("a different font size must not reuse a cached width");
+            goto done;
+        }
+    }
+    /* More expanded parts than the cache's initial capacity must not free
+     * the first part while Clay's render commands still refer to its text. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoMessage *many = &agent->messages[agent->message_count - 1];
+    many->trace = calloc(1, sizeof(PicoTraceLine));
+    many->trace_count = 1;
+    many->trace[0].text = strdup("first unique segment");
+    many->trace[0].think_steps = 1;
+    many->trace[0].expanded = true;
+    many->trace[0].think_part_count = 16;
+    many->trace[0].think_parts = calloc(16, sizeof(char *));
+    for (int i = 0; i < 16; i++)
+    {
+        char part[64];
+        snprintf(part, sizeof(part), "unique thinking segment %02d", i);
+        many->trace[0].think_parts[i] = strdup(i ? part : "first unique segment");
+    }
+    agent->state = PICO_AGENT_LLM_WAIT;
+    PicoChat_ResetBottomSpace(host);
+    Clay_RenderCommandArray commands = CachedThinkFrame(host, viewport);
+    commands = CachedThinkFrame(host, viewport);
+    bool first_found = false;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (command && command->commandType == CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            Clay_StringSlice text = command->renderData.text.stringContents;
+            if (text.length == (int)strlen("first unique segment") &&
+                memcmp(text.chars, "first unique segment", (size_t)text.length) == 0)
+            {
+                first_found = true;
+                break;
+            }
+        }
+    }
+    if (!first_found)
+    {
+        Fail("render commands must retain text from the first expanded thinking part");
+        goto done;
+    }
+
+    /* Font replacement invalidates exact-text measurement hits. */
+    Clay_StringSlice slice = {.length = 9, .chars = "cached abc"};
+    Clay_TextElementConfig config = {.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI};
+    Pico_MeasureTextUtf8(slice, &config, NULL);
+    Pico_UnloadFonts(NULL);
+    g_think_measure_calls = 0;
+    Pico_MeasureTextUtf8(slice, &config, NULL);
+    if (g_think_measure_calls != 1)
+    {
+        Fail("reloaded fonts must trigger a fresh text measurement");
+        goto done;
+    }
+    g_think_parse_calls = 0;
+    CachedThinkFrame(host, viewport);
+    if (g_think_parse_calls == 0)
+    {
+        Fail("font replacement must rebuild retained thinking layouts");
+        goto done;
+    }
+    rc = 0;
+done:
+    if (host)
+    {
+        PicoAgent_ClearMessages(agent);
+        pico_host_free(host);
+    }
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    free(body);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+#endif
+
 int main(int argc, char **argv)
 {
 #ifdef PICO_OPENAI_LOGIN_TESTS
@@ -10399,6 +10790,11 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--think-cache") == 0)
+        return TestExpandedThinkRenderingIsCached();
+    if (TestExpandedThinkRenderingIsCached() != 0) return 1;
+#endif
     if (TestChatFindTranscript() != 0) return 1;
     if (TestChatTraceRowsShareHeight() != 0)
     {

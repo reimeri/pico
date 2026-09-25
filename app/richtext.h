@@ -66,6 +66,37 @@ float RichText_MeasureWidth(Clay_String text, Clay_TextElementConfig config);
 void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_width,
                               const RichTextStyle *style, RichTextEmitState *emit);
 
+/* Prefix cache for streamed documents whose parse/wrap arena is rebuilt on
+ * every delta. Stored outside that arena; words are matched by order, bytes,
+ * style and font generation, and an edited suffix is discarded. */
+typedef struct RichTextWordWidth {
+    size_t offset;
+    int length;
+    uint16_t font_id;
+    uint16_t font_size;
+    uint16_t letter_spacing;
+    float scale;
+    float width;
+} RichTextWordWidth;
+
+typedef struct RichTextWordCache {
+    RichTextWordWidth *words;
+    int count;
+    int capacity;
+    int cursor;
+    char *bytes;
+    size_t bytes_len;
+    size_t bytes_cap;
+    uint64_t font_generation;
+} RichTextWordCache;
+
+void RichTextWordCache_Begin(RichTextWordCache *cache);
+void RichTextWordCache_End(RichTextWordCache *cache);
+void RichTextWordCache_Free(RichTextWordCache *cache);
+void RichText_RenderParagraphCached(MdBlock *block, MdArena *arena, float available_width,
+                                    const RichTextStyle *style, RichTextEmitState *emit,
+                                    RichTextWordCache *word_cache);
+
 // Unwrapped preferred width (longest line) and min width (longest word) for
 // a chunk list. Used to allocate table column widths.
 void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextStyle *style,

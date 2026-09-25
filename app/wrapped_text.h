@@ -40,4 +40,19 @@ bool PicoWrappedText_Fits(const char *text, int text_length, float width,
                           PicoWrappedTextMeasureFn measure, void *measure_user,
                           int *prefix_length);
 
+/* Single-line shortening for labels. Returns true when the original text
+ * already fits in width (and copies it to out when possible). When it does
+ * not, writes a shortened display string to out and returns false.
+ *
+ * Paths (containing '/') drop middle directories first, always keeping the
+ * filename: `Assets/…/file.png`. If even `…/filename` is too wide, a trailing
+ * filename suffix is kept after an ellipsis. Labels without '/' keep a leading
+ * prefix plus ellipsis.
+ *
+ * out is NUL-terminated when out_size > 0. *out_length receives the byte
+ * length excluding the NUL. */
+bool PicoWrappedText_Shorten(const char *text, int text_length, float width,
+                             PicoWrappedTextMeasureFn measure, void *measure_user,
+                             char *out, int out_size, int *out_length);
+
 #endif

@@ -387,11 +387,125 @@ static void TestCompleteDetailDoesNotCoverLabel(void)
     free(memory);
 }
 
+static int LongPathQuery(PicoHost *host, const char *prefix, PicoCompleteItem *out, int max,
+                         void *state)
+{
+    (void)host;
+    (void)prefix;
+    (void)state;
+    if (max < 1)
+    {
+        return 0;
+    }
+    snprintf(out[0].label, sizeof(out[0].label),
+             "Assets/Textures/BattleMap/GrassTerrains/Pipoya RPG Tileset 32x32/"
+             "[A]_type3/not_animation/[A]Water3_Cave1_pipo.png");
+    out[0].detail[0] = '\0';
+    snprintf(out[0].insert, sizeof(out[0].insert), "@%s", out[0].label);
+    return 1;
+}
+
+static Clay_RenderCommand *FindTextContaining(Clay_RenderCommandArray *commands, const char *text)
+{
+    size_t length = strlen(text);
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        Clay_StringSlice contents = command->renderData.text.stringContents;
+        if (contents.length >= (int32_t)length)
+        {
+            const char *chars = contents.chars;
+            for (int32_t n = 0; n + (int32_t)length <= contents.length; n++)
+            {
+                if (memcmp(chars + n, text, length) == 0)
+                {
+                    return command;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static void TestCompleteLongPathKeepsFilename(void)
+{
+    const Clay_Dimensions viewport = {280, 400};
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost app;
+    char composer[32];
+    const char *path =
+        "Assets/Textures/BattleMap/GrassTerrains/Pipoya RPG Tileset 32x32/"
+        "[A]_type3/not_animation/[A]Water3_Cave1_pipo.png";
+    const char *filename = "Water3_Cave1_pipo.png";
+    bool ok = false;
+    if (!memory)
+    {
+        Check(false, "could not allocate complete path layout arena");
+        return;
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Check(false, "could not initialize Clay for complete path layout");
+        free(memory);
+        return;
+    }
+    Clay_SetMeasureTextFunction(CompleteMeasureText, NULL);
+    Clay_SetLayoutDimensions(viewport);
+    memset(&app, 0, sizeof(app));
+    app.completers[0] = (PicoCompleter){
+        .trigger = '@',
+        .host_query = LongPathQuery,
+    };
+    app.completer_count = 1;
+    SetComposer(&app, composer, sizeof(composer), "@Assets");
+    PicoComplete_Refresh(&app);
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("CompleteTestRoot"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .sizing = {.width = CLAY_SIZING_FIXED(viewport.width),
+                                .height = CLAY_SIZING_FIXED(viewport.height)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_GROW(0)}}})
+        {
+        }
+        CLAY(CLAY_ID("CompleteTestParent"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                    .height = CLAY_SIZING_FIXED(48)}}})
+        {
+            PicoComplete_Render(&app);
+        }
+    }
+    Clay_RenderCommandArray commands = Clay_EndLayout(0.0f);
+    Clay_ElementData popup = Clay_GetElementData(CLAY_ID("CompletePopup"));
+    Clay_RenderCommand *file_cmd = FindTextContaining(&commands, filename);
+    Clay_RenderCommand *full_cmd = FindTextCommand(&commands, path);
+    if (popup.found && file_cmd && !full_cmd &&
+        file_cmd->boundingBox.x + 0.01f >= popup.boundingBox.x &&
+        file_cmd->boundingBox.x + file_cmd->boundingBox.width <=
+            popup.boundingBox.x + popup.boundingBox.width + 0.01f)
+    {
+        ok = true;
+    }
+    Check(ok, "a long complete path must stay inside the popup and keep the filename");
+    PicoComplete_Close();
+    Clay_SetCurrentContext(previous);
+    free(memory);
+}
+
 int main(void)
 {
     TestBoundedMentions();
     TestMentionImagePart();
     TestCompleteRebuildsAtTokenStart();
     TestCompleteDetailDoesNotCoverLabel();
+    TestCompleteLongPathKeepsFilename();
     return g_failed;
 }

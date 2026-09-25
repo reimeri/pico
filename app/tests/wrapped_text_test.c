@@ -165,5 +165,53 @@ int main(void)
     {
         return Fail("multibyte trim must keep the widest fitting codepoint prefix");
     }
+
+    char shortened[64];
+    int shortened_len = -1;
+    const char *path = "a/b/c/file";
+    if (!PicoWrappedText_Shorten(path, (int)strlen(path), 10.0f, UnitMeasure, &measure,
+                                 shortened, (int)sizeof(shortened), &shortened_len) ||
+        shortened_len != (int)strlen(path) || strcmp(shortened, path) != 0)
+    {
+        return Fail("a path that fits must be left unchanged");
+    }
+    shortened_len = -1;
+    if (PicoWrappedText_Shorten(path, (int)strlen(path), 8.0f, UnitMeasure, &measure,
+                                shortened, (int)sizeof(shortened), &shortened_len) ||
+        strcmp(shortened, "a/…/file") != 0)
+    {
+        return Fail("a deep path must drop middle directories and keep the filename");
+    }
+    const char *shallow = "dir/file";
+    shortened_len = -1;
+    if (PicoWrappedText_Shorten(shallow, (int)strlen(shallow), 6.0f, UnitMeasure, &measure,
+                                shortened, (int)sizeof(shortened), &shortened_len) ||
+        strcmp(shortened, "…/file") != 0)
+    {
+        return Fail("a two-component path that cannot keep the directory keeps /filename");
+    }
+    shortened_len = -1;
+    if (PicoWrappedText_Shorten(path, (int)strlen(path), 4.0f, UnitMeasure, &measure,
+                                shortened, (int)sizeof(shortened), &shortened_len) ||
+        strcmp(shortened, "…ile") != 0)
+    {
+        return Fail("a path narrower than the filename must keep a trailing suffix");
+    }
+    const char *command = "abcdef";
+    shortened_len = -1;
+    if (PicoWrappedText_Shorten(command, 6, 4.0f, UnitMeasure, &measure, shortened,
+                                (int)sizeof(shortened), &shortened_len) ||
+        strcmp(shortened, "abc…") != 0)
+    {
+        return Fail("a non-path label must keep a leading prefix plus ellipsis");
+    }
+    const char *utf_path = "å/b/c/d/cä";
+    shortened_len = -1;
+    if (PicoWrappedText_Shorten(utf_path, (int)strlen(utf_path), 6.0f, UnitMeasure, &measure,
+                                shortened, (int)sizeof(shortened), &shortened_len) ||
+        strcmp(shortened, "å/…/cä") != 0)
+    {
+        return Fail("path shortening must not split a UTF-8 codepoint");
+    }
     return 0;
 }

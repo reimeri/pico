@@ -3,6 +3,8 @@
 
 #include "clay/clay.h"
 #include "complete_internal.h"
+#include "pico/theme.h"
+#include "wrapped_text.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -22,6 +24,7 @@ typedef struct CompleteState {
     uint64_t token_id;
     int count;
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
+    char display_label[PICO_MAX_COMPLETE_ITEMS][PICO_COMPLETE_LABEL_MAX + 8];
 } CompleteState;
 
 static CompleteState *GetCompleteState(void)
@@ -457,6 +460,51 @@ bool PicoComplete_HandlePointer(PicoHost *app)
     return false;
 }
 
+static float MeasureCompleteLabel(void *user, const char *text, int length)
+{
+    Clay_TextElementConfig *config = (Clay_TextElementConfig *)user;
+    if (!text || length <= 0 || !config)
+    {
+        return 0.0f;
+    }
+    if (IsWindowReady())
+    {
+        Clay_StringSlice slice = {.length = length, .chars = text, .baseChars = text};
+        return Pico_MeasureTextUtf8(slice, config, NULL).width;
+    }
+    /* Headless tests stub Clay measure at 0.6em per byte. Use the same scale so
+     * shortening agrees with layout when fonts are not loaded. */
+    return (float)length * (float)config->fontSize * 0.6f;
+}
+
+/* Popup padding 6+6 and item padding 8+8. Labels that still do not fit are
+ * shortened; clip keeps any remainder inside the composer-width popup. */
+#define COMPLETE_LABEL_PAD (6 + 6 + 8 + 8)
+
+static float CompleteLabelWidth(void)
+{
+    Clay_ElementData popup = Clay_GetElementData(CLAY_ID("CompletePopup"));
+    float width = 0.0f;
+    if (popup.found && popup.boundingBox.width > 0.0f)
+    {
+        width = popup.boundingBox.width;
+    }
+    else
+    {
+        Clay_ElementData composer = Clay_GetElementData(CLAY_ID("Composer"));
+        if (composer.found && composer.boundingBox.width > 0.0f)
+        {
+            width = composer.boundingBox.width;
+        }
+        else
+        {
+            width = Clay_GetLayoutDimensions().width;
+        }
+    }
+    width -= (float)COMPLETE_LABEL_PAD;
+    return width > 0.0f ? width : 0.0f;
+}
+
 void PicoComplete_Render(PicoHost *app)
 {
     (void)app;
@@ -465,6 +513,11 @@ void PicoComplete_Render(PicoHost *app)
         return;
     }
     SelectHoveredItem();
+    float label_width = CompleteLabelWidth();
+    Clay_TextElementConfig label_cfg = {.fontId = FONT_MONO,
+                                        .fontSize = PICO_FONT_UI,
+                                        .textColor = COLOR_TEXT,
+                                        .wrapMode = CLAY_TEXT_WRAP_NONE};
     CLAY(CLAY_ID("CompletePopup"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
                        .zIndex = 25,
@@ -475,6 +528,7 @@ void PicoComplete_Render(PicoHost *app)
                      .padding = {6, 6, 6, 6},
                      .childGap = 2,
                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
+          .clip = {.horizontal = true},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
@@ -490,8 +544,22 @@ void PicoComplete_Render(PicoHost *app)
                   .backgroundColor = bg,
                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
-                Clay_String label = {.length = (int32_t)strlen(g_complete.items[i].label),
-                                     .chars = g_complete.items[i].label};
+                const char *chars = g_complete.items[i].label;
+                int length = (int)strlen(chars);
+                if (label_width > 0.0f)
+                {
+                    int display_len = 0;
+                    if (!PicoWrappedText_Shorten(chars, length, label_width,
+                                                 MeasureCompleteLabel, &label_cfg,
+                                                 g_complete.display_label[i],
+                                                 (int)sizeof(g_complete.display_label[i]),
+                                                 &display_len))
+                    {
+                        chars = g_complete.display_label[i];
+                        length = display_len;
+                    }
+                }
+                Clay_String label = {.length = (int32_t)length, .chars = chars};
                 /* Commands keep their natural width so a long description cannot
                  * compress or paint over them. Details fill leftover space. */
                 CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO,

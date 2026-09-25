@@ -610,6 +610,7 @@ if(BUILD_TESTING)
         tests/files_test.c
         tests/clay_impl.c
         builtins/complete.c
+        wrapped_text.c
         builtins/composer.c
         builtins/spell.c
         spell_engine.c
@@ -654,6 +655,7 @@ if(BUILD_TESTING)
         tests/composer_test.c
         tests/clay_impl.c
         builtins/complete.c
+        wrapped_text.c
         builtins/composer.c
         builtins/spell.c
         spell_engine.c

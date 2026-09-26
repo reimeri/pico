@@ -87,9 +87,14 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
     int old_count = reset ? 0 : cache->count;
     if (reset)
     {
-        memset(cache->heights, 0, (size_t)count * sizeof(float));
-        memset(cache->revisions, 0, (size_t)count * sizeof(uint64_t));
-        memset(cache->dirty, 1, (size_t)count);
+        /* Buffers stay NULL when nothing was ever reserved; zero-length
+         * memsets must not pass those NULL pointers to memset. */
+        if (count > 0)
+        {
+            memset(cache->heights, 0, (size_t)count * sizeof(float));
+            memset(cache->revisions, 0, (size_t)count * sizeof(uint64_t));
+            memset(cache->dirty, 1, (size_t)count);
+        }
         cache->measure_all = count > 0;
     }
     else if (count > old_count)
@@ -100,7 +105,10 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
                (size_t)(count - old_count) * sizeof(uint64_t));
         memset(cache->dirty + old_count, 1, (size_t)(count - old_count));
     }
-    memset(cache->mounted, 0, (size_t)count);
+    if (count > 0)
+    {
+        memset(cache->mounted, 0, (size_t)count);
+    }
     cache->identity = identity;
     cache->width = width;
     cache->font_scale = font_scale;

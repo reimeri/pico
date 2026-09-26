@@ -1,4 +1,5 @@
 #include "diff_lines.h"
+#include "sanitizer_detect.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -123,6 +124,14 @@ static int LargeEmptySide(void)
     if (pid == 0)
     {
         struct rlimit limit = {128u * 1024u * 1024u, 128u * 1024u * 1024u};
+#if PICO_TEST_ASAN
+        /* ASan maps shadow memory over most of the address space; a hard cap
+         * aborts the child during sanitizer init before product code runs.
+         * The diff must still complete; the memory budget itself is enforced
+         * by ordinary builds. */
+        limit.rlim_cur = RLIM_INFINITY;
+        limit.rlim_max = RLIM_INFINITY;
+#endif
         if (setrlimit(RLIMIT_AS, &limit) != 0) _exit(2);
         int n = 20000;
         char *text = malloc((size_t)n * 2 + 1);

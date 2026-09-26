@@ -1,5 +1,6 @@
 #include "canonical.h"
 #include "json.h"
+#include "sanitizer_detect.h"
 #include "pico/app.h"
 #include "host_internal.h"
 
@@ -258,6 +259,13 @@ static void TestBoundedMentions(void)
     {
         alarm(3);
         struct rlimit limit = {128u * 1024u * 1024u, 128u * 1024u * 1024u};
+#if PICO_TEST_ASAN
+        /* ASan shadow mapping needs the full address space; a hard cap aborts
+         * the child during sanitizer init. Oversized files must still be
+         * omitted; the memory budget is enforced by ordinary builds. */
+        limit.rlim_cur = RLIM_INFINITY;
+        limit.rlim_max = RLIM_INFINITY;
+#endif
         if (setrlimit(RLIMIT_AS, &limit) != 0) _exit(2);
         char *result = pico_files_expand_mentions(root, "@large.txt @pipe", false, NULL);
         bool ok = result && strstr(result, "(file too large, omitted, 256.0 MB)");

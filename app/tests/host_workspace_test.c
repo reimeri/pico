@@ -3,6 +3,7 @@
 #include "pico/plugin.h"
 #include "pico/auth.h"
 #include "host_internal.h"
+#include "sanitizer_detect.h"
 #include "workspace_internal.h"
 #include "settings.h"
 #include "session.h"
@@ -8342,7 +8343,16 @@ static int TestDiffShutdownDoesNotWaitForGit(void)
     /* The worker is intentionally detached. Keep its fake executable,
      * workspace, PATH, and release marker valid until this test process exits
      * instead of imposing a timing-dependent cleanup wait on the main thread. */
-    if (!opened || !blocked || elapsed >= 0.1)
+#if PICO_TEST_ASAN
+    /* Sanitizer builds run the close path several times slower; a genuinely
+     * blocked close (full quiesce deadline or worker join) still exceeds this
+     * budget, and an unbounded wait still hangs before the release file
+     * exists. */
+    const double close_budget = 1.0;
+#else
+    const double close_budget = 0.1;
+#endif
+    if (!opened || !blocked || elapsed >= close_budget)
     {
         Fail("diff workspace shutdown must detach without waiting for blocked git");
         return 1;

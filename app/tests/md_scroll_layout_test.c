@@ -267,6 +267,32 @@ static int TestWideTable(void)
     return result;
 }
 
+static int TestUnorderedListMarkerCentersOnFirstLine(void)
+{
+    const char *source = "- AlphaWord BetaWord";
+    MdDocument doc = MdDocument_Parse(source, strlen(source));
+    Clay_RenderCommandArray commands = RenderDocument(&doc, 3500, 120.0f, true);
+    Clay_RenderCommand *marker = FindTextCommand(&commands, "\xE2\x80\xA2", FONT_REGULAR);
+    Clay_RenderCommand *first = FindTextCommand(&commands, "AlphaWord", FONT_REGULAR);
+    Clay_RenderCommand *second = FindTextCommand(&commands, "BetaWord", FONT_REGULAR);
+    int result = 0;
+    if (!marker || !first || !second)
+    {
+        result = Fail("unordered list test did not render marker and wrapped item text");
+    }
+    else if (second->boundingBox.y <= first->boundingBox.y + 0.01f)
+    {
+        result = Fail("unordered list item did not wrap to a second line");
+    }
+    else if (fabsf((marker->boundingBox.y + marker->boundingBox.height * 0.5f) -
+                   (first->boundingBox.y + first->boundingBox.height * 0.5f)) > 0.01f)
+    {
+        result = Fail("unordered list marker was not vertically centered on the first text line");
+    }
+    MdDocument_Free(&doc);
+    return result;
+}
+
 static int TestListItemsUseInnerWidth(void)
 {
     const char *source =
@@ -506,6 +532,10 @@ int main(void)
     if (result == 0)
     {
         result = TestWideTable();
+    }
+    if (result == 0)
+    {
+        result = TestUnorderedListMarkerCentersOnFirstLine();
     }
     if (result == 0)
     {

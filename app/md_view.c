@@ -594,6 +594,8 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                 Clay_TextElementConfig marker_config = {
                     .fontId = FONT_REGULAR,
                     .fontSize = style.font_size,
+                    .lineHeight = Pico_FontPxU16(style.line_height > 0 ? style.line_height
+                                                                      : style.font_size),
                     .textColor = block->list_item_task
                                      ? (block->list_item_done ? COLOR_MUTED : COLOR_LINK)
                                      : COLOR_MUTED,

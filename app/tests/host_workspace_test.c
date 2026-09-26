@@ -2734,6 +2734,288 @@ done:
     return rc;
 }
 
+/* Expanded live thinking grows the transcript while following the bottom.
+ * When that body folds into a collapsed group, the scroll extent must shrink
+ * with it so the new bottom stays in view instead of a blank retained spacer. */
+static int TestExpandedThinkFoldResizesChat(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-think-fold-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-think-fold-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    PicoMessage *msg;
+    ChatStabilitySnapshot live = {0};
+    ChatStabilitySnapshot folded = {0};
+    char *body = NULL;
+    size_t body_cap = 4096;
+    size_t body_len = 0;
+    int last_index;
+    int rc = 1;
+    int i;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("think fold setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("think fold host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("think fold open workspace");
+        goto done;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("think fold create agent");
+        goto done;
+    }
+    for (i = 0; i < 28; i++)
+    {
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "think fold history message");
+    }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    last_index = agent->message_count - 1;
+    msg = &agent->messages[last_index];
+    msg->trace = calloc(1, sizeof(PicoTraceLine));
+    if (!msg->trace)
+    {
+        Fail("think fold trace allocation");
+        goto done;
+    }
+    msg->trace_count = 1;
+    body = malloc(body_cap);
+    if (!body)
+    {
+        Fail("think fold body allocation");
+        goto done;
+    }
+    body[0] = '\0';
+    for (i = 0; i < 1600; i++)
+    {
+        char word[16];
+        int n = snprintf(word, sizeof(word), "w%05d ", i);
+        if (body_len + (size_t)n + 1 > body_cap)
+        {
+            size_t cap = body_cap * 2;
+            char *next = realloc(body, cap);
+            if (!next)
+            {
+                Fail("think fold body grow");
+                goto done;
+            }
+            body = next;
+            body_cap = cap;
+        }
+        memcpy(body + body_len, word, (size_t)n);
+        body_len += (size_t)n;
+        body[body_len] = '\0';
+    }
+    msg->trace[0].text = strdup(body);
+    if (!msg->trace[0].text)
+    {
+        Fail("think fold text dup");
+        goto done;
+    }
+    msg->trace[0].expanded = true;
+    msg->trace_group_expanded = false;
+    agent->state = PICO_AGENT_LLM_WAIT;
+
+    {
+        Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+        if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+        {
+            Fail("think fold Clay initialization");
+            goto done;
+        }
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    host->chat_follow_bottom = true;
+    PicoChat_ResetBottomSpace(host);
+    for (i = 0; i < 8; i++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(false, &live))
+    {
+        Fail("think fold could not capture the live layout");
+        goto done;
+    }
+    {
+        Clay_ElementData think_row = Clay_GetElementData(MainTraceRowId(last_index, 0, "ThinkRow"));
+        Clay_ElementData last = Clay_GetElementData(CLAY_IDI("MsgMain", last_index));
+        float overflow = live.content_height - live.container_height;
+        if (!think_row.found || !last.found || last.boundingBox.height <= viewport.height ||
+            overflow <= 0.0f || fabsf(live.scroll_y + overflow) > 0.5f)
+        {
+            Fail("expanded thinking must overflow the chat while following the bottom");
+            goto done;
+        }
+    }
+
+    agent->state = PICO_AGENT_IDLE;
+    pico_run_hooks(host, PICO_HOOK_ON_TURN_END, agent->id);
+    LayoutChatStabilityFrame(host, viewport);
+    if (!CaptureChatStabilitySnapshot(false, &folded))
+    {
+        Fail("think fold could not capture the folded layout");
+        goto done;
+    }
+    {
+        Clay_ElementData group = Clay_GetElementData(MainTraceRowId(last_index, 0, "TraceGroupRow"));
+        Clay_ElementData think_row = Clay_GetElementData(MainTraceRowId(last_index, 0, "ThinkRow"));
+        Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        Clay_ElementData last = Clay_GetElementData(CLAY_IDI("MsgMain", last_index));
+        float overflow = folded.content_height - folded.container_height;
+        if (!group.found || think_row.found)
+        {
+            Fail("finished thinking must fold into the trace group header");
+            goto done;
+        }
+        if (!chat.found || !last.found ||
+            !ShellVerticallyContains(chat.boundingBox, last.boundingBox) ||
+            folded.stabilization.height > 0.5f ||
+            folded.content_height >= live.content_height - 0.5f ||
+            (overflow > 0.0f && fabsf(folded.scroll_y + overflow) > 0.5f))
+        {
+            Fail("folding expanded thinking must resize the chat onto the new bottom");
+            goto done;
+        }
+    }
+
+    /* A replacement live think on the same presented-frame boundary must not
+     * hide the fold: the previous body disappeared even though a think body
+     * is still visible. */
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    last_index = agent->message_count - 1;
+    msg = &agent->messages[last_index];
+    msg->trace = calloc(1, sizeof(PicoTraceLine));
+    if (!msg->trace)
+    {
+        Fail("think fold replacement trace allocation");
+        goto done;
+    }
+    msg->trace_count = 1;
+    msg->trace[0].text = strdup(body);
+    if (!msg->trace[0].text)
+    {
+        Fail("think fold replacement text dup");
+        goto done;
+    }
+    msg->trace[0].expanded = true;
+    msg->trace_group_expanded = false;
+    agent->state = PICO_AGENT_LLM_WAIT;
+    PicoChat_ResetBottomSpace(host);
+    for (i = 0; i < 8; i++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+    }
+    if (!CaptureChatStabilitySnapshot(false, &live))
+    {
+        Fail("think fold could not capture the replacement live layout");
+        goto done;
+    }
+    {
+        Clay_ElementData think_row = Clay_GetElementData(MainTraceRowId(last_index, 0, "ThinkRow"));
+        float overflow = live.content_height - live.container_height;
+        if (!think_row.found || live.content_height <= folded.content_height + 0.5f ||
+            overflow <= 0.0f || fabsf(live.scroll_y + overflow) > 0.5f)
+        {
+            Fail("replacement expanded thinking must overflow the chat again");
+            goto done;
+        }
+    }
+    {
+        PicoTraceLine *lines = realloc(msg->trace, 2 * sizeof(*lines));
+        if (!lines)
+        {
+            Fail("think fold replacement grow");
+            goto done;
+        }
+        msg->trace = lines;
+        memset(&msg->trace[1], 0, sizeof(msg->trace[1]));
+        msg->trace[1].text = strdup("next think");
+        if (!msg->trace[1].text)
+        {
+            Fail("think fold replacement next think");
+            goto done;
+        }
+        msg->trace[1].expanded = true;
+        msg->trace_count = 2;
+    }
+    LayoutChatStabilityFrame(host, viewport);
+    if (!CaptureChatStabilitySnapshot(false, &folded))
+    {
+        Fail("think fold could not capture the replacement folded layout");
+        goto done;
+    }
+    {
+        Clay_ElementData group = Clay_GetElementData(MainTraceRowId(last_index, 0, "TraceGroupRow"));
+        Clay_ElementData folded_row = Clay_GetElementData(MainTraceRowId(last_index, 0, "ThinkRow"));
+        Clay_ElementData live_row = Clay_GetElementData(MainTraceRowId(last_index, 1, "ThinkRow"));
+        Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        Clay_ElementData last = Clay_GetElementData(CLAY_IDI("MsgMain", last_index));
+        float overflow = folded.content_height - folded.container_height;
+        if (!group.found || folded_row.found || !live_row.found)
+        {
+            Fail("a new live think must not keep the previous body outside the group");
+            goto done;
+        }
+        if (!chat.found || !last.found ||
+            !ShellVerticallyContains(chat.boundingBox, last.boundingBox) ||
+            folded.stabilization.height > 0.5f ||
+            folded.content_height >= live.content_height - 0.5f ||
+            (overflow > 0.0f && fabsf(folded.scroll_y + overflow) > 0.5f))
+        {
+            Fail("replacing expanded thinking must resize the chat onto the new bottom");
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    free(body);
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 static int TestChatTraceRowsShareHeight(void)
 {
     const Clay_Dimensions viewport = {1100, 800};
@@ -11270,9 +11552,8 @@ static int TestExpandedThinkRenderingIsCached(void)
     }
 
     /* The AI stops thinking: the live row folds into the collapsed group on
-     * the first idle frame. The bottom-follow layout then retains the old
-     * extent and unmounts the shrunken message, so geometry is read from the
-     * transition frame itself. */
+     * the first idle frame. Measure the shrunken message on that transition
+     * frame before later virtualization can unmount it. */
     agent->state = PICO_AGENT_IDLE;
     pico_run_hooks(host, PICO_HOOK_ON_TURN_END, agent->id);
     g_think_parse_calls = 0;
@@ -11483,6 +11764,7 @@ int main(int argc, char **argv)
 #endif
     if (TestChatFindTranscript() != 0) return 1;
     if (TestExpandedStreamingThinkStaysInsideChat() != 0) return 1;
+    if (TestExpandedThinkFoldResizesChat() != 0) return 1;
     if (TestChatTraceRowsShareHeight() != 0)
     {
         return 1;

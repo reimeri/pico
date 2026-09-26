@@ -170,6 +170,9 @@ typedef struct ChatState {
     bool bottom_reset;
     bool bottom_configured;
     bool bottom_rebase_pending;
+    bool expanded_think_body;
+    int expanded_think_msg;
+    int expanded_think_trace;
 } ChatState;
 
 static __thread ChatState *s_active_chat_state = NULL;
@@ -1202,6 +1205,80 @@ static bool TraceLineOpen(const TranscriptView *view, const PicoTraceLine *line,
     return pico_trace_line_open(line, pending,
                                 ToolFallbackLive(view, message_index, trace_index),
                                 ThinkBurstLive(view, message_index, trace_index), dwell);
+}
+
+static bool TraceShowsExpandedThinkBody(const TranscriptView *view, int message_index,
+                                        int trace_index)
+{
+    if (!view || !view->messages || message_index < 0 || message_index >= view->message_count)
+    {
+        return false;
+    }
+    const PicoMessage *msg = &view->messages[message_index];
+    const PicoTraceLine *line;
+    if (trace_index < 0 || trace_index >= msg->trace_count)
+    {
+        return false;
+    }
+    line = &msg->trace[trace_index];
+    /* Finished thinks render only inside an expanded group; live/open thinks
+     * render their expanded body outside the group even when it is collapsed. */
+    if (!pico_trace_line_visible(line) || !ThinkHasBody(line) || !line->expanded)
+    {
+        return false;
+    }
+    return TraceLineOpen(view, line, message_index, trace_index) || msg->trace_group_expanded;
+}
+
+static bool TranscriptExpandedThinkBody(const TranscriptView *view, int *message_index,
+                                        int *trace_index)
+{
+    int msg_i;
+    int shown = -1;
+    const PicoMessage *msg;
+    if (message_index)
+    {
+        *message_index = -1;
+    }
+    if (trace_index)
+    {
+        *trace_index = -1;
+    }
+    if (!view || !view->messages || view->message_count <= 0)
+    {
+        return false;
+    }
+    msg_i = view->message_count - 1;
+    msg = &view->messages[msg_i];
+    for (int t = 0; t < msg->trace_count; t++)
+    {
+        if (!TraceShowsExpandedThinkBody(view, msg_i, t))
+        {
+            continue;
+        }
+        if (TraceLineOpen(view, &msg->trace[t], msg_i, t))
+        {
+            shown = t;
+            break;
+        }
+        if (shown < 0)
+        {
+            shown = t;
+        }
+    }
+    if (shown < 0)
+    {
+        return false;
+    }
+    if (message_index)
+    {
+        *message_index = msg_i;
+    }
+    if (trace_index)
+    {
+        *trace_index = shown;
+    }
+    return true;
 }
 
 static bool MessageHasFinishedTrace(const TranscriptView *view, const PicoMessage *msg,
@@ -2457,6 +2534,32 @@ void PicoChat_Render(PicoHost *app, void *state)
         s_active_chat_state->bottom_space = 0.0f;
         s_active_chat_state->bottom_extent = 0.0f;
         s_active_chat_state->bottom_reset = true;
+    }
+    /* Expanded live thinking can grow the transcript by thousands of pixels.
+     * Folding that body into a collapsed group would otherwise retain the old
+     * extent as blank space and leave a follow-bottom view looking empty.
+     * Track the specific row so a replacement live think cannot hide the fold. */
+    {
+        TranscriptView think_view = {
+            .app = app,
+            .messages = active ? active->messages : NULL,
+            .message_count = active ? active->message_count : 0,
+            .state = active ? active->state : PICO_AGENT_IDLE,
+            .activity = active ? active->activity : NULL,
+            .owner = active,
+        };
+        int think_msg = -1;
+        int think_trace = -1;
+        bool expanded_think_body = TranscriptExpandedThinkBody(&think_view, &think_msg, &think_trace);
+        if (s_active_chat_state->expanded_think_body && app->chat_follow_bottom &&
+            !TraceShowsExpandedThinkBody(&think_view, s_active_chat_state->expanded_think_msg,
+                                         s_active_chat_state->expanded_think_trace))
+        {
+            PicoChat_ResetBottomSpace(app);
+        }
+        s_active_chat_state->expanded_think_body = expanded_think_body;
+        s_active_chat_state->expanded_think_msg = think_msg;
+        s_active_chat_state->expanded_think_trace = think_trace;
     }
     app->hovered_tool = false;
     ThinkFrameReset();

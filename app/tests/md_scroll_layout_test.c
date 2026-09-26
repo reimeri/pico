@@ -32,6 +32,11 @@ float Pico_FontScale(void)
     return 1.0f;
 }
 
+uint64_t Pico_FontGeneration(void)
+{
+    return 1;
+}
+
 float Pico_FontPx(uint16_t design)
 {
     return (float)design;

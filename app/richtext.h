@@ -67,7 +67,8 @@ void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_wi
                               const RichTextStyle *style, RichTextEmitState *emit);
 
 /* Prefix cache for streamed documents whose parse/wrap arena is rebuilt on
- * every delta. Stored outside that arena; words are matched by order, bytes,
+ * every reparse (debounced while streaming, so at most a few times per
+ * second). Stored outside that arena; words are matched by order, bytes,
  * style and font generation, and an edited suffix is discarded. */
 typedef struct RichTextWordWidth {
     size_t offset;

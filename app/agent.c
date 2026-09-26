@@ -216,6 +216,7 @@ struct PicoAgentRt {
 
     int stream_msg;
     bool stream_dirty;
+    double stream_reparse_at; /* main thread only: last debounced reparse */
     double action_t0;
 };
 
@@ -1776,6 +1777,26 @@ static void ReparseMessage(PicoHost *app, PicoAgent *agent, int idx)
     m->doc = MdDocument_ParseEx(m->source ? m->source : "", len, MD_PARSE_DEFAULT);
 }
 
+/* While a message streams, reparsing on every landed delta discards the
+ * document's wrap/highlight caches, so the UI pays the full parse + wrap +
+ * highlight cost of the whole message every frame. Reparse at most this often
+ * instead; md4c parses ~1 MB in ~1 ms, so the rendered document stays current
+ * to within the interval. Turn end always flushes (FlushStreamReparse), so
+ * the final document always matches the final source. */
+#define PICO_STREAM_REPARSE_INTERVAL_SEC 0.1
+
+/* Final reparse of a message whose mid-stream reparse was deferred. Must run
+ * before the runtime forgets stream_msg. */
+static void FlushStreamReparse(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    if (rt->stream_dirty)
+    {
+        rt->stream_dirty = false;
+        ReparseMessage(app, agent, rt->stream_msg);
+    }
+}
+
 static void SetMessageText(PicoHost *app, PicoAgent *agent, int idx, const char *text)
 {
     if (idx < 0 || idx >= agent->message_count)
@@ -1790,6 +1811,10 @@ static void SetMessageText(PicoHost *app, PicoAgent *agent, int idx, const char 
     free(m->source);
     m->source = Dup(text ? text : "");
     ReparseMessage(app, agent, idx);
+    if (agent->runtime && agent->runtime->stream_msg == idx)
+    {
+        agent->runtime->stream_dirty = false;
+    }
 }
 
 static void PopLastMessage(PicoHost *app, PicoAgent *agent)
@@ -2275,8 +2300,8 @@ static void GoIdle(PicoHost *app, PicoAgent *agent)
     {
         FreezeTrailingThinkMs(&agent->messages[rt->stream_msg]);
     }
+    FlushStreamReparse(app, agent);
     rt->stream_msg = -1;
-    rt->stream_dirty = false;
     rt->compacting = false;
     rt->compact_no_tools = false;
     agent->activity[0] = '\0';
@@ -2374,8 +2399,8 @@ static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary
 static void StartCompact(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
+    FlushStreamReparse(app, agent);
     rt->stream_msg = -1;
-    rt->stream_dirty = false;
     agent->state = PICO_AGENT_COMPACT_WAIT;
     SetActivity(app, agent, "Compacting…");
     free(agent->compact_summary);
@@ -2421,8 +2446,8 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
     {
         SetMessageText(app, agent, rt->stream_msg, agent->error);
     }
+    FlushStreamReparse(app, agent);
     rt->stream_msg = -1;
-    rt->stream_dirty = false;
     ClearPending(rt);
     ClearOfferedTools(rt);
     rt->compacting = false;
@@ -2543,6 +2568,7 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
         rt->stream_msg = agent->message_count - 1;
     }
     rt->stream_dirty = false;
+    rt->stream_reparse_at = 0; /* first streamed delta renders immediately */
     ClearProvStream(rt);
     agent->state = PICO_AGENT_LLM_WAIT;
     StampActionT0(rt);
@@ -4490,8 +4516,13 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
 
     if (rt->stream_dirty)
     {
-        ReparseMessage(app, agent, rt->stream_msg);
-        rt->stream_dirty = false;
+        double now = ThinkNow();
+        if (now - rt->stream_reparse_at >= PICO_STREAM_REPARSE_INTERVAL_SEC)
+        {
+            rt->stream_dirty = false;
+            rt->stream_reparse_at = now;
+            ReparseMessage(app, agent, rt->stream_msg);
+        }
     }
 
     for (int i = 0; i < event_count; i++)

@@ -386,7 +386,25 @@ static int Utf8Next(const char *text, int length, int position)
 
 /* Longest UTF-8 prefix that measures at most `width`. Always returns at least
  * one codepoint when length > 0 so a single glyph wider than the container
- * still occupies a line instead of looping. */
+ * still occupies a line instead of looping.
+ *
+ * Prefix width grows with length, so probe boundaries gallop (1, 2, 4, ...
+ * codepoints) and then bisect instead of measuring every prefix: a fragment
+ * costs a handful of measures instead of one per codepoint, which keeps
+ * pathological long-word wrapping (a 256 KB unbroken token) inside the frame
+ * budget. With a non-monotonic measure function the result may break earlier
+ * than the true longest prefix, but it still fits and at least one codepoint
+ * is always returned. */
+static int BoundaryAfterCodepoints(const char *text, int length, int from, int count)
+{
+    int position = from;
+    for (int i = 0; i < count && position < length; i++)
+    {
+        position = Utf8Next(text, length, position);
+    }
+    return position;
+}
+
 static int LongestPrefixBytes(const char *text, int length, Clay_TextElementConfig *config,
                               float width)
 {
@@ -394,19 +412,70 @@ static int LongestPrefixBytes(const char *text, int length, Clay_TextElementConf
     {
         return 0;
     }
-    int position = 0;
-    int best = 0;
-    while (position < length)
+    int lo = 0; /* boundary known to fit */
+    int hi = 0; /* boundary known to overflow (0 = none found yet) */
+    int count = 1; /* codepoints in the next galloping probe */
+    while (lo < length)
     {
-        int next = Utf8Next(text, length, position);
-        if (Measure(text, next, config).width > width && best > 0)
+        int probe = BoundaryAfterCodepoints(text, length, lo, count);
+        if (probe < length)
         {
-            return best;
+            if (Measure(text, probe, config).width > width)
+            {
+                hi = probe;
+                break;
+            }
+            lo = probe;
+            count *= 2;
+            if (count > length)
+            {
+                count = length;
+            }
+            continue;
         }
-        best = next;
-        position = next;
+        /* The probe ran to the end: fewer codepoints remain than the probe
+         * step, so the whole remaining text is the last candidate. */
+        if (Measure(text, length, config).width > width && length > lo)
+        {
+            hi = length;
+        }
+        else
+        {
+            lo = length;
+        }
+        break;
     }
-    return best;
+    while (hi > lo && hi - lo > 1)
+    {
+        int mid = lo + (hi - lo) / 2;
+        if (mid <= lo)
+        {
+            mid = lo + 1;
+        }
+        while (mid < hi && ((unsigned char)text[mid] & 0xC0) == 0x80)
+        {
+            mid++;
+        }
+        if (mid >= hi)
+        {
+            break;
+        }
+        if (Measure(text, mid, config).width > width)
+        {
+            hi = mid;
+        }
+        else
+        {
+            lo = mid;
+        }
+    }
+    if (lo > 0)
+    {
+        return lo;
+    }
+    /* Nothing fit (or nothing was probed): one codepoint minimum, matching
+     * the single-glyph-wider-than-the-line case. */
+    return BoundaryAfterCodepoints(text, length, 0, 1);
 }
 
 static void ScratchRunAppendWord(ScratchRun *run, RtWord *word, bool add_space)
@@ -524,8 +593,14 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
                 word->space_before = false;
                 /* Fragments are generated after all source words have been
                  * cached. Inserting them into the source-word sequence would
-                 * invalidate every subsequent word on the next rebuild. */
-                word->width = Measure(word->text, word->length, &config).width;
+                 * invalidate every subsequent word on the next rebuild.
+                 *
+                 * The remainder keeps its width by subtracting the fragment
+                 * instead of re-measuring the whole suffix: text measure is
+                 * per-glyph additive, and re-measuring costs O(remaining)
+                 * per fragment, which is quadratic across a long word
+                 * (a 256 KB unbroken token re-measured ~450 MB per frame). */
+                word->width -= place.width;
                 continue_remainder = true;
             }
         }

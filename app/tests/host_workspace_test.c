@@ -8480,6 +8480,227 @@ static int TestMultiWorkspaceFairPumping(void)
     return 0;
 }
 
+/* Streaming reparse debounce: while a message streams, reparsing on every
+ * landed delta discards the document's wrap/highlight caches and re-pays the
+ * full parse+wrap+highlight cost every frame. Mid-stream reparses must be
+ * debounced (the document renders a prefix of the source between
+ * reparses), the document must never run ahead of the source, and the turn
+ * must end with the document caught up to the full streamed text. */
+typedef struct StreamProbeState {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    bool release;
+    bool entered;
+} StreamProbeState;
+
+static void StreamProbeInit(StreamProbeState *state)
+{
+    memset(state, 0, sizeof(*state));
+    pthread_mutex_init(&state->mu, NULL);
+    pthread_cond_init(&state->cv, NULL);
+}
+
+static void StreamProbeRelease(StreamProbeState *state)
+{
+    pthread_mutex_lock(&state->mu);
+    state->release = true;
+    pthread_cond_broadcast(&state->cv);
+    pthread_mutex_unlock(&state->mu);
+}
+
+static void StreamProbeDestroy(StreamProbeState *state)
+{
+    pthread_mutex_destroy(&state->mu);
+    pthread_cond_destroy(&state->cv);
+}
+
+/* Streams single-character text deltas until released, then returns an empty
+ * result so the streamed text survives as the final message text. */
+static int StreamProbeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
+                               PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta,
+                               void *user, PicoLlmResult *out, void *opaque)
+{
+    (void)ctx;
+    (void)turn;
+    (void)cancel;
+    (void)out;
+    StreamProbeState *state = (StreamProbeState *)opaque;
+    pthread_mutex_lock(&state->mu);
+    state->entered = true;
+    pthread_cond_broadcast(&state->cv);
+    pthread_mutex_unlock(&state->mu);
+    for (;;)
+    {
+        pthread_mutex_lock(&state->mu);
+        bool release = state->release;
+        pthread_mutex_unlock(&state->mu);
+        if (release)
+        {
+            break;
+        }
+        if (on_delta)
+        {
+            PicoLlmDelta delta = {.kind = PICO_LLM_DELTA_TEXT, .text = "x", .len = 1,
+                                  .call_index = -1};
+            on_delta(user, &delta);
+        }
+        usleep(100);
+    }
+    return PICO_LLM_OK;
+}
+
+static size_t DocTextBytes(const PicoMessage *message)
+{
+    size_t bytes = 0;
+    for (int b = 0; b < message->doc.block_count; b++)
+    {
+        const MdBlock *block = &message->doc.blocks[b];
+        for (int c = 0; c < block->chunk_count; c++)
+        {
+            bytes += (size_t)block->chunks[c].length;
+        }
+    }
+    return bytes;
+}
+
+static const PicoMessage *LastAssistantMessage(const PicoAgent *agent)
+{
+    for (int i = agent->message_count - 1; i >= 0; i--)
+    {
+        if (agent->messages[i].role == PICO_ROLE_ASSISTANT)
+        {
+            return &agent->messages[i];
+        }
+    }
+    return NULL;
+}
+
+static int TestStreamingReparseDebounced(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("stream debounce host init");
+        return 1;
+    }
+    char dir[] = "/tmp/pico-ws-stream-debounce-XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Fail("stream debounce mkdtemp");
+        pico_host_free(host);
+        return 1;
+    }
+    PicoWorkspaceId workspace_id = 0;
+    pico_workspace_open(host, dir, &workspace_id);
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
+    StreamProbeState state;
+    StreamProbeInit(&state);
+    PicoAgentId agent_id = 0;
+    PicoAgent *agent = NULL;
+    int rc = 1;
+    bool configured = false;
+    if (workspace)
+    {
+        free(workspace->models); /* defaults loaded by pico_workspace_open; replaced below */
+        workspace->models = (PicoModel *)calloc(1, sizeof(*workspace->models));
+        workspace->model_count = 1;
+        snprintf(workspace->models[0].id, sizeof(workspace->models[0].id), "probe-model");
+        snprintf(workspace->models[0].name, sizeof(workspace->models[0].name), "probe-model");
+        snprintf(workspace->models[0].provider, sizeof(workspace->models[0].provider), "probe");
+        snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model),
+                 "probe-model");
+        PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+        PicoProvider provider = {.name = "probe", .stream = StreamProbeProvider,
+                                 .map_context = true, .state = &state};
+        pico_add_provider(workspace, &provider);
+        PicoHost_PublishRegistration(host, &state);
+        configured = pico_workspace_find_provider(workspace, "probe") != NULL;
+    }
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    pico_main_agent_create(host, workspace_id, &opt, &agent_id);
+    agent = PicoHost_FindAgent(host, agent_id);
+    if (!configured || !agent)
+    {
+        Fail("stream debounce agent setup");
+        goto done;
+    }
+    PicoAgent_StartTurn(host, agent, "stream");
+
+    /* Wait for the provider to enter, then pump frames faster than the
+     * reparse debounce interval. */
+    bool entered = false;
+    for (int i = 0; i < 3000 && !entered; i++)
+    {
+        pico_host_pump(host);
+        pthread_mutex_lock(&state.mu);
+        entered = state.entered;
+        pthread_mutex_unlock(&state.mu);
+        if (!entered)
+        {
+            usleep(1000);
+        }
+    }
+    bool lagged = false;
+    bool doc_ran_ahead = false;
+    bool stream_grew = false;
+    size_t previous_source = 0;
+    for (int i = 0; i < 40; i++)
+    {
+        pico_host_pump(host);
+        const PicoMessage *message = LastAssistantMessage(agent);
+        if (!message)
+        {
+            Fail("stream debounce missing assistant message");
+            goto done;
+        }
+        size_t source = message->source ? strlen(message->source) : 0;
+        size_t doc = DocTextBytes(message);
+        if (doc > source)
+        {
+            doc_ran_ahead = true;
+        }
+        if (source > previous_source)
+        {
+            stream_grew = true;
+        }
+        if (source > 0 && doc < source)
+        {
+            lagged = true;
+        }
+        previous_source = source;
+        usleep(2000);
+    }
+
+    StreamProbeRelease(&state);
+    bool completed = PumpUntilIdle(host, agent, 3000);
+    const PicoMessage *message = LastAssistantMessage(agent);
+    if (!completed || !message || !message->source || !message->source[0])
+    {
+        Fail("stream debounce turn did not complete with streamed text");
+        goto done;
+    }
+    size_t final_source = strlen(message->source);
+    size_t final_doc = DocTextBytes(message);
+    if (!stream_grew || !lagged)
+    {
+        Fail("mid-stream reparses must be debounced: the document must render a "
+             "prefix of the source between reparses");
+        goto done;
+    }
+    if (doc_ran_ahead || final_doc != final_source)
+    {
+        Fail("the streamed document must stay a prefix of the source and catch up "
+             "to the full stream at turn end");
+        goto done;
+    }
+    rc = 0;
+done:
+    pico_host_free(host);
+    StreamProbeDestroy(&state);
+    rmdir(dir);
+    return rc;
+}
+
 static double ElapsedSeconds(const struct timespec *start, const struct timespec *end)
 {
     return (double)(end->tv_sec - start->tv_sec) +
@@ -11254,6 +11475,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestMultiWorkspaceFairPumping() != 0)
+    {
+        return 1;
+    }
+    if (TestStreamingReparseDebounced() != 0)
     {
         return 1;
     }

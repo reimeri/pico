@@ -412,8 +412,23 @@ static void HlTokenizeLang(const PicoHlLang *L, const char *s, HlOut *out)
 /* Markdown: line structure plus a few inline spans. Fenced regions    */
 /* suppress inline highlighting so embedded code samples stay plain.   */
 
+/* Forward closer searches are capped: an unmatched opener otherwise rescans
+ * the entire remaining line, which is quadratic on long bracket- or
+ * backtick-heavy lines (streamed JSON samples inside a ```markdown fence).
+ * An inline style spanning farther than the cap carries no visual value, so
+ * the span is simply not emitted. */
+#define HL_MD_INLINE_SCAN_MAX 512
+
+/* A line longer than this is a data blob, not prose: skip inline spans and
+ * leave it plain (structure prefixes are still handled by the caller). */
+#define HL_MD_INLINE_LINE_MAX 4096
+
 static void HlMarkdownInline(const char *line, int base, int from, int len, HlOut *out)
 {
+    if (len - from > HL_MD_INLINE_LINE_MAX)
+    {
+        return;
+    }
     int i = from;
     while (i < len)
     {
@@ -424,8 +439,9 @@ static void HlMarkdownInline(const char *line, int base, int from, int len, HlOu
             {
                 run++;
             }
+            int limit = i + HL_MD_INLINE_SCAN_MAX;
             int j = i + run;
-            while (j < len)
+            while (j < len && j < limit)
             {
                 if (line[j] == '`')
                 {
@@ -445,20 +461,28 @@ static void HlMarkdownInline(const char *line, int base, int from, int len, HlOu
                     j++;
                 }
             }
-            int end = j < len ? j + run : len;
-            HlEmit(out, base + i, base + end, PICO_HL_STRING);
-            i = end;
+            if (j < len && j < limit)
+            {
+                int end = j + run;
+                HlEmit(out, base + i, base + end, PICO_HL_STRING);
+                i = end;
+            }
+            else
+            {
+                i += run;
+            }
         }
         else if ((line[i] == '*' || line[i] == '_') && i + 2 < len && line[i + 1] == line[i] &&
                  line[i + 2] != ' ')
         {
             char mark = line[i];
+            int limit = i + HL_MD_INLINE_SCAN_MAX;
             int j = i + 2;
-            while (j + 1 < len && !(line[j] == mark && line[j + 1] == mark))
+            while (j + 1 < len && j + 1 < limit && !(line[j] == mark && line[j + 1] == mark))
             {
                 j++;
             }
-            if (j + 1 < len)
+            if (j + 1 < len && j + 1 < limit)
             {
                 HlEmit(out, base + i, base + j + 2, PICO_HL_TYPE);
                 i = j + 2;
@@ -470,20 +494,21 @@ static void HlMarkdownInline(const char *line, int base, int from, int len, HlOu
         }
         else if (line[i] == '[')
         {
+            int limit = i + HL_MD_INLINE_SCAN_MAX;
             int j = i + 1;
-            while (j < len && line[j] != ']')
+            while (j < len && j < limit && line[j] != ']')
             {
                 j++;
             }
-            if (j + 1 < len && line[j] == ']' && line[j + 1] == '(')
+            if (j < len && j < limit && line[j] == ']' && j + 1 < len && line[j + 1] == '(')
             {
                 int k = j + 2;
-                while (k < len && line[k] != ')')
+                while (k < len && k < limit && line[k] != ')')
                 {
                     k++;
                 }
                 HlEmit(out, base + i, base + j + 1, PICO_HL_FIELD);
-                if (k < len)
+                if (k < len && k < limit)
                 {
                     HlEmit(out, base + j + 1, base + k + 1, PICO_HL_STRING);
                     i = k + 1;

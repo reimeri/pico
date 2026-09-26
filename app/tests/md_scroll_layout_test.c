@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static Clay_Dimensions MeasureRichText(Clay_StringSlice text, Clay_TextElementConfig *config,
                                        void *user_data)
@@ -352,6 +353,104 @@ static int TestLongUnspacedWordWrapsInsideWidth(void)
     return result;
 }
 
+static double NowSeconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+/* A pathologically long unbroken word (a streamed base64 blob) must wrap in
+ * bounded time instead of re-measuring the whole remaining word for every
+ * fragment, and it must wrap into thousands of lines, each inside the
+ * container. Clay culls off-screen render commands, so the wrapped line
+ * total is asserted through the scroll container's content height and the
+ * visible fragments are checked directly. */
+static int TestHugeUnspacedWordWrapsInsideBudget(void)
+{
+    const size_t n = 256 * 1024;
+    const float width = 180.0f;
+    char *source = (char *)malloc(n + 1);
+    void *memory = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    int32_t previous_elements = Clay_GetMaxElementCount();
+    MdDocument doc = {0};
+    int result = 1;
+    if (!source)
+    {
+        Fail("huge word test allocation");
+        goto done;
+    }
+    memset(source, 'a', n);
+    source[n] = '\0';
+    doc = MdDocument_Parse(source, n);
+
+    /* The wrapped word produces ~12.5k lines, more elements than the shared
+     * default context holds; raise the capacity for this test only. */
+    Clay_SetCurrentContext(NULL);
+    Clay_SetMaxElementCount(65536);
+    memory = malloc(Clay_MinMemorySize());
+    Clay_Arena arena =
+        Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory);
+    if (!memory || !Clay_Initialize(arena, (Clay_Dimensions){width, 600.0f},
+                                    (Clay_ErrorHandler){0}))
+    {
+        Fail("huge word test could not raise Clay capacity");
+        goto done;
+    }
+    Clay_SetMeasureTextFunction(MeasureRichText, NULL);
+
+    double start = NowSeconds();
+    Clay_RenderCommandArray commands = RenderDocument(&doc, 7000, width, false);
+    double elapsed = NowSeconds() - start;
+
+    Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("MdScrollTestChat"));
+
+    Clay_SetCurrentContext(NULL);
+    Clay_SetMaxElementCount(previous_elements);
+    Clay_SetCurrentContext(previous);
+
+    bool inside_width = true;
+    int text_cmds = 0;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            continue;
+        }
+        text_cmds++;
+        Clay_BoundingBox box = command->boundingBox;
+        if (box.x < -0.01f || box.x + box.width > width + 0.5f)
+        {
+            inside_width = false;
+            break;
+        }
+    }
+    if (!inside_width || text_cmds < 2)
+    {
+        Fail("huge unspaced word must wrap inside the container");
+        goto done;
+    }
+    if (!chat.found || chat.contentDimensions.height < 100.0f * 600.0f)
+    {
+        Fail("a 256 KB word must wrap into thousands of lines, not one screenful");
+        goto done;
+    }
+    if (elapsed > 0.075)
+    {
+        fprintf(stderr, "huge word wrap took %.1f ms (bound 75 ms)\n", elapsed * 1000.0);
+        Fail("wrapping a 256 KB word must stay inside the frame budget");
+        goto done;
+    }
+    result = 0;
+done:
+    MdDocument_Free(&doc);
+    free(memory);
+    free(source);
+    return result;
+}
+
 static int TestSearchRenderedText(void)
 {
     const char *source = "A **styled** phrase and an unbrokenverylongtoken. Adjacent**bold**text.\n\nSeparate block.";
@@ -421,6 +520,7 @@ int main(void)
         result = TestLongUnspacedWordWrapsInsideWidth();
     }
     if (result == 0) result = TestSearchRenderedText();
+    if (result == 0) result = TestHugeUnspacedWordWrapsInsideBudget();
     free(memory);
     return result;
 }

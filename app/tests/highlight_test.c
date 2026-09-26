@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Each check highlights a snippet and expects an exact span list. Expected
  * spans are located by searching for their text with a moving cursor, so
@@ -282,6 +283,83 @@ static int TestMarkdown(void)
     return Check("markdown", "markdown", t, wants, 9);
 }
 
+static double NowSeconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+/* A markdown code-block line of unmatched '[' openers (a streamed JSON
+ * sample) must tokenize in bounded time instead of rescanning the line once
+ * per opener, and such a data-blob line renders plain. */
+static int TestMarkdownUnmatchedOpenersStayBounded(void)
+{
+    const PicoHlLang *lang = PicoHl_Lookup("markdown");
+    if (!lang)
+    {
+        fprintf(stderr, "markdown: tag did not resolve\n");
+        return 1;
+    }
+    const size_t n = 128 * 1024;
+    char *text = (char *)malloc(n + 1);
+    if (!text)
+    {
+        fprintf(stderr, "markdown: out of memory\n");
+        return 1;
+    }
+    for (size_t i = 0; i < n; i += 3)
+    {
+        size_t left = n - i;
+        memcpy(text + i, "[x ", left < 3 ? left : 3);
+    }
+    text[n] = '\0';
+    double start = NowSeconds();
+    int count = PicoHl_Count(lang, text);
+    PicoHlSpan *spans =
+        (PicoHlSpan *)malloc(sizeof(PicoHlSpan) * (size_t)(count > 0 ? count : 1));
+    int filled = spans ? PicoHl_Fill(lang, text, spans, count) : -1;
+    double elapsed = NowSeconds() - start;
+    free(spans);
+    free(text);
+    int fails = 0;
+    if (filled != 0)
+    {
+        fprintf(stderr, "markdown: data-blob line must render plain, got %d spans\n", filled);
+        fails++;
+    }
+    if (elapsed > 0.05)
+    {
+        fprintf(stderr, "markdown: unmatched-openers line took %.1f ms (bound 50 ms)\n",
+                elapsed * 1000.0);
+        fails++;
+    }
+    return fails;
+}
+
+/* An inline opener with no closer nearby (an unterminated code span from a
+ * truncated stream) must not style the rest of the line as code. */
+static int TestMarkdownDistantCloserIsNotStyled(void)
+{
+    const PicoHlLang *lang = PicoHl_Lookup("markdown");
+    if (!lang)
+    {
+        fprintf(stderr, "markdown: tag did not resolve\n");
+        return 1;
+    }
+    char text[2048];
+    text[0] = '`';
+    memset(text + 1, 'a', sizeof(text) - 2);
+    text[sizeof(text) - 1] = '\0';
+    const int count = PicoHl_Count(lang, text);
+    if (count != 0)
+    {
+        fprintf(stderr, "markdown: unterminated code span styled %d spans of plain text\n", count);
+        return 1;
+    }
+    return 0;
+}
+
 static int TestDiff(void)
 {
     const char *t = "--- a/f.c\n"
@@ -368,6 +446,8 @@ int main(void)
     fails += TestLua();
     fails += TestTypeScriptKeywords();
     fails += TestMarkdown();
+    fails += TestMarkdownUnmatchedOpenersStayBounded();
+    fails += TestMarkdownDistantCloserIsNotStyled();
     fails += TestDiff();
     fails += TestLookup();
     fails += TestEmptyAndNull();

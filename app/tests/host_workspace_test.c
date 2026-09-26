@@ -140,11 +140,12 @@ static void WaitPluginLoad(PicoHost *host)
 }
 static void WaitPluginPoll(PicoHost *host)
 {
+    /* A due poll schedules detection; the next poll adopts its result. */
+    host->plugin_last_poll = -1;
     for (int i = 0; i < 10000; i++)
     {
-        host->plugin_last_poll = -1;
         PicoPlugins_Poll(host);
-        if (!host->plugin_compile) return;
+        if (!host->plugin_scan_pending && !host->plugin_compile) return;
         usleep(1000);
     }
 }
@@ -5838,6 +5839,161 @@ static double TestMonotonicTime(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* A dependency manifest can be on a slow filesystem. A pending read must not
+ * block an ordinary automatic poll, and closing the host must quiesce the
+ * scanner once the read completes. */
+static int TestPluginSourceScanDoesNotBlockUi(void)
+{
+    char cfg[] = "/tmp/pico-scan-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-scan-cache-XXXXXX";
+    char ext_dir[4096], src[8192], header[8192], cache_dir[4096];
+    char manifest[8192] = {0}, saved[8192] = {0};
+    PicoHost *host = NULL;
+    int failed = 1;
+    if (!mkdtemp(cfg) || !mkdtemp(cache)) return 1;
+    snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/pico/ext", cache);
+    snprintf(src, sizeof(src), "%s/probe.c", ext_dir);
+    snprintf(header, sizeof(header), "%s/value.h", ext_dir);
+    const char *code =
+        "#include \"pico/plugin.h\"\n#include \"value.h\"\n"
+        "static int Init(PicoHost *h, void **s) { (void)h; int *v=malloc(sizeof(*v)); if(!v)return -1; *v=VALUE; *s=v; return 0; }\n"
+        "static void Stop(PicoHost *h, void *s) { (void)h; free(s); }\n"
+        "PicoExt pico_ext(void) { return (PicoExt){.abi=PICO_EXT_ABI,.name=\"scan_probe\",.host_init=Init,.host_shutdown=Stop}; }\n";
+    if (MkdirParents(ext_dir) || WriteFile(src, code) ||
+        WriteFile(header, "#define VALUE 10\n")) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, false) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    int *value = PicoPlugins_HostState(host, "scan_probe");
+    if (!value || *value != 10) goto done;
+    DIR *dir = opendir(cache_dir);
+    if (!dir) goto done;
+    struct dirent *entry;
+    while ((entry = readdir(dir)))
+    {
+        size_t n = strlen(entry->d_name);
+        if (n > 5 && strcmp(entry->d_name + n - 5, ".deps") == 0)
+        {
+            snprintf(manifest, sizeof(manifest), "%s/%s", cache_dir, entry->d_name);
+            break;
+        }
+    }
+    closedir(dir);
+    if (!manifest[0]) goto done;
+    snprintf(saved, sizeof(saved), "%s.saved", manifest);
+    if (rename(manifest, saved) || mkfifo(manifest, 0600)) goto done;
+
+    host->plugin_last_poll = -1;
+    double start = TestMonotonicTime();
+    PicoPlugins_Poll(host);
+    if (TestMonotonicTime() - start > 0.25 || !host->plugin_scan_pending) goto done;
+    /* The worker's open of the manifest has no reader-independent deadline.
+     * The UI must remain responsive even while that open is blocked. */
+    start = TestMonotonicTime();
+    PicoPlugins_Poll(host);
+    if (TestMonotonicTime() - start > 0.25 || PicoPlugins_HostState(host, "scan_probe") != value)
+        goto done;
+    int writer = -1;
+    for (int i = 0; i < 1000 && writer < 0; i++)
+    {
+        writer = open(manifest, O_WRONLY | O_NONBLOCK);
+        if (writer < 0 && errno != ENXIO) goto done;
+        if (writer < 0) usleep(1000);
+    }
+    if (writer < 0) goto done;
+    close(writer);
+    if (rename(saved, manifest)) goto done;
+    WaitPluginPoll(host);
+    value = PicoPlugins_HostState(host, "scan_probe");
+    if (!value || *value != 10) goto done;
+    if (WriteFile(header, "#define VALUE 20\n")) goto done;
+    host->plugin_last_poll = -1;
+    WaitPluginPoll(host);
+    value = PicoPlugins_HostState(host, "scan_probe");
+    if (!value || *value != 20) goto done;
+    failed = 0;
+done:
+    if (failed) Fail("source detection must not block UI on a slow dependency read");
+    if (saved[0] && manifest[0]) rename(saved, manifest);
+    pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg); RmRf(cache);
+    return failed;
+}
+
+static int TestBlockedSourceScanRetainsShutdown(void)
+{
+    pid_t child = fork();
+    if (child < 0) { Fail("source scanner shutdown fork"); return 1; }
+    if (child == 0)
+    {
+        char cfg[] = "/tmp/pico-scan-shutdown-cfg-XXXXXX";
+        char cache[] = "/tmp/pico-scan-shutdown-cache-XXXXXX";
+        char ext_dir[4096], src[8192], cache_dir[4096], manifest[8192] = {0};
+        PicoHost *host = NULL;
+        if (!mkdtemp(cfg) || !mkdtemp(cache)) _exit(2);
+        snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
+        snprintf(cache_dir, sizeof(cache_dir), "%s/pico/ext", cache);
+        snprintf(src, sizeof(src), "%s/probe.c", ext_dir);
+        if (MkdirParents(ext_dir) ||
+            WriteFile(src, "#include \"pico/plugin.h\"\nPicoExt pico_ext(void) { return (PicoExt){.abi=PICO_EXT_ABI,.name=\"shutdown_scan_probe\"}; }\n"))
+            _exit(3);
+        setenv("XDG_CONFIG_HOME", cfg, 1);
+        setenv("XDG_CACHE_HOME", cache, 1);
+        if (pico_host_init(&host, NULL, false) != PICO_OK) _exit(4);
+        WaitPluginLoad(host);
+        bool loaded = false;
+        for (int i = 0; i < host->module_count; i++)
+            if (host->modules[i].desired && strcmp(host->modules[i].source, src) == 0)
+                loaded = true;
+        if (!loaded) _exit(5);
+        DIR *dir = opendir(cache_dir);
+        if (!dir) _exit(6);
+        struct dirent *entry;
+        while ((entry = readdir(dir)))
+        {
+            size_t n = strlen(entry->d_name);
+            if (n > 5 && strcmp(entry->d_name + n - 5, ".deps") == 0)
+            {
+                snprintf(manifest, sizeof(manifest), "%s/%s", cache_dir, entry->d_name);
+                break;
+            }
+        }
+        closedir(dir);
+        if (!manifest[0] || unlink(manifest) || mkfifo(manifest, 0600)) _exit(7);
+        host->plugin_last_poll = -1;
+        PicoPlugins_Poll(host);
+        /* Keep the writer open, so the scanner has opened the FIFO but cannot
+         * reach EOF. Unlike a sleep, this guarantees it stays blocked. */
+        int writer = -1;
+        for (int i = 0; i < 1000 && writer < 0; i++)
+        {
+            writer = open(manifest, O_WRONLY | O_NONBLOCK);
+            if (writer < 0 && errno != ENXIO) _exit(8);
+            if (writer < 0) usleep(1000);
+        }
+        if (writer < 0) _exit(9);
+        alarm(15);
+        PicoHostShutdownResult result = PicoHost_Shutdown(host);
+        alarm(0);
+        close(writer);
+        RmRf(cfg); RmRf(cache);
+        _exit(result == PICO_HOST_SHUTDOWN_RETAINED ? 0 : 10);
+    }
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        Fail("blocked source scan must use retained bounded shutdown");
+        return 1;
+    }
+    return 0;
 }
 
 static int TestHeaderReloadIsAsynchronous(void)
@@ -11894,6 +12050,8 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestHeaderReloadIsAsynchronous()) return 1;
+    if (TestPluginSourceScanDoesNotBlockUi()) return 1;
+    if (TestBlockedSourceScanRetainsShutdown()) return 1;
     if (TestSdkDependencyManifestsDoNotCrossReloadHosts() != 0)
     {
         return 1;

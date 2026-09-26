@@ -9,7 +9,7 @@ Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext(
 
 Subfolders are fine. Only `.c` files are loaded (depth 8). Skip with `pico --safe`. Workspace-local sources must not declare host callbacks.
 
-After writing a file, each workspace reloads independently once its live and retired runtimes are quiescent. F5 and `/reload` reload host extensions (user-global / config sources only) and the selected workspace; other workspaces keep accepting work. A workspace-local compile failure does not block host-extension replacement. While a workspace reload is queued, new turns and delegations are refused only in that workspace, but current work, cancellation, and ask UI keep pumping.
+Automatic source/dependency detection runs on a core worker; main-thread validation and activation follow a current detection result. After writing a file, each workspace reloads independently once its live and retired runtimes are quiescent. F5 and `/reload` reload host extensions (user-global / config sources only) and the selected workspace; other workspaces keep accepting work. A workspace-local compile failure does not block host-extension replacement. While a workspace reload is queued, new turns and delegations are refused only in that workspace, but current work, cancellation, and ask UI keep pumping.
 
 `/cd` opens or selects a workspace and leaves the previous workspace running. Compile errors and failed tool registrations appear in the overlay. `/docs [topic]` prints these pages into chat.
 

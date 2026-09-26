@@ -675,6 +675,8 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace);
    sources are refreshed by that workspace's reload. */
 bool PicoPlugins_ReloadHost(PicoHost *host);
 void PicoPlugins_Reload(PicoHost *host);
+/* Adopts completed automatic source scans without waiting for discovery;
+   in-flight compiler checks can still read files. Detection may need another poll. */
 void PicoPlugins_Poll(PicoHost *host);
 void PicoPlugins_OnFrame(PicoHost *host, float dt);
 void PicoPlugins_UnloadUser(PicoHost *host);

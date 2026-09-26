@@ -5312,6 +5312,7 @@ typedef struct PicoSessionLoadWorker {
     char requested[4096];
     bool latest;
     bool explicit_path;
+    bool explicit_in_workspace;
     bool allow_prefix;
     bool no_session;
     char path[4096];
@@ -5330,6 +5331,7 @@ typedef struct PicoSessionLoad {
     PicoAgent *candidate;
     PicoSessionReplay *replay;
     char path[4096];
+    char target_id[40];
     int finish_message;
 } PicoSessionLoad;
 
@@ -5343,6 +5345,19 @@ static void *SessionLoadRead(void *arg)
     if (worker->explicit_path)
     {
         if (!realpath(worker->requested, worker->path)) return NULL;
+        PicoWorkspace *lookup = calloc(1, sizeof(*lookup));
+        if (lookup)
+        {
+            char dir[4096], canonical[4096];
+            snprintf(lookup->path, sizeof(lookup->path), "%s", worker->workspace_path);
+            if (SessionDir(lookup, dir, sizeof(dir)) && realpath(dir, canonical))
+            {
+                size_t len = strlen(canonical);
+                worker->explicit_in_workspace = strncmp(worker->path, canonical, len) == 0 &&
+                                                worker->path[len] == '/';
+            }
+            free(lookup);
+        }
     }
     else
     {
@@ -5439,6 +5454,9 @@ static void SessionLoadCompleted(PicoHost *host, void *arg)
     (void)PicoSession_TestHook("async_replay_after_adopt");
 #endif
     snprintf(load->path, sizeof(load->path), "%s", worker->path);
+    const char *filename = strrchr(worker->path, '/');
+    if (!worker->explicit_path || worker->explicit_in_workspace)
+        IdFromName(filename ? filename + 1 : worker->path, load->target_id, sizeof(load->target_id));
 }
 
 PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
@@ -5472,6 +5490,8 @@ PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
     worker->latest = latest;
     worker->explicit_path = explicit_path;
     load->workspace_id = workspace_id;
+    if (!allow_prefix && !latest && !explicit_path)
+        snprintf(load->target_id, sizeof(load->target_id), "%s", requested);
     load->replace_id = replace_id;
     load->selected_at_start = host->selected_agent_id;
     load->startup = startup;
@@ -5490,6 +5510,17 @@ PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
 bool PicoSession_LoadPending(const PicoHost *host)
 {
     return host && host->session_load != NULL;
+}
+
+bool PicoSession_LoadTarget(const PicoHost *host, const char **workspace_path,
+                            const char **session_id)
+{
+    const PicoSessionLoad *load = host ? host->session_load : NULL;
+    PicoWorkspace *ws = load ? PicoHost_FindWorkspace((PicoHost *)host, load->workspace_id) : NULL;
+    if (!ws || !load->target_id[0]) return false;
+    if (workspace_path) *workspace_path = PicoWorkspace_Path(ws);
+    if (session_id) *session_id = load->target_id;
+    return true;
 }
 
 bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
@@ -5576,7 +5607,6 @@ void PicoSession_LoadPump(PicoHost *host)
     /* Session hooks may close the just-published agent or supersede this load. */
     PicoAgent *live = PicoHost_FindAgent(host, published_id);
     if (live) ReplayAppendInterrupted(host, live, load->replay);
-    if (live && host->session_load == load) PicoOverlay_Notify(host, "Session loaded.");
     goto cancelled;
 failed:
     PicoOverlay_Notify(host, "Could not open that session.");

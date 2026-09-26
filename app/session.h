@@ -110,6 +110,9 @@ void PicoSession_LoadCancel(PicoHost *host);
 void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id);
 void PicoSession_LoadPump(PicoHost *host);
 bool PicoSession_LoadPending(const PicoHost *host);
+/* Borrowed target identity, if resolved; valid only until the next load pump/cancel. */
+bool PicoSession_LoadTarget(const PicoHost *host, const char **workspace_path,
+                            const char **session_id);
 bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id);
 /* `/resume` passes parents_only to hide subagents; resolve still lists all. */
 int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only);

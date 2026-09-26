@@ -3166,7 +3166,23 @@ float PicoHost_MainColumnWidth(const PicoHost *host)
 static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_height, float delta_time)
 {
     PicoChatFind_Sync(app);
+    /* Clay computes clipping after the overlay has rendered. Use the previous
+     * pass's row and scroll bounds to choose the toast fallback this pass. */
+    app->session_load_row_was_visible = true;
+    if (app->session_load_row_known)
+    {
+        Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarSess", app->session_load_row_id));
+        Clay_ElementData scroll = Clay_GetElementData(CLAY_ID("SidebarScroll"));
+        if (row.found && scroll.found)
+        {
+            Clay_BoundingBox r = row.boundingBox, s = scroll.boundingBox;
+            app->session_load_row_was_visible = r.x < s.x + s.width && r.x + r.width > s.x &&
+                                                r.y < s.y + s.height && r.y + r.height > s.y;
+        }
+    }
     Clay_BeginLayout();
+    app->session_load_row_known = false;
+    app->session_load_row_rendered = false;
     MdView_BeginFrame();
     app->hovered_text = false;
     app->hovered_drag = false;

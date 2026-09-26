@@ -708,7 +708,40 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
 }
 
-static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, bool worktree)
+static void RenderSessionSpinner(int row_id, float slot)
+{
+    const int segments = 8;
+    const float two_pi = 6.28318530718f;
+    float theta = (float)GetTime() * two_pi * 1.5f;
+    float size = slot * 0.23f;
+    /* Floating segments may extend beyond the slot without changing row layout. */
+    float diameter = Pico_FontPx(11);
+    float radius = (diameter - size) * 0.5f;
+    CLAY(CLAY_IDI("SidebarSessSpinner", row_id),
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(slot),
+                                .height = CLAY_SIZING_FIXED(slot)}}})
+    {
+        for (int i = 0; i < segments; i++)
+        {
+            float angle = theta - (float)i * two_pi / (float)segments;
+            Clay_Color color = COLOR_STATUS_OFF;
+            color.a *= 1.0f - 0.85f * (float)i / (float)(segments - 1);
+            CLAY(CLAY_IDI("SidebarSessSpinSegment", row_id * segments + i),
+                 {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                               .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_CENTER,
+                                                .parent = CLAY_ATTACH_POINT_CENTER_CENTER},
+                               .offset = {.x = radius * cosf(angle), .y = radius * sinf(angle)}},
+                  .layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                         .height = CLAY_SIZING_FIXED(size)}},
+                  .backgroundColor = color,
+                  .cornerRadius = CLAY_CORNER_RADIUS(size * 0.5f)}) {}
+        }
+    }
+}
+
+static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, bool worktree,
+                             bool loading, bool unloaded)
 {
     float gutter = Pico_FontPx(SIDEBAR_FOLDER_ICON);
     float slot = Pico_FontPx(SIDEBAR_SESSION_DOT);
@@ -737,12 +770,17 @@ static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, b
     default:
         break;
     }
+    if (unloaded) color.a *= 0.65f;
     CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter),
                                         .height = CLAY_SIZING_FIXED(slot)},
                              .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
                                                 .y = CLAY_ALIGN_Y_CENTER}}})
     {
-        if (worktree && kind == SIDEBAR_DOT_IDLE && s && s->worktree_icon.id != 0)
+        if (loading)
+        {
+            RenderSessionSpinner(row_id, slot);
+        }
+        else if (worktree && kind == SIDEBAR_DOT_IDLE && s && s->worktree_icon.id != 0)
         {
             CLAY(CLAY_IDI("SidebarSessDot", row_id),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(gutter),
@@ -985,8 +1023,21 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
                              bool missing_checkout)
 {
     bool selected = SessionIsSelected(host, ws_path, session_id, live_id);
+    PicoAgentId row_live_id = live_id ? live_id : LiveMainAgent(host, ws_path, session_id);
+    const char *target_ws = NULL;
+    const char *target_id = NULL;
+    bool loading = PicoSession_LoadTarget(host, &target_ws, &target_id) &&
+                   ws_path && session_id && session_id[0] &&
+                   strcmp(ws_path, target_ws) == 0 && strcmp(session_id, target_id) == 0;
     Clay_ElementId id = CLAY_IDI("SidebarSess", row_id);
     bool hovered = Clay_PointerOver(id);
+    if (loading)
+    {
+        host->session_load_row_rendered = host->session_load_row_id != row_id ||
+                                          host->session_load_row_was_visible;
+        host->session_load_row_id = row_id;
+        host->session_load_row_known = true;
+    }
     CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                          .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 3, 3},
@@ -995,8 +1046,8 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
               .backgroundColor = RowFill(selected, hovered),
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        RenderSessionDot(s, SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen),
-                         row_id, worktree);
+        RenderSessionDot(s, SessionDotKind(host, ws_path, session_id, row_live_id, catalog_unseen),
+                         row_id, worktree, loading, !row_live_id);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
                       .clip = {.horizontal = true}})
         {

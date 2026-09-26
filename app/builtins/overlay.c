@@ -285,7 +285,7 @@ static float NotifyRemaining(void)
 
 static void RenderToast(PicoHost *app)
 {
-    bool loading = PicoSession_LoadPending(app);
+    bool loading = PicoSession_LoadPending(app) && !app->session_load_row_rendered;
     if (!loading && (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f))
     {
         return;

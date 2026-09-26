@@ -139,6 +139,10 @@ struct PicoHost {
     struct PicoHostTask *tasks; /* Compiled-in workers, including retired auth attempts. */
     struct PicoWorktreeJob *worktree_job;
     struct PicoSessionLoad *session_load;
+    bool session_load_row_rendered; /* reset at the beginning of each shell layout pass */
+    bool session_load_row_was_visible;
+    bool session_load_row_known;
+    int session_load_row_id;
     PicoAgent *session_replay_agent; /* only valid during a main-thread replay callback */
     uint64_t next_session_load_serial;
     pid_t browser_children[16]; /* Independent processes; reap, never wait on the UI thread. */

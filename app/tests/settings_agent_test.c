@@ -28,6 +28,10 @@ void pico_status_warn(PicoHost *host, const char *message)
     host->status_warn = JsonDup(message);
 }
 
+bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
+{ (void)host; (void)id; return false; }
+void PicoSession_LoadCancel(PicoHost *host) { (void)host; }
+
 void PicoSession_EnqueueModelChange(PicoHost *host, PicoAgent *agent)
 {
     (void)host;

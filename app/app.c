@@ -67,10 +67,13 @@ typedef struct PicoHostTask {
     void *state;
     void (*cancel)(void *);
     void (*destroy)(void *);
+    void (*complete)(PicoHost *, void *);
 } PicoHostTask;
 
-bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
-                        void (*cancel)(void *), void (*destroy)(void *))
+bool PicoHost_StartTaskCompleted(PicoHost *host, void *(*run)(void *), void *state,
+                                 void (*cancel)(void *),
+                                 void (*complete)(PicoHost *, void *),
+                                 void (*destroy)(void *))
 {
     if (!host || host->terminal_shutdown || g_pico_process_retired) return false;
     int count = 0;
@@ -81,6 +84,7 @@ bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
     task->state = state;
     task->cancel = cancel;
     task->destroy = destroy;
+    task->complete = complete;
     if (pthread_create(&task->thread, NULL, run, state) != 0)
     {
         free(task);
@@ -89,6 +93,12 @@ bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
     task->next = host->tasks;
     host->tasks = task;
     return true;
+}
+
+bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
+                        void (*cancel)(void *), void (*destroy)(void *))
+{
+    return PicoHost_StartTaskCompleted(host, run, state, cancel, NULL, destroy);
 }
 
 static void PicoHost_PumpTasks(PicoHost *host)
@@ -100,6 +110,7 @@ static void PicoHost_PumpTasks(PicoHost *host)
         if (pthread_tryjoin_np(task->thread, NULL) == 0)
         {
             *link = task->next;
+            if (task->complete) task->complete(host, task->state);
             task->destroy(task->state);
             free(task);
         }
@@ -260,6 +271,9 @@ PicoAgent *PicoHost_FindAgent(PicoHost *host, PicoAgentId id)
     {
         return NULL;
     }
+    /* Main-thread callback scope for an unpublished session candidate. */
+    if (host->session_replay_agent && host->session_replay_agent->id == id)
+        return host->session_replay_agent;
     for (int i = 0; i < host->workspace_count; i++)
     {
         PicoWorkspace *workspace = host->workspaces[i];
@@ -1806,7 +1820,8 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
         free(normalized);
         return PICO_INVALID;
     }
-    if (PicoAgent_IsBusy(agent) || !PicoWorkspace_AcceptsNewWork(agent->workspace))
+    if (PicoSession_LoadBlocksSubmit(host, agent->id) || PicoAgent_IsBusy(agent) ||
+        !PicoWorkspace_AcceptsNewWork(agent->workspace))
     {
         free(normalized);
         return PICO_BUSY;
@@ -2236,6 +2251,7 @@ PicoResult PicoWorkspace_RequestReload(PicoHost *host, PicoWorkspace *workspace,
     {
         return PICO_BUSY;
     }
+    PicoSession_LoadCancelWorkspace(host, workspace->id);
     workspace->reload_retry_compile_failures |= retry_compile_failures;
     if (workspace->state == PICO_WORKSPACE_OPEN)
     {
@@ -2263,6 +2279,7 @@ PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id)
     {
         return PICO_INVALID;
     }
+    PicoSession_LoadCancelWorkspace(host, workspace->id);
     workspace->state = PICO_WORKSPACE_CLOSING;
     PicoWorkspace_SetAcceptingWork(workspace, false);
     PicoWorkspace_CancelDelegations(workspace, 0, 0);
@@ -2314,6 +2331,8 @@ PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, c
     {
         return PICO_INVALID;
     }
+    if (host->session_replay_agent && host->session_replay_agent->id == id)
+        return PICO_BUSY;
     agent = PicoHost_FindAgent(host, id);
     if (!agent)
     {
@@ -2331,6 +2350,7 @@ void pico_host_pump(PicoHost *host)
         return;
     }
     PicoHost_PumpTasks(host);
+    PicoSession_LoadPump(host);
     {
         PicoWorktreeResult result;
         if (PicoWorktree_TakeResult(host, &result))
@@ -2461,15 +2481,19 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
     PicoCatalog_Ensure(PicoWorkspace_Path(PicoHost_FindWorkspace(host, workspace_id)));
     initial = PicoHost_FindAgent(host, initial_id);
     pico_run_hooks(host, PICO_HOOK_ON_SESSION_RESET, initial_id);
-    if (session_file && session_file[0])
+    if (session_start != PICO_SESSION_NONE && session_file && session_file[0])
     {
-        PicoSession_Reset(host, initial);
-        PicoSession_Start(host, initial, session_start, session_file);
+        if (PicoSession_LoadAsync(host, workspace_id, initial_id, session_file,
+                                  false, false, true, true) != PICO_OK)
+            pico_status_warn(host, "Could not start loading the requested session file.");
     }
     else if (session_start == PICO_SESSION_RESUME ||
-             (host->workspaces[0]->settings.resume_last && !host->workspaces[0]->worktree))
+             (session_start != PICO_SESSION_NONE && host->workspaces[0]->settings.resume_last &&
+              !host->workspaces[0]->worktree))
     {
-        PicoSession_Start(host, initial, session_start, NULL);
+        if (PicoSession_LoadAsync(host, workspace_id, initial_id, NULL,
+                                  false, true, false, true) != PICO_OK)
+            pico_status_warn(host, "Could not start loading the last session.");
     }
 }
 
@@ -3048,6 +3072,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         return PICO_HOST_SHUTDOWN_RETAINED;
     }
     PicoPlugins_CancelCompiles(host);
+    PicoSession_LoadCancel(host);
     PicoChat_InspectClose();
     bool clean = true;
     struct timespec deadline;

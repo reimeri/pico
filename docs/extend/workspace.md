@@ -48,7 +48,7 @@ Closing a workspace is backend-only (`pico_workspace_request_close`). The builti
 
 The folder picker (footer cwd and sidebar Projects `+`) uses the same open-or-select path. Sidebar Projects `+` also creates the catalog folder and `.workspace.json` before opening.
 
-Opening a linked-worktree root directly starts a fresh main session in that checkout (reusing only an untouched draft through the normal draft rules); selecting a durable sidebar row resumes that exact session instead. Project `+` targets the main/local checkout. `/new` in a linked worktree starts a fresh session in the main/local checkout; it never retargets an existing agent or removes the worktree.
+Opening a linked-worktree root directly starts a fresh main session in that checkout (reusing only an untouched draft through the normal draft rules); selecting a durable sidebar row resumes that exact session instead. Sidebar session selection does not immediately publish a new agent: it keeps the old chat selected while a core worker validates the session and the main thread replays it in bounded batches. Another selection cancels the pending UI load. `/resume` has the same asynchronous UI behavior. This differs from the synchronous public `pico_main_agent_create(..., PICO_SESSION_RESUME, ...)` contract; see [agents](agents.md). Project `+` targets the main/local checkout. `/new` in a linked worktree starts a fresh session in the main/local checkout; it never retargets an existing agent or removes the worktree.
 
 ## Agents
 

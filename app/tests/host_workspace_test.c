@@ -181,6 +181,9 @@ static int g_persist_ready_fd = -1;
 static int g_persist_continue_fd = -1;
 static int g_catalog_scan_calls;
 static bool g_sidebar_poll_due;
+static int g_replay_ready_fd = -1;
+static int g_replay_continue_fd = -1;
+static int g_replay_adopted;
 
 static bool TransferTestByte(int fd, bool write_byte)
 {
@@ -195,6 +198,18 @@ static bool TransferTestByte(int fd, bool write_byte)
 
 bool PicoSession_TestHook(const char *stage)
 {
+    if (stage && strcmp(stage, "async_replay_after_adopt") == 0)
+    {
+        g_replay_adopted++;
+    }
+    if (stage && strcmp(stage, "async_replay_before_read") == 0 &&
+        g_replay_ready_fd >= 0 && g_replay_continue_fd >= 0)
+    {
+        int ready = g_replay_ready_fd;
+        int resume = g_replay_continue_fd;
+        g_replay_ready_fd = g_replay_continue_fd = -1;
+        return !TransferTestByte(ready, true) || !TransferTestByte(resume, false);
+    }
     if (stage && strcmp(stage, "catalog_scan") == 0)
     {
         g_catalog_scan_calls++;
@@ -9369,6 +9384,231 @@ static int TestAgentCloseAppliesQueuedPersistenceFailure(void)
     return 0;
 }
 
+static int TestAsyncSessionReplay(void)
+{
+    char dir[] = "/tmp/pico-async-session-XXXXXX";
+    char cfg[] = "/tmp/pico-async-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId seed_id = 0, current_id = 0, other_id = 0;
+    PicoHost *startup = NULL;
+    PicoHost *bad_startup = NULL;
+    PicoHost *no_session_startup = NULL;
+    char bad_path[4096] = {0};
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW,
+                                      .select = true};
+    char session_id[40] = {0}, path[4096] = {0};
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    int rc = 1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) { Fail("async replay fixture"); return 1; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws_id) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    if (pico_main_agent_create(host, ws_id, &options, &seed_id) != PICO_OK) goto done;
+    PicoAgent *seed = PicoHost_FindAgent(host, seed_id);
+    if (!seed || PicoSession_LogUser(host, seed, "persisted", "persisted", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, seed)) goto done;
+    snprintf(session_id, sizeof(session_id), "%s", seed->session_id);
+    snprintf(path, sizeof(path), "%s", seed->session_path);
+    /* Many records ensure adoption and commit cannot occur in one pump. */
+    FILE *f = fopen(path, "ab");
+    if (!f) goto done;
+    for (int i = 0; i < 80; i++)
+        fputs("{\"type\":\"message\",\"role\":\"user\",\"content\":\"*replayed*\"}\n", f);
+    if (fclose(f) != 0 || pico_agent_close(host, seed_id) != PICO_OK) goto done;
+    options.session_start = PICO_SESSION_NONE;
+    if (pico_main_agent_create(host, ws_id, &options, &current_id) != PICO_OK) goto done;
+    PicoAgent_AddMessage(host, PicoHost_FindAgent(host, current_id), PICO_ROLE_USER, "original");
+    if (pipe(ready) != 0 || pipe(release) != 0) goto done;
+    g_replay_ready_fd = ready[1];
+    g_replay_continue_fd = release[0];
+    int adopted_before = g_replay_adopted;
+    /* Exercise the actual /resume command registration, not just its loader. */
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, ws_id);
+    const PicoCommand *command = NULL;
+    for (int i = 0; i < ws->command_count; i++)
+        if (ws->commands[i].name && strcmp(ws->commands[i].name, "resume") == 0)
+            command = &ws->commands[i];
+    if (!command) goto done;
+    command->workspace_run(ws, current_id, session_id, command->state);
+    if (!TransferTestByte(ready[0], false)) goto done;
+    for (int i = 0; i < 3; i++) pico_host_pump(host);
+    PicoAgent *current = PicoHost_FindAgent(host, current_id);
+    if (!PicoSession_LoadPending(host) || pico_agent_active(host) != current_id ||
+        !current || current->message_count != 1 || strcmp(current->messages[0].source, "original") != 0)
+    {
+        Fail("/resume must keep the old chat usable while the worker is loading");
+        goto done;
+    }
+    if (!TransferTestByte(release[1], true)) goto done;
+    for (int i = 0; i < 10000 && g_replay_adopted == adopted_before; i++)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    if (g_replay_adopted == adopted_before || !PicoSession_LoadPending(host) ||
+        !PicoHost_FindAgent(host, current_id))
+    {
+        Fail("worker adoption must not publish a partly replayed transcript");
+        goto done;
+    }
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++) pico_host_pump(host);
+    PicoAgent *loaded = PicoHost_SelectedAgent(host);
+    if (PicoSession_LoadPending(host) || !loaded || loaded->id == current_id ||
+        loaded->message_count != 81 || PicoHost_FindAgent(host, current_id) ||
+        !loaded->messages[loaded->message_count - 1].doc.block_count)
+    {
+        Fail("/resume must publish the fully parsed transcript atomically");
+        goto done;
+    }
+    /* Resuming the already-open session must be a no-op, not an in-use error. */
+    if (PicoSession_LoadAsync(host, ws_id, loaded->id, session_id, false,
+                              false, false, false) != PICO_OK) goto done;
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    if (PicoSession_LoadPending(host) || PicoHost_SelectedAgent(host) != loaded)
+    {
+        Fail("resuming the current session must preserve its agent");
+        goto done;
+    }
+    /* An invalid load leaves the selected chat and session reservation alone. */
+    if (PicoSession_LoadAsync(host, ws_id, loaded->id, "unknown", false,
+                              false, false, false) != PICO_OK) goto done;
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    if (PicoSession_LoadPending(host) || PicoHost_SelectedAgent(host) != loaded)
+    {
+        Fail("failed async replay replaced the previous chat");
+        goto done;
+    }
+    /* Selecting another chat supersedes a worker still reading a prior choice. */
+    close(ready[0]); close(ready[1]); close(release[0]); close(release[1]);
+    ready[0] = ready[1] = release[0] = release[1] = -1;
+    if (pipe(ready) != 0 || pipe(release) != 0) goto done;
+    g_replay_ready_fd = ready[1];
+    g_replay_continue_fd = release[0];
+    if (PicoSession_LoadAsync(host, ws_id, loaded->id, session_id, false,
+                              false, false, false) != PICO_OK ||
+        !TransferTestByte(ready[0], false)) goto done;
+    options.session_start = PICO_SESSION_NONE;
+    options.select = false;
+    if (pico_main_agent_create(host, ws_id, &options, &other_id) != PICO_OK ||
+        !pico_agent_select(host, other_id) || PicoSession_LoadPending(host) ||
+        !TransferTestByte(release[1], true))
+    {
+        Fail("selecting another agent must cancel a pending session load");
+        goto done;
+    }
+    for (int i = 0; i < 30; i++) pico_host_pump(host);
+    if (pico_agent_active(host) != other_id || !PicoHost_FindAgent(host, loaded->id))
+    {
+        Fail("cancelled load changed the selected or existing agent");
+        goto done;
+    }
+
+    /* Sidebar session selection creates a new agent rather than replacing an
+     * existing one; it must also keep the current chat until completion. */
+    if (pico_agent_close(host, loaded->id) != PICO_OK ||
+        PicoSession_LoadAsync(host, ws_id, 0, session_id, false,
+                              false, false, false) != PICO_OK ||
+        pico_agent_active(host) != other_id) goto done;
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    PicoAgent *sidebar_loaded = PicoHost_SelectedAgent(host);
+    if (PicoSession_LoadPending(host) || !sidebar_loaded ||
+        sidebar_loaded->id == other_id || sidebar_loaded->message_count != 81 ||
+        !PicoHost_FindAgent(host, other_id))
+    {
+        Fail("sidebar-style load must select the complete new agent without losing the old chat");
+        goto done;
+    }
+
+    /* Startup must return while reading is gated, and must reject submits into
+     * the empty initial agent until the replay is ready for atomic publication. */
+    if (pico_host_init(&startup, NULL, true) != PICO_OK) goto done;
+    PicoHost_Start(startup, NULL, dir, true, PICO_SESSION_RESUME, path);
+    PicoAgentId initial = pico_agent_active(startup);
+    if (!PicoSession_LoadPending(startup) || !initial ||
+        pico_agent_submit(startup, initial, "premature", NULL) != PICO_BUSY)
+    {
+        Fail("startup must defer replay and block submitting to an empty agent");
+        goto done;
+    }
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(startup); i++)
+    {
+        pico_host_pump(startup);
+        usleep(1000);
+    }
+    PicoAgent *started = PicoHost_SelectedAgent(startup);
+    if (PicoSession_LoadPending(startup) || !started || started->id == initial ||
+        started->message_count != 81)
+    {
+        Fail("startup must publish the complete resumed session");
+        goto done;
+    }
+    if (snprintf(bad_path, sizeof(bad_path), "%s/bad.jsonl", dir) >= (int)sizeof(bad_path)) goto done;
+    FILE *bad = fopen(bad_path, "wb");
+    if (!bad) goto done;
+    fputs("{bad json}\n", bad);
+    if (fclose(bad) != 0 || pico_host_init(&bad_startup, NULL, true) != PICO_OK) goto done;
+    PicoHost_Start(bad_startup, NULL, dir, true, PICO_SESSION_RESUME, bad_path);
+    PicoAgentId empty_id = pico_agent_active(bad_startup);
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(bad_startup); i++)
+    {
+        pico_host_pump(bad_startup);
+        usleep(1000);
+    }
+    PicoAgent *empty = PicoHost_SelectedAgent(bad_startup);
+    if (!empty_id || PicoSession_LoadPending(bad_startup) || !empty ||
+        empty->id != empty_id || empty->message_count != 0 ||
+        PicoSession_LoadBlocksSubmit(bad_startup, empty_id))
+    {
+        Fail("invalid startup session must leave the empty agent available");
+        goto done;
+    }
+    if (pico_host_init(&no_session_startup, NULL, true) != PICO_OK) goto done;
+    PicoWorkspaceId empty_ws = 0;
+    if (pico_workspace_open(no_session_startup, dir, &empty_ws) != PICO_OK) goto done;
+    PicoHost_FindWorkspace(no_session_startup, empty_ws)->settings.resume_last = true;
+    PicoHost_Start(no_session_startup, NULL, dir, true, PICO_SESSION_NONE, NULL);
+    if (PicoSession_LoadPending(no_session_startup) ||
+        !PicoHost_SelectedAgent(no_session_startup) ||
+        PicoHost_SelectedAgent(no_session_startup)->message_count != 0)
+    {
+        Fail("explicit no-session startup must ignore resume_last");
+        goto done;
+    }
+    rc = 0;
+done:
+    /* Always release the test worker before host shutdown, even on failure. */
+    if (release[1] >= 0) (void)TransferTestByte(release[1], true);
+    g_replay_ready_fd = g_replay_continue_fd = -1;
+    if (no_session_startup) pico_host_free(no_session_startup);
+    if (bad_startup) pico_host_free(bad_startup);
+    if (startup) pico_host_free(startup);
+    if (host) pico_host_free(host);
+    if (ready[0] >= 0) close(ready[0]);
+    if (ready[1] >= 0) close(ready[1]);
+    if (release[0] >= 0) close(release[0]);
+    if (release[1] >= 0) close(release[1]);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    if (bad_path[0]) unlink(bad_path);
+    rmdir(dir);
+    if (rc && !g_failed) Fail("async replay setup failed");
+    return rc;
+}
+
 static int TestResumeLoadsStoredModel(void)
 {
     char dir[] = "/tmp/pico-ws-model-XXXXXX";
@@ -11520,6 +11760,7 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (TestAsyncSessionReplay() != 0) return 1;
     if (TestResumeLoadsStoredModel() != 0)
     {
         return 1;

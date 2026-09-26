@@ -281,7 +281,8 @@ static void CmdResume(PicoWorkspace *workspace, PicoAgentId agent_id, const char
         }
         return;
     }
-    PicoResult result = PicoWorkspace_Resume(app, agent_id, args, true);
+    PicoResult result = PicoSession_LoadAsync(app, agent->workspace->id,
+                                              agent_id, args, true, false, false, false);
     if (result != PICO_OK)
     {
         char line[256];

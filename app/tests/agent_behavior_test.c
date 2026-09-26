@@ -1658,6 +1658,23 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
     return 0;
 }
 
+/* This isolated agent target substitutes session I/O and async UI loading. */
+PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
+                                 PicoAgentId replace_id, const char *requested,
+                                 bool allow_prefix, bool latest, bool explicit_path,
+                                 bool startup)
+{
+    (void)host; (void)workspace_id; (void)replace_id; (void)requested;
+    (void)allow_prefix; (void)latest; (void)explicit_path; (void)startup;
+    return PICO_INVALID;
+}
+void PicoSession_LoadCancel(PicoHost *host) { (void)host; }
+void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id)
+{ (void)host; (void)id; }
+void PicoSession_LoadPump(PicoHost *host) { (void)host; }
+bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
+{ (void)host; (void)id; return false; }
+
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path, bool append_interrupted)
 {
     (void)append_interrupted;

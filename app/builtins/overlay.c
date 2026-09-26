@@ -5,6 +5,7 @@
 #include "../composer_internal.h"
 #include "overlay.h"
 #include "json.h"
+#include "session.h"
 #include "scrollbar.h"
 
 #include "clay/clay.h"
@@ -284,12 +285,14 @@ static float NotifyRemaining(void)
 
 static void RenderToast(PicoHost *app)
 {
-    if (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f)
+    bool loading = PicoSession_LoadPending(app);
+    if (!loading && (!g_notify || !g_notify[0] || g_notify_ttl <= 0.0f))
     {
         return;
     }
     float y = HasError(app) ? 110.0f : 12.0f;
-    Clay_String text = {.length = (int32_t)strlen(g_notify), .chars = g_notify};
+    const char *label = loading ? "Loading session..." : g_notify;
+    Clay_String text = {.length = (int32_t)strlen(label), .chars = label};
     CLAY(CLAY_ID("NotifyToast"),
          {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
                        .zIndex = 21,

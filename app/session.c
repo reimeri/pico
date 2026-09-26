@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "usage.h"
 #include "host_internal.h"
+#include "overlay.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -20,6 +21,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1360,23 +1362,54 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     free(type);
 }
 
-int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
-                       bool append_interrupted)
+/* Only owned file data and JSON tokens live here; workers never hold a host,
+ * agent, workspace, or registration pointer. */
+typedef struct PicoSessionReplay {
+    char **lines;
+    JsonDoc *docs;
+    int count;
+    int cursor;
+    int last_compact;
+    int last_tool_call;
+    int last_tool_result;
+    int tool_calls;
+    int tool_results;
+    int active_group;
+} PicoSessionReplay;
+
+void PicoSession_ReplayFree(PicoSessionReplay *replay)
+{
+    if (!replay) return;
+    for (int i = 0; i < replay->count; i++)
+    {
+        JsonFree(&replay->docs[i]);
+        free(replay->lines[i]);
+    }
+    free(replay->docs);
+    free(replay->lines);
+    free(replay);
+}
+
+/* Reading and strict validation are worker-safe. All ReplayLine calls remain
+ * on the main thread, including historical extension tool apply callbacks. */
+static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind kind,
+                                              const atomic_bool *cancelled)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
     {
-        return -1;
+        return NULL;
     }
-    snprintf(agent->session_path, sizeof(agent->session_path), "%s", path);
 
+
+    JsonDoc *docs = NULL;
     char **lines = NULL;
     int n = 0;
     int cap = 0;
     char *buf = NULL;
     size_t buf_cap = 0;
     bool read_failed = false;
-    while (getline(&buf, &buf_cap, f) != -1)
+    while ((!cancelled || !atomic_load(cancelled)) && getline(&buf, &buf_cap, f) != -1)
     {
         size_t len = strlen(buf);
         while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
@@ -1412,65 +1445,63 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
     }
     free(buf);
     fclose(f);
-    if (read_failed || n == 0)
+    if (read_failed || n == 0 || (cancelled && atomic_load(cancelled)))
     {
         goto invalid;
     }
 
+    docs = (JsonDoc *)calloc((size_t)n, sizeof(JsonDoc));
+    if (!docs) goto invalid;
     int last_compact = -1;
     int last_tool_call = -1;
     int last_tool_result = -1;
+    int tool_calls = 0;
+    int tool_results = 0;
     bool valid_header = false;
     for (int i = 0; i < n; i++)
     {
-        JsonDoc doc;
-        memset(&doc, 0, sizeof(doc));
-        if (JsonParse(&doc, lines[i], strlen(lines[i])) != 0 || !JsonIsObject(&doc, 0))
+        if (cancelled && atomic_load(cancelled)) goto invalid;
+        JsonDoc *doc = &docs[i];
+        if (JsonParse(doc, lines[i], strlen(lines[i])) != 0 || !JsonIsObject(doc, 0))
         {
-            if (doc.toks)
-            {
-                JsonFree(&doc);
-            }
             goto invalid;
         }
-        char *type = JsonObjStr(&doc, 0, "type");
+        char *type = JsonObjStr(doc, 0, "type");
         if (i == 0)
         {
-            char *header_id = JsonObjStr(&doc, 0, "id");
-            char *kind = JsonObjStr(&doc, 0, "kind");
-            char *profile = JsonObjStr(&doc, 0, "profile");
-            char *purpose = JsonObjStr(&doc, 0, "initial_purpose");
-            int version = JsonObjInt(&doc, 0, "version", 0);
-            bool normal = kind && strcmp(kind, "normal") == 0;
-            bool subagent = kind && strcmp(kind, "subagent") == 0 &&
+            char *header_id = JsonObjStr(doc, 0, "id");
+            char *header_kind = JsonObjStr(doc, 0, "kind");
+            char *profile = JsonObjStr(doc, 0, "profile");
+            char *purpose = JsonObjStr(doc, 0, "initial_purpose");
+            int version = JsonObjInt(doc, 0, "version", 0);
+            bool normal = header_kind && strcmp(header_kind, "normal") == 0;
+            bool subagent = header_kind && strcmp(header_kind, "subagent") == 0 &&
                             profile && profile[0] && purpose && purpose[0];
-            bool compatible_kind = (normal && agent->kind == PICO_AGENT_MAIN) ||
-                                   (subagent && agent->kind == PICO_AGENT_SUBAGENT);
+            bool compatible_kind = (normal && kind == PICO_AGENT_MAIN) ||
+                                   (subagent && kind == PICO_AGENT_SUBAGENT);
             valid_header = type && strcmp(type, "session") == 0 &&
                            header_id && header_id[0] && version == 4 &&
                            compatible_kind;
             free(header_id);
-            free(kind);
+            free(header_kind);
             free(profile);
             free(purpose);
             if (!valid_header)
             {
                 free(type);
-                JsonFree(&doc);
                 goto invalid;
             }
         }
         bool requires_group = type && strcmp(type, "tool_call") == 0;
         if (type && strcmp(type, "message") == 0)
         {
-            char *role = JsonObjStr(&doc, 0, "role");
+            char *role = JsonObjStr(doc, 0, "role");
             requires_group = role && strcmp(role, "assistant") == 0;
             free(role);
         }
-        if (requires_group && !JsonObjNonNegativeInt(&doc, 0, "message_group", NULL))
+        if (requires_group && !JsonObjNonNegativeInt(doc, 0, "message_group", NULL))
         {
             free(type);
-            JsonFree(&doc);
             goto invalid;
         }
         if (type && strcmp(type, "compaction") == 0)
@@ -1480,63 +1511,103 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
         else if (type && strcmp(type, "tool_call") == 0)
         {
             last_tool_call = i;
+            tool_calls++;
         }
         else if (type && strcmp(type, "tool_result") == 0)
         {
             last_tool_result = i;
+            tool_results++;
         }
         free(type);
-        JsonFree(&doc);
-    }
-    if (!valid_header)
-    {
-        goto invalid;
-    }
 
-    PicoAgent_ClearInput(agent);
-    int active_group = -1;
-    for (int i = 0; i < n; i++)
-    {
-        JsonDoc doc;
-        if (JsonParse(&doc, lines[i], strlen(lines[i])) != 0)
-        {
-            continue;
-        }
-        bool into_input = (last_compact < 0) || (i >= last_compact);
-        ReplayLine(app, agent, &doc, 0, into_input, &active_group);
-        JsonFree(&doc);
     }
+    if (!valid_header) goto invalid;
 
-    for (int i = 0; i < n; i++)
-    {
-        free(lines[i]);
-    }
-    free(lines);
-    app->chat_follow_bottom = true;
-    if (append_interrupted && last_tool_call > last_tool_result)
-    {
-        PicoSession_AppendInterrupted(app, agent);
-    }
-    /* Replay uses the live output setters, but historical tools must group
-     * immediately when the restored transcript is first presented. */
-    for (int i = 0; i < agent->message_count; i++)
-    {
-        for (int t = 0; t < agent->messages[i].trace_count; t++)
-        {
-            agent->messages[i].trace[t].tool_done_t0 = 0.0;
-        }
-    }
-    agent->accepted_submit = true;
-    return 0;
-
+    PicoSessionReplay *replay = (PicoSessionReplay *)calloc(1, sizeof(*replay));
+    if (!replay) goto invalid;
+    replay->lines = lines;
+    replay->docs = docs;
+    replay->count = n;
+    replay->last_compact = last_compact;
+    replay->last_tool_call = last_tool_call;
+    replay->last_tool_result = last_tool_result;
+    replay->tool_calls = tool_calls;
+    replay->tool_results = tool_results;
+    replay->active_group = -1;
+    return replay;
 invalid:
     for (int i = 0; i < n; i++)
     {
+        if (docs) JsonFree(&docs[i]);
         free(lines[i]);
     }
+    free(docs);
     free(lines);
-    agent->session_path[0] = '\0';
-    return -1;
+    return NULL;
+}
+
+PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind)
+{
+    return ReplayPrepareBefore(path, kind, NULL);
+}
+
+/* Returns true when complete. Call on the main thread only. */
+bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay *replay,
+                             int max_records)
+{
+    if (!app || !agent || !replay || max_records <= 0) return false;
+    int end = replay->cursor + max_records;
+    if (end > replay->count) end = replay->count;
+    for (int i = replay->cursor; i < end; i++)
+    {
+        bool into_input = replay->last_compact < 0 || i >= replay->last_compact;
+        ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group);
+    }
+    replay->cursor = end;
+    return end == replay->count;
+}
+
+static void ReplayAppendInterrupted(PicoHost *app, PicoAgent *agent,
+                                    const PicoSessionReplay *replay)
+{
+    if (replay->last_tool_call <= replay->last_tool_result ||
+        replay->tool_calls <= replay->tool_results) return;
+    const JsonDoc *doc = &replay->docs[replay->last_tool_call];
+    char *call_id = JsonObjStr(doc, 0, "call_id");
+    char *name = JsonObjStr(doc, 0, "name");
+    PicoSession_LogToolResult(app, agent, call_id, name, "(interrupted)", true, NULL);
+    PicoAgent_SetLastToolOutput(agent, "(interrupted)", true);
+    PicoAgent_PushHistoryFunctionOutput(agent, call_id, name, "(interrupted)", true);
+    free(call_id);
+    free(name);
+}
+
+void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
+                               const PicoSessionReplay *replay, bool append_interrupted)
+{
+    if (append_interrupted) ReplayAppendInterrupted(app, agent, replay);
+    agent->accepted_submit = true;
+}
+
+int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
+                       bool append_interrupted)
+{
+    PicoSessionReplay *replay = PicoSession_ReplayPrepare(path, agent->kind);
+    if (!replay)
+    {
+        agent->session_path[0] = '\0';
+        return -1;
+    }
+    snprintf(agent->session_path, sizeof(agent->session_path), "%s", path);
+    PicoAgent_ClearInput(agent);
+    (void)PicoSession_ReplayBatch(app, agent, replay, replay->count);
+    app->chat_follow_bottom = true;
+    PicoSession_ReplayFinish(app, agent, replay, append_interrupted);
+    for (int i = 0; i < agent->message_count; i++)
+        for (int t = 0; t < agent->messages[i].trace_count; t++)
+            agent->messages[i].trace[t].tool_done_t0 = 0.0;
+    PicoSession_ReplayFree(replay);
+    return 0;
 }
 
 void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent)
@@ -5230,4 +5301,290 @@ void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
     }
     (void)QueueSessionLine(app, agent, json);
     free(json);
+}
+
+/* UI-initiated loads only. Public create/resume and extension reload retain their
+ * synchronous contract. The worker owns only copied paths and parsed JSON. */
+typedef struct PicoSessionLoadWorker {
+    atomic_bool cancelled;
+    uint64_t serial;
+    char workspace_path[4096];
+    char requested[4096];
+    bool latest;
+    bool explicit_path;
+    bool allow_prefix;
+    bool no_session;
+    char path[4096];
+    PicoSessionReplay *replay;
+} PicoSessionLoadWorker;
+
+typedef struct PicoSessionLoad {
+    uint64_t serial;
+    PicoWorkspaceId workspace_id;
+    PicoAgentId replace_id;
+    PicoAgentId selected_at_start;
+    bool startup;
+    bool cancelled;
+    bool processing;
+    PicoSessionLoadWorker *worker;
+    PicoAgent *candidate;
+    PicoSessionReplay *replay;
+    char path[4096];
+    int finish_message;
+} PicoSessionLoad;
+
+static void *SessionLoadRead(void *arg)
+{
+    PicoSessionLoadWorker *worker = arg;
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("async_replay_before_read");
+#endif
+    if (atomic_load(&worker->cancelled)) return NULL;
+    if (worker->explicit_path)
+    {
+        if (!realpath(worker->requested, worker->path)) return NULL;
+    }
+    else
+    {
+        /* Only the copied path is used; no live workspace state crosses the
+         * thread boundary. Listing and latest-session scans remain worker I/O. */
+        PicoWorkspace *lookup = calloc(1, sizeof(*lookup));
+        if (!lookup) return NULL;
+        snprintf(lookup->path, sizeof(lookup->path), "%s", worker->workspace_path);
+        if (worker->latest)
+        {
+            char dir[4096], latest[4096];
+            if (!SessionDir(lookup, dir, sizeof(dir)) ||
+                FindLatest(dir, latest, sizeof(latest)) != 0)
+                worker->no_session = true;
+            else if (!realpath(latest, worker->path)) worker->path[0] = '\0';
+        }
+        else if (PicoSession_Resolve(lookup, worker->requested,
+                                     worker->allow_prefix, worker->path,
+                                     sizeof(worker->path)) != 0)
+            worker->path[0] = '\0';
+        free(lookup);
+    }
+    if (worker->path[0] && !atomic_load(&worker->cancelled))
+        worker->replay = ReplayPrepareBefore(worker->path, PICO_AGENT_MAIN,
+                                              &worker->cancelled);
+    return NULL;
+}
+
+static void SessionLoadWorkerCancel(void *arg)
+{
+    atomic_store(&((PicoSessionLoadWorker *)arg)->cancelled, true);
+}
+
+static void SessionLoadWorkerDestroy(void *arg)
+{
+    PicoSessionLoadWorker *worker = arg;
+    PicoSession_ReplayFree(worker->replay);
+    free(worker);
+}
+
+static void SessionLoadDiscard(PicoHost *host, PicoSessionLoad *load)
+{
+    if (!load) return;
+    if (load->candidate)
+    {
+        PicoWorkspace *ws = load->candidate->workspace;
+        PicoWorkspace_ReleaseSessions(ws, load->candidate->id);
+        if (load->replay && load->replay->cursor > 0)
+            PicoWorkspace_RunHooks(ws, PICO_HOOK_ON_AGENT_DESTROY, load->candidate->id);
+        (void)PicoAgent_Destroy(load->candidate);
+    }
+    PicoSession_ReplayFree(load->replay);
+    if (host && host->session_load == load) host->session_load = NULL;
+    free(load);
+}
+
+void PicoSession_LoadCancel(PicoHost *host)
+{
+    if (!host || !host->session_load) return;
+    PicoSessionLoad *load = host->session_load;
+    host->session_load = NULL;
+    load->cancelled = true;
+    if (load->worker) atomic_store(&load->worker->cancelled, true);
+    /* Workers have no pointer to this load; a stale completion is discarded. */
+    if (!load->processing) SessionLoadDiscard(host, load);
+}
+
+void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id)
+{
+    if (host && host->session_load && host->session_load->workspace_id == id)
+        PicoSession_LoadCancel(host);
+}
+
+static void SessionLoadCompleted(PicoHost *host, void *arg)
+{
+    PicoSessionLoadWorker *worker = arg;
+    PicoSessionLoad *load = host->session_load;
+    if (!load || load->serial != worker->serial || load->cancelled) return;
+    load->worker = NULL;
+    if (worker->no_session && load->startup)
+    {
+        PicoSession_LoadCancel(host);
+        return;
+    }
+    if (!worker->replay)
+    {
+        PicoOverlay_Notify(host, "Could not open that session.");
+        PicoSession_LoadCancel(host);
+        return;
+    }
+    load->replay = worker->replay;
+    worker->replay = NULL;
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("async_replay_after_adopt");
+#endif
+    snprintf(load->path, sizeof(load->path), "%s", worker->path);
+}
+
+PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
+                                 PicoAgentId replace_id, const char *requested,
+                                 bool allow_prefix, bool latest, bool explicit_path,
+                                 bool startup)
+{
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, workspace_id);
+    if (!host || !ws || (!latest && (!requested || !requested[0])) ||
+        ws->state != PICO_WORKSPACE_OPEN) return PICO_INVALID;
+    if (replace_id)
+    {
+        PicoAgent *old = PicoWorkspace_FindAgent(ws, replace_id);
+        if (!old) return PICO_NOT_FOUND;
+        if (PicoAgent_IsBusy(old)) return PICO_BUSY;
+    }
+    if (!replace_id && (ws->count >= PICO_MAX_AGENTS ||
+                        PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS)) return PICO_LIMIT;
+    PicoSession_LoadCancel(host);
+    PicoSessionLoad *load = calloc(1, sizeof(*load));
+    PicoSessionLoadWorker *worker = calloc(1, sizeof(*worker));
+    if (!load || !worker)
+    {
+        free(load); free(worker);
+        return PICO_NO_MEMORY;
+    }
+    worker->serial = load->serial = ++host->next_session_load_serial;
+    snprintf(worker->workspace_path, sizeof(worker->workspace_path), "%s", ws->path);
+    snprintf(worker->requested, sizeof(worker->requested), "%s", requested ? requested : "");
+    worker->allow_prefix = allow_prefix;
+    worker->latest = latest;
+    worker->explicit_path = explicit_path;
+    load->workspace_id = workspace_id;
+    load->replace_id = replace_id;
+    load->selected_at_start = host->selected_agent_id;
+    load->startup = startup;
+    if (!PicoHost_StartTaskCompleted(host, SessionLoadRead, worker,
+                                      SessionLoadWorkerCancel, SessionLoadCompleted,
+                                      SessionLoadWorkerDestroy))
+    {
+        free(worker); free(load);
+        return PICO_NO_MEMORY;
+    }
+    load->worker = worker;
+    host->session_load = load;
+    return PICO_OK;
+}
+
+bool PicoSession_LoadPending(const PicoHost *host)
+{
+    return host && host->session_load != NULL;
+}
+
+bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
+{
+    return host && host->session_load && host->session_load->startup &&
+           host->session_load->replace_id == id;
+}
+
+/* A per-frame time budget complements the row budget: small records should
+ * not aggregate into a long frame. A single callback/record is uninterruptible. */
+void PicoSession_LoadPump(PicoHost *host)
+{
+    PicoSessionLoad *load = host ? host->session_load : NULL;
+    if (!load || !load->replay) return;
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, load->workspace_id);
+    PicoAgent *old = load->replace_id && ws ? PicoWorkspace_FindAgent(ws, load->replace_id) : NULL;
+    if (!ws || ws->state != PICO_WORKSPACE_OPEN ||
+        (load->replace_id && (!old || PicoAgent_IsBusy(old))))
+    {
+        PicoSession_LoadCancel(host);
+        return;
+    }
+    if (old && old->session_path[0] && strcmp(old->session_path, load->path) == 0)
+    {
+        PicoSession_LoadCancel(host);
+        return;
+    }
+    load->processing = true;
+    if (!load->candidate)
+    {
+        if (!load->replace_id &&
+            (ws->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS))
+            goto failed;
+        load->candidate = PicoAgent_Create(host, ws);
+        if (!load->candidate) goto failed;
+        load->candidate->persistence = PICO_SESSION_DURABLE;
+        if (!PicoWorkspace_ReserveSession(ws, load->candidate->id, load->path))
+        {
+            PicoOverlay_Notify(host, PicoWorkspace_SessionReserved(ws, load->path,
+                                  load->candidate->id) ? "Session is already open by another agent."
+                                                        : "Could not reserve that session.");
+            goto cancelled;
+        }
+        snprintf(load->candidate->session_path, sizeof(load->candidate->session_path),
+                 "%s", load->path);
+        PicoAgent_ClearInput(load->candidate);
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double deadline = (double)now.tv_sec + now.tv_nsec / 1e9 + 0.004;
+    for (int budget = 0; budget < 16 && !load->cancelled; budget++)
+    {
+        host->session_replay_agent = load->candidate;
+        bool finished = PicoSession_ReplayBatch(host, load->candidate, load->replay, 1);
+        host->session_replay_agent = NULL;
+        if (!finished)
+        {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if ((double)now.tv_sec + now.tv_nsec / 1e9 >= deadline) break;
+        }
+        else break;
+    }
+    if (load->cancelled) goto cancelled;
+    if (load->replay->cursor < load->replay->count) goto done;
+    /* Historical tool rows must not retain their live completion dwell. */
+    for (int budget = 0; budget < 32 &&
+                         load->finish_message < load->candidate->message_count; budget++)
+    {
+        PicoMessage *msg = &load->candidate->messages[load->finish_message++];
+        for (int t = 0; t < msg->trace_count; t++) msg->trace[t].tool_done_t0 = 0.0;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((double)now.tv_sec + now.tv_nsec / 1e9 >= deadline) break;
+    }
+    if (load->finish_message < load->candidate->message_count) goto done;
+    PicoSession_ReplayFinish(host, load->candidate, load->replay, false);
+    if (load->cancelled) goto cancelled;
+    PicoAgent *published = load->candidate;
+    PicoAgentId published_id = published->id;
+    if (!PicoWorkspace_CommitLoadedSession(host, load->workspace_id, load->replace_id,
+                                           published,
+                                           load->selected_at_start == host->selected_agent_id))
+        goto failed;
+    load->candidate = NULL;
+    /* Session hooks may close the just-published agent or supersede this load. */
+    PicoAgent *live = PicoHost_FindAgent(host, published_id);
+    if (live) ReplayAppendInterrupted(host, live, load->replay);
+    if (live && host->session_load == load) PicoOverlay_Notify(host, "Session loaded.");
+    goto cancelled;
+failed:
+    PicoOverlay_Notify(host, "Could not open that session.");
+cancelled:
+    load->processing = false;
+    SessionLoadDiscard(host, load);
+    return;
+done:
+    load->processing = false;
+    if (load->cancelled) SessionLoadDiscard(host, load);
 }

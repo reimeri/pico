@@ -594,6 +594,7 @@ PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCr
         agent->persistence = PICO_SESSION_DURABLE;
     }
 
+    if (options->select) PicoSession_LoadCancel(app);
     PublishAgent(workspace, agent, options->select);
     if (options->session_start == PICO_SESSION_RESUME)
     {
@@ -654,6 +655,8 @@ PicoAgentId pico_agent_active(const PicoHost *app)
 
 bool pico_agent_select(PicoHost *app, PicoAgentId id)
 {
+    if (app && app->session_replay_agent && app->session_replay_agent->id == id)
+        return false; /* A private replay callback cannot select its candidate. */
     PicoAgent *agent = app ? PicoHost_FindAgent(app, id) : NULL;
     if (!app || !agent)
     {
@@ -664,6 +667,7 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
     {
         return true;
     }
+    PicoSession_LoadCancel(app);
     SelectAgentAndDiscardDraft(app, id);
     PicoChatSel_Clear(app);
     memset(&app->chat_scrollbar, 0, sizeof(app->chat_scrollbar));
@@ -675,6 +679,8 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
 
 PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
 {
+    if (app && app->session_replay_agent && app->session_replay_agent->id == id)
+        return PICO_BUSY;
     PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
@@ -791,6 +797,8 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
 
 PicoResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
 {
+    if (app && app->session_replay_agent && app->session_replay_agent->id == id)
+        return PICO_BUSY;
     PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
@@ -802,6 +810,8 @@ PicoResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
 
 PicoResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
 {
+    if (app && app->session_replay_agent && app->session_replay_agent->id == id)
+        return PICO_BUSY;
     PicoAgent *agent = PicoHost_FindAgent(app, id);
     if (!agent)
     {
@@ -1210,6 +1220,43 @@ bool pico_subagent_profile_info(const PicoHost *app, int index,
         return false;
     }
     *out = workspace->profiles[index];
+    return true;
+}
+
+/* Only a fully replayed, documented private candidate reaches this commit.
+ * Existing UI selection survives a load that completed in the background. */
+bool PicoWorkspace_CommitLoadedSession(PicoHost *host, PicoWorkspaceId workspace_id,
+                                       PicoAgentId replace_id, PicoAgent *candidate,
+                                       bool select)
+{
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, workspace_id);
+    if (!ws || !candidate || candidate->workspace != ws ||
+        ws->state != PICO_WORKSPACE_OPEN) return false;
+    PicoAgentId candidate_id = candidate->id;
+    if (replace_id)
+    {
+        int index = FindIndex(ws, replace_id);
+        if (index < 0 || PicoAgent_IsBusy(ws->agents[index])) return false;
+        PicoAgent *old = ws->agents[index];
+        bool was_selected = host->selected_agent_id == replace_id;
+        if (!PicoAgent_Destroy(old)) return false;
+        ws->agents[index] = candidate;
+        PicoWorkspace_ReleaseSessions(ws, replace_id);
+        if (was_selected)
+        {
+            SyncSelectedAgent(host, candidate->id);
+            PicoChatSel_Clear(host);
+            host->chat_follow_bottom = true;
+        }
+        PicoWorkspace_DropAgentMailboxes(ws, replace_id, 0);
+        PicoWorkspace_RunHooks(ws, PICO_HOOK_ON_AGENT_DESTROY, replace_id);
+    }
+    else
+    {
+        PublishAgent(ws, candidate, select);
+        if (select) host->chat_follow_bottom = true;
+    }
+    pico_run_hooks(host, PICO_HOOK_ON_SESSION_RESET, candidate_id);
     return true;
 }
 

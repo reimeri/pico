@@ -232,6 +232,9 @@ bool PicoWorkspace_SessionReserved(const PicoWorkspace *workspace, const char *p
 
 void PicoWorkspace_LoadProfiles(PicoWorkspace *workspace);
 void PicoWorkspace_ReplayToolDetails(PicoWorkspace *workspace);
+bool PicoWorkspace_CommitLoadedSession(PicoHost *host, PicoWorkspaceId workspace_id,
+                                       PicoAgentId replace_id, PicoAgent *candidate,
+                                       bool select);
 PicoResult PicoWorkspace_Resume(PicoHost *host, PicoAgentId agent_id, const char *id,
                                 bool allow_prefix);
 char *PicoWorkspace_Delegate(PicoAgentContext *ctx, const char *profile,

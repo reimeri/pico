@@ -468,12 +468,11 @@ static void OpenCatalogSession(PicoHost *host, SidebarState *s, const char *path
 {
     PicoAgentId live;
     PicoWorkspaceId id;
-    PicoAgentCreateOptions options;
-    PicoAgentId agent_id = 0;
     PicoResult created;
     live = LiveMainAgent(host, path, session_id);
     if (live)
     {
+        PicoSession_LoadCancel(host);
         SelectAgent(host, live);
         return;
     }
@@ -482,22 +481,8 @@ static void OpenCatalogSession(PicoHost *host, SidebarState *s, const char *path
     {
         return;
     }
-    memset(&options, 0, sizeof(options));
-    options.kind = PICO_AGENT_MAIN;
-    options.session_start = PICO_SESSION_RESUME;
-    options.session_id = session_id;
-    options.select = true;
     PicoChat_InspectClose();
-    created = pico_main_agent_create(host, id, &options, &agent_id);
-    if (created == PICO_SESSION_IN_USE)
-    {
-        live = LiveMainAgent(host, path, session_id);
-        if (live)
-        {
-            SelectAgent(host, live);
-            return;
-        }
-    }
+    created = PicoSession_LoadAsync(host, id, 0, session_id, false, false, false, false);
     if (created != PICO_OK)
     {
         if (created == PICO_LIMIT)

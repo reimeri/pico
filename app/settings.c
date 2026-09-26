@@ -1020,6 +1020,7 @@ bool PicoSettings_SetFast(PicoAgent *agent, bool enabled)
     if (!agent || !agent->workspace)
         return false;
     PicoHost *host = agent->workspace->host;
+    if (PicoSession_LoadBlocksSubmit(host, agent->id)) PicoSession_LoadCancel(host);
     if (enabled && !PicoSettings_FastAvailable(agent))
     {
         PicoOverlay_Notify(host, "Fast mode is unavailable for this model or authentication route.");
@@ -1127,6 +1128,7 @@ bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name)
     }
     PicoWorkspace *workspace = agent->workspace;
     PicoHost *host = workspace->host;
+    if (PicoSession_LoadBlocksSubmit(host, agent->id)) PicoSession_LoadCancel(host);
     PicoModel *m = FindCatalog(workspace, id_or_name);
     if (!m)
     {
@@ -1158,6 +1160,7 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
     }
     PicoWorkspace *workspace = agent->workspace;
     PicoHost *host = workspace->host;
+    if (PicoSession_LoadBlocksSubmit(host, agent->id)) PicoSession_LoadCancel(host);
     PicoModel *m = PicoSettings_SelectedModel(agent);
     if (!m)
     {

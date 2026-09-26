@@ -138,6 +138,9 @@ struct PicoHost {
     struct PicoAuthStore *auth_store;
     struct PicoHostTask *tasks; /* Compiled-in workers, including retired auth attempts. */
     struct PicoWorktreeJob *worktree_job;
+    struct PicoSessionLoad *session_load;
+    PicoAgent *session_replay_agent; /* only valid during a main-thread replay callback */
+    uint64_t next_session_load_serial;
     pid_t browser_children[16]; /* Independent processes; reap, never wait on the UI thread. */
     bool submit_cancel;
     char *agent_input;
@@ -349,6 +352,10 @@ bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name);
  * run returns and calls destroy; on failure ownership remains with the caller.
  * cancel must return promptly. Workers cannot touch host or extension/UI state.
  * This is private to compiled-in code, NOT a user-extension worker API. */
+bool PicoHost_StartTaskCompleted(PicoHost *host, void *(*run)(void *), void *state,
+                                 void (*cancel)(void *),
+                                 void (*complete)(PicoHost *, void *),
+                                 void (*destroy)(void *));
 bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
                         void (*cancel)(void *), void (*destroy)(void *));
 bool PicoHost_StartLocalSession(PicoHost *host, PicoAgentId from_agent_id);

@@ -100,6 +100,17 @@ typedef struct PicoSessionHeader {
 } PicoSessionHeader;
 
 void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, const char *session_file);
+/* Internal UI loading: asynchronous reading/validation and bounded main-thread
+ * replay into an unpublished agent. Public creation/reload remain synchronous. */
+PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
+                                 PicoAgentId replace_id, const char *requested,
+                                 bool allow_prefix, bool latest, bool explicit_path,
+                                 bool startup);
+void PicoSession_LoadCancel(PicoHost *host);
+void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id);
+void PicoSession_LoadPump(PicoHost *host);
+bool PicoSession_LoadPending(const PicoHost *host);
+bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id);
 /* `/resume` passes parents_only to hide subagents; resolve still lists all. */
 int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only);
 int PicoSession_Open(PicoHost *app, PicoAgent *agent, const char *id);
@@ -115,6 +126,15 @@ void PicoSession_CopyDisplayTitle(const PicoAgent *agent, char *out, size_t cap)
  * empty until PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */
 int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
                                PicoMessage **out, int *out_count);
+/* Worker-safe preparation owns its file data and parsed tokens; replay, hooks,
+ * and tool apply run only from ReplayBatch on the main thread. */
+typedef struct PicoSessionReplay PicoSessionReplay;
+PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind);
+void PicoSession_ReplayFree(PicoSessionReplay *replay);
+bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay *replay,
+                             int max_records);
+void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
+                               const PicoSessionReplay *replay, bool append_interrupted);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
                        bool append_interrupted);

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #define PICO_TRANSCRIPT_ESTIMATED_HEIGHT 96.0f
+#define PICO_TRANSCRIPT_BACKGROUND_BATCH 32
 
 static bool SameGeometry(const PicoTranscriptVirtual *cache, float width, float font_scale)
 {
@@ -96,6 +97,7 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
             memset(cache->dirty, 1, (size_t)count);
         }
         cache->measure_all = count > 0;
+        cache->measure_cursor = 0;
     }
     else if (count > old_count)
     {
@@ -134,11 +136,15 @@ void PicoTranscriptVirtual_SetRevision(PicoTranscriptVirtual *cache, int index,
     }
 }
 
+float PicoTranscriptVirtual_ItemHeight(const PicoTranscriptVirtual *cache, int index)
+{
+    return cache->heights[index] > 0.5f ? cache->heights[index]
+                                         : PICO_TRANSCRIPT_ESTIMATED_HEIGHT;
+}
+
 static float ItemHeight(const PicoTranscriptVirtual *cache, int index, float message_gap)
 {
-    float height = cache->heights[index] > 0.5f
-                       ? cache->heights[index]
-                       : PICO_TRANSCRIPT_ESTIMATED_HEIGHT;
+    float height = PicoTranscriptVirtual_ItemHeight(cache, index);
     if (index + 1 < cache->count)
     {
         height += message_gap;
@@ -152,11 +158,6 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
 {
     if (!cache || cache->count <= 0)
     {
-        return;
-    }
-    if (cache->measure_all || viewport_height <= 0.5f)
-    {
-        memset(cache->mounted, 1, (size_t)cache->count);
         return;
     }
     if (scroll_top < 0.0f)
@@ -178,13 +179,29 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
     for (int i = 0; i < cache->count; i++)
     {
         float next = y + ItemHeight(cache, i, message_gap);
-        if (cache->dirty[i] || i == force_index ||
-            (next >= visible_from && y <= visible_to))
+        if (i == force_index ||
+            (viewport_height > 0.5f && next >= visible_from && y <= visible_to))
         {
             cache->mounted[i] = 1;
         }
         y = next;
     }
+    /* Visible/forced rows are never delayed. Spend a bounded additional budget
+     * on dirty offscreen rows, continuing where the previous pass stopped. */
+    int budget = PICO_TRANSCRIPT_BACKGROUND_BATCH;
+    int scanned = 0;
+    int cursor = cache->measure_cursor;
+    while (budget > 0 && scanned < cache->count)
+    {
+        if (cache->dirty[cursor] && !cache->mounted[cursor])
+        {
+            cache->mounted[cursor] = 1;
+            budget--;
+        }
+        cursor = (cursor + 1) % cache->count;
+        scanned++;
+    }
+    cache->measure_cursor = cursor;
 }
 
 void PicoTranscriptVirtual_ForceMount(PicoTranscriptVirtual *cache, int index)
@@ -229,17 +246,19 @@ float PicoTranscriptVirtual_AnchorDelta(const PicoTranscriptVirtual *cache,
                                         float scroll_top, float message_gap)
 {
     if (!cache || index < 0 || index >= cache->count ||
-        cache->heights[index] <= 0.5f || new_height <= 0.5f)
+        new_height <= 0.5f)
     {
         return 0.0f;
     }
     float top = PicoTranscriptVirtual_SpanHeight(cache, 0, index, message_gap);
-    float bottom = top + cache->heights[index];
+    float previous = cache->heights[index] > 0.5f
+                         ? cache->heights[index] : PICO_TRANSCRIPT_ESTIMATED_HEIGHT;
+    float bottom = top + previous;
     if (bottom > scroll_top + 0.01f)
     {
         return 0.0f;
     }
-    return new_height - cache->heights[index];
+    return new_height - previous;
 }
 
 void PicoTranscriptVirtual_RecordHeight(PicoTranscriptVirtual *cache, int index,

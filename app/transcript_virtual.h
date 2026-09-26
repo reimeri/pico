@@ -11,6 +11,7 @@ typedef struct PicoTranscriptVirtual {
     unsigned char *mounted;
     int count;
     int capacity;
+    int measure_cursor;
     uint64_t identity;
     float width;
     float font_scale;
@@ -28,6 +29,8 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
                                 int force_index, float message_gap);
 void PicoTranscriptVirtual_ForceMount(PicoTranscriptVirtual *cache, int index);
 bool PicoTranscriptVirtual_Mounted(const PicoTranscriptVirtual *cache, int index);
+/* Measured row height, or the same estimate used by unmeasured spacers. */
+float PicoTranscriptVirtual_ItemHeight(const PicoTranscriptVirtual *cache, int index);
 float PicoTranscriptVirtual_SpanHeight(const PicoTranscriptVirtual *cache,
                                        int begin, int end, float message_gap);
 float PicoTranscriptVirtual_AnchorDelta(const PicoTranscriptVirtual *cache,

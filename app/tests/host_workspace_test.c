@@ -1851,7 +1851,7 @@ done:
     return rc;
 }
 
-static int RunFastFooterCase(bool with_sidebar)
+static int RunFastFooterCase(bool with_sidebar, bool cold_history)
 {
     const Clay_Dimensions viewport = {1100, 800};
     char dir[] = "/tmp/pico-fast-footer-XXXXXX";
@@ -1895,7 +1895,7 @@ static int RunFastFooterCase(bool with_sidebar)
         goto done;
     }
     PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
-    for (int i = 0; i < 40; i++)
+    for (int i = 0; i < (cold_history ? 320 : 40); i++)
         PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Fast footer bottom-follow conversation content");
     PicoModel *model = PicoSettings_ActiveModel(agent);
     if (!model)
@@ -1960,13 +1960,14 @@ static int RunFastFooterCase(bool with_sidebar)
         PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
                                    scroll.contentDimensions.height, &scroll.scrollPosition->y);
         (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        PicoChat_HarvestVirtualHeights(host);
         for (int i = 0; i < pane_count; i++)
         {
             Clay_String name = {.chars = panes[i], .length = (int32_t)strlen(panes[i])};
             Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(name));
-            if (!box.found || (frame > 2 && !ShellBoxStable(expected[i], box.boundingBox)))
+            if (!box.found || (frame > (cold_history ? 30 : 2) && !ShellBoxStable(expected[i], box.boundingBox)))
             {
-                Fail("Fast icon caused repeated bottom-follow geometry to drift");
+                Fail("batched transcript measurement changed bottom-follow shell bounds");
                 goto done;
             }
             expected[i] = box.boundingBox;
@@ -2080,7 +2081,8 @@ static int TestBottomFollowShellGeometryStable(void)
     }
     if (RunQuestionPanelShellCase(false) != 0 || RunQuestionPanelShellCase(true) != 0)
         return 1;
-    if (RunFastFooterCase(false) != 0 || RunFastFooterCase(true) != 0)
+    if (RunFastFooterCase(false, false) != 0 || RunFastFooterCase(true, false) != 0 ||
+        RunFastFooterCase(false, true) != 0 || RunFastFooterCase(true, true) != 0)
         return 1;
     return RunWorkspaceLessShellCase();
 }
@@ -2150,7 +2152,7 @@ static int TestChatBottomFollowClearsComposer(void)
         rmdir(dir);
         return 1;
     }
-    for (int i = 0; i < 30; i++)
+    for (int i = 0; i < 320; i++)
     {
         PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "chat bottom spacer clearance test message");
     }
@@ -2171,7 +2173,7 @@ static int TestChatBottomFollowClearsComposer(void)
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
 
-    for (frame = 0; frame < 12; frame++)
+    for (frame = 0; frame < 30; frame++)
     {
         Clay_SetLayoutDimensions(viewport);
         Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
@@ -2220,6 +2222,14 @@ static int TestChatBottomFollowClearsComposer(void)
             else if (gap + 0.5f < spacer.boundingBox.height)
             {
                 Fail("last message must clear the composer overlays when pinned to the bottom");
+            }
+            else
+            {
+                Clay_ElementData viewport_box = Clay_GetElementData(CLAY_ID("ChatScroll"));
+                if (last.boundingBox.y + last.boundingBox.height < viewport_box.boundingBox.y ||
+                    last.boundingBox.y + last.boundingBox.height >
+                        viewport_box.boundingBox.y + viewport_box.boundingBox.height)
+                    Fail("cold measurements must not leave the last message outside the bottom viewport");
             }
         }
     }
@@ -2595,7 +2605,7 @@ static int TestExpandedStreamingThinkStaysInsideChat(void)
         goto done;
     }
     body[0] = '\0';
-    for (frame = 0; frame < 12; frame++)
+    for (frame = 0; frame < 30; frame++)
     {
         int i;
         for (i = 0; i < 180; i++)

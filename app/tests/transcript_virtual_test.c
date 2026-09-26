@@ -30,7 +30,7 @@ int main(void)
         !PicoTranscriptVirtual_Mounted(&cache, 2))
     {
         PicoTranscriptVirtual_Free(&cache);
-        return Fail("initial exact-measure pass did not mount every message");
+        return Fail("small cold transcript did not render every message");
     }
     PicoTranscriptVirtual_RecordHeight(&cache, 0, 50.0f);
     PicoTranscriptVirtual_RecordHeight(&cache, 1, 100.0f);
@@ -39,7 +39,7 @@ int main(void)
     if (cache.measure_all)
     {
         PicoTranscriptVirtual_Free(&cache);
-        return Fail("exact-measure pass remained active after every height was recorded");
+        return Fail("cold transcript did not settle after heights were recorded");
     }
     float anchor_delta = PicoTranscriptVirtual_AnchorDelta(&cache, 0, 70.0f,
                                                            180.0f, gap);
@@ -121,7 +121,60 @@ int main(void)
         !PicoTranscriptVirtual_Mounted(&cache, 2))
     {
         PicoTranscriptVirtual_Free(&cache);
-        return Fail("width change did not request a new exact-measure pass");
+        return Fail("width change did not invalidate measured heights");
+    }
+
+    /* A large cold transcript must never mount its whole history in a frame,
+     * even before Clay has reported usable scroll viewport dimensions. */
+    const int rows = 480;
+    PicoTranscriptVirtual_Begin(&cache, 21, rows, 600.0f, 1.0f);
+    for (int i = 0; i < rows; i++)
+    {
+        PicoTranscriptVirtual_SetRevision(&cache, i, (uint64_t)(i + 1));
+    }
+    int frames = 0;
+    while (cache.measure_all && frames++ < rows)
+    {
+        if (frames > 1)
+        {
+            PicoTranscriptVirtual_Begin(&cache, 21, rows, 600.0f, 1.0f);
+        }
+        PicoTranscriptVirtual_Plan(&cache, 0.0f, frames == 1 ? 0.0f : 80.0f,
+                                   0.0f, rows - 1, gap);
+        int mounted = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            if (PicoTranscriptVirtual_Mounted(&cache, i))
+            {
+                mounted++;
+                PicoTranscriptVirtual_RecordHeight(&cache, i, 50.0f);
+            }
+        }
+        if (mounted > rows / 4 || !PicoTranscriptVirtual_Mounted(&cache, rows - 1))
+        {
+            PicoTranscriptVirtual_Free(&cache);
+            return Fail("cold measurement was unbounded or lost the forced row");
+        }
+        PicoTranscriptVirtual_FinishMeasure(&cache);
+    }
+    if (cache.measure_all || frames < 2)
+    {
+        PicoTranscriptVirtual_Free(&cache);
+        return Fail("cold measurement failed to converge across frames");
+    }
+    PicoTranscriptVirtual_Begin(&cache, 22, rows, 500.0f, 1.0f);
+    for (int i = 0; i < rows; i++)
+    {
+        PicoTranscriptVirtual_SetRevision(&cache, i, (uint64_t)(i + 1));
+    }
+    PicoTranscriptVirtual_Plan(&cache, 0.0f, 80.0f, 0.0f, -1, gap);
+    float estimated = PicoTranscriptVirtual_SpanHeight(&cache, 0, 1, gap) - gap;
+    if (!cache.measure_all || PicoTranscriptVirtual_Mounted(&cache, rows / 2) ||
+        !Near(PicoTranscriptVirtual_AnchorDelta(&cache, 0, estimated + 40.0f,
+                                                500.0f, gap), 40.0f))
+    {
+        PicoTranscriptVirtual_Free(&cache);
+        return Fail("reset reused stale heights or lost estimated anchor correction");
     }
 
     PicoTranscriptVirtual_Free(&cache);

@@ -328,7 +328,7 @@ void PicoChatFind_MountTargets(PicoHost *app, PicoTranscriptVirtual *cache, floa
     float top = 8; /* ChatContent's top padding, not a message-height estimate. */
     for (int i = 0; i < cache->count && i < f->search.message_count; i++)
     {
-        float bottom = top + cache->heights[i];
+        float bottom = top + PicoTranscriptVirtual_ItemHeight(cache, i);
         if (f->search.messages[i].count)
         {
             if (bottom < center) before = i;

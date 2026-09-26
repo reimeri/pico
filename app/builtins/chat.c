@@ -2400,14 +2400,13 @@ bool PicoChat_StabilizeScrollLayout(PicoHost *app)
                             fabsf(viewport - state->bottom_view_height) > 0.01f ||
                             fabsf(width - state->bottom_width) > 0.01f ||
                             state->bottom_font_scale != Pico_FontScale();
-    bool rebase = state->bottom_reset || geometry_changed || state->bottom_rebase_pending;
-    /* Offscreen virtual spacers can still describe the old geometry. Measure
-     * all rows in the correction pass before committing the new baseline. */
-    state->bottom_rebase_pending = geometry_changed;
-    if (geometry_changed)
-    {
-        state->main_virtual.measure_all = true;
-    }
+    /* Cold offscreen estimates are provisional: never retain their old extent
+     * as permanent blank space when measured rows turn out shorter. Keep one
+     * final rebase after the last batch has been harvested. */
+    bool approximate = state->main_virtual.measure_all;
+    bool rebase = state->bottom_reset || geometry_changed ||
+                  state->bottom_rebase_pending || approximate;
+    state->bottom_rebase_pending = geometry_changed || approximate;
     state->bottom_reset = false;
     state->bottom_configured = true;
     state->bottom_view_height = viewport;

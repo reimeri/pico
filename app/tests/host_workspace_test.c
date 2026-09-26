@@ -2442,8 +2442,8 @@ static int TestChatFindTranscript(void)
     PicoChatFind_Close(host);
     if (label_scroll.scrollPosition->x != 0)
     { Fail("closing find must restore the non-user-scrollable thinking label"); goto done; }
-    /* A raw thinking body uses Clay wrapping rather than rich-text runs. A
-     * result near the end of a very long body must still have reveal geometry. */
+    /* A result near the end of a very long expanded thinking body must still
+     * have reveal geometry after wrapping. */
     free(thinking->trace[0].think_parts[0]);
     free(thinking->trace[0].think_parts);
     thinking->trace[0].think_parts = NULL;
@@ -2464,7 +2464,7 @@ static int TestChatFindTranscript(void)
     PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
     chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
     if (!range.found || !ShellVerticallyContains(chat.boundingBox, range.box))
-    { Fail("a match near the end of a long Clay-wrapped thought must be revealable"); goto done; }
+    { Fail("a match near the end of a long expanded thought must be revealable"); goto done; }
     PicoAgent_ClearMessages(agent);
     if (host->find.open || host->find.field.length || host->find.search.count)
     { Fail("session reset must clear search and pending navigation"); goto done; }
@@ -2502,6 +2502,211 @@ done:
     unsetenv("XDG_CONFIG_HOME");
     rmdir(dir); rmdir(cfg);
     return g_failed ? 1 : 0;
+}
+
+
+static int TestExpandedStreamingThinkStaysInsideChat(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-think-stream-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-think-stream-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    PicoMessage *msg;
+    char *body = NULL;
+    size_t body_len = 0;
+    size_t body_cap = 0;
+    char tail[32];
+    int word = 0;
+    int rc = 1;
+    int frame;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("streaming think setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("streaming think host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("streaming think open workspace");
+        goto done;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("streaming think create agent");
+        goto done;
+    }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    msg = &agent->messages[agent->message_count - 1];
+    msg->trace = calloc(1, sizeof(PicoTraceLine));
+    if (!msg->trace)
+    {
+        Fail("streaming think trace allocation");
+        goto done;
+    }
+    msg->trace_count = 1;
+    msg->trace[0].expanded = true;
+    agent->state = PICO_AGENT_LLM_WAIT;
+    host->chat_follow_bottom = true;
+
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){Pico_HandleClayErrors, 0}))
+    {
+        Fail("streaming think Clay initialization");
+        goto done;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    Pico_ClearClayReinit();
+
+    body_cap = 8192;
+    body = malloc(body_cap);
+    if (!body)
+    {
+        Fail("streaming think body allocation");
+        goto done;
+    }
+    body[0] = '\0';
+    for (frame = 0; frame < 12; frame++)
+    {
+        int i;
+        for (i = 0; i < 180; i++)
+        {
+            char word_buf[16];
+            int n = snprintf(word_buf, sizeof(word_buf), "w%05d ", word++);
+            if (body_len + (size_t)n + sizeof(tail) + 1 > body_cap)
+            {
+                size_t cap = body_cap * 2;
+                char *next = realloc(body, cap);
+                if (!next)
+                {
+                    Fail("streaming think body grow");
+                    goto done;
+                }
+                body = next;
+                body_cap = cap;
+            }
+            memcpy(body + body_len, word_buf, (size_t)n);
+            body_len += (size_t)n;
+        }
+        snprintf(tail, sizeof(tail), "tail-%02d", frame);
+        memcpy(body + body_len, tail, strlen(tail) + 1);
+        free(msg->trace[0].text);
+        msg->trace[0].text = strdup(body);
+        if (!msg->trace[0].text)
+        {
+            Fail("streaming think text dup");
+            goto done;
+        }
+        Clay_SetLayoutDimensions(viewport);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+        {
+            Clay_ScrollContainerData data =
+                Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+            if (data.found && data.scrollPosition)
+            {
+                PicoScrollbar_PinToBottom(data.scrollContainerDimensions.height,
+                                          data.contentDimensions.height,
+                                          &data.scrollPosition->y);
+            }
+        }
+        commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        PicoChat_HarvestVirtualHeights(host);
+        if (Pico_NeedsClayReinit())
+        {
+            Fail("streaming expanded thinking overflowed Clay capacity");
+            goto done;
+        }
+        Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        if (!chat.found)
+        {
+            Fail("streaming think layout missing ChatScroll");
+            goto done;
+        }
+        {
+            float right = chat.boundingBox.x + chat.boundingBox.width;
+            int32_t c;
+            bool saw_tail = false;
+            for (c = 0; c < commands.length; c++)
+            {
+                Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, c);
+                Clay_StringSlice text;
+                Clay_BoundingBox box;
+                if (!cmd || cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+                {
+                    continue;
+                }
+                box = cmd->boundingBox;
+                if (box.y + box.height >= chat.boundingBox.y &&
+                    box.y <= chat.boundingBox.y + chat.boundingBox.height &&
+                    box.x + box.width > right + 1.0f)
+                {
+                    Fail("expanded streaming thinking must stay inside the chat column");
+                    goto done;
+                }
+                text = cmd->renderData.text.stringContents;
+                if (!saw_tail && text.chars && text.length >= (int32_t)strlen(tail))
+                {
+                    int32_t o;
+                    for (o = 0; o + (int32_t)strlen(tail) <= text.length; o++)
+                    {
+                        if (memcmp(text.chars + o, tail, strlen(tail)) == 0)
+                        {
+                            saw_tail = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!saw_tail)
+            {
+                Fail("latest streamed thinking token must remain visible");
+                goto done;
+            }
+        }
+    }
+    rc = 0;
+done:
+    free(body);
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
 }
 
 static int TestChatTraceRowsShareHeight(void)
@@ -10806,6 +11011,7 @@ int main(int argc, char **argv)
     if (TestExpandedThinkRenderingIsCached() != 0) return 1;
 #endif
     if (TestChatFindTranscript() != 0) return 1;
+    if (TestExpandedStreamingThinkStaysInsideChat() != 0) return 1;
     if (TestChatTraceRowsShareHeight() != 0)
     {
         return 1;

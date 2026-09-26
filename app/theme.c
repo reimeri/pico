@@ -555,6 +555,8 @@ static struct {
 } clay_arena;
 
 static bool needs_clay_reinit = false;
+static bool clay_internal_error_reported = false;
+static int32_t pending_measure_word_count = 0;
 
 #define PICO_CLAY_SCROLL_MAX 16
 
@@ -606,16 +608,38 @@ static void RequestCapacityReinit(const char *reason)
             (int)Clay_GetMaxElementCount(), reason, clay_scroll_snap_count);
 }
 
+static void RequestMeasureCacheReinit(void)
+{
+    int32_t current = Clay_GetMaxMeasureTextCacheWordCount();
+    needs_clay_reinit = true;
+    if (pending_measure_word_count < current)
+    {
+        pending_measure_word_count = current;
+    }
+    if (pending_measure_word_count < 1)
+    {
+        pending_measure_word_count = 1;
+    }
+    pending_measure_word_count *= 2;
+    fprintf(stderr, "clay-scroll: text-cache reinit pending words=%d (live=%d) snaps=%d\n",
+            (int)pending_measure_word_count, (int)current, clay_scroll_snap_count);
+}
+
 void Pico_HandleClayErrors(Clay_ErrorData error_data)
 {
     if (error_data.errorType == CLAY_ERROR_TYPE_INTERNAL_ERROR)
     {
-        ReportClayInternalError(error_data.errorText);
+        /* One backtrace per overflow: Clay can range-check on every subsequent
+         * cache lookup in the same layout, and printing each one freezes the UI. */
+        if (!clay_internal_error_reported)
+        {
+            ReportClayInternalError(error_data.errorText);
+            clay_internal_error_reported = true;
+        }
+        needs_clay_reinit = true;
+        return;
     }
-    else
-    {
-        printf("%.*s\n", error_data.errorText.length, error_data.errorText.chars);
-    }
+    printf("%.*s\n", error_data.errorText.length, error_data.errorText.chars);
     if (error_data.errorType == CLAY_ERROR_TYPE_ELEMENTS_CAPACITY_EXCEEDED ||
         error_data.errorType == CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED ||
         error_data.errorType == CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE)
@@ -646,10 +670,10 @@ void Pico_HandleClayErrors(Clay_ErrorData error_data)
     }
     else if (error_data.errorType == CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED)
     {
-        fprintf(stderr, "clay-scroll: error text-cache max=%d snaps=%d\n", (int)Clay_GetMaxElementCount(),
-                clay_scroll_snap_count);
-        needs_clay_reinit = true;
-        Clay_SetMaxMeasureTextCacheWordCount(Clay_GetMaxMeasureTextCacheWordCount() * 2);
+        /* Grow the word cache on the next reinit. Changing maxMeasureTextCacheWordCount
+         * on the live context resizes Clay's hash-bucket modulus without reallocating
+         * the map, which then range-checks as an internal error for the rest of the layout. */
+        RequestMeasureCacheReinit();
     }
 }
 
@@ -662,6 +686,7 @@ void Pico_ClearClayReinit(void)
 {
     needs_clay_reinit = false;
     clay_capacity_grown = false;
+    clay_internal_error_reported = false;
 }
 
 /* Clay reads capacities from the previous current context during initialization.
@@ -718,6 +743,7 @@ void Pico_FreeClay(void)
     memset(clay_scroll_snaps, 0, sizeof(clay_scroll_snaps));
     clay_scroll_snap_count = 0;
     clay_scroll_restore_pending = false;
+    pending_measure_word_count = 0;
     Pico_ClearClayReinit();
 }
 
@@ -728,11 +754,16 @@ bool Pico_ReinitClay(Font *fonts, bool debug_enabled)
     {
         return false;
     }
+    if (pending_measure_word_count > Clay_GetMaxMeasureTextCacheWordCount())
+    {
+        Clay_SetMaxMeasureTextCacheWordCount(pending_measure_word_count);
+    }
     Pico_CaptureClayScroll();
     if (!ReplaceClayArena(Clay_GetLayoutDimensions()))
     {
         return false;
     }
+    pending_measure_word_count = 0;
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, fonts);
 #ifdef PICO_CLAY_DEBUG
     Clay_SetDebugModeEnabled(debug_enabled);

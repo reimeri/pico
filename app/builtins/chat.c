@@ -1032,12 +1032,12 @@ static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, int
         }
         else if (line->text && line->text[0])
         {
-            ViewText(view, ViewCStr(line->text),
-                     (Clay_TextElementConfig){.fontId = FONT_ITALIC,
-                                              .fontSize = PICO_FONT_UI,
-                                              .textColor = COLOR_MUTED,
-                                              .wrapMode = CLAY_TEXT_WRAP_WORDS});
-            ViewBreak(view);
+            /* Clay WRAP_WORDS on a streaming body stores every word of each
+             * unique prefix in the text-measure cache. That overflow stops
+             * wrapping (a line paints past the container) and then trips
+             * internal range checks every frame. Pre-wrap like summaries. */
+            RenderThinkMarkdown(view, message_index, trace_index, 0, line->text,
+                                available_width - 24.0f);
         }
     }
 }

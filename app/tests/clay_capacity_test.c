@@ -307,11 +307,75 @@ static int TestArenaFailure(bool allocation)
 }
 #endif
 
+static int TestInternalErrorRequestsReinit(void)
+{
+    if (!Pico_InitClay((Clay_Dimensions){100, 100}))
+    {
+        return Fail("could not initialize Clay");
+    }
+    Pico_ClearClayReinit();
+    int32_t elements = Clay_GetMaxElementCount();
+    int32_t words = Clay_GetMaxMeasureTextCacheWordCount();
+    Pico_HandleClayErrors((Clay_ErrorData){
+        .errorType = CLAY_ERROR_TYPE_INTERNAL_ERROR,
+        .errorText = CLAY_STRING("Clay attempted to make an out of bounds array access"),
+    });
+    int failed = 0;
+    if (!Pico_NeedsClayReinit())
+    {
+        failed = Fail("internal error did not request Clay reinit");
+    }
+    else if (Clay_GetMaxElementCount() != elements || Clay_GetMaxMeasureTextCacheWordCount() != words)
+    {
+        failed = Fail("internal error must not grow live Clay capacities");
+    }
+    Pico_ClearClayReinit();
+    Pico_FreeClay();
+    return failed;
+}
+
+static int TestTextCacheOverflowGrowsOnReinit(void)
+{
+    if (!Pico_InitClay((Clay_Dimensions){100, 100}))
+    {
+        return Fail("could not initialize Clay");
+    }
+    Pico_ClearClayReinit();
+    int32_t before = Clay_GetMaxMeasureTextCacheWordCount();
+    Pico_HandleClayErrors((Clay_ErrorData){
+        .errorType = CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED,
+        .errorText = CLAY_STRING("text cache overflow"),
+    });
+    int failed = 0;
+    if (!Pico_NeedsClayReinit())
+    {
+        failed = Fail("text-cache overflow did not request Clay reinit");
+    }
+    else if (Clay_GetMaxMeasureTextCacheWordCount() != before)
+    {
+        failed = Fail("text-cache overflow must not change the live word count");
+    }
+    else if (!Pico_ReinitClay(NULL, false))
+    {
+        failed = Fail("could not reinit Clay after text-cache overflow");
+    }
+    else if (Clay_GetMaxMeasureTextCacheWordCount() <= before)
+    {
+        failed = Fail("reinit after text-cache overflow must grow the word cache");
+    }
+    Pico_FreeClay();
+    return failed;
+}
+
 int main(void)
 {
     int rc = TestOverflowGrows(CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED);
     if (rc != 0) return rc;
     rc = TestOverflowGrows(CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE);
+    if (rc != 0) return rc;
+    rc = TestInternalErrorRequestsReinit();
+    if (rc != 0) return rc;
+    rc = TestTextCacheOverflowGrowsOnReinit();
     if (rc != 0) return rc;
     rc = TestLayoutRecoversAfterOverflow();
     if (rc != 0) return rc;

@@ -2,6 +2,7 @@
 
 #include "pico/theme.h"
 #include "richtext.h"
+#include "theme_internal.h"
 #include "chat_sel.h"
 #include "highlight.h"
 #include "hl_colors.h"
@@ -10,6 +11,7 @@
 #include "raylib.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,6 +65,68 @@ static const HlCache *HlCacheForBlock(MdDocument *doc, MdBlock *block)
     }
     const HlCache *cache = (const HlCache *)block->hl_cache;
     return cache->count > 0 ? cache : NULL;
+}
+
+static void CodeLineIndex(MdDocument *doc, MdBlock *block)
+{
+    if (block->code_line_offsets || !block->raw_text) return;
+    size_t size = strlen(block->raw_text);
+    if (size > INT_MAX) return;
+    int count = size ? 1 : 0;
+    for (size_t i = 0; i < size; i++) if (block->raw_text[i] == '\n') count++;
+    if (count <= 0) return;
+    int *offsets = MdArena_Alloc(&doc->arena, (size_t)count * sizeof(*offsets), 8);
+    if (!offsets) return;
+    int n = 0;
+    offsets[n++] = 0;
+    for (int i = 0; i < (int)size; i++)
+        if (block->raw_text[i] == '\n') offsets[n++] = i + 1;
+    block->code_line_offsets = offsets;
+    block->code_line_count = count;
+    block->code_byte_count = (int)size;
+}
+
+static int CodeLineLength(const MdBlock *block, int index)
+{
+    int start = block->code_line_offsets[index];
+    return index + 1 < block->code_line_count
+        ? block->code_line_offsets[index + 1] - start - 1
+        : block->code_byte_count - start;
+}
+
+static float CodeBlockWidth(MdBlock *block)
+{
+    if (block->code_width_font_generation != Pico_FontGeneration() ||
+        block->code_width_font_scale != Pico_FontScale() ||
+        (!block->code_width_valid && !block->code_width_next))
+    {
+        block->code_width_cache = 0;
+        block->code_width_next = block->raw_text;
+        block->code_width_valid = false;
+        block->code_width_font_generation = Pico_FontGeneration();
+        block->code_width_font_scale = Pico_FontScale();
+    }
+    if (block->code_width_valid) return block->code_width_cache;
+    Clay_TextElementConfig config = {.fontId = FONT_MONO,
+                                     .fontSize = PICO_FONT_UI,
+                                     .wrapMode = CLAY_TEXT_WRAP_NONE};
+    /* A long code fence can contain tens of thousands of lines. Do not
+     * MeasureTextEx every line on the first visible frame; retain the widest
+     * observed line and complete the scan over subsequent layouts. */
+    const char *line = block->code_width_next;
+    int scan_budget = block->code_line_count <= 256 ? block->code_line_count : 128;
+    for (int budget = 0; line && *line && budget < scan_budget; budget++)
+    {
+        const char *end = strchr(line, '\n');
+        int length = end ? (int)(end - line) : (int)strlen(line);
+        Clay_String text = {.chars = line, .length = length};
+        float width = RichText_MeasureWidth(text, config);
+        if (width > block->code_width_cache) block->code_width_cache = width;
+        line = end ? end + 1 : NULL;
+    }
+    block->code_width_next = line;
+    if (!line || !*line) block->code_width_valid = true;
+    return block->code_width_cache;
 }
 
 static void CodeLineSegment(const char *chars, int length, Clay_Color color)
@@ -577,7 +641,8 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                               .backgroundColor = COLOR_QUOTE_BG,
                               .border = {.color = COLOR_QUOTE_BORDER, .width = {.left = 4}}})
                 {
-                    RichText_RenderParagraph(block, &doc->arena, content_width, &style, emit);
+                    RichText_RenderParagraphWindowed(block, &doc->arena, content_width, &style, emit, NULL,
+                                                      CLAY_IDI("MdParagraph", id_base + index));
                 }
             }
             else if (block->type == MDB_LIST_ITEM)
@@ -616,13 +681,15 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                     {
-                        RichText_RenderParagraph(block, &doc->arena, content_width, &style, emit);
+                        RichText_RenderParagraphWindowed(block, &doc->arena, content_width, &style, emit, NULL,
+                                                      CLAY_IDI("MdParagraph", id_base + index));
                     }
                 }
             }
             else
             {
-                RichText_RenderParagraph(block, &doc->arena, available_width, &style, emit);
+                RichText_RenderParagraphWindowed(block, &doc->arena, available_width, &style, emit, NULL,
+                                                  CLAY_IDI("MdParagraph", id_base + index));
             }
             break;
         }
@@ -630,6 +697,50 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
         case MDB_HTML:
         {
             Clay_ElementId scroll_id = HorizontalScrollId(id_base, index);
+            Clay_ElementData previous_scroll = Clay_GetElementData(scroll_id);
+            CodeLineIndex(doc, block);
+            float code_width = CodeBlockWidth(block);
+            /* The staged width scan may not yet have reached the visible or
+             * find-target line. Measure those now so reveal never clamps to a
+             * narrower provisional horizontal extent. */
+            float target_top, target_bottom, scroll_delta;
+            bool follow_bottom;
+            if (block->code_line_count > 256 &&
+                RichText_Viewport(&target_top, &target_bottom, &follow_bottom, &scroll_delta))
+            {
+                int target_from = -1;
+                (void)RichText_TargetRange(&target_from, NULL);
+                int logical = PicoChatSel_CurrentOffset();
+                int index_line = 0;
+                Clay_TextElementConfig config = {.fontId = FONT_MONO, .fontSize = PICO_FONT_UI,
+                                                 .wrapMode = CLAY_TEXT_WRAP_NONE};
+                float row_h = (float)Pico_FontPxU16(PICO_FONT_UI_LINE) + 2.0f;
+                int count = block->code_line_offsets ? block->code_line_count : 0;
+                int visible = (int)((target_bottom - target_top) / row_h) + 64;
+                if (visible < 64) visible = 64;
+                int first = previous_scroll.found
+                    ? (int)((target_top - previous_scroll.boundingBox.y - scroll_delta - 12.0f) / row_h) - 32
+                    : follow_bottom ? count - visible : 0;
+                if (first < 0) first = 0;
+                if (first > count - visible) first = count - visible;
+                if (first < 0) first = 0;
+                int last = first + visible;
+                for (; index_line < count; index_line++)
+                {
+                    int length = CodeLineLength(block, index_line);
+                    const char *line = block->raw_text + block->code_line_offsets[index_line];
+                    if ((index_line >= first && index_line <= last) ||
+                        (target_from >= logical && target_from < logical + length))
+                    {
+                        float width = RichText_MeasureWidth((Clay_String){.chars = line, .length = length}, config);
+                        if (width > code_width) code_width = width;
+                    }
+                    if (length > 0) logical += length + 1;
+                }
+                if (code_width > block->code_width_cache) block->code_width_cache = code_width;
+            }
+            code_width += 28.0f;
+            if (code_width < available_width) code_width = available_width;
             TrackHorizontalScroller(scroll_id);
             PicoChatSel_SetHorizontalClip(scroll_id, false);
             CLAY(scroll_id,
@@ -640,7 +751,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                          .padding = {14, 14, 12, 12},
                                          .childGap = 2,
-                                         .sizing = {.width = CLAY_SIZING_FIT(available_width)}},
+                                         .sizing = {.width = CLAY_SIZING_FIXED(code_width)}},
                               .backgroundColor = COLOR_CODE_BG,
                               .cornerRadius = CLAY_CORNER_RADIUS(6)})
                 {
@@ -648,14 +759,70 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     int hl_index = 0;
                     char *line = block->raw_text;
                     int line_count = 0;
-                    if (strlen(block->raw_text) == 0)
+                    int total_lines = block->code_line_count;
+                    int first = 0, last = total_lines;
+                    float viewport_top, viewport_bottom, scroll_delta;
+                    bool follow_bottom;
+                    float row_h = (float)Pico_FontPxU16(PICO_FONT_UI_LINE) + 2.0f;
+                    bool windowed = total_lines > 256 &&
+                        RichText_Viewport(&viewport_top, &viewport_bottom, &follow_bottom, &scroll_delta);
+                    if (windowed)
                     {
-                        line = NULL;
+                        int visible = (int)((viewport_bottom - viewport_top) / row_h) + 64;
+                        if (visible < 64) visible = 64;
+                        if (previous_scroll.found)
+                            first = (int)((viewport_top - previous_scroll.boundingBox.y - scroll_delta - 12.0f) / row_h) - 32;
+                        else if (follow_bottom)
+                            first = total_lines - visible;
+                        if (first < 0) first = 0;
+                        if (first > total_lines - visible) first = total_lines - visible;
+                        if (first < 0) first = 0;
+                        last = first + visible;
+                        if (last > total_lines) last = total_lines;
                     }
-                    while (line)
+                    int target_from;
+                    if (windowed && RichText_TargetRange(&target_from, NULL) &&
+                        target_from >= PicoChatSel_CurrentOffset() &&
+                        target_from < PicoChatSel_CurrentOffset() + (int)strlen(block->raw_text))
                     {
-                        char *newline = strchr(line, '\n');
-                        int length = newline ? (int)(newline - line) : (int)strlen(line);
+                        int offset = PicoChatSel_CurrentOffset();
+                        int target_line = 0;
+                        for (int j = 0; j < total_lines; j++)
+                        {
+                            int length = CodeLineLength(block, j);
+                            if (target_from < offset + length + 1)
+                            {
+                                target_line = j;
+                                break;
+                            }
+                            if (length > 0) offset += length + 1;
+                        }
+                        first = target_line > 32 ? target_line - 32 : 0;
+                        int visible = (int)((viewport_bottom - viewport_top) / row_h) + 64;
+                        if (visible < 64) visible = 64;
+                        if (first > total_lines - visible) first = total_lines - visible;
+                        if (first < 0) first = 0;
+                        last = first + visible;
+                        if (last > total_lines) last = total_lines;
+                    }
+                    while (line && line_count < total_lines)
+                    {
+                        int length = CodeLineLength(block, line_count);
+                        char *next_line = line_count + 1 < total_lines
+                            ? block->raw_text + block->code_line_offsets[line_count + 1] : NULL;
+                        if (windowed && line_count == 0 && first > 0)
+                        {
+                            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                       .height = CLAY_SIZING_FIXED(first * row_h - 2.0f)}}}) {}
+                        }
+                        if (windowed && (line_count < first || line_count >= last))
+                        {
+                            PicoChatSel_AppendOnly((Clay_String){.chars = line, .length = length});
+                            PicoChatSel_Break();
+                            line = next_line;
+                            line_count++;
+                            continue;
+                        }
                         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT()}}})
                         {
                             if (!hl || length == 0)
@@ -701,8 +868,13 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                             }
                         }
                         PicoChatSel_Break();
-                        line = newline ? newline + 1 : NULL;
+                        line = next_line;
                         line_count++;
+                    }
+                    if (windowed && last < total_lines)
+                    {
+                        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                   .height = CLAY_SIZING_FIXED((total_lines - last) * row_h - 2.0f)}}}) {}
                     }
                     if (line_count == 0)
                     {

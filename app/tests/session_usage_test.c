@@ -496,6 +496,39 @@ void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text
     message->source = next;
 }
 
+void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
+                                  const char *markdown, MdDocument *prepared,
+                                  const char *prepared_source)
+{
+    (void)prepared;
+    (void)prepared_source;
+    PicoAgent_AddMessage(app, agent, role, markdown);
+}
+
+void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const char *text,
+                                       MdDocument *prepared, const char *prepared_source)
+{
+    (void)prepared;
+    (void)prepared_source;
+    PicoAgent_AppendAssistant(app, agent, text);
+}
+
+MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
+{
+    (void)src;
+    (void)length;
+    (void)flags;
+    return (MdDocument){0};
+}
+
+void MdDocument_Free(MdDocument *doc)
+{
+    if (doc)
+    {
+        *doc = (MdDocument){0};
+    }
+}
+
 void PicoAgent_AddToolCall(PicoHost *app, PicoAgent *agent, const char *name, const char *args_json)
 {
     PicoAgent_AddToolCallWithId(app, agent, NULL, name, args_json);

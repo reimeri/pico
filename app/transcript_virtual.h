@@ -17,6 +17,8 @@ typedef struct PicoTranscriptVirtual {
     float font_scale;
     bool configured;
     bool measure_all;
+    float last_scroll_y;
+    bool scroll_position_known;
 } PicoTranscriptVirtual;
 
 void PicoTranscriptVirtual_Free(PicoTranscriptVirtual *cache);

@@ -48,4 +48,4 @@ Each item:
 - Query/accept run on the **main thread** while typing.
 - Esc (or a click outside the popup) dismisses completions. Query stays skipped until the composer text changes or the cursor moves to a different token.
 - Max 16 completers (`PICO_MAX_COMPLETERS`). First match for a trigger wins (`bol_only` preferred when the cursor is at bol).
-- Builtins: `/` commands, `@` workspace files. `@` rescans the selected agent's workspace when a mention token starts and keeps that snapshot while the cursor stays in the token.
+- Builtins: `/` commands, `@` workspace files. The builtin `/resume` argument list refreshes on a core worker and may be briefly empty or stale; custom completer query/accept remain synchronous. `@` rescans the selected agent's workspace when a mention token starts and keeps that snapshot while the cursor stays in the token.

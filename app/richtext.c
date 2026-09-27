@@ -775,40 +775,173 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
     }
 }
 
-static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitState *emit)
+static _Thread_local struct {
+    bool active;
+    bool follow_bottom;
+    float top, bottom, scroll_delta;
+    int target_from, target_to;
+} s_viewport;
+
+void RichText_SetViewport(float top, float bottom, bool follow_bottom, float scroll_delta)
+{
+    s_viewport.active = bottom > top;
+    s_viewport.top = top;
+    s_viewport.bottom = bottom;
+    s_viewport.follow_bottom = follow_bottom;
+    s_viewport.scroll_delta = scroll_delta;
+    s_viewport.target_from = s_viewport.target_to = -1;
+}
+void RichText_ClearViewport(void) { s_viewport.active = false; }
+bool RichText_Viewport(float *top, float *bottom, bool *follow_bottom, float *scroll_delta)
+{
+    if (!s_viewport.active) return false;
+    if (top) *top = s_viewport.top;
+    if (bottom) *bottom = s_viewport.bottom;
+    if (follow_bottom) *follow_bottom = s_viewport.follow_bottom;
+    if (scroll_delta) *scroll_delta = s_viewport.scroll_delta;
+    return true;
+}
+bool RichText_TargetRange(int *from, int *to)
+{
+    if (!s_viewport.active || s_viewport.target_from < 0) return false;
+    if (from) *from = s_viewport.target_from;
+    if (to) *to = s_viewport.target_to;
+    return true;
+}
+void RichText_SetTarget(int from, int to)
+{
+    s_viewport.target_from = from;
+    s_viewport.target_to = to;
+}
+
+/* Logical text is independent of the Clay line window. Every omitted run
+ * advances the same buffer offsets as a visible run, including soft spaces. */
+static void EmitLineRange(RtCache *cache, const RichTextStyle *style,
+                          RichTextEmitState *emit, int first, int last)
 {
     Clay_TextElementConfig space_config = TextConfigFor(style, false, false, false, false);
     uint16_t row_h = Pico_FontPxU16(style->line_height > 0 ? style->line_height : style->font_size);
-    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    for (int l = 0; l < cache->line_count; l++)
     {
-        for (int l = 0; l < cache->line_count; l++)
+        RtLine *line = &cache->lines[l];
+        if (line->hard_break_before) PicoChatSel_Break();
+        else if (l > 0 && line->run_count && line->runs[0].space_before) PicoChatSel_Glue(" ");
+        if (l == first && first > 0)
         {
-            RtLine *line = &cache->lines[l];
-            if (line->hard_break_before) PicoChatSel_Break();
-            else if (l > 0 && line->run_count && line->runs[0].space_before) PicoChatSel_Glue(" ");
-            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                     .sizing = {.width = CLAY_SIZING_GROW(0),
-                                                .height = CLAY_SIZING_FIXED((float)row_h)},
-                                     .childAlignment = {.x = style->text_align,
-                                                        .y = CLAY_ALIGN_Y_CENTER}}})
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                                 .height = CLAY_SIZING_FIXED((float)first * row_h)}}}) {}
+        }
+        if (l < first || l >= last)
+        {
+            if (!line->run_count) PicoChatSel_AppendOnly(CLAY_STRING(" "));
+            for (int r = 0; r < line->run_count; r++)
             {
-                if (line->run_count == 0)
+                if (r > 0 && line->runs[r].space_before) PicoChatSel_Glue(" ");
+                PicoChatSel_AppendOnly((Clay_String){.chars = line->runs[r].text,
+                                       .length = (int32_t)strlen(line->runs[r].text)});
+            }
+            continue;
+        }
+        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_FIXED((float)row_h)},
+                                 .childAlignment = {.x = style->text_align,
+                                                    .y = CLAY_ALIGN_Y_CENTER}}})
+        {
+            if (line->run_count == 0)
+            {
+                PicoChatSel_Text(CLAY_STRING(" "), space_config);
+            }
+            else
+            {
+                for (int r = 0; r < line->run_count; r++)
                 {
-                    PicoChatSel_Text(CLAY_STRING(" "), space_config);
-                }
-                else
-                {
-                    for (int r = 0; r < line->run_count; r++)
-                    {
-                        if (r > 0 && line->runs[r].space_before)
-                        {
-                            PicoChatSel_Text(CLAY_STRING(" "), space_config);
-                        }
-                        EmitRun(&line->runs[r], style, emit);
-                    }
+                    if (r > 0 && line->runs[r].space_before)
+                        PicoChatSel_Text(CLAY_STRING(" "), space_config);
+                    EmitRun(&line->runs[r], style, emit);
                 }
             }
+        }
+    }
+    if (last < cache->line_count)
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                           .height = CLAY_SIZING_FIXED((float)(cache->line_count - last) * row_h)}}}) {}
+    }
+}
+
+static void EmitLines(RtCache *cache, const RichTextStyle *style,
+                      RichTextEmitState *emit, Clay_ElementId id)
+{
+    int first = 0, last = cache->line_count;
+    uint16_t row_h = Pico_FontPxU16(style->line_height > 0 ? style->line_height : style->font_size);
+    bool windowed = id.id && s_viewport.active && cache->line_count > 256 && row_h;
+    if (windowed)
+    {
+        Clay_ElementData prev = Clay_GetElementData(id);
+        int visible = (int)((s_viewport.bottom - s_viewport.top) / row_h) + 64;
+        if (visible < 64) visible = 64;
+        if (prev.found)
+        {
+            first = (int)((s_viewport.top - prev.boundingBox.y - s_viewport.scroll_delta) / row_h) - 32;
+            if (first < 0) first = 0;
+        }
+        else if (s_viewport.follow_bottom)
+            first = cache->line_count - visible;
+        if (first < 0) first = 0;
+        if (s_viewport.target_from >= PicoChatSel_CurrentOffset())
+        {
+            int offset = PicoChatSel_CurrentOffset();
+            char last_char = PicoChatSel_LastByte();
+            for (int l = 0; l < cache->line_count; l++)
+            {
+                RtLine *line = &cache->lines[l];
+                if (line->hard_break_before && offset && last_char != '\n')
+                {
+                    offset++;
+                    last_char = '\n';
+                }
+                else if (l > 0 && line->run_count && line->runs[0].space_before)
+                {
+                    offset++;
+                    last_char = ' ';
+                }
+                if (!line->run_count) { offset++; last_char = ' '; }
+                for (int r = 0; r < line->run_count; r++)
+                {
+                    if (r > 0 && line->runs[r].space_before) { offset++; last_char = ' '; }
+                    int len = (int)strlen(line->runs[r].text);
+                    if (len) last_char = line->runs[r].text[len - 1];
+                    offset += len;
+                }
+                if (s_viewport.target_from < offset)
+                {
+                    first = l > 32 ? l - 32 : 0;
+                    break;
+                }
+            }
+        }
+        if (first > cache->line_count - visible) first = cache->line_count - visible;
+        if (first < 0) first = 0;
+        last = first + visible;
+        if (last > cache->line_count) last = cache->line_count;
+    }
+    if (!windowed) id = (Clay_ElementId){0};
+    if (id.id)
+    {
+        CLAY(id, {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                              .sizing = {.width = CLAY_SIZING_GROW(0),
+                                         .height = CLAY_SIZING_FIXED((float)row_h * cache->line_count)}}})
+        {
+            EmitLineRange(cache, style, emit, first, last);
+        }
+    }
+    else
+    {
+        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            EmitLineRange(cache, style, emit, first, last);
         }
     }
 }
@@ -816,9 +949,9 @@ static void EmitLines(RtCache *cache, const RichTextStyle *style, RichTextEmitSt
 // ---------------------------------------------------------------------------
 // Public API
 
-void RichText_RenderParagraphCached(MdBlock *block, MdArena *arena, float available_width,
-                                    const RichTextStyle *style, RichTextEmitState *emit,
-                                    RichTextWordCache *word_cache)
+void RichText_RenderParagraphWindowed(MdBlock *block, MdArena *arena, float available_width,
+                                      const RichTextStyle *style, RichTextEmitState *emit,
+                                      RichTextWordCache *word_cache, Clay_ElementId id)
 {
     RtCache *cache = (RtCache *)block->wrap_cache;
     if (!cache || cache->width != available_width || cache->font_size != style->font_size ||
@@ -828,7 +961,15 @@ void RichText_RenderParagraphCached(MdBlock *block, MdArena *arena, float availa
         cache = BuildWrapCache(block, arena, available_width, style, word_cache);
         block->wrap_cache = cache;
     }
-    EmitLines(cache, style, emit);
+    EmitLines(cache, style, emit, id);
+}
+
+void RichText_RenderParagraphCached(MdBlock *block, MdArena *arena, float available_width,
+                                    const RichTextStyle *style, RichTextEmitState *emit,
+                                    RichTextWordCache *word_cache)
+{
+    RichText_RenderParagraphWindowed(block, arena, available_width, style, emit, word_cache,
+                                     (Clay_ElementId){0});
 }
 
 void RichText_RenderParagraph(MdBlock *block, MdArena *arena, float available_width,

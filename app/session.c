@@ -1188,8 +1188,16 @@ static bool ReplayThinkParts(PicoHost *app, PicoAgent *agent, const JsonDoc *doc
     return restored;
 }
 
+typedef struct ReplayPreparedMessage {
+    char *content;
+    char *display;
+    char *rendered;
+    MdDocument doc;
+} ReplayPreparedMessage;
+
 static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int obj,
-                       bool into_input, int *active_group)
+                       bool into_input, int *active_group,
+                       ReplayPreparedMessage *prepared)
 {
     char *type = JsonObjStr(doc, obj, "type");
     if (!type)
@@ -1212,17 +1220,23 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     else if (strcmp(type, "message") == 0)
     {
         char *role = JsonObjStr(doc, obj, "role");
-        char *content = JsonObjStr(doc, obj, "content");
+        char *content = prepared && prepared->content ? prepared->content
+                                                        : JsonObjStr(doc, obj, "content");
         if (role && strcmp(role, "user") == 0)
         {
             if (active_group)
             {
                 *active_group = -1;
             }
-            char *display = JsonObjStr(doc, obj, "display");
+            char *display = prepared && prepared->display ? prepared->display
+                                                           : JsonObjStr(doc, obj, "display");
             char *parts = JsonObjRaw(doc, obj, "parts");
-            PicoAgent_AddMessage(app, agent, PICO_ROLE_USER,
-                               display && display[0] ? display : (content ? content : ""));
+            if (prepared && prepared->doc.arena.primary.memory)
+                PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_USER,
+                    display && display[0] ? display : (content ? content : ""), &prepared->doc, prepared->rendered);
+            else
+                PicoAgent_AddMessage(app, agent, PICO_ROLE_USER,
+                    display && display[0] ? display : (content ? content : ""));
             if (into_input)
             {
                 if (parts && parts[0] == '[')
@@ -1234,7 +1248,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
                     PicoAgent_PushHistoryUser(agent, content ? content : "");
                 }
             }
-            free(display);
+            if (!prepared || display != prepared->display) free(display);
             free(parts);
         }
         else if (role && strcmp(role, "assistant") == 0)
@@ -1245,11 +1259,15 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
             if (StartsAssistantGroup(agent->messages, agent->message_count,
                                      message_group, active_group))
             {
-                PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
+                if (prepared && prepared->doc.arena.primary.memory)
+                    PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_ASSISTANT, text, &prepared->doc, prepared->rendered);
+                else PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
             }
             else
             {
-                PicoAgent_AppendAssistant(app, agent, text);
+                if (prepared && prepared->doc.arena.primary.memory)
+                    PicoAgent_AppendAssistantPrepared(app, agent, text, &prepared->doc, prepared->rendered);
+                else PicoAgent_AppendAssistant(app, agent, text);
             }
             char *thinking = JsonObjStr(doc, obj, "thinking");
             char *signature = JsonObjStr(doc, obj, "thinking_signature");
@@ -1272,7 +1290,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
             free(parts);
         }
         free(role);
-        free(content);
+        if (!prepared || content != prepared->content) free(content);
     }
     else if (strcmp(type, "tool_call") == 0)
     {
@@ -1375,6 +1393,7 @@ typedef struct PicoSessionReplay {
     int tool_calls;
     int tool_results;
     int active_group;
+    ReplayPreparedMessage *prepared;
 } PicoSessionReplay;
 
 void PicoSession_ReplayFree(PicoSessionReplay *replay)
@@ -1384,16 +1403,25 @@ void PicoSession_ReplayFree(PicoSessionReplay *replay)
     {
         JsonFree(&replay->docs[i]);
         free(replay->lines[i]);
+        if (replay->prepared)
+        {
+            free(replay->prepared[i].content);
+            free(replay->prepared[i].display);
+            free(replay->prepared[i].rendered);
+            MdDocument_Free(&replay->prepared[i].doc);
+        }
     }
     free(replay->docs);
     free(replay->lines);
+    free(replay->prepared);
     free(replay);
 }
 
 /* Reading and strict validation are worker-safe. All ReplayLine calls remain
  * on the main thread, including historical extension tool apply callbacks. */
 static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind kind,
-                                              const atomic_bool *cancelled)
+                                              const atomic_bool *cancelled,
+                                              bool prepare_messages)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -1534,6 +1562,86 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
     replay->tool_calls = tool_calls;
     replay->tool_results = tool_results;
     replay->active_group = -1;
+    if (prepare_messages)
+    {
+        replay->prepared = calloc((size_t)n, sizeof(*replay->prepared));
+        if (!replay->prepared) { PicoSession_ReplayFree(replay); return NULL; }
+        int group = -1;
+        int prepared_docs = 0;
+        /* Keep worker preparation from multiplying one arena per JSONL
+         * record across an arbitrarily long session. Unprepared records
+         * retain the existing main-thread replay behavior. */
+        const int max_prepared_docs = 16;
+        char *assembled = NULL;
+        size_t assembled_len = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (cancelled && atomic_load(cancelled)) break;
+            JsonDoc *doc = &replay->docs[i];
+            ReplayPreparedMessage *item = &replay->prepared[i];
+            if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "message"))
+            {
+                if (JsonEq(doc, JsonObjGet(doc, 0, "role"), "user"))
+                {
+                    free(assembled); assembled = NULL; assembled_len = 0; group = -1;
+                    item->content = JsonObjStr(doc, 0, "content");
+                    item->display = JsonObjStr(doc, 0, "display");
+                    const char *shown = item->display && item->display[0]
+                                            ? item->display : item->content;
+                    if (shown && strlen(shown) > 8192 && prepared_docs < max_prepared_docs)
+                    {
+                        prepared_docs++;
+                        item->rendered = JsonDup(shown);
+                        if (item->rendered)
+                            item->doc = MdDocument_ParseEx(shown, strlen(shown),
+                                                          MD_PARSE_PRESERVE_NEWLINES);
+                    }
+                }
+                else if (JsonEq(doc, JsonObjGet(doc, 0, "role"), "assistant"))
+                {
+                    int next_group = -1;
+                    (void)JsonObjNonNegativeInt(doc, 0, "message_group", &next_group);
+                    if (group != next_group)
+                    {
+                        free(assembled); assembled = NULL; assembled_len = 0;
+                        group = next_group;
+                    }
+                    item->content = JsonObjStr(doc, 0, "content");
+                    size_t length = item->content ? strlen(item->content) : 0;
+                    char *next = realloc(assembled, assembled_len + length + 1);
+                    if (next)
+                    {
+                        assembled = next;
+                        if (length) memcpy(assembled + assembled_len, item->content, length);
+                        assembled_len += length;
+                        assembled[assembled_len] = '\0';
+                        /* Do not retain a 1 MiB parse arena for every tiny
+                         * fragment of one long assistant turn. Small chunks
+                         * keep the existing batched UI replay path. */
+                        if (length > 8192 && prepared_docs < max_prepared_docs)
+                        {
+                            prepared_docs++;
+                            item->rendered = JsonDup(assembled);
+                            if (item->rendered)
+                                item->doc = MdDocument_ParseEx(assembled, assembled_len,
+                                                               MD_PARSE_DEFAULT);
+                        }
+                    }
+                }
+            }
+            else if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "tool_call"))
+            {
+                int next_group = -1;
+                (void)JsonObjNonNegativeInt(doc, 0, "message_group", &next_group);
+                if (group != next_group)
+                {
+                    free(assembled); assembled = NULL; assembled_len = 0;
+                    group = next_group;
+                }
+            }
+        }
+        free(assembled);
+    }
     return replay;
 invalid:
     for (int i = 0; i < n; i++)
@@ -1548,7 +1656,7 @@ invalid:
 
 PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind)
 {
-    return ReplayPrepareBefore(path, kind, NULL);
+    return ReplayPrepareBefore(path, kind, NULL, false);
 }
 
 /* Returns true when complete. Call on the main thread only. */
@@ -1561,7 +1669,8 @@ bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay 
     for (int i = replay->cursor; i < end; i++)
     {
         bool into_input = replay->last_compact < 0 || i >= replay->last_compact;
-        ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group);
+        ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group,
+                   replay->prepared ? &replay->prepared[i] : NULL);
     }
     replay->cursor = end;
     return end == replay->count;
@@ -5382,7 +5491,7 @@ static void *SessionLoadRead(void *arg)
     }
     if (worker->path[0] && !atomic_load(&worker->cancelled))
         worker->replay = ReplayPrepareBefore(worker->path, PICO_AGENT_MAIN,
-                                              &worker->cancelled);
+                                              &worker->cancelled, true);
     return NULL;
 }
 

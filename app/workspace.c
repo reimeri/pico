@@ -1697,39 +1697,90 @@ static void FillInspectFromSnapshot(PicoSubagentInspect *out, const PicoSubagent
     out->message_count = slot->message_count;
 }
 
+/* The inspect overlay stays open while an owned transcript/markdown snapshot is
+ * built by a core task. No worker retains the workspace or a live agent. */
+typedef struct InspectLoadTask {
+    PicoWorkspaceId workspace_id;
+    char workspace_path[4096];
+    char session_id[40];
+    PicoMessage *messages;
+    int count;
+    PicoSessionHeader header;
+    bool loaded;
+} InspectLoadTask;
+
+static void *InspectLoadRead(void *arg)
+{
+    InspectLoadTask *task = arg;
+    PicoWorkspace *lookup = calloc(1, sizeof(*lookup));
+    if (!lookup) return NULL;
+    snprintf(lookup->path, sizeof(lookup->path), "%s", task->workspace_path);
+    char path[4096];
+    if (PicoSession_Resolve(lookup, task->session_id, false, path, sizeof(path)) == 0 &&
+        PicoSession_ReadHeader(path, &task->header) == 0 &&
+        PicoSession_LoadTranscript(lookup, task->session_id, &task->messages, &task->count) == 0)
+    {
+        PicoMessages_PrepareDocs(task->messages, task->count);
+        task->loaded = true;
+    }
+    free(lookup);
+    return NULL;
+}
+
+static void InspectLoadCompleted(PicoHost *host, void *arg)
+{
+    InspectLoadTask *task = arg;
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, task->workspace_id);
+    if (!ws || strcmp(ws->path, task->workspace_path) != 0 ||
+        strcmp(ws->inspect_loading_id, task->session_id) != 0) return;
+    ws->inspect_loading_id[0] = '\0';
+    if (ws->state != PICO_WORKSPACE_OPEN) return;
+    if (!task->loaded)
+    {
+        snprintf(ws->inspect_failed_id, sizeof(ws->inspect_failed_id), "%s", task->session_id);
+        return;
+    }
+    if (FindSnapshot(ws, 0, task->session_id)) return;
+    PicoSubagentSnapshot *slot = AllocSnapshot(ws);
+    if (!slot) return;
+    slot->messages = task->messages;
+    slot->message_count = task->count;
+    task->messages = NULL;
+    task->count = 0;
+    snprintf(slot->session_id, sizeof(slot->session_id), "%s", task->session_id);
+    snprintf(slot->profile, sizeof(slot->profile), "%s", task->header.profile);
+    snprintf(slot->purpose, sizeof(slot->purpose), "%s", task->header.initial_purpose);
+    snprintf(slot->model, sizeof(slot->model), "%s", task->header.model);
+}
+
+static void InspectLoadDestroy(void *arg)
+{
+    InspectLoadTask *task = arg;
+    PicoMessages_Free(task->messages, task->count);
+    free(task);
+}
+
 static bool LoadSnapshotFromSession(PicoWorkspace *workspace, const char *session_id)
 {
-    if (!workspace || !workspace->host || !session_id || !session_id[0] ||
-        FindSnapshot(workspace, 0, session_id))
+    if (!workspace || !workspace->host || !session_id || !session_id[0]) return false;
+    if (FindSnapshot(workspace, 0, session_id)) return true;
+    if (strcmp(workspace->inspect_failed_id, session_id) == 0) return false;
+    if (workspace->inspect_loading_id[0]) return false;
+    workspace->inspect_failed_id[0] = '\0';
+    InspectLoadTask *task = calloc(1, sizeof(*task));
+    if (!task) return false;
+    task->workspace_id = workspace->id;
+    snprintf(task->workspace_path, sizeof(task->workspace_path), "%s", workspace->path);
+    snprintf(task->session_id, sizeof(task->session_id), "%s", session_id);
+    if (!PicoHost_StartTaskCompleted(workspace->host, InspectLoadRead, task, NULL,
+                                     InspectLoadCompleted, InspectLoadDestroy))
     {
-        return FindSnapshot(workspace, 0, session_id) != NULL;
-    }
-    PicoMessage *messages = NULL;
-    int count = 0;
-    if (PicoSession_LoadTranscript(workspace, session_id, &messages, &count) != 0)
-    {
+        free(task);
         return false;
     }
-    PicoMessages_PrepareDocs(messages, count);
-    PicoSubagentSnapshot *slot = AllocSnapshot(workspace);
-    if (!slot)
-    {
-        PicoMessages_Free(messages, count);
-        return false;
-    }
-    slot->messages = messages;
-    slot->message_count = count;
-    snprintf(slot->session_id, sizeof(slot->session_id), "%s", session_id);
-    PicoSessionHeader header;
-    char path[4096];
-    if (PicoSession_Resolve(workspace, session_id, false, path, sizeof(path)) == 0 &&
-        PicoSession_ReadHeader(path, &header) == 0)
-    {
-        snprintf(slot->profile, sizeof(slot->profile), "%s", header.profile);
-        snprintf(slot->purpose, sizeof(slot->purpose), "%s", header.initial_purpose);
-        snprintf(slot->model, sizeof(slot->model), "%s", header.model);
-    }
-    return true;
+    snprintf(workspace->inspect_loading_id, sizeof(workspace->inspect_loading_id),
+             "%s", session_id);
+    return false;
 }
 
 static void LinkDelegationToolRows(PicoWorkspace *workspace)
@@ -1767,6 +1818,14 @@ static void LinkDelegationToolRows(PicoWorkspace *workspace)
         }
         StampSubagentLine(line, child_id, sid);
     }
+}
+
+void PicoWorkspace_InspectDismissFailure(PicoHost *host, const char *session_id)
+{
+    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(host);
+    if (workspace && session_id && session_id[0] &&
+        strcmp(workspace->inspect_failed_id, session_id) == 0)
+        workspace->inspect_failed_id[0] = '\0';
 }
 
 bool PicoWorkspace_InspectSubagent(PicoHost *host, const PicoTraceLine *line,

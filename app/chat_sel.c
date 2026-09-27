@@ -378,6 +378,24 @@ void PicoChatSel_Glue(const char *s)
     BufAppend(b, s, (int)strlen(s));
 }
 
+void PicoChatSel_AppendOnly(Clay_String text)
+{
+    SelBuf *b = CurBuf();
+    if (b && text.chars && text.length > 0) BufAppend(b, text.chars, text.length);
+}
+
+int PicoChatSel_CurrentOffset(void)
+{
+    SelBuf *b = CurBuf();
+    return b ? b->len : 0;
+}
+
+char PicoChatSel_LastByte(void)
+{
+    SelBuf *b = CurBuf();
+    return b && b->len > 0 ? b->text[b->len - 1] : '\0';
+}
+
 void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config)
 {
     if (s_cur_msg < 0 || text.length <= 0 || !text.chars)
@@ -779,6 +797,11 @@ void PicoChatSel_VisitRange(int msg, int from, int to, PicoChatRangeFn visit, vo
         int h = lo > buffer->first_hit ? lo - 1 : lo;
         if (h >= buffer->end_hit) h = buffer->end_hit - 1;
         SelHit *hit = &s_hits[h];
+        /* Do not synthesize geometry for an arbitrary offscreen gap between
+         * windowed lines. This fallback only represents the single missing
+         * separator next to a rendered run. */
+        if (from < hit->start - 1 || from > hit->start + hit->length + 1 ||
+            (buffer->text[from] != ' ' && buffer->text[from] != '\n')) return;
         Clay_ElementData el = Clay_GetElementData(CLAY_IDI("ChatRun", h));
         if (el.found && PrepareHit(hit, el.boundingBox))
         {

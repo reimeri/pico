@@ -1556,6 +1556,12 @@ void PicoPlugins_Reload(PicoHost *app)
     PicoPlugins_ReloadHost(app);
 }
 
+void PicoPlugins_StopScanner(PicoHost *app) { (void)app; }
+bool PicoPlugins_QuiesceScannerBefore(PicoHost *app, const struct timespec *deadline)
+{
+    (void)app; (void)deadline;
+    return true;
+}
 void PicoPlugins_Shutdown(PicoHost *app)
 {
     (void)app;

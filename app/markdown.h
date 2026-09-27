@@ -106,6 +106,15 @@ typedef struct MdBlock {
     // Highlight span cache for MDB_CODE (filled in by md_view.c on first
     // render). Lives in the document arena, freed automatically on reload.
     void *hl_cache;
+    /* Full logical code width survives inner vertical line window changes. */
+    float code_width_cache;
+    uint64_t code_width_font_generation;
+    float code_width_font_scale;
+    bool code_width_valid;
+    const char *code_width_next; /* document-owned source cursor */
+    int *code_line_offsets; /* document-owned start byte for each source line */
+    int code_line_count;
+    int code_byte_count;
 } MdBlock;
 
 typedef struct MdDocument {

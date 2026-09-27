@@ -164,6 +164,8 @@ struct PicoWorkspace {
     PicoSubagentSnapshot *snapshots;
     int snapshot_count;
     int snapshot_capacity;
+    char inspect_loading_id[40];
+    char inspect_failed_id[40];
     pthread_mutex_t lifecycle_mu;
     pthread_mutex_t ui_post_mu;
     PicoUiMailbox ui_mailboxes[PICO_MAX_UI_POSTS];
@@ -248,6 +250,7 @@ bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id)
 PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
                                      PicoAgentId *out);
 
+void PicoWorkspace_InspectDismissFailure(PicoHost *host, const char *session_id);
 bool PicoWorkspace_InspectSubagent(PicoHost *host, const PicoTraceLine *line,
                                    PicoSubagentInspect *out);
 

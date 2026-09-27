@@ -28,6 +28,73 @@
 
 #include "raylib.h"
 
+static uint64_t s_resume_cache_serial;
+
+typedef struct ResumeListCache {
+    uint64_t serial;
+    PicoWorkspaceId workspace_id;
+    char workspace_path[4096];
+    PicoSessionInfo *items;
+    int count;
+    bool pending;
+    double next_refresh;
+} ResumeListCache;
+
+typedef struct ResumeListTask {
+    uint64_t serial;
+    PicoWorkspaceId workspace_id;
+    char workspace_path[4096];
+    PicoSessionInfo *items;
+    int count;
+    ResumeListCache *owner; /* compared only after verifying live builtin state */
+} ResumeListTask;
+
+static void *ResumeListRead(void *arg)
+{
+    ResumeListTask *task = arg;
+    PicoWorkspace *lookup = calloc(1, sizeof(*lookup));
+    if (!lookup) return NULL;
+    snprintf(lookup->path, sizeof(lookup->path), "%s", task->workspace_path);
+    task->count = PicoSession_List(lookup, &task->items, true);
+    free(lookup);
+    return NULL;
+}
+
+static void ResumeListDone(PicoHost *host, void *arg)
+{
+    ResumeListTask *task = arg;
+    ResumeListCache *cache = PicoPlugins_HostState(host, "commands");
+    if (!cache || cache != task->owner || cache->serial != task->serial) return;
+    cache->pending = false;
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(host);
+    if (!ws || ws->id != task->workspace_id ||
+        strcmp(ws->path, task->workspace_path) != 0)
+    {
+        cache->next_refresh = 0;
+        return;
+    }
+    free(cache->items);
+    cache->items = task->items;
+    task->items = NULL;
+    cache->count = task->count;
+    cache->next_refresh = GetTime() + 2.0;
+    PicoComplete_Refresh(host);
+}
+
+static void ResumeListDestroy(void *arg)
+{
+    ResumeListTask *task = arg;
+    free(task->items);
+    free(task);
+}
+
+static void CommandsHostShutdown(PicoHost *host, void *state)
+{
+    (void)host;
+    ResumeListCache *cache = state;
+    if (cache) { free(cache->items); free(cache); }
+}
+
 static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
 {
     PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, text);
@@ -806,7 +873,6 @@ static int AuthQuery(PicoHost *app, bool is_login, const char *rest, PicoComplet
 
 static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
-    (void)state;
     char cmd[64];
     const char *rest = "";
     SplitPrefix(prefix, cmd, sizeof(cmd), &rest);
@@ -944,9 +1010,37 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
     }
     if (FoldEq(cmd, "resume"))
     {
-        PicoSessionInfo *list = NULL;
+        ResumeListCache *cache = state;
         const PicoAgent *selected = PicoHost_SelectedAgentConst(app);
-        int nlist = PicoSession_List(PicoAgent_Workspace(selected), &list, true);
+        PicoWorkspace *workspace = PicoAgent_Workspace(selected);
+        if (!cache || !workspace) return 0;
+        if (cache->workspace_id != workspace->id ||
+            strcmp(cache->workspace_path, workspace->path) != 0)
+        {
+            free(cache->items);
+            cache->items = NULL;
+            cache->count = 0;
+            cache->workspace_id = workspace->id;
+            snprintf(cache->workspace_path, sizeof(cache->workspace_path), "%s", workspace->path);
+            cache->next_refresh = 0;
+        }
+        if (!cache->pending && GetTime() >= cache->next_refresh)
+        {
+            ResumeListTask *task = calloc(1, sizeof(*task));
+            if (task)
+            {
+                task->owner = cache;
+                task->serial = cache->serial;
+                task->workspace_id = workspace->id;
+                snprintf(task->workspace_path, sizeof(task->workspace_path), "%s", workspace->path);
+                if (PicoHost_StartTaskCompleted(app, ResumeListRead, task, NULL,
+                                               ResumeListDone, ResumeListDestroy))
+                    cache->pending = true;
+                else free(task);
+            }
+        }
+        const PicoSessionInfo *list = cache->items;
+        int nlist = cache->count;
         for (int i = 0; i < nlist && n < max; i++)
         {
             const PicoSessionInfo *s = &list[i];
@@ -968,7 +1062,6 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
             snprintf(out[n].insert, sizeof(out[n].insert), "/resume %s", s->id);
             n++;
         }
-        free(list);
         return n;
     }
     if (FoldEq(cmd, "skill"))
@@ -1036,7 +1129,10 @@ static void CommandsBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *
 
 static int CommandsHostInit(PicoHost *app, void **state_out)
 {
-    (void)state_out;
+    ResumeListCache *cache = calloc(1, sizeof(*cache));
+    if (!cache) return -1;
+    cache->serial = ++s_resume_cache_serial;
+    *state_out = cache;
     pico_host_add_command(app, "login", "Sign in a provider", CmdLogin);
     pico_host_add_command(app, "logout", "Sign out a provider", CmdLogout);
     pico_host_add_command(app, "quit", "Quit Pico", CmdQuit);
@@ -1068,6 +1164,7 @@ PicoExt pico_ext_commands(void)
         .name = "commands",
         .description = "Slash commands",
         .host_init = CommandsHostInit,
+        .host_shutdown = CommandsHostShutdown,
         .workspace_init = CommandsWorkspaceInit,
     };
 }

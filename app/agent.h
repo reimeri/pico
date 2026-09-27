@@ -65,6 +65,13 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text);
+/* Replay-only: transfer worker-prepared markdown to the private candidate.
+ * On allocation failure the caller still owns the document. */
+void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
+                                  const char *markdown, MdDocument *prepared,
+                                  const char *prepared_source);
+void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const char *text,
+                                       MdDocument *prepared, const char *prepared_source);
 void PicoAgent_AppendThink(PicoHost *app, PicoAgent *agent, const char *text, int think_ms);
 void PicoAgent_AppendThinkSummary(PicoHost *app, PicoAgent *agent, const char *text,
                                   int step, int think_ms);

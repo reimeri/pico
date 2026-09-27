@@ -1564,7 +1564,9 @@ static void RunSlot(PicoHost *host, PicoUiSlot slot)
     }
 }
 
-void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown)
+void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
+                                  const char *markdown, MdDocument *prepared,
+                                  const char *prepared_source)
 {
     if (!app || !agent)
     {
@@ -1590,12 +1592,24 @@ void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const 
     {
         memcpy(msg->source, markdown ? markdown : "", len + 1);
     }
-    msg->doc = MdDocument_ParseEx(markdown ? markdown : "", len,
-                                  role == PICO_ROLE_USER ? MD_PARSE_PRESERVE_NEWLINES : MD_PARSE_DEFAULT);
+    if (prepared && prepared_source && strcmp(prepared_source, markdown ? markdown : "") == 0)
+    {
+        msg->doc = *prepared;
+        *prepared = (MdDocument){0};
+    }
+    else
+        msg->doc = MdDocument_ParseEx(markdown ? markdown : "", len,
+                                      role == PICO_ROLE_USER ? MD_PARSE_PRESERVE_NEWLINES : MD_PARSE_DEFAULT);
     pico_run_hooks(app, PICO_HOOK_ON_MESSAGE, agent->id);
 }
 
-void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text)
+void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown)
+{
+    PicoAgent_AddMessagePrepared(app, agent, role, markdown, NULL, NULL);
+}
+
+void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const char *text,
+                                       MdDocument *prepared, const char *prepared_source)
 {
     if (!agent)
     {
@@ -1607,7 +1621,7 @@ void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text
     }
     if (agent->message_count <= 0 || agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
     {
-        PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
+        PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_ASSISTANT, text, prepared, prepared_source);
         return;
     }
     if (!text[0])
@@ -1625,7 +1639,12 @@ void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text
     memcpy(next + old, text, n + 1);
     m->source = next;
     MdDocument_Free(&m->doc);
-    m->doc = MdDocument_ParseEx(m->source, old + n, MD_PARSE_DEFAULT);
+    if (prepared && prepared_source && strcmp(prepared_source, m->source) == 0)
+    {
+        m->doc = *prepared;
+        *prepared = (MdDocument){0};
+    }
+    else m->doc = MdDocument_ParseEx(m->source, old + n, MD_PARSE_DEFAULT);
 }
 
 void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *call_id,
@@ -1786,6 +1805,11 @@ void pico_agent_set_compact_summary(PicoHost *app, PicoAgentId agent_id, char *s
     }
     free(agent->compact_summary);
     agent->compact_summary = summary;
+}
+
+void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text)
+{
+    PicoAgent_AppendAssistantPrepared(app, agent, text, NULL, NULL);
 }
 
 static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const char *text,
@@ -3079,7 +3103,8 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 1;
-    for (PicoHostTask *task = host->tasks; task; task = task->next) task->cancel(task->state);
+    for (PicoHostTask *task = host->tasks; task; task = task->next)
+        if (task->cancel) task->cancel(task->state);
     for (i = 0; i < host->workspace_count; i++)
     {
         if (host->workspaces[i])
@@ -3671,6 +3696,7 @@ void PicoHost_Frame(PicoHost *app)
             SkipClayPresent(render_commands);
             return;
         }
+        PicoChat_RecordVirtualScroll();
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
         {

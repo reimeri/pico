@@ -42,4 +42,4 @@ Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types 
 - Max 64 commands (`PICO_MAX_COMMANDS`).
 - Builtin `/` completer (`bol_only`) lists your command automatically.
 
-To offer argument completions (`/docs topic`), add a `pico_host_add_completer` or `pico_workspace_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`. `/resume` completions list parent sessions; a subagent session can still be opened by typing its session ID.
+To offer argument completions (`/docs topic`), add a `pico_host_add_completer` or `pico_workspace_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`. `/resume` completions list parent sessions from an asynchronously refreshed core snapshot, so the popup may initially be empty or briefly stale while disk scanning completes; a subagent session can still be opened by typing its session ID.

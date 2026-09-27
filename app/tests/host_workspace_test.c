@@ -2285,7 +2285,11 @@ static void FindLayoutFrame(PicoHost *host, Clay_Dimensions viewport)
     Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0);
     (void)PicoHost_LayoutShell(host, viewport.height, 0);
     PicoChat_HarvestVirtualHeights(host);
-    if (PicoChatFind_Reveal(host)) (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    if (PicoChatFind_Reveal(host))
+    {
+        (void)PicoHost_LayoutShell(host, viewport.height, 0);
+        PicoChat_RecordVirtualScroll();
+    }
 }
 
 typedef struct FindTestRange {
@@ -2510,6 +2514,89 @@ static int TestChatFindTranscript(void)
     chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
     if (!range.found || !ShellVerticallyContains(chat.boundingBox, range.box))
     { Fail("a whitespace-only hit at a soft wrap must be reachable"); goto done; }
+    /* A mounted row much taller than the viewport must retain its logical
+     * text and scroll range without exhausting the ordinary Clay arena. */
+    PicoAgent_ClearMessages(agent);
+    host->preferences.chat_width = 20;
+    const size_t huge_len = 256 * 1024;
+    char *huge = malloc(huge_len + 40);
+    if (!huge) { Fail("large visible row allocation"); goto done; }
+    memset(huge, 'a', huge_len);
+    strcpy(huge + huge_len, " deep-window-needle");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, huge);
+    free(huge);
+    int32_t ordinary_capacity = Clay_GetMaxElementCount();
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, "deep-window-needle");
+    for (int i = 0; i < 5; i++) FindLayoutFrame(host, viewport);
+    if (search->count != 1 || search->active < 0) goto done;
+    match = search->matches[search->active];
+    range = (FindTestRange){0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (Clay_GetMaxElementCount() != ordinary_capacity || search->count != 1 ||
+        !range.found || !ShellVerticallyContains(chat.boundingBox, range.box) ||
+        !scroll.found || scroll.contentDimensions.height <= viewport.height * 10.0f)
+    { Fail("giant visible paragraph must keep full scroll/search with bounded Clay elements"); goto done; }
+
+    PicoAgent_ClearMessages(agent);
+    FILE *block = tmpfile();
+    if (!block) { Fail("large code fixture allocation"); goto done; }
+    fputs("```text\n", block);
+    fputs("short\n", block);
+    for (int i = 0; i < 10500; i++)
+    {
+        if (i == 5000)
+        {
+            for (int j = 0; j < 300; j++) fputc('W', block);
+            fputs(" middle-window-needle\n", block);
+        }
+        else if (i == 10490)
+        {
+            for (int j = 0; j < 300; j++) fputc('W', block);
+            fputs(" last-window-needle\n", block);
+        }
+        else fputs("short\n", block);
+    }
+    fputs("```\n", block);
+    long code_len = ftell(block);
+    if (code_len <= 0 || fseek(block, 0, SEEK_SET) != 0) { fclose(block); goto done; }
+    char *code_source = malloc((size_t)code_len + 1);
+    if (!code_source || fread(code_source, 1, (size_t)code_len, block) != (size_t)code_len)
+    { free(code_source); fclose(block); goto done; }
+    fclose(block);
+    code_source[code_len] = '\0';
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, code_source);
+    free(code_source);
+    host->chat_follow_bottom = true;
+    for (int i = 0; i < 3; i++) FindLayoutFrame(host, viewport);
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, "middle-window-needle");
+    for (int i = 0; i < 5; i++) FindLayoutFrame(host, viewport);
+    if (search->count != 1 || Clay_GetMaxElementCount() != ordinary_capacity)
+    { Fail("middle of giant code block must remain searchable at ordinary Clay capacity"); goto done; }
+    match = search->matches[search->active];
+    range = (FindTestRange){0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    Clay_ScrollContainerData mid_horizontal = Clay_GetScrollContainerData(range.horizontal);
+    if (!range.found || !mid_horizontal.found || !mid_horizontal.scrollPosition ||
+        mid_horizontal.scrollPosition->x >= 0)
+    { Fail("search must horizontally reveal a wide late code line before the width scan reaches it"); goto done; }
+    PicoChatFind_SetQuery(host, "last-window-needle");
+    for (int i = 0; i < 5; i++) FindLayoutFrame(host, viewport);
+    if (search->count != 1 || Clay_GetMaxElementCount() != ordinary_capacity)
+    { Fail("end of giant code block must be reachable at ordinary Clay capacity"); goto done; }
+    match = search->matches[search->active];
+    range = (FindTestRange){0};
+    PicoChatSel_VisitRange(match.message, match.from, match.to, FindCaptureRange, &range);
+    chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    Clay_ScrollContainerData horizontal_window = Clay_GetScrollContainerData(range.horizontal);
+    if (!range.found || !ShellVerticallyContains(chat.boundingBox, range.box) ||
+        !horizontal_window.found ||
+        horizontal_window.contentDimensions.width <= horizontal_window.scrollContainerDimensions.width)
+    { Fail("giant code block must keep full horizontal extent while vertically windowed"); goto done; }
+
     PicoChatFind_Open(host);
     PicoChatFind_SetQuery(host, "remember only this conversation");
     PicoAgentId other;
@@ -10047,6 +10134,175 @@ done:
     return rc;
 }
 
+/* Parsing and decoding a single huge message belongs on the read worker.
+ * The one-record replay remains main-thread so extension hooks keep their
+ * ordering and threading, but should not reparse its large Markdown source. */
+static int TestAsyncReplayLargeMessage(void)
+{
+    char dir[] = "/tmp/pico-large-replay-XXXXXX";
+    char cfg[] = "/tmp/pico-large-replay-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId old_id = 0, current_id = 0;
+    int result = 1;
+    char path[4096] = {0}, session_id[40] = {0};
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+                                      .session_start = PICO_SESSION_NEW, .select = true};
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws_id) != PICO_OK ||
+        pico_main_agent_create(host, ws_id, &options, &old_id) != PICO_OK) goto done;
+    PicoAgent *old = PicoHost_FindAgent(host, old_id);
+    if (!old || PicoSession_LogUser(host, old, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, old)) goto done;
+    snprintf(path, sizeof(path), "%s", old->session_path);
+    snprintf(session_id, sizeof(session_id), "%s", old->session_id);
+    FILE *file = fopen(path, "ab");
+    if (!file) goto done;
+    fputs("{\"type\":\"message\",\"role\":\"assistant\",\"message_group\":1,\"content\":\"", file);
+    for (int i = 0; i < 256 * 1024; i++) fputc('a', file);
+    fputs(" saved-record-target\"}\n", file);
+    for (int i = 0; i < 150; i++)
+        fprintf(file, "{\"type\":\"message\",\"role\":\"assistant\",\"message_group\":1,\"content\":\" fragment-%d\"}\n", i);
+    if (fclose(file) != 0 || pico_agent_close(host, old_id) != PICO_OK) goto done;
+    options.session_start = PICO_SESSION_NONE;
+    if (pico_main_agent_create(host, ws_id, &options, &current_id) != PICO_OK ||
+        PicoSession_LoadAsync(host, ws_id, current_id, session_id, false,
+                              false, false, false) != PICO_OK) goto done;
+    double slowest = 0;
+    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    {
+        double start = TestMonotonicTime();
+        pico_host_pump(host);
+        double elapsed = TestMonotonicTime() - start;
+        if (elapsed > slowest) slowest = elapsed;
+        usleep(1000);
+    }
+    PicoAgent *loaded = PicoHost_SelectedAgent(host);
+    if (PicoSession_LoadPending(host) || !loaded || loaded->id == current_id ||
+        loaded->message_count != 2 || !loaded->messages[1].doc.block_count ||
+        !strstr(loaded->messages[1].source, "saved-record-target") ||
+        !strstr(loaded->messages[1].source, "fragment-149") ||
+        DocTextBytes(&loaded->messages[1]) != strlen(loaded->messages[1].source) ||
+        slowest > 0.1)
+    {
+        Fail("large validated message must replay atomically without a long UI pump");
+        goto done;
+    }
+    result = 0;
+done:
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    return result;
+}
+
+static int TestSavedSubagentInspectLoadsOffThread(void)
+{
+    char dir[] = "/tmp/pico-inspect-async-XXXXXX";
+    char cfg[] = "/tmp/pico-inspect-async-cfg-XXXXXX";
+    PicoHost *seed_host = NULL, *viewer = NULL;
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId parent_id = 0, child_id = 0;
+    char session_id[40] = {0};
+    int result = 1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    PicoAgentCreateOptions main_options = {.kind = PICO_AGENT_MAIN,
+                                           .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_host_init(&seed_host, NULL, true) != PICO_OK ||
+        pico_workspace_open(seed_host, dir, &ws_id) != PICO_OK ||
+        pico_main_agent_create(seed_host, ws_id, &main_options, &parent_id) != PICO_OK) goto done;
+    PicoWorkspace *ws = PicoHost_FindWorkspace(seed_host, ws_id);
+    PicoAgentCreateOptions child_options = {.kind = PICO_AGENT_SUBAGENT,
+        .parent_id = parent_id, .profile = "inspect-test", .purpose = "inspect session",
+        .session_start = PICO_SESSION_NEW};
+    if (PicoWorkspace_CreateAgent(ws, &child_options, &child_id) != PICO_OK) goto done;
+    PicoAgent *child = PicoHost_FindAgent(seed_host, child_id);
+    if (!child || PicoSession_LogUser(seed_host, child, "saved child content", "saved child content", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(seed_host, child)) goto done;
+    snprintf(session_id, sizeof(session_id), "%s", child->session_id);
+    pico_host_free(seed_host);
+    seed_host = NULL;
+    if (pico_host_init(&viewer, NULL, true) != PICO_OK ||
+        pico_workspace_open(viewer, dir, &ws_id) != PICO_OK) goto done;
+    PicoTraceLine line = {0};
+    snprintf(line.child_session_id, sizeof(line.child_session_id), "%s", session_id);
+    PicoSubagentInspect info = {0};
+    double start = TestMonotonicTime();
+    bool immediate = PicoWorkspace_InspectSubagent(viewer, &line, &info);
+    if (immediate || TestMonotonicTime() - start > 0.1) goto done;
+    ws = PicoHost_FindWorkspace(viewer, ws_id);
+    for (int i = 0; i < 10000 && ws->inspect_loading_id[0]; i++)
+    {
+        pico_host_pump(viewer);
+        usleep(1000);
+    }
+    if (ws->inspect_loading_id[0] ||
+        !PicoWorkspace_InspectSubagent(viewer, &line, &info) ||
+        info.message_count != 1 || !info.messages ||
+        strcmp(info.messages[0].source, "saved child content") != 0)
+    { Fail("saved subagent inspection must publish complete worker-loaded transcript"); goto done; }
+    result = 0;
+done:
+    if (seed_host) pico_host_free(seed_host);
+    if (viewer) pico_host_free(viewer);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (result && !g_failed) Fail("async inspection setup failed");
+    return result;
+}
+
+static int TestResumeCompletionDoesNotScanOnUi(void)
+{
+    char dir[] = "/tmp/pico-resume-complete-XXXXXX";
+    char cfg[] = "/tmp/pico-resume-complete-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId id = 0;
+    char session_id[40] = {0};
+    int result = 1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+                                      .session_start = PICO_SESSION_NEW, .select = true};
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws_id) != PICO_OK ||
+        pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    if (!agent || PicoSession_LogUser(host, agent, "completion seed", "completion seed", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, agent)) goto done;
+    snprintf(session_id, sizeof(session_id), "%s", agent->session_id);
+    const PicoCompleter *command = NULL;
+    for (int i = 0; i < host->completer_count; i++)
+        if (host->completers[i].trigger == '/' && host->completers[i].host_query)
+            command = &host->completers[i];
+    if (!command) goto done;
+    PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
+    double start = TestMonotonicTime();
+    int count = command->host_query(host, "resume ", items, PICO_MAX_COMPLETE_ITEMS, command->state);
+    if (count != 0 || TestMonotonicTime() - start > 0.1) goto done;
+    for (int i = 0; i < 10000 && !count; i++)
+    {
+        pico_host_pump(host);
+        count = command->host_query(host, "resume ", items, PICO_MAX_COMPLETE_ITEMS, command->state);
+        if (!count) usleep(1000);
+    }
+    bool found = false;
+    for (int i = 0; i < count; i++)
+        if (strstr(items[i].insert, session_id)) found = true;
+    if (!found)
+    { Fail("resume completion must publish worker-listed parent sessions"); goto done; }
+    result = 0;
+done:
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (result && !g_failed) Fail("async resume completion setup failed");
+    return result;
+}
+
 static int TestResumeLoadsStoredModel(void)
 {
     char dir[] = "/tmp/pico-ws-model-XXXXXX";
@@ -12201,6 +12457,9 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestAsyncSessionReplay() != 0) return 1;
+    if (TestAsyncReplayLargeMessage() != 0) return 1;
+    if (TestSavedSubagentInspectLoadsOffThread() != 0) return 1;
+    if (TestResumeCompletionDoesNotScanOnUi() != 0) return 1;
     if (TestResumeLoadsStoredModel() != 0)
     {
         return 1;

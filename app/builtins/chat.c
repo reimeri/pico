@@ -1003,8 +1003,13 @@ static void RenderThinkMarkdown(const TranscriptView *view, int message_index, i
             continue;
         }
         ViewBreak(view);
-        RichText_RenderParagraphCached(block, &doc->arena, available_width, &style, &emit,
-                                       entry->word_cache_pending ? &entry->word_cache : NULL);
+        uint32_t window_id = (uint32_t)(view->virtual_identity ^
+                             ((uint64_t)(message_index + 1) << 21) ^
+                             ((uint64_t)(trace_index + 1) << 12) ^
+                             ((uint64_t)(part_index + 1) << 7) ^ (uint64_t)b);
+        RichText_RenderParagraphWindowed(block, &doc->arena, available_width, &style, &emit,
+                                         entry->word_cache_pending ? &entry->word_cache : NULL,
+                                         CLAY_IDI("ThinkParagraph", window_id));
         ViewBreak(view);
     }
     if (entry->word_cache_pending)
@@ -2238,6 +2243,26 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
         {
             PicoChatSel_SetMessage(i);
         }
+        Clay_ElementData window = Clay_GetElementData(Clay_GetElementId(view->scroll_id));
+        Clay_Dimensions dimensions = Clay_GetLayoutDimensions();
+        float window_top = window.found ? window.boundingBox.y : 0.0f;
+        float window_bottom = window.found ? window_top + window.boundingBox.height
+                                           : dimensions.height;
+        Clay_ScrollContainerData position = Clay_GetScrollContainerData(Clay_GetElementId(view->scroll_id));
+        float scroll_delta = view->virtual_cache && view->virtual_cache->scroll_position_known &&
+                             position.found && position.scrollPosition
+                           ? position.scrollPosition->y - view->virtual_cache->last_scroll_y : 0.0f;
+        RichText_SetViewport(window_top, window_bottom,
+                             overlay ? g_inspect_follow : view->app->chat_follow_bottom,
+                             scroll_delta);
+        RichText_SetTarget(-1, -1);
+        if (view->selectable && view->app->find.open && (view->app->find.reveal || view->app->find.nearest) &&
+            view->app->find.search.active >= 0 &&
+            view->app->find.search.active < view->app->find.search.count)
+        {
+            PicoChatMatch match = view->app->find.search.matches[view->app->find.search.active];
+            if (match.message == i) RichText_SetTarget(match.from, match.to);
+        }
         bool has_source = msg->source && msg->source[0];
         bool live = !user && i == view->message_count - 1 && OwnerWaiting(view);
         bool live_llm = live && view->state == PICO_AGENT_LLM_WAIT;
@@ -2254,6 +2279,7 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
             int markdown_id_base = (int)(uint32_t)(markdown_identity ^ (markdown_identity >> 32));
             MdView_RenderDocument(&msg->doc, markdown_id_base, available_width);
         }
+        RichText_ClearViewport();
         if (view->selectable)
         {
             PicoChatSel_SetMessage(-1);
@@ -2412,12 +2438,32 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
     }
 }
 
+void PicoChat_RecordVirtualScroll(void)
+{
+    Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (chat.found && chat.scrollPosition)
+    {
+        g_main_virtual.last_scroll_y = chat.scrollPosition->y;
+        g_main_virtual.scroll_position_known = true;
+    }
+    Clay_ScrollContainerData inspect = Clay_GetScrollContainerData(CLAY_ID("SubagentChatScroll"));
+    if (inspect.found && inspect.scrollPosition)
+    {
+        g_inspect_virtual.last_scroll_y = inspect.scrollPosition->y;
+        g_inspect_virtual.scroll_position_known = true;
+    }
+}
+
 void PicoChat_HarvestVirtualHeights(PicoHost *app)
 {
     if (!app)
     {
         return;
     }
+    /* The incoming scroll offset belongs to the layout we just harvested.
+     * Anchor correction may change it below, so retain the pre-correction
+     * value until the corrected same-frame layout has completed. */
+    PicoChat_RecordVirtualScroll();
     HarvestTranscriptHeights(&g_main_virtual, 0, CLAY_STRING("ChatScroll"),
                              !app->chat_follow_bottom);
     HarvestTranscriptHeights(&g_inspect_virtual, g_inspect_virtual_ns,
@@ -2719,6 +2765,7 @@ static bool InspectPop(void)
         return false;
     }
     g_inspect_n--;
+    if (g_app) PicoWorkspace_InspectDismissFailure(g_app, g_inspect[g_inspect_n].session_id);
     free(g_inspect[g_inspect_n].tool_call_id);
     free(g_inspect[g_inspect_n].fallback);
     memset(&g_inspect[g_inspect_n], 0, sizeof(g_inspect[g_inspect_n]));
@@ -2973,9 +3020,15 @@ static void InspectRender(PicoHost *app, void *state)
     static char title[192];
     static char meta[256];
     const InspectFrame *frame = &g_inspect[g_inspect_n - 1];
+    PicoWorkspace *inspect_ws = PicoHost_SelectedWorkspace(app);
+    bool loading = inspect_ws && frame->session_id[0] &&
+                   strcmp(inspect_ws->inspect_loading_id, frame->session_id) == 0;
+    bool unavailable = inspect_ws && frame->session_id[0] &&
+                       strcmp(inspect_ws->inspect_failed_id, frame->session_id) == 0;
     bool queued = !found && !frame->child_id && !frame->session_id[0] &&
                   (!fallback || !fallback[0]);
-    const char *status = found && inspect.live ? "Running" : queued ? "Queued" : "Done";
+    const char *status = found && inspect.live ? "Running" : loading ? "Loading" :
+                         unavailable ? "Unavailable" : queued ? "Queued" : "Done";
     if (found && inspect.profile[0])
     {
         snprintf(title, sizeof(title), "%s · %s", inspect.profile, status);
@@ -3119,6 +3172,12 @@ static void InspectRender(PicoHost *app, void *state)
                                                              inspect.session_id);
                         g_inspect_virtual_ns = view.id_ns;
                         RenderTranscript(&view, transcript_w);
+                    }
+                    else if (loading)
+                    {
+                        CLAY_TEXT(CLAY_STRING("Loading saved transcript…"),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC, .fontSize = PICO_FONT_UI,
+                                                    .textColor = COLOR_MUTED}));
                     }
                     else if (fallback && fallback[0])
                     {

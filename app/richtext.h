@@ -46,6 +46,13 @@ typedef struct RichTextEmitState {
 // Resets per-layout-pass state (link id counter). Call once per frame before
 // any RichText_RenderParagraph call.
 void RichText_BeginLayout(void);
+/* Optional screen-space viewport for long paragraph emission; text outside it
+ * still enters the selection/search buffer. NULL disables inner windowing. */
+void RichText_SetViewport(float top, float bottom, bool follow_bottom, float scroll_delta);
+void RichText_ClearViewport(void);
+void RichText_SetTarget(int from, int to);
+bool RichText_Viewport(float *top, float *bottom, bool *follow_bottom, float *scroll_delta);
+bool RichText_TargetRange(int *from, int *to);
 
 // Must be wired up before any RichText_* call: same signature as the measure
 // function handed to Clay_SetMeasureTextFunction (e.g. Raylib_MeasureText).
@@ -94,6 +101,9 @@ typedef struct RichTextWordCache {
 void RichTextWordCache_Begin(RichTextWordCache *cache);
 void RichTextWordCache_End(RichTextWordCache *cache);
 void RichTextWordCache_Free(RichTextWordCache *cache);
+void RichText_RenderParagraphWindowed(MdBlock *block, MdArena *arena, float available_width,
+                                      const RichTextStyle *style, RichTextEmitState *emit,
+                                      RichTextWordCache *word_cache, Clay_ElementId id);
 void RichText_RenderParagraphCached(MdBlock *block, MdArena *arena, float available_width,
                                     const RichTextStyle *style, RichTextEmitState *emit,
                                     RichTextWordCache *word_cache);

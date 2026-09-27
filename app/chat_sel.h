@@ -21,6 +21,10 @@ void PicoChatSel_SetMessage(int msg);
 void PicoChatSel_Break(void);
 void PicoChatSel_Glue(const char *s);
 void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config);
+/* Append offscreen text to the same selection/search buffer without Clay hits. */
+void PicoChatSel_AppendOnly(Clay_String text);
+int PicoChatSel_CurrentOffset(void);
+char PicoChatSel_LastByte(void);
 
 bool PicoChatSel_HasSelection(const struct PicoHost *app);
 void PicoChatSel_Clear(struct PicoHost *app);

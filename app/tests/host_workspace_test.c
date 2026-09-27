@@ -11552,12 +11552,21 @@ static int TestQuitDefersTeardownUntilFrameReturns(void)
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static int g_redraw_frame_callbacks;
 static int g_redraw_render_callbacks;
+static int g_redraw_layout_callbacks;
 
 static void RequestRedrawFromFrame(PicoHost *host, void *state, float dt)
 {
     (void)state;
     (void)dt;
     if (++g_redraw_frame_callbacks == 3) pico_host_request_redraw(host);
+}
+
+static void CountLayouts(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)host;
+    (void)event;
+    (void)state;
+    g_redraw_layout_callbacks++;
 }
 
 static void RequestRedrawFromRender(PicoHost *host, const PicoHookEvent *event, void *state)
@@ -11582,6 +11591,7 @@ static int TestIdleFrameOnlyPresentsOnInvalidation(void)
     memset(host->view_count, 0, sizeof(host->view_count));
     host->hook_count = 0;
     PicoHost_BeginRegistration(host, PICO_REG_HOST, NULL);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, CountLayouts);
     pico_host_add_hook(host, PICO_HOOK_AFTER_RENDER, RequestRedrawFromRender);
     PicoHost_PublishRegistration(host, NULL);
 
@@ -11590,17 +11600,27 @@ static int TestIdleFrameOnlyPresentsOnInvalidation(void)
     host->host_plugins[host->host_plugin_count++] =
         (PicoPluginSlot){.module = &module, .initialized = true};
     g_clay_frame_test = true;
-    g_redraw_frame_callbacks = g_redraw_render_callbacks = 0;
+    g_redraw_frame_callbacks = g_redraw_render_callbacks = g_redraw_layout_callbacks = 0;
     int start = g_presented_frames;
     PicoHost_Frame(host); /* First presentation; render hook requests another. */
     PicoHost_Frame(host); /* Honor the after-render request. */
     PicoHost_Frame(host); /* Host callback requests a new image. */
+    if (g_redraw_layout_callbacks < 3)
+    {
+        Fail("invalidated frames must lay out");
+        return 1;
+    }
+    int layouts_before_idle = g_redraw_layout_callbacks;
     PicoHost_Frame(host); /* No new request: still pump but skip presentation. */
-    bool good = g_redraw_frame_callbacks == 4 && g_presented_frames == start + 3;
+    /* An unchanged idle pump must keep pumping yet skip both layout and
+     * presentation; hit-test state from the last layout stays valid. */
+    bool good = g_redraw_frame_callbacks == 4 && g_presented_frames == start + 3 &&
+                g_redraw_layout_callbacks == layouts_before_idle;
     g_find_input_test = true;
     g_find_key = KEY_F2;
     PicoHost_Frame(host); /* A key after idle must be processed and presented. */
-    good = good && g_presented_frames == start + 4;
+    good = good && g_presented_frames == start + 4 &&
+           g_redraw_layout_callbacks > layouts_before_idle;
     g_find_key = 0;
     g_find_input_test = false;
     memset(&host->host_plugins[slots], 0, sizeof(host->host_plugins[0]));
@@ -11608,7 +11628,7 @@ static int TestIdleFrameOnlyPresentsOnInvalidation(void)
     g_clay_frame_test = false;
     pico_host_free(host);
     Pico_FreeClay();
-    if (!good) Fail("idle frame must keep pumping and present only on explicit requests");
+    if (!good) Fail("idle frame must keep pumping but lay out and present only on invalidation");
     return g_failed ? 1 : 0;
 }
 

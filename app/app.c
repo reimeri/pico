@@ -3796,6 +3796,16 @@ void PicoHost_Frame(PicoHost *app)
     }
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, wheel.y);
 
+    /* Layout output is consumed only by rendering (gated on redraw_requested)
+     * and by hit-testing, whose inputs -- pointer, wheel, buttons, keys,
+     * resize, focus, and scroll movement -- all request a redraw when they
+     * change. With no invalidation, skip layout entirely: Clay pointer and
+     * scroll state persist across pumps, so next pump's hit queries keep
+     * using the last computed bounds. Extension on_frame callbacks and all
+     * pre-layout pumping above still run at the normal cadence. */
+    if (!app->redraw_requested && !app->ui_relayout_requested)
+        return;
+
     Clay_RenderCommandArray render_commands =
         RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), frame_dt));
 

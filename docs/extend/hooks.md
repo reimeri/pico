@@ -39,7 +39,7 @@ All notifications run on the main thread. Host UI notifications may run while no
 
 ### Host Notification Hooks (`pico_host_add_hook`)
 Registered during `host_init`. Only valid for host-global UI hooks:
-- `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. Host-global UI work; `event->agent_id` is the UI-selected agent, or zero.
+- `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. Host-global UI work; `event->agent_id` is the UI-selected agent, or zero. Runs only on pumps that perform layout: an unchanged idle pump skips layout and this hook, so use `on_frame` for per-pump cadence.
 - `PICO_HOOK_AFTER_RENDER` — after `Clay_Raylib_Render`. Host-global UI work; `event->agent_id` is the UI-selected agent, or zero.
 
 ### Workspace Notification Hooks (`pico_workspace_add_hook`)

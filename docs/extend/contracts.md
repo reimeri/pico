@@ -26,6 +26,8 @@ Pico owns window destruction; extensions must not call Raylib `CloseWindow()`. O
 
 Pico still pumps host and workspace `on_frame` callbacks at its display-paced
 cadence when the window is unchanged; a pump is not necessarily a presentation.
+An unchanged pump also skips Clay layout, so view render callbacks and
+`PICO_HOOK_AFTER_LAYOUT` hooks run only on laid-out pumps.
 Visible extension-owned state does **not** invalidate the window automatically:
 call `pico_host_request_redraw(host)` on the main thread when changing a Clay
 view or a direct after-render drawing, or

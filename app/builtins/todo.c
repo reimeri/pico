@@ -420,24 +420,22 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
         }
         if (todos->expanded)
         {
-            CLAY(CLAY_ID("TodoListScrollRow"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = SCROLLBAR_GAP,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}}})
+            CLAY(CLAY_ID("TodoListScroll"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 8,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}},
+                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
             {
-                CLAY(CLAY_ID("TodoListScroll"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = 8,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}},
-                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
-                {
-                    RenderTodoRows(todos);
-                }
-                if (s->overflow)
-                {
-                    PicoScrollbar_Render(CLAY_STRING("TodoListScroll"), CLAY_STRING("TodoListScrollTrack"),
-                                         CLAY_STRING("TodoListScrollHandle"));
-                }
+                RenderTodoRows(todos);
+            }
+            /* The panel animates its dimensions on expand, so the list transiently overflows
+             * mid-transition even when the settled layout fits. Hide the bar until the
+             * transition settles, and float it over the list edge so its appearance never
+             * changes row widths. */
+            if (s->overflow && GetTime() >= s->transition_until)
+            {
+                PicoScrollbar_RenderOverlay(CLAY_STRING("TodoListScroll"), CLAY_STRING("TodoListScrollTrack"),
+                                            CLAY_STRING("TodoListScrollHandle"));
             }
         }
     }
@@ -536,8 +534,8 @@ static void TodoWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
     TodoAgentState *todos = ActiveState(s, app);
     if (todos && todos->expanded)
     {
-        PicoScrollbar_UpdateDrag(&s->scrollbar, CLAY_STRING("TodoListScroll"),
-                                 CLAY_STRING("TodoListScrollHandle"));
+        PicoScrollbar_UpdateDragOverlay(&s->scrollbar, CLAY_STRING("TodoListScroll"),
+                                        CLAY_STRING("TodoListScrollHandle"));
         if (IsKeyPressed(KEY_ESCAPE))
         {
             todos->expanded = false;

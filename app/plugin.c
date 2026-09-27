@@ -26,7 +26,7 @@
 #define PICO_CC "cc"
 #endif
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.3.1"
+#define PICO_VERSION "0.3.2"
 #endif
 
 #define PICO_MAX_USER_PLUGINS 32
@@ -1663,7 +1663,8 @@ static bool PollCollectWalk(void *ctx, const char *path, time_t mtime)
 {
     PollCollectCtx *collect = ctx;
     PollSourceSet *set = collect->set;
-    if (set->id && !PollSourceOwnedBy(collect->scan, set, path)) return false;
+    if (set->id && !PollSourceOwnedBy(collect->scan, set, path))
+        return false;
     int n = set->count;
     snprintf(set->paths[n], sizeof(set->paths[n]), "%s", path);
     set->mtimes[n] = mtime;
@@ -1723,15 +1724,15 @@ static bool PluginScanMatches(const PicoHost *host, const PluginScan *scan)
     if (scan->module_generation != host->next_module_generation ||
         scan->workspace_count != host->workspace_count ||
         (ConfigExtDir(path, sizeof(path)) ? strcmp(path, scan->sets[0].dir) != 0
-                                           : scan->sets[0].dir[0] != '\0'))
+                                          : scan->sets[0].dir[0] != '\0'))
         return false;
     path[0] = '\0';
     if ((CacheDir(path, sizeof(path)) ? strcmp(path, scan->cache_dir) != 0
-                                       : scan->cache_dir[0] != '\0'))
+                                      : scan->cache_dir[0] != '\0'))
         return false;
     path[0] = '\0';
     if ((Pico_SdkIncludeDir(path, sizeof(path)) ? strcmp(path, scan->sdk_include) != 0
-                                                 : scan->sdk_include[0] != '\0'))
+                                                : scan->sdk_include[0] != '\0'))
         return false;
     for (int i = 0; i < host->workspace_count; i++)
     {
@@ -1749,7 +1750,8 @@ static bool PluginScanMatches(const PicoHost *host, const PluginScan *scan)
 static PluginScan *PluginScanSnapshot(const PicoHost *host)
 {
     PluginScan *scan = calloc(1, sizeof(*scan));
-    if (!scan) return NULL;
+    if (!scan)
+        return NULL;
     (void)ConfigExtDir(scan->sets[0].dir, sizeof(scan->sets[0].dir));
     (void)CacheDir(scan->cache_dir, sizeof(scan->cache_dir));
     (void)Pico_SdkIncludeDir(scan->sdk_include, sizeof(scan->sdk_include));
@@ -1775,11 +1777,14 @@ static bool SourceSetChanged(const PicoHost *host, const PicoWorkspace *workspac
     for (int i = 0; i < host->module_count; i++)
     {
         const LoadedPlugin *module = &host->modules[i];
-        if (module->builtin || !module->desired) continue;
+        if (module->builtin || !module->desired)
+            continue;
         PicoWorkspace *owner = SourceWorkspace(host, module->source);
-        if ((workspace && owner == workspace) || (!workspace && !owner)) desired_count++;
+        if ((workspace && owner == workspace) || (!workspace && !owner))
+            desired_count++;
     }
-    if (set->count != desired_count) return true;
+    if (set->count != desired_count)
+        return true;
     for (int i = 0; i < set->count; i++)
     {
         bool found = false;
@@ -1791,11 +1796,13 @@ static bool SourceSetChanged(const PicoHost *host, const PicoWorkspace *workspac
             {
                 found = true;
                 if (module->mtime != set->mtimes[i] ||
-                    module->content_hash != set->hashes[i]) return true;
+                    module->content_hash != set->hashes[i])
+                    return true;
                 break;
             }
         }
-        if (!found) return true;
+        if (!found)
+            return true;
     }
     return false;
 }
@@ -1803,8 +1810,13 @@ static bool SourceSetChanged(const PicoHost *host, const PicoWorkspace *workspac
 static void PluginScannerStart(PicoHost *host)
 {
     struct PicoPluginScanner *scanner = calloc(1, sizeof(*scanner));
-    if (!scanner) return;
-    if (pthread_mutex_init(&scanner->mu, NULL) != 0) { free(scanner); return; }
+    if (!scanner)
+        return;
+    if (pthread_mutex_init(&scanner->mu, NULL) != 0)
+    {
+        free(scanner);
+        return;
+    }
     if (pthread_cond_init(&scanner->cv, NULL) != 0)
     {
         pthread_mutex_destroy(&scanner->mu);
@@ -1824,7 +1836,8 @@ static void PluginScannerStart(PicoHost *host)
 void PicoPlugins_StopScanner(PicoHost *host)
 {
     struct PicoPluginScanner *scanner = host ? host->plugin_scanner : NULL;
-    if (!scanner) return;
+    if (!scanner)
+        return;
     pthread_mutex_lock(&scanner->mu);
     scanner->stop = true;
     pthread_cond_broadcast(&scanner->cv);
@@ -1834,7 +1847,8 @@ void PicoPlugins_StopScanner(PicoHost *host)
 bool PicoPlugins_QuiesceScannerBefore(PicoHost *host, const struct timespec *deadline)
 {
     struct PicoPluginScanner *scanner = host ? host->plugin_scanner : NULL;
-    if (!scanner) return true;
+    if (!scanner)
+        return true;
     pthread_mutex_lock(&scanner->mu);
     while (!scanner->exited)
     {
@@ -1843,7 +1857,8 @@ bool PicoPlugins_QuiesceScannerBefore(PicoHost *host, const struct timespec *dea
     }
     bool exited = scanner->exited;
     pthread_mutex_unlock(&scanner->mu);
-    if (!exited) return false; /* retain scanner/host until process exit */
+    if (!exited)
+        return false; /* retain scanner/host until process exit */
     pthread_join(scanner->thread, NULL);
     pthread_cond_destroy(&scanner->cv);
     pthread_mutex_destroy(&scanner->mu);
@@ -1865,7 +1880,8 @@ void PicoPlugins_Poll(PicoHost *app)
     AdvanceCompiles(app);
     double now = GetTime();
     struct PicoPluginScanner *scanner = app->plugin_scanner;
-    if (!scanner) PluginScannerStart(app);
+    if (!scanner)
+        PluginScannerStart(app);
     scanner = app->plugin_scanner;
     PluginScan *scan = NULL;
     if (scanner)
@@ -1873,7 +1889,8 @@ void PicoPlugins_Poll(PicoHost *app)
         pthread_mutex_lock(&scanner->mu);
         scan = scanner->result;
         scanner->result = NULL;
-        if (scan) app->plugin_scan_pending = false;
+        if (scan)
+            app->plugin_scan_pending = false;
         pthread_mutex_unlock(&scanner->mu);
     }
     if (scan && !PluginScanMatches(app, scan))
@@ -1919,7 +1936,7 @@ void PicoPlugins_Poll(PicoHost *app)
     {
         for (int w = 0; w < app->workspace_count; w++)
             workspace_changed[w] = app->workspaces[w] &&
-                SourceSetChanged(app, app->workspaces[w], &scan->sets[w + 1]);
+                                   SourceSetChanged(app, app->workspaces[w], &scan->sets[w + 1]);
         free(scan);
     }
 

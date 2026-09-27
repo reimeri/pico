@@ -61,7 +61,8 @@ PicoHost *pico_workspace_host(PicoWorkspace *workspace)
 
 /* Compiled-in work only: a task may outlive its host-extension generation, but
  * never curl cleanup. Its worker must not retain a host/UI pointer. */
-typedef struct PicoHostTask {
+typedef struct PicoHostTask
+{
     struct PicoHostTask *next;
     pthread_t thread;
     void *state;
@@ -75,12 +76,16 @@ bool PicoHost_StartTaskCompleted(PicoHost *host, void *(*run)(void *), void *sta
                                  void (*complete)(PicoHost *, void *),
                                  void (*destroy)(void *))
 {
-    if (!host || host->terminal_shutdown || g_pico_process_retired) return false;
+    if (!host || host->terminal_shutdown || g_pico_process_retired)
+        return false;
     int count = 0;
-    for (PicoHostTask *t = host->tasks; t; t = t->next) count++;
-    if (count >= 64) return false;
+    for (PicoHostTask *t = host->tasks; t; t = t->next)
+        count++;
+    if (count >= 64)
+        return false;
     PicoHostTask *task = calloc(1, sizeof(*task));
-    if (!task) return false;
+    if (!task)
+        return false;
     task->state = state;
     task->cancel = cancel;
     task->destroy = destroy;
@@ -110,11 +115,16 @@ static void PicoHost_PumpTasks(PicoHost *host)
         if (pthread_tryjoin_np(task->thread, NULL) == 0)
         {
             *link = task->next;
-            if (task->complete) { task->complete(host, task->state); pico_host_request_redraw(host); }
+            if (task->complete)
+            {
+                task->complete(host, task->state);
+                pico_host_request_redraw(host);
+            }
             task->destroy(task->state);
             free(task);
         }
-        else link = &task->next;
+        else
+            link = &task->next;
     }
 }
 
@@ -123,15 +133,18 @@ static void PicoHost_ReapBrowsers(PicoHost *host)
     for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
     {
         pid_t pid = host->browser_children[i];
-        if (pid <= 0) continue;
+        if (pid <= 0)
+            continue;
         pid_t result = waitpid(pid, NULL, WNOHANG);
-        if (result == pid || (result < 0 && errno == ECHILD)) host->browser_children[i] = 0;
+        if (result == pid || (result < 0 && errno == ECHILD))
+            host->browser_children[i] = 0;
     }
 }
 
 /* A browser may keep its launcher alive. After host teardown, a reaper owns
  * just the pids, never host/curl state, and does not terminate the user's browser. */
-typedef struct PicoBrowserReaper {
+typedef struct PicoBrowserReaper
+{
     pid_t pids[16];
 } PicoBrowserReaper;
 
@@ -145,10 +158,13 @@ static void *PicoHost_BrowserReaper(void *user)
         for (size_t i = 0; i < sizeof(reaper->pids) / sizeof(reaper->pids[0]); i++)
         {
             pid_t pid = reaper->pids[i];
-            if (pid <= 0) continue;
+            if (pid <= 0)
+                continue;
             pid_t rc = waitpid(pid, NULL, WNOHANG);
-            if (rc == pid || (rc < 0 && errno == ECHILD)) reaper->pids[i] = 0;
-            else pending = true;
+            if (rc == pid || (rc < 0 && errno == ECHILD))
+                reaper->pids[i] = 0;
+            else
+                pending = true;
         }
         if (pending)
         {
@@ -166,33 +182,50 @@ static bool PicoHost_DetachBrowsers(PicoHost *host)
     bool any = false;
     for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
         any |= host->browser_children[i] > 0;
-    if (!any) return true;
+    if (!any)
+        return true;
     PicoBrowserReaper *reaper = calloc(1, sizeof(*reaper));
-    if (!reaper) return false;
+    if (!reaper)
+        return false;
     memcpy(reaper->pids, host->browser_children, sizeof(reaper->pids));
     pthread_attr_t attr;
-    if (pthread_attr_init(&attr) != 0) { free(reaper); return false; }
+    if (pthread_attr_init(&attr) != 0)
+    {
+        free(reaper);
+        return false;
+    }
     pthread_t thread;
     bool ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
               pthread_create(&thread, &attr, PicoHost_BrowserReaper, reaper) == 0;
     pthread_attr_destroy(&attr);
-    if (!ok) { free(reaper); return false; }
+    if (!ok)
+    {
+        free(reaper);
+        return false;
+    }
     memset(host->browser_children, 0, sizeof(host->browser_children));
     return true;
 }
 
 bool PicoHost_OpenBrowser(PicoHost *host, const char *url)
 {
-    if (!host || !url || host->terminal_shutdown || g_pico_process_retired) return false;
+    if (!host || !url || host->terminal_shutdown || g_pico_process_retired)
+        return false;
     PicoHost_ReapBrowsers(host);
     pid_t *slot = NULL;
     for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
-        if (!host->browser_children[i]) { slot = &host->browser_children[i]; break; }
-    if (!slot) return false;
+        if (!host->browser_children[i])
+        {
+            slot = &host->browser_children[i];
+            break;
+        }
+    if (!slot)
+        return false;
     extern char **environ;
     char *argv[] = {"xdg-open", (char *)url, NULL};
     posix_spawn_file_actions_t actions;
-    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    if (posix_spawn_file_actions_init(&actions) != 0)
+        return false;
     /* No shell, no blocking wait, and no URL-bearing browser diagnostics in logs. */
     pid_t pid = 0;
     bool ok = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0 &&
@@ -200,7 +233,8 @@ bool PicoHost_OpenBrowser(PicoHost *host, const char *url)
               posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
               posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ) == 0;
     posix_spawn_file_actions_destroy(&actions);
-    if (ok) *slot = pid;
+    if (ok)
+        *slot = pid;
     return ok;
 }
 
@@ -209,11 +243,13 @@ static bool PicoHost_TasksQuiesceBefore(PicoHost *host, const struct timespec *d
     while (host->tasks)
     {
         PicoHost_PumpTasks(host);
-        if (!host->tasks) return true;
+        if (!host->tasks)
+            return true;
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
         if (now.tv_sec > deadline->tv_sec ||
-            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) return false;
+            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec))
+            return false;
         struct timespec pause = {.tv_nsec = 1000000};
         nanosleep(&pause, NULL);
     }
@@ -701,7 +737,8 @@ void pico_workspace_add_view(PicoWorkspace *workspace, PicoUiSlot slot, int z, P
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->view_count[slot] +
-        host->staging.ws_view_count[slot] >= PICO_MAX_SLOT_VIEWS)
+            host->staging.ws_view_count[slot] >=
+        PICO_MAX_SLOT_VIEWS)
     {
         pico_workspace_status_warn(workspace, "pico_workspace_add_view: slot view limit reached");
         return;
@@ -740,7 +777,8 @@ void pico_workspace_add_empty_view(PicoWorkspace *workspace, PicoEmptyKind kind,
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->empty_view_count +
-        host->staging.ws_empty_view_count >= PICO_MAX_EMPTY_VIEWS)
+            host->staging.ws_empty_view_count >=
+        PICO_MAX_EMPTY_VIEWS)
     {
         pico_workspace_status_warn(workspace, "pico_workspace_add_empty_view: empty view limit reached");
         return;
@@ -815,7 +853,8 @@ void pico_workspace_add_hook(PicoWorkspace *workspace, PicoHook hook, PicoWorksp
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->hook_count +
-        host->staging.ws_hook_count >= PICO_MAX_HOOKS)
+            host->staging.ws_hook_count >=
+        PICO_MAX_HOOKS)
     {
         pico_workspace_status_warn(workspace, "pico_workspace_add_hook: hook limit reached");
         return;
@@ -848,7 +887,8 @@ void pico_add_tool_before_hook(PicoWorkspace *workspace, PicoToolBeforeFn fn)
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->tool_before_hook_count +
-        host->staging.ws_tool_before_hook_count >= PICO_MAX_TOOL_HOOKS)
+            host->staging.ws_tool_before_hook_count >=
+        PICO_MAX_TOOL_HOOKS)
     {
         pico_workspace_status_warn(workspace, "pico_add_tool_before_hook: hook limit reached");
         return;
@@ -878,7 +918,8 @@ void pico_add_tool_after_hook(PicoWorkspace *workspace, PicoToolAfterFn fn)
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->tool_after_hook_count +
-        host->staging.ws_tool_after_hook_count >= PICO_MAX_TOOL_HOOKS)
+            host->staging.ws_tool_after_hook_count >=
+        PICO_MAX_TOOL_HOOKS)
     {
         pico_workspace_status_warn(workspace, "pico_add_tool_after_hook: hook limit reached");
         return;
@@ -908,7 +949,8 @@ void pico_add_llm_hook(PicoWorkspace *workspace, PicoLlmHookFn fn)
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->llm_hook_count +
-        host->staging.ws_llm_hook_count >= PICO_MAX_LLM_HOOKS)
+            host->staging.ws_llm_hook_count >=
+        PICO_MAX_LLM_HOOKS)
     {
         pico_workspace_status_warn(workspace, "pico_add_llm_hook: hook limit reached");
         return;
@@ -938,7 +980,8 @@ void pico_add_context_hook(PicoWorkspace *workspace, PicoContextHookFn fn)
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->context_hook_count +
-        host->staging.ws_context_hook_count >= PICO_MAX_CONTEXT_HOOKS)
+            host->staging.ws_context_hook_count >=
+        PICO_MAX_CONTEXT_HOOKS)
     {
         pico_workspace_status_warn(workspace, "pico_add_context_hook: hook limit reached");
         return;
@@ -968,7 +1011,8 @@ void pico_add_tool_row_hook(PicoWorkspace *workspace, PicoToolRowFn fn)
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->tool_row_hook_count +
-        host->staging.ws_tool_row_hook_count >= PICO_MAX_TOOL_ROW_HOOKS)
+            host->staging.ws_tool_row_hook_count >=
+        PICO_MAX_TOOL_ROW_HOOKS)
     {
         pico_workspace_status_warn(workspace, "pico_add_tool_row_hook: hook limit reached");
         return;
@@ -1298,7 +1342,8 @@ void pico_workspace_add_completer(PicoWorkspace *workspace, char trigger, bool b
         return;
     }
     if (WorkspaceRegistrationTarget(host, workspace)->completer_count +
-        host->staging.ws_completer_count >= PICO_MAX_COMPLETERS)
+            host->staging.ws_completer_count >=
+        PICO_MAX_COMPLETERS)
     {
         pico_workspace_status_warn(workspace, "pico_workspace_add_completer: completer limit reached");
         return;
@@ -1468,8 +1513,8 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
         if (ws && (agent_registration || ws->active_registration))
         {
             const PicoRegistrationGeneration *registration = agent_registration
-                                                                  ? agent_registration
-                                                                  : ws->active_registration;
+                                                                 ? agent_registration
+                                                                 : ws->active_registration;
             for (int i = 0; i < registration->hook_count; i++)
             {
                 if (registration->hooks[i].hook == hook && registration->hooks[i].workspace_fn)
@@ -1646,11 +1691,12 @@ void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const ch
         m->doc = *prepared;
         *prepared = (MdDocument){0};
     }
-    else m->doc = MdDocument_ParseEx(m->source, old + n, MD_PARSE_DEFAULT);
+    else
+        m->doc = MdDocument_ParseEx(m->source, old + n, MD_PARSE_DEFAULT);
 }
 
 void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *call_id,
-                                const char *name, const char *args)
+                                 const char *name, const char *args)
 {
     if (!agent)
     {
@@ -1787,7 +1833,7 @@ void PicoHost_SetLastToolOutput(PicoHost *app, PicoAgentId agent_id, const char 
 }
 
 PicoSessionWriteResult pico_session_log_custom(PicoHost *app, PicoAgentId agent_id,
-                                                const char *ext, const char *data_json)
+                                               const char *ext, const char *data_json)
 {
     PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
     if (!agent)
@@ -2027,9 +2073,11 @@ void PicoHost_Cancel(PicoHost *app)
 bool PicoUi_QuestionnaireOpen(const PicoHost *app)
 {
     PicoToolAsk ask;
-    if (!pico_tool_pending_ask(app, &ask) || !ask.request_json) return false;
+    if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
+        return false;
     JsonDoc doc;
-    if (JsonParse(&doc, ask.request_json, strlen(ask.request_json)) != 0) return false;
+    if (JsonParse(&doc, ask.request_json, strlen(ask.request_json)) != 0)
+        return false;
     bool questionnaire = JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "questionnaire") &&
                          JsonEq(&doc, JsonObjGet(&doc, 0, "ui"), "custom");
     JsonFree(&doc);
@@ -2045,19 +2093,22 @@ bool PicoUi_ModalOpen(const PicoHost *app)
 
 void pico_host_request_redraw(PicoHost *host)
 {
-    if (host) host->redraw_requested = true;
+    if (host)
+        host->redraw_requested = true;
 }
 
 void pico_host_request_redraw_after(PicoHost *host, double delay_seconds)
 {
-    if (!host) return;
+    if (!host)
+        return;
     if (!(delay_seconds > 0.0))
     {
         pico_host_request_redraw(host);
         return;
     }
     double at = GetTime() + delay_seconds;
-    if (host->redraw_at == 0.0 || at < host->redraw_at) host->redraw_at = at;
+    if (host->redraw_at == 0.0 || at < host->redraw_at)
+        host->redraw_at = at;
 }
 
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
@@ -2077,7 +2128,7 @@ static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
     host->safe_mode = safe_mode;
     host->module_capacity = PICO_MAX_MODULE_GENERATIONS;
     host->modules = (PicoModuleGeneration *)calloc((size_t)host->module_capacity,
-                                                    sizeof(*host->modules));
+                                                   sizeof(*host->modules));
     if (!host->modules)
     {
         host->module_capacity = 0;
@@ -2369,7 +2420,8 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
     copy.kind = PICO_AGENT_MAIN;
     copy.parent_id = 0;
     PicoResult result = PicoWorkspace_CreateAgent(workspace, &copy, out);
-    if (result == PICO_OK) pico_host_request_redraw(host);
+    if (result == PICO_OK)
+        pico_host_request_redraw(host);
     return result;
 }
 
@@ -2388,7 +2440,8 @@ PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, c
         return PICO_NOT_FOUND;
     }
     PicoResult result = SubmitPreparedTurn(host, agent, text, text, parts_json);
-    if (result == PICO_OK) pico_host_request_redraw(host);
+    if (result == PICO_OK)
+        pico_host_request_redraw(host);
     return result;
 }
 
@@ -2415,7 +2468,8 @@ void pico_host_pump(PicoHost *host)
                 PicoWorkspaceId target_id = 0;
                 PicoResult opened = pico_workspace_open(host, result.path, &target_id);
                 PicoWorkspace *target = (opened == PICO_OK || opened == PICO_ALREADY_OPEN)
-                                            ? PicoHost_FindWorkspace(host, target_id) : NULL;
+                                            ? PicoHost_FindWorkspace(host, target_id)
+                                            : NULL;
                 PicoAgentCreateOptions options;
                 PicoAgentId created_id = 0;
                 memset(&options, 0, sizeof(options));
@@ -2678,20 +2732,27 @@ static PicoAgent *FirstMainAgent(PicoWorkspace *workspace)
 
 static bool AgentTreeHasActiveWork(const PicoWorkspace *workspace, PicoAgentId root_id)
 {
-    if (!workspace || !root_id) return true;
+    if (!workspace || !root_id)
+        return true;
     for (int i = 0; i < workspace->count; i++)
     {
         PicoAgent *candidate = workspace->agents[i];
-        if (!candidate) continue;
+        if (!candidate)
+            continue;
         PicoAgentId cursor = candidate->id;
         bool in_tree = false;
         for (int depth = 0; cursor && depth <= PICO_MAX_DELEGATION_DEPTH; depth++)
         {
-            if (cursor == root_id) { in_tree = true; break; }
+            if (cursor == root_id)
+            {
+                in_tree = true;
+                break;
+            }
             PicoAgent *parent = PicoWorkspace_FindAgent((PicoWorkspace *)workspace, cursor);
             cursor = parent ? parent->parent_id : 0;
         }
-        if (!in_tree) continue;
+        if (!in_tree)
+            continue;
         if (PicoAgent_IsBusy(candidate) || PicoAgent_RetiredReferences(workspace, candidate->id) ||
             PicoWorkspace_JobReferences(workspace, candidate->id) ||
             PicoBgTable_RunningCount(workspace->background, candidate->id) > 0)
@@ -2705,11 +2766,14 @@ bool PicoHost_StartLocalSession(PicoHost *host, PicoAgentId from_agent_id)
     PicoAgent *from_agent = PicoHost_FindAgent(host, from_agent_id);
     PicoWorkspace *from = from_agent ? from_agent->workspace : NULL;
     const char *local = from && from->project_path[0] ? from->project_path : NULL;
-    if (!host || !from_agent || !from || !local || !local[0]) return false;
-    if (AgentTreeHasActiveWork(from, from_agent_id)) return false;
+    if (!host || !from_agent || !from || !local || !local[0])
+        return false;
+    if (AgentTreeHasActiveWork(from, from_agent_id))
+        return false;
     PicoWorkspaceId id = 0;
     PicoResult opened = pico_workspace_open(host, local, &id);
-    if (opened != PICO_OK && opened != PICO_ALREADY_OPEN) return false;
+    if (opened != PICO_OK && opened != PICO_ALREADY_OPEN)
+        return false;
     PicoAgentCreateOptions options;
     PicoAgentId new_id = 0;
     memset(&options, 0, sizeof(options));
@@ -2718,7 +2782,8 @@ bool PicoHost_StartLocalSession(PicoHost *host, PicoAgentId from_agent_id)
     options.select = true;
     if (pico_main_agent_create(host, id, &options, &new_id) != PICO_OK)
     {
-        if (opened == PICO_OK) (void)pico_workspace_request_close(host, id);
+        if (opened == PICO_OK)
+            (void)pico_workspace_request_close(host, id);
         return false;
     }
     PicoCatalog_Ensure(local);
@@ -3132,7 +3197,8 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 1;
     for (PicoHostTask *task = host->tasks; task; task = task->next)
-        if (task->cancel) task->cancel(task->state);
+        if (task->cancel)
+            task->cancel(task->state);
     for (i = 0; i < host->workspace_count; i++)
     {
         if (host->workspaces[i])
@@ -3143,9 +3209,12 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
             }
         }
     }
-    if (!PicoHost_TasksQuiesceBefore(host, &deadline)) clean = false;
-    if (!PicoPlugins_QuiesceScannerBefore(host, &deadline)) clean = false;
-    if (!PicoHost_DetachBrowsers(host)) clean = false;
+    if (!PicoHost_TasksQuiesceBefore(host, &deadline))
+        clean = false;
+    if (!PicoPlugins_QuiesceScannerBefore(host, &deadline))
+        clean = false;
+    if (!PicoHost_DetachBrowsers(host))
+        clean = false;
     if (!PicoCatalog_DrainOrderPersistBefore(host, &deadline))
     {
         clean = false;
@@ -3202,7 +3271,8 @@ PicoHostShutdownResult pico_host_free(PicoHost *host)
     return result;
 }
 
-enum {
+enum
+{
     SHELL_ROOT_PADDING = 12,
     SHELL_BODY_GAP = 12,
     SHELL_SIDEBAR_WIDTH = 200,
@@ -3320,7 +3390,7 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
 static void UpdateChatScrollbarDrag(PicoHost *app)
 {
     PicoScrollbar_UpdateDragOverlay(&app->chat_scrollbar, CLAY_STRING("ChatScroll"),
-                                   CLAY_STRING("ChatScrollBarHandle"));
+                                    CLAY_STRING("ChatScrollBarHandle"));
 }
 
 #define CHAT_FOLLOW_SLACK 8.0f
@@ -3393,6 +3463,45 @@ static void UpdateChatFollowFromUserScroll(PicoHost *app, bool over_chat, bool m
     }
     Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
     app->chat_follow_bottom = ChatScrollAtBottom(data);
+}
+
+/* Mesa latches wl_egl_window's creation size for the first buffer. GLFW has
+ * already applied the compositor configure, but that first swap still commits
+ * the create hint (1100x800). Record the hint before SyncRaylibWindowSize replaces it. */
+static bool s_creation_size_known = false;
+static int s_creation_width = 0;
+static int s_creation_height = 0;
+static bool s_creation_buffer_flushed = false;
+
+static void RememberCreationSize(void)
+{
+    if (s_creation_size_known)
+    {
+        return;
+    }
+    s_creation_size_known = true;
+    s_creation_width = GetScreenWidth();
+    s_creation_height = GetScreenHeight();
+}
+
+/* Drop the latched create-hint buffer without blocking on vblank. The caller
+ * presents the configured size immediately afterwards, so niri does not keep
+ * the small window until the next animation redraw. */
+static bool FlushWaylandCreationBuffer(void)
+{
+    GLFWwindow *win = GetWindowHandle();
+    if (!win || glfwGetPlatform() != GLFW_PLATFORM_WAYLAND)
+        return false;
+    int width = 0;
+    int height = 0;
+    glfwGetWindowSize(win, &width, &height);
+    if (width <= 0 || height <= 0)
+        return false;
+    if (width == s_creation_width && height == s_creation_height)
+        return false;
+    glfwSwapInterval(0);
+    glfwSwapBuffers(win);
+    return true;
 }
 
 /* Wayland delivers the first xdg_toplevel configure during glfwCreateWindow,
@@ -3496,7 +3605,8 @@ void PicoHost_Frame(PicoHost *app)
     app->frame_presented = false;
     double now = GetTime();
     float frame_dt = app->frame_at > 0.0 ? (float)(now - app->frame_at) : GetFrameTime();
-    if (frame_dt < 0.0f) frame_dt = 0.0f;
+    if (frame_dt < 0.0f)
+        frame_dt = 0.0f;
     app->frame_at = now;
     app->frame_delta = frame_dt;
     if (app->redraw_at > 0.0 && now >= app->redraw_at)
@@ -3504,6 +3614,7 @@ void PicoHost_Frame(PicoHost *app)
         app->redraw_at = 0.0;
         pico_host_request_redraw(app);
     }
+    RememberCreationSize();
     int old_width = GetScreenWidth(), old_height = GetScreenHeight();
     SyncRaylibWindowSize();
     if (old_width != GetScreenWidth() || old_height != GetScreenHeight() || IsWindowResized())
@@ -3648,8 +3759,7 @@ void PicoHost_Frame(PicoHost *app)
         CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),
         CLAY_STRING("ExtModalScroll"), CLAY_STRING("PromptModalScroll"),
         CLAY_STRING("BackgroundListScroll"), CLAY_STRING("BackgroundLogScroll"),
-        CLAY_STRING("DiffScroll"), CLAY_STRING("MdHorizontalScroll")
-    };
+        CLAY_STRING("DiffScroll"), CLAY_STRING("MdHorizontalScroll")};
     Clay_Vector2 previous_scroll[sizeof(scroll_ids) / sizeof(scroll_ids[0])];
     for (size_t i = 0; i < sizeof(scroll_ids) / sizeof(scroll_ids[0]); i++)
     {
@@ -3745,12 +3855,14 @@ void PicoHost_Frame(PicoHost *app)
     else
     {
         PicoChat_HarvestVirtualHeights(app);
-        if (PicoChat_TakeVirtualRelayout()) relayout = true;
+        if (PicoChat_TakeVirtualRelayout())
+            relayout = true;
         if (Pico_RestoreClayScroll())
         {
             relayout = true;
         }
-        if (PicoChatFind_Reveal(app)) relayout = true;
+        if (PicoChatFind_Reveal(app))
+            relayout = true;
         if (app->chat_follow_bottom)
         {
             Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
@@ -3801,13 +3913,22 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
 
-    if (!app->redraw_requested) return;
+    if (!app->redraw_requested)
+        return;
     app->redraw_requested = false;
+    bool restore_vsync = false;
+    if (!s_creation_buffer_flushed)
+    {
+        s_creation_buffer_flushed = true;
+        restore_vsync = FlushWaylandCreationBuffer();
+    }
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
     pico_run_hooks(app, PICO_HOOK_AFTER_RENDER, pico_agent_active(app));
     PicoChatFind_DrawInput(app);
     EndDrawing();
+    if (restore_vsync)
+        glfwSwapInterval(IsWindowState(FLAG_VSYNC_HINT) ? 1 : 0);
     app->frame_presented = true;
 }

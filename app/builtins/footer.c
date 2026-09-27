@@ -271,7 +271,7 @@ static void HandleWorktreeKeys(PicoHost *app)
         StartWorktreeCreation(app);
         return;
     }
-    PicoTextField_HandleKeys(&g_worktree_field);
+    if (PicoTextField_HandleKeys(&g_worktree_field)) pico_host_request_redraw(app);
 }
 
 static void FooterDrawWorktreeOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
@@ -282,6 +282,7 @@ static void FooterDrawWorktreeOverlay(PicoHost *app, const PicoHookEvent *event,
         return;
     PicoTextField_Draw(&g_worktree_field, CLAY_ID("WorktreeName"), (float)WORKTREE_NAME_PAD_X,
                        (float)WORKTREE_NAME_PAD_Y, FONT_MONO);
+    pico_host_request_redraw_after(app, PicoTextField_NextBlink(&g_worktree_field));
 }
 
 static void MutedText(const char *s)

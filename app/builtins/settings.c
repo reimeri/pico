@@ -1839,7 +1839,7 @@ static void HandleKeys(SettingsState *s)
         AddCustomEffort(s, s->focus_model);
         return;
     }
-    PicoTextField_HandleKeys(&s->field);
+    if (PicoTextField_HandleKeys(&s->field)) pico_host_request_redraw(s->host);
 }
 
 static bool HandleClicks(SettingsState *s)
@@ -2058,6 +2058,7 @@ static void SettingsDrawFieldOverlay(PicoHost *app, const PicoHookEvent *event, 
         return;
     }
     PicoTextField_Draw(&s->field, FocusElementId(s), 8.0f, 6.0f, FONT_REGULAR);
+    pico_host_request_redraw_after(app, PicoTextField_NextBlink(&s->field));
 }
 
 static void SettingsOnFrame(PicoHost *app, void *state, float dt)

@@ -205,7 +205,7 @@ void PicoChatFind_HandleInput(PicoHost *app)
     f->claimed_input = true;
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) PicoChatFind_Navigate(app, shift ? -1 : 1);
     unsigned revision = f->field.revision;
-    PicoTextField_HandleKeys(&f->field);
+    if (PicoTextField_HandleKeys(&f->field)) pico_host_request_redraw(app);
     if (f->field.revision != revision) QueryChanged(f);
 }
 
@@ -273,6 +273,7 @@ void PicoChatFind_DrawInput(PicoHost *app)
     PicoChatFind *f = &app->find;
     if (!f->open || !f->focused || PicoUi_ModalOpen(app)) return;
     PicoTextField_Draw(&f->field, CLAY_ID("ChatFindInput"), 6.0f, 3.0f, FONT_REGULAR);
+    pico_host_request_redraw_after(app, PicoTextField_NextBlink(&f->field));
 }
 
 typedef struct RangeBounds {

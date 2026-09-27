@@ -37,6 +37,19 @@ The normal CLI startup initializes the host, opens the initial directory, create
 
 `pico_host_pump` does one bounded round-robin pass: host posts and process services, then each non-closed workspace once (at most 256 queued runtime events and one new delegation per workspace), then each eligible workspace-extension `on_frame` and each host-extension `on_frame` exactly once with the current frame delta. It is valid to pump a host with zero workspaces. Host `on_frame`, views, and UI hooks must tolerate `pico_agent_active(host) == 0`; host init and frame callbacks can run before any workspace exists. Contextual workspace views and empty-state views render only when an agent in that workspace is selected. Inactive workspaces still pump and still run workspace `on_frame`; they must not draw.
 
+The desktop loop keeps calling `on_frame` at the display-paced cadence even when it
+has no new image to present. Visible changes to extension-owned state require an
+explicit `pico_host_request_redraw(host)` from the main thread. Workspace callbacks
+can obtain the host with `pico_workspace_host(workspace)`. The request is coalesced
+and presents the next full frame; it is not an immediate draw. Use
+`pico_host_request_redraw_after(host, seconds)` for a scheduled visual change
+such as the next caret blink. Repeated requests can bring the deadline forward.
+Do not request redraw unconditionally in an idle `on_frame` callback: that
+would restore the refresh-rate GPU load. A worker cannot call either function;
+post through Pico's worker-to-main UI/event mechanism, then invalidate from
+main-thread adoption when it changes extension-owned UI state. See
+[views](views.md#contract) and [contracts](contracts.md#threads).
+
 `pico_host_free` applies the process-wide bounded shutdown deadline of about one second. It returns `PICO_HOST_SHUTDOWN_CLEAN` when every worker joins, or `PICO_HOST_SHUTDOWN_RETAINED` when a callback is still blocked. Retained shutdown detaches that callback and keeps every registration, auth store, builtin state, and user-extension `.so` it can reach. No extension `shutdown`, `dlclose`, auth destruction, or curl cleanup runs. Pico is then permanently retired in that process; later `pico_host_init` is rejected. Only `pico_host_free` uses this process deadline. Workspace close never does.
 
 ## CLI shutdown

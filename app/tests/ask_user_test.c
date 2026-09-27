@@ -26,6 +26,12 @@ static void *MovingRealloc(void *ptr, size_t size)
 #include "builtins/ask_user.c"
 #undef realloc
 
+/* This input-focused executable includes ask_user.c without the host renderer.
+ * Host redraw scheduling is exercised by the host/workspace frame tests. */
+void pico_host_request_redraw(PicoHost *host) { (void)host; }
+void pico_host_request_redraw_after(PicoHost *host, double delay_seconds)
+{ (void)host; (void)delay_seconds; }
+
 bool PicoUi_ModalOpen(const PicoHost *app) { (void)app; return false; }
 bool PicoChatFind_PointerOver(const PicoHost *app) { (void)app; return false; }
 void PicoChatSel_Clear(PicoHost *app) { (void)app; }

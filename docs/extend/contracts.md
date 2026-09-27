@@ -22,6 +22,24 @@ On process exit, every agent, delegation job, retired runtime, core-tracked Open
 
 Pico owns window destruction; extensions must not call Raylib `CloseWindow()`. On clean CLI shutdown, extension `shutdown` callbacks run while the graphics context is still available. See [host shutdown](host.md#cli-shutdown) for the exit and cleanup sequence.
 
+## Redraw and frame callbacks
+
+Pico still pumps host and workspace `on_frame` callbacks at its display-paced
+cadence when the window is unchanged; a pump is not necessarily a presentation.
+Visible extension-owned state does **not** invalidate the window automatically:
+call `pico_host_request_redraw(host)` on the main thread when changing a Clay
+view or a direct after-render drawing, or
+`pico_host_request_redraw_after(host, seconds)` for the next timed visual
+change. A request coalesces with other requests and causes a full redraw at or
+after that frame/deadline. A request issued during `AFTER_RENDER` schedules a
+future frame, not recursion. Registration/reload invalidates the shell, but a
+running extension must explicitly invalidate its own subsequent UI changes.
+Do not call these functions on workers or request a redraw on every idle pump:
+workers use `pico_ui_post` or other core queues and the main-thread adoption
+requests a redraw; extension-specific main-thread state changes need a request
+from the owning callback. No Clay-owned pointer survives a frame or same-frame
+reflow even when no image was presented.
+
 ## Threads
 
 Main thread: `init`, `shutdown`, `on_frame`, view render, notification hooks, after-tool hooks, tool-row hooks, tool apply callbacks, LLM/context hooks, command `run`, completer query/accept, auth login/logout, `pico_ui_modal_push` / `pop`, `pico_agent_ui_latest` / `pico_agent_ui_clear`. Host `init`, `on_frame`, sidebar/main/overlay views, and UI notification hooks may run with zero workspaces and active agent ID zero; host extensions must treat that as a normal state. Composer/footer slots and workspace contextual/empty-state views do not render without a selected agent. Agent-scoped callbacks receive a `PicoAgentId`; keep mutable agent/session extension state in an ID-keyed map. Main-thread callbacks are serialized and must return promptly. They must not join or wait for asynchronous work. A user `.so` must not leave an extension-owned background thread running across frames: the public lifecycle has no pre-shutdown quiescence callback, `shutdown` cannot wait, and `dlclose` follows it. A stuck main-thread callback blocks the whole host and is an extension contract violation. Sidebar session selection, `/resume`, and startup validate JSONL and prepare a bounded number of large-message Markdown documents on a core worker, but replay hooks and tool `apply` callbacks still run in original record order on the main thread in bounded batches. Prepared Markdown is used only if it matches the actual message after earlier replay hooks. Saved-subagent inspection reads and prepares its transcript on a core worker before atomically publishing its snapshot; the inspect overlay may show Loading in the meantime. The builtin `/resume` completer lists sessions on a core worker and may initially show no results or a briefly stale cached list; extension completer query/accept callbacks are unchanged and remain synchronous. During these callbacks a private candidate can be looked up by its ID (for example with `pico_agent_message`), but it is not counted, selected, or otherwise published between callbacks and may be discarded if loading is cancelled or fails. On cancellation after callbacks have run, Pico emits `PICO_HOOK_ON_AGENT_DESTROY` for the private candidate so extensions can discard agent-ID-keyed state; arbitrary external callback side effects are not rolled back. Replayable tool apply must be idempotent. Public `pico_main_agent_create` with `PICO_SESSION_RESUME`, named child continuation, and extension reload tool-detail restoration remain synchronous and can block the UI if invoked from main-thread work. A large message beyond the bounded preparation set, or another exceptionally large record, can still hitch the UI during unsliced core parsing/mutation or an extension callback; the per-pump budget cannot interrupt a callback. View render callbacks are declarative and may run more than once per displayed frame during same-frame reflow; keep durable state changes, I/O, and input consumption in `on_frame` or hooks.

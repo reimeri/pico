@@ -6,6 +6,8 @@
 //
 // Adds a line above the builtin Tools / Context / Skills cards. To replace
 // those cards entirely, register PICO_EMPTY_REPLACE instead (see /docs views).
+// If workspace_on_frame changes the banner, request a redraw via
+// pico_host_request_redraw(pico_workspace_host(workspace)); see /docs views.
 
 #include "pico/plugin.h"
 

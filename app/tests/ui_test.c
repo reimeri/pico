@@ -4,6 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/* The modal stack is linked without app.c; model its public invalidation
+ * boundary, while the host/workspace tests exercise real presentation. */
+void pico_host_request_redraw(PicoHost *host)
+{
+    if (host) host->redraw_requested = true;
+}
+
 static int g_failed;
 static int g_hook_a;
 static int g_hook_b;
@@ -73,6 +80,8 @@ static int TestModalStack(void)
     Check(pico_ui_modal_top(&app) == NULL, "empty top");
 
     Check(pico_ui_modal_push(&app, "a"), "push a");
+    Check(app.redraw_requested, "opening a modal invalidates the host view");
+    app.redraw_requested = false;
     Check(pico_ui_modal_push(&app, "b"), "push b");
     Check(pico_ui_modal_count(&app) == 2, "count 2");
     Check(pico_ui_modal_top(&app) && strcmp(pico_ui_modal_top(&app), "b") == 0, "top b");
@@ -81,7 +90,9 @@ static int TestModalStack(void)
     Check(pico_ui_modal_has(&app, "a") && pico_ui_modal_has(&app, "b"), "has a and b");
     Check(!pico_ui_modal_pop(&app, "a"), "pop non-top fails");
     Check(pico_ui_modal_top(&app) && strcmp(pico_ui_modal_top(&app), "b") == 0, "top still b");
+    app.redraw_requested = false;
     Check(pico_ui_modal_pop(&app, "b"), "pop top b");
+    Check(app.redraw_requested, "closing a modal invalidates the host view");
     Check(pico_ui_modal_top(&app) && strcmp(pico_ui_modal_top(&app), "a") == 0, "top a");
     Check(pico_ui_modal_pop(&app, "a"), "pop a");
     Check(pico_ui_modal_count(&app) == 0, "stack empty again");

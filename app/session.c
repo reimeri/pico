@@ -5658,6 +5658,7 @@ void PicoSession_LoadPump(PicoHost *host)
         return;
     }
     load->processing = true;
+    pico_host_request_redraw(host);
     if (!load->candidate)
     {
         if (!load->replace_id &&

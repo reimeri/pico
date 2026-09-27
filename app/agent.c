@@ -4454,6 +4454,9 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     }
     pthread_mutex_unlock(&rt->mu);
 
+    if (status_dirty || stream_len || think_len || summary_len || prov_update_count || event_count)
+        pico_host_request_redraw(app);
+
     if (status_dirty && agent->state == PICO_AGENT_LLM_WAIT)
         SetActivity(app, agent, provider_status[0] ? provider_status : "Thinking…");
 

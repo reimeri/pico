@@ -290,6 +290,15 @@ void PicoTextField_KeepCaretVisible(PicoTextField *f, float view_width, uint16_t
     }
 }
 
+double PicoTextField_NextBlink(const PicoTextField *f)
+{
+    if (!f || !f->bound) return 0.0;
+    double elapsed = GetTime() - f->blink_at;
+    if (elapsed < 0.0) elapsed = 0.0;
+    return (floor(elapsed * PICO_TEXT_FIELD_BLINK_HZ) + 1.0) /
+           PICO_TEXT_FIELD_BLINK_HZ - elapsed;
+}
+
 void PicoTextField_Draw(const PicoTextField *f, Clay_ElementId id, float pad_x, float pad_y,
                         uint16_t font_id)
 {

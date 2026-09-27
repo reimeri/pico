@@ -33,6 +33,8 @@ void PicoTextField_KeepCaretVisible(PicoTextField *f, float view_width, uint16_t
  * element's bounding box. Call from an after-render hook. */
 void PicoTextField_Draw(const PicoTextField *f, Clay_ElementId id, float pad_x, float pad_y,
                         uint16_t font_id);
+/* Seconds until the next visual caret toggle, for redraw scheduling. */
+double PicoTextField_NextBlink(const PicoTextField *f);
 
 /* Text width of text[0, n) with the field font; exposed for callers
  * that position companions (e.g. error popovers) relative to text. */

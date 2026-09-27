@@ -220,6 +220,7 @@ static void SidebarRefresh(SidebarState *s)
     }
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(prev_ui);
+    pico_host_request_redraw(s->host);
     s->workspaces = next;
     s->workspace_count = n;
     s->ui = next_ui;
@@ -1548,7 +1549,7 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
     }
     if (!s->delete_confirm)
     {
-        PicoTextField_HandleKeys(&s->edit_field);
+        if (PicoTextField_HandleKeys(&s->edit_field)) pico_host_request_redraw(host);
     }
     else
     {
@@ -1629,6 +1630,7 @@ static void SidebarDrawEditOverlay(PicoHost *host, const PicoHookEvent *event, v
     if (!s || !s->edit_open || !pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
         return;
     PicoTextField_Draw(&s->edit_field, CLAY_ID("SidebarEditName"), 7.0f, 6.0f, FONT_REGULAR);
+    pico_host_request_redraw_after(host, PicoTextField_NextBlink(&s->edit_field));
 }
 
 static void RenderFolderModal(PicoHost *host, void *state)
@@ -1978,6 +1980,16 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         return;
     }
     selected = PicoHost_SelectedAgentConst(host);
+    for (int i = 0; i < pico_agent_count(host); i++)
+    {
+        PicoAgentInfo info;
+        if (pico_agent_info(host, i, &info) &&
+            PicoAgent_IsBusy(PicoHost_FindAgent(host, info.id)))
+        {
+            pico_host_request_redraw(host);
+            break;
+        }
+    }
     if (s->order_persist_generation != 0)
     {
         PicoCatalogPersistStatus status = PicoCatalog_OrderPersistStatus(

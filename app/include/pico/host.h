@@ -35,6 +35,13 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode);
 PicoHostShutdownResult pico_host_free(PicoHost *host); /* process deadline; may return RETAINED */
 /* Fair round-robin; valid with zero workspaces and active agent ID zero. */
 void pico_host_pump(PicoHost *host);
+/* Main-thread UI invalidation. Call when visible state changes; the next host
+ * frame lays out and presents it. Coalesces repeated requests. */
+void pico_host_request_redraw(PicoHost *host);
+/* Schedule one redraw no later than `delay_seconds` from now (e.g. a caret blink).
+ * Must be called on the main thread; a subsequent request can move it earlier. */
+void pico_host_request_redraw_after(PicoHost *host, double delay_seconds);
+
 
 int pico_workspace_count(const PicoHost *host);
 bool pico_workspace_info(const PicoHost *host, int index, PicoWorkspaceInfo *out);

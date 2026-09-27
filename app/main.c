@@ -120,9 +120,22 @@ int main(int argc, char **argv)
     {
         PicoPlugins_Load(app);
     }
+    /* Query the monitor once: GLFW's Wayland backend cannot report window
+     * position, so GetCurrentMonitor() on every idle tick logs a warning. */
+    int refresh_hz = GetMonitorRefreshRate(GetCurrentMonitor());
+    if (refresh_hz <= 0) refresh_hz = 60;
     while (!PicoHost_ShouldExit(app) && !WindowShouldClose())
     {
+        double frame_start = GetTime();
         PicoHost_Frame(app);
+        if (!app->frame_presented && !PicoHost_ShouldExit(app))
+        {
+            /* EndDrawing normally paces the frame and polls Raylib input. Keep
+             * its input snapshot semantics even when there is no new image. */
+            double remaining = 1.0 / refresh_hz - (GetTime() - frame_start);
+            if (remaining > 0.0) WaitTime(remaining);
+            PollInputEvents();
+        }
     }
 
     char session_path[4096];

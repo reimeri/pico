@@ -1,3 +1,4 @@
+#include <math.h>
 // Pico extension: structured, multi-step clarifying questions.
 // The ask_user tool accepts all questions in one call and presents a custom
 // composer-area panel with required single-select and free-form answers.
@@ -1505,6 +1506,7 @@ static void HandleTextKeys(PicoHost *app, AskQuestion *q)
             char bytes[4];
             int n = PicoText_Utf8Encode(cp, bytes);
             AskTextInsert(q, bytes, n);
+            pico_host_request_redraw(app);
         }
     }
 }
@@ -2228,6 +2230,8 @@ static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *
     {
         elapsed = 0;
     }
+    pico_host_request_redraw_after(app, (floor(elapsed * ASK_USER_CARET_BLINK_HZ) + 1.0) /
+                                               ASK_USER_CARET_BLINK_HZ - elapsed);
     if (((int)(elapsed * ASK_USER_CARET_BLINK_HZ) & 1) == 0)
     {
         int line_i = CaretLineIndex(q->cursor);

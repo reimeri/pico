@@ -85,6 +85,7 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
         return;
     }
     if (host->selected_agent_id != id) PicoChatFind_Reset(host);
+    if (host->selected_agent_id != id) pico_host_request_redraw(host);
     host->selected_agent_id = id;
     agent = PicoHost_FindAgent(host, id);
     if (agent)
@@ -294,6 +295,7 @@ void PicoWorkspace_PumpUiPosts(PicoWorkspace *workspace)
                 memcpy(box->pub_text, box->text, box->text_len + 1);
             }
         }
+        pico_host_request_redraw(workspace->host);
         box->published = true;
         box->dirty = false;
         i++;
@@ -792,6 +794,7 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
     {
         return PICO_BUSY;
     }
+    pico_host_request_redraw(app);
     return PICO_OK;
 }
 
@@ -805,6 +808,7 @@ PicoResult pico_agent_cancel(PicoHost *app, PicoAgentId id)
         return PICO_NOT_FOUND;
     }
     PicoAgent_Cancel(agent);
+    pico_host_request_redraw(app);
     return PICO_OK;
 }
 
@@ -818,6 +822,7 @@ PicoResult pico_agent_force_cancel(PicoHost *app, PicoAgentId id)
         return PICO_NOT_FOUND;
     }
     PicoAgent_ForceCancel(app, agent);
+    pico_host_request_redraw(app);
     if (agent->workspace)
     {
         PicoWorkspace_DropAgentMailboxes(agent->workspace, agent->id, 0);

@@ -101,7 +101,19 @@ static int CustomEmptyInit(PicoWorkspace *workspace, void **state_out)
 
 ## Contract
 
-- Render callbacks run on the **main thread** inside Clay layout. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Host sidebar/main/overlay views must tolerate zero live workspaces and `pico_agent_active(host) == 0`. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`, and the type scale `PICO_FONT_CAPTION` 15 / `PICO_FONT_UI` 16 / `PICO_FONT_BODY` 18 / `PICO_FONT_TITLE` 20). Do not set `fontSize` below 14. Those values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16` (`PICO_FONT_CAPTION_LINE` 20 / `PICO_FONT_UI_LINE` 22 / `PICO_FONT_BODY_LINE` 26).
+- Render callbacks run on the **main thread** inside Clay layout, including pumps that skip presentation. They are declarative and may run more than once per displayed frame when Pico performs a same-frame reflow; do not mutate durable state, perform I/O, or consume input in them. Put those effects in `on_frame` or a notification hook. Host sidebar/main/overlay views must tolerate zero live workspaces and `pico_agent_active(host) == 0`. Use Clay macros; fonts/colors from `pico/theme.h` (`FONT_*`, `COLOR_*`, and the type scale `PICO_FONT_CAPTION` 15 / `PICO_FONT_UI` 16 / `PICO_FONT_BODY` 18 / `PICO_FONT_TITLE` 20). Do not set `fontSize` below 14. Those values are design pixels; Pico multiplies them by user-global `settings.json` `font_scale` (default 1.0) at measure and draw. Direct `MeasureTextEx` / `DrawTextEx` must use `Pico_FontPx`. Explicit `lineHeight` must use `Pico_FontPxU16` (`PICO_FONT_CAPTION_LINE` 20 / `PICO_FONT_UI_LINE` 22 / `PICO_FONT_BODY_LINE` 26).
+- An unchanged desktop window does not present every pump. If extension-owned
+  state affecting a Clay view or an after-render drawing changes, call
+  `pico_host_request_redraw(host)` on the main thread (for a workspace view,
+  `pico_workspace_host(workspace)` returns the host). A view callback does not
+  request its own render: request from the `on_frame`, notification, input, or
+  apply callback which changes that state. For timed visuals, schedule the next
+  *actual change* with `pico_host_request_redraw_after(host, delay_seconds)`;
+  after-render hooks may schedule their next update. Calls coalesce into one
+  full redraw; a request made during after-render applies to the next frame.
+  Idle `on_frame` callbacks keep running but must not request a redraw unless
+  something visible changed. Worker callbacks must publish their data through
+  normal main-thread handoff rather than calling redraw APIs.
 - Unique `CLAY_ID(...)` per element. Colliding IDs break layout.
 - Pointer handling belongs in `PICO_HOOK_AFTER_LAYOUT`; extra drawing after Clay in `PICO_HOOK_AFTER_RENDER` (see `hooks.md`). Those hooks are host-scoped.
 - Do not call Clay from a tool, provider, or workspace `on_frame` callback. Workspace `on_frame` runs for every `OPEN` or `RELOADING` workspace and must not draw.

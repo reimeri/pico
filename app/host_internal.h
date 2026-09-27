@@ -158,6 +158,13 @@ struct PicoHost {
     bool composer_overflow;
     bool reinitialize_clay;
     bool ui_relayout_requested; /* Main-thread input changed layout/scroll after layout. */
+    bool redraw_requested; /* Full-frame invalidation; only the main thread mutates it. */
+    bool frame_presented; /* The last frame called EndDrawing. */
+    bool window_focused;
+    bool window_minimized;
+    double redraw_at; /* Earliest pending animation deadline, or zero. */
+    double frame_at; /* Previous host frame start, including skipped presentations. */
+    float frame_delta;
     bool debug_enabled;
     bool safe_mode;
     bool reload_queued;

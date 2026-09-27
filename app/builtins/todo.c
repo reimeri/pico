@@ -19,6 +19,7 @@
 #define TODO_EXPANDED_WIDTH 520.0f
 #define TODO_EXPANDED_HEIGHT 420.0f
 #define TODO_GAP 8.0f
+#define TODO_TRANSITION_DURATION 0.18f
 
 typedef struct TodoAgentState {
     PicoAgentId agent_id;
@@ -34,6 +35,7 @@ typedef struct TodoState {
     float space_above;
     char header[64];
     bool overflow;
+    double transition_until;
     PicoScrollbar scrollbar;
 } TodoState;
 
@@ -193,6 +195,7 @@ static bool TodoApply(PicoWorkspace *workspace, PicoAgentId agent_id, const char
     PicoTodoList_Free(&parsed);
     if (todos->todos.count == 0)
     {
+        if (todos->expanded) s->transition_until = GetTime() + TODO_TRANSITION_DURATION;
         todos->expanded = false;
     }
     if (replay)
@@ -381,7 +384,7 @@ static void TodoRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, 
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = todos->expanded ? CLAY_CORNER_RADIUS(10) : CLAY_CORNER_RADIUS(18),
           .transition = {.handler = Clay_EaseOut,
-                         .duration = 0.18f,
+                         .duration = TODO_TRANSITION_DURATION,
                          .properties = CLAY_TRANSITION_PROPERTY_DIMENSIONS |
                                        CLAY_TRANSITION_PROPERTY_CORNER_RADIUS}})
     {
@@ -484,6 +487,7 @@ static void TodoHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     {
         return;
     }
+    bool was_expanded = todos->expanded;
     if (!todos->expanded && over_panel)
     {
         todos->expanded = true;
@@ -496,6 +500,7 @@ static void TodoHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     {
         todos->expanded = false;
     }
+    if (was_expanded != todos->expanded) s->transition_until = GetTime() + TODO_TRANSITION_DURATION;
 }
 
 static void TodoWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt)
@@ -507,6 +512,12 @@ static void TodoWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
         return;
     }
     PicoHost *app = workspace ? workspace->host : NULL;
+    if (app && s->transition_until > 0.0)
+    {
+        /* Include the first settled layout after the transition deadline. */
+        pico_host_request_redraw(app);
+        if (GetTime() >= s->transition_until) s->transition_until = 0.0;
+    }
     for (int i = 0; app && i < PICO_MAX_AGENTS; i++)
     {
         TodoAgentState *pending = &s->states[i];
@@ -530,6 +541,7 @@ static void TodoWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
         if (IsKeyPressed(KEY_ESCAPE))
         {
             todos->expanded = false;
+            s->transition_until = GetTime() + TODO_TRANSITION_DURATION;
         }
     }
 }

@@ -16,6 +16,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1058,6 +1059,7 @@ static void ClipboardProcessFallback(PicoHost *app)
 {
     ClipboardProcessClear();
     PasteClipboard(&app->composer);
+    pico_host_request_redraw(app);
 }
 
 bool PicoComposer_ClipboardPasteBusy(void)
@@ -1154,6 +1156,7 @@ void PicoComposer_PumpClipboardPaste(PicoHost *app)
     {
         bool attached = PersistClipboardImage(app, g_clip_process.bytes, g_clip_process.length, ext);
         ClipboardProcessClear();
+        if (attached) pico_host_request_redraw(app);
         if (!attached)
         {
             pico_status_warn(app, "Could not attach the pasted image.");
@@ -1800,6 +1803,7 @@ void PicoComposer_HandleInput(PicoHost *app)
             char bytes[4];
             int n = PicoText_Utf8Encode(cp, bytes);
             ComposerInsert(c, bytes, n);
+            pico_host_request_redraw(app);
         }
     }
     PicoComplete_Refresh(app);
@@ -2317,6 +2321,8 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
     {
         elapsed = 0;
     }
+    pico_host_request_redraw_after(app, (floor(elapsed * CARET_BLINK_HZ) + 1.0) /
+                                               CARET_BLINK_HZ - elapsed);
     if (((int)(elapsed * CARET_BLINK_HZ) & 1) == 0)
     {
         float x, y, h;
@@ -2399,6 +2405,7 @@ static void ConsumeDroppedFiles(PicoHost *app)
         for (unsigned int i = 0; i < files.count; i++)
         {
             pico_composer_attach_path(files.paths[i], false);
+            pico_host_request_redraw(app);
         }
     }
     UnloadDroppedFiles(files);

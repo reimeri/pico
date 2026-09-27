@@ -4,6 +4,9 @@
 // Layout/ownership contracts: docs/extend/views.md#clay-layout-lifetime and
 // docs/extend/contracts.md. Views may run again before a frame is presented;
 // do not retain Clay-owned pointers between callbacks.
+// If an on_frame or input callback changes visible state, call
+// pico_host_request_redraw(host). Timed visuals can use
+// pico_host_request_redraw_after(host, delay_seconds); see /docs host.
 //
 //   mkdir -p ~/.config/pico/extensions/hello
 //   cp examples/hello.c ~/.config/pico/extensions/hello/

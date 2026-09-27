@@ -148,6 +148,7 @@ bool PicoWorkspace_PublishRegistrationGeneration(PicoWorkspace *workspace)
     }
     old = workspace->active_registration;
     workspace->active_registration = next;
+    pico_host_request_redraw(workspace->host);
     PicoWorkspace_RegistrationRelease(old);
     return true;
 }

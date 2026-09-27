@@ -11398,6 +11398,68 @@ static int TestQuitDefersTeardownUntilFrameReturns(void)
 }
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static int g_redraw_frame_callbacks;
+static int g_redraw_render_callbacks;
+
+static void RequestRedrawFromFrame(PicoHost *host, void *state, float dt)
+{
+    (void)state;
+    (void)dt;
+    if (++g_redraw_frame_callbacks == 3) pico_host_request_redraw(host);
+}
+
+static void RequestRedrawFromRender(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)event;
+    (void)state;
+    if (++g_redraw_render_callbacks == 1) pico_host_request_redraw(host);
+}
+
+static int TestIdleFrameOnlyPresentsOnInvalidation(void)
+{
+    PicoHost *host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800}))
+    {
+        Fail("idle redraw setup");
+        if (host) pico_host_free(host);
+        return 1;
+    }
+    WaitPluginLoad(host);
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    memset(host->view_count, 0, sizeof(host->view_count));
+    host->hook_count = 0;
+    PicoHost_BeginRegistration(host, PICO_REG_HOST, NULL);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_RENDER, RequestRedrawFromRender);
+    PicoHost_PublishRegistration(host, NULL);
+
+    PicoModuleGeneration module = {.ext = {.host_on_frame = RequestRedrawFromFrame}};
+    int slots = host->host_plugin_count;
+    host->host_plugins[host->host_plugin_count++] =
+        (PicoPluginSlot){.module = &module, .initialized = true};
+    g_clay_frame_test = true;
+    g_redraw_frame_callbacks = g_redraw_render_callbacks = 0;
+    int start = g_presented_frames;
+    PicoHost_Frame(host); /* First presentation; render hook requests another. */
+    PicoHost_Frame(host); /* Honor the after-render request. */
+    PicoHost_Frame(host); /* Host callback requests a new image. */
+    PicoHost_Frame(host); /* No new request: still pump but skip presentation. */
+    bool good = g_redraw_frame_callbacks == 4 && g_presented_frames == start + 3;
+    g_find_input_test = true;
+    g_find_key = KEY_F2;
+    PicoHost_Frame(host); /* A key after idle must be processed and presented. */
+    good = good && g_presented_frames == start + 4;
+    g_find_key = 0;
+    g_find_input_test = false;
+    memset(&host->host_plugins[slots], 0, sizeof(host->host_plugins[0]));
+    host->host_plugin_count = slots;
+    g_clay_frame_test = false;
+    pico_host_free(host);
+    Pico_FreeClay();
+    if (!good) Fail("idle frame must keep pumping and present only on explicit requests");
+    return g_failed ? 1 : 0;
+}
+
 static void RecoveryOverflowView(PicoHost *host, void *state)
 {
     (void)host;
@@ -12127,6 +12189,7 @@ int main(int argc, char **argv)
     {
         return TestFrameRetriesFailedArenaReplacement();
     }
+    if (TestIdleFrameOnlyPresentsOnInvalidation() != 0) return 1;
     if (TestFrameRetriesFailedArenaReplacement() != 0)
     {
         return 1;

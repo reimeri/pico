@@ -38,6 +38,7 @@ bool pico_ui_modal_push(PicoHost *app, const char *name)
         return false;
     }
     app->ui_modal_count++;
+    pico_host_request_redraw(app);
     return true;
 }
 
@@ -53,6 +54,7 @@ bool pico_ui_modal_pop(PicoHost *app, const char *name)
     }
     app->ui_modal_count--;
     app->ui_modals[app->ui_modal_count][0] = '\0';
+    pico_host_request_redraw(app);
     return true;
 }
 
@@ -104,6 +106,7 @@ void pico_ui_modal_reset(PicoHost *app)
     {
         return;
     }
+    if (app->ui_modal_count) pico_host_request_redraw(app);
     memset(app->ui_modals, 0, sizeof(app->ui_modals));
     app->ui_modal_count = 0;
 }

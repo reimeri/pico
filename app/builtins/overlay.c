@@ -47,6 +47,7 @@ static OverlayState *ActiveOverlayState(void)
 
 void PicoOverlay_Notify(PicoHost *app, const char *text)
 {
+    pico_host_request_redraw(app);
     s_active_overlay_state = (OverlayState *)PicoPlugins_HostState(app, "overlay");
     if (!s_active_overlay_state)
     {
@@ -347,12 +348,14 @@ void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
     }
     if (g_notify)
     {
+        pico_host_request_redraw(app); /* The toast progress bar changes with its TTL. */
         g_notify_ttl -= dt;
         if (g_notify_ttl <= 0.0f)
         {
             free(g_notify);
             g_notify = NULL;
             g_notify_ttl = 0.0f;
+            pico_host_request_redraw(app);
         }
     }
     if (pico_ui_modal_claimed(app) || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))

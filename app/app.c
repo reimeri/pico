@@ -110,7 +110,7 @@ static void PicoHost_PumpTasks(PicoHost *host)
         if (pthread_tryjoin_np(task->thread, NULL) == 0)
         {
             *link = task->next;
-            if (task->complete) task->complete(host, task->state);
+            if (task->complete) { task->complete(host, task->state); pico_host_request_redraw(host); }
             task->destroy(task->state);
             free(task);
         }
@@ -405,6 +405,7 @@ void PicoHost_PublishRegistration(PicoHost *host, void *state)
     {
         return;
     }
+    pico_host_request_redraw(host);
     if (host->reg_scope == PICO_REG_HOST)
     {
         for (int slot = 0; slot < PICO_SLOT_COUNT; slot++)
@@ -995,6 +996,7 @@ void pico_status_warn(PicoHost *host, const char *msg)
     memcpy(host->status_warn + old, msg, extra - 1);
     host->status_warn[old + extra - 2] = '\n';
     host->status_warn[old + extra - 1] = '\0';
+    pico_host_request_redraw(host);
 }
 
 void pico_workspace_status_warn(PicoWorkspace *workspace, const char *msg)
@@ -2041,9 +2043,27 @@ bool PicoUi_ModalOpen(const PicoHost *app)
            (pico_tool_pending_ask(app, &ask) && !PicoUi_QuestionnaireOpen(app));
 }
 
+void pico_host_request_redraw(PicoHost *host)
+{
+    if (host) host->redraw_requested = true;
+}
+
+void pico_host_request_redraw_after(PicoHost *host, double delay_seconds)
+{
+    if (!host) return;
+    if (!(delay_seconds > 0.0))
+    {
+        pico_host_request_redraw(host);
+        return;
+    }
+    double at = GetTime() + delay_seconds;
+    if (host->redraw_at == 0.0 || at < host->redraw_at) host->redraw_at = at;
+}
+
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
 {
     memset(host, 0, sizeof(*host));
+    host->redraw_requested = true;
     host->next_workspace_id = 1;
     host->next_agent_id = 1;
     host->next_ask_id = 0;
@@ -2257,6 +2277,7 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
         return PICO_NO_MEMORY;
     }
     PicoPlugins_InitWorkspace(host, workspace);
+    pico_host_request_redraw(host);
     if (out)
     {
         *out = workspace->id;
@@ -2276,6 +2297,7 @@ PicoResult PicoWorkspace_RequestReload(PicoHost *host, PicoWorkspace *workspace,
         return PICO_BUSY;
     }
     PicoSession_LoadCancelWorkspace(host, workspace->id);
+    pico_host_request_redraw(host);
     workspace->reload_retry_compile_failures |= retry_compile_failures;
     if (workspace->state == PICO_WORKSPACE_OPEN)
     {
@@ -2304,6 +2326,7 @@ PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id)
         return PICO_INVALID;
     }
     PicoSession_LoadCancelWorkspace(host, workspace->id);
+    pico_host_request_redraw(host);
     workspace->state = PICO_WORKSPACE_CLOSING;
     PicoWorkspace_SetAcceptingWork(workspace, false);
     PicoWorkspace_CancelDelegations(workspace, 0, 0);
@@ -2345,7 +2368,9 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
     copy = *options;
     copy.kind = PICO_AGENT_MAIN;
     copy.parent_id = 0;
-    return PicoWorkspace_CreateAgent(workspace, &copy, out);
+    PicoResult result = PicoWorkspace_CreateAgent(workspace, &copy, out);
+    if (result == PICO_OK) pico_host_request_redraw(host);
+    return result;
 }
 
 PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json)
@@ -2362,7 +2387,9 @@ PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, c
     {
         return PICO_NOT_FOUND;
     }
-    return SubmitPreparedTurn(host, agent, text, text, parts_json);
+    PicoResult result = SubmitPreparedTurn(host, agent, text, text, parts_json);
+    if (result == PICO_OK) pico_host_request_redraw(host);
+    return result;
 }
 
 static void PicoHost_PumpLifecycle(PicoHost *host);
@@ -2428,7 +2455,7 @@ void pico_host_pump(PicoHost *host)
     PicoHost_ReapBrowsers(host);
     PicoHost_PumpLifecycle(host);
     PicoSessionPersist_Pump(host);
-    float dt = GetFrameTime();
+    float dt = host->frame_at > 0.0 ? host->frame_delta : GetFrameTime();
     for (int w = 0; w < host->workspace_count; w++)
     {
         PicoWorkspace *workspace = host->workspaces[w];
@@ -2918,6 +2945,7 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
                     host->workspaces[j - 1] = host->workspaces[j];
                 }
                 host->workspaces[--host->workspace_count] = NULL;
+                pico_host_request_redraw(host);
                 continue;
             }
             i++;
@@ -3424,11 +3452,6 @@ static void SkipClayPresent(Clay_RenderCommandArray commands)
 {
     fprintf(stderr, "clay-scroll: skip present cmds=%d overlay=%d needs=%d\n", commands.length,
             ClayCapacityErrorOverlay(commands) ? 1 : 0, Pico_NeedsClayReinit() ? 1 : 0);
-    GLFWwindow *win = GetWindowHandle();
-    if (win)
-    {
-        glfwPollEvents();
-    }
 }
 
 static Clay_RenderCommandArray RecoverClayLayoutIfNeeded(PicoHost *app, Clay_RenderCommandArray commands)
@@ -3470,8 +3493,43 @@ void PicoHost_Frame(PicoHost *app)
     {
         return;
     }
+    app->frame_presented = false;
+    double now = GetTime();
+    float frame_dt = app->frame_at > 0.0 ? (float)(now - app->frame_at) : GetFrameTime();
+    if (frame_dt < 0.0f) frame_dt = 0.0f;
+    app->frame_at = now;
+    app->frame_delta = frame_dt;
+    if (app->redraw_at > 0.0 && now >= app->redraw_at)
+    {
+        app->redraw_at = 0.0;
+        pico_host_request_redraw(app);
+    }
+    int old_width = GetScreenWidth(), old_height = GetScreenHeight();
     SyncRaylibWindowSize();
+    if (old_width != GetScreenWidth() || old_height != GetScreenHeight() || IsWindowResized())
+        pico_host_request_redraw(app);
+    bool focused = IsWindowFocused(), minimized = IsWindowMinimized();
+    if (focused != app->window_focused || minimized != app->window_minimized)
+        pico_host_request_redraw(app);
+    app->window_focused = focused;
+    app->window_minimized = minimized;
     Vector2 mouse_delta = GetMouseWheelMoveV();
+    Vector2 movement = GetMouseDelta();
+    if (movement.x != 0.0f || movement.y != 0.0f || mouse_delta.x != 0.0f || mouse_delta.y != 0.0f)
+        pico_host_request_redraw(app);
+    for (int key = 0; key < 512; key++)
+        if (IsKeyPressed(key) || IsKeyReleased(key) || IsKeyPressedRepeat(key))
+        {
+            pico_host_request_redraw(app);
+            break;
+        }
+    for (int button = 0; button < 7; button++)
+        if (IsMouseButtonPressed(button) || IsMouseButtonReleased(button) || IsMouseButtonDown(button))
+        {
+            pico_host_request_redraw(app);
+            break;
+        }
+
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
 
@@ -3580,10 +3638,36 @@ void PicoHost_Frame(PicoHost *app)
      * settings pane instead. The floating default-model menu keeps its own drag
      * scrolling; wheel and the custom scrollbar are separate. */
     bool over_settings_content = PicoSettingsUi_ScrollHovered(app, wheel.y);
+    /* Clay advances drag inertia independently of wheel/input events. A new
+     * scroll offset is a visible change even with a stationary pointer. */
+    static const Clay_String scroll_ids[] = {
+        CLAY_STRING("ChatScroll"), CLAY_STRING("SidebarScroll"),
+        CLAY_STRING("SubagentChatScroll"), CLAY_STRING("TodoListScroll"),
+        CLAY_STRING("SettingsModalScroll"), CLAY_STRING("SettingsDefaultMenuScroll"),
+        CLAY_STRING("AskModalScroll"), CLAY_STRING("AskUserTextScroll"),
+        CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),
+        CLAY_STRING("ExtModalScroll"), CLAY_STRING("PromptModalScroll"),
+        CLAY_STRING("BackgroundListScroll"), CLAY_STRING("BackgroundLogScroll"),
+        CLAY_STRING("DiffScroll"), CLAY_STRING("MdHorizontalScroll")
+    };
+    Clay_Vector2 previous_scroll[sizeof(scroll_ids) / sizeof(scroll_ids[0])];
+    for (size_t i = 0; i < sizeof(scroll_ids) / sizeof(scroll_ids[0]); i++)
+    {
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(scroll_ids[i]));
+        previous_scroll[i] = (data.found && data.scrollPosition) ? *data.scrollPosition : (Clay_Vector2){0};
+    }
     Clay_UpdateScrollContainers(
         !bar_drag && !over_settings_content &&
             (modal_open || (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
-        (pane_wheel || sidebar_wheel || over_settings_content) ? (Clay_Vector2){0, 0} : wheel, GetFrameTime());
+        (pane_wheel || sidebar_wheel || over_settings_content) ? (Clay_Vector2){0, 0} : wheel, frame_dt);
+    for (size_t i = 0; i < sizeof(scroll_ids) / sizeof(scroll_ids[0]); i++)
+    {
+        Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(scroll_ids[i]));
+        if (data.found && data.scrollPosition &&
+            (previous_scroll[i].x != data.scrollPosition->x ||
+             previous_scroll[i].y != data.scrollPosition->y))
+            pico_host_request_redraw(app);
+    }
     if (pane_wheel)
     {
         ApplyPaneWheel(over_inspect ? CLAY_STRING("SubagentChatScroll") : CLAY_STRING("ChatScroll"),
@@ -3596,7 +3680,7 @@ void PicoHost_Frame(PicoHost *app)
     UpdateChatFollowFromUserScroll(app, over_chat, modal_open, wheel.y);
 
     Clay_RenderCommandArray render_commands =
-        RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), GetFrameTime()));
+        RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), frame_dt));
 
     if (ClayLayoutUnusable(render_commands))
     {
@@ -3686,6 +3770,7 @@ void PicoHost_Frame(PicoHost *app)
     }
     if (relayout)
     {
+        pico_host_request_redraw(app);
         fprintf(stderr, "clay-scroll: relayout follow=%d\n", app->chat_follow_bottom ? 1 : 0);
         /* Clay has already generated command bounds with the prior offset.
          * Rebuild once so the corrected offset is visible this frame. */
@@ -3716,10 +3801,13 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
 
+    if (!app->redraw_requested) return;
+    app->redraw_requested = false;
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
     pico_run_hooks(app, PICO_HOOK_AFTER_RENDER, pico_agent_active(app));
     PicoChatFind_DrawInput(app);
     EndDrawing();
+    app->frame_presented = true;
 }

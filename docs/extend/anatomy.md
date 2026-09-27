@@ -36,7 +36,7 @@ PicoExt pico_ext(void)
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.
 - `host_shutdown` / `workspace_shutdown` — release instance state after the instance is quiescent.
-- `host_on_frame` / `workspace_on_frame` — main thread, once per frame, `dt` in seconds. Workspace `on_frame` must not draw.
+- `host_on_frame` / `workspace_on_frame` — main thread, once per frame, `dt` in seconds. Workspace `on_frame` must not draw. A frame callback may run without a presentation; invalidate changed UI explicitly (see [host](host.md#lifecycle) and [views](views.md#contract)).
 
 A builtin or user-global source may provide host callbacks, workspace callbacks, or both. A source under `<workspace>/.pico/extensions/` must set every host callback to `NULL`. If it does not, activation fails and the previous active generation remains in use.
 

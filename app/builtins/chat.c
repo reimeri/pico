@@ -4037,6 +4037,8 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
+    const PicoAgent *active = PicoHost_SelectedAgentConst(app);
+    if (PicoAgent_IsBusy(active)) pico_host_request_redraw(app);
     for (int i = 0; i < EMPTY_CARD_COUNT; i++)
     {
         PicoScrollbar_UpdateDrag(&s_active_chat_state->empty_card_bar[i], EmptyCardScrollId(i),

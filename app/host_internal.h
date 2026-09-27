@@ -295,6 +295,8 @@ int PicoHost_ResolveWorkspaceDir(const char *workspace, const char *arg, char *o
 bool PicoHost_ProcessRetired(void);
 /* Current-frame shell allocation; independent of previous layout bounds. */
 float PicoHost_MainColumnWidth(const PicoHost *host);
+/* Available width of the shell-owned sidebar view during the current layout. */
+float PicoHost_SidebarContentWidth(void);
 /* The builtin questionnaire replaces composer input, but does not claim a modal. */
 bool PicoUi_QuestionnaireOpen(const PicoHost *host);
 Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *host, float viewport_height, float delta_time);

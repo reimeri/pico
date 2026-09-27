@@ -3276,7 +3276,14 @@ enum
     SHELL_ROOT_PADDING = 12,
     SHELL_BODY_GAP = 12,
     SHELL_SIDEBAR_WIDTH = 200,
+    SHELL_SIDEBAR_PADDING = 8,
 };
+
+float PicoHost_SidebarContentWidth(void)
+{
+    /* The sidebar view fills the fixed shell pane's horizontally padded interior. */
+    return SHELL_SIDEBAR_WIDTH - 2.0f * SHELL_SIDEBAR_PADDING;
+}
 
 float PicoHost_MainColumnWidth(const PicoHost *host)
 {
@@ -3335,7 +3342,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                 CLAY(CLAY_ID("Sidebar"),
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
-                                 .padding = {8, 8, 8, 8},
+                                 .padding = {SHELL_SIDEBAR_PADDING, SHELL_SIDEBAR_PADDING, 8, 8},
                                  .sizing = {.width = CLAY_SIZING_FIXED(SHELL_SIDEBAR_WIDTH), .height = CLAY_SIZING_PERCENT(1)}},
                       .backgroundColor = COLOR_CONTENT_BG,
                       .cornerRadius = CLAY_CORNER_RADIUS(8)})

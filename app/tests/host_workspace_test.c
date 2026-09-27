@@ -21,6 +21,7 @@
 #include "worktree.h"
 #include "docs_path.h"
 #include "clay/clay.h"
+#include <utf8proc.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -10756,6 +10757,157 @@ static bool SidebarSessionDotVisible(Clay_RenderCommandArray *commands, int row_
     return false;
 }
 
+static bool SidebarTextValidUtf8(const Clay_RenderCommand *text)
+{
+    if (!text) return false;
+    Clay_StringSlice value = text->renderData.text.stringContents;
+    for (int pos = 0; pos < value.length; )
+    {
+        utf8proc_int32_t cp;
+        utf8proc_ssize_t step = utf8proc_iterate((const utf8proc_uint8_t *)value.chars + pos,
+                                                 value.length - pos, &cp);
+        if (step <= 0) return false;
+        pos += (int)step;
+    }
+    return true;
+}
+
+static bool SidebarPrefixEndsAtGrapheme(const Clay_RenderCommand *text, const char *source)
+{
+    Clay_StringSlice value = text->renderData.text.stringContents;
+    int prefix = value.length - 3;
+    int pos = 0;
+    utf8proc_int32_t previous = 0, current, state = 0;
+    if (prefix <= 0) return false;
+    for (; source[pos]; )
+    {
+        utf8proc_ssize_t step = utf8proc_iterate((const utf8proc_uint8_t *)source + pos,
+                                                 strlen(source + pos), &current);
+        if (step <= 0) return false;
+        if (pos == prefix) return utf8proc_grapheme_break_stateful(previous, current, &state);
+        if (pos > 0) (void)utf8proc_grapheme_break_stateful(previous, current, &state);
+        pos += (int)step;
+        previous = current;
+    }
+    return pos == prefix;
+}
+
+/* Sidebar labels shorten at the rendered row's width, including the hover
+ * action, without changing their catalog title or painting into adjacent UI. */
+static int TestSidebarDisplayTitlesFitRows(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    const char *workspace_title = "Workspace-éééééééééééééééééééééééééé";
+    const char *session_title = "Session-åäö-abcdefghijklmnopqrstuvwxyz-0123456789-very-long-title";
+    char dir[] = "/tmp/pico-sidebar-title-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-sidebar-title-cfg-XXXXXX";
+    float old_scale = Pico_FontScale();
+    void *memory = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt = {0};
+    Clay_RenderCommandArray commands;
+    Clay_RenderCommand *workspace_text, *session_text;
+    Clay_ElementData workspace_row, session_row, plus;
+    int rc = 1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("sidebar label fixture directories");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        PicoCatalog_Ensure(dir) != 0 ||
+        PicoCatalog_SetProjectName(dir, workspace_title) != 0)
+    {
+        Fail("sidebar label fixture catalog");
+        goto done;
+    }
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        PicoSession_LogUser(host, PicoHost_FindAgent(host, agent_id),
+                            session_title, session_title, NULL) != PICO_SESSION_WRITE_OK)
+    {
+        Fail("sidebar label fixture session");
+        goto done;
+    }
+    if (!ShutdownAfterSessionPersist(host, PicoHost_FindAgent(host, agent_id)))
+    {
+        host = NULL;
+        Fail("sidebar label fixture persistence");
+        goto done;
+    }
+    host = NULL;
+    if (pico_host_init(&host, NULL, true) != PICO_OK)
+    {
+        Fail("sidebar label fixture reload");
+        goto done;
+    }
+    WaitPluginLoad(host);
+    pico_host_pump(host);
+    memory = malloc(Clay_MinMemorySize());
+    if (!memory || !Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                                    viewport, (Clay_ErrorHandler){0}))
+    {
+        Fail("sidebar label fixture layout");
+        goto done;
+    }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    workspace_text = FindTrimmedCardText(&commands, workspace_title);
+    session_text = FindTrimmedCardText(&commands, session_title);
+    workspace_row = Clay_GetElementData(CLAY_IDI("SidebarWs", 0));
+    session_row = Clay_GetElementData(CLAY_IDI("SidebarSess", 0));
+    if (!workspace_text || !session_text || !workspace_row.found || !session_row.found ||
+        !SidebarTextValidUtf8(workspace_text) || !SidebarTextValidUtf8(session_text) ||
+        !SidebarPrefixEndsAtGrapheme(workspace_text, workspace_title) ||
+        workspace_text->boundingBox.x + workspace_text->boundingBox.width >
+            workspace_row.boundingBox.x + workspace_row.boundingBox.width ||
+        session_text->boundingBox.x + session_text->boundingBox.width >
+            session_row.boundingBox.x + session_row.boundingBox.width)
+    {
+        Fail("sidebar long titles must render as bounded UTF-8 prefixes plus ellipses");
+        goto done;
+    }
+
+    /* Hover adds a sibling '+' button. The shortened workspace label must
+     * still fit to its left at a different font scale on the very next pass. */
+    Pico_SetFontScale(1.5f);
+    Clay_SetPointerState((Clay_Vector2){workspace_row.boundingBox.x + 8.0f,
+                                       workspace_row.boundingBox.y + workspace_row.boundingBox.height / 2.0f}, false);
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    workspace_text = FindTrimmedCardText(&commands, workspace_title);
+    session_text = FindTrimmedCardText(&commands, session_title);
+    plus = Clay_GetElementData(CLAY_IDI("SidebarPlus", 0));
+    session_row = Clay_GetElementData(CLAY_IDI("SidebarSess", 0));
+    if (!workspace_text || !session_text || !plus.found || !session_row.found ||
+        workspace_text->boundingBox.x + workspace_text->boundingBox.width > plus.boundingBox.x ||
+        session_text->boundingBox.x + session_text->boundingBox.width >
+            session_row.boundingBox.x + session_row.boundingBox.width)
+    {
+        Fail("sidebar titles must fit beside hover actions after font-scale changes");
+        goto done;
+    }
+    rc = 0;
+done:
+    Clay_SetCurrentContext(previous);
+    Pico_SetFontScale(old_scale);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    return rc;
+}
+
 /* Idle sidebar sessions show a visible status dot, smaller than attention dots. */
 static int TestIdleSidebarSessionDot(void)
 {
@@ -12256,6 +12408,7 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (TestSidebarDisplayTitlesFitRows() != 0) return 1;
     if (TestCanonicalOpenAndDuplicate() != 0)
     {
         return 1;

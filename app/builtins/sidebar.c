@@ -18,6 +18,7 @@
 #include "clay/clay.h"
 
 #include <math.h>
+#include <utf8proc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,14 @@ extern bool PicoSession_TestHook(const char *stage);
 #define SIDEBAR_SESSION_DOT 8
 #define SIDEBAR_SESSION_IDLE_DOT 4
 #define SIDEBAR_DRAG_THRESHOLD 4.0f
+#define SIDEBAR_LABEL_CHUNK_SIZE 32
+#define SIDEBAR_LABEL_CAPACITY (PICO_SESSION_TITLE_MAX_BYTES + 4)
+
+typedef struct SidebarLabelChunk
+{
+    struct SidebarLabelChunk *next;
+    char text[SIDEBAR_LABEL_CHUNK_SIZE][SIDEBAR_LABEL_CAPACITY];
+} SidebarLabelChunk;
 
 typedef struct SidebarWsUi
 {
@@ -81,6 +90,10 @@ typedef struct SidebarState
     int drag_target_index;
     uint64_t order_persist_generation;
     bool order_unsaved;
+    float row_width;
+    SidebarLabelChunk *label_chunks;
+    SidebarLabelChunk *label_chunk;
+    int label_used;
 } SidebarState;
 
 static Clay_String CStr(const char *s)
@@ -90,6 +103,126 @@ static Clay_String CStr(const char *s)
         s = "";
     }
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+}
+
+static float SidebarTextWidth(const char *text, int length)
+{
+    Clay_TextElementConfig config = {.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
+                                     .wrapMode = CLAY_TEXT_WRAP_NONE};
+    return Pico_MeasureTextUtf8((Clay_StringSlice){.chars = text, .length = length},
+                                &config, NULL).width;
+}
+
+/* Text commands refer to these strings until Clay_EndLayout and the draw complete.
+ * Never realloc a buffer containing a previously emitted title. Reuse the
+ * chunks on the next layout pass, after the prior command array is finished. */
+static char *SidebarNextLabel(SidebarState *s)
+{
+    if (!s->label_chunk || s->label_used == SIDEBAR_LABEL_CHUNK_SIZE)
+    {
+        SidebarLabelChunk *next = s->label_chunk ? s->label_chunk->next : s->label_chunks;
+        if (!next)
+        {
+            next = calloc(1, sizeof(*next));
+            if (!next) return NULL;
+            if (s->label_chunk) s->label_chunk->next = next;
+            else s->label_chunks = next;
+        }
+        s->label_chunk = next;
+        s->label_used = 0;
+    }
+    return s->label_chunk->text[s->label_used++];
+}
+
+static Clay_String SidebarDisplayTitle(SidebarState *s, const char *title, float width)
+{
+    static const char ellipsis[] = "\xE2\x80\xA6";
+    Clay_String full = CStr(title);
+    if (full.length <= 0) return full;
+    if (!(width > 0.0f)) return CLAY_STRING("");
+
+    /* Catalog names need not be valid UTF-8. Replace malformed bytes in the
+     * display copy so a long accepted name does not disappear when shortened. */
+    char normalized[SIDEBAR_LABEL_CAPACITY];
+    bool repaired = false;
+    for (int pos = 0; pos < full.length && pos < SIDEBAR_LABEL_CAPACITY - 1; )
+    {
+        utf8proc_int32_t codepoint;
+        utf8proc_ssize_t step = utf8proc_iterate(
+            (const utf8proc_uint8_t *)full.chars + pos, full.length - pos, &codepoint);
+        if (step <= 0)
+        {
+            if (!repaired)
+            {
+                memcpy(normalized, full.chars, (size_t)full.length + 1);
+                repaired = true;
+            }
+            normalized[pos++] = '?';
+        }
+        else pos += (int)step;
+    }
+    if (repaired) full.chars = normalized;
+    /* Leave space for rounded glyph placement and scissor-free painting. */
+    width -= 2.0f;
+    if (!(width > 0.0f)) return CLAY_STRING("");
+    if (SidebarTextWidth(full.chars, full.length) <= width)
+    {
+        if (!repaired) return full;
+        char *copy = SidebarNextLabel(s);
+        if (!copy) return CLAY_STRING("");
+        memcpy(copy, full.chars, (size_t)full.length + 1);
+        return (Clay_String){.chars = copy, .length = full.length};
+    }
+    if (SidebarTextWidth(ellipsis, 3) > width) return CLAY_STRING("");
+    char *display = SidebarNextLabel(s);
+    if (!display) return CLAY_STRING("");
+
+    /* A codepoint boundary can still split a combining character or emoji
+     * sequence. Shorten on displayed-character (grapheme) boundaries. */
+    int boundaries[SIDEBAR_LABEL_CAPACITY] = {0};
+    int count = 0, pos = 0;
+    utf8proc_int32_t previous = 0, state = 0, codepoint;
+    while (pos < full.length && count < SIDEBAR_LABEL_CAPACITY - 2)
+    {
+        utf8proc_ssize_t step = utf8proc_iterate(
+            (const utf8proc_uint8_t *)full.chars + pos, full.length - pos, &codepoint);
+        if (step <= 0) return CLAY_STRING("");
+        if (pos > 0 && utf8proc_grapheme_break_stateful(previous, codepoint, &state))
+        {
+            boundaries[++count] = pos;
+        }
+        pos += (int)step;
+        previous = codepoint;
+    }
+    boundaries[++count] = pos;
+    int low = 0, high = count;
+    while (low < high)
+    {
+        int mid = low + (high - low + 1) / 2;
+        int bytes = boundaries[mid];
+        if (bytes + 4 > SIDEBAR_LABEL_CAPACITY)
+        {
+            high = mid - 1;
+            continue;
+        }
+        memcpy(display, full.chars, (size_t)bytes);
+        memcpy(display + bytes, ellipsis, 3);
+        display[bytes + 3] = '\0';
+        if (SidebarTextWidth(display, bytes + 3) <= width) low = mid;
+        else high = mid - 1;
+    }
+    int bytes = low ? boundaries[low] : 0;
+    memcpy(display, full.chars, (size_t)bytes);
+    memcpy(display + bytes, ellipsis, 3);
+    display[bytes + 3] = '\0';
+    return (Clay_String){.chars = display, .length = bytes + 3};
+}
+
+static float SidebarLabelWidth(float row_width, float leading_width, float trailing_width)
+{
+    float width = row_width - 2.0f * SIDEBAR_ROW_PAD_X - leading_width - SIDEBAR_ROW_GAP;
+    if (trailing_width > 0.0f) width -= SIDEBAR_ROW_GAP + trailing_width;
+    return width > 0.0f ? width : 0.0f;
 }
 
 static int ClampShown(int shown, int total)
@@ -981,6 +1114,10 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
     bool hovered = !is_dragged && (Clay_PointerOver(row_id) || plus_hovered);
     Clay_Color fill = is_dragged ? (Clay_Color){35, 35, 42, 100} : RowFill(false, hovered);
     Clay_Color text_col = is_dragged ? (Clay_Color){120, 120, 135, 120} : COLOR_TEXT;
+    float plus_width = hovered && !is_dragged
+                           ? 8.0f + SidebarTextWidth("+", 1) : 0.0f;
+    Clay_String display = SidebarDisplayTitle(
+        s, ws->name, SidebarLabelWidth(s->row_width, Pico_FontPx(SIDEBAR_FOLDER_ICON), plus_width));
 
     CLAY(row_id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
@@ -998,10 +1135,9 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
                              edit_hovered ? "*" : ws->collapsed ? ">"
                                                                 : "v");
         }
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                      .clip = {.horizontal = true}})
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY_TEXT(CStr(ws->name),
+            CLAY_TEXT(display,
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = PICO_FONT_UI,
                                         .textColor = text_col,
@@ -1032,6 +1168,9 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
                    strcmp(ws_path, target_ws) == 0 && strcmp(session_id, target_id) == 0;
     Clay_ElementId id = CLAY_IDI("SidebarSess", row_id);
     bool hovered = Clay_PointerOver(id);
+    Clay_String display = SidebarDisplayTitle(
+        s, title && title[0] ? title : "Untitled",
+        SidebarLabelWidth(s->row_width, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0.0f));
     if (loading)
     {
         host->session_load_row_rendered = host->session_load_row_id != row_id ||
@@ -1049,10 +1188,9 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
     {
         RenderSessionDot(s, SessionDotKind(host, ws_path, session_id, row_live_id, catalog_unseen),
                          row_id, worktree, loading, !row_live_id);
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                      .clip = {.horizontal = true}})
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            CLAY_TEXT(CStr(title && title[0] ? title : "Untitled"),
+            CLAY_TEXT(display,
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                         .fontSize = PICO_FONT_UI,
                                         .textColor = missing_checkout ? COLOR_STATUS_ERR
@@ -1254,8 +1392,14 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
         return;
     }
     EnsureFolderIcons(s);
+    s->row_width = PicoHost_SidebarContentWidth();
+    s->label_chunk = NULL;
+    s->label_used = 0;
 
     add_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs")));
+    float add_width = 8.0f + SidebarTextWidth("+", 1);
+    Clay_String header = SidebarDisplayTitle(s, "Projects",
+        s->row_width - 2.0f * SIDEBAR_ROW_PAD_X - SIDEBAR_ROW_GAP - add_width);
     CLAY(CLAY_ID("SidebarRoot"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 6,
@@ -1268,10 +1412,9 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                          .childGap = SIDEBAR_ROW_GAP,
                          .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
         {
-            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                          .clip = {.horizontal = true}})
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
-                CLAY_TEXT(CLAY_STRING("Projects"),
+                CLAY_TEXT(header,
                           CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                             .fontSize = PICO_FONT_UI,
                                             .textColor = COLOR_MUTED,
@@ -1287,7 +1430,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = 2,
                          .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}},
-              .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
+              .clip = {.vertical = true, .horizontal = true, .childOffset = Clay_GetScrollOffset()}})
         {
             for (int section = 0; section < 2; section++)
             {
@@ -1361,6 +1504,9 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
         {
             Vector2 mouse = GetMousePosition();
             const PicoCatalogWorkspace *drag_ws = &s->workspaces[s->drag_source_index];
+            Clay_String preview = SidebarDisplayTitle(
+                s, drag_ws->name,
+                SidebarLabelWidth(180.0f, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0.0f));
             CLAY(CLAY_ID("SidebarDragPreview"),
                  {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
                                .offset = {.x = mouse.x + 12.0f, .y = mouse.y - 12.0f},
@@ -1377,10 +1523,9 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
             {
                 RenderFolderIcon(drag_ws->collapsed ? &s->folder_collapsed : &s->folder_expanded,
                                  drag_ws->collapsed ? ">" : "v");
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}},
-                              .clip = {.horizontal = true}})
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
                 {
-                    CLAY_TEXT(CStr(drag_ws->name),
+                    CLAY_TEXT(preview,
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                 .fontSize = PICO_FONT_UI,
                                                 .textColor = COLOR_TEXT,
@@ -2094,6 +2239,12 @@ static void SidebarShutdown(PicoHost *host, void *state)
     UnloadFolderIcons(s);
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);
+    for (SidebarLabelChunk *chunk = s->label_chunks; chunk; )
+    {
+        SidebarLabelChunk *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
     free(s);
 }
 

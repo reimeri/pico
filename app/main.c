@@ -90,7 +90,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "Pico could not initialize Clay.\n");
         return 1;
     }
-    Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE);
     SetExitKey(KEY_NULL);
 
     char workspace[4096];

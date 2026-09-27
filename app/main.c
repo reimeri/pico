@@ -90,7 +90,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "Pico could not initialize Clay.\n");
         return 1;
     }
-    Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE);
+    Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     SetExitKey(KEY_NULL);
 
     char workspace[4096];
@@ -123,7 +123,8 @@ int main(int argc, char **argv)
     /* Query the monitor once: GLFW's Wayland backend cannot report window
      * position, so GetCurrentMonitor() on every idle tick logs a warning. */
     int refresh_hz = GetMonitorRefreshRate(GetCurrentMonitor());
-    if (refresh_hz <= 0) refresh_hz = 60;
+    if (refresh_hz <= 0)
+        refresh_hz = 60;
     while (!PicoHost_ShouldExit(app) && !WindowShouldClose())
     {
         double frame_start = GetTime();
@@ -133,7 +134,8 @@ int main(int argc, char **argv)
             /* EndDrawing normally paces the frame and polls Raylib input. Keep
              * its input snapshot semantics even when there is no new image. */
             double remaining = 1.0 / refresh_hz - (GetTime() - frame_start);
-            if (remaining > 0.0) WaitTime(remaining);
+            if (remaining > 0.0)
+                WaitTime(remaining);
             PollInputEvents();
         }
     }

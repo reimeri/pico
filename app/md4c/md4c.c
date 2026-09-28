@@ -3810,6 +3810,12 @@ md_analyze_tilde(MD_CTX* ctx, int mark_index)
     MD_MARK* mark = &ctx->marks[mark_index];
     MD_MARKSTACK* stack = md_opener_stack(ctx, mark_index);
 
+    /* Approximation markers such as "~1.6 ... ~24%" must stay literal in
+     * Pico; only double tildes are intended to denote deletion spans. */
+    if((ctx->parser.flags & MD_FLAG_STRIKETHROUGH_DOUBLE_ONLY) &&
+       mark->end - mark->beg == 1)
+        return;
+
     /* We attempt to be Github Flavored Markdown compatible here. GFM accepts
      * only tildes sequences of length 1 and 2, and the length of the opener
      * and closer has to match. */

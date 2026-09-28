@@ -1269,7 +1269,7 @@ MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
 
     MD_PARSER parser = {0};
     parser.flags = MD_FLAG_PERMISSIVEAUTOLINKS | MD_FLAG_NOHTMLSPANS | MD_FLAG_TASKLISTS |
-                   MD_FLAG_STRIKETHROUGH | MD_FLAG_TABLES;
+                   MD_FLAG_STRIKETHROUGH | MD_FLAG_STRIKETHROUGH_DOUBLE_ONLY | MD_FLAG_TABLES;
     parser.enter_block = OnEnterBlock;
     parser.leave_block = OnLeaveBlock;
     parser.enter_span = OnEnterSpan;

@@ -5,6 +5,7 @@
 
 #include "pico/plugin.h"
 #include "pico/theme.h"
+#include "render_scale.h"
 #include "builtins/ask_user.h"
 #include "json.h"
 #include "scrollbar.h"
@@ -2184,7 +2185,7 @@ static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *
         Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
     float scroll_y = (scroll.found && scroll.scrollPosition) ? scroll.scrollPosition->y : 0;
     float line_height = g_ui.line_height > 1 ? g_ui.line_height : AskTextPx();
-    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+    Pico_Scissor((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
 
     if (AskHasSelection(q) && q->text)
     {
@@ -2252,7 +2253,7 @@ static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *
                        255};
         DrawRectangle((int)x, (int)y, 2, (int)line_height, caret);
     }
-    EndScissorMode();
+    Pico_ScissorEnd();
 }
 
 static void AskUserLlm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *event, void *state)

@@ -1,6 +1,7 @@
 #include "theme_internal.h"
 #include "docs_path.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,11 @@ static Font g_fonts[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_ready[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_owned[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static float g_font_scale = PICO_FONT_SCALE_DEFAULT;
+/* Device (framebuffer) scale the atlas in each slot was rasterized for. The
+ * slot key is the logical size, so a device scale change must invalidate the
+ * entry: Pico_FontAt reloads slots whose loaded-at scale differs. */
+static float g_font_slot_device_scale[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
+static float g_device_font_scale = 1.0f;
 
 static bool AddCodepointRange(int start, int end)
 {
@@ -133,6 +139,7 @@ float Pico_FontScale(void)
     return g_font_scale;
 }
 
+
 static void FontPath(uint16_t fontId, char *out, size_t cap)
 {
     const char *relative = kFontPaths[fontId];
@@ -162,14 +169,50 @@ static int RoundedFontPx(uint16_t design)
     return n;
 }
 
+/* Atlas rasterization size for a logical font size: the device pixels a glyph
+ * occupies, so glyph texels map 1:1 onto framebuffer pixels when the logical
+ * quad is scaled by the viewport transform. */
+static int AtlasPixelSize(int logicalSize)
+{
+    float px = (float)logicalSize * g_device_font_scale;
+    int n = px <= 0.0f ? 0 : (int)(px + 0.5f);
+    return n < 1 ? 1 : n;
+}
+
+/* Effective font size passed to measure and draw, in logical units. It is the
+ * atlas size divided by the device scale, so the quad scale factor
+ * (fontSize/baseSize) times the device scale is exactly 1 and glyph quads map
+ * 1:1 onto atlas texels. Without the snap, a size whose device pixels are
+ * fractional (18px at 1.25x -> 22.5) is resampled against the rounded atlas
+ * (23) and renders visibly softer than a grid-aligned size (16 -> 20). */
 float Pico_FontPx(uint16_t design)
 {
-    return (float)RoundedFontPx(design);
+    int logical = RoundedFontPx(design);
+    if (logical <= 0)
+    {
+        return 0.0f;
+    }
+    int atlas = AtlasPixelSize(logical);
+    return (float)atlas / g_device_font_scale;
 }
 
 uint16_t Pico_FontPxU16(uint16_t design)
 {
     return (uint16_t)RoundedFontPx(design);
+}
+
+/* Integer device scales place glyph texels exactly on device pixels, so
+ * nearest sampling stays pixel-crisp. Fractional scales leave glyph offsets
+ * between texels; bilinear avoids dropped columns. */
+static int AtlasTextureFilter(void)
+{
+    float scale = g_device_font_scale;
+    float nearest = roundf(scale);
+    if (nearest >= 1.0f && fabsf(scale - nearest) < 0.01f)
+    {
+        return TEXTURE_FILTER_POINT;
+    }
+    return TEXTURE_FILTER_BILINEAR;
 }
 
 static Font LoadFontWithFallback(const char *primaryPath, const char *fallbackPath, int pixelSize, int *codepoints,
@@ -341,13 +384,17 @@ Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
         fontId = FONT_REGULAR;
     }
     int idx = SizeIndex(Pico_FontPxU16(fontSize));
-    if (g_font_ready[fontId][idx])
+    if (g_font_ready[fontId][idx] && g_font_slot_device_scale[fontId][idx] == g_device_font_scale)
     {
         return g_fonts[fontId][idx];
     }
 
     EnsureCodepoints();
-    int pixel_size = idx + PICO_FONT_SIZE_MIN;
+    /* Rasterize the atlas at device pixels for the logical size: font.baseSize
+     * becomes the atlas size while fontSize passed to DrawTextEx/MeasureTextEx
+     * stays logical, so quads scale by logical/atlas and land 1:1 on texels
+     * after the viewport transform multiplies by the device scale. */
+    int pixel_size = AtlasPixelSize(idx + PICO_FONT_SIZE_MIN);
     char path[4096];
     char fallback_path[4096];
     FontPath(fontId, path, sizeof(path));
@@ -361,11 +408,17 @@ Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
     }
     else if (font.texture.id != 0 && font.texture.id != fallback.texture.id)
     {
-        SetTextureFilter(font.texture, TEXTURE_FILTER_POINT);
+        SetTextureFilter(font.texture, AtlasTextureFilter());
+    }
+    if (g_font_ready[fontId][idx] && g_font_owned[fontId][idx])
+    {
+        /* Replace a slot rasterized for a previous device scale. */
+        Pico_UnloadFont(g_fonts[fontId][idx]);
     }
     g_fonts[fontId][idx] = font;
     g_font_ready[fontId][idx] = true;
     g_font_owned[fontId][idx] = owned;
+    g_font_slot_device_scale[fontId][idx] = g_device_font_scale;
     return font;
 }
 
@@ -432,6 +485,29 @@ static uint64_t MeasureCacheHash(const char *text, int32_t length,
 void Pico_MeasureCacheReset(void)
 {
     memset(s_measure_cache, 0, sizeof(s_measure_cache));
+}
+
+void Pico_SetDeviceFontScale(float scale)
+{
+    if (!(scale > 0.0f) || scale > 16.0f)
+    {
+        return;
+    }
+    if (scale == g_device_font_scale)
+    {
+        return;
+    }
+    g_device_font_scale = scale;
+    /* Logical measurements are unaffected, but the wrapped-text caches key on
+     * the font generation and atlas rounding can shift a pixel, so force a
+     * re-measure. Slots reload lazily via Pico_FontAt. */
+    Pico_MeasureCacheReset();
+    s_font_generation++;
+}
+
+float Pico_DeviceFontScale(void)
+{
+    return g_device_font_scale;
 }
 
 static Clay_Dimensions MeasureWithFont(const char *text, int32_t length,

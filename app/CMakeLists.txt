@@ -40,9 +40,11 @@ unset(_pico_policy_version_minimum_defined)
 target_compile_options(raylib PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wno-unused-result>)
 
-# Raylib 5.5 never sets GLFW_SCALE_FRAMEBUFFER; wrap glfwCreateWindow in rcore
-# (which includes the desktop backend) so Wayland gets a 1:1 window/framebuffer
-# (raylib #5564).
+# Raylib 5.5 never sets GLFW_SCALE_FRAMEBUFFER (raylib #5564); keep the GLFW 3.4
+# default TRUE so Wayland hands us a monitor-scaled framebuffer for
+# native-resolution rendering (app/render_scale.c). The rcore include (which
+# pulls in the desktop backend) wraps glfwCreateWindow so
+# PICO_DISABLE_NATIVE_SCALE=1 can restore the 1:1 logical framebuffer.
 set_property(SOURCE "${raylib_SOURCE_DIR}/src/rcore.c"
     TARGET_DIRECTORY raylib
     PROPERTY COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/pico_glfw_scale.h")
@@ -160,6 +162,7 @@ add_executable(pico
     host_extensions.c
     workspace_extensions.c
     theme.c
+    render_scale.c
     md_view.c
     markdown.c
     richtext.c
@@ -235,6 +238,7 @@ target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyfiledialogs
+    ${raylib_SOURCE_DIR}/src
     ${raylib_SOURCE_DIR}/src/external/glfw/include)
 
 target_compile_definitions(pico PRIVATE
@@ -543,6 +547,7 @@ if(BUILD_TESTING)
     set_source_files_properties(tests/parallel_tool_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
+        render_scale.c
         tests/workspace_test.c
         tests/subagent_config_test.c
         tests/subagent_test.c
@@ -608,6 +613,7 @@ if(BUILD_TESTING)
 
     add_executable(pico_files_tests
         tests/files_test.c
+        render_scale.c
         tests/clay_impl.c
         builtins/complete.c
         wrapped_text.c
@@ -653,6 +659,7 @@ if(BUILD_TESTING)
 
     add_executable(pico_composer_tests
         tests/composer_test.c
+        render_scale.c
         tests/clay_impl.c
         builtins/complete.c
         wrapped_text.c
@@ -761,6 +768,25 @@ if(BUILD_TESTING)
     target_link_options(pico_font_scale_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_font_scale_tests COMMAND pico_font_scale_tests)
 
+    add_executable(pico_render_scale_tests
+        tests/render_scale_test.c
+        render_scale.c
+        theme.c
+        docs_path.c)
+    target_include_directories(pico_render_scale_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src
+        ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    pico_warnings_are_errors(pico_render_scale_tests)
+    target_compile_options(pico_render_scale_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_render_scale_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_render_scale_tests PRIVATE raylib)
+    target_compile_definitions(pico_render_scale_tests PRIVATE
+        PICO_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME pico_render_scale_tests COMMAND pico_render_scale_tests)
+
     add_executable(pico_font_symbols_tests
         tests/font_symbols_test.c
         theme.c
@@ -825,6 +851,7 @@ if(BUILD_TESTING)
 
     add_executable(pico_host_workspace_tests
         tests/host_workspace_test.c
+        render_scale.c
         tests/clay_impl.c
         app.c
         worktree.c

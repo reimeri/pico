@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include "raymath.h"
+#include "render_scale.h"
 #include "stdint.h"
 #include "string.h"
 #include "stdio.h"
@@ -215,7 +216,7 @@ static void Clay_Raylib_PushScissor(Clay_BoundingBox box)
     {
         clay_raylib_scissors[clay_raylib_scissor_depth++] = r;
     }
-    BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+    Pico_Scissor((int)r.x, (int)r.y, (int)r.width, (int)r.height);
 }
 
 static void Clay_Raylib_PopScissor(void)
@@ -224,11 +225,11 @@ static void Clay_Raylib_PopScissor(void)
     {
         clay_raylib_scissor_depth--;
     }
-    EndScissorMode();
+    Pico_ScissorEnd();
     if (clay_raylib_scissor_depth > 0)
     {
         Rectangle r = clay_raylib_scissors[clay_raylib_scissor_depth - 1];
-        BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+        Pico_Scissor((int)r.x, (int)r.y, (int)r.width, (int)r.height);
     }
 }
 
@@ -273,7 +274,12 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 // Raylib uses standard C strings so isn't compatible with cheap slices, we need to clone the string to append null terminator
                 memcpy(temp_render_buffer, textData->stringContents.chars, textData->stringContents.length);
                 temp_render_buffer[textData->stringContents.length] = '\0';
-                DrawTextEx(fontToUse, temp_render_buffer, (Vector2){roundf(boundingBox.x), roundf(boundingBox.y)}, Pico_FontPx(textData->fontSize), Pico_FontPx(textData->letterSpacing), CLAY_COLOR_TO_RAYLIB_COLOR(textData->textColor));
+                float device_scale = Pico_DeviceScale();
+                DrawTextEx(fontToUse, temp_render_buffer,
+                           (Vector2){Pico_RoundToPhysical(boundingBox.x, device_scale),
+                                     Pico_RoundToPhysical(boundingBox.y, device_scale)},
+                           Pico_FontPx(textData->fontSize), Pico_FontPx(textData->letterSpacing),
+                           CLAY_COLOR_TO_RAYLIB_COLOR(textData->textColor));
     
                 break;
             }

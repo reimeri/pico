@@ -107,8 +107,8 @@ void pico_host_add_view(PicoHost *app, PicoUiSlot slot, int z, PicoHostViewFn fn
 { (void)app; (void)slot; (void)z; (void)fn; }
 void pico_host_add_hook(PicoHost *app, PicoHook kind, PicoHostHookFn fn)
 { (void)app; (void)kind; (void)fn; }
-void BeginScissorMode(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
-void EndScissorMode(void) {}
+void Pico_Scissor(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+void Pico_ScissorEnd(void) {}
 void DrawRectangle(int x, int y, int w, int h, Color c) { (void)x; (void)y; (void)w; (void)h; (void)c; }
 
 bool PicoChatFind_BlocksInput(const PicoHost *app) { (void)app; return find_focused; }

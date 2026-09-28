@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include "render_scale.h"
 #include "theme_internal.h"
 #include "pico/plugin.h"
 #include "pico/md_view.h"
@@ -3784,6 +3785,14 @@ void PicoHost_Frame(PicoHost *app)
     SyncRaylibWindowSize();
     if (old_width != GetScreenWidth() || old_height != GetScreenHeight() || IsWindowResized())
         pico_host_request_redraw(app);
+    if (Pico_RenderScaleBeginFrame())
+    {
+        /* Resize or monitor move changed the framebuffer/scale: re-snapshot
+         * the UI fonts at the new device pixel size and repaint. Layout,
+         * mouse, and text metrics all stay in logical units. */
+        Pico_LoadFonts(app->fonts);
+        pico_host_request_redraw(app);
+    }
     bool focused = IsWindowFocused(), minimized = IsWindowMinimized();
     if (focused != app->window_focused || minimized != app->window_minimized)
         pico_host_request_redraw(app);

@@ -1,5 +1,6 @@
 #include "chat_sel.h"
 #include "host_internal.h"
+#include "render_scale.h"
 
 #include "pico/app.h"
 #include "text_range.h"
@@ -828,9 +829,9 @@ static void DrawSelectionRange(Clay_BoundingBox box, Clay_ElementId horizontal_c
         clip.x = fmaxf(clip.x, horizontal.boundingBox.x);
         clip.width = fmaxf(0, right - clip.x);
     }
-    BeginScissorMode((int)ceilf(clip.x), (int)ceilf(clip.y), (int)clip.width, (int)clip.height);
+    Pico_Scissor((int)ceilf(clip.x), (int)ceilf(clip.y), (int)clip.width, (int)clip.height);
     DrawRectangle((int)box.x, (int)box.y, (int)box.width, (int)box.height, ClayToRay(COLOR_SELECTION));
-    EndScissorMode();
+    Pico_ScissorEnd();
 }
 
 void PicoChatSel_DrawOverlay(PicoHost *app)

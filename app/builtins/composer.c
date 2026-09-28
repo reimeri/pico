@@ -2,6 +2,7 @@
 
 #include "pico/plugin.h"
 #include "canonical.h"
+#include "render_scale.h"
 #include "complete_internal.h"
 #include "composer_internal.h"
 #include "json.h"
@@ -2245,7 +2246,7 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
         return;
     }
 
-    BeginScissorMode((int)v.clip.x, (int)v.clip.y, (int)v.clip.width, (int)v.clip.height);
+    Pico_Scissor((int)v.clip.x, (int)v.clip.y, (int)v.clip.width, (int)v.clip.height);
 
     if (PicoComposer_HasSelection(app) && c->text)
     {
@@ -2331,7 +2332,7 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
         DrawRectangle((int)x, (int)y, 2, (int)h, caret);
     }
 
-    EndScissorMode();
+    Pico_ScissorEnd();
 }
 
 static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)

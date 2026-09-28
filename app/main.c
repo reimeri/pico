@@ -4,6 +4,7 @@
 #include "clay/clay.h"
 #include "../clay/renderers/raylib/clay_renderer_raylib.c"
 #include "host_internal.h"
+#include "render_scale.h"
 #include "theme_internal.h"
 
 #include "pico/app.h"
@@ -113,6 +114,7 @@ static void PrintUsage(const char *argv0)
             "  PICO_MODEL                        default gpt-4o\n"
             "  PICO_EFFORT                       override selected_effort of the active model\n"
             "  PICO_FONT_SCALE                   override font_scale (0.5-3.0, default 1.0)\n"
+            "  PICO_DISABLE_NATIVE_SCALE         render at logical resolution (upscaled on HiDPI)\n"
             "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale,\n"
             "                                    chat_width, disabled_extensions, disabled_host_extensions}\n"
             "  <workspace>/.pico/settings.json   workspace model/defaults override\n"
@@ -152,6 +154,9 @@ int main(int argc, char **argv)
         return 1;
     }
     Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    /* Sync the native viewport before fonts load so the first atlas is
+     * rasterized at device pixels. */
+    Pico_RenderScaleInit();
     SetExitKey(KEY_NULL);
     WatchPolledInput();
 

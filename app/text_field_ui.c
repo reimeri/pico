@@ -1,3 +1,4 @@
+#include "render_scale.h"
 #include "text_field_ui.h"
 
 #include "pico/app.h"
@@ -320,7 +321,7 @@ void PicoTextField_Draw(const PicoTextField *f, Clay_ElementId id, float pad_x, 
     }
     float origin_x = box.x + pad_x - f->scroll_x;
     float origin_y = box.y + pad_y;
-    BeginScissorMode((int)box.x, (int)box.y, (int)box.width, (int)box.height);
+    Pico_Scissor((int)box.x, (int)box.y, (int)box.width, (int)box.height);
     if (PicoTextField_HasSelection(f))
     {
         float x0 = MeasureSlice(f, 0, PicoTextField_SelFrom(f), font_id);
@@ -342,5 +343,5 @@ void PicoTextField_Draw(const PicoTextField *f, Clay_ElementId id, float pad_x, 
                        (unsigned char)COLOR_CURSOR.b, 255};
         DrawRectangle((int)x, (int)origin_y, 2, (int)inner_h, caret);
     }
-    EndScissorMode();
+    Pico_ScissorEnd();
 }

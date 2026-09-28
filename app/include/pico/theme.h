@@ -85,6 +85,10 @@ enum {
 Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 Font Pico_FontAt(uint16_t fontId, uint16_t fontSize);
 float Pico_FontScale(void);
+/* Device (framebuffer:window) scale the font atlas is rasterized for. Managed
+ * by the host from the window's framebuffer; layout stays logical. */
+void Pico_SetDeviceFontScale(float scale);
+float Pico_DeviceFontScale(void);
 float Pico_FontPx(uint16_t design);
 uint16_t Pico_FontPxU16(uint16_t design);
 void Pico_LoadFonts(Font *fonts);

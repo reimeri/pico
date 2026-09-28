@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "host_internal.h"
+#include "render_scale.h"
 
 #include "../agent_internal.h"
 #include "../composer_internal.h"
@@ -459,15 +460,15 @@ static void OverlayAfterRender(PicoHost *app, const PicoHookEvent *event, void *
     {
         return;
     }
-    BeginScissorMode(x0, y1 - bar, width, bar);
+    Pico_Scissor(x0, y1 - bar, width, bar);
     DrawRectangleRounded(rec, roundness, 8, ClayToRay(COLOR_HR));
-    EndScissorMode();
+    Pico_ScissorEnd();
     int fill = (int)roundf((float)width * remaining);
     if (fill > 0)
     {
-        BeginScissorMode(x0, y1 - bar, fill, bar);
+        Pico_Scissor(x0, y1 - bar, fill, bar);
         DrawRectangleRounded(rec, roundness, 8, ClayToRay(COLOR_LINK));
-        EndScissorMode();
+        Pico_ScissorEnd();
     }
 }
 

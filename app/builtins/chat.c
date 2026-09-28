@@ -1,5 +1,6 @@
 #include "pico/plugin.h"
 #include "host_internal.h"
+#include "render_scale.h"
 
 #include "../agent_internal.h"
 #include "agent.h"
@@ -3638,7 +3639,7 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
     {
         return;
     }
-    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+    Pico_Scissor((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
     Font font = Pico_FontAt(FONT_REGULAR, PICO_FONT_UI);
     const char *glyph = "\xE2\x80\xBA";
     float glyph_px = Pico_FontPx(PICO_FONT_UI);
@@ -3692,7 +3693,7 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
                         line->expanded ? 90.0f : 0.0f, glyph_px, 0.0f, color);
         }
     }
-    EndScissorMode();
+    Pico_ScissorEnd();
 }
 
 static void FormatLiveTimer(int ms, char *buf, size_t cap)
@@ -3732,7 +3733,7 @@ static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox cli
     {
         return;
     }
-    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+    Pico_Scissor((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
     for (int i = 0; i < view->message_count; i++)
     {
         PicoMessage *msg = (PicoMessage *)&view->messages[i];
@@ -3768,7 +3769,7 @@ static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox cli
             }
         }
     }
-    EndScissorMode();
+    Pico_ScissorEnd();
 }
 
 static void PicoChat_DrawChevrons(PicoHost *app)
@@ -3916,13 +3917,13 @@ static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, 
         int sy = (int)pieces[i].y;
         int sw = (int)(pieces[i].width + 0.5f);
         int sh = (int)(pieces[i].height + 0.5f);
-        BeginScissorMode(sx, sy, sw, sh);
+        Pico_Scissor(sx, sy, sw, sh);
         BeginBlendMode(BLEND_ADDITIVE);
         DrawRectangleGradientH((int)sheen.x, (int)sheen.y, (int)sheen.width, (int)sheen.height,
                                (Color){255, 255, 255, 0}, (Color){255, 255, 255, 40});
         EndBlendMode();
         DrawTextEx(font, text, text_pos, px, 0.0f, ClayToRay(COLOR_TEXT));
-        EndScissorMode();
+        Pico_ScissorEnd();
     }
 }
 

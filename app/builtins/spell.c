@@ -216,6 +216,7 @@ static void *SpellLoaderMain(void *arg)
     }
     loader->done = true;
     pthread_mutex_unlock(&loader->lock);
+    pico_host_wakeup(NULL);
 
     if (cancelled || error[0])
     {

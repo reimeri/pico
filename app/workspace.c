@@ -249,6 +249,7 @@ void PicoWorkspace_UiPost(PicoWorkspace *workspace, const char *name, PicoUiPost
         box->dirty = true;
     }
     pthread_mutex_unlock(&workspace->ui_post_mu);
+    pico_host_wakeup(NULL);
 }
 
 void PicoWorkspace_PumpUiPosts(PicoWorkspace *workspace)

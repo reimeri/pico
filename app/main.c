@@ -12,10 +12,71 @@
 #include "richtext.h"
 #include "cli.h"
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Raylib owns the input snapshot, but GLFW can dispatch events inside the
+ * explicit pre-wait PollInputEvents(). Track those callbacks without reading
+ * (and consuming) Raylib's pressed-character/key queues. */
+static bool s_input_polled;
+static GLFWkeyfun s_raylib_key;
+static GLFWcharfun s_raylib_char;
+static GLFWmousebuttonfun s_raylib_mouse_button;
+static GLFWcursorposfun s_raylib_cursor_pos;
+static GLFWcursorenterfun s_raylib_cursor_enter;
+static GLFWscrollfun s_raylib_scroll;
+
+static void OnKey(GLFWwindow *window, int key, int scan, int action, int mods)
+{
+    s_input_polled = true;
+    if (s_raylib_key) s_raylib_key(window, key, scan, action, mods);
+}
+
+static void OnChar(GLFWwindow *window, unsigned int codepoint)
+{
+    s_input_polled = true;
+    if (s_raylib_char) s_raylib_char(window, codepoint);
+}
+
+static void OnMouseButton(GLFWwindow *window, int button, int action, int mods)
+{
+    s_input_polled = true;
+    if (s_raylib_mouse_button) s_raylib_mouse_button(window, button, action, mods);
+}
+
+static void OnCursorPos(GLFWwindow *window, double x, double y)
+{
+    s_input_polled = true;
+    if (s_raylib_cursor_pos) s_raylib_cursor_pos(window, x, y);
+}
+
+static void OnCursorEnter(GLFWwindow *window, int entered)
+{
+    s_input_polled = true;
+    if (s_raylib_cursor_enter) s_raylib_cursor_enter(window, entered);
+}
+
+static void OnScroll(GLFWwindow *window, double x, double y)
+{
+    s_input_polled = true;
+    if (s_raylib_scroll) s_raylib_scroll(window, x, y);
+}
+
+static void WatchPolledInput(void)
+{
+    GLFWwindow *window = (GLFWwindow *)GetWindowHandle();
+    s_raylib_key = glfwSetKeyCallback(window, OnKey);
+    s_raylib_char = glfwSetCharCallback(window, OnChar);
+    s_raylib_mouse_button = glfwSetMouseButtonCallback(window, OnMouseButton);
+    s_raylib_cursor_pos = glfwSetCursorPosCallback(window, OnCursorPos);
+    s_raylib_cursor_enter = glfwSetCursorEnterCallback(window, OnCursorEnter);
+    s_raylib_scroll = glfwSetScrollCallback(window, OnScroll);
+}
 
 static void FputsQuoted(FILE *out, const char *s)
 {
@@ -92,6 +153,7 @@ int main(int argc, char **argv)
     }
     Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     SetExitKey(KEY_NULL);
+    WatchPolledInput();
 
     char workspace[4096];
     if (PicoCli_ShouldOpenDefaultWorkspace(&options) && !getcwd(workspace, sizeof(workspace)))
@@ -112,6 +174,7 @@ int main(int argc, char **argv)
         Clay_Raylib_Close();
         return 1;
     }
+    PicoHost_EnableWakeups(true);
     if (PicoCli_ShouldOpenDefaultWorkspace(&options))
     {
         PicoHost_Start(app, fonts, workspace, options.safe_mode, options.session_start, options.session_file);
@@ -120,23 +183,38 @@ int main(int argc, char **argv)
     {
         PicoPlugins_Load(app);
     }
-    /* Query the monitor once: GLFW's Wayland backend cannot report window
-     * position, so GetCurrentMonitor() on every idle tick logs a warning. */
-    int refresh_hz = GetMonitorRefreshRate(GetCurrentMonitor());
-    if (refresh_hz <= 0)
-        refresh_hz = 60;
     while (!PicoHost_ShouldExit(app) && !WindowShouldClose())
     {
         double frame_start = GetTime();
         PicoHost_Frame(app);
         if (!app->frame_presented && !PicoHost_ShouldExit(app))
         {
-            /* EndDrawing normally paces the frame and polls Raylib input. Keep
-             * its input snapshot semantics even when there is no new image. */
-            double remaining = 1.0 / refresh_hz - (GetTime() - frame_start);
-            if (remaining > 0.0)
-                WaitTime(remaining);
+            /* EndDrawing normally paces a presented frame and polls Raylib
+             * input. A non-presented frame means nothing visible changed, so
+             * instead of the display cadence, block until the nearest real
+             * deadline: a scheduled redraw (caret blink) when one is due, and
+             * never longer than the idle floor, which keeps polling on_frame
+             * callbacks and any missed worker completion responsive. Input,
+             * window close, and pico_host_wakeup() interrupt the wait.
+             *
+             * Raylib snapshots previous input and clears its pressed queues
+             * before polling GLFW. Do this before a blocking wait: GLFW
+             * callbacks dispatched by that wait must remain visible to the
+             * next PicoHost_Frame(), not be cleared on the way there. */
+            s_input_polled = false;
             PollInputEvents();
+            if (!s_input_polled && !IsWindowResized() &&
+                IsWindowFocused() == app->window_focused && !WindowShouldClose())
+            {
+                double remaining = PICO_HOST_IDLE_WAIT_CAP - (GetTime() - frame_start);
+                if (app->redraw_at > 0.0)
+                {
+                    double to_redraw = app->redraw_at - GetTime();
+                    if (to_redraw < remaining)
+                        remaining = to_redraw;
+                }
+                PicoHost_WaitIdle(app, remaining);
+            }
         }
     }
 
@@ -147,6 +225,7 @@ int main(int argc, char **argv)
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
+    PicoHost_EnableWakeups(false);
     PicoHostShutdownResult shutdown = pico_host_free(app);
 
     Pico_FreeClay();

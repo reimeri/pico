@@ -336,6 +336,7 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
             free(payload);
             free(tool_args);
             free(tool_details);
+            pico_host_wakeup(NULL);
             return;
         }
         rt->events = next;
@@ -362,6 +363,7 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
     }
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    pico_host_wakeup(NULL);
 }
 
 static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens, int cached)
@@ -671,6 +673,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
         rt->provider_status[len] = '\0';
         rt->provider_status_dirty = true;
         pthread_mutex_unlock(&rt->mu);
+        pico_host_wakeup(NULL);
         return;
     }
     if (rt->provider_status[0])
@@ -699,6 +702,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             rt->prov_dirty = true;
         }
         pthread_mutex_unlock(&rt->mu);
+        pico_host_wakeup(NULL);
         return;
     }
     if (kind == PICO_LLM_DELTA_TOOL_CALL_ARGS)
@@ -718,6 +722,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             rt->prov_dirty = true;
         }
         pthread_mutex_unlock(&rt->mu);
+        pico_host_wakeup(NULL);
         return;
     }
     if (kind == PICO_LLM_DELTA_TOOL_CALL_DONE)
@@ -752,6 +757,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             rt->prov_dirty = true;
         }
         pthread_mutex_unlock(&rt->mu);
+        pico_host_wakeup(NULL);
         return;
     }
     if (kind == PICO_LLM_DELTA_THINKING_SUMMARY)
@@ -774,6 +780,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             }
         }
         pthread_mutex_unlock(&rt->mu);
+        pico_host_wakeup(NULL);
         return;
     }
     if (!s || n == 0)
@@ -791,6 +798,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
         BufAppend(&rt->stream, &rt->stream_len, &rt->stream_cap, s, n);
     }
     pthread_mutex_unlock(&rt->mu);
+    pico_host_wakeup(NULL);
 }
 
 static bool WorkerIsCancelled(PicoAgentRt *rt)

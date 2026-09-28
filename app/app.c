@@ -33,6 +33,7 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include <stdatomic.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -66,10 +67,22 @@ typedef struct PicoHostTask
     struct PicoHostTask *next;
     pthread_t thread;
     void *state;
+    void *(*run)(void *);
     void (*cancel)(void *);
     void (*destroy)(void *);
     void (*complete)(PicoHost *, void *);
 } PicoHostTask;
+
+/* Trampoline so a finished task wakes the main loop out of its idle wait;
+ * completion is otherwise discovered by the next pump's tryjoin. The worker
+ * never retains a host pointer -- the wake needs none. */
+static void *PicoHostTaskMain(void *arg)
+{
+    PicoHostTask *task = (PicoHostTask *)arg;
+    void *result = task->run(task->state);
+    pico_host_wakeup(NULL);
+    return result;
+}
 
 bool PicoHost_StartTaskCompleted(PicoHost *host, void *(*run)(void *), void *state,
                                  void (*cancel)(void *),
@@ -87,10 +100,11 @@ bool PicoHost_StartTaskCompleted(PicoHost *host, void *(*run)(void *), void *sta
     if (!task)
         return false;
     task->state = state;
+    task->run = run;
     task->cancel = cancel;
     task->destroy = destroy;
     task->complete = complete;
-    if (pthread_create(&task->thread, NULL, run, state) != 0)
+    if (pthread_create(&task->thread, NULL, PicoHostTaskMain, task) != 0)
     {
         free(task);
         return false;
@@ -2091,6 +2105,49 @@ bool PicoUi_ModalOpen(const PicoHost *app)
            (pico_tool_pending_ask(app, &ask) && !PicoUi_QuestionnaireOpen(app));
 }
 
+/* Coalesce posts until the main loop has completed its pump. Checking and
+ * clearing the flag after that pump avoids losing a handoff whose GLFW event
+ * was already consumed by EndDrawing() or PollInputEvents(). A post after the
+ * exchange still queues an event and interrupts the upcoming wait. */
+static _Atomic bool g_host_wake_pending;
+static pthread_mutex_t g_host_wake_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool g_host_wake_enabled;
+
+void PicoHost_EnableWakeups(bool enabled)
+{
+    pthread_mutex_lock(&g_host_wake_mu);
+    g_host_wake_enabled = enabled;
+    if (!enabled)
+        atomic_store(&g_host_wake_pending, false);
+    pthread_mutex_unlock(&g_host_wake_mu);
+}
+
+void pico_host_wakeup(PicoHost *host)
+{
+    (void)host; /* GLFW's event queue is process-global; no per-host state. */
+    pthread_mutex_lock(&g_host_wake_mu);
+    if (g_host_wake_enabled)
+    {
+        bool expected = false;
+        if (atomic_compare_exchange_strong(&g_host_wake_pending, &expected, true))
+            glfwPostEmptyEvent();
+    }
+    pthread_mutex_unlock(&g_host_wake_mu);
+}
+
+void PicoHost_WaitIdle(PicoHost *host, double seconds)
+{
+    (void)host;
+    /* Do not sleep if anything arrived after the preceding pump. Even if
+     * GLFW has already consumed its event, the next pump must adopt it. */
+    if (atomic_exchange(&g_host_wake_pending, false))
+        return;
+    if (seconds > 0.002)
+        glfwWaitEventsTimeout(seconds);
+    else if (seconds > 0.0)
+        WaitTime(seconds);
+}
+
 void pico_host_request_redraw(PicoHost *host)
 {
     if (host)
@@ -3615,7 +3672,12 @@ void PicoHost_Frame(PicoHost *app)
     if (frame_dt < 0.0f)
         frame_dt = 0.0f;
     app->frame_at = now;
+    /* frame_delta stays truthful for extension on_frame dt consumers. The
+     * visual delta fed to scroll inertia and layout is clamped so the first
+     * frame after an idle wait does not lurch. */
     app->frame_delta = frame_dt;
+    if (frame_dt > (float)PICO_HOST_IDLE_WAIT_CAP)
+        frame_dt = (float)PICO_HOST_IDLE_WAIT_CAP;
     if (app->redraw_at > 0.0 && now >= app->redraw_at)
     {
         app->redraw_at = 0.0;

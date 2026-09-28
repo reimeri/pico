@@ -118,6 +118,7 @@ static void *DiffThreadMain(void *arg)
         pthread_mutex_unlock(&w->lock);
         if (fresh)
         {
+            pico_host_wakeup(NULL);
             PicoDiffModel_Free(old);
         }
         if (stop)

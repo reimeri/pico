@@ -1244,7 +1244,6 @@ typedef struct {
     Clay_Vector2 previousDelta;
     float momentumTime;
     uint32_t elementId;
-    bool openThisFrame;
     bool pointerScrollActive;
 } Clay__ScrollContainerDataInternal;
 
@@ -2172,11 +2171,10 @@ void Clay__ConfigureOpenElementPtr(const Clay_ElementDeclaration *declaration) {
             if (openLayoutElement->id == mapping->elementId) {
                 scrollOffset = mapping;
                 scrollOffset->layoutElement = openLayoutElement;
-                scrollOffset->openThisFrame = true;
             }
         }
         if (!scrollOffset) {
-            scrollOffset = Clay__ScrollContainerDataInternalArray_Add(&context->scrollContainerDatas, CLAY__INIT(Clay__ScrollContainerDataInternal){.layoutElement = openLayoutElement, .scrollOrigin = {-1,-1}, .elementId = openLayoutElement->id, .openThisFrame = true});
+            scrollOffset = Clay__ScrollContainerDataInternalArray_Add(&context->scrollContainerDatas, CLAY__INIT(Clay__ScrollContainerDataInternal){.layoutElement = openLayoutElement, .scrollOrigin = {-1,-1}, .elementId = openLayoutElement->id});
         }
         if (context->externalScrollHandlingEnabled) {
             scrollOffset->scrollPosition = Clay__QueryScrollOffset(scrollOffset->elementId, context->queryScrollOffsetUserData);
@@ -4250,15 +4248,14 @@ void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDe
     Clay__ScrollContainerDataInternal *highestPriorityScrollData = CLAY__NULL;
     for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
         Clay__ScrollContainerDataInternal *scrollData = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
-        if (!scrollData->openThisFrame) {
-            Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
-            continue;
-        }
-        scrollData->openThisFrame = false;
         Clay_LayoutElementHashMapItem *hashMapItem = Clay__GetHashMapItem(scrollData->elementId);
-        // Element isn't rendered this frame but scroll offset has been retained
-        if (!hashMapItem) {
+        // Updates can run without a layout. Keep the previous layout's scroll
+        // state until a later layout actually removes the element; otherwise
+        // two idle updates erase its position and viewport dimensions.
+        if (hashMapItem == &Clay_LayoutElementHashMapItem_DEFAULT ||
+            hashMapItem->generation <= context->generation) {
             Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
+            i--;
             continue;
         }
 

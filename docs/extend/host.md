@@ -37,9 +37,18 @@ The normal CLI startup initializes the host, opens the initial directory, create
 
 `pico_host_pump` does one bounded round-robin pass: host posts and process services, then each non-closed workspace once (at most 256 queued runtime events and one new delegation per workspace), then each eligible workspace-extension `on_frame` and each host-extension `on_frame` exactly once with the current frame delta. It is valid to pump a host with zero workspaces. Host `on_frame`, views, and UI hooks must tolerate `pico_agent_active(host) == 0`; host init and frame callbacks can run before any workspace exists. Contextual workspace views and empty-state views render only when an agent in that workspace is selected. Inactive workspaces still pump and still run workspace `on_frame`; they must not draw.
 
-The desktop loop keeps calling `on_frame` at the display-paced cadence even when it
-has no new image to present. Visible changes to extension-owned state require an
-explicit `pico_host_request_redraw(host)` from the main thread. Workspace callbacks
+The desktop loop keeps calling `on_frame` even when it has no new image to present,
+but an unchanged window does not hold the display-paced cadence: the idle loop blocks
+until an input event, a worker notification, a scheduled redraw deadline, or an idle
+cap of about 100 ms, so idle `on_frame` runs at roughly 10 Hz. Worker notifications
+usually wake the loop promptly, but task completion can be adopted on the next idle
+tick if its notification precedes thread exit; polled child processes and extension
+state have the same bounded idle latency. The Linux clipboard-image paste subprocess
+may take up to one extra idle tick to finish its 50 ms termination follow-up; copying
+chat text is unaffected. The `dt` argument stays truthful and can reflect a long idle
+sleep; integrate against it, do not assume a fixed cadence. Visible changes to
+extension-owned state require an explicit `pico_host_request_redraw(host)` from
+the main thread. Workspace callbacks
 can obtain the host with `pico_workspace_host(workspace)`. The request is coalesced
 and presents the next full frame; it is not an immediate draw. Use
 `pico_host_request_redraw_after(host, seconds)` for a scheduled visual change

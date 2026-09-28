@@ -24,10 +24,21 @@ Pico owns window destruction; extensions must not call Raylib `CloseWindow()`. O
 
 ## Redraw and frame callbacks
 
-Pico still pumps host and workspace `on_frame` callbacks at its display-paced
-cadence when the window is unchanged; a pump is not necessarily a presentation.
-An unchanged pump also skips Clay layout, so view render callbacks and
-`PICO_HOOK_AFTER_LAYOUT` hooks run only on laid-out pumps.
+Pico still pumps host and workspace `on_frame` callbacks when the window is
+unchanged; a pump is not necessarily a presentation. An unchanged pump also skips
+Clay layout, so view render callbacks and `PICO_HOOK_AFTER_LAYOUT` hooks run only on
+laid-out pumps. Clay scroll state from the last layout survives skipped-layout pumps,
+so scrolling an idle chat does not lose its offset or virtualized transcript viewport.
+The idle pump cadence is not display-paced: the loop blocks until an
+input event, a worker notification, a scheduled redraw deadline, or an idle cap of
+about 100 ms, so `on_frame` observes roughly 10 Hz while idle and `dt` can be large
+after a sleep. Pico queues notify the loop on worker handoff, but a wake may arrive
+before a task becomes joinable; adoption can then take another idle tick. Work
+polled without a notification (including child-process completion and extension
+state read only from `on_frame`) can also take up to the idle cap to be observed.
+The Linux clipboard-image paste subprocess has a 50 ms termination follow-up;
+while idle, its retry/fallback may run up to an idle tick late. This does not
+affect copying text to the clipboard.
 Visible extension-owned state does **not** invalidate the window automatically:
 call `pico_host_request_redraw(host)` on the main thread when changing a Clay
 view or a direct after-render drawing, or

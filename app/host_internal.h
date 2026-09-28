@@ -113,6 +113,8 @@ typedef struct PicoSessionPersistFailure {
 
 struct PicoWorktreeJob;
 
+#define PICO_HOST_IDLE_WAIT_CAP 0.1 /* Max idle sleep; bounds latency of undeclared polling work. */
+
 struct PicoHost {
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;
@@ -309,6 +311,18 @@ PicoAgent *PicoHost_SelectedAgent(PicoHost *host);
 const PicoAgent *PicoHost_SelectedAgentConst(const PicoHost *host);
 /* Host-extension replacement only. Does not pause or reload workspaces. */
 void PicoHost_RequestHostReload(PicoHost *host);
+
+/* Main thread: gate worker GLFW calls while a desktop window is available.
+ * Disabling waits for any in-flight post before GLFW teardown. */
+void PicoHost_EnableWakeups(bool enabled);
+/* Thread-safe worker notification; no-op for headless hosts. A completion
+ * that is not joinable yet is adopted at the next idle pump. */
+void pico_host_wakeup(PicoHost *host);
+
+/* Sleep the idle main loop up to `seconds`, waking on window input or a
+ * worker pico_host_wakeup(). Callers compute `seconds` from the nearest
+ * deadline and the idle floor. */
+void PicoHost_WaitIdle(PicoHost *host, double seconds);
 
 /* UI adapters: selected agent's workspace, else the host's primary workspace. */
 static inline PicoWorkspace *PicoHost_SelectedWorkspace(PicoHost *host)

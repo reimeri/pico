@@ -577,6 +577,7 @@ static void *DeviceLoginMain(void *arg)
     pthread_mutex_lock(&s->login.mu);
     s->login.running = false;
     pthread_mutex_unlock(&s->login.mu);
+    pico_host_wakeup(NULL);
     return NULL;
 }
 

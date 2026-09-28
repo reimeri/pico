@@ -1714,6 +1714,7 @@ static void *PluginScannerMain(void *arg)
             scan = NULL;
         }
         pthread_mutex_unlock(&scanner->mu);
+        pico_host_wakeup(NULL);
         free(scan);
     }
 }

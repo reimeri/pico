@@ -4995,6 +4995,7 @@ static void *PersistThreadMain(void *arg)
         }
         pthread_cond_broadcast(&host->persist_cv);
         pthread_mutex_unlock(&host->persist_mu);
+        pico_host_wakeup(NULL);
         PersistJobClear(&job);
     }
     return NULL;

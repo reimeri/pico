@@ -52,6 +52,12 @@ static bool TransferByte(int fd, bool write_byte)
     return result == 1;
 }
 
+/* Session tests exercise persistence without a desktop event loop. */
+void pico_host_wakeup(PicoHost *host)
+{
+    (void)host;
+}
+
 bool PicoSession_TestHook(const char *stage)
 {
     if (stage && strcmp(stage, "scan_session_file") == 0)

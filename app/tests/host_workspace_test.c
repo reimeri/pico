@@ -42,6 +42,7 @@ static bool g_find_shift;
 static int g_find_character;
 static bool g_find_press;
 static Vector2 g_find_pointer;
+static Vector2 g_find_wheel;
 
 bool __real_IsKeyDown(int key);
 bool __wrap_IsKeyDown(int key)
@@ -66,6 +67,11 @@ bool __wrap_IsMouseButtonPressed(int button)
 }
 Vector2 __real_GetMousePosition(void);
 Vector2 __wrap_GetMousePosition(void) { return g_find_input_test ? g_find_pointer : __real_GetMousePosition(); }
+Vector2 __real_GetMouseWheelMoveV(void);
+Vector2 __wrap_GetMouseWheelMoveV(void)
+{
+    return g_find_input_test ? g_find_wheel : __real_GetMouseWheelMoveV();
+}
 
 static bool g_clay_frame_test;
 /* Do not let an unrelated persistence worker consume the UI allocation fault. */
@@ -11576,6 +11582,114 @@ static void RequestRedrawFromRender(PicoHost *host, const PicoHookEvent *event, 
     if (++g_redraw_render_callbacks == 1) pico_host_request_redraw(host);
 }
 
+/* Several unchanged host pumps must not expire the scroll container belonging
+ * to the last laid-out shell. A fresh layout after idle needs its dimensions
+ * to mount even a clean, short transcript; a long transcript needs its offset. */
+static int TestIdleFrameRetainsChatScroll(void)
+{
+    char dir[] = "/tmp/pico-idle-scroll-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-idle-scroll-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgent *agent = NULL;
+    ShellTestState shell = {.composer_height = 44.0f};
+    bool good = false;
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("idle chat test workspace setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800}))
+        goto done;
+    WaitPluginLoad(host);
+    /* The frame draws through test wrappers, not a graphics context. */
+    host->hook_count = 0;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    host->preferences.chat_width = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &shell);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id,
+            &(PicoAgentCreateOptions){.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE,
+                                      .select = true}, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+        goto done;
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "A short visible reply.");
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    PicoHost_Frame(host);
+    int idle_frames = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        PicoHost_Frame(host);
+        if (!host->frame_presented) idle_frames++;
+    }
+    if (idle_frames != 4) goto done;
+    pico_host_request_redraw(host);
+    PicoHost_Frame(host);
+    Clay_ElementData reply = Clay_GetElementData(CLAY_IDI("MsgMain", 0));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!reply.found || !scroll.found || !scroll.scrollPosition)
+        goto done;
+    for (int i = 0; i < 40; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT,
+                             "A longer transcript must remain scrollable after idle.");
+    pico_host_request_redraw(host);
+    for (int i = 0; i < 5; i++) PicoHost_Frame(host);
+    scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!scroll.found || !scroll.scrollPosition ||
+        scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height + 100.0f)
+        goto done;
+    host->chat_follow_bottom = false;
+    scroll.scrollPosition->y = -60.0f;
+    Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    if (!chat.found) goto done;
+    g_find_pointer = (Vector2){chat.boundingBox.x + chat.boundingBox.width / 2.0f,
+                               chat.boundingBox.y + chat.boundingBox.height / 2.0f};
+    pico_host_request_redraw(host);
+    PicoHost_Frame(host);
+    idle_frames = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        PicoHost_Frame(host);
+        if (!host->frame_presented) idle_frames++;
+    }
+    scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (idle_frames != 4 || !scroll.found || !scroll.scrollPosition ||
+        scroll.scrollPosition->y >= -1.0f)
+        goto done;
+    float before_wheel = scroll.scrollPosition->y;
+    g_find_wheel.y = -1.0f;
+    PicoHost_Frame(host);
+    g_find_wheel = (Vector2){0};
+    scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    good = host->frame_presented && scroll.found && scroll.scrollPosition &&
+           scroll.scrollPosition->y < before_wheel;
+    /* A real layout removal, unlike an idle pump, must discard its scroller. */
+    host->view_count[PICO_SLOT_MAIN] = 0;
+    pico_host_request_redraw(host);
+    PicoHost_Frame(host);
+    PicoHost_Frame(host);
+    good = good && !Clay_GetScrollContainerData(CLAY_ID("ChatScroll")).found;
+
+done:
+    g_find_wheel = (Vector2){0};
+    g_clay_frame_test = g_find_input_test = false;
+    g_find_key = 0;
+    if (host) pico_host_free(host);
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    if (!good) Fail("idle pumps must retain short chat content and long chat scroll position");
+    return good ? 0 : 1;
+}
+
 static int TestIdleFrameOnlyPresentsOnInvalidation(void)
 {
     PicoHost *host = NULL;
@@ -12362,6 +12476,7 @@ int main(int argc, char **argv)
         return TestFrameRetriesFailedArenaReplacement();
     }
     if (TestIdleFrameOnlyPresentsOnInvalidation() != 0) return 1;
+    if (TestIdleFrameRetainsChatScroll() != 0) return 1;
     if (TestFrameRetriesFailedArenaReplacement() != 0)
     {
         return 1;

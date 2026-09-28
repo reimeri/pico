@@ -1047,9 +1047,10 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
 done:
     Clay_SetCurrentContext(previous);
 done_host:
-    if (host)
+    if (host && pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
     {
-        pico_host_free(host);
+        Fail("chat stabilization host shutdown retained pending work");
+        rc = 1;
     }
     free(memory);
     unsetenv("XDG_CONFIG_HOME");
@@ -1864,10 +1865,21 @@ static int TestFastSelectionPersistence(void)
         Fail("switching to an unsupported model must clear Fast");
         goto done;
     }
+    /* These final settings changes queue session writes. Let the test's
+     * persistence work finish before the host's bounded shutdown deadline. */
+    if (!DrainSessionForAssertion(host, writer) || !DrainSessionForAssertion(host, resumed))
+    {
+        Fail("Fast persistence final writes did not drain");
+        goto done;
+    }
     rc = 0;
 done:
     if (rc && !g_failed) Fail("Fast persistence setup or session operation failed");
-    if (host) pico_host_free(host);
+    if (host && pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        Fail("Fast persistence host shutdown retained pending work");
+        rc = 1;
+    }
     unsetenv("XDG_CONFIG_HOME");
     rmdir(cfg);
     rmdir(dir);

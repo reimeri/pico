@@ -41,6 +41,8 @@ static bool g_find_ctrl;
 static bool g_find_shift;
 static int g_find_character;
 static bool g_find_press;
+static bool g_find_down;
+static bool g_find_released;
 static Vector2 g_find_pointer;
 static Vector2 g_find_wheel;
 
@@ -64,6 +66,16 @@ bool __real_IsMouseButtonPressed(int button);
 bool __wrap_IsMouseButtonPressed(int button)
 {
     return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_press : __real_IsMouseButtonPressed(button);
+}
+bool __real_IsMouseButtonDown(int button);
+bool __wrap_IsMouseButtonDown(int button)
+{
+    return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_down : __real_IsMouseButtonDown(button);
+}
+bool __real_IsMouseButtonReleased(int button);
+bool __wrap_IsMouseButtonReleased(int button)
+{
+    return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_released : __real_IsMouseButtonReleased(button);
 }
 Vector2 __real_GetMousePosition(void);
 Vector2 __wrap_GetMousePosition(void) { return g_find_input_test ? g_find_pointer : __real_GetMousePosition(); }
@@ -11784,6 +11796,142 @@ done:
     return good ? 0 : 1;
 }
 
+static int SidebarVisibleSessionRows(void)
+{
+    int count = 0;
+    for (int id = 0; id < 128; id++)
+        if (Clay_GetElementData(CLAY_IDI("SidebarSess", id)).found) count++;
+    return count;
+}
+
+static bool SidebarFrameClick(PicoHost *host, Clay_ElementData element)
+{
+    if (!host || !element.found) return false;
+    g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2.0f,
+                               element.boundingBox.y + element.boundingBox.height / 2.0f};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_press = true;
+    PicoHost_Frame(host);
+    g_find_press = false;
+    return host->frame_presented;
+}
+
+static bool SidebarFrameClickWorkspace(PicoHost *host, Clay_ElementData element)
+{
+    if (!host || !element.found) return false;
+    g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2.0f,
+                               element.boundingBox.y + element.boundingBox.height / 2.0f};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    g_find_down = g_find_press = true;
+    PicoHost_Frame(host);
+    g_find_down = g_find_press = false;
+    g_find_released = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    PicoHost_Frame(host);
+    g_find_released = false;
+    return host->frame_presented;
+}
+
+/* Exercise sidebar changes through actual host input frames. The selected
+ * session stays pinned when collapsed; nonselected live sessions fill More. */
+static int TestSidebarSameFrameControls(void)
+{
+    char dir[] = "/tmp/pico-sidebar-frame-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-sidebar-frame-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    bool good = false;
+    const char *phase = "setup";
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("sidebar same-frame fixture directories");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
+    WaitPluginLoad(host);
+    /* Frame presentation is wrapped, but builtin overlay after-render hooks
+     * call graphics scissoring directly. Keep input hooks and omit those. */
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+    host->preferences.chat_width = 0;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    if (PicoCatalog_Ensure(dir) != 0 ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK) goto done;
+    for (int i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_NONE, .select = i == 0};
+        if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK)
+            goto done;
+    }
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    PicoHost_Frame(host);
+
+    phase = "initial workspace layout";
+    Clay_ElementData workspace = Clay_GetElementData(CLAY_IDI("SidebarWs", 0));
+    int expanded_rows = SidebarVisibleSessionRows();
+    if (!workspace.found || expanded_rows == 0 ||
+        !SidebarFrameClickWorkspace(host, workspace)) goto done;
+    phase = "collapse frame";
+    int collapsed_rows = SidebarVisibleSessionRows();
+    if (collapsed_rows >= expanded_rows ||
+        !SidebarFrameClickWorkspace(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0))) ||
+        SidebarVisibleSessionRows() != expanded_rows) goto done;
+
+    phase = "expand frame";
+    Clay_ElementData more = Clay_GetElementData(CLAY_IDI("SidebarMore", 0));
+    int before_more = SidebarVisibleSessionRows();
+    if (!more.found || !SidebarFrameClick(host, more)) goto done;
+    int after_more = SidebarVisibleSessionRows();
+    if (after_more <= before_more || !Clay_GetElementData(CLAY_IDI("SidebarLess", 0)).found)
+        goto done;
+    Clay_ElementData less = Clay_GetElementData(CLAY_IDI("SidebarLess", 0));
+    if (!SidebarFrameClick(host, less) || SidebarVisibleSessionRows() >= after_more)
+        goto done;
+
+    phase = "More/Less frames";
+    /* Refresh the catalog through the normal poll hook after stashing. */
+    if (PicoCatalog_SetProjectStashed(dir, true) != 0) goto done;
+    g_sidebar_poll_due = true;
+    pico_host_request_redraw(host);
+    PicoHost_Frame(host);
+    phase = "stash refresh";
+    Clay_ElementData stash = Clay_GetElementData(CLAY_ID("SidebarStashedHeader"));
+    if (!stash.found || !SidebarFrameClick(host, stash) ||
+        !Clay_GetElementData(CLAY_IDI("SidebarWs", 0)).found) goto done;
+    stash = Clay_GetElementData(CLAY_ID("SidebarStashedHeader"));
+    if (!SidebarFrameClick(host, stash) ||
+        Clay_GetElementData(CLAY_IDI("SidebarWs", 0)).found) goto done;
+    good = true;
+done:
+    g_find_input_test = g_find_press = g_find_down = g_find_released = false;
+    g_find_key = 0;
+    g_clay_frame_test = false;
+    g_sidebar_poll_due = false;
+    if (host) pico_host_free(host);
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    if (!good) { fprintf(stderr, "sidebar same-frame phase: %s\n", phase); Fail("sidebar expand/collapse, stash, and More/Less must relayout in the action frame"); }
+    return good ? 0 : 1;
+}
+
 static int TestIdleFrameOnlyPresentsOnInvalidation(void)
 {
     PicoHost *host = NULL;
@@ -12569,6 +12717,7 @@ int main(int argc, char **argv)
     {
         return TestFrameRetriesFailedArenaReplacement();
     }
+    if (TestSidebarSameFrameControls() != 0) return 1;
     if (TestIdleFrameOnlyPresentsOnInvalidation() != 0) return 1;
     if (TestIdleFrameRetainsChatScroll() != 0) return 1;
     if (TestFrameRetriesFailedArenaReplacement() != 0)

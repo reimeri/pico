@@ -949,7 +949,8 @@ if(BUILD_TESTING)
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
             -Wl,--wrap=SetMouseCursor -Wl,--wrap=IsKeyDown -Wl,--wrap=IsKeyPressed
-            -Wl,--wrap=GetCharPressed -Wl,--wrap=IsMouseButtonPressed -Wl,--wrap=GetMousePosition
+            -Wl,--wrap=GetCharPressed -Wl,--wrap=IsMouseButtonPressed
+            -Wl,--wrap=IsMouseButtonDown -Wl,--wrap=IsMouseButtonReleased -Wl,--wrap=GetMousePosition
             -Wl,--wrap=GetMouseWheelMoveV
             -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx)
     endif()

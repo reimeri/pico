@@ -261,6 +261,7 @@ static void AdjustShown(SidebarState *s, int index, int delta, int total)
         return;
     }
     s->ui[index].shown = ClampShown(s->ui[index].shown + delta, total);
+    s->host->ui_relayout_requested = true;
 }
 
 static int PrevShownForPath(const SidebarWsUi *ui, int ui_count, const char *path)
@@ -648,6 +649,8 @@ static void ToggleCollapsed(SidebarState *s, int index)
     }
     ws = &s->workspaces[index];
     ws->collapsed = !ws->collapsed;
+    /* Input runs after layout; rebuild before presenting the changed rows. */
+    s->host->ui_relayout_requested = true;
     PicoCatalog_SetCollapsed(ws->path, ws->collapsed);
 }
 
@@ -2044,6 +2047,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     if (Clay_PointerOver(CLAY_ID("SidebarStashedHeader")))
     {
         s->stash_expanded = !s->stash_expanded;
+        host->ui_relayout_requested = true;
         return;
     }
     for (i = 0; i < s->workspace_count; i++)

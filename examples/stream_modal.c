@@ -234,6 +234,7 @@ static int StreamHostInit(PicoHost *host, void **state_out)
     pico_host_add_view(host, PICO_SLOT_OVERLAY, 50, StreamRender);
     pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, StreamAfterLayout);
     pico_host_add_command(host, "stream", "Toggle the streaming overlay modal", CmdStream);
+    pico_host_command_allow_while_busy(host, "stream");
     return 0;
 }
 

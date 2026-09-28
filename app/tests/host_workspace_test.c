@@ -4339,6 +4339,88 @@ static int TestCdOpensSelectsAndReusesWorkspace(void)
 }
 
 
+static int TestBusySlashCommandsOpenBackgroundWithoutJobs(void)
+{
+    PicoHost *host = NULL;
+    char dir[] = "/tmp/pico-bg-busy-XXXXXX";
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE,
+        .select = true,
+    };
+    PicoAgent *agent;
+    PicoWorkspace *workspace;
+    int original_messages;
+    int rc = 1;
+
+    if (!mkdtemp(dir))
+    {
+        Fail("mkdtemp busy background command");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        pico_workspace_open(host, dir, &ws_id) != PICO_OK ||
+        pico_main_agent_create(host, ws_id, &options, &agent_id) != PICO_OK)
+    {
+        Fail("start busy background command host");
+        goto done;
+    }
+    workspace = PicoHost_FindWorkspace(host, ws_id);
+    agent = PicoHost_FindAgent(host, agent_id);
+    if (!workspace || !agent || PicoBgTable_RunningCount(PicoWorkspace_Background(workspace), agent_id) != 0)
+    {
+        Fail("busy background command requires an empty process list");
+        goto done;
+    }
+    original_messages = pico_agent_message_count(host, agent_id);
+    agent->state = PICO_AGENT_LLM_WAIT;
+
+    PicoComposer_SetText(host, " /BACKGROUND ");
+    PicoHost_Submit(host);
+    if (!pico_ui_modal_has(host, "background-list") || host->composer.length != 0 ||
+        agent->state != PICO_AGENT_LLM_WAIT || pico_agent_message_count(host, agent_id) != original_messages)
+    {
+        Fail("/background must open an empty modal without interrupting a streaming turn");
+        goto done;
+    }
+    pico_ui_modal_pop(host, "background-list");
+
+    PicoComposer_SetText(host, "/help");
+    PicoHost_Submit(host);
+    if (host->composer.length != 0 || pico_agent_message_count(host, agent_id) <= original_messages ||
+        agent->state != PICO_AGENT_LLM_WAIT)
+    {
+        Fail("opted-in informational command must run during streaming");
+        goto done;
+    }
+    original_messages = pico_agent_message_count(host, agent_id);
+
+    PicoComposer_SetText(host, "/new");
+    PicoHost_Submit(host);
+    if (pico_agent_active(host) != agent_id || host->composer.length != 4 ||
+        strcmp(host->composer.text, "/new") != 0 || agent->state != PICO_AGENT_LLM_WAIT ||
+        pico_agent_message_count(host, agent_id) != original_messages)
+    {
+        Fail("unmarked commands must retain the draft and not interrupt streaming");
+        goto done;
+    }
+    rc = 0;
+done:
+    if (host)
+    {
+        agent = PicoHost_FindAgent(host, agent_id);
+        if (agent && agent->state == PICO_AGENT_LLM_WAIT)
+        {
+            agent->state = PICO_AGENT_IDLE;
+        }
+        pico_host_free(host);
+    }
+    rmdir(dir);
+    return rc;
+}
+
 static int TestBackgroundJobsSurviveWorkspaceReload(void)
 {
     PicoHost *host = NULL;
@@ -12585,6 +12667,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestCdOpensSelectsAndReusesWorkspace() != 0)
+    {
+        return 1;
+    }
+    if (TestBusySlashCommandsOpenBackgroundWithoutJobs() != 0)
     {
         return 1;
     }

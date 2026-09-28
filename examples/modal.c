@@ -142,6 +142,7 @@ static int ModalHostInit(PicoHost *host, void **state_out)
     pico_host_add_view(host, PICO_SLOT_OVERLAY, 50, ModalRender);
     pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, ModalAfterLayout);
     pico_host_add_command(host, "modal", "Toggle the example overlay modal", CmdModal);
+    pico_host_command_allow_while_busy(host, "modal");
     return 0;
 }
 

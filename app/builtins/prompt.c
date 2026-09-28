@@ -367,6 +367,7 @@ static int PromptInit(PicoHost *app, void **state_out)
     }
     s_active_prompt_state = s;
     pico_host_add_command(app, "show-prompt", "Show the system prompt sent to the agent", CmdShowPrompt);
+    pico_host_command_allow_while_busy(app, "show-prompt");
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 11, PromptRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, PromptAfterLayout);
     return 0;

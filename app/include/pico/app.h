@@ -305,6 +305,7 @@ typedef struct PicoCommand {
     PicoWorkspaceCmdFn workspace_run;
     PicoWorkspace *workspace;
     void *state;
+    bool allow_while_busy;
 } PicoCommand;
 
 typedef struct PicoCompleter {
@@ -605,6 +606,11 @@ bool PicoUi_ModalOpen(const PicoHost *host);
 void pico_host_add_command(PicoHost *host, const char *name, const char *help, PicoHostCmdFn run);
 void pico_workspace_add_command(PicoWorkspace *workspace, const char *name, const char *help,
                                 PicoWorkspaceCmdFn run);
+/* Init-only opt-in for a command already registered in this extension init.
+ * Only use for UI commands that are safe while the selected agent is streaming.
+ * Ordinary submissions and other commands remain blocked until the turn ends. */
+bool pico_host_command_allow_while_busy(PicoHost *host, const char *name);
+bool pico_workspace_command_allow_while_busy(PicoWorkspace *workspace, const char *name);
 void pico_host_add_completer(PicoHost *host, char trigger, bool bol_only, PicoHostCompleteQueryFn query,
                              PicoHostCompleteAcceptFn accept);
 void pico_workspace_add_completer(PicoWorkspace *workspace, char trigger, bool bol_only,

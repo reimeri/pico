@@ -2197,6 +2197,7 @@ static int SettingsInit(PicoHost *app, void **state_out)
     }
     s_active_settings_state = s;
     pico_host_add_command(app, "settings", "Edit user settings", CmdSettings);
+    pico_host_command_allow_while_busy(app, "settings");
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 12, SettingsRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, SettingsAfterLayout);
     pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, SettingsDrawFieldOverlay);

@@ -1305,6 +1305,43 @@ void pico_workspace_add_command(PicoWorkspace *workspace, const char *name, cons
     host->staging.ws_commands[host->staging.ws_command_count++] = c;
 }
 
+bool pico_host_command_allow_while_busy(PicoHost *host, const char *name)
+{
+    if (!host || host->reg_scope != PICO_REG_HOST || !name)
+    {
+        return false;
+    }
+    for (int i = 0; i < host->staging.host_command_count; i++)
+    {
+        PicoCommand *cmd = &host->staging.host_commands[i];
+        if (strcmp(cmd->name, name) == 0)
+        {
+            cmd->allow_while_busy = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pico_workspace_command_allow_while_busy(PicoWorkspace *workspace, const char *name)
+{
+    PicoHost *host = workspace ? workspace->host : NULL;
+    if (!host || host->reg_scope != PICO_REG_WORKSPACE || host->reg_workspace != workspace || !name)
+    {
+        return false;
+    }
+    for (int i = 0; i < host->staging.ws_command_count; i++)
+    {
+        PicoCommand *cmd = &host->staging.ws_commands[i];
+        if (strcmp(cmd->name, name) == 0)
+        {
+            cmd->allow_while_busy = true;
+            return true;
+        }
+    }
+    return false;
+}
+
 void pico_host_add_completer(PicoHost *host, char trigger, bool bol_only, PicoHostCompleteQueryFn query,
                              PicoHostCompleteAcceptFn accept)
 {
@@ -1928,13 +1965,72 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
     return PICO_OK;
 }
 
+/* Match the builtin slash parser before invoking submit hooks on a busy turn.
+ * Do not run arbitrary submit hooks for blocked drafts or unmarked commands. */
+static bool BusyCommandAllowed(const PicoHost *host, const PicoWorkspace *workspace, const char *text)
+{
+    const char *start = text;
+    const char *end;
+    size_t len;
+    if (!start)
+    {
+        return false;
+    }
+    while (*start == ' ' || *start == '\n' || *start == '\t')
+    {
+        start++;
+    }
+    if (*start++ != '/')
+    {
+        return false;
+    }
+    while (*start && isspace((unsigned char)*start))
+    {
+        start++;
+    }
+    end = start;
+    while (*end && !isspace((unsigned char)*end))
+    {
+        end++;
+    }
+    len = (size_t)(end - start);
+    if (!len || len >= 64) /* CommandsBeforeSubmit uses a 64-byte command buffer. */
+    {
+        return false;
+    }
+    for (int scope = 0; scope < 2; scope++)
+    {
+        const PicoCommand *commands = scope == 0 ? host->commands : workspace->commands;
+        int count = scope == 0 ? host->command_count : workspace->command_count;
+        for (int i = 0; i < count; i++)
+        {
+            const char *name = commands[i].name;
+            size_t j = 0;
+            if (!name || strlen(name) != len)
+            {
+                continue;
+            }
+            while (j < len && tolower((unsigned char)name[j]) == tolower((unsigned char)start[j]))
+            {
+                j++;
+            }
+            if (j == len)
+            {
+                return commands[i].allow_while_busy;
+            }
+        }
+    }
+    return false;
+}
+
 void PicoHost_Submit(PicoHost *app)
 {
     PicoAgentId id = app ? app->selected_agent_id : 0;
     PicoAgent *active = PicoHost_FindAgent(app, id);
     if (!app || !active || !PicoWorkspace_AcceptsNewWork(active->workspace) ||
-        active->state == PICO_AGENT_LLM_WAIT || active->state == PICO_AGENT_TOOL_WAIT ||
-        active->state == PICO_AGENT_COMPACT_WAIT)
+        ((active->state == PICO_AGENT_LLM_WAIT || active->state == PICO_AGENT_TOOL_WAIT ||
+          active->state == PICO_AGENT_COMPACT_WAIT) &&
+         !BusyCommandAllowed(app, active->workspace, app->composer.text)))
     {
         return;
     }

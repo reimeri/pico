@@ -756,6 +756,7 @@ static int BackgroundWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                   "are dropped.",
                   kIdParams, LogBackground, NULL, PICO_TOOL_SEQUENTIAL);
     pico_workspace_add_command(workspace, "background", "Show background processes", BackgroundCommand);
+    pico_workspace_command_allow_while_busy(workspace, "background");
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_SESSION_RESET, BackgroundReset);
     pico_workspace_add_hook(workspace, PICO_HOOK_ON_AGENT_DESTROY, BackgroundReset);
     pico_workspace_add_view(workspace, PICO_SLOT_OVERLAY, 7, BackgroundRender);

@@ -1137,7 +1137,9 @@ static int CommandsHostInit(PicoHost *app, void **state_out)
     pico_host_add_command(app, "logout", "Sign out a provider", CmdLogout);
     pico_host_add_command(app, "quit", "Quit Pico", CmdQuit);
     pico_host_add_command(app, "help", "List commands", CmdHelp);
+    pico_host_command_allow_while_busy(app, "help");
     pico_host_add_command(app, "docs", "Show extension docs", CmdDocs);
+    pico_host_command_allow_while_busy(app, "docs");
     pico_host_add_command(app, "reload", "Reload host extensions and the selected workspace", CmdReload);
     pico_host_add_completer(app, '/', true, CommandQuery, NULL);
     return 0;

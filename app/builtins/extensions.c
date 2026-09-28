@@ -420,6 +420,7 @@ static int ExtsInit(PicoHost *app, void **state_out)
     }
     s_active_exts_state = s;
     pico_host_add_command(app, "extensions", "Manage extensions", CmdExtensions);
+    pico_host_command_allow_while_busy(app, "extensions");
     pico_host_add_view(app, PICO_SLOT_OVERLAY, 10, ExtsRender);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, ExtsAfterLayout);
     return 0;

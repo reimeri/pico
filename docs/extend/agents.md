@@ -116,6 +116,7 @@ Read-only accessors provide copied worker values:
 - `pico_agent_context_purpose(ctx)`
 - `pico_agent_context_safe_mode(ctx)`
 - `pico_agent_context_cancelled(ctx)`
+- `pico_agent_context_tool_call_id(ctx)` — provider call id of the tool invocation this context belongs to; empty in provider callbacks, so per-call UI mailbox names can be derived inside a tool or before-tool callback and recomputed from a tool row's `call_id`
 
 A context binds to one agent ID and runtime generation, with separate callback context and ask/process ownership for each tool invocation. `pico_agent_context_registration_generation` is the workspace registration generation copied when that turn was accepted. After its callback—or after that runtime is retired—accessors fail closed: IDs/generation become zero, strings become empty, and cancellation reports true. Stale contexts cannot ask, post to a UI mailbox, or bind child processes. A still-running tool callback that registers a positive PID after cancellation raced with spawn causes immediate termination of that process group, rather than leaving it untracked.
 

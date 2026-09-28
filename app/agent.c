@@ -4832,6 +4832,11 @@ bool pico_agent_context_cancelled(const PicoAgentContext *ctx)
     return WorkerIsCancelled(ctx->runtime);
 }
 
+const char *pico_agent_context_tool_call_id(const PicoAgentContext *ctx)
+{
+    return PicoAgentContext_ToolCallId(ctx);
+}
+
 PicoWorkspace *PicoAgentContext_Workspace(const PicoAgentContext *ctx)
 {
     return AgentContextActive(ctx) ? ctx->workspace_owner : NULL;

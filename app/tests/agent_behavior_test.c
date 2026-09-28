@@ -116,6 +116,7 @@ typedef struct TestState {
     int life_ask_end;
     int ask_entered;
     PicoAgentId tool_ctx_id;
+    char tool_seen_call_id[64];
     PicoAgentId after_agent_id;
     PicoAgentId apply_agent_id;
     PicoAgentId llm_agent_id;
@@ -225,6 +226,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.life_ask_end = 0;
     g_test.ask_entered = 0;
     g_test.tool_ctx_id = 0;
+    g_test.tool_seen_call_id[0] = '\0';
     g_test.after_agent_id = 0;
     g_test.apply_agent_id = 0;
     g_test.llm_agent_id = 0;
@@ -822,6 +824,8 @@ static void UiPostTool(PicoAgentContext *ctx, const char *args_json, PicoToolRes
     pthread_mutex_lock(&g_test.mu);
     mode = g_test.mode;
     g_test.tool_invocations++;
+    snprintf(g_test.tool_seen_call_id, sizeof(g_test.tool_seen_call_id), "%s",
+             pico_agent_context_tool_call_id(ctx));
     pthread_mutex_unlock(&g_test.mu);
 
     if (mode == TEST_UI_POST_CAP)
@@ -4869,6 +4873,10 @@ static int TestUiPostAppendReplace(void)
     pico_ui_post(NULL, "stream", PICO_UI_POST_TEXT, "nope", 4);
     pico_ui_latest(&app, "stream", &stream);
     ok = ok && stream.text && strcmp(stream.text, "abcd") == 0;
+    {
+        PicoTraceLine *line = ToolTraceByCallId(&app, "call-1-0");
+        ok = ok && line != NULL && strcmp(g_test.tool_seen_call_id, "call-1-0") == 0;
+    }
     pico_ui_clear(&app, "stream");
     ok = ok && !pico_ui_latest(&app, "stream", &after_clear) &&
          pico_ui_latest(&app, "other", &other);

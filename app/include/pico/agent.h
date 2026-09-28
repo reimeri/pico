@@ -132,5 +132,8 @@ const char *pico_agent_context_profile(const PicoAgentContext *ctx);
 const char *pico_agent_context_purpose(const PicoAgentContext *ctx);
 bool pico_agent_context_safe_mode(const PicoAgentContext *ctx);
 bool pico_agent_context_cancelled(const PicoAgentContext *ctx);
+/* Provider call id of the tool invocation this ctx belongs to. Empty for
+ * provider callbacks and after the callback scope ends. */
+const char *pico_agent_context_tool_call_id(const PicoAgentContext *ctx);
 
 #endif

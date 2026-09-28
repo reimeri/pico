@@ -8,3 +8,4 @@ Terminal=false
 Categories=Development;
 Keywords=AI;Agent;Developer;
 StartupNotify=true
+X-AppImage-Name=Pico

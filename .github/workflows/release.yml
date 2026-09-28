@@ -27,7 +27,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential ninja-build meson pkg-config git curl patchelf file imagemagick \
+            build-essential ninja-build meson pkg-config git curl patchelf file imagemagick zsync \
             appstream desktop-file-utils libfuse2 \
             libcurl4-openssl-dev libssl-dev libutf8proc-dev libgl1-mesa-dev \
             libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev libxext-dev \

@@ -15,6 +15,15 @@ linuxdeploy=${LINUXDEPLOY:-linuxdeploy-x86_64.AppImage}
 output="$output_dir/pico-${version}-linux-x86_64.AppImage"
 wayland_prefix=${PICO_APPIMAGE_WAYLAND_PREFIX:-}
 
+# AppImage managers such as Gear Lever discover GitHub updates through the
+# update information embedded in the AppImage runtime (.upd_info ELF section).
+# The pattern must match the .zsync control file published with each release,
+# and that .zsync must sit next to an AppImage asset with the same name minus
+# the .zsync suffix.
+update_repo=${PICO_APPIMAGE_UPDATE_REPO:-${GITHUB_REPOSITORY:-reimeri/pico}}
+zsync_pattern="pico-*-linux-x86_64.AppImage.zsync"
+update_info="gh-releases-zsync|${update_repo}|latest|${zsync_pattern}"
+
 if [[ -n $wayland_prefix ]]; then
     wayland_prefix=$(realpath "$wayland_prefix")
     export PKG_CONFIG_PATH="$wayland_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -24,12 +33,20 @@ if ! command -v "$linuxdeploy" >/dev/null 2>&1 && [[ ! -x "$linuxdeploy" ]]; the
     echo "linuxdeploy is unavailable: $linuxdeploy" >&2
     exit 1
 fi
+if [[ $linuxdeploy != /* && -x $linuxdeploy ]]; then
+    linuxdeploy="$(pwd)/$linuxdeploy"
+fi
 
 rm -rf "$appdir"
 DESTDIR="$appdir" cmake --install "$build_dir" --prefix /usr
 install -Dm755 "$repo_root/packaging/appimage/AppRun" "$appdir/AppRun"
 install -Dm644 "$repo_root/packaging/linux/io.github.reimeri.pico.desktop" \
     "$appdir/io.github.reimeri.pico.desktop"
+# Gear Lever reports the version of an imported AppImage from
+# X-AppImage-Version in the desktop file shipped inside the AppImage.
+printf 'X-AppImage-Version=%s\n' "$version" >> "$appdir/io.github.reimeri.pico.desktop"
+install -Dm644 "$appdir/io.github.reimeri.pico.desktop" \
+    "$appdir/usr/share/applications/io.github.reimeri.pico.desktop"
 if command -v magick >/dev/null 2>&1; then
     magick "$repo_root/app/resources/logo.png" -resize 512x512 "$appdir/pico.png"
 elif command -v convert >/dev/null 2>&1; then
@@ -99,15 +116,25 @@ for plugin in "${decor_plugin_files[@]}"; do
     dependency_args+=(--deploy-deps-only "$target")
 done
 
-rm -f "$output"
-ARCH=x86_64 LDAI_OUTPUT="$output" LDAI_NO_APPSTREAM=1 \
-    APPIMAGE_EXTRACT_AND_RUN=1 "$linuxdeploy" \
-    --appdir "$appdir" \
-    --executable "$appdir/usr/bin/pico" \
-    --desktop-file "$appdir/io.github.reimeri.pico.desktop" \
-    --icon-file "$appdir/pico.png" \
-    "${dependency_args[@]}" \
-    --output appimage
+rm -f "$output" "${output}.zsync"
+if [[ "${output##*/}.zsync" != "$zsync_pattern" ]]; then
+    echo "update information pattern $zsync_pattern does not match ${output##*/}.zsync" >&2
+    exit 1
+fi
+# appimagetool writes the .zsync control file to the working directory rather
+# than next to the AppImage, so package from the output directory to keep the
+# release assets together.
+(
+    cd "$output_dir"
+    ARCH=x86_64 LDAI_OUTPUT="$output" LDAI_UPDATE_INFORMATION="$update_info" LDAI_NO_APPSTREAM=1 \
+        APPIMAGE_EXTRACT_AND_RUN=1 "$linuxdeploy" \
+        --appdir "$appdir" \
+        --executable "$appdir/usr/bin/pico" \
+        --desktop-file "$appdir/io.github.reimeri.pico.desktop" \
+        --icon-file "$appdir/pico.png" \
+        "${dependency_args[@]}" \
+        --output appimage
+)
 
 if ! find "$appdir/usr/lib" -maxdepth 1 -name 'libcrypto.so*' -print -quit | grep -q .; then
     echo "AppImage is missing the OpenSSL Crypto runtime" >&2
@@ -125,6 +152,21 @@ if ! readelf --dyn-syms --wide "$appdir/usr/lib/${required_sonames[0]}" | grep -
 fi
 if ! find "$appdir/usr/lib/libdecor/plugins-1" -maxdepth 1 -type f -name '*.so' -print -quit | grep -q .; then
     echo "AppImage is missing its libdecor runtime plugin" >&2
+    exit 1
+fi
+
+if ! readelf --string-dump=.upd_info --wide "$output" | grep -F "$update_info" >/dev/null; then
+    echo "AppImage does not embed the GitHub update information $update_info" >&2
+    exit 1
+fi
+zsync_file="${output}.zsync"
+if [[ ! -f $zsync_file ]]; then
+    echo "AppImage is missing its zsync control file $zsync_file" >&2
+    exit 1
+fi
+output_sha1=$(sha1sum "$output" | awk '{print $1}')
+if ! grep -qx "SHA-1: ${output_sha1}" "$zsync_file"; then
+    echo "zsync control file does not describe $output" >&2
     exit 1
 fi
 

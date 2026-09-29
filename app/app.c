@@ -23,6 +23,7 @@
 #include "builtins/todo.h"
 #include "builtins/background_model.h"
 #include "host_internal.h"
+#include "http_internal.h"
 #include "path.h"
 #include "trace_group.h"
 #include "worktree.h"
@@ -3397,6 +3398,15 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         clean = false;
     }
     if (!clean)
+    {
+        host->terminal_shutdown = true;
+        g_pico_process_retired = true;
+        return PICO_HOST_SHUTDOWN_RETAINED;
+    }
+    /* An extension can call the public HTTP helpers from its own thread.
+     * Check before dlclose/shutdown callbacks can invalidate its code or
+     * borrowed request data; keep the whole execution host on this path. */
+    if (host->curl_initialized && !PicoHttp_ShutdownConnections())
     {
         host->terminal_shutdown = true;
         g_pico_process_retired = true;

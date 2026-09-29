@@ -1,8 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "pico/http.h"
+#include "http_internal.h"
 #include <arpa/inet.h>
 #include <curl/curl.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -188,6 +190,134 @@ static int NoReplayAfterHeaders(void)
     return rc != PICO_HTTP_FAIL || r.waits != 0;
 }
 
+typedef struct KeepAliveServer { int listener; int accepted; int served; } KeepAliveServer;
+static void *ServeKeepAlive(void *arg)
+{
+    KeepAliveServer *s = arg;
+    int fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        struct pollfd fds[2] = {{.fd = fd, .events = POLLIN},
+                                {.fd = s->listener, .events = POLLIN}};
+        if (fd < 0) { fds[0].fd = -1; }
+        if (poll(fds, 2, 3000) <= 0) break;
+        if (fds[1].revents & POLLIN)
+        {
+            if (fd >= 0) close(fd);
+            fd = accept(s->listener, NULL, NULL);
+            if (fd < 0) break;
+            s->accepted++;
+        }
+        char request[2048] = {0};
+        size_t len = 0;
+        while (len + 1 < sizeof(request) && !strstr(request, "\r\n\r\n"))
+        {
+            ssize_t n = recv(fd, request + len, sizeof(request) - len - 1, 0);
+            if (n <= 0) break;
+            len += (size_t)n;
+            request[len] = '\0';
+        }
+        if (!strstr(request, "\r\n\r\n")) break;
+        const char reply[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
+        if (send(fd, reply, sizeof(reply) - 1, MSG_NOSIGNAL) <= 0) break;
+        s->served++;
+    }
+    if (fd >= 0) close(fd);
+    return NULL;
+}
+
+static int KeepAliveReuse(void)
+{
+    KeepAliveServer s = {.listener = socket(AF_INET, SOCK_STREAM, 0)};
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    if (s.listener < 0 || bind(s.listener, (void *)&addr, size) ||
+        listen(s.listener, 2) || getsockname(s.listener, (void *)&addr, &size)) return 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, ServeKeepAlive, &s)) { close(s.listener); return 1; }
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
+    PicoHttpReq req = {.url = url};
+    int failed = 0;
+    for (int i = 0; i < 2; i++)
+    {
+        char *body = NULL;
+        long code = 0;
+        int rc = pico_http_get(&req, &code, &body, NULL);
+        failed |= rc != PICO_HTTP_OK || code != 200 || !body || strcmp(body, "ok");
+        free(body);
+    }
+    pthread_join(thread, NULL);
+    close(s.listener);
+    return failed || s.accepted != 1 || s.served != 2;
+}
+
+typedef struct BlockedHttp {
+    int listener;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    bool received, release;
+    int rc;
+    char url[128];
+} BlockedHttp;
+static void *BlockedHttpServer(void *arg)
+{
+    BlockedHttp *b = arg;
+    int fd = accept(b->listener, NULL, NULL);
+    if (fd < 0) return NULL;
+    char request[2048];
+    (void)recv(fd, request, sizeof(request), 0);
+    pthread_mutex_lock(&b->mu);
+    b->received = true;
+    pthread_cond_signal(&b->cv);
+    while (!b->release) pthread_cond_wait(&b->cv, &b->mu);
+    pthread_mutex_unlock(&b->mu);
+    const char reply[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    send(fd, reply, sizeof(reply) - 1, MSG_NOSIGNAL);
+    close(fd);
+    return NULL;
+}
+static void *BlockedHttpClient(void *arg)
+{
+    BlockedHttp *b = arg;
+    PicoHttpReq req = {.url = b->url};
+    char *body = NULL;
+    b->rc = pico_http_get(&req, NULL, &body, NULL);
+    free(body);
+    return NULL;
+}
+static int ShutdownWhileBorrowed(void)
+{
+    BlockedHttp b = {.listener = socket(AF_INET, SOCK_STREAM, 0)};
+    pthread_mutex_init(&b.mu, NULL);
+    pthread_cond_init(&b.cv, NULL);
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    if (b.listener < 0 || bind(b.listener, (void *)&addr, size) ||
+        listen(b.listener, 1) || getsockname(b.listener, (void *)&addr, &size)) return 1;
+    snprintf(b.url, sizeof(b.url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
+    pthread_t server, client;
+    if (pthread_create(&server, NULL, BlockedHttpServer, &b)) return 1;
+    if (pthread_create(&client, NULL, BlockedHttpClient, &b)) return 1;
+    pthread_mutex_lock(&b.mu);
+    while (!b.received) pthread_cond_wait(&b.cv, &b.mu);
+    pthread_mutex_unlock(&b.mu);
+    int fail = PicoHttp_ShutdownConnections(); /* must retain curl global state */
+    PicoHttpReq req = {.url = b.url};
+    fail |= pico_http_get(&req, NULL, NULL, NULL) != PICO_HTTP_FAIL;
+    pthread_mutex_lock(&b.mu);
+    b.release = true;
+    pthread_cond_signal(&b.cv);
+    pthread_mutex_unlock(&b.mu);
+    pthread_join(client, NULL);
+    pthread_join(server, NULL);
+    fail |= b.rc != PICO_HTTP_OK || !PicoHttp_ShutdownConnections();
+    close(b.listener);
+    pthread_cond_destroy(&b.cv);
+    pthread_mutex_destroy(&b.mu);
+    return fail;
+}
+
 int main(void)
 {
     setenv("NO_PROXY", "127.0.0.1", 1);
@@ -217,6 +347,8 @@ int main(void)
     fail |= RetryRequest(false, false, false);
     fail |= NoReplayAfterHeaders();
     fail |= RetryTlsHandshake();
+    fail |= KeepAliveReuse();
+    fail |= ShutdownWhileBorrowed();
     curl_global_cleanup();
     if (fail) fprintf(stderr, "HTTP framing or callback cancellation failed\n");
     return fail;

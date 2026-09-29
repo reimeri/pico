@@ -6,12 +6,14 @@
 
 typedef struct PicoTranscriptVirtual {
     float *heights;
+    double *height_tree; /* Fenwick index of effective heights (including estimates). */
     uint64_t *revisions;
     unsigned char *dirty;
     unsigned char *mounted;
     int count;
     int capacity;
     int measure_cursor;
+    int dirty_count;
     uint64_t identity;
     float width;
     float font_scale;

@@ -8,7 +8,7 @@
 - **Method:** source and call-path review, independent subsystem reviews, cross-checking existing caches/limits/thread boundaries, and running the existing Release build and local test suite inside `nix develop`.
 - **Not performed:** live provider requests, GUI/GPU profiling, cold-start timing, new benchmark implementations, or production-code changes.
 
-**Follow-up:** Phase 1 has since implemented F1 and the targeted F2/F3/F4/F5/F6/F7 improvements described below. The detailed findings remain a snapshot of the reviewed revision; their line numbers and source-level descriptions are historical unless explicitly qualified here. Phase 2 scaling work remains open.
+**Follow-up:** Phase 1 has since implemented F1 and the targeted F2/F3/F4/F5/F6/F7 improvements described below. The detailed findings remain a snapshot of the reviewed revision; their line numbers and source-level descriptions are historical unless explicitly qualified here. Phase 2 has partial follow-up work described below; full streaming Markdown incrementality, history-wide transcript scans, and shell spool quotas remain open by design.
 
 **Important distinction:** the timings below are measured. The individual findings establish source-level work, blocking, or resource-growth risks; their user-visible cost has **not** been measured in a representative interactive session. Priorities are an engineering triage recommendation, not a profiler ranking. Source links and line numbers refer to the revision above.
 
@@ -19,8 +19,8 @@ Pico already has substantial performance engineering: invalidation-driven layout
 The most valuable next work is to close gaps around those optimizations:
 
 1. **Keep storage off the UI thread.** Title rewrites queue on the persist worker (F1), and sidebar refresh scans now run as cancellable host tasks (F4); direct catalog APIs and the no-task fallback still scan synchronously.
-2. **Make long-stream updates proportional to new work.** Append now tracks length/capacity, but each display reparse still rebuilds the whole Markdown document and discards document-local caches. Throttling helps frequency, not growth in work per update.
-3. **Finish transcript virtualization at the bookkeeping layer.** Message bodies are virtualized, but planning/revision/height operations still scan history; anchor queries repeatedly sum prefixes.
+2. **Make long-stream updates proportional to new work.** Append tracks length/capacity, but each display reparse still rebuilds the whole Markdown document and discards document-local caches. Safe incremental parsing remains unimplemented; Markdown can reinterpret earlier text. Throttling helps frequency, not growth in work per update.
+3. **Finish transcript virtualization at the bookkeeping layer.** Message bodies are virtualized and height/prefix queries are indexed, but revision checks, emission, mounted-array clearing, and offscreen dirty scanning still walk history.
 4. **Avoid unchanged input and background work.** Phase 1 caches file-completion queries and composer wraps and invokes each LLM hook once per request; diff workers still rebuild models before discovering nothing changed.
 5. **Bound bytes as well as item counts.** Replay, queued persistence, diff capture, and shell spooling have memory or disk costs that are not bounded by their visible row/job limits.
 
@@ -32,16 +32,16 @@ The most valuable next work is to close gaps around those optimizations:
 |---|---|---|---|---|
 | F1 | ~~P1~~ **addressed** | Title persistence no longer blocks the frame thread | TODO task-title change; slow/contended storage | High |
 | F2 | P1; partial | Growing stream text is still reparsed repeatedly; length/capacity now avoid repeated append scans | Long streamed answers, especially rich Markdown | High |
-| F3 | P1; partial | Explicit message revisions replace content hashing; virtualization still performs history-wide bookkeeping | Large history, scrolling, streaming, anchor preservation | High |
+| F3 | P1; partial | Indexed heights make spacer/anchor/viewport lookup cheaper; history-wide revision, emission, and dirty scans remain | Large history, scrolling, streaming, anchor preservation | High |
 | F4 | ~~P1~~ addressed for sidebar | Sidebar reconciliation now scans on a host task | Startup, catalog changes, periodic reconciliation | High |
 | F5 | ~~P2~~ addressed for file completion | Unchanged file-completion queries are cached; file-token discovery runs on a worker | Active `@` token in a large workspace | High; allocator impact conditional |
 | F6 | ~~P2~~ addressed | Composer wrap results are shared across UI phases | Long pasted drafts; repeated redraws | High |
 | F7 | ~~P2~~ addressed | Each LLM hook runs once per request, avoiding the duplicate skill rescan | Requests offering `use_skill` | High |
-| F8 | P2 | Diff polling pays full capture cost before deduplication | Dirty/untracked repositories; multiple workspaces | High |
-| F9 | P2 | Replay retains transcript-sized temporary representations | Large saved sessions | High |
-| F10 | P2 | Persistence coalescing has growing-prefix work and no byte cap | Slow writer plus bursty logging | High; copying impact conditional |
-| F11 | P2 | HTTP requests discard connection state between rounds | Repeated short calls/tool follow-ups | High on lifecycle; latency impact unmeasured |
-| F12 | P2 | Shell output cap does not cap disk spooling | Noisy/long-running shell commands | High |
+| F8 | P2; partial | Diff polling still captures full models before deduplication; inactive polling backs off and capture bytes are limited | Dirty/untracked repositories; multiple workspaces | High |
+| F9 | P2; partial | Replay holds all records during validation/preparation, then releases records as they are applied | Large saved sessions | High |
+| F10 | ~~P2~~ addressed for pending session payloads | Persistence coalescing uses capacity-aware buffers and a pending-byte cap | Slow writer plus bursty logging | High; copying impact conditional |
+| F11 | P2; partial | HTTP requests reuse a small pool of idle curl handles | Repeated short calls/tool follow-ups | High on lifecycle; latency impact unmeasured |
+| F12 | P2; intentionally deferred | Shell output remains unbounded on disk to preserve complete access (intentional deferral) | Noisy/long-running shell commands | High |
 | F13 | P3 | Build graph repeats work unnecessarily | No-op builds, relinks, broad test builds | High; unchanged build observed |
 
 ## Validation performed
@@ -94,7 +94,20 @@ There is no dedicated, repeatable performance benchmark target in the reviewed C
 - **F6:** composer wraps are retained by text revision, width and font generation/identity and reused for render, geometry and caret/selection paths. This is not a claim about spell-check work or measured real-font frame time.
 - **F7:** each LLM hook now runs once per request, combining tool exclusion and extra instructions; later hooks see preceding exclusions/instructions. The skills hook therefore scans once, not twice, for a request that offers `use_skill`. Discovery still runs for each such request, and first-byte I/O is not eliminated.
 
-The follow-up has correctness tests (including the debug host-workspace suite and 43/43 debug CTest passes), not workload timing or memory measurements. The original measurements above remain measurements of the reviewed revision, not of this follow-up.
+The follow-up has correctness tests (including the debug host-workspace suite and 43/43 debug CTest passes), not workload timing or memory measurements.
+
+### Phase 2 follow-up (after Phase 1)
+
+- **F2:** no safe incremental Markdown boundary was established. Debounced reparsing and exact final Markdown remain unchanged. This part of Phase 2 is **open**, not an achieved performance gain.
+- **F3 partial:** a Fenwick height index supplies range/anchor sums and binary-search viewport entry; a dirty count makes settled-state detection constant-time. Full revisions, mounted-array clearing, spacer emission, harvesting, and offscreen dirty-row discovery still scan history. This is not fully sublinear layout. Geometry hierarchy was not changed.
+- **F8 partial:** inactive workspaces reconcile less frequently (30 s vs 2 s); selecting/opening asks for an immediate refresh and displays the last model meanwhile. Git stdout capture retains at most 16 MiB per command, tracked patch truncation discards incomplete trailing lines, and untracked retained content and materialized-file counts are bounded (8 MiB/1,024 files); tracked-file and parsed-row counts have no separate cap. Partial models are labeled in the modal. Git commands are still launched on each poll and have no execution timeout; clean and selected workspaces still capture whole patches before deduplication. No idle CPU benchmark was taken.
+- **F9 partial:** validated lines, JSON tokens, and prebuilt display documents are freed after main-thread apply, retaining only the final unmatched tool call until replay finishes. Worker validation/preparation still retains the entire file and token trees at peak; valid sessions are not rejected by a new size limit. Peak RSS reduction is **not established** for preparation.
+- **F10:** queued session appends use stored length/geometric capacity; pending payloads are accounted per session (16 MiB) and globally (64 MiB), with prompt failure rather than silent drops or unbounded waits. Title continuations share the same budget. These are pending logical byte counts, not an exact RSS ceiling (capacity slack, in-flight jobs, and caller-owned input remain outside them). Existing FIFO and failure handling remain.
+- **F11 partial:** streaming and buffered requests borrow from a four-idle-handle pool, returning reset handles that retain curl's connection cache; transfers do not hold a global lock. Idle handles are cleaned up before host curl shutdown. If an extension-owned transfer is still running at shutdown, the host retains curl global state rather than freeing it under that transfer; new borrows are rejected. A local keep-alive fixture confirms two sequential requests share one accepted socket; provider TLS/first-byte timing remains unmeasured. This is a process-wide pool in the current single-host lifecycle, not a general multi-host isolation mechanism.
+- **F12 intentionally deferred (user decision):** successful shell output must remain complete and accessible through returned temporary files, and files are left for OS cleanup. The existing TMPDIR preference with `/tmp` fallback remains; no disk quota/truncation/retention logic was introduced. Consequently noisy commands can still fill temporary storage. This is not a claim that F12 is resolved.
+
+Validation: targeted transcript, diff, HTTP (including sequential keep-alive and a borrowed-transfer shutdown), and session suites passed; the debug host-workspace suite passed after reviewer fixes, and the debug CTest suite passed 43/43 before the final HTTP cleanup-order adjustment (targeted HTTP and host-workspace suites were rerun afterward). The review identified and prompted fixes for empty-transcript initialization, selected-workspace diff polling, pending-header accounting, truncated numstat tails, and borrowed-HTTP shutdown. These are correctness/ownership changes, not representative interactive performance measurements. The original revision's timings do not quantify their savings.
+ The original measurements above remain measurements of the reviewed revision, not of this follow-up.
 
 ## Detailed findings
 
@@ -291,12 +304,13 @@ No interactive cold/warm startup measurement was taken, so there is no evidence 
 
 These have narrow, explainable benefits without requiring an engine rewrite. Add timing/counters around the existing boundaries so savings can be attributed correctly.
 
-### Phase 2 — Address scaling and resource ceilings
+### Phase 2 — Address scaling and resource ceilings (partial follow-up)
 
-- Indexed transcript heights/dirty queues; investigate safe incremental Markdown work (F2/F3).
-- Demand-driven/cached detailed diff capture and aggregate limits (F8).
-- Replay representation lifetime and persistence byte-aware queues (F9/F10).
-- Shell spool quotas/cleanup and connection reuse (F12/F11).
+- **F2/F3:** height index and viewport lookup added. Full incremental Markdown parsing, dirty queues and history-wide revision/emission work remain open.
+- **F8:** inactive backoff, open refresh, and explicit partial byte/file-bounded capture added. Cheap status probing, cancellation/timeouts and capture-on-demand remain open.
+- **F9/F10:** consumed replay records are released, but preparation peak remains transcript-sized. Pending session writes are length/capacity-aware and byte-limited with explicit failure.
+- **F11:** a bounded pool reuses HTTP handles/connections across rounds; transport timings and broader ownership/isolation evaluation remain.
+- **F12:** deliberately deferred at the user's request: full shell outputs remain on disk and accessible; no spool quota or automatic cleanup.
 
 ### Phase 3 — Optimize measured residual costs
 
@@ -331,4 +345,4 @@ For interactive workloads, record the entire frame/pump critical path rather tha
 - **Tools:** keep policy-aware parallelism and serial barriers. Raising worker limits is not a substitute for fixing shared UI or storage bottlenecks.
 - **Documentation:** if implementation changes public registration, lifecycle, threading, ownership, reload or hook behavior, update the matching `docs/extend/` topic and `contracts.md`, and keep examples aligned. No compatibility layer is needed.
 
-**Bottom line:** title persistence and sidebar catalog scans no longer block normal frame pumping (F1/F4). Phase 1 removes duplicate append/query/wrap/hook work; remaining priority is full Markdown reparses, growing-history bookkeeping and other scaling/resource ceilings. Existing tests provide a strong correctness base, but passing them does not establish smooth real-font rendering, low idle CPU, bounded peak memory or low provider round-trip overhead. Add measurements at those product boundaries before choosing larger architectural changes.
+**Bottom line:** Phase 1 removed duplicate synchronous work. Phase 2 has bounded session queues, cheaper indexed height lookups, partial diff limits/backoff, consumed-replay reclamation, and sequential HTTP reuse; full Markdown reparsing, history-wide layout work, replay preparation peak, diff capture polling, and unbounded shell spooling remain open. Existing tests provide a strong correctness base, but passing them does not establish smooth real-font rendering, low idle CPU, bounded peak memory or low provider round-trip overhead. Add measurements at those product boundaries before choosing larger architectural changes.

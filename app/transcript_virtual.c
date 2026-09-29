@@ -23,12 +23,14 @@ static bool Reserve(PicoTranscriptVirtual *cache, int count)
         capacity *= 2;
     }
     float *heights = (float *)calloc((size_t)capacity, sizeof(float));
+    double *tree = (double *)calloc((size_t)capacity + 1, sizeof(double));
     uint64_t *revisions = (uint64_t *)calloc((size_t)capacity, sizeof(uint64_t));
     unsigned char *dirty = (unsigned char *)calloc((size_t)capacity, 1);
     unsigned char *mounted = (unsigned char *)calloc((size_t)capacity, 1);
-    if (!heights || !revisions || !dirty || !mounted)
+    if (!heights || !tree || !revisions || !dirty || !mounted)
     {
         free(heights);
+        free(tree);
         free(revisions);
         free(dirty);
         free(mounted);
@@ -42,10 +44,18 @@ static bool Reserve(PicoTranscriptVirtual *cache, int count)
         memcpy(mounted, cache->mounted, (size_t)cache->capacity);
     }
     free(cache->heights);
+    free(cache->height_tree);
     free(cache->revisions);
     free(cache->dirty);
     free(cache->mounted);
     cache->heights = heights;
+    cache->height_tree = tree;
+    /* Fenwick nodes at a new capacity depend on heights in the old prefix. */
+    for (int i = 0; i < cache->count; i++)
+    {
+        double h = heights[i] > 0.5f ? heights[i] : PICO_TRANSCRIPT_ESTIMATED_HEIGHT;
+        for (int j = i + 1; j <= capacity; j += j & -j) tree[j] += h;
+    }
     cache->revisions = revisions;
     cache->dirty = dirty;
     cache->mounted = mounted;
@@ -60,10 +70,24 @@ void PicoTranscriptVirtual_Free(PicoTranscriptVirtual *cache)
         return;
     }
     free(cache->heights);
+    free(cache->height_tree);
     free(cache->revisions);
     free(cache->dirty);
     free(cache->mounted);
     memset(cache, 0, sizeof(*cache));
+}
+
+static void HeightChange(PicoTranscriptVirtual *cache, int index, double delta)
+{
+    for (int j = index + 1; j <= cache->capacity; j += j & -j)
+        cache->height_tree[j] += delta;
+}
+
+static double HeightPrefix(const PicoTranscriptVirtual *cache, int end)
+{
+    double sum = 0;
+    for (int j = end; j > 0; j -= j & -j) sum += cache->height_tree[j];
+    return sum;
 }
 
 void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity,
@@ -98,6 +122,11 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
         }
         cache->measure_all = count > 0;
         cache->measure_cursor = 0;
+        cache->dirty_count = count;
+        if (cache->height_tree)
+            memset(cache->height_tree, 0, ((size_t)cache->capacity + 1) * sizeof(double));
+        for (int i = 0; i < count; i++)
+            HeightChange(cache, i, PICO_TRANSCRIPT_ESTIMATED_HEIGHT);
     }
     else if (count > old_count)
     {
@@ -106,6 +135,9 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
         memset(cache->revisions + old_count, 0,
                (size_t)(count - old_count) * sizeof(uint64_t));
         memset(cache->dirty + old_count, 1, (size_t)(count - old_count));
+        cache->dirty_count += count - old_count;
+        for (int i = old_count; i < count; i++)
+            HeightChange(cache, i, PICO_TRANSCRIPT_ESTIMATED_HEIGHT);
     }
     if (count > 0)
     {
@@ -132,6 +164,7 @@ void PicoTranscriptVirtual_SetRevision(PicoTranscriptVirtual *cache, int index,
     if (cache->revisions[index] != revision)
     {
         cache->revisions[index] = revision;
+        if (!cache->dirty[index]) cache->dirty_count++;
         cache->dirty[index] = 1;
     }
 }
@@ -175,17 +208,25 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
         visible_from = 0.0f;
     }
 
-    float y = 0.0f;
-    for (int i = 0; i < cache->count; i++)
+    /* Binary-search cumulative heights, then visit only visible rows. A gap
+     * belongs to its preceding row, including the boundary at visible_from. */
+    int lo = 0, hi = cache->count;
+    while (lo < hi)
     {
-        float next = y + ItemHeight(cache, i, message_gap);
-        if (i == force_index ||
-            (viewport_height > 0.5f && next >= visible_from && y <= visible_to))
-        {
-            cache->mounted[i] = 1;
-        }
-        y = next;
+        int mid = lo + (hi - lo) / 2;
+        double bottom = HeightPrefix(cache, mid + 1) +
+                        (double)(mid < cache->count - 1 ? mid + 1 : mid) * message_gap;
+        if (bottom < visible_from) lo = mid + 1;
+        else hi = mid;
     }
+    double y = HeightPrefix(cache, lo) + (double)lo * message_gap;
+    for (int i = lo; i < cache->count && y <= visible_to; i++)
+    {
+        if (viewport_height > 0.5f) cache->mounted[i] = 1;
+        y += ItemHeight(cache, i, message_gap);
+    }
+    if (force_index >= 0 && force_index < cache->count)
+        cache->mounted[force_index] = 1;
     /* Visible/forced rows are never delayed. Spend a bounded additional budget
      * on dirty offscreen rows, continuing where the previous pass stopped. */
     int budget = PICO_TRANSCRIPT_BACKGROUND_BATCH;
@@ -233,12 +274,9 @@ float PicoTranscriptVirtual_SpanHeight(const PicoTranscriptVirtual *cache,
     {
         return 0.0f;
     }
-    float height = 0.0f;
-    for (int i = begin; i < end; i++)
-    {
-        height += ItemHeight(cache, i, message_gap);
-    }
-    return height;
+    double height = HeightPrefix(cache, end) - HeightPrefix(cache, begin);
+    int gaps = end - begin - (end == cache->count ? 1 : 0);
+    return (float)(height + (double)gaps * message_gap);
 }
 
 float PicoTranscriptVirtual_AnchorDelta(const PicoTranscriptVirtual *cache,
@@ -268,7 +306,10 @@ void PicoTranscriptVirtual_RecordHeight(PicoTranscriptVirtual *cache, int index,
     {
         return;
     }
+    double old = PicoTranscriptVirtual_ItemHeight(cache, index);
     cache->heights[index] = height;
+    HeightChange(cache, index, (double)height - old);
+    if (cache->dirty[index]) cache->dirty_count--;
     cache->dirty[index] = 0;
 }
 
@@ -278,12 +319,5 @@ void PicoTranscriptVirtual_FinishMeasure(PicoTranscriptVirtual *cache)
     {
         return;
     }
-    for (int i = 0; i < cache->count; i++)
-    {
-        if (cache->dirty[i])
-        {
-            return;
-        }
-    }
-    cache->measure_all = false;
+    if (cache->dirty_count == 0) cache->measure_all = false;
 }

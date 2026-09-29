@@ -94,6 +94,9 @@ int main(void)
         {"/ws", 1, 1, 0, true, "src/main.c", ROW_CTX, "int main(int argc)"}, /* row text */
     };
     uint64_t base = PicoDiffModel_Signature(a);
+    b->partial = true;
+    CHECK(PicoDiffModel_Signature(b) != base);
+    b->partial = false;
     for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); i++)
     {
         RowSpec mut_rows[5];

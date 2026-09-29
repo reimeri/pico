@@ -26,6 +26,7 @@
 /* ------------------------------------------------------------------ */
 
 #define DIFF_POLL_SECONDS 2
+#define DIFF_INACTIVE_POLL_SECONDS 30
 
 typedef struct DiffWorkerCtx
 {
@@ -36,6 +37,8 @@ typedef struct DiffWorkerCtx
     char workspace[4096];
     bool thread_started;
     bool thread_stop;
+    bool active; /* selected workspace or open modal, published by main thread */
+    bool refresh_requested;
     pthread_t thread;
     /* Worker-thread-only capture dedup: signature of the last published
      * model. Unchanged captures are dropped before highlighting. */
@@ -81,6 +84,7 @@ static void *DiffThreadMain(void *arg)
     {
         pthread_mutex_lock(&w->lock);
         bool stop = w->thread_stop;
+        bool active = w->active;
         char ws[4096];
         snprintf(ws, sizeof(ws), "%s", w->workspace);
         pthread_mutex_unlock(&w->lock);
@@ -131,13 +135,15 @@ static void *DiffThreadMain(void *arg)
          * (the condvar's default clock). */
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_sec += DIFF_POLL_SECONDS;
+        deadline.tv_sec += active ? DIFF_POLL_SECONDS : DIFF_INACTIVE_POLL_SECONDS;
         pthread_mutex_lock(&w->lock);
         while (!w->thread_stop)
         {
-            if (pthread_cond_timedwait(&w->wake, &w->lock, &deadline) != 0)
+            if (pthread_cond_timedwait(&w->wake, &w->lock, &deadline) != 0 ||
+                w->refresh_requested)
             {
-                break; /* timeout: poll again */
+                w->refresh_requested = false;
+                break; /* timeout or explicit refresh */
             }
         }
         stop = w->thread_stop;
@@ -351,6 +357,12 @@ static bool CloseModal(DiffState *s)
         return false;
     }
     s->open = false;
+    if (s->worker)
+    {
+        pthread_mutex_lock(&s->worker->lock);
+        s->worker->active = host && PicoHost_SelectedWorkspace(host) == s->workspace;
+        pthread_mutex_unlock(&s->worker->lock);
+    }
     memset(&s->scrollbar, 0, sizeof(s->scrollbar));
     return true;
 }
@@ -360,6 +372,14 @@ static void OpenModal(DiffState *s, PicoHost *app)
     if (s && !s->open && pico_ui_modal_push(app, "diff"))
     {
         s->open = true;
+        if (s->worker)
+        {
+            pthread_mutex_lock(&s->worker->lock);
+            s->worker->active = true;
+            s->worker->refresh_requested = true;
+            pthread_cond_signal(&s->worker->wake);
+            pthread_mutex_unlock(&s->worker->lock);
+        }
     }
 }
 
@@ -588,6 +608,14 @@ static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent
                                             .fontSize = PICO_FONT_TITLE,
                                             .textColor = COLOR_TEXT,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                if (s->model && s->model->partial)
+                {
+                    CLAY_TEXT(CLAY_STRING(" (partial; capture limit reached)"),
+                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = PICO_FONT_CAPTION,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
                 if (HasChanges(s))
                 {
                     CLAY_TEXT(CLAY_STRING("·"),
@@ -755,12 +783,21 @@ static void DiffHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
 
 static void DiffWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt)
 {
-    (void)workspace;
     (void)dt;
     DiffState *s = (DiffState *)state;
-    if (!s)
+    if (!s) return;
+    if (s->worker)
     {
-        return;
+        bool active = s->open || (workspace &&
+            PicoHost_SelectedWorkspace(workspace->host) == workspace);
+        pthread_mutex_lock(&s->worker->lock);
+        if (active && !s->worker->active)
+        {
+            s->worker->refresh_requested = true;
+            pthread_cond_signal(&s->worker->wake);
+        }
+        s->worker->active = active;
+        pthread_mutex_unlock(&s->worker->lock);
     }
     AdoptPending(s);
     if (!s->open)

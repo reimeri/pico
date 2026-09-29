@@ -116,6 +116,9 @@ typedef struct PicoTraceLine {
 typedef struct PicoMessage {
     PicoRole role;
     char *source;
+    size_t source_len;
+    size_t source_cap;
+    uint64_t revision;
     PicoTraceLine *trace;
     int trace_count;
     bool trace_group_expanded;
@@ -144,6 +147,7 @@ typedef struct PicoComposer {
     char *text;
     int length;
     int capacity;
+    uint64_t revision;
     int cursor;
     int sel_anchor;
     bool mouse_selecting;

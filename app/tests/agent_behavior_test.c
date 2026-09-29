@@ -120,6 +120,7 @@ typedef struct TestState {
     PicoAgentId after_agent_id;
     PicoAgentId apply_agent_id;
     PicoAgentId llm_agent_id;
+    int llm_hook_calls;
     PicoAgentId context_agent_id;
     PicoAgentId hook_agent_id;
     bool context_workspace_matches;
@@ -230,6 +231,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.after_agent_id = 0;
     g_test.apply_agent_id = 0;
     g_test.llm_agent_id = 0;
+    g_test.llm_hook_calls = 0;
     g_test.context_agent_id = 0;
     g_test.hook_agent_id = 0;
     g_test.context_workspace_matches = false;
@@ -1060,6 +1062,7 @@ static void ExtraInstructions(PicoWorkspace *workspace, PicoAgentId agent_id, Pi
     (void)workspace;
     (void)state;
     g_test.llm_agent_id = agent_id;
+    g_test.llm_hook_calls++;
     event->extra_instructions = JsonDup("injected-line");
 }
 
@@ -3330,7 +3333,8 @@ static int TestLlmExtraInstructions(void)
                              ? strstr(g_test.last_instructions, "## Additional instructions")
                              : NULL;
     const char *extra = g_test.last_instructions ? strstr(g_test.last_instructions, "injected-line") : NULL;
-    bool ok = g_test.llm_agent_id == pico_agent_id(TestAgent(&app)) && header && extra &&
+    bool ok = g_test.llm_hook_calls == 1 &&
+              g_test.llm_agent_id == pico_agent_id(TestAgent(&app)) && header && extra &&
               extra > header;
     pthread_mutex_unlock(&g_test.mu);
     PicoHost_Shutdown(&app);
@@ -4106,10 +4110,10 @@ static int TestAskUserHiddenOmitsGuidance(void)
     PicoHost app;
     InitApp(&app);
     PicoExt ext = pico_ext_ask_user();
-    InitExt(&app, TestWs(&app), ext, NULL, NULL);
     PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, PicoHost_PrimaryWorkspace(&app));
     pico_add_llm_hook(PicoHost_PrimaryWorkspace(&app), ExcludeAskUser);
     PicoHost_PublishRegistration(&app, NULL);
+    InitExt(&app, TestWs(&app), ext, NULL, NULL);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
     if (!WaitForIdle(&app))
     {

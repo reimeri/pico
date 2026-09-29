@@ -23,7 +23,7 @@
  *   <workspace>/.pico/skills/<name>/SKILL.md
  * Progressive disclosure: the LLM hook lists name+description in the
  * instructions; the use_skill tool loads the full body into the transcript.
- * The catalog is rescanned on every prompt build so skills dropped onto disk
+ * The catalog is rescanned once per prompt build so skills dropped onto disk
  * take effect without a reload, mirroring how SYSTEM.md is re-read per turn. */
 
 typedef struct SkillsState {

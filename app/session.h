@@ -4,6 +4,7 @@
 #include "agent_internal.h"
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <time.h>
 
 #define PICO_SESSION_TITLE_MAX_BYTES (72 * 4)
@@ -64,6 +65,7 @@ typedef struct PicoCatalogWorkspace {
     bool stashed; /* logical project group presentation state */
     PicoCatalogSession *sessions;
     int session_count;
+    int session_capacity;
 } PicoCatalogWorkspace;
 
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
@@ -75,6 +77,7 @@ void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
 /* Sidebar presentation: exact-checkout catalogs grouped by logical Git project. */
 int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out);
+int PicoCatalog_ScanGroupedInterruptible(PicoCatalogWorkspace **out, const atomic_bool *cancelled);
 /* Missing token files report a valid empty token. Read failures return false. */
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);

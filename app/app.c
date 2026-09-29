@@ -1690,6 +1690,9 @@ void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role
     if (msg->source)
     {
         memcpy(msg->source, markdown ? markdown : "", len + 1);
+        msg->source_len = len;
+        msg->source_cap = len + 1;
+        msg->revision = 1;
     }
     if (prepared && prepared_source && strcmp(prepared_source, markdown ? markdown : "") == 0)
     {
@@ -1728,15 +1731,32 @@ void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const ch
         return;
     }
     PicoMessage *m = &agent->messages[agent->message_count - 1];
-    size_t old = m->source ? strlen(m->source) : 0;
+    size_t old = m->source_len;
     size_t n = strlen(text);
-    char *next = (char *)realloc(m->source, old + n + 1);
-    if (!next)
+    size_t need = old + n + 1;
+    if (need > m->source_cap)
     {
-        return;
+        size_t cap = m->source_cap ? m->source_cap : 16;
+        char *grown;
+        while (cap < need)
+        {
+            if (cap > (size_t)-1 / 2)
+            {
+                return;
+            }
+            cap *= 2;
+        }
+        grown = (char *)realloc(m->source, cap);
+        if (!grown)
+        {
+            return;
+        }
+        m->source = grown;
+        m->source_cap = cap;
     }
-    memcpy(next + old, text, n + 1);
-    m->source = next;
+    memcpy(m->source + old, text, n + 1);
+    m->source_len = old + n;
+    m->revision++;
     MdDocument_Free(&m->doc);
     if (prepared && prepared_source && strcmp(prepared_source, m->source) == 0)
     {
@@ -1799,6 +1819,7 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
             m->trace[t].tool_output = JsonDup(output ? output : "");
             m->trace[t].tool_error = is_error;
             pico_trace_line_stamp_tool_done(&m->trace[t]);
+            m->revision++;
             return;
         }
     }
@@ -1832,6 +1853,7 @@ void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                 free(line->tool_args_json);
                 line->tool_args = display;
                 line->tool_args_json = raw;
+                message->revision++;
                 return;
             }
         }
@@ -1858,6 +1880,7 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                 line->tool_output = JsonDup(output ? output : "");
                 line->tool_error = is_error;
                 pico_trace_line_stamp_tool_done(line);
+                message->revision++;
                 return;
             }
         }

@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #ifdef PICO_SESSION_TEST_HOOKS
 extern bool PicoSession_TestHook(const char *stage);
@@ -51,6 +52,18 @@ typedef struct SidebarWsUi
     int shown;
 } SidebarWsUi;
 
+typedef struct SidebarScanWorker
+{
+    atomic_bool cancelled;
+    uint64_t serial;
+    char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    bool token_before_valid;
+    bool token_after_valid;
+    PicoCatalogWorkspace *workspaces;
+    int workspace_count;
+} SidebarScanWorker;
+
 typedef struct SidebarState
 {
     PicoHost *host;
@@ -66,6 +79,8 @@ typedef struct SidebarState
     double last_reconcile;
     char catalog_change_token[PICO_CATALOG_CHANGE_TOKEN_MAX];
     bool catalog_change_token_valid;
+    uint64_t scan_serial;
+    SidebarScanWorker *scan_worker;
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
     Texture2D archive_open;
@@ -317,23 +332,19 @@ static void SidebarPreserveWorkspaceOrder(PicoCatalogWorkspace *next, int next_c
     qsort(next, (size_t)next_count, sizeof(*next), SidebarWorkspaceOrderCmp);
 }
 
-static void SidebarRefresh(SidebarState *s)
+static void SidebarAdoptCatalog(SidebarState *s, PicoCatalogWorkspace *next, int n,
+                                bool token_before_valid, const char *token_before,
+                                bool token_after_valid, const char *token_after)
 {
-    char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
-    char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
-    PicoCatalogWorkspace *next = NULL;
     SidebarWsUi *next_ui = NULL;
     SidebarWsUi *prev_ui;
     int prev_ui_count;
-    int n;
     int i;
     if (!s)
     {
+        PicoCatalog_Free(next, n);
         return;
     }
-    bool token_before_valid = PicoCatalog_ReadChangeToken(token_before);
-    n = PicoCatalog_ScanGrouped(&next);
-    bool token_after_valid = PicoCatalog_ReadChangeToken(token_after);
     if (s->order_unsaved)
     {
         SidebarPreserveWorkspaceOrder(next, n, s->workspaces, s->workspace_count);
@@ -360,15 +371,123 @@ static void SidebarRefresh(SidebarState *s)
     s->ui = next_ui;
     s->ui_count = next_ui ? n : 0;
     s->catalog_change_token_valid = token_after_valid;
-    if (token_after_valid)
+    if (token_after_valid && token_after)
     {
         snprintf(s->catalog_change_token, sizeof(s->catalog_change_token), "%s", token_after);
     }
     s->dirty = token_after_valid &&
-               (!token_before_valid || strcmp(token_before, token_after) != 0);
+               (!token_before_valid || !token_before || strcmp(token_before, token_after) != 0);
     s->catalog_scanned = true;
     s->last_scan = GetTime();
     s->last_reconcile = s->last_scan;
+}
+
+static void *SidebarScanRun(void *arg)
+{
+    SidebarScanWorker *worker = (SidebarScanWorker *)arg;
+    worker->token_before_valid = PicoCatalog_ReadChangeToken(worker->token_before);
+    if (!atomic_load(&worker->cancelled))
+    {
+        worker->workspace_count =
+            PicoCatalog_ScanGroupedInterruptible(&worker->workspaces, &worker->cancelled);
+    }
+    worker->token_after_valid = PicoCatalog_ReadChangeToken(worker->token_after);
+    return NULL;
+}
+
+static void SidebarScanCancel(void *arg)
+{
+    atomic_store(&((SidebarScanWorker *)arg)->cancelled, true);
+}
+
+static void SidebarScanDestroy(void *arg)
+{
+    SidebarScanWorker *worker = (SidebarScanWorker *)arg;
+    PicoCatalog_Free(worker->workspaces, worker->workspace_count);
+    free(worker);
+}
+
+static void SidebarScanCompleted(PicoHost *host, void *arg)
+{
+    SidebarScanWorker *worker = (SidebarScanWorker *)arg;
+    SidebarState *s = host ? (SidebarState *)PicoPlugins_HostState(host, "sidebar") : NULL;
+    if (s && s->scan_worker == worker)
+    {
+        s->scan_worker = NULL;
+    }
+    if (!s || s->scan_serial != worker->serial || atomic_load(&worker->cancelled))
+    {
+        return;
+    }
+    SidebarAdoptCatalog(s, worker->workspaces, worker->workspace_count,
+                        worker->token_before_valid, worker->token_before,
+                        worker->token_after_valid, worker->token_after);
+    worker->workspaces = NULL;
+    worker->workspace_count = 0;
+}
+
+static void SidebarRefreshSync(SidebarState *s)
+{
+    char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
+    PicoCatalogWorkspace *next = NULL;
+    int n;
+    bool token_before_valid;
+    bool token_after_valid;
+    if (!s)
+    {
+        return;
+    }
+    token_before_valid = PicoCatalog_ReadChangeToken(token_before);
+    n = PicoCatalog_ScanGrouped(&next);
+    token_after_valid = PicoCatalog_ReadChangeToken(token_after);
+    SidebarAdoptCatalog(s, next, n, token_before_valid, token_before, token_after_valid, token_after);
+}
+
+static bool SidebarHostCanTask(const PicoHost *host)
+{
+    return host && host->ask_id_mu_ready && !host->terminal_shutdown;
+}
+
+static void SidebarStartRefresh(SidebarState *s)
+{
+    SidebarScanWorker *worker;
+    if (!s || !s->host)
+    {
+        return;
+    }
+    if (s->scan_worker)
+    {
+        atomic_store(&s->scan_worker->cancelled, true);
+        s->scan_worker = NULL;
+    }
+    s->scan_serial++;
+    if (s->scan_serial == 0)
+    {
+        s->scan_serial = 1;
+    }
+    s->dirty = false;
+    s->last_scan = GetTime();
+    if (!SidebarHostCanTask(s->host))
+    {
+        SidebarRefreshSync(s);
+        return;
+    }
+    worker = (SidebarScanWorker *)calloc(1, sizeof(*worker));
+    if (!worker)
+    {
+        s->dirty = true;
+        return;
+    }
+    worker->serial = s->scan_serial;
+    if (!PicoHost_StartTaskCompleted(s->host, SidebarScanRun, worker, SidebarScanCancel,
+                                     SidebarScanCompleted, SidebarScanDestroy))
+    {
+        free(worker);
+        s->dirty = true;
+        return;
+    }
+    s->scan_worker = worker;
 }
 
 static bool SidebarCatalogChanged(SidebarState *s)
@@ -2156,17 +2275,22 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         }
     }
     double now = GetTime();
-    bool poll_due = !s->catalog_scanned || now - s->last_scan >= SIDEBAR_SCAN_SEC;
+    bool poll_due = now - s->last_scan >= SIDEBAR_SCAN_SEC;
 #ifdef PICO_SESSION_TEST_HOOKS
     poll_due = poll_due || PicoSession_TestHook("sidebar_poll_due");
 #endif
-    bool reconcile_due = !s->catalog_scanned ||
-                         now - s->last_reconcile >= SIDEBAR_RECONCILE_SEC;
+    bool reconcile_due = now - s->last_reconcile >= SIDEBAR_RECONCILE_SEC;
+    bool need_refresh = s->dirty ||
+                        (!s->catalog_scanned && !s->scan_worker) ||
+                        (poll_due && (reconcile_due || SidebarCatalogChanged(s)));
     if (!s->is_dragging && !s->drag_press_pending &&
-        s->order_persist_generation == 0 &&
-        (s->dirty || (poll_due && (reconcile_due || SidebarCatalogChanged(s)))))
+        s->order_persist_generation == 0 && need_refresh)
     {
-        SidebarRefresh(s);
+        if (!s->scan_worker || s->dirty ||
+            (s->catalog_scanned && SidebarCatalogChanged(s)))
+        {
+            SidebarStartRefresh(s);
+        }
     }
     else if (poll_due)
     {
@@ -2241,6 +2365,12 @@ static void SidebarShutdown(PicoHost *host, void *state)
         host->ui_drag_active = false;
     }
     UnloadFolderIcons(s);
+    if (s->scan_worker)
+    {
+        atomic_store(&s->scan_worker->cancelled, true);
+        s->scan_worker = NULL;
+    }
+    s->scan_serial++;
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);
     for (SidebarLabelChunk *chunk = s->label_chunks; chunk; )

@@ -300,18 +300,22 @@ void PicoComplete_Refresh(PicoHost *app)
     }
     if (n < 0)
     {
-        n = 0;
+        PicoComplete_Close();
+        return;
     }
     if (n > PICO_MAX_COMPLETE_ITEMS)
     {
         n = PICO_MAX_COMPLETE_ITEMS;
+    }
+    if (n > 0)
+    {
+        SortItems(raw, n, prefix);
     }
     if (n == 0)
     {
         PicoComplete_Close();
         return;
     }
-    SortItems(raw, n, prefix);
     g_complete.open = true;
     g_complete.token_start = start;
     g_complete.token_end = end;

@@ -8,7 +8,7 @@
 - **Method:** source and call-path review, independent subsystem reviews, cross-checking existing caches/limits/thread boundaries, and running the existing Release build and local test suite inside `nix develop`.
 - **Not performed:** live provider requests, GUI/GPU profiling, cold-start timing, new benchmark implementations, or production-code changes.
 
-**Follow-up:** F1 (synchronous title rewrite on the frame thread) has been implemented after this review. Line numbers in unfixed findings still refer to the revision above.
+**Follow-up:** Phase 1 has since implemented F1 and the targeted F2/F3/F4/F5/F6/F7 improvements described below. The detailed findings remain a snapshot of the reviewed revision; their line numbers and source-level descriptions are historical unless explicitly qualified here. Phase 2 scaling work remains open.
 
 **Important distinction:** the timings below are measured. The individual findings establish source-level work, blocking, or resource-growth risks; their user-visible cost has **not** been measured in a representative interactive session. Priorities are an engineering triage recommendation, not a profiler ranking. Source links and line numbers refer to the revision above.
 
@@ -18,10 +18,10 @@ Pico already has substantial performance engineering: invalidation-driven layout
 
 The most valuable next work is to close gaps around those optimizations:
 
-1. **Remove remaining synchronous catalog scans from the UI thread (F4).** Title rewrites now queue on the persist worker like session appends (F1). Sidebar reconciliation still does disk work synchronously.
-2. **Make long-stream updates proportional to new work.** The runtime repeatedly scans growing text, reparses the whole Markdown document, and discards document-local caches. Throttling helps frequency, not growth in work per update.
+1. **Keep storage off the UI thread.** Title rewrites queue on the persist worker (F1), and sidebar refresh scans now run as cancellable host tasks (F4); direct catalog APIs and the no-task fallback still scan synchronously.
+2. **Make long-stream updates proportional to new work.** Append now tracks length/capacity, but each display reparse still rebuilds the whole Markdown document and discards document-local caches. Throttling helps frequency, not growth in work per update.
 3. **Finish transcript virtualization at the bookkeeping layer.** Message bodies are virtualized, but planning/revision/height operations still scan history; anchor queries repeatedly sum prefixes.
-4. **Avoid unchanged input and background work.** Completion queries recur without edits, composer wrapping repeats across UI phases, skill discovery can run twice per request, and diff workers rebuild models before discovering nothing changed.
+4. **Avoid unchanged input and background work.** Phase 1 caches file-completion queries and composer wraps and invokes each LLM hook once per request; diff workers still rebuild models before discovering nothing changed.
 5. **Bound bytes as well as item counts.** Replay, queued persistence, diff capture, and shell spooling have memory or disk costs that are not bounded by their visible row/job limits.
 
 ### Priority map
@@ -31,12 +31,12 @@ The most valuable next work is to close gaps around those optimizations:
 | ID | Priority | Issue | Primary trigger | Evidence confidence |
 |---|---|---|---|---|
 | F1 | ~~P1~~ **addressed** | Title persistence no longer blocks the frame thread | TODO task-title change; slow/contended storage | High |
-| F2 | P1 | Growing stream text is scanned/reparsed repeatedly | Long streamed answers, especially rich Markdown | High |
-| F3 | P1 | Virtualization still performs history-wide bookkeeping | Large history, scrolling, streaming, anchor preservation | High |
-| F4 | P1 for large catalogs | Sidebar reconciliation performs synchronous storage work | Startup, catalog changes, periodic reconciliation | High |
-| F5 | P2 | Completion rescans unchanged queries; token creation walks disk | Active `@` token in a large workspace | High; allocator impact conditional |
-| F6 | P2 | Composer wrapping repeats across UI phases | Long pasted drafts; repeated redraws | High |
-| F7 | P2 | Skills are rediscovered redundantly during request preparation | Requests offering `use_skill` | High |
+| F2 | P1; partial | Growing stream text is still reparsed repeatedly; length/capacity now avoid repeated append scans | Long streamed answers, especially rich Markdown | High |
+| F3 | P1; partial | Explicit message revisions replace content hashing; virtualization still performs history-wide bookkeeping | Large history, scrolling, streaming, anchor preservation | High |
+| F4 | ~~P1~~ addressed for sidebar | Sidebar reconciliation now scans on a host task | Startup, catalog changes, periodic reconciliation | High |
+| F5 | ~~P2~~ addressed for file completion | Unchanged file-completion queries are cached; file-token discovery runs on a worker | Active `@` token in a large workspace | High; allocator impact conditional |
+| F6 | ~~P2~~ addressed | Composer wrap results are shared across UI phases | Long pasted drafts; repeated redraws | High |
+| F7 | ~~P2~~ addressed | Each LLM hook runs once per request, avoiding the duplicate skill rescan | Requests offering `use_skill` | High |
 | F8 | P2 | Diff polling pays full capture cost before deduplication | Dirty/untracked repositories; multiple workspaces | High |
 | F9 | P2 | Replay retains transcript-sized temporary representations | Large saved sessions | High |
 | F10 | P2 | Persistence coalescing has growing-prefix work and no byte cap | Slow writer plus bursty logging | High; copying impact conditional |
@@ -86,6 +86,16 @@ There is no dedicated, repeatable performance benchmark target in the reviewed C
 - [`TestBottomFollowShellGeometryStable`](app/tests/host_workspace_test.c#L2111) protects repeated shell-layout geometry. Virtualization, scroll, diff, tool-concurrency and persistence correctness suites also passed.
 - [`TestTitleRewriteDoesNotBlockOtherWorkspace`](app/tests/host_workspace_test.c) holds a session lock while a title rewrite is pending and checks that another workspace can still pump and accept cancellation.
 
+### Phase 1 follow-up (after the reviewed revision)
+
+- **F2/F3 partial:** streamed message append tracks source length and geometric capacity; messages and trace edits increment revisions, avoiding the growing-prefix `strlen` and unchanged last-message source hashing. Full Markdown reparsing, virtualization height scans, and prefix-sum anchor work remain for Phase 2.
+- **F4:** sidebar refresh reads change tokens, scans grouped catalogs, and adopts results through a cancellable host task. A host without task support uses the synchronous path; when task creation fails on a task-capable host, it retries instead of scanning on the UI thread. Metadata indexing and one-pass JSON traversal avoid repeated cached-session lookup and token traversal. Catalog metadata covers older sessions beyond the visible 256-session listing cap. Lock acquisition can still block a worker, and direct synchronous catalog APIs remain synchronous.
+- **F5:** unchanged file-completion queries (including zero-result queries) reuse results. Other completers remain live because their data/context may change without a token edit (notably asynchronous `/resume`). File discovery builds a per-token snapshot on a host task; completion publishes the finished index on the main thread. A host without task support retains synchronous discovery. File pointer storage grows geometrically. The completer may return no items while its index builds.
+- **F6:** composer wraps are retained by text revision, width and font generation/identity and reused for render, geometry and caret/selection paths. This is not a claim about spell-check work or measured real-font frame time.
+- **F7:** each LLM hook now runs once per request, combining tool exclusion and extra instructions; later hooks see preceding exclusions/instructions. The skills hook therefore scans once, not twice, for a request that offers `use_skill`. Discovery still runs for each such request, and first-byte I/O is not eliminated.
+
+The follow-up has correctness tests (including the debug host-workspace suite and 43/43 debug CTest passes), not workload timing or memory measurements. The original measurements above remain measurements of the reviewed revision, not of this follow-up.
+
 ## Detailed findings
 
 ### F1 — Session title changes can block the entire UI — **addressed**
@@ -128,7 +138,7 @@ The 32-row offscreen measurement batch bounds additional **message count**, not 
 
 **Validation:** benchmark history size independently of viewport and visible content size. Cover top/middle/bottom, stationary redraws, streaming, width/font changes, selection and search-forced mounting. Preserve visible behavior, not private data structures. Any shell nesting/viewport change must extend `TestBottomFollowShellGeometryStable` and run the repository-mandated debug host-workspace suite. Do not replace exact structural heights with vertical `FIT`/`GROW` as an optimization.
 
-### F4 — Catalog refresh still performs potentially large synchronous I/O
+### F4 — Catalog refresh performed potentially large synchronous I/O (addressed for sidebar)
 
 **Path:** [`SidebarOnFrame`](app/builtins/sidebar.c#L2158-L2173) → [`SidebarRefresh`](app/builtins/sidebar.c#L320-L371) → catalog scan → [`ListSessionsInDir`](app/session.c#L474-L542).
 
@@ -146,7 +156,7 @@ Several costs remain:
 
 **Validation:** exercise initial/warm/changed scans with histories below and above the cache limit, multiple checkout catalogs, missing paths, and contended catalog locks. Assert that input/pumping remains responsive during a blocked scan and that external changes still become visible. Retain `TestCatalogListingCache`, `TestSessionListCompleteness`, and `TestSidebarCatalogChangeToken`.
 
-### F5 — File completion repeats queries without edits and rebuilds on token creation
+### F5 — File completion repeated queries without edits and rebuilt on token creation (addressed)
 
 **Evidence:** [`ComposerFrame`](app/builtins/composer.c#L2415-L2435), [unconditional eligible refresh](app/builtins/composer.c#L1810), [`PicoComplete_Refresh`](app/builtins/complete.c#L258-L300), [`pico_files_complete`](app/builtins/files.c#L184-L253).
 
@@ -160,7 +170,7 @@ A new eligible file-completion token triggers a synchronous filesystem rebuild w
 
 **Validation:** retain token snapshot behavior in `files_test.c`. Measure first-token latency and no-match/rare-match query cost near the supported index size. Include an unchanged active token while another workspace streams, because composer callbacks run before layout's idle gate.
 
-### F6 — Long drafts are wrapped repeatedly, bypassing the measurement cache
+### F6 — Long drafts were wrapped repeatedly, bypassing the measurement cache (addressed for wraps)
 
 [`WrapComposer`](app/builtins/composer.c#L95-L177) measures individual UTF-8 codepoints with direct `MeasureTextEx` calls. This bypasses Pico's short-string measurement cache ([`Pico_MeasureTextUtf8`](app/theme.c#L425-L436)).
 
@@ -172,7 +182,7 @@ When optional spell checking is active, unchanged draws also compare the full fi
 
 **Validation:** compare unchanged redraws and single edits for long prose, Unicode, long tokens and drafts exceeding the visible composer height. Preserve selection, caret and width behavior with `composer_test.c`, `wrapped_text_test.c` and `spell_test.c`; benchmark with real fonts as well as test measurement functions.
 
-### F7 — Skills discovery can run twice for one provider request
+### F7 — Skills discovery ran twice for one provider request (addressed)
 
 [`QueueLlm`](app/agent.c#L1523-L1553) calls `RunLlmHooks` before handing work to the provider worker. [`RunLlmHooks`](app/agent.c#L1000-L1063) invokes each hook once for filtering and again for instructions. On a non-compaction request where `use_skill` is offered, both invocations of [`SkillsLlmHook`](app/builtins/skills.c#L178-L203) call `SkillsRescan`.
 
@@ -274,10 +284,10 @@ No interactive cold/warm startup measurement was taken, so there is no evidence 
 ### Phase 1 — Remove avoidable synchronous and duplicate work
 
 - ~~Move title rewrites off the frame thread (F1).~~ **Done:** title rewrites queue on the persist worker; lock/copy/fsync stay off the UI thread.
-- Move sidebar catalog scans off the frame thread (F4).
-- Store stream lengths/capacity and explicit revisions (part of F2/F3).
-- Cache unchanged completion results and composer wraps (F5/F6).
-- Ensure the two LLM-hook phases share one skill discovery snapshot (F7).
+- ~~Move sidebar catalog scans off the frame thread (F4).~~ **Done for sidebar:** adopt worker-produced grouped catalog snapshots.
+- ~~Store stream lengths/capacity and explicit revisions (part of F2/F3).~~ **Done:** growing append scans and last-message source hashing are removed; Markdown/history-wide bookkeeping is not.
+- ~~Cache unchanged file-completion results and composer wraps (F5/F6).~~ **Done:** including empty file results and async first-token file discovery; dynamic non-file completers still query on refresh.
+- ~~Avoid duplicate skill discovery across the two LLM-hook phases (F7).~~ **Done:** one invocation per hook/request combines exclusion and instruction contribution; rescan once per request remains.
 
 These have narrow, explainable benefits without requiring an engine rewrite. Add timing/counters around the existing boundaries so savings can be attributed correctly.
 
@@ -321,4 +331,4 @@ For interactive workloads, record the entire frame/pump critical path rather tha
 - **Tools:** keep policy-aware parallelism and serial barriers. Raising worker limits is not a substitute for fixing shared UI or storage bottlenecks.
 - **Documentation:** if implementation changes public registration, lifecycle, threading, ownership, reload or hook behavior, update the matching `docs/extend/` topic and `contracts.md`, and keep examples aligned. No compatibility layer is needed.
 
-**Bottom line:** title persistence no longer blocks the frame thread (F1). Remaining priority is other UI-thread storage work (especially F4 catalog scans) and repeated growing-history/text work. Existing tests provide a strong correctness base, but passing them does not establish smooth real-font rendering, low idle CPU, bounded peak memory or low provider round-trip overhead. Add measurements at those product boundaries before choosing larger architectural changes.
+**Bottom line:** title persistence and sidebar catalog scans no longer block normal frame pumping (F1/F4). Phase 1 removes duplicate append/query/wrap/hook work; remaining priority is full Markdown reparses, growing-history bookkeeping and other scaling/resource ceilings. Existing tests provide a strong correctness base, but passing them does not establish smooth real-font rendering, low idle CPU, bounded peak memory or low provider round-trip overhead. Add measurements at those product boundaries before choosing larger architectural changes.

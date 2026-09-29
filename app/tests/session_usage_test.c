@@ -2281,6 +2281,90 @@ static int TestSessionListCompleteness(void)
     return 0;
 }
 
+static int TestCatalogCacheCoversOlderSessions(void)
+{
+    char ws[] = "/tmp/pico-catalog-older-XXXXXX";
+    char key[4096];
+    char sessions_dir[4096];
+    PicoCatalogWorkspace *catalog = NULL;
+    const PicoCatalogWorkspace *found;
+    int catalog_n;
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0)
+    {
+        return Fail("older cache setup");
+    }
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (!found)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("older cache catalog workspace");
+    }
+    snprintf(key, sizeof(key), "%s", found->key);
+    PicoCatalog_Free(catalog, catalog_n);
+    if (!PicoPath_Format(sessions_dir, sizeof(sessions_dir), "%s/sessions/%s", g_config_dir, key))
+    {
+        return Fail("older cache session directory");
+    }
+    for (int i = 0; i < PICO_MAX_CATALOG_SESSIONS + 4; i++)
+    {
+        char path[4096];
+        FILE *f;
+        if (!PicoPath_Format(path, sizeof(path), "%s/2026-01-01T00-00-%03dZ_old%03d.jsonl",
+                             sessions_dir, i, i))
+        {
+            return Fail("older cache path");
+        }
+        f = fopen(path, "wb");
+        if (!f)
+        {
+            return Fail("older cache file");
+        }
+        fprintf(f,
+                "{\"type\":\"session\",\"version\":4,\"id\":\"old%03d\","
+                "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n"
+                "{\"type\":\"message\",\"role\":\"user\",\"content\":\"old-%03d\"}\n",
+                i, ws, i);
+        fclose(f);
+    }
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (!found || found->session_count != PICO_MAX_CATALOG_SESSIONS)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("catalog listing stays at the visible session limit");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    /* A later update must still append metadata even though the sidebar is full. */
+    if (PicoCatalog_SetSessionModel(ws, "later", "new-model", "") != 0)
+    {
+        return Fail("catalog write-through past listing limit");
+    }
+    {
+        char meta[4096];
+        char *raw = NULL;
+        size_t raw_len = 0;
+        int ids = 0;
+        if (!PicoPath_Format(meta, sizeof(meta), "%s/sessions/%s/.workspace.json", g_config_dir, key) ||
+            !(raw = Pico_ReadFile(meta, &raw_len)))
+        {
+            return Fail("older cache metadata missing");
+        }
+        for (const char *p = raw; (p = strstr(p, "\"id\":")); p += 4)
+        {
+            ids++;
+        }
+        if (ids != PICO_MAX_CATALOG_SESSIONS + 5 || !strstr(raw, "old000") ||
+            !strstr(raw, "\"id\":\"later\"") || !strstr(raw, "new-model"))
+        {
+            free(raw);
+            return Fail("metadata must cover sessions beyond the listing limit");
+        }
+        free(raw);
+    }
+    return 0;
+}
+
 static int TestUnseenCompleteRoundTrip(void)
 {
     char wsdir[] = "/tmp/pico-unseen-ws-XXXXXX";
@@ -3303,6 +3387,7 @@ int main(void)
         TestCatalogProjectDeleteBeyondScanLimit() != 0 ||
         TestCatalogWorkspaceReorder() != 0 ||
         TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
+        TestCatalogCacheCoversOlderSessions() != 0 ||
         TestUnseenCompleteRoundTrip() != 0 ||
         TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||
         TestQueuedModelChangeOrdersUserWrite() != 0 || TestQueuedModelChangeFailureThenDrain() != 0 ||

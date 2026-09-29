@@ -223,12 +223,26 @@ typedef struct ClipboardProcess {
     bool terminating;
 } ClipboardProcess;
 
+typedef struct ComposerWrapCache {
+    uint64_t text_revision;
+    uint64_t font_generation;
+    float font_scale;
+    unsigned int font_texture_id;
+    int text_length;
+    float wrap_width;
+    float line_height;
+    CompLine lines[COMPOSER_MAX_LINES];
+    int line_count;
+    bool valid;
+} ComposerWrapCache;
+
 typedef struct ComposerState {
     float wrap_width;
     float composer_width;
     int seen_cursor;
     int seen_length;
     float goal_x;
+    ComposerWrapCache wrap_cache;
     double caret_blink_at;
     PicoHost *app;
     ComposerAttach attach[COMPOSER_MAX_ATTACH];
@@ -247,6 +261,39 @@ static __thread ComposerState *s_active_composer_state = NULL;
 static ComposerState *ActiveComposerState(void)
 {
     return s_active_composer_state;
+}
+
+static int WrapComposerCached(ComposerState *s, const PicoComposer *c, Font font, float max_width,
+                              CompLine *lines, int max_lines, float *line_height)
+{
+    if (s && s->wrap_cache.valid && c &&
+        s->wrap_cache.text_revision == c->revision &&
+        s->wrap_cache.text_length == c->length &&
+        s->wrap_cache.font_generation == Pico_FontGeneration() &&
+        s->wrap_cache.font_scale == Pico_FontScale() &&
+        s->wrap_cache.font_texture_id == font.texture.id &&
+        s->wrap_cache.wrap_width == max_width &&
+        s->wrap_cache.line_count <= max_lines)
+    {
+        memcpy(lines, s->wrap_cache.lines, (size_t)s->wrap_cache.line_count * sizeof(*lines));
+        *line_height = s->wrap_cache.line_height;
+        return s->wrap_cache.line_count;
+    }
+    int n = WrapComposer(c, font, max_width, lines, max_lines, line_height);
+    if (s && n > 0 && n <= COMPOSER_MAX_LINES)
+    {
+        s->wrap_cache.valid = true;
+        s->wrap_cache.text_revision = c ? c->revision : 0;
+        s->wrap_cache.text_length = c ? c->length : 0;
+        s->wrap_cache.font_generation = Pico_FontGeneration();
+        s->wrap_cache.font_scale = Pico_FontScale();
+        s->wrap_cache.font_texture_id = font.texture.id;
+        s->wrap_cache.wrap_width = max_width;
+        s->wrap_cache.line_height = *line_height;
+        s->wrap_cache.line_count = n;
+        memcpy(s->wrap_cache.lines, lines, (size_t)n * sizeof(*lines));
+    }
+    return n;
 }
 
 #define s_wrap_width (ActiveComposerState()->wrap_width)
@@ -1217,7 +1264,7 @@ static ComposerView GetComposerView(PicoHost *app)
     {
         v.scroll_y = scroll.scrollPosition->y;
     }
-    v.line_count = WrapComposer(c, ComposerFont(), v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
+    v.line_count = WrapComposerCached(ActiveComposerState(), c, ComposerFont(), v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
     return v;
 }
 
@@ -1263,7 +1310,7 @@ static void MoveVertical(PicoHost *app, int dir, bool extend)
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = ComposerPx();
     float wrap = ComposerWrapWidth(app);
-    int line_count = WrapComposer(c, ComposerFont(), wrap, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_count = WrapComposerCached(ActiveComposerState(), c, ComposerFont(), wrap, lines, COMPOSER_MAX_LINES, &line_height);
     int line_i = 0;
     for (int i = 0; i < line_count; i++)
     {
@@ -1481,10 +1528,12 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     c->cursor = from;
     c->sel_anchor = from;
     c->text[c->length] = '\0';
+    c->revision++;
     ComposerState *s = ActiveComposerState();
     if (s)
     {
         s->goal_x = -1;
+        s->wrap_cache.valid = false;
     }
     NoteCaretActivity();
 }
@@ -1545,10 +1594,12 @@ static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
     c->cursor += nbytes;
     c->sel_anchor = c->cursor;
     c->text[c->length] = '\0';
+    c->revision++;
     ComposerState *s = ActiveComposerState();
     if (s)
     {
         s->goal_x = -1;
+        s->wrap_cache.valid = false;
     }
     NoteCaretActivity();
 }
@@ -2098,7 +2149,7 @@ void PicoComposer_Render(PicoHost *app, void *state)
     float wrap_width = ComposerWrapWidth(app);
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = ComposerPx();
-    int line_count = empty ? 1 : WrapComposer(c, ComposerFont(), wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_count = empty ? 1 : WrapComposerCached(ActiveComposerState(), c, ComposerFont(), wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
     if (line_height < 1)
     {
         line_height = ComposerPx();

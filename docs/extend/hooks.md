@@ -130,7 +130,7 @@ static void Llm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *ev
 
 Full file: [`../../examples/extra_instructions.c`](../../examples/extra_instructions.c).
 
-LLM hooks run on the serialized main thread for every request, including compaction. They see only tools permitted by the agent policy. Hooks run twice per request in registration order: first a filtering pass where `exclude[i] = true` hides a tool from this request (any `extra_instructions` set during this pass is discarded), then an instructions pass where every hook sees the final exclusion set and malloc'd `extra_instructions` is appended under a shared `## Additional instructions` section for later hooks. The heading is omitted when no hook contributes a non-empty extra.
+LLM hooks run on the serialized main thread for every request, including compaction. They see only tools permitted by the agent policy. Each hook is invoked once per request in registration order. The callback may set `exclude[i] = true` to hide a tool from this request and/or malloc `extra_instructions`, which Pico appends under a shared `## Additional instructions` section. Later hooks see earlier exclusions and any extra-instruction section already appended. The heading is omitted when no hook contributes a non-empty extra.
 
 The provider receives a retained copy of the final catalog. `/show-prompt` runs the same hooks with the selected agent's workspace. Reload of that workspace cannot unload hooks while a runtime retains a callback/catalog snapshot; it waits for that workspace's quiescence and releases idle snapshots first. Other workspaces are not blocked.
 

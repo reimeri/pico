@@ -2161,20 +2161,10 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         }
     }
     hash = RevisionMix(hash, msg->trace_group_expanded ? 1 : 0);
+    hash = RevisionMix(hash, msg->revision);
+    hash = RevisionMix(hash, (uint64_t)msg->source_len);
     if (message_index == view->message_count - 1)
     {
-        /* Streaming buffers often grow in place, so pointer identity alone is
-         * insufficient for the one message that can still be changing. */
-        hash = RevisionText(hash, msg->source);
-        for (int t = 0; t < msg->trace_count; t++)
-        {
-            const PicoTraceLine *line = &msg->trace[t];
-            hash = RevisionText(hash, line->text);
-            if (line->think_part_count > 0 && line->think_parts)
-            {
-                hash = RevisionText(hash, line->think_parts[line->think_part_count - 1]);
-            }
-        }
         hash = RevisionMix(hash, (uint64_t)view->state);
         hash = RevisionText(hash, view->activity);
     }

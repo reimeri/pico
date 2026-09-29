@@ -26,6 +26,7 @@ static pthread_mutex_t http_pool_mu = PTHREAD_MUTEX_INITIALIZER;
 static CURL *http_idle[HTTP_IDLE_HANDLES];
 static int http_idle_count;
 static int http_borrowed;
+static int http_hosts;
 static bool http_closing;
 
 static CURL *HttpAcquire(void)
@@ -71,16 +72,40 @@ static void HttpRelease(CURL *curl)
     }
 }
 
-/* Called after host workers have shut down, before curl_global_cleanup. */
+void PicoHttp_HostStarted(void)
+{
+    pthread_mutex_lock(&http_pool_mu);
+    if (http_hosts == 0 && http_borrowed == 0) http_closing = false;
+    http_hosts++;
+    pthread_mutex_unlock(&http_pool_mu);
+}
+
+/* Called after this host's workers have stopped, before its curl_global_cleanup.
+ * Other live hosts keep the shared pool open. */
 bool PicoHttp_ShutdownConnections(void)
 {
     pthread_mutex_lock(&http_pool_mu);
+    /* A public helper can run on an extension-owned thread, and there is no
+     * host identity on its request. Conservatively retain this host while any
+     * transfer is outstanding, even if another host is also running. */
+    if (http_borrowed > 0)
+    {
+        http_closing = true;
+        pthread_mutex_unlock(&http_pool_mu);
+        return false;
+    }
+    if (http_hosts > 1)
+    {
+        http_hosts--;
+        pthread_mutex_unlock(&http_pool_mu);
+        return true;
+    }
+    http_closing = true;
     for (int i = 0; i < http_idle_count; i++) curl_easy_cleanup(http_idle[i]);
     http_idle_count = 0;
-    http_closing = true;
-    bool drained = http_borrowed == 0;
+    if (http_hosts > 0) http_hosts--;
     pthread_mutex_unlock(&http_pool_mu);
-    return drained;
+    return true;
 }
 
 /* Never replay after headers (including redirects/interim responses) or body. */

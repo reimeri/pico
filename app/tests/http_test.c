@@ -65,6 +65,7 @@ static int Request(const char *type, const char *body, Result *r)
     PicoHttpPost req = {.url = url, .body = "{}", .on_json = Got, .user = r};
     long http;
     int result = pico_http_post_sse(&req, &http, NULL);
+    if (result != PICO_HTTP_OK) shutdown(s.fd, SHUT_RDWR);
     pthread_join(thread, NULL);
     close(s.fd);
     return result != PICO_HTTP_OK || http != 200;
@@ -286,6 +287,26 @@ static void *BlockedHttpClient(void *arg)
     free(body);
     return NULL;
 }
+/* One host shutting down must not close the pool for another; once the
+ * last one exits, a new clean host can use the transport again. */
+static int CleanHostCycles(void)
+{
+    int failed = 0;
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    PicoHttp_HostStarted(); /* second host alongside the initial test host */
+    failed |= !PicoHttp_ShutdownConnections();
+    curl_global_cleanup();
+    Result first = {0};
+    failed |= Request("application/json", "{}", &first) || first.count != 1;
+    failed |= !PicoHttp_ShutdownConnections();
+    curl_global_cleanup();
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    PicoHttp_HostStarted(); /* clean restart */
+    Result restarted = {0};
+    failed |= Request("application/json", "{}", &restarted) || restarted.count != 1;
+    return failed;
+}
+
 static int ShutdownWhileBorrowed(void)
 {
     BlockedHttp b = {.listener = socket(AF_INET, SOCK_STREAM, 0)};
@@ -322,6 +343,7 @@ int main(void)
 {
     setenv("NO_PROXY", "127.0.0.1", 1);
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    PicoHttp_HostStarted();
     Result json = {0}, sse = {0}, stopped = {.abort = true};
     const char *error = "{\"error\":\"invalid data: bad event: request\"}";
     const char *events = "event: first\r\ndata: {\"a\":1}\r\n\r\ndata: {\"b\":\n"
@@ -348,6 +370,7 @@ int main(void)
     fail |= NoReplayAfterHeaders();
     fail |= RetryTlsHandshake();
     fail |= KeepAliveReuse();
+    fail |= CleanHostCycles();
     fail |= ShutdownWhileBorrowed();
     curl_global_cleanup();
     if (fail) fprintf(stderr, "HTTP framing or callback cancellation failed\n");

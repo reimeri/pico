@@ -13103,6 +13103,23 @@ done:
 }
 #endif
 
+static int TestCopiedMessageSourceMetadata(void)
+{
+    PicoMessage source = {.role = PICO_ROLE_ASSISTANT, .source = "copied answer",
+                          .source_len = strlen("copied answer"), .revision = 7};
+    PicoMessage *copy = NULL;
+    int count = 0;
+    if (!PicoMessages_Copy(&source, 1, &copy, &count)) return 1;
+    bool ok = count == 1 && copy[0].source &&
+              strcmp(copy[0].source, source.source) == 0 &&
+              copy[0].source_len == strlen(copy[0].source) &&
+              copy[0].source_cap >= copy[0].source_len + 1 &&
+              copy[0].revision == source.revision;
+    PicoMessages_Free(copy, count);
+    if (!ok) fprintf(stderr, "FAIL: copied message source metadata is inconsistent\n");
+    return !ok;
+}
+
 int main(int argc, char **argv)
 {
 #ifdef PICO_OPENAI_LOGIN_TESTS
@@ -13128,6 +13145,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 #endif
+    if (TestCopiedMessageSourceMetadata() != 0) return 1;
     if (TestWorktreeSuggestNameUsesProjectFolder() != 0) return 1;
     if (TestWorktreeDiscoveryCreationAndGrouping() != 0) return 1;
     if (TestQuitDefersTeardownUntilFrameReturns() != 0)

@@ -2399,6 +2399,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
         return PICO_NO_MEMORY;
     }
     host->curl_initialized = true;
+    PicoHttp_HostStarted();
     PicoHostPreferences_Load(host);
     PicoAuth_Load(host);
     *out = host;
@@ -2737,6 +2738,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
             return;
         }
         host->curl_initialized = true;
+        PicoHttp_HostStarted();
         PicoHostPreferences_Load(host);
         PicoAuth_Load(host);
     }
@@ -3272,6 +3274,14 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
     {
         copy[i].role = src[i].role;
         copy[i].source = src[i].source ? JsonDup(src[i].source) : NULL;
+        if (src[i].source && !copy[i].source)
+        {
+            PicoMessages_Free(copy, i + 1);
+            return false;
+        }
+        copy[i].source_len = copy[i].source ? strlen(copy[i].source) : 0;
+        copy[i].source_cap = copy[i].source ? copy[i].source_len + 1 : 0;
+        copy[i].revision = src[i].revision;
         copy[i].trace_group_expanded = src[i].trace_group_expanded;
         if (src[i].trace_count > 0)
         {

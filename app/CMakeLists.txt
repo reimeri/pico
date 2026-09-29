@@ -555,6 +555,8 @@ if(BUILD_TESTING)
         tests/clay_impl.c
         chat_find.c
         app.c
+        http.c
+        http_capture.c
         ui.c
         scrollbar.c
         text_range.c

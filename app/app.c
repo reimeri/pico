@@ -1758,6 +1758,7 @@ void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const ch
     memcpy(m->source + old, text, n + 1);
     m->source_len = old + n;
     m->revision++;
+    PicoAgent_TranscriptChanged(agent, agent->message_count - 1);
     MdDocument_Free(&m->doc);
     if (prepared && prepared_source && strcmp(prepared_source, m->source) == 0)
     {
@@ -1798,6 +1799,8 @@ void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *ca
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
     line->tool_args = PicoAgent_FormatToolArgs(name, args);
     line->tool_args_json = JsonDup(args ? args : "");
+    m->revision++;
+    PicoAgent_TranscriptChanged(agent, agent->message_count - 1);
 }
 
 void PicoAgent_AddToolCall(PicoHost *app, PicoAgent *agent, const char *name, const char *args)
@@ -1821,6 +1824,7 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
             m->trace[t].tool_error = is_error;
             pico_trace_line_stamp_tool_done(&m->trace[t]);
             m->revision++;
+            PicoAgent_TranscriptChanged(agent, agent->message_count - 1);
             return;
         }
     }
@@ -1855,6 +1859,7 @@ void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                 line->tool_args = display;
                 line->tool_args_json = raw;
                 message->revision++;
+                PicoAgent_TranscriptChanged(agent, i);
                 return;
             }
         }
@@ -1882,6 +1887,7 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                 line->tool_error = is_error;
                 pico_trace_line_stamp_tool_done(line);
                 message->revision++;
+                PicoAgent_TranscriptChanged(agent, i);
                 return;
             }
         }
@@ -3326,6 +3332,7 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
     {
         return;
     }
+    agent->transcript_reset_generation++;
     PicoHost *host = agent->workspace ? agent->workspace->host : NULL;
     if (host && host->selected_agent_id == agent->id)
     {

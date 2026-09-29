@@ -275,14 +275,19 @@ static PicoWrappedText *ToolWrapCacheSet_Get(ToolWrapCacheSet *set,
     {
         return NULL;
     }
-    for (int i = 0; i < set->count; i++)
+    int lo = 0, hi = set->count;
+    while (lo < hi)
     {
-        if (set->entries[i].message_index == message_index &&
-            set->entries[i].trace_index == trace_index)
-        {
-            return &set->entries[i].wrapped;
-        }
+        int mid = lo + (hi - lo) / 2;
+        ToolWrapCacheEntry *entry = &set->entries[mid];
+        if (entry->message_index < message_index ||
+            (entry->message_index == message_index && entry->trace_index < trace_index))
+            lo = mid + 1;
+        else hi = mid;
     }
+    if (lo < set->count && set->entries[lo].message_index == message_index &&
+        set->entries[lo].trace_index == trace_index)
+        return &set->entries[lo].wrapped;
     if (set->count >= set->capacity)
     {
         int capacity = set->capacity == 0 ? 32 : set->capacity * 2;
@@ -298,7 +303,12 @@ static PicoWrappedText *ToolWrapCacheSet_Get(ToolWrapCacheSet *set,
         set->entries = entries;
         set->capacity = capacity;
     }
-    ToolWrapCacheEntry *entry = &set->entries[set->count++];
+    if (lo < set->count)
+        memmove(&set->entries[lo + 1], &set->entries[lo],
+                (size_t)(set->count - lo) * sizeof(*set->entries));
+    set->count++;
+    ToolWrapCacheEntry *entry = &set->entries[lo];
+    memset(entry, 0, sizeof(*entry));
     entry->message_index = message_index;
     entry->trace_index = trace_index;
     return &entry->wrapped;
@@ -2125,10 +2135,11 @@ static uint64_t RevisionText(uint64_t hash, const char *text)
     return hash;
 }
 
-static uint64_t MessageRevision(const TranscriptView *view, int message_index)
+static uint64_t MessageRevision(const TranscriptView *view, int message_index, bool *timed)
 {
     const PicoMessage *msg = &view->messages[message_index];
     uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    if (timed) *timed = false;
     hash = RevisionMix(hash, (uint64_t)msg->role);
     hash = RevisionPointer(hash, msg->source);
     hash = RevisionPointer(hash, msg->trace);
@@ -2152,6 +2163,8 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         hash = RevisionMix(hash, (uint64_t)line->tool_stream_bytes);
         hash = RevisionMix(hash, line->expanded ? 1 : 0);
         hash = RevisionMix(hash, (uint64_t)ToolProgress(view, line));
+        if (timed && pico_trace_tool_row_dwelling(line->tool_done_t0, pico_trace_now()))
+            *timed = true;
         /* Offscreen messages must be measured again when a completed row
          * joins its group, even if no transcript data changed. */
         hash = RevisionMix(hash, TraceLineOpen(view, line, message_index, t) ? 1 : 0);
@@ -2169,6 +2182,14 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index)
         hash = RevisionText(hash, view->activity);
     }
     return hash;
+}
+
+static void RefreshMessageRevision(const TranscriptView *view, PicoTranscriptVirtual *cache, int index)
+{
+    bool timed = false;
+    uint64_t revision = MessageRevision(view, index, &timed);
+    PicoTranscriptVirtual_SetRevision(cache, index, revision);
+    PicoTranscriptVirtual_WatchTimed(cache, index, timed);
 }
 
 static Clay_ElementId TranscriptSpacerId(const TranscriptView *view, int begin)
@@ -2298,6 +2319,10 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
 {
     PicoTranscriptVirtual *cache = view->virtual_cache;
     ToolWrapCacheSet_Begin(view->tool_wrap_cache, view->virtual_identity);
+    int old_count = cache ? cache->count : 0;
+    bool reset = !cache || !cache->configured || cache->identity != view->virtual_identity ||
+                 view->message_count < old_count || cache->width != available_width ||
+                 cache->font_scale != Pico_FontScale();
     PicoTranscriptVirtual_Begin(cache, view->virtual_identity, view->message_count,
                                 available_width, Pico_FontScale());
     if (!cache || cache->count != view->message_count)
@@ -2308,10 +2333,48 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
         }
         return;
     }
-    for (int i = 0; i < view->message_count; i++)
+    /* The selected agent's main-thread edits publish changed indices. A
+     * lagging reader that missed the bounded journal reconciles once, rather
+     * than silently losing an offscreen invalidation. Snapshots without that
+     * ownership guarantee retain the exhaustive revision path. */
+    const PicoAgent *owner = view->owner && view->owner->messages == view->messages
+                                ? view->owner : NULL;
+    uint64_t seq = owner ? owner->transcript_change_seq : 0;
+    bool reconcile = reset || !owner || seq < cache->seen_change_seq ||
+                     seq - cache->seen_change_seq > PICO_TRANSCRIPT_CHANGE_CAP;
+    if (reconcile)
     {
-        PicoTranscriptVirtual_SetRevision(cache, i, MessageRevision(view, i));
+        for (int i = 0; i < view->message_count; i++)
+            RefreshMessageRevision(view, cache, i);
     }
+    else
+    {
+        for (int i = old_count; i < view->message_count; i++)
+            RefreshMessageRevision(view, cache, i);
+        if (old_count > 0 && old_count < view->message_count)
+            RefreshMessageRevision(view, cache, old_count - 1);
+        for (uint64_t n = cache->seen_change_seq + 1; n <= seq; n++)
+        {
+            int i = owner->transcript_changes[n % PICO_TRANSCRIPT_CHANGE_CAP];
+            if (i >= 0 && i < view->message_count)
+                RefreshMessageRevision(view, cache, i);
+        }
+        /* Live state, activity, tool progress and timed dwell are not owned
+         * by a message edit. Recheck the live edge every layout; visible rows
+         * are rechecked below before rendering, including historical dwell. */
+        if (view->message_count > 0)
+            RefreshMessageRevision(view, cache, view->message_count - 1);
+    }
+    /* Completed tool rows change shape on dwell expiry without a mutation.
+     * Recheck only those currently dwelling, then unwatch after expiry. */
+    for (int j = 0; j < PicoTranscriptVirtual_TimedCount(cache); )
+    {
+        int i = PicoTranscriptVirtual_TimedIndex(cache, j);
+        RefreshMessageRevision(view, cache, i);
+        if (PicoTranscriptVirtual_TimedIndex(cache, j) == i) j++;
+    }
+    cache->seen_change_seq = seq;
+
 
     Clay_ScrollContainerData scroll =
         Clay_GetScrollContainerData(Clay_GetElementId(view->scroll_id));
@@ -2328,29 +2391,23 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
                                force_index, TRANSCRIPT_MESSAGE_GAP);
 
     if (view->selectable) PicoChatFind_MountTargets(view->app, cache, TRANSCRIPT_MESSAGE_GAP);
+    for (int j = 0; j < PicoTranscriptVirtual_MountedCount(cache); j++)
+    {
+        int i = PicoTranscriptVirtual_MountedIndex(cache, j);
+        RefreshMessageRevision(view, cache, i);
+    }
 
-    int skipped = -1;
-    for (int i = 0; i < view->message_count; i++)
+    int next = 0;
+    int mounted_count = PicoTranscriptVirtual_MountedCount(cache);
+    for (int j = 0; j < mounted_count; j++)
     {
-        if (!PicoTranscriptVirtual_Mounted(cache, i))
-        {
-            if (skipped < 0)
-            {
-                skipped = i;
-            }
-            continue;
-        }
-        if (skipped >= 0)
-        {
-            RenderTranscriptSpacer(view, skipped, i);
-            skipped = -1;
-        }
+        int i = PicoTranscriptVirtual_MountedIndex(cache, j);
+        if (next < i) RenderTranscriptSpacer(view, next, i);
         RenderTranscriptMessage(view, i, available_width);
+        next = i + 1;
     }
-    if (skipped >= 0)
-    {
-        RenderTranscriptSpacer(view, skipped, view->message_count);
-    }
+    if (next < view->message_count)
+        RenderTranscriptSpacer(view, next, view->message_count);
 }
 
 static uint64_t TranscriptIdentity(const TranscriptView *view)
@@ -2359,6 +2416,7 @@ static uint64_t TranscriptIdentity(const TranscriptView *view)
     if (view->owner)
     {
         identity = RevisionMix(identity, (uint64_t)view->owner->id);
+        identity = RevisionMix(identity, view->owner->transcript_reset_generation);
         identity = RevisionText(identity, view->owner->session_id);
     }
     else
@@ -2381,12 +2439,9 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
     float anchor_top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
     float anchor_delta = 0.0f;
     TranscriptView ids = {.id_ns = id_ns};
-    for (int i = 0; i < cache->count; i++)
+    for (int j = 0; j < PicoTranscriptVirtual_MountedCount(cache); j++)
     {
-        if (!PicoTranscriptVirtual_Mounted(cache, i))
-        {
-            continue;
-        }
+        int i = PicoTranscriptVirtual_MountedIndex(cache, j);
         Clay_ElementData element = Clay_GetElementData(MessageId(&ids, i));
         if (!element.found)
         {
@@ -3339,6 +3394,7 @@ void PicoChat_HandleToolRelease(PicoHost *app)
     PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
     if (msg->trace[t].is_tool && pico_tool_row_activate(ws, active->id, &msg->trace[t]))
     {
+        PicoAgent_TranscriptChanged(active, app->chat_sel.tool_msg);
         app->chat_sel.pressed_tool = false;
         return;
     }
@@ -3347,6 +3403,7 @@ void PicoChat_HandleToolRelease(PicoHost *app)
         return;
     }
     msg->trace[t].expanded = !msg->trace[t].expanded;
+    PicoAgent_TranscriptChanged(active, app->chat_sel.tool_msg);
     app->chat_sel.pressed_tool = false;
 }
 
@@ -3465,6 +3522,7 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
                 HitTraceGroup(&main, app->chat_sel.tool_msg))
             {
                 msg->trace_group_expanded = !msg->trace_group_expanded;
+                PicoAgent_TranscriptChanged(PicoHost_SelectedAgent(app), app->chat_sel.tool_msg);
                 if (!msg->trace_group_expanded && app->chat_follow_bottom)
                 {
                     PicoChat_ResetBottomSpace(app);
@@ -3480,11 +3538,12 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
                     if (msg->trace[t].is_tool &&
                         pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
                     {
-                        /* hook handled the row */
+                        PicoAgent_TranscriptChanged(PicoHost_SelectedAgent(app), app->chat_sel.tool_msg);
                     }
                     else
                     {
                         msg->trace[t].expanded = !msg->trace[t].expanded;
+                        PicoAgent_TranscriptChanged(PicoHost_SelectedAgent(app), app->chat_sel.tool_msg);
                     }
                 }
             }

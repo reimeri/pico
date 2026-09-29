@@ -1102,6 +1102,28 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
         goto done;
     }
 
+    /* Replacing all messages without changing the count must discard heights
+     * for offscreen rows too, not just for the visible last message. */
+    host->chat_follow_bottom = false;
+    PicoHost_ClearMessages(host, agent_id);
+    for (int i = 0; i < 100; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, "short");
+    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    Clay_ScrollContainerData old_scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    float old_height = old_scroll.contentDimensions.height;
+    PicoHost_ClearMessages(host, agent_id);
+    for (int i = 0; i < 100; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_USER,
+                             "longer paragraph\n\nlonger paragraph\n\nlonger paragraph\n\nlonger paragraph");
+    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    Clay_ScrollContainerData new_scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!old_scroll.found || !new_scroll.found ||
+        new_scroll.contentDimensions.height <= old_height * 1.5f)
+    {
+        Fail("equal-count replacement kept stale offscreen transcript heights");
+        goto done;
+    }
+
     rc = g_failed ? 1 : 0;
 
 done:

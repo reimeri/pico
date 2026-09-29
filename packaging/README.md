@@ -23,8 +23,8 @@ install under an AppDir and invokes `linuxdeploy`. It requires ImageMagick,
 The script derives the 512x512 AppImage icon from `app/resources/logo.png` and explicitly bundles GLFW's dlopen-only Wayland, Xcursor, XKB, and libdecor dependencies. Build a pinned Wayland 1.24 runtime with `packaging/appimage/build-wayland-runtime.sh OUTPUT_DIR` and pass that new, non-existing directory as `PICO_APPIMAGE_WAYLAND_PREFIX`; this prevents an older bundled `libwayland-client` from breaking newer host EGL/Mesa drivers. The helper requires curl, Meson, Ninja, a C toolchain, pkg-config, libffi and Expat development files, binutils, tar, and sha256sum. A libdecor runtime plugin must also be installed on the packaging host.
 
 OpenSSL Crypto is a direct runtime dependency. `linuxdeploy` must bundle
-`libcrypto` along with Pico's other linked libraries; the AppImage build checks
-that it is present. Local browser login uses the host's `xdg-open`; if unavailable,
+`libcrypto` and `libsqlite3` along with Pico's other linked libraries;
+the AppImage build checks that both are present. Local browser login uses the host's `xdg-open`; if unavailable,
 Pico still displays a sign-in link.
 
 ## GitHub release

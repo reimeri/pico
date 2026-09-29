@@ -12267,6 +12267,35 @@ static int TestSidebarSameFrameControls(void)
         if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK)
             goto done;
     }
+    /* Real persisted rows must be loaded on demand beyond the live extras. */
+    PicoCatalogWorkspace *fixture = NULL;
+    int fixture_count = PicoCatalog_Scan(&fixture);
+    const PicoCatalogWorkspace *fixture_ws = NULL;
+    for (int j = 0; j < fixture_count; j++)
+        if (strcmp(fixture[j].path, dir) == 0) fixture_ws = &fixture[j];
+    if (!fixture_ws) { PicoCatalog_Free(fixture, fixture_count); goto done; }
+    char session_dir[4096];
+    bool fixture_ok = PicoPath_Format(session_dir, sizeof(session_dir),
+                                      "%s/pico/sessions/%s", cfg, fixture_ws->key);
+    PicoCatalog_Free(fixture, fixture_count);
+    if (!fixture_ok) goto done;
+    for (int j = 0; j < 12; j++)
+    {
+        char path[4096];
+        if (!PicoPath_Format(path, sizeof(path), "%s/2026-01-01T00-00-%02dZ_paging%02d.jsonl",
+                             session_dir, j, j)) goto done;
+        FILE *f = fopen(path, "wb");
+        if (!f) goto done;
+        fprintf(f, "{\"type\":\"session\",\"version\":4,\"id\":\"paging%02d\","
+                   "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
+                   "{\"type\":\"message\",\"role\":\"user\","
+                   "\"content\":\"paging-title-%02d\"}\n", j, dir, j);
+        fclose(f);
+    }
+    fixture_count = PicoCatalog_Scan(&fixture);
+    PicoCatalog_Free(fixture, fixture_count);
+    if (fixture_count < 1) goto done;
+    g_sidebar_poll_due = true;
     g_clay_frame_test = g_find_input_test = true;
     g_find_key = -1;
     phase = "catalog";
@@ -12291,8 +12320,19 @@ static int TestSidebarSameFrameControls(void)
     int after_more = SidebarVisibleSessionRows();
     if (after_more <= before_more || !Clay_GetElementData(CLAY_IDI("SidebarLess", 0)).found)
         goto done;
+    phase = "second persisted page";
+    int scan_before = g_catalog_scan_done_calls;
+    if (!WaitCatalogScanDone(host, scan_before + 1)) goto done;
+    PicoHost_Frame(host);
+    more = Clay_GetElementData(CLAY_IDI("SidebarMore", 0));
+    if (!more.found || !SidebarFrameClick(host, more)) goto done;
+    scan_before = g_catalog_scan_done_calls;
+    if (!WaitCatalogScanDone(host, scan_before + 1)) goto done;
+    PicoHost_Frame(host);
+    if (SidebarVisibleSessionRows() <= after_more ||
+        Clay_GetElementData(CLAY_IDI("SidebarMore", 0)).found) goto done;
     Clay_ElementData less = Clay_GetElementData(CLAY_IDI("SidebarLess", 0));
-    if (!SidebarFrameClick(host, less) || SidebarVisibleSessionRows() >= after_more)
+    if (!SidebarFrameClick(host, less) || SidebarVisibleSessionRows() >= after_more + 10)
         goto done;
 
     phase = "More/Less frames";

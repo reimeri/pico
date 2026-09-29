@@ -40,6 +40,7 @@
             curl
             utf8proc
             openssl
+            sqlite
             glfw
             libGL
             libx11

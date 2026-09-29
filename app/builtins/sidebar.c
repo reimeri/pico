@@ -46,11 +46,7 @@ typedef struct SidebarLabelChunk
     char text[SIDEBAR_LABEL_CHUNK_SIZE][SIDEBAR_LABEL_CAPACITY];
 } SidebarLabelChunk;
 
-typedef struct SidebarWsUi
-{
-    char path[4096];
-    int shown;
-} SidebarWsUi;
+typedef PicoCatalogPage SidebarWsUi;
 
 typedef struct SidebarScanWorker
 {
@@ -62,6 +58,9 @@ typedef struct SidebarScanWorker
     bool token_after_valid;
     PicoCatalogWorkspace *workspaces;
     int workspace_count;
+    PicoCatalogPage *pages;
+    int page_count;
+    bool failed;
 } SidebarScanWorker;
 
 typedef struct SidebarState
@@ -389,8 +388,10 @@ static void *SidebarScanRun(void *arg)
     if (!atomic_load(&worker->cancelled))
     {
         worker->workspace_count =
-            PicoCatalog_ScanGroupedInterruptible(&worker->workspaces, &worker->cancelled);
+            PicoCatalog_ScanGroupedPaged(&worker->workspaces, &worker->cancelled,
+                                         worker->pages, worker->page_count);
     }
+    if (worker->workspace_count < 0) worker->failed = true;
     worker->token_after_valid = PicoCatalog_ReadChangeToken(worker->token_after);
     return NULL;
 }
@@ -404,6 +405,7 @@ static void SidebarScanDestroy(void *arg)
 {
     SidebarScanWorker *worker = (SidebarScanWorker *)arg;
     PicoCatalog_Free(worker->workspaces, worker->workspace_count);
+    free(worker->pages);
     free(worker);
 }
 
@@ -419,9 +421,12 @@ static void SidebarScanCompleted(PicoHost *host, void *arg)
     {
         return;
     }
+    if (worker->failed) { s->dirty = true; return; }
+    bool refresh_again = s->dirty;
     SidebarAdoptCatalog(s, worker->workspaces, worker->workspace_count,
                         worker->token_before_valid, worker->token_before,
                         worker->token_after_valid, worker->token_after);
+    s->dirty = s->dirty || refresh_again;
     worker->workspaces = NULL;
     worker->workspace_count = 0;
 }
@@ -439,8 +444,10 @@ static void SidebarRefreshSync(SidebarState *s)
         return;
     }
     token_before_valid = PicoCatalog_ReadChangeToken(token_before);
-    n = PicoCatalog_ScanGrouped(&next);
+    atomic_bool cancelled = false;
+    n = PicoCatalog_ScanGroupedPaged(&next, &cancelled, s->ui, s->ui_count);
     token_after_valid = PicoCatalog_ReadChangeToken(token_after);
+    if (n < 0) { s->dirty = true; return; }
     SidebarAdoptCatalog(s, next, n, token_before_valid, token_before, token_after_valid, token_after);
 }
 
@@ -458,8 +465,8 @@ static void SidebarStartRefresh(SidebarState *s)
     }
     if (s->scan_worker)
     {
-        atomic_store(&s->scan_worker->cancelled, true);
-        s->scan_worker = NULL;
+        s->dirty = true;
+        return;
     }
     s->scan_serial++;
     if (s->scan_serial == 0)
@@ -480,9 +487,17 @@ static void SidebarStartRefresh(SidebarState *s)
         return;
     }
     worker->serial = s->scan_serial;
+    worker->page_count = s->ui_count;
+    if (worker->page_count)
+    {
+        worker->pages = malloc((size_t)worker->page_count * sizeof(*worker->pages));
+        if (!worker->pages) { free(worker); s->dirty = true; return; }
+        memcpy(worker->pages, s->ui, (size_t)worker->page_count * sizeof(*worker->pages));
+    }
     if (!PicoHost_StartTaskCompleted(s->host, SidebarScanRun, worker, SidebarScanCancel,
                                      SidebarScanCompleted, SidebarScanDestroy))
     {
+        free(worker->pages);
         free(worker);
         s->dirty = true;
         return;
@@ -668,8 +683,12 @@ static void ExpandWorkspace(SidebarState *s, int index)
     {
         return;
     }
+    if (PicoCatalog_SetCollapsed(ws->path, false) != 0)
+    {
+        PicoOverlay_Notify(s->host, "Could not expand the workspace.");
+        return;
+    }
     ws->collapsed = false;
-    PicoCatalog_SetCollapsed(ws->path, false);
 }
 
 static void NewSessionInWorkspace(PicoHost *host, SidebarState *s, int index)
@@ -767,10 +786,14 @@ static void ToggleCollapsed(SidebarState *s, int index)
         return;
     }
     ws = &s->workspaces[index];
+    if (PicoCatalog_SetCollapsed(ws->path, !ws->collapsed) != 0)
+    {
+        PicoOverlay_Notify(s->host, "Could not update the workspace.");
+        return;
+    }
     ws->collapsed = !ws->collapsed;
     /* Input runs after layout; rebuild before presenting the changed rows. */
     s->host->ui_relayout_requested = true;
-    PicoCatalog_SetCollapsed(ws->path, ws->collapsed);
 }
 
 static Clay_Color RowFill(bool selected, bool hovered)
@@ -1599,7 +1622,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                     else
                     {
                         extras = CountLiveExtras(host, ws);
-                        total = extras + ws->session_count;
+                        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
                         shown = ShownForIndex(s, i, total);
                         RenderLiveExtras(host, s, ws, i, shown < extras ? shown : extras);
                         for (j = 0; j < shown - extras && j < ws->session_count; j++)
@@ -2031,7 +2054,7 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
             continue;
         }
         extras = CountLiveExtras(host, ws);
-        total = extras + ws->session_count;
+        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)) || Clay_PointerOver(CLAY_IDI("SidebarLess", i)))
         {
@@ -2206,11 +2229,12 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
             continue;
         }
         extras = CountLiveExtras(host, ws);
-        total = extras + ws->session_count;
+        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)))
         {
             AdjustShown(s, i, SIDEBAR_SESSION_PAGE, total);
+            s->dirty = true;
             return;
         }
         if (Clay_PointerOver(CLAY_IDI("SidebarLess", i)))
@@ -2367,8 +2391,8 @@ static void SidebarShutdown(PicoHost *host, void *state)
     UnloadFolderIcons(s);
     if (s->scan_worker)
     {
-        atomic_store(&s->scan_worker->cancelled, true);
-        s->scan_worker = NULL;
+        s->dirty = true;
+        return;
     }
     s->scan_serial++;
     PicoCatalog_Free(s->workspaces, s->workspace_count);

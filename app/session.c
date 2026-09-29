@@ -47,6 +47,8 @@ static void CatalogWriteThroughFields(PicoAgentKind kind, PicoSessionPersistence
                                       const char *event_json, const struct stat *previous_stat);
 static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent,
                                                  const char *json);
+static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent,
+                                                const char *title);
 static bool DrainPersistUiBound(PicoHost *app, PicoAgent *agent);
 #ifdef PICO_SESSION_TEST_HOOKS
 extern bool PicoSession_TestHook(const char *stage);
@@ -2848,57 +2850,48 @@ static bool CopyRemainder(FILE *src, int fd)
     }
 }
 
-PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title)
+static bool RewriteSessionTitleAtPath(const char *session_path, const char *title,
+                                      PicoAgentKind kind, PicoSessionPersistence persistence,
+                                      const char *session_id, const char *workspace_path,
+                                      char *error, size_t error_cap)
 {
-    if (!app || !agent || !title || !title[0])
-    {
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (agent->persistence == PICO_SESSION_EPHEMERAL)
-    {
-        return PICO_SESSION_WRITE_SKIPPED;
-    }
-    /* The rewrite must not run while appends are still queued: they would
-     * land after the title event, out of call order. */
-    if (!DrainPersistUiBound(app, agent))
-    {
-        pico_status_warn(app, "Session writes are still pending; the title was not changed.");
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (agent->persistence == PICO_SESSION_FAILED)
-    {
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (!agent->session_path[0] && CreateNew(app, agent) != 0)
-    {
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (!agent->session_path[0])
-    {
-        PersistenceFailed(app, agent, "session path was not created");
-        return PICO_SESSION_WRITE_FAILED;
-    }
-
-    char error[256] = {0};
-    int lock_fd = SessionLockAcquire(agent->session_path, error, sizeof(error));
-    if (lock_fd < 0)
-    {
-        PersistenceFailed(app, agent, error);
-        return PICO_SESSION_WRITE_FAILED;
-    }
-
+    char error_buf[256];
+    int lock_fd;
     int failure = 0;
     struct stat previous_stat;
-    bool have_previous_stat = stat(agent->session_path, &previous_stat) == 0;
+    bool have_previous_stat = false;
     bool renamed = false;
     FILE *src = NULL;
     char *header = NULL;
     char *event_line = NULL;
     int fd = -1;
-    char tmp_path[sizeof(agent->session_path) + 16];
-    tmp_path[0] = '\0';
+    char tmp_path[4096 + 16];
 
-    src = fopen(agent->session_path, "rb");
+    if (error && error_cap > 0)
+    {
+        error[0] = '\0';
+    }
+    if (!error || error_cap == 0)
+    {
+        error = error_buf;
+        error_cap = sizeof(error_buf);
+        error[0] = '\0';
+    }
+    tmp_path[0] = '\0';
+    if (!session_path || !session_path[0] || !title || !title[0])
+    {
+        snprintf(error, error_cap, "session path is missing");
+        return false;
+    }
+
+    lock_fd = SessionLockAcquire(session_path, error, error_cap);
+    if (lock_fd < 0)
+    {
+        return false;
+    }
+
+    have_previous_stat = stat(session_path, &previous_stat) == 0;
+    src = fopen(session_path, "rb");
     if (!src)
     {
         failure = errno ? errno : EIO;
@@ -2945,7 +2938,7 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
         goto done;
     }
 
-    if ((size_t)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", agent->session_path) >= sizeof(tmp_path))
+    if ((size_t)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", session_path) >= sizeof(tmp_path))
     {
         failure = ENAMETOOLONG;
         goto done;
@@ -2970,13 +2963,13 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
         goto done;
     }
     fd = -1;
-    if (SessionTestFail("title_before_rename") || rename(tmp_path, agent->session_path) != 0)
+    if (SessionTestFail("title_before_rename") || rename(tmp_path, session_path) != 0)
     {
         failure = errno ? errno : EIO;
         goto done;
     }
     renamed = true;
-    if (SessionTestFail("title_dir_fsync") || !SyncParentDir(agent->session_path))
+    if (SessionTestFail("title_dir_fsync") || !SyncParentDir(session_path))
     {
         failure = errno ? errno : EIO;
         goto done;
@@ -2999,14 +2992,55 @@ done:
     }
     if (failure == 0 && renamed)
     {
-        CatalogWriteThrough(app, agent, title, NULL,
-                            have_previous_stat ? &previous_stat : NULL);
+        CatalogWriteThroughFields(kind, persistence, session_id, session_path, workspace_path, title, NULL,
+                                  have_previous_stat ? &previous_stat : NULL);
         CatalogMarkChanged();
     }
     SessionLockRelease(lock_fd);
     if (failure != 0)
     {
-        PersistenceFailed(app, agent, strerror(failure));
+        snprintf(error, error_cap, "%s", strerror(failure));
+        return false;
+    }
+    return true;
+}
+
+PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title)
+{
+    if (!app || !agent || !title || !title[0])
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (agent->persistence == PICO_SESSION_EPHEMERAL)
+    {
+        return PICO_SESSION_WRITE_SKIPPED;
+    }
+    /* With a persist thread, title rewrites queue behind earlier records so the
+     * UI never blocks on the session lock, transcript copy, or fsync. */
+    if (app->persist_ready)
+    {
+        return QueueSessionTitle(app, agent, title);
+    }
+    if (agent->persistence == PICO_SESSION_FAILED)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!agent->session_path[0] && CreateNew(app, agent) != 0)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!agent->session_path[0])
+    {
+        PersistenceFailed(app, agent, "session path was not created");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+
+    char error[256] = {0};
+    if (!RewriteSessionTitleAtPath(agent->session_path, title, agent->kind, agent->persistence,
+                                   agent->session_id, PicoWorkspace_Path(SessionWorkspace(app, agent)),
+                                   error, sizeof(error)))
+    {
+        PersistenceFailed(app, agent, error);
         return PICO_SESSION_WRITE_FAILED;
     }
     return PICO_SESSION_WRITE_OK;
@@ -4670,14 +4704,68 @@ int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out)
 
 static void PersistJobClear(PicoSessionPersistJob *job)
 {
+    PicoSessionPersistJob *chain;
     if (!job)
     {
         return;
     }
+    chain = job->next;
+    job->next = NULL;
     free(job->header_json);
     free(job->event_json);
+    free(job->title);
     free(job->catalog_order_json);
     memset(job, 0, sizeof(*job));
+    while (chain)
+    {
+        PicoSessionPersistJob *next = chain->next;
+        chain->next = NULL;
+        PersistJobClear(chain);
+        free(chain);
+        chain = next;
+    }
+}
+
+static PicoSessionPersistJob *PersistJobTail(PicoSessionPersistJob *job)
+{
+    if (!job)
+    {
+        return NULL;
+    }
+    while (job->next)
+    {
+        job = job->next;
+    }
+    return job;
+}
+
+static PicoSessionPersistJob *PersistJobExtend(PicoSessionPersistJob *last, PicoSessionPersistJob *src)
+{
+    PicoSessionPersistJob *node;
+    if (!last || !src)
+    {
+        return NULL;
+    }
+    node = (PicoSessionPersistJob *)calloc(1, sizeof(*node));
+    if (!node)
+    {
+        return NULL;
+    }
+    node->job_kind = PICO_PERSIST_JOB_SESSION;
+    node->agent_id = src->agent_id;
+    node->kind = src->kind;
+    node->persistence = src->persistence;
+    snprintf(node->session_id, sizeof(node->session_id), "%s", src->session_id);
+    snprintf(node->session_path, sizeof(node->session_path), "%s", src->session_path);
+    snprintf(node->workspace_path, sizeof(node->workspace_path), "%s", src->workspace_path);
+    node->header_json = src->header_json;
+    node->event_json = src->event_json;
+    node->title = src->title;
+    src->header_json = NULL;
+    src->event_json = NULL;
+    src->title = NULL;
+    last->next = node;
+    return node;
 }
 
 static PicoAgent *PersistFindAgent(PicoHost *host, PicoAgentId id)
@@ -4795,7 +4883,7 @@ static PicoSessionPersistJob *PersistPendingForAgentLocked(PicoHost *host, PicoA
     {
         return NULL;
     }
-    for (i = 0; i < host->persist_pending_count; i++)
+    for (i = host->persist_pending_count - 1; i >= 0; i--)
     {
         if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_SESSION &&
             host->persist_pending[i].agent_id == id &&
@@ -4954,18 +5042,35 @@ static void *PersistThreadMain(void *arg)
         {
             failed = !CatalogWriteOrderJson(job.catalog_order_json, error, sizeof(error));
         }
-        else if (job.header_json && job.header_json[0] &&
-                 (!EnsureSessionParent(job.session_path, error, sizeof(error)) ||
-                  !WriteLineAtPath(job.session_path, job.header_json, false, job.kind, job.persistence,
-                                   job.session_id, job.workspace_path, error, sizeof(error))))
+        else
         {
-            failed = true;
-        }
-        else if (job.event_json && job.event_json[0] &&
-                 !WriteLineAtPath(job.session_path, job.event_json, true, job.kind, job.persistence,
-                                  job.session_id, job.workspace_path, error, sizeof(error)))
-        {
-            failed = true;
+            PicoSessionPersistJob *cur = &job;
+            while (cur && !failed)
+            {
+                if (cur->header_json && cur->header_json[0] &&
+                    (!EnsureSessionParent(cur->session_path, error, sizeof(error)) ||
+                     !WriteLineAtPath(cur->session_path, cur->header_json, false, cur->kind,
+                                      cur->persistence, cur->session_id, cur->workspace_path, error,
+                                      sizeof(error))))
+                {
+                    failed = true;
+                }
+                else if (cur->event_json && cur->event_json[0] &&
+                         !WriteLineAtPath(cur->session_path, cur->event_json, true, cur->kind,
+                                          cur->persistence, cur->session_id, cur->workspace_path, error,
+                                          sizeof(error)))
+                {
+                    failed = true;
+                }
+                else if (cur->title && cur->title[0] &&
+                         !RewriteSessionTitleAtPath(cur->session_path, cur->title, cur->kind,
+                                                    cur->persistence, cur->session_id,
+                                                    cur->workspace_path, error, sizeof(error)))
+                {
+                    failed = true;
+                }
+                cur = cur->next;
+            }
         }
 
         pthread_mutex_lock(&host->persist_mu);
@@ -5281,8 +5386,10 @@ PicoCatalogPersistStatus PicoCatalog_OrderPersistStatus(PicoHost *host,
 /* Queue one JSONL record on the persist thread. Lines queued for the same
  * agent accumulate in FIFO order in its pending slot, so the on-disk order
  * always matches the call order and the calling thread never touches the
- * session file. Write failures surface asynchronously through the persist
- * failure pump, which moves the agent to PICO_SESSION_FAILED. */
+ * session file. A pending title rewrite is a barrier: later appends start a
+ * new job so they cannot land inside that rewrite. Write failures surface
+ * asynchronously through the persist failure pump, which moves the agent to
+ * PICO_SESSION_FAILED. */
 static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, const char *json)
 {
     PicoSessionPersistJob *pending;
@@ -5350,28 +5457,154 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
     pending = PersistPendingForAgentLocked(app, agent->id, agent->session_id);
     if (pending)
     {
-        size_t have = pending->event_json ? strlen(pending->event_json) : 0;
-        size_t add = strlen(job.event_json);
-        char *merged = (char *)realloc(pending->event_json, have + (have ? 1 : 0) + add + 1);
-        if (!merged)
+        PicoSessionPersistJob *last = PersistJobTail(pending);
+        if (last && !last->title)
+        {
+            size_t have = last->event_json ? strlen(last->event_json) : 0;
+            size_t add = strlen(job.event_json);
+            char *merged = (char *)realloc(last->event_json, have + (have ? 1 : 0) + add + 1);
+            if (!merged)
+            {
+                pthread_mutex_unlock(&app->persist_mu);
+                PersistJobClear(&job);
+                PersistenceFailed(app, agent, "out of memory while queueing the session write");
+                return PICO_SESSION_WRITE_FAILED;
+            }
+            if (have)
+            {
+                merged[have] = '\n';
+            }
+            memcpy(merged + have + (have ? 1 : 0), job.event_json, add + 1);
+            last->event_json = merged;
+            if (!last->header_json && job.header_json)
+            {
+                last->header_json = job.header_json;
+                job.header_json = NULL;
+            }
+            PersistJobClear(&job);
+        }
+        else if (!PersistJobExtend(last, &job))
         {
             pthread_mutex_unlock(&app->persist_mu);
             PersistJobClear(&job);
             PersistenceFailed(app, agent, "out of memory while queueing the session write");
             return PICO_SESSION_WRITE_FAILED;
         }
-        if (have)
+        else
         {
-            merged[have] = '\n';
+            PersistJobClear(&job);
         }
-        memcpy(merged + have + (have ? 1 : 0), job.event_json, add + 1);
-        pending->event_json = merged;
-        if (!pending->header_json && job.header_json)
-        {
-            pending->header_json = job.header_json;
-            job.header_json = NULL;
-        }
+    }
+    else if (app->persist_pending &&
+             app->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY)
+    {
+        app->persist_pending[app->persist_pending_count++] = job;
+        pthread_cond_signal(&app->persist_cv);
+    }
+    else
+    {
+        pthread_mutex_unlock(&app->persist_mu);
         PersistJobClear(&job);
+        PersistenceFailed(app, agent, "session persist queue is full");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    pthread_mutex_unlock(&app->persist_mu);
+    return PICO_SESSION_WRITE_OK;
+}
+
+/* Queue a title rewrite behind earlier records for this session. Distinct
+ * titles are not coalesced: each accepted change is its own rewrite/event.
+ * A title can ride on the current pending append job when that job does not
+ * already have a rewrite, which keeps FIFO order without cutting in front of
+ * already-queued events. Later appends start a new job so they cannot land
+ * inside the rewrite. */
+static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent, const char *title)
+{
+    PicoSessionPersistJob *pending;
+    PicoSessionPersistJob job;
+    bool new_identity;
+    if (!app || !agent || !title || !title[0])
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (agent->persistence == PICO_SESSION_EPHEMERAL)
+    {
+        return PICO_SESSION_WRITE_SKIPPED;
+    }
+    if (agent->persistence == PICO_SESSION_FAILED)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!app->persist_ready)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+
+    memset(&job, 0, sizeof(job));
+    job.job_kind = PICO_PERSIST_JOB_SESSION;
+    job.title = JsonDup(title);
+    if (!job.title)
+    {
+        PersistenceFailed(app, agent, "out of memory while queueing the session title");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    new_identity = !agent->session_path[0];
+    if (AssignSessionIdentity(app, agent) != 0 || !agent->session_path[0] || agent->id == 0)
+    {
+        PersistJobClear(&job);
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (new_identity)
+    {
+        job.header_json = BuildSessionHeaderJson(app, agent);
+        if (!job.header_json)
+        {
+            PersistJobClear(&job);
+            PersistenceFailed(app, agent, "out of memory while creating the session header");
+            return PICO_SESSION_WRITE_FAILED;
+        }
+    }
+    job.agent_id = agent->id;
+    job.kind = agent->kind;
+    job.persistence = agent->persistence;
+    snprintf(job.session_id, sizeof(job.session_id), "%s", agent->session_id);
+    snprintf(job.session_path, sizeof(job.session_path), "%s", agent->session_path);
+    snprintf(job.workspace_path, sizeof(job.workspace_path), "%s",
+             PicoWorkspace_Path(SessionWorkspace(app, agent)));
+
+    pthread_mutex_lock(&app->persist_mu);
+    if (PersistHasFailureLocked(app, agent->id, agent->session_id))
+    {
+        pthread_mutex_unlock(&app->persist_mu);
+        PersistJobClear(&job);
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    pending = PersistPendingForAgentLocked(app, agent->id, agent->session_id);
+    if (pending)
+    {
+        PicoSessionPersistJob *last = PersistJobTail(pending);
+        if (last && !last->title)
+        {
+            last->title = job.title;
+            job.title = NULL;
+            if (!last->header_json && job.header_json)
+            {
+                last->header_json = job.header_json;
+                job.header_json = NULL;
+            }
+            PersistJobClear(&job);
+        }
+        else if (!PersistJobExtend(last, &job))
+        {
+            pthread_mutex_unlock(&app->persist_mu);
+            PersistJobClear(&job);
+            PersistenceFailed(app, agent, "out of memory while queueing the session title");
+            return PICO_SESSION_WRITE_FAILED;
+        }
+        else
+        {
+            PersistJobClear(&job);
+        }
     }
     else if (app->persist_pending &&
              app->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY)

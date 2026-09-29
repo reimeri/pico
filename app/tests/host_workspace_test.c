@@ -7,6 +7,7 @@
 #include "workspace_internal.h"
 #include "settings.h"
 #include "session.h"
+#include "json.h"
 #include "path.h"
 #include "scrollbar.h"
 #include "trace_group.h"
@@ -10022,7 +10023,187 @@ static int TestAgentCloseAppliesQueuedPersistenceFailure(void)
     return 0;
 }
 
+static int HoldSessionLockChild(const char *session_path, int ready_fd, int continue_fd)
+{
+    char lock_path[4102];
+    int fd;
+    struct flock lock;
+    if (!session_path ||
+        (size_t)snprintf(lock_path, sizeof(lock_path), "%s.lock", session_path) >= sizeof(lock_path))
+    {
+        return 2;
+    }
+    fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+    {
+        return 3;
+    }
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    while (fcntl(fd, F_SETLKW, &lock) != 0)
+    {
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        close(fd);
+        return 4;
+    }
+    if (!TransferTestByte(ready_fd, true) || !TransferTestByte(continue_fd, false))
+    {
+        close(fd);
+        return 5;
+    }
+    close(fd);
+    return 0;
+}
+
+static int TestTitleRewriteDoesNotBlockOtherWorkspace(void)
+{
+    char dirA[] = "/tmp/pico-title-lock-A-XXXXXX";
+    char dirB[] = "/tmp/pico-title-lock-B-XXXXXX";
+    char cfg[] = "/tmp/pico-title-lock-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId idA = 0, idB = 0;
+    PicoAgentId agentA = 0, agentB = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *session_agent;
+    char session_path[4096];
+    int ready[2] = {-1, -1};
+    int proceed[2] = {-1, -1};
+    pid_t child = -1;
+    int status = 0;
+    int result = 1;
+    size_t file_len = 0;
+    char *file = NULL;
+
+    if (!mkdtemp(dirA) || !mkdtemp(dirB) || !mkdtemp(cfg))
+    {
+        Fail("title lock fixture");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NEW;
+    opt.select = true;
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dirA, &idA) != PICO_OK ||
+        pico_workspace_open(host, dirB, &idB) != PICO_OK ||
+        pico_main_agent_create(host, idA, &opt, &agentA) != PICO_OK)
+    {
+        Fail("title lock host setup");
+        goto done;
+    }
+    session_agent = PicoHost_FindAgent(host, agentA);
+    if (!session_agent ||
+        PicoSession_LogUser(host, session_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, session_agent) || !session_agent->session_path[0])
+    {
+        Fail("title lock seed session");
+        goto done;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, idB, &opt, &agentB) != PICO_OK ||
+        !pico_agent_select(host, agentB) ||
+        !PicoHost_FindAgent(host, agentA))
+    {
+        Fail("title lock other workspace");
+        goto done;
+    }
+    snprintf(session_path, sizeof(session_path), "%s", session_agent->session_path);
+    if (pipe(ready) != 0 || pipe(proceed) != 0)
+    {
+        Fail("title lock pipes");
+        goto done;
+    }
+    child = fork();
+    if (child < 0)
+    {
+        Fail("title lock fork");
+        goto done;
+    }
+    if (child == 0)
+    {
+        close(ready[0]);
+        close(proceed[1]);
+        _exit(HoldSessionLockChild(session_path, ready[1], proceed[0]));
+    }
+    close(ready[1]);
+    close(proceed[0]);
+    ready[1] = proceed[0] = -1;
+    alarm(15);
+    if (!TransferTestByte(ready[0], false))
+    {
+        alarm(0);
+        Fail("title lock holder did not acquire the session lock");
+        goto done;
+    }
+    if (PicoSession_LogTitle(host, session_agent, "Locked title") != PICO_SESSION_WRITE_OK)
+    {
+        alarm(0);
+        Fail("title rewrite was not accepted while the session lock was held");
+        goto done;
+    }
+    pico_host_request_submit_cancel(host);
+    pico_host_pump(host);
+    alarm(0);
+    if (!host->submit_cancel)
+    {
+        Fail("other workspace must still accept cancellation while a title rewrite is pending");
+        goto done;
+    }
+    if (!TransferTestByte(proceed[1], true))
+    {
+        Fail("could not release the held session lock");
+        goto done;
+    }
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        child = -1;
+        Fail("session lock holder exited unsuccessfully");
+        goto done;
+    }
+    child = -1;
+    if (!DrainSessionForAssertion(host, session_agent))
+    {
+        Fail("pending title rewrite did not complete after the lock was released");
+        goto done;
+    }
+    file = Pico_ReadFile(session_agent->session_path, &file_len);
+    if (!file || !strstr(file, "\"title\":\"Locked title\""))
+    {
+        Fail("title rewrite did not land after the lock holder released");
+        goto done;
+    }
+    result = 0;
+done:
+    alarm(0);
+    if (child > 0)
+    {
+        if (proceed[1] >= 0)
+        {
+            (void)TransferTestByte(proceed[1], true);
+        }
+        waitpid(child, &status, 0);
+    }
+    if (ready[0] >= 0) close(ready[0]);
+    if (ready[1] >= 0) close(ready[1]);
+    if (proceed[0] >= 0) close(proceed[0]);
+    if (proceed[1] >= 0) close(proceed[1]);
+    free(file);
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dirA);
+    RmRf(dirB);
+    if (result && !g_failed) Fail("title lock workspace pump setup failed");
+    return result;
+}
+
 static int TestAsyncSessionReplay(void)
+
 {
     char dir[] = "/tmp/pico-async-session-XXXXXX";
     char cfg[] = "/tmp/pico-async-cfg-XXXXXX";
@@ -13051,6 +13232,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (TestAgentCloseAppliesQueuedPersistenceFailure() != 0)
+    {
+        return 1;
+    }
+    if (TestTitleRewriteDoesNotBlockOtherWorkspace() != 0)
     {
         return 1;
     }

@@ -2708,6 +2708,201 @@ static int TestQueuedModelChangeDrainDeadline(void)
     return timed_out ? 0 : Fail("blocked persistence must report the shared drain deadline");
 }
 
+static int TestQueuedTitleOrdersAfterUserWrite(void)
+{
+    char ws[] = "/tmp/pico-title-order-XXXXXX";
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent blocker;
+    PicoAgent agent;
+    int ready[2];
+    int proceed[2];
+    size_t file_len = 0;
+    char *file = NULL;
+    const char *user;
+    const char *title;
+    const char *header;
+    const char *after;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("queued title order workspace");
+    }
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&blocker, 0, sizeof(blocker));
+    memset(&agent, 0, sizeof(agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "%s", ws);
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    blocker.workspace = agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &blocker;
+    writer_ws.agents[1] = &agent;
+    writer_ws.count = 2;
+    blocker.persistence = agent.persistence = PICO_SESSION_DURABLE;
+    blocker.kind = agent.kind = PICO_AGENT_MAIN;
+    blocker.id = 6;
+    agent.id = 7;
+    snprintf(blocker.model, sizeof(blocker.model), "blocker-model");
+    snprintf(agent.model, sizeof(agent.model), "title-model");
+    if (pipe(ready) != 0 || pipe(proceed) != 0)
+    {
+        return Fail("queued title order pipes");
+    }
+
+    PicoSessionPersist_Init(&writer);
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = proceed[0];
+    PicoSession_EnqueueModelChange(&writer, &blocker);
+    if (!TransferByte(ready[0], false))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("queued title order did not block the persist worker");
+    }
+    if (PicoSession_LogUser(&writer, &agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogTitle(&writer, &agent, "Queued title") != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(&writer, &agent, "after title", "after title", NULL) !=
+            PICO_SESSION_WRITE_OK)
+    {
+        (void)TransferByte(proceed[1], true);
+        PicoSessionPersist_Shutdown(&writer);
+        unlink(blocker.session_path);
+        unlink(agent.session_path);
+        return Fail("title rewrite was not accepted behind a blocked persist worker");
+    }
+    if (!TransferByte(proceed[1], true))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("could not release the blocked persist worker");
+    }
+    PicoSession_DrainPersist(&writer, &blocker);
+    PicoSession_DrainPersist(&writer, &agent);
+    PicoSessionPersist_Shutdown(&writer);
+    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+    file = Pico_ReadFile(agent.session_path, &file_len);
+    unlink(blocker.session_path);
+    unlink(agent.session_path);
+    rmdir(ws);
+    if (!file)
+    {
+        return Fail("queued title rewrite did not create a session file");
+    }
+    header = strstr(file, "\"type\":\"session\"");
+    user = strstr(file, "\"content\":\"hello\"");
+    title = strstr(file, "\"type\":\"title\"");
+    after = strstr(file, "\"content\":\"after title\"");
+    bool ok = header && user && title && after && header < user && user < title && title < after &&
+              strstr(file, "\"title\":\"Queued title\"") && CountType(file, "title") == 1;
+    free(file);
+    return ok ? 0 : Fail("queued title must rewrite after earlier records and before later appends");
+}
+
+static int TestQueuedTitleFailureThenDrain(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    size_t file_len = 0;
+    char *before = NULL;
+    char *after = NULL;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &writer_agent;
+    writer_ws.count = 1;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.id = 7;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "fail-title-model");
+    PicoSessionPersist_Init(&writer);
+    if (PicoSession_LogUser(&writer, &writer_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("queued title failure test could not log the seed");
+    }
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    before = Pico_ReadFile(writer_agent.session_path, &file_len);
+    g_status_warning[0] = '\0';
+    g_session_fail_stage = "title_before_rename";
+    if (PicoSession_LogTitle(&writer, &writer_agent, "Should fail") != PICO_SESSION_WRITE_OK)
+    {
+        g_session_fail_stage = NULL;
+        PicoSessionPersist_Shutdown(&writer);
+        free(before);
+        unlink(writer_agent.session_path);
+        return Fail("title rewrite was not accepted before the injected failure");
+    }
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    g_session_fail_stage = NULL;
+    after = Pico_ReadFile(writer_agent.session_path, &file_len);
+    bool intact = before && after && strcmp(before, after) == 0;
+    bool ok = writer_agent.persistence == PICO_SESSION_FAILED &&
+              strstr(g_status_warning, "no longer resumable") && intact &&
+              PicoSession_LogUser(&writer, &writer_agent, "hello", "hello", NULL) ==
+                  PICO_SESSION_WRITE_FAILED;
+    PicoSessionPersist_Shutdown(&writer);
+    free(before);
+    free(after);
+    unlink(writer_agent.session_path);
+    return ok ? 0 : Fail("queued title rewrite failure was not applied on drain");
+}
+
+static int TestQueuedDistinctTitlesPreserveEvents(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    size_t file_len = 0;
+    char *file = NULL;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &writer_agent;
+    writer_ws.count = 1;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.id = 8;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "titles-model");
+    PicoSessionPersist_Init(&writer);
+    if (PicoSession_LogTitle(&writer, &writer_agent, "First title") != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogTitle(&writer, &writer_agent, "Second title") != PICO_SESSION_WRITE_OK)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        if (writer_agent.session_path[0])
+        {
+            unlink(writer_agent.session_path);
+        }
+        return Fail("distinct queued titles were not accepted");
+    }
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    PicoSessionPersist_Shutdown(&writer);
+    file = Pico_ReadFile(writer_agent.session_path, &file_len);
+    unlink(writer_agent.session_path);
+    const char *first_event = file ? strstr(file, "\"type\":\"title\"") : NULL;
+    const char *second_event = first_event ? strstr(first_event + 1, "\"type\":\"title\"") : NULL;
+    bool ok = file && CountType(file, "title") == 2 && first_event && second_event &&
+              first_event < second_event &&
+              strstr(first_event, "\"title\":\"First title\"") &&
+              strstr(first_event, "\"title\":\"First title\"") < second_event &&
+              strstr(second_event, "\"title\":\"Second title\"");
+    int rc = ok ? 0 : Fail("distinct queued titles must each append an event in call order");
+    free(file);
+    return rc;
+}
+
 static int TestModelResumeReplay(void)
 {
     PicoHost writer;
@@ -3112,7 +3307,10 @@ int main(void)
         TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||
         TestQueuedModelChangeOrdersUserWrite() != 0 || TestQueuedModelChangeFailureThenDrain() != 0 ||
         TestQueuedModelChangeCreatesHeaderPerAgent() != 0 ||
-        TestQueuedModelChangeDrainDeadline() != 0)
+        TestQueuedModelChangeDrainDeadline() != 0 ||
+        TestQueuedTitleOrdersAfterUserWrite() != 0 ||
+        TestQueuedTitleFailureThenDrain() != 0 ||
+        TestQueuedDistinctTitlesPreserveEvents() != 0)
     {
         return 1;
     }

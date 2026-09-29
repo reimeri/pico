@@ -101,6 +101,8 @@ typedef struct PicoSessionPersistJob {
     char workspace_path[4096];
     char *header_json;
     char *event_json;
+    char *title; /* Rewrite after header/event writes; not coalesced with later titles. */
+    struct PicoSessionPersistJob *next; /* Same-session work after a title barrier. */
     char *catalog_order_json;
     uint64_t catalog_order_generation;
 } PicoSessionPersistJob;

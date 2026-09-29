@@ -8,6 +8,8 @@
 - **Method:** source and call-path review, independent subsystem reviews, cross-checking existing caches/limits/thread boundaries, and running the existing Release build and local test suite inside `nix develop`.
 - **Not performed:** live provider requests, GUI/GPU profiling, cold-start timing, new benchmark implementations, or production-code changes.
 
+**Follow-up:** F1 (synchronous title rewrite on the frame thread) has been implemented after this review. Line numbers in unfixed findings still refer to the revision above.
+
 **Important distinction:** the timings below are measured. The individual findings establish source-level work, blocking, or resource-growth risks; their user-visible cost has **not** been measured in a representative interactive session. Priorities are an engineering triage recommendation, not a profiler ranking. Source links and line numbers refer to the revision above.
 
 ## Executive summary
@@ -16,7 +18,7 @@ Pico already has substantial performance engineering: invalidation-driven layout
 
 The most valuable next work is to close gaps around those optimizations:
 
-1. **Remove synchronous title rewrites and catalog scans from the UI thread.** A TODO title update can wait on a blocking file lock and copy/fsync an entire transcript from an `on_frame` callback. Sidebar reconciliation also does disk work synchronously.
+1. **Remove remaining synchronous catalog scans from the UI thread (F4).** Title rewrites now queue on the persist worker like session appends (F1). Sidebar reconciliation still does disk work synchronously.
 2. **Make long-stream updates proportional to new work.** The runtime repeatedly scans growing text, reparses the whole Markdown document, and discards document-local caches. Throttling helps frequency, not growth in work per update.
 3. **Finish transcript virtualization at the bookkeeping layer.** Message bodies are virtualized, but planning/revision/height operations still scan history; anchor queries repeatedly sum prefixes.
 4. **Avoid unchanged input and background work.** Completion queries recur without edits, composer wrapping repeats across UI phases, skill discovery can run twice per request, and diff workers rebuild models before discovering nothing changed.
@@ -28,7 +30,7 @@ The most valuable next work is to close gaps around those optimizations:
 
 | ID | Priority | Issue | Primary trigger | Evidence confidence |
 |---|---|---|---|---|
-| F1 | P1 | Title persistence can block the frame thread | TODO task-title change; slow/contended storage | High |
+| F1 | ~~P1~~ **addressed** | Title persistence no longer blocks the frame thread | TODO task-title change; slow/contended storage | High |
 | F2 | P1 | Growing stream text is scanned/reparsed repeatedly | Long streamed answers, especially rich Markdown | High |
 | F3 | P1 | Virtualization still performs history-wide bookkeeping | Large history, scrolling, streaming, anchor preservation | High |
 | F4 | P1 for large catalogs | Sidebar reconciliation performs synchronous storage work | Startup, catalog changes, periodic reconciliation | High |
@@ -82,26 +84,19 @@ There is no dedicated, repeatable performance benchmark target in the reviewed C
 - [`TestAsyncReplayLargeMessage`](app/tests/host_workspace_test.c#L10253) replays a 256 KiB message plus 150 fragments and rejects a pump exceeding 100 ms in that fixture. It does not measure peak RSS or cover arbitrary record sizes.
 - [`TestHugeUnspacedWordWrapsInsideBudget`](app/tests/md_scroll_layout_test.c#L395) exercises a 256 KiB token with a 75 ms guard and a test measurement function. This is not a real-font/GPU benchmark.
 - [`TestBottomFollowShellGeometryStable`](app/tests/host_workspace_test.c#L2111) protects repeated shell-layout geometry. Virtualization, scroll, diff, tool-concurrency and persistence correctness suites also passed.
+- [`TestTitleRewriteDoesNotBlockOtherWorkspace`](app/tests/host_workspace_test.c) holds a session lock while a title rewrite is pending and checks that another workspace can still pump and accept cancellation.
 
 ## Detailed findings
 
-### F1 — Session title changes can block the entire UI
+### F1 — Session title changes can block the entire UI — **addressed**
 
-**Path:** [`TodoWorkspaceOnFrame`](app/builtins/todo.c#L504-L532) → [`PicoSession_LogTitle`](app/session.c#L2851-L3012).
+**Original path (reviewed revision):** [`TodoWorkspaceOnFrame`](app/builtins/todo.c) → [`PicoSession_LogTitle`](app/session.c).
 
-The TODO builtin reconciles its task title during a main-thread frame callback. Title persistence:
+The TODO builtin still reconciles its task title during a main-thread frame callback, but `PicoSession_LogTitle` now enqueues on the persist worker when that worker is running. The calling thread no longer drains, takes the session lock, copies the transcript, or fsyncs. Distinct titles are not coalesced: each accepted change is its own header rewrite plus `title` event, stored as a continuation on that session's pending persist slot so a title burst cannot fill the global job queue. Completion and failure publish through the existing persist pump. Close/reset still drain queued work with a bound. Tests without a persist thread keep the synchronous rewrite fallback.
 
-1. Drains queued writes with a one-second deadline ([`DrainPersistUiBound`](app/session.c#L5184-L5194)).
-2. Acquires the session lock using blocking `fcntl(..., F_SETLKW, ...)` ([`SessionLockAcquire`](app/session.c#L622-L671)).
-3. If the title changed, copies the remainder of the transcript to a temporary file, appends the title event, fsyncs, renames, syncs the parent directory, and updates the catalog.
+**Historical issue:** title persistence drained queued writes with a one-second deadline, then acquired a blocking `fcntl(..., F_SETLKW, ...)` lock and copied/fsynced the transcript on the frame thread. The drain deadline did not bound lock wait or rewrite I/O.
 
-**The one-second drain deadline does not bound the operation.** Lock acquisition and subsequent storage operations have no equivalent deadline. An unchanged title avoids the rewrite, but only after draining and taking the lock.
-
-**Impact:** changed titles cause O(transcript bytes) copying and durable filesystem I/O on the thread responsible for input, cancellation UI, and all workspace pumps. Another process holding the lock can stall that thread regardless of transcript size. This is a stronger responsiveness concern than ordinary background persistence throughput.
-
-**Recommendation:** serialize title rewrites as jobs on the persistence worker behind earlier records for that session. Publish completion/failure asynchronously; preserve FIFO ordering, inter-process locking, atomic replacement, and durable failure reporting. Avoid fixing this by weakening fsync or lock correctness. Coalescing may be appropriate only where it preserves the required event/title semantics.
-
-**Validation:** retain title ordering/failure tests in [`session_usage_test.c`](app/tests/session_usage_test.c#L819-L1120). Add an observable test that holds the session lock while a title change is pending and verifies another workspace can still pump and accept cancellation. Separately measure rewrite throughput against transcript size.
+**Remaining measurement:** rewrite throughput versus transcript size is still unmeasured. Responsiveness is covered by `TestTitleRewriteDoesNotBlockOtherWorkspace` (lock held, other workspace pumps and accepts cancellation) and queued FIFO/failure tests in `session_usage_test.c`.
 
 ### F2 — Streaming performs growing-prefix work and invalidates Markdown caches
 
@@ -278,7 +273,8 @@ No interactive cold/warm startup measurement was taken, so there is no evidence 
 
 ### Phase 1 — Remove avoidable synchronous and duplicate work
 
-- Move title rewrites and sidebar catalog scans off the frame thread (F1, F4).
+- ~~Move title rewrites off the frame thread (F1).~~ **Done:** title rewrites queue on the persist worker; lock/copy/fsync stay off the UI thread.
+- Move sidebar catalog scans off the frame thread (F4).
 - Store stream lengths/capacity and explicit revisions (part of F2/F3).
 - Cache unchanged completion results and composer wraps (F5/F6).
 - Ensure the two LLM-hook phases share one skill discovery snapshot (F7).
@@ -325,4 +321,4 @@ For interactive workloads, record the entire frame/pump critical path rather tha
 - **Tools:** keep policy-aware parallelism and serial barriers. Raising worker limits is not a substitute for fixing shared UI or storage bottlenecks.
 - **Documentation:** if implementation changes public registration, lifecycle, threading, ownership, reload or hook behavior, update the matching `docs/extend/` topic and `contracts.md`, and keep examples aligned. No compatibility layer is needed.
 
-**Bottom line:** prioritize UI-thread storage work and repeated growing-history/text work. Existing tests provide a strong correctness base, but passing them does not establish smooth real-font rendering, low idle CPU, bounded peak memory or low provider round-trip overhead. Add measurements at those product boundaries before choosing larger architectural changes.
+**Bottom line:** title persistence no longer blocks the frame thread (F1). Remaining priority is other UI-thread storage work (especially F4 catalog scans) and repeated growing-history/text work. Existing tests provide a strong correctness base, but passing them does not establish smooth real-font rendering, low idle CPU, bounded peak memory or low provider round-trip overhead. Add measurements at those product boundaries before choosing larger architectural changes.

@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <math.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,24 +206,28 @@ static int g_persist_continue_fd = -1;
 static atomic_int g_catalog_scan_calls;
 static atomic_int g_catalog_scan_done_calls;
 static atomic_int g_catalog_scan_block_ms;
+static atomic_int g_catalog_snapshot_calls;
+static atomic_int g_catalog_snapshot_done_calls;
+static int g_catalog_ready_fd = -1;
+static int g_catalog_continue_fd = -1;
 static bool g_sidebar_poll_due;
 static int g_replay_ready_fd = -1;
 static int g_replay_continue_fd = -1;
 static int g_replay_adopted;
 
-static bool WaitCatalogScanDone(PicoHost *host, int target_done)
+static bool WaitCatalogWorkDone(PicoHost *host, const atomic_int *completed, int target_done)
 {
     for (int i = 0; i < 10000; i++)
     {
         pico_host_pump(host);
-        if (g_catalog_scan_done_calls >= target_done)
+        if (*completed >= target_done)
         {
-            int last = g_catalog_scan_done_calls;
+            int last = *completed;
             int quiet = 0;
             for (int j = 0; j < 100; j++)
             {
                 pico_host_pump(host);
-                if (g_catalog_scan_done_calls == last)
+                if (*completed == last)
                 {
                     quiet++;
                     if (quiet >= 3)
@@ -232,7 +237,7 @@ static bool WaitCatalogScanDone(PicoHost *host, int target_done)
                 }
                 else
                 {
-                    last = g_catalog_scan_done_calls;
+                    last = *completed;
                     quiet = 0;
                 }
                 usleep(1000);
@@ -242,6 +247,16 @@ static bool WaitCatalogScanDone(PicoHost *host, int target_done)
         usleep(1000);
     }
     return false;
+}
+
+static bool WaitCatalogScanDone(PicoHost *host, int target_done)
+{
+    return WaitCatalogWorkDone(host, &g_catalog_scan_done_calls, target_done);
+}
+
+static bool WaitCatalogSnapshotDone(PicoHost *host, int target_done)
+{
+    return WaitCatalogWorkDone(host, &g_catalog_snapshot_done_calls, target_done);
 }
 
 static bool TransferTestByte(int fd, bool write_byte)
@@ -272,6 +287,12 @@ bool PicoSession_TestHook(const char *stage)
     if (stage && strcmp(stage, "catalog_scan") == 0)
     {
         g_catalog_scan_calls++;
+        if (g_catalog_ready_fd >= 0 && g_catalog_continue_fd >= 0)
+        {
+            int ready = g_catalog_ready_fd, resume = g_catalog_continue_fd;
+            g_catalog_ready_fd = g_catalog_continue_fd = -1;
+            if (!TransferTestByte(ready, true) || !TransferTestByte(resume, false)) return true;
+        }
         if (g_catalog_scan_block_ms > 0)
         {
             int ms = atomic_exchange(&g_catalog_scan_block_ms, 0);
@@ -282,6 +303,8 @@ bool PicoSession_TestHook(const char *stage)
     {
         g_catalog_scan_done_calls++;
     }
+    if (stage && strcmp(stage, "catalog_snapshot") == 0) g_catalog_snapshot_calls++;
+    if (stage && strcmp(stage, "catalog_snapshot_done") == 0) g_catalog_snapshot_done_calls++;
     if (stage && strcmp(stage, "sidebar_poll_due") == 0)
     {
         bool due = g_sidebar_poll_due;
@@ -11386,6 +11409,117 @@ done_host:
     return rc;
 }
 
+static bool SidebarCommandsContain(Clay_RenderCommandArray *commands, const char *label)
+{
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (command && command->commandType == CLAY_RENDER_COMMAND_TYPE_TEXT)
+        {
+            Clay_StringSlice text = command->renderData.text.stringContents;
+            if (text.length == (int)strlen(label) && !memcmp(text.chars, label, (size_t)text.length))
+                return true;
+        }
+    }
+    return false;
+}
+
+static int TestSidebarSnapshotBeforeReconcile(bool fail_reconcile)
+{
+    char dir[] = "/tmp/pico-sidebar-snapshot-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-sidebar-snapshot-cfg-XXXXXX";
+    char path[4096], id[40], broken[4096];
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    const Clay_Dimensions viewport = {1100, 800};
+    void *memory = NULL;
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    int result = 1;
+    bool released = false;
+    const char *phase = "fixture";
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK) goto done;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NEW, .select = true};
+    if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    if (PicoSession_LogUser(host, agent, "Cached row", "Cached row", NULL) != PICO_SESSION_WRITE_OK)
+        goto done;
+    snprintf(path, sizeof(path), "%s", agent->session_path);
+    snprintf(id, sizeof(id), "%s", agent->session_id);
+    /* Drain writes without pumping sidebar maintenance, leaving last_reconcile unset. */
+    bool shutdown_ok = ShutdownAfterSessionPersist(host, agent);
+    host = NULL;
+    if (!shutdown_ok || pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    if (pipe(ready) != 0 || pipe(proceed) != 0) goto done;
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = proceed[0];
+    phase = "initial snapshot";
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
+    struct pollfd check = {.fd = ready[0], .events = POLLIN};
+    if (poll(&check, 1, 5000) != 1 || !TransferTestByte(ready[0], false)) goto done;
+    memory = malloc(Clay_MinMemorySize());
+    if (!memory || !Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                                   viewport, (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+    if (!SidebarCommandsContain(&commands, "Cached row")) goto done;
+    phase = "external transcript change";
+    if (fail_reconcile)
+    {
+        snprintf(broken, sizeof(broken), "%s", path);
+        char *slash = strrchr(broken, '/');
+        if (!slash) goto done;
+        snprintf(slash + 1, (size_t)(broken + sizeof(broken) - slash - 1), "broken.jsonl");
+        if (symlink("missing-transcript", broken) != 0) goto done;
+    }
+    else
+    {
+        FILE *file = fopen(path, "wb");
+        if (!file) goto done;
+        fprintf(file, "{\"type\":\"session\",\"version\":4,\"id\":\"%s\","
+                      "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"Updated row\"}\n", id, dir);
+        fclose(file);
+    }
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    phase = "completed reconciliation";
+    for (int i = 0; i < 10000 && host->tasks; i++)
+    {
+        pico_host_pump(host);
+        usleep(1000);
+    }
+    if (host->tasks) goto done;
+    commands = PicoHost_LayoutShell(host, viewport.height, 0);
+    if (!SidebarCommandsContain(&commands, fail_reconcile ? "Cached row" : "Updated row")) goto done;
+    result = 0;
+done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    if (host) pico_host_free(host);
+    g_catalog_ready_fd = g_catalog_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (result)
+    {
+        fprintf(stderr, "sidebar snapshot phase: %s (failure=%d)\n", phase, fail_reconcile);
+        Fail("sidebar must display its cached snapshot before reconciliation and preserve it on failure");
+    }
+    return result;
+}
+
 static int TestSidebarCatalogChangeToken(void)
 {
     char dir[] = "/tmp/pico-sidebar-token-ws-XXXXXX";
@@ -11427,11 +11561,12 @@ static int TestSidebarCatalogChangeToken(void)
         Fail("create sidebar catalog token change");
         goto done;
     }
+    int snapshots_before = g_catalog_snapshot_done_calls;
     g_sidebar_poll_due = true;
-    if (!WaitCatalogScanDone(host, done_before + 2) ||
-        g_catalog_scan_calls != scans_before + 2)
+    if (!WaitCatalogSnapshotDone(host, snapshots_before + 1) ||
+        g_catalog_scan_calls != scans_before + 1)
     {
-        Fail("changed catalog token must refresh the sidebar");
+        Fail("changed catalog token must refresh from SQLite without a full scan");
         goto done;
     }
     result = 0;
@@ -12299,7 +12434,7 @@ static int TestSidebarSameFrameControls(void)
     g_clay_frame_test = g_find_input_test = true;
     g_find_key = -1;
     phase = "catalog";
-    if (!WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1)) goto done;
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
     PicoHost_Frame(host);
 
     phase = "initial workspace layout";
@@ -12321,13 +12456,13 @@ static int TestSidebarSameFrameControls(void)
     if (after_more <= before_more || !Clay_GetElementData(CLAY_IDI("SidebarLess", 0)).found)
         goto done;
     phase = "second persisted page";
-    int scan_before = g_catalog_scan_done_calls;
-    if (!WaitCatalogScanDone(host, scan_before + 1)) goto done;
+    int scan_before = g_catalog_snapshot_done_calls;
+    if (!WaitCatalogSnapshotDone(host, scan_before + 1)) goto done;
     PicoHost_Frame(host);
     more = Clay_GetElementData(CLAY_IDI("SidebarMore", 0));
     if (!more.found || !SidebarFrameClick(host, more)) goto done;
-    scan_before = g_catalog_scan_done_calls;
-    if (!WaitCatalogScanDone(host, scan_before + 1)) goto done;
+    scan_before = g_catalog_snapshot_done_calls;
+    if (!WaitCatalogSnapshotDone(host, scan_before + 1)) goto done;
     PicoHost_Frame(host);
     if (SidebarVisibleSessionRows() <= after_more ||
         Clay_GetElementData(CLAY_IDI("SidebarMore", 0)).found) goto done;
@@ -12341,7 +12476,7 @@ static int TestSidebarSameFrameControls(void)
     g_sidebar_poll_due = true;
     pico_host_request_redraw(host);
     phase = "catalog";
-    if (!WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1)) goto done;
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
     PicoHost_Frame(host);
     phase = "stash refresh";
     Clay_ElementData stash = Clay_GetElementData(CLAY_ID("SidebarStashedHeader"));
@@ -13160,11 +13295,35 @@ static int TestCopiedMessageSourceMetadata(void)
     return !ok;
 }
 
+static char g_test_home[4096];
+
+static void RemoveTestHome(void)
+{
+    RmRf(g_test_home);
+}
+
+static bool IsolateTestHome(void)
+{
+    char home[] = "/tmp/pico-host-test-home-XXXXXX";
+    if (!mkdtemp(home)) return false;
+    snprintf(g_test_home, sizeof(g_test_home), "%s", home);
+    if (atexit(RemoveTestHome) != 0 || setenv("HOME", home, 1) != 0) return false;
+    /* Fixtures clear XDG overrides between tests. Their fallback must never
+     * write workspace/session metadata into the developer's real HOME. */
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    unsetenv("XDG_DATA_HOME");
+    return true;
+}
+
 int main(int argc, char **argv)
 {
 #ifdef PICO_OPENAI_LOGIN_TESTS
     if (argc == 2 && strcmp(argv[1], "--openai-retained-shutdown") == 0)
         return TestOpenAiBlockedShutdownChild();
+#endif
+    if (!IsolateTestHome()) return 1;
+#ifdef PICO_OPENAI_LOGIN_TESTS
     if (argc == 2 && strcmp(argv[1], "--openai-login") == 0)
         return TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown();
     if (TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown()) return 1;
@@ -13249,6 +13408,8 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (TestSidebarSnapshotBeforeReconcile(false) != 0 ||
+        TestSidebarSnapshotBeforeReconcile(true) != 0) return 1;
     if (TestSidebarCatalogChangeToken() != 0)
     {
         return 1;

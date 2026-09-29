@@ -87,6 +87,11 @@ int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out);
 int PicoCatalog_ScanGroupedInterruptible(PicoCatalogWorkspace **out, const atomic_bool *cancelled);
 int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
                                  const PicoCatalogPage *pages, int page_count);
+/* Indexed sidebar snapshot: no JSONL enumeration or reconciliation. Filters
+ * missing normal checkout directories, retains missing linked worktrees, and
+ * returns cached sessions until a successful background scan refreshes them. */
+int PicoCatalog_ReadGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count);
 /* Missing token files report a valid empty token. Read failures return false. */
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);

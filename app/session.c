@@ -39,7 +39,6 @@ static bool CatalogKeyFromPath(const char *path, char *out, size_t cap);
 static void CatalogLockRelease(int fd);
 static void CatalogRowFromFile(const char *path, PicoCatalogSession *row);
 static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap);
-static void CatalogProjectLoad(const char *project, PicoCatalogWorkspace *group);
 static int CmpCatalogOrder(const void *a, const void *b);
 static void CatalogClearSessions(PicoCatalogWorkspace *ws);
 static void CatalogMarkChanged(void);
@@ -3292,16 +3291,6 @@ static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/.project-%s.json", root, key);
 }
 
-static void CatalogProjectLoad(const char *project, PicoCatalogWorkspace *group)
-{
-    sqlite3 *db = CatalogDbOpen();
-    if (db)
-    {
-        (void)CatalogDbReadProject(db, project, group);
-        sqlite3_close(db);
-    }
-}
-
 static int CatalogProjectUpdate(const char *project, const char *name, int stash)
 {
     char canonical[4096];
@@ -3415,16 +3404,17 @@ static bool CatalogWriteOrderJson(const char *json, char *error, size_t error_ca
     return ok;
 }
 
-static void CatalogApplyOrderFile(PicoCatalogWorkspace *list, int count)
+static bool CatalogApplyOrder(sqlite3 *db, PicoCatalogWorkspace *list, int count)
 {
-    sqlite3 *db;
     sqlite3_stmt *stmt = NULL;
-    if (!list || count < 2 || !(db = CatalogDbOpen())) return;
-    if (CatalogDbPrepare(db, &stmt, "SELECT path,position FROM workspace_order ORDER BY position"))
+    if (!list || count < 2) return true;
+    bool ok = CatalogDbPrepare(db, &stmt, "SELECT path,position FROM workspace_order ORDER BY position");
+    if (ok)
     {
         for (int i = 0; i < count; i++) list[i].order = count + i;
         int index = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW)
+        int rc;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
         {
             const char *path = CatalogDbText(stmt, 0);
             for (int j = 0; j < count; j++)
@@ -3433,10 +3423,11 @@ static void CatalogApplyOrderFile(PicoCatalogWorkspace *list, int count)
                     list[j].order = index;
             index++;
         }
-        qsort(list, (size_t)count, sizeof(*list), CmpCatalogOrder);
+        ok = rc == SQLITE_DONE;
+        if (ok) qsort(list, (size_t)count, sizeof(*list), CmpCatalogOrder);
     }
     sqlite3_finalize(stmt);
-    sqlite3_close(db);
+    return ok;
 }
 
 static void CatalogClearSessions(PicoCatalogWorkspace *ws)
@@ -4147,18 +4138,17 @@ static bool CatalogDbSeed(sqlite3 *db, const char *path)
 static bool CatalogDbReadProject(sqlite3 *db, const char *path, PicoCatalogWorkspace *ws)
 {
     sqlite3_stmt *stmt = NULL;
-    bool found = false;
     if (!CatalogDbPrepare(db, &stmt, "SELECT name,stashed FROM projects WHERE path=?")) return false;
     sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) == SQLITE_ROW)
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW)
     {
         if (CatalogDbText(stmt, 0)[0])
             snprintf(ws->name, sizeof(ws->name), "%s", CatalogDbText(stmt, 0));
         ws->stashed = sqlite3_column_int(stmt, 1) != 0;
-        found = true;
     }
     sqlite3_finalize(stmt);
-    return found;
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
 }
 
 static int CmpCatalogOrder(const void *a, const void *b)
@@ -4448,20 +4438,17 @@ static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
                               previous_stat);
 }
 
-static bool CatalogScanDir(const char *dir, const char *key, PicoCatalogWorkspace *out,
+static bool CatalogScanDir(sqlite3 *db, const char *dir, const char *key, PicoCatalogWorkspace *out,
                            const atomic_bool *cancelled, int session_limit, bool *failed)
 {
     PicoCatalogWorkspace ws = {0};
     PicoSessionInfo *rows = NULL;
-    sqlite3 *db;
     int lock_fd, count;
     bool ok = false;
     if (failed) *failed = false;
     if (!dir || !key || !out || CatalogCancelled(cancelled)) return false;
     lock_fd = CatalogLockAcquire(dir);
     if (lock_fd < 0) { if (failed) *failed = true; return false; }
-    db = CatalogDbOpen();
-    if (!db) { if (failed) *failed = true; goto done; }
     int workspace_state = CatalogDbReadWorkspace(db, key, &ws);
     if (workspace_state < 0) { if (failed) *failed = true; goto done_db; }
     if (!workspace_state)
@@ -4528,15 +4515,13 @@ static bool CatalogScanDir(const char *dir, const char *key, PicoCatalogWorkspac
     ok = true;
 done_db:
     free(rows);
-    sqlite3_close(db);
-done:
     CatalogClearSessions(&ws);
     CatalogLockRelease(lock_fd);
     return ok;
 }
 
 /* limit <= 0 enumerates every catalog; project deletion must not truncate. */
-static int CatalogScanN(PicoCatalogWorkspace **out, int limit, const atomic_bool *cancelled, int session_limit)
+static int CatalogScanN(sqlite3 *db, PicoCatalogWorkspace **out, int limit, const atomic_bool *cancelled, int session_limit)
 {
 #ifdef PICO_SESSION_TEST_HOOKS
     (void)PicoSession_TestHook("catalog_scan");
@@ -4588,7 +4573,7 @@ static int CatalogScanN(PicoCatalogWorkspace **out, int limit, const atomic_bool
         if (!ent->d_name[0] || ent->d_name[0] == '.' ||
             !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, ent->d_name) ||
             stat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
-            !CatalogScanDir(dir, ent->d_name, &ws, cancelled, session_limit, &failed))
+            !CatalogScanDir(db, dir, ent->d_name, &ws, cancelled, session_limit, &failed))
         {
             if (failed)
             {
@@ -4603,7 +4588,9 @@ static int CatalogScanN(PicoCatalogWorkspace **out, int limit, const atomic_bool
         if (!next)
         {
             CatalogClearSessions(&ws);
-            break;
+            closedir(d);
+            PicoCatalog_Free(list, n);
+            return -1;
         }
         list = next;
         list[n++] = ws;
@@ -4621,7 +4608,11 @@ static int CatalogScanN(PicoCatalogWorkspace **out, int limit, const atomic_bool
     if (n > 1)
     {
         qsort(list, (size_t)n, sizeof(*list), CmpCatalogOrder);
-        CatalogApplyOrderFile(list, n);
+        if (!CatalogApplyOrder(db, list, n))
+        {
+            PicoCatalog_Free(list, n);
+            return -1;
+        }
     }
 #ifdef PICO_SESSION_TEST_HOOKS
     (void)PicoSession_TestHook("catalog_scan_done");
@@ -4632,7 +4623,13 @@ static int CatalogScanN(PicoCatalogWorkspace **out, int limit, const atomic_bool
 
 int PicoCatalog_Scan(PicoCatalogWorkspace **out)
 {
-    return CatalogScanN(out, PICO_MAX_CATALOG_WORKSPACES, NULL, PICO_MAX_CATALOG_SESSIONS);
+    if (out) *out = NULL;
+    if (!out) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    int count = CatalogScanN(db, out, PICO_MAX_CATALOG_WORKSPACES, NULL, PICO_MAX_CATALOG_SESSIONS);
+    sqlite3_close(db);
+    return count;
 }
 
 /* Pico-owned catalog root files: meta, sessions, and atomic-write residue
@@ -4770,7 +4767,10 @@ static int CatalogDeleteProjectLocked(PicoHost *host, const char *project)
         pthread_mutex_unlock(&host->persist_mu);
         if (busy) return -1;
     }
-    count = CatalogScanN(&leaves, 0, NULL, 0); /* deletion must see every checkout in the group */
+    sqlite3 *scan_db = CatalogDbOpen();
+    if (!scan_db) return -1;
+    count = CatalogScanN(scan_db, &leaves, 0, NULL, 0); /* deletion must see every checkout in the group */
+    sqlite3_close(scan_db);
     if (count < 0) return -1;
     int *locks = malloc((size_t)(count > 0 ? count : 1) * sizeof(*locks));
     if (!locks) { PicoCatalog_Free(leaves, count); return -1; }
@@ -4918,14 +4918,12 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
         "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree"
         " FROM sessions s JOIN workspaces w ON w.path=s.workspace_path"
         " WHERE s.project_path=? AND s.kind=0"
-        " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC LIMIT ?")) return false;
+        " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC")) return false;
     sqlite3_bind_text(stmt, 1, group->path, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 2, requested + 1);
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW && !CatalogCancelled(cancelled))
     {
         PicoCatalogSession row = {0};
-        if (group->session_count >= requested) { group->has_more_sessions = true; break; }
         snprintf(row.id, sizeof(row.id), "%s", CatalogDbText(stmt, 0));
         snprintf(row.title, sizeof(row.title), "%s", CatalogDbText(stmt, 1));
         snprintf(row.model, sizeof(row.model), "%s", CatalogDbText(stmt, 2));
@@ -4943,6 +4941,14 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
         row.worktree = sqlite3_column_int(stmt, 14) != 0;
         struct stat st;
         row.missing_checkout = stat(row.checkout_path, &st) != 0 || !S_ISDIR(st.st_mode);
+        if (row.missing_checkout && !row.worktree) continue;
+        char canonical[4096];
+        if (!row.missing_checkout &&
+            (!CanonicalWorkspacePath(row.checkout_path, canonical, sizeof(canonical)) ||
+             strcmp(canonical, row.checkout_path))) continue;
+        /* Count the look-ahead row only after filtering unavailable normal
+         * checkouts, so they cannot consume a page or its has-more indicator. */
+        if (group->session_count >= requested) { group->has_more_sessions = true; break; }
         if (!CatalogAppendSession(group, &row)) break;
     }
     bool ok = group->has_more_sessions || rc == SQLITE_DONE;
@@ -4950,14 +4956,14 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
     return ok;
 }
 
-int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+static int CatalogGroupSnapshot(sqlite3 *db, PicoCatalogWorkspace *leaves, int count,
+                                 PicoCatalogWorkspace **out, const atomic_bool *cancelled,
                                  const PicoCatalogPage *pages, int page_count)
 {
-    PicoCatalogWorkspace *leaves = NULL, *groups = NULL;
+    PicoCatalogWorkspace *groups = NULL;
     int group_count = 0;
     if (out) *out = NULL;
-    if (!out) return 0;
-    int count = CatalogScanN(&leaves, PICO_MAX_CATALOG_WORKSPACES, cancelled, 0);
+    if (!out) { PicoCatalog_Free(leaves, count); return 0; }
     if (CatalogCancelled(cancelled) || count < 0) { PicoCatalog_Free(leaves, count); return count < 0 ? -1 : 0; }
     for (int i = 0; i < count; i++)
     {
@@ -4969,7 +4975,12 @@ int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *
         if (gi < 0)
         {
             PicoCatalogWorkspace *next = realloc(groups, (size_t)(group_count + 1) * sizeof(*next));
-            if (!next) break;
+            if (!next)
+            {
+                PicoCatalog_Free(leaves, count);
+                PicoCatalog_Free(groups, group_count);
+                return -1;
+            }
             groups = next;
             gi = group_count++;
             memset(&groups[gi], 0, sizeof(groups[gi]));
@@ -4987,12 +4998,11 @@ int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *
     }
     PicoCatalog_Free(leaves, count);
     if (CatalogCancelled(cancelled)) { PicoCatalog_Free(groups, group_count); return 0; }
-    sqlite3 *db = CatalogDbOpen();
-    if (!db) { PicoCatalog_Free(groups, group_count); return -1; }
     bool failed = false;
     for (int i = 0; i < group_count; i++)
     {
-        CatalogProjectLoad(groups[i].path, &groups[i]);
+        if (!CatalogDbReadProject(db, groups[i].path, &groups[i]))
+        { failed = true; break; }
         int requested = 10;
         for (int j = 0; j < page_count; j++)
             if (!strcmp(pages[j].path, groups[i].path) && pages[j].shown > requested)
@@ -5001,12 +5011,84 @@ int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *
         if (!CatalogDbGroupRows(db, &groups[i], requested, cancelled))
         { failed = true; break; }
     }
-    sqlite3_close(db);
     if (failed) { PicoCatalog_Free(groups, group_count); return -1; }
     if (group_count > 1) qsort(groups, (size_t)group_count, sizeof(*groups), CmpCatalogOrder);
     if (CatalogCancelled(cancelled)) { PicoCatalog_Free(groups, group_count); return 0; }
     *out = groups;
     return group_count;
+}
+
+/* Snapshot reads never enumerate or reconcile transcripts. A read transaction
+ * keeps workspace preferences, project grouping and pages from one generation. */
+int PicoCatalog_ReadGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count)
+{
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_snapshot");
+#endif
+    PicoCatalogWorkspace *leaves = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int count = 0, rc = SQLITE_DONE, result = -1;
+    if (out) *out = NULL;
+    if (!out || CatalogCancelled(cancelled)) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    bool ok = CatalogDbExec(db, "BEGIN") && CatalogDbPrepare(db, &stmt,
+        "SELECT path,key,project_path,checkout_name,worktree,name,collapsed,ord"
+        " FROM workspaces ORDER BY ord,path");
+    while (ok && count < PICO_MAX_CATALOG_WORKSPACES &&
+           (rc = sqlite3_step(stmt)) == SQLITE_ROW && !CatalogCancelled(cancelled))
+    {
+        PicoCatalogWorkspace ws = {0};
+        char canonical[4096];
+        CatalogDbFillWorkspace(stmt, &ws);
+        if (!CanonicalWorkspacePath(ws.path, canonical, sizeof(canonical)))
+        {
+            if (!ws.worktree) continue;
+            ws.missing = true;
+        }
+        else if (strcmp(canonical, ws.path) != 0) continue;
+        if (!ws.name[0]) PathBasename(ws.path, ws.name, sizeof(ws.name));
+        if (!ws.checkout_name[0]) PathBasename(ws.path, ws.checkout_name, sizeof(ws.checkout_name));
+        PicoCatalogWorkspace *next = realloc(leaves, (size_t)(count + 1) * sizeof(*next));
+        if (!next) { ok = false; break; }
+        leaves = next;
+        leaves[count++] = ws;
+    }
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) ok = false;
+    sqlite3_finalize(stmt);
+    if (ok) ok = CatalogApplyOrder(db, leaves, count);
+    if (ok)
+    {
+        result = CatalogGroupSnapshot(db, leaves, count, out, cancelled, pages, page_count);
+        leaves = NULL;
+    }
+    PicoCatalog_Free(leaves, count);
+    if (!CatalogDbExec(db, "COMMIT"))
+    {
+        PicoCatalog_Free(*out, result);
+        *out = NULL;
+        result = -1;
+    }
+    sqlite3_close(db);
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_snapshot_done");
+#endif
+    return result;
+}
+
+int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count)
+{
+    PicoCatalogWorkspace *leaves = NULL;
+    if (out) *out = NULL;
+    if (!out || CatalogCancelled(cancelled)) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    int count = CatalogScanN(db, &leaves, PICO_MAX_CATALOG_WORKSPACES, cancelled, 0);
+    int result = CatalogGroupSnapshot(db, leaves, count, out, cancelled, pages, page_count);
+    sqlite3_close(db);
+    return result;
 }
 
 int PicoCatalog_ScanGroupedInterruptible(PicoCatalogWorkspace **out, const atomic_bool *cancelled)

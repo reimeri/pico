@@ -2426,6 +2426,68 @@ static int TestCatalogScanFailureKeepsIndexedSession(void)
     return 0;
 }
 
+static int TestCatalogSnapshotDoesNotReconcile(void)
+{
+    char config[] = "/tmp/pico-catalog-snapshot-cfg-XXXXXX";
+    char ws[] = "/tmp/pico-catalog-snapshot-ws-XXXXXX";
+    char original[4096];
+    PicoHost host = {0};
+    PicoWorkspace workspace = {0};
+    PicoAgent agent = {0};
+    PicoCatalogWorkspace *list = NULL;
+    int result = 1, n = 0;
+    const char *phase = "seed";
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(ws)) return Fail("snapshot fixture directories");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    workspace.host = &host;
+    snprintf(workspace.path, sizeof(workspace.path), "%s", ws);
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    agent.workspace = &workspace;
+    agent.persistence = PICO_SESSION_DURABLE;
+    if (PicoSession_LogUser(&host, &agent, "cached title", "cached title", NULL) !=
+        PICO_SESSION_WRITE_OK) goto done;
+    FILE *file = fopen(agent.session_path, "wb");
+    if (!file) goto done;
+    fprintf(file, "{\"type\":\"session\",\"version\":4,\"id\":\"%s\","
+                  "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"external title\"}\n",
+                  agent.session_id, ws);
+    fclose(file);
+    phase = "cached external title";
+    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    const PicoCatalogWorkspace *found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        strcmp(found->sessions[0].title, "cached title")) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    phase = "reconciled external title";
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        strcmp(found->sessions[0].title, "external title")) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    phase = "deleted transcript";
+    if (unlink(agent.session_path) != 0) goto done;
+    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 0) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    phase = "missing checkout";
+    if (rmdir(ws) != 0) goto done;
+    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    if (n != 0) goto done;
+    result = 0;
+done:
+    PicoCatalog_Free(list, n);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    if (result) fprintf(stderr, "snapshot test phase: %s\n", phase);
+    return result ? Fail("indexed snapshots must defer transcript changes to reconciliation and omit missing checkouts") : 0;
+}
+
 static int TestSidebarScanFailureKeepsIndexedSession(void)
 {
     char config[] = "/tmp/pico-sidebar-failed-scan-cfg-XXXXXX";
@@ -3639,6 +3701,7 @@ int main(void)
         TestProjectDeleteWaitsForCrossProcessWriter() != 0 ||
         TestCatalogScanFailureKeepsIndexedSession() != 0 ||
         TestSidebarScanFailureKeepsIndexedSession() != 0 ||
+        TestCatalogSnapshotDoesNotReconcile() != 0 ||
         TestCatalogDeleteRejectsSwappedCheckout() != 0 ||
         TestCatalogRejectsCollidingPaths() != 0 ||
         TestCatalogSQLiteImport() != 0 ||

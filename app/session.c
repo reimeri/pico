@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -30,13 +31,16 @@
 #include <unistd.h>
 
 static bool CatalogMetaPath(const char *dir, char *out, size_t cap);
-static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out);
+static int CatalogLockAcquire(const char *dir);
+static int CatalogDeletionGuardAcquire(char *error, size_t error_cap);
+static void CatalogDeletionGuardRelease(int fd);
+static void PathBasename(const char *path, char *out, size_t cap);
+static bool CatalogKeyFromPath(const char *path, char *out, size_t cap);
+static void CatalogLockRelease(int fd);
+static void CatalogRowFromFile(const char *path, PicoCatalogSession *row);
 static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap);
-static void CatalogProjectLoad(const char *project, PicoCatalogWorkspace *group);
 static int CmpCatalogOrder(const void *a, const void *b);
 static void CatalogClearSessions(PicoCatalogWorkspace *ws);
-static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
-                                                    const char *id);
 static void CatalogMarkChanged(void);
 static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
                                 const char *title_override, const char *event_json,
@@ -45,8 +49,22 @@ static void CatalogWriteThroughFields(PicoAgentKind kind, PicoSessionPersistence
                                       const char *session_id, const char *session_path,
                                       const char *ws_path, const char *title_override,
                                       const char *event_json, const struct stat *previous_stat);
+static sqlite3 *CatalogDbOpen(void);
+static bool CatalogDbExec(sqlite3 *db, const char *sql);
+static bool CatalogDbPrepare(sqlite3 *db, sqlite3_stmt **stmt, const char *sql);
+static const char *CatalogDbText(sqlite3_stmt *stmt, int column);
+static bool CatalogDbReadProject(sqlite3 *db, const char *path, PicoCatalogWorkspace *ws);
+static bool CatalogDbWorkspace(sqlite3 *db, const char *path, const char *key,
+                               const char *project, const char *checkout, bool worktree);
+static bool CatalogDbReconcileDir(sqlite3 *db, const char *dir, const char *workspace,
+                                  const atomic_bool *cancelled, bool force);
+static bool CatalogDbSeed(sqlite3 *db, const char *path);
+static int CatalogDbList(sqlite3 *db, const char *workspace, const char *search,
+                         PicoSessionInfo **out, bool parents_only, int maximum);
 static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent,
                                                  const char *json);
+static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent,
+                                                const char *title);
 static bool DrainPersistUiBound(PicoHost *app, PicoAgent *agent);
 #ifdef PICO_SESSION_TEST_HOOKS
 extern bool PicoSession_TestHook(const char *stage);
@@ -365,11 +383,6 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info, bool header
     }
 }
 
-typedef struct SessionListingRow {
-    PicoSessionInfo info;
-    bool cache_hit;
-} SessionListingRow;
-
 static long StatMtimeNsec(const struct stat *st)
 {
 #if defined(__APPLE__)
@@ -386,20 +399,6 @@ static long StatCtimeNsec(const struct stat *st)
 #else
     return st ? st->st_ctim.tv_nsec : 0;
 #endif
-}
-
-static void CopyStatToInfo(PicoSessionInfo *info, const struct stat *st)
-{
-    if (!info || !st)
-    {
-        return;
-    }
-    info->mtime = st->st_mtime;
-    info->mtime_nsec = StatMtimeNsec(st);
-    info->ctime = st->st_ctime;
-    info->ctime_nsec = StatCtimeNsec(st);
-    info->inode = (uint64_t)st->st_ino;
-    info->size = (uint64_t)st->st_size;
 }
 
 static void CopyStatToCatalog(PicoCatalogSession *session, const struct stat *st)
@@ -424,180 +423,30 @@ static bool CatalogGenerationMatches(const PicoCatalogSession *cached, const str
            cached->size == (uint64_t)st->st_size;
 }
 
-static int CmpListingMtimeDesc(const void *a, const void *b)
+static bool CatalogCancelled(const atomic_bool *cancelled)
 {
-    const SessionListingRow *x = (const SessionListingRow *)a;
-    const SessionListingRow *y = (const SessionListingRow *)b;
-    if (x->info.mtime > y->info.mtime)
-    {
-        return -1;
-    }
-    if (x->info.mtime < y->info.mtime)
-    {
-        return 1;
-    }
-    if (x->info.mtime_nsec > y->info.mtime_nsec)
-    {
-        return -1;
-    }
-    if (x->info.mtime_nsec < y->info.mtime_nsec)
-    {
-        return 1;
-    }
-    return strcmp(y->info.path, x->info.path);
-}
-
-static void CopyCacheToInfo(PicoSessionInfo *info, const PicoCatalogSession *cached,
-                            const struct stat *st)
-{
-    snprintf(info->id, sizeof(info->id), "%s", cached->id);
-    snprintf(info->title, sizeof(info->title), "%s", cached->title);
-    snprintf(info->model, sizeof(info->model), "%s", cached->model);
-    snprintf(info->effort, sizeof(info->effort), "%s", cached->effort);
-    info->kind = cached->kind;
-    CopyStatToInfo(info, st);
-    info->unseen_complete = cached->unseen_complete;
-}
-
-static int ListSessionsInDir(const char *dir, PicoSessionInfo **out, bool parents_only,
-                             const PicoCatalogWorkspace *cache, int max_results)
-{
-    SessionListingRow *rows = NULL;
-    PicoSessionInfo *list = NULL;
-    int n = 0;
-    int cap = 0;
-    int result_n;
-    struct dirent *ent;
-    DIR *d;
-    if (out)
-    {
-        *out = NULL;
-    }
-    if (!dir || !dir[0] || !out)
-    {
-        return 0;
-    }
-    d = opendir(dir);
-    if (!d)
-    {
-        return 0;
-    }
-    while ((ent = readdir(d)))
-    {
-        SessionListingRow *row;
-        const PicoCatalogSession *cached;
-        struct stat st;
-        if (!IsSessionJsonl(ent->d_name))
-        {
-            continue;
-        }
-        if (n >= cap)
-        {
-            int next_cap = cap == 0 ? 8 : cap * 2;
-            SessionListingRow *next =
-                (SessionListingRow *)realloc(rows, (size_t)next_cap * sizeof(*next));
-            if (!next)
-            {
-                break;
-            }
-            rows = next;
-            cap = next_cap;
-        }
-        row = &rows[n];
-        memset(row, 0, sizeof(*row));
-        if (!PicoPath_Format(row->info.path, sizeof(row->info.path), "%s/%s", dir, ent->d_name) ||
-            stat(row->info.path, &st) != 0 || !S_ISREG(st.st_mode))
-        {
-            continue;
-        }
-        CopyStatToInfo(&row->info, &st);
-        IdFromName(ent->d_name, row->info.id, sizeof(row->info.id));
-        cached = CatalogFindSession(cache, row->info.id);
-        if (CatalogGenerationMatches(cached, &st))
-        {
-            CopyCacheToInfo(&row->info, cached, &st);
-            row->cache_hit = true;
-        }
-        else
-        {
-            ScanSessionFile(row->info.path, &row->info, true);
-            CopyStatToInfo(&row->info, &st);
-        }
-        if (!row->info.id[0] ||
-            (parents_only && row->info.kind == PICO_AGENT_SUBAGENT))
-        {
-            continue;
-        }
-        n++;
-    }
-    closedir(d);
-    if (n > 1)
-    {
-        qsort(rows, (size_t)n, sizeof(*rows), CmpListingMtimeDesc);
-    }
-    result_n = max_results > 0 && n > max_results ? max_results : n;
-    if (result_n > 0)
-    {
-        list = (PicoSessionInfo *)malloc((size_t)result_n * sizeof(*list));
-        if (!list)
-        {
-            free(rows);
-            return 0;
-        }
-    }
-    for (int i = 0; i < result_n; i++)
-    {
-        list[i] = rows[i].info;
-        if (!rows[i].cache_hit)
-        {
-            PicoSessionInfo parsed;
-            memset(&parsed, 0, sizeof(parsed));
-            snprintf(parsed.path, sizeof(parsed.path), "%s", rows[i].info.path);
-            snprintf(parsed.id, sizeof(parsed.id), "%s", rows[i].info.id);
-            ScanSessionFile(rows[i].info.path, &parsed, false);
-            parsed.mtime = rows[i].info.mtime;
-            parsed.mtime_nsec = rows[i].info.mtime_nsec;
-            parsed.ctime = rows[i].info.ctime;
-            parsed.ctime_nsec = rows[i].info.ctime_nsec;
-            parsed.inode = rows[i].info.inode;
-            parsed.size = rows[i].info.size;
-            if (!parsed.id[0])
-            {
-                snprintf(parsed.id, sizeof(parsed.id), "%s", rows[i].info.id);
-            }
-            list[i] = parsed;
-        }
-    }
-    free(rows);
-    *out = list;
-    return result_n;
+    return cancelled && atomic_load(cancelled);
 }
 
 int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only)
 {
-    PicoCatalogWorkspace cache;
+    sqlite3 *db;
     char dir[4096];
-    char meta[4096];
-    int n;
-    if (out)
+    int n = 0;
+    if (out) *out = NULL;
+    if (!workspace || !out || !SessionDir(workspace, dir, sizeof(dir))) return 0;
+    db = CatalogDbOpen();
+    if (!db) return 0;
+    if (!CatalogDbSeed(db, PicoWorkspace_Path(workspace)))
+    { sqlite3_close(db); return 0; }
+    int lock = CatalogLockAcquire(dir);
+    if (lock >= 0)
     {
-        *out = NULL;
+        if (CatalogDbReconcileDir(db, dir, PicoWorkspace_Path(workspace), NULL, true))
+            n = CatalogDbList(db, PicoWorkspace_Path(workspace), NULL, out, parents_only, 0);
+        CatalogLockRelease(lock);
     }
-    if (!workspace || !out)
-    {
-        return 0;
-    }
-    if (!SessionDir(workspace, dir, sizeof(dir)))
-    {
-        return 0;
-    }
-    memset(&cache, 0, sizeof(cache));
-    if (CatalogMetaPath(dir, meta, sizeof(meta)))
-    {
-        (void)CatalogLoadMeta(meta, &cache);
-    }
-    n = ListSessionsInDir(dir, out, parents_only, &cache, 0);
-    CatalogClearSessions(&cache);
+    sqlite3_close(db);
     return n;
 }
 
@@ -728,6 +577,7 @@ static bool WriteLineAtPath(const char *session_path, const char *json, bool wri
     struct stat previous_stat;
     bool have_previous_stat = false;
     int lock_fd;
+    int deletion_fd = -1;
     if (!session_path || !session_path[0] || !json)
     {
         if (error && error_cap > 0)
@@ -736,10 +586,22 @@ static bool WriteLineAtPath(const char *session_path, const char *json, bool wri
         }
         return false;
     }
+    if (persistence == PICO_SESSION_DURABLE)
+    {
+        deletion_fd = CatalogDeletionGuardAcquire(error, error_cap);
+        if (deletion_fd < 0) return false;
+    }
     lock_fd = SessionLockAcquire(session_path, error, error_cap);
     if (lock_fd < 0)
     {
+        if (deletion_fd >= 0) CatalogDeletionGuardRelease(deletion_fd);
         return false;
+    }
+    /* An old agent must not recreate a session deleted by another process. */
+    if (write_catalog && access(session_path, F_OK) != 0)
+    {
+        failure = ENOENT;
+        goto finish;
     }
     int fd = open(session_path, O_WRONLY | O_APPEND | O_CREAT, 0600);
     off_t original_size = -1;
@@ -767,8 +629,12 @@ static bool WriteLineAtPath(const char *session_path, const char *json, bool wri
             failure = errno ? errno : EIO;
         }
     }
+finish:
     if (failure == 0 && write_catalog)
     {
+#ifdef PICO_SESSION_TEST_HOOKS
+        (void)PicoSession_TestHook("catalog_before_upsert");
+#endif
         CatalogWriteThroughFields(kind, persistence, session_id, session_path, workspace_path, NULL, json,
                                   have_previous_stat ? &previous_stat : NULL);
     }
@@ -777,6 +643,7 @@ static bool WriteLineAtPath(const char *session_path, const char *json, bool wri
         CatalogMarkChanged();
     }
     SessionLockRelease(lock_fd);
+    if (deletion_fd >= 0) CatalogDeletionGuardRelease(deletion_fd);
     if (failure != 0 && error && error_cap > 0)
     {
         snprintf(error, error_cap, "%s", strerror(failure));
@@ -1396,21 +1263,27 @@ typedef struct PicoSessionReplay {
     ReplayPreparedMessage *prepared;
 } PicoSessionReplay;
 
+static void ReplayReleaseRecord(PicoSessionReplay *replay, int i)
+{
+    JsonFree(&replay->docs[i]);
+    free(replay->lines[i]);
+    replay->lines[i] = NULL;
+    if (replay->prepared)
+    {
+        ReplayPreparedMessage *item = &replay->prepared[i];
+        free(item->content);
+        free(item->display);
+        free(item->rendered);
+        MdDocument_Free(&item->doc);
+        memset(item, 0, sizeof(*item));
+    }
+}
+
 void PicoSession_ReplayFree(PicoSessionReplay *replay)
 {
     if (!replay) return;
     for (int i = 0; i < replay->count; i++)
-    {
-        JsonFree(&replay->docs[i]);
-        free(replay->lines[i]);
-        if (replay->prepared)
-        {
-            free(replay->prepared[i].content);
-            free(replay->prepared[i].display);
-            free(replay->prepared[i].rendered);
-            MdDocument_Free(&replay->prepared[i].doc);
-        }
-    }
+        ReplayReleaseRecord(replay, i);
     free(replay->docs);
     free(replay->lines);
     free(replay->prepared);
@@ -1671,6 +1544,12 @@ bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay 
         bool into_input = replay->last_compact < 0 || i >= replay->last_compact;
         ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group,
                    replay->prepared ? &replay->prepared[i] : NULL);
+        /* The final unmatched call is needed by ReplayFinish to append its
+         * interrupted result; every other record can be released now. */
+        if (i != replay->last_tool_call ||
+            replay->last_tool_call <= replay->last_tool_result ||
+            replay->tool_calls <= replay->tool_results)
+            ReplayReleaseRecord(replay, i);
     }
     replay->cursor = end;
     return end == replay->count;
@@ -2005,6 +1884,9 @@ static bool LoadedAddMessage(PicoMessage **messages, int *count, int *capacity,
     memset(msg, 0, sizeof(*msg));
     msg->role = role;
     msg->source = JsonDup(text ? text : "");
+    msg->source_len = msg->source ? strlen(msg->source) : 0;
+    msg->source_cap = msg->source ? msg->source_len + 1 : 0;
+    msg->revision = 1;
     return msg->source != NULL;
 }
 
@@ -2020,15 +1902,32 @@ static bool LoadedAppendAssistant(PicoMessage **messages, int *count, int *capac
         return true;
     }
     PicoMessage *msg = &(*messages)[*count - 1];
-    size_t old = msg->source ? strlen(msg->source) : 0;
+    size_t old = msg->source_len;
     size_t n = strlen(text);
-    char *next = (char *)realloc(msg->source, old + n + 1);
-    if (!next)
+    size_t need = old + n + 1;
+    if (need > msg->source_cap)
     {
-        return false;
+        size_t cap = msg->source_cap ? msg->source_cap : 16;
+        char *grown;
+        while (cap < need)
+        {
+            if (cap > (size_t)-1 / 2)
+            {
+                return false;
+            }
+            cap *= 2;
+        }
+        grown = (char *)realloc(msg->source, cap);
+        if (!grown)
+        {
+            return false;
+        }
+        msg->source = grown;
+        msg->source_cap = cap;
     }
-    memcpy(next + old, text, n + 1);
-    msg->source = next;
+    memcpy(msg->source + old, text, n + 1);
+    msg->source_len = old + n;
+    msg->revision++;
     return true;
 }
 
@@ -2376,43 +2275,82 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
     return 0;
 }
 
+int PicoSession_Search(const PicoWorkspace *workspace, const char *search,
+                       PicoSessionInfo **out, bool parents_only, int maximum)
+{
+    sqlite3 *db;
+    if (out) *out = NULL;
+    if (!workspace || !out || maximum < 1 || !(db = CatalogDbOpen())) return 0;
+    char dir[4096];
+    if (!SessionDir(workspace, dir, sizeof(dir)))
+    { sqlite3_close(db); return 0; }
+    int count = 0;
+    if (CatalogDbSeed(db, PicoWorkspace_Path(workspace)))
+    {
+        int lock = CatalogLockAcquire(dir);
+        if (lock >= 0)
+        {
+            if (CatalogDbReconcileDir(db, dir, PicoWorkspace_Path(workspace), NULL, false))
+                count = CatalogDbList(db, PicoWorkspace_Path(workspace), search,
+                                      out, parents_only, maximum);
+            CatalogLockRelease(lock);
+        }
+    }
+    sqlite3_close(db);
+    return count;
+}
+
 int PicoSession_Resolve(const PicoWorkspace *workspace, const char *id, bool allow_prefix,
                         char *path, size_t path_cap)
 {
-    if (!workspace || !id || !id[0] || !path || path_cap == 0)
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    char dir[4096], exact[4096] = {0};
+    bool ok = false;
+    if (!workspace || !id || !id[0] || !path || path_cap == 0 ||
+        !SessionDir(workspace, dir, sizeof(dir)) || !(db = CatalogDbOpen())) return -1;
+    if (!CatalogDbSeed(db, PicoWorkspace_Path(workspace)))
+    { sqlite3_close(db); return -1; }
+    /* Exact IDs must win regardless of the number of prefix matches. */
+    for (int attempt = 0; attempt < 2 && !ok; attempt++)
     {
-        return -1;
-    }
-    PicoSessionInfo *list = NULL;
-    int n = PicoSession_List(workspace, &list, false);
-    const PicoSessionInfo *found = NULL;
-    const PicoSessionInfo *prefix = NULL;
-    int prefix_hits = 0;
-    size_t id_len = strlen(id);
-    for (int i = 0; i < n; i++)
-    {
-        if (strcmp(list[i].id, id) == 0)
+        if (!CatalogDbPrepare(db, &stmt,
+            "SELECT file_path FROM sessions WHERE workspace_path=? AND id=?")) break;
+        sqlite3_bind_text(stmt, 1, PicoWorkspace_Path(workspace), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            snprintf(exact, sizeof(exact), "%s", CatalogDbText(stmt, 0));
+        sqlite3_finalize(stmt); stmt = NULL;
+        if (!exact[0] && allow_prefix && CatalogDbPrepare(db, &stmt,
+            "SELECT file_path FROM sessions WHERE workspace_path=? AND"
+            " substr(id,1,length(?))=? LIMIT 2"))
         {
-            found = &list[i];
-            break;
+            sqlite3_bind_text(stmt, 1, PicoWorkspace_Path(workspace), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 3, id, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+            {
+                snprintf(exact, sizeof(exact), "%s", CatalogDbText(stmt, 0));
+                if (sqlite3_step(stmt) == SQLITE_ROW) exact[0] = '\0';
+            }
+            sqlite3_finalize(stmt); stmt = NULL;
         }
-        if (allow_prefix && strncmp(list[i].id, id, id_len) == 0)
+        char canonical[4096];
+        ok = exact[0] && realpath(exact, canonical) && strlen(canonical) < path_cap;
+        if (ok) snprintf(path, path_cap, "%s", canonical);
+        if (!ok && attempt == 0)
         {
-            prefix = &list[i];
-            prefix_hits++;
+            exact[0] = '\0';
+            int lock = CatalogLockAcquire(dir);
+            if (lock >= 0)
+            {
+                (void)CatalogDbReconcileDir(db, dir, PicoWorkspace_Path(workspace), NULL, true);
+                CatalogLockRelease(lock);
+            }
         }
     }
-    if (!found && allow_prefix && prefix_hits == 1)
-    {
-        found = prefix;
-    }
-    char canonical[4096];
-    bool ok = found && realpath(found->path, canonical) && strlen(canonical) < path_cap;
-    if (ok)
-    {
-        snprintf(path, path_cap, "%s", canonical);
-    }
-    free(list);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
     return ok ? 0 : -1;
 }
 
@@ -2848,57 +2786,55 @@ static bool CopyRemainder(FILE *src, int fd)
     }
 }
 
-PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title)
+static bool RewriteSessionTitleAtPath(const char *session_path, const char *title,
+                                      PicoAgentKind kind, PicoSessionPersistence persistence,
+                                      const char *session_id, const char *workspace_path,
+                                      char *error, size_t error_cap)
 {
-    if (!app || !agent || !title || !title[0])
-    {
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (agent->persistence == PICO_SESSION_EPHEMERAL)
-    {
-        return PICO_SESSION_WRITE_SKIPPED;
-    }
-    /* The rewrite must not run while appends are still queued: they would
-     * land after the title event, out of call order. */
-    if (!DrainPersistUiBound(app, agent))
-    {
-        pico_status_warn(app, "Session writes are still pending; the title was not changed.");
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (agent->persistence == PICO_SESSION_FAILED)
-    {
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (!agent->session_path[0] && CreateNew(app, agent) != 0)
-    {
-        return PICO_SESSION_WRITE_FAILED;
-    }
-    if (!agent->session_path[0])
-    {
-        PersistenceFailed(app, agent, "session path was not created");
-        return PICO_SESSION_WRITE_FAILED;
-    }
-
-    char error[256] = {0};
-    int lock_fd = SessionLockAcquire(agent->session_path, error, sizeof(error));
-    if (lock_fd < 0)
-    {
-        PersistenceFailed(app, agent, error);
-        return PICO_SESSION_WRITE_FAILED;
-    }
-
+    char error_buf[256];
+    int lock_fd;
+    int deletion_fd = -1;
     int failure = 0;
     struct stat previous_stat;
-    bool have_previous_stat = stat(agent->session_path, &previous_stat) == 0;
+    bool have_previous_stat = false;
     bool renamed = false;
     FILE *src = NULL;
     char *header = NULL;
     char *event_line = NULL;
     int fd = -1;
-    char tmp_path[sizeof(agent->session_path) + 16];
-    tmp_path[0] = '\0';
+    char tmp_path[4096 + 16];
 
-    src = fopen(agent->session_path, "rb");
+    if (error && error_cap > 0)
+    {
+        error[0] = '\0';
+    }
+    if (!error || error_cap == 0)
+    {
+        error = error_buf;
+        error_cap = sizeof(error_buf);
+        error[0] = '\0';
+    }
+    tmp_path[0] = '\0';
+    if (!session_path || !session_path[0] || !title || !title[0])
+    {
+        snprintf(error, error_cap, "session path is missing");
+        return false;
+    }
+
+    if (persistence == PICO_SESSION_DURABLE)
+    {
+        deletion_fd = CatalogDeletionGuardAcquire(error, error_cap);
+        if (deletion_fd < 0) return false;
+    }
+    lock_fd = SessionLockAcquire(session_path, error, error_cap);
+    if (lock_fd < 0)
+    {
+        if (deletion_fd >= 0) CatalogDeletionGuardRelease(deletion_fd);
+        return false;
+    }
+
+    have_previous_stat = stat(session_path, &previous_stat) == 0;
+    src = fopen(session_path, "rb");
     if (!src)
     {
         failure = errno ? errno : EIO;
@@ -2945,7 +2881,7 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
         goto done;
     }
 
-    if ((size_t)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", agent->session_path) >= sizeof(tmp_path))
+    if ((size_t)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", session_path) >= sizeof(tmp_path))
     {
         failure = ENAMETOOLONG;
         goto done;
@@ -2970,13 +2906,13 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
         goto done;
     }
     fd = -1;
-    if (SessionTestFail("title_before_rename") || rename(tmp_path, agent->session_path) != 0)
+    if (SessionTestFail("title_before_rename") || rename(tmp_path, session_path) != 0)
     {
         failure = errno ? errno : EIO;
         goto done;
     }
     renamed = true;
-    if (SessionTestFail("title_dir_fsync") || !SyncParentDir(agent->session_path))
+    if (SessionTestFail("title_dir_fsync") || !SyncParentDir(session_path))
     {
         failure = errno ? errno : EIO;
         goto done;
@@ -2999,14 +2935,56 @@ done:
     }
     if (failure == 0 && renamed)
     {
-        CatalogWriteThrough(app, agent, title, NULL,
-                            have_previous_stat ? &previous_stat : NULL);
+        CatalogWriteThroughFields(kind, persistence, session_id, session_path, workspace_path, title, NULL,
+                                  have_previous_stat ? &previous_stat : NULL);
         CatalogMarkChanged();
     }
     SessionLockRelease(lock_fd);
+    if (deletion_fd >= 0) CatalogDeletionGuardRelease(deletion_fd);
     if (failure != 0)
     {
-        PersistenceFailed(app, agent, strerror(failure));
+        snprintf(error, error_cap, "%s", strerror(failure));
+        return false;
+    }
+    return true;
+}
+
+PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title)
+{
+    if (!app || !agent || !title || !title[0])
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (agent->persistence == PICO_SESSION_EPHEMERAL)
+    {
+        return PICO_SESSION_WRITE_SKIPPED;
+    }
+    /* With a persist thread, title rewrites queue behind earlier records so the
+     * UI never blocks on the session lock, transcript copy, or fsync. */
+    if (app->persist_ready)
+    {
+        return QueueSessionTitle(app, agent, title);
+    }
+    if (agent->persistence == PICO_SESSION_FAILED)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!agent->session_path[0] && CreateNew(app, agent) != 0)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!agent->session_path[0])
+    {
+        PersistenceFailed(app, agent, "session path was not created");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+
+    char error[256] = {0};
+    if (!RewriteSessionTitleAtPath(agent->session_path, title, agent->kind, agent->persistence,
+                                   agent->session_id, PicoWorkspace_Path(SessionWorkspace(app, agent)),
+                                   error, sizeof(error)))
+    {
+        PersistenceFailed(app, agent, error);
         return PICO_SESSION_WRITE_FAILED;
     }
     return PICO_SESSION_WRITE_OK;
@@ -3124,6 +3102,33 @@ static bool CatalogDirForPath(const char *workspace_path, char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/%s", root, key);
 }
 
+/* Held while a JSONL is written or a project is removed. File locks coordinate
+ * independent Pico processes; the mutex supplies the missing thread-level
+ * serialization (POSIX record locks are process-scoped). */
+static pthread_mutex_t g_catalog_deletion_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int CatalogDeletionGuardAcquire(char *error, size_t error_cap)
+{
+    char root[4096], path[4096];
+    if (!SessionsRoot(root, sizeof(root)) ||
+        !PicoPath_Format(path, sizeof(path), "%s/.catalog-deletion", root))
+    {
+        if (error && error_cap) snprintf(error, error_cap, "catalog deletion lock path is too long");
+        return -1;
+    }
+    Pico_MkdirP(root);
+    pthread_mutex_lock(&g_catalog_deletion_mu);
+    int fd = SessionLockAcquire(path, error, error_cap);
+    if (fd < 0) pthread_mutex_unlock(&g_catalog_deletion_mu);
+    return fd;
+}
+
+static void CatalogDeletionGuardRelease(int fd)
+{
+    SessionLockRelease(fd);
+    pthread_mutex_unlock(&g_catalog_deletion_mu);
+}
+
 static bool CatalogMetaPath(const char *dir, char *out, size_t cap)
 {
     return PicoPath_Format(out, cap, "%s/.workspace.json", dir);
@@ -3221,95 +3226,6 @@ static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
     return close(dfd) == 0;
 }
 
-static char *CatalogSerialize(const PicoCatalogWorkspace *ws)
-{
-    JsonBuf b;
-    int i;
-    if (!ws)
-    {
-        return NULL;
-    }
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"version\":1,\"key\":");
-    JsonBuf_String(&b, ws->key);
-    JsonBuf_Puts(&b, ",\"path\":");
-    JsonBuf_String(&b, ws->path);
-    JsonBuf_Puts(&b, ",\"project_path\":");
-    JsonBuf_String(&b, ws->project_path[0] ? ws->project_path : ws->path);
-    JsonBuf_Puts(&b, ",\"checkout_name\":");
-    JsonBuf_String(&b, ws->checkout_name);
-    JsonBuf_Puts(&b, ",\"worktree\":");
-    JsonBuf_Bool(&b, ws->worktree);
-    JsonBuf_Puts(&b, ",\"name\":");
-    JsonBuf_String(&b, ws->name);
-    JsonBuf_Puts(&b, ",\"order\":");
-    JsonBuf_Int(&b, ws->order);
-    JsonBuf_Puts(&b, ",\"collapsed\":");
-    JsonBuf_Bool(&b, ws->collapsed);
-    JsonBuf_Puts(&b, ",\"sessions\":[");
-    for (i = 0; i < ws->session_count; i++)
-    {
-        const PicoCatalogSession *s = &ws->sessions[i];
-        char number[32];
-        if (i > 0)
-        {
-            JsonBuf_Putc(&b, ',');
-        }
-        JsonBuf_Puts(&b, "{\"id\":");
-        JsonBuf_String(&b, s->id);
-        JsonBuf_Puts(&b, ",\"title\":");
-        JsonBuf_String(&b, s->title);
-        JsonBuf_Puts(&b, ",\"model\":");
-        JsonBuf_String(&b, s->model);
-        JsonBuf_Puts(&b, ",\"effort\":");
-        JsonBuf_String(&b, s->effort);
-        JsonBuf_Puts(&b, ",\"kind\":");
-        JsonBuf_String(&b, s->kind == PICO_AGENT_SUBAGENT ? "subagent" : "normal");
-        JsonBuf_Puts(&b, ",\"mtime\":");
-        snprintf(number, sizeof(number), "%lld", (long long)s->mtime);
-        JsonBuf_Puts(&b, number);
-        JsonBuf_Puts(&b, ",\"mtime_nsec\":");
-        snprintf(number, sizeof(number), "%ld", s->mtime_nsec);
-        JsonBuf_Puts(&b, number);
-        JsonBuf_Puts(&b, ",\"ctime\":");
-        snprintf(number, sizeof(number), "%lld", (long long)s->ctime);
-        JsonBuf_Puts(&b, number);
-        JsonBuf_Puts(&b, ",\"ctime_nsec\":");
-        snprintf(number, sizeof(number), "%ld", s->ctime_nsec);
-        JsonBuf_Puts(&b, number);
-        JsonBuf_Puts(&b, ",\"inode\":");
-        snprintf(number, sizeof(number), "%llu", (unsigned long long)s->inode);
-        JsonBuf_Puts(&b, number);
-        JsonBuf_Puts(&b, ",\"size\":");
-        snprintf(number, sizeof(number), "%llu", (unsigned long long)s->size);
-        JsonBuf_Puts(&b, number);
-        JsonBuf_Puts(&b, ",\"unseen_complete\":");
-        JsonBuf_Bool(&b, s->unseen_complete);
-        JsonBuf_Putc(&b, '}');
-    }
-    JsonBuf_Puts(&b, "]}");
-    return JsonBuf_Steal(&b);
-}
-
-static bool CatalogWrite(const PicoCatalogWorkspace *ws, const char *dir)
-{
-    char meta[4096];
-    char *json;
-    bool ok;
-    if (!ws || !CatalogMetaPath(dir, meta, sizeof(meta)))
-    {
-        return false;
-    }
-    json = CatalogSerialize(ws);
-    if (!json)
-    {
-        return false;
-    }
-    ok = CatalogAtomicWrite(meta, json, strlen(json));
-    free(json);
-    return ok;
-}
-
 static bool CatalogChangeTokenPath(char *out, size_t cap)
 {
     char root[4096];
@@ -3366,16 +3282,6 @@ static void CatalogMarkChanged(void)
     }
 }
 
-static bool CatalogWriteChanged(const PicoCatalogWorkspace *ws, const char *dir)
-{
-    if (!CatalogWrite(ws, dir))
-    {
-        return false;
-    }
-    CatalogMarkChanged();
-    return true;
-}
-
 /* Project-level presentation survives even when only linked worktrees have catalogs. */
 static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
 {
@@ -3385,62 +3291,32 @@ static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/.project-%s.json", root, key);
 }
 
-static void CatalogProjectLoad(const char *project, PicoCatalogWorkspace *group)
-{
-    char path[4096];
-    size_t len = 0;
-    char *raw;
-    JsonDoc doc;
-    if (!CatalogProjectMetaPath(project, path, sizeof(path)) || !(raw = Pico_ReadFile(path, &len))) return;
-    if (JsonParse(&doc, raw, len) == 0)
-    {
-        if (JsonIsObject(&doc, 0))
-        {
-            char *name = JsonObjStr(&doc, 0, "name");
-            char *identity = JsonObjStr(&doc, 0, "path");
-            if (identity && strcmp(identity, project) == 0)
-            {
-                if (name && name[0]) snprintf(group->name, sizeof(group->name), "%s", name);
-                group->stashed = JsonEq(&doc, JsonObjGet(&doc, 0, "stashed"), "true");
-            }
-            free(name);
-            free(identity);
-        }
-        JsonFree(&doc);
-    }
-    free(raw);
-}
-
 static int CatalogProjectUpdate(const char *project, const char *name, int stash)
 {
-    char path[4096], canonical[4096], root[4096];
-    char error[256];
-    PicoCatalogWorkspace group = {0};
-    JsonBuf b;
-    int fd;
+    char canonical[4096];
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
     bool ok;
     if (!project || project[0] != '/' ||
         (CanonicalWorkspacePath(project, canonical, sizeof(canonical)) && strcmp(project, canonical) != 0) ||
-        !CatalogProjectMetaPath(project, path, sizeof(path)) ||
-        !SessionsRoot(root, sizeof(root))) return -1;
-    Pico_MkdirP(root);
-    fd = CatalogFileLockAcquire(path, error, sizeof(error));
-    if (fd < 0) return -1;
-    CatalogProjectLoad(project, &group);
-    if (name) snprintf(group.name, sizeof(group.name), "%s", name);
-    if (stash >= 0) group.stashed = stash != 0;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"path\":");
-    JsonBuf_String(&b, project);
-    JsonBuf_Puts(&b, ",\"name\":");
-    JsonBuf_String(&b, group.name);
-    JsonBuf_Puts(&b, ",\"stashed\":");
-    JsonBuf_Bool(&b, group.stashed);
-    JsonBuf_Puts(&b, "}\n");
-    ok = b.data && CatalogAtomicWrite(path, b.data, b.len);
-    JsonBuf_Free(&b);
+        !(db = CatalogDbOpen())) return -1;
+    sqlite3_busy_timeout(db, 30);
+    ok = CatalogDbPrepare(db, &stmt,
+        "INSERT INTO projects(path,name,stashed) VALUES(?,?,?)"
+        " ON CONFLICT(path) DO UPDATE SET name=CASE WHEN ? THEN excluded.name ELSE projects.name END,"
+        "stashed=CASE WHEN ? THEN excluded.stashed ELSE projects.stashed END");
+    if (ok)
+    {
+        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, name ? name : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, stash > 0);
+        sqlite3_bind_int(stmt, 4, name != NULL);
+        sqlite3_bind_int(stmt, 5, stash >= 0);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
     if (ok) CatalogMarkChanged();
-    CatalogLockRelease(fd);
     return ok ? 0 : -1;
 }
 
@@ -3455,13 +3331,6 @@ int PicoCatalog_SetProjectName(const char *project, const char *name)
 int PicoCatalog_SetProjectStashed(const char *project, bool stashed)
 {
     return CatalogProjectUpdate(project, NULL, stashed ? 1 : 0);
-}
-
-static bool CatalogOrderPath(char *out, size_t cap)
-{
-    char root[4096];
-    return SessionsRoot(root, sizeof(root)) &&
-           PicoPath_Format(out, cap, "%s/.workspace-order.json", root);
 }
 
 static char *CatalogOrderSerialize(const PicoCatalogWorkspace *workspaces, int count)
@@ -3488,108 +3357,77 @@ static char *CatalogOrderSerialize(const PicoCatalogWorkspace *workspaces, int c
 
 static bool CatalogWriteOrderJson(const char *json, char *error, size_t error_cap)
 {
-    char root[4096];
-    char path[4096];
-    int lock_fd;
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    JsonDoc doc;
     bool ok;
-    if (!json || !json[0] || !SessionsRoot(root, sizeof(root)) ||
-        !PicoPath_Format(path, sizeof(path), "%s/.workspace-order.json", root))
+    if (!json || !json[0] || JsonParse(&doc, json, strlen(json)) != 0)
     {
-        snprintf(error, error_cap, "catalog order path is too long");
+        snprintf(error, error_cap, "invalid workspace order");
         return false;
     }
-    Pico_MkdirP(root);
-    if (SessionTestFail("catalog_order_before_write"))
+    int items = JsonObjGet(&doc, 0, "workspaces");
+    ok = JsonIsArray(&doc, items);
+#ifdef PICO_SESSION_TEST_HOOKS
+    if (ok && PicoSession_TestHook("catalog_order_before_write")) ok = false;
+#endif
+    if (ok && (db = CatalogDbOpen()))
+        ok = CatalogDbExec(db, "BEGIN IMMEDIATE") &&
+             CatalogDbExec(db, "DELETE FROM workspace_order") &&
+             CatalogDbPrepare(db, &stmt, "INSERT INTO workspace_order(path,position) VALUES(?,?)");
+    else ok = false;
+    for (int i = 0; ok && i < JsonArrayLen(&doc, items); i++)
     {
-        snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
-        return false;
+        char *path = JsonStrDup(&doc, JsonArrayAt(&doc, items, i));
+        if (!path) { ok = false; break; }
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, i);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+        free(path);
     }
-    lock_fd = CatalogFileLockAcquire(path, error, error_cap);
-    if (lock_fd < 0)
+    sqlite3_finalize(stmt);
+    if (db)
     {
-        return false;
+        if (ok) ok = CatalogDbExec(db, "COMMIT");
+        if (!ok)
+        {
+            snprintf(error, error_cap, "%s", sqlite3_errmsg(db));
+            CatalogDbExec(db, "ROLLBACK");
+        }
+        sqlite3_close(db);
     }
-    ok = CatalogAtomicWrite(path, json, strlen(json));
-    if (ok)
-    {
-        CatalogMarkChanged();
-    }
-    if (!ok && error && error_cap > 0 && !error[0])
-    {
-        snprintf(error, error_cap, "%s", strerror(errno ? errno : EIO));
-    }
-    CatalogLockRelease(lock_fd);
+    else if (!ok) snprintf(error, error_cap, "could not open catalog database");
+    JsonFree(&doc);
+    if (ok) CatalogMarkChanged();
     return ok;
 }
 
-static void CatalogApplyOrderFile(PicoCatalogWorkspace *list, int count)
+static bool CatalogApplyOrder(sqlite3 *db, PicoCatalogWorkspace *list, int count)
 {
-    char path[4096];
-    char error[256];
-    char *raw;
-    size_t raw_len = 0;
-    JsonDoc doc;
-    int workspaces;
-    int order_count;
-    int lock_fd;
-    int i;
-    if (!list || count <= 1 || !CatalogOrderPath(path, sizeof(path)))
+    sqlite3_stmt *stmt = NULL;
+    if (!list || count < 2) return true;
+    bool ok = CatalogDbPrepare(db, &stmt, "SELECT path,position FROM workspace_order ORDER BY position");
+    if (ok)
     {
-        return;
-    }
-    error[0] = '\0';
-    lock_fd = CatalogFileLockAcquire(path, error, sizeof(error));
-    if (lock_fd < 0)
-    {
-        return;
-    }
-    raw = Pico_ReadFile(path, &raw_len);
-    CatalogLockRelease(lock_fd);
-    if (!raw)
-    {
-        return;
-    }
-    if (JsonParse(&doc, raw, raw_len) != 0)
-    {
-        free(raw);
-        return;
-    }
-    workspaces = JsonObjGet(&doc, 0, "workspaces");
-    order_count = JsonArrayLen(&doc, workspaces);
-    if (!JsonIsObject(&doc, 0) || JsonObjInt(&doc, 0, "version", 0) != 1 ||
-        !JsonIsArray(&doc, workspaces) || order_count < 0 ||
-        order_count > PICO_MAX_CATALOG_WORKSPACES)
-    {
-        JsonFree(&doc);
-        free(raw);
-        return;
-    }
-    for (i = 0; i < count; i++)
-    {
-        list[i].order = order_count + i;
-    }
-    for (i = 0; i < order_count; i++)
-    {
-        char *ordered_path = JsonStrDup(&doc, JsonArrayAt(&doc, workspaces, i));
-        int j;
-        if (!ordered_path)
+        for (int i = 0; i < count; i++) list[i].order = count + i;
+        int index = 0;
+        int rc;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
         {
-            continue;
+            const char *path = CatalogDbText(stmt, 0);
+            for (int j = 0; j < count; j++)
+                if (list[j].order >= count &&
+                    (!strcmp(list[j].path, path) || !strcmp(list[j].project_path, path)))
+                    list[j].order = index;
+            index++;
         }
-        for (j = 0; j < count; j++)
-        {
-            if (list[j].order >= order_count &&
-                (strcmp(list[j].path, ordered_path) == 0 ||
-                 (list[j].project_path[0] && strcmp(list[j].project_path, ordered_path) == 0)))
-            {
-                list[j].order = i;
-            }
-        }
-        free(ordered_path);
+        ok = rc == SQLITE_DONE;
+        if (ok) qsort(list, (size_t)count, sizeof(*list), CmpCatalogOrder);
     }
-    JsonFree(&doc);
-    free(raw);
-    qsort(list, (size_t)count, sizeof(*list), CmpCatalogOrder);
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 static void CatalogClearSessions(PicoCatalogWorkspace *ws)
@@ -3601,231 +3439,716 @@ static void CatalogClearSessions(PicoCatalogWorkspace *ws)
     free(ws->sessions);
     ws->sessions = NULL;
     ws->session_count = 0;
+    ws->session_capacity = 0;
 }
 
-static bool CatalogCopySession(PicoCatalogWorkspace *ws, const PicoCatalogSession *src)
+static bool CatalogGrowSessions(PicoCatalogWorkspace *ws, int need)
 {
     PicoCatalogSession *next;
-    if (!ws || !src || !src->id[0] || ws->session_count >= PICO_MAX_CATALOG_SESSIONS)
+    int cap;
+    if (!ws)
     {
         return false;
     }
-    next = (PicoCatalogSession *)realloc(ws->sessions,
-                                         (size_t)(ws->session_count + 1) * sizeof(*next));
+    if (need <= ws->session_capacity)
+    {
+        return true;
+    }
+    cap = ws->session_capacity > 0 ? ws->session_capacity : 8;
+    while (cap < need)
+    {
+        if (cap > INT_MAX / 2)
+        {
+            return false;
+        }
+        cap *= 2;
+    }
+    next = (PicoCatalogSession *)realloc(ws->sessions, (size_t)cap * sizeof(*next));
     if (!next)
     {
         return false;
     }
     ws->sessions = next;
-    ws->sessions[ws->session_count] = *src;
-    ws->session_count++;
+    ws->session_capacity = cap;
     return true;
 }
 
-static const PicoCatalogSession *CatalogFindSession(const PicoCatalogWorkspace *ws,
-                                                    const char *id)
+static bool CatalogAppendSession(PicoCatalogWorkspace *ws, const PicoCatalogSession *src)
 {
-    int i;
-    if (!ws || !id || !id[0])
+    if (!ws || !src || !src->id[0])
     {
+        return false;
+    }
+    if (!CatalogGrowSessions(ws, ws->session_count + 1))
+    {
+        return false;
+    }
+    ws->sessions[ws->session_count++] = *src;
+    return true;
+}
+
+/* SQLite is the catalog's index and presentation store. JSONL remains the
+ * durable source of session contents. Each operation owns its own connection. */
+static bool CatalogDbExec(sqlite3 *db, const char *sql)
+{
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool CatalogDbPrepare(sqlite3 *db, sqlite3_stmt **stmt, const char *sql)
+{
+    return sqlite3_prepare_v2(db, sql, -1, stmt, NULL) == SQLITE_OK;
+}
+
+static const char *CatalogDbText(sqlite3_stmt *stmt, int column)
+{
+    const unsigned char *value = sqlite3_column_text(stmt, column);
+    return value ? (const char *)value : "";
+}
+
+static bool CatalogDbImportWorkspace(sqlite3 *db, const char *dir, const char *key)
+{
+    char path[4096];
+    char *raw;
+    size_t len = 0;
+    JsonDoc doc;
+    sqlite3_stmt *stmt = NULL;
+    bool ok;
+    if (!CatalogMetaPath(dir, path, sizeof(path))) return false;
+    raw = Pico_ReadFile(path, &len);
+    if (!raw) return errno == ENOENT;
+    if (JsonParse(&doc, raw, len) != 0) { free(raw); return false; }
+    char *ws_path = JsonObjStr(&doc, 0, "path");
+    char *project = JsonObjStr(&doc, 0, "project_path");
+    char *checkout = JsonObjStr(&doc, 0, "checkout_name");
+    char *name = JsonObjStr(&doc, 0, "name");
+    ok = ws_path && ws_path[0] && JsonIsObject(&doc, 0) &&
+         CatalogDbPrepare(db, &stmt,
+             "INSERT INTO workspaces(path,key,project_path,checkout_name,worktree,name,collapsed,ord)"
+             " VALUES(?,?,?,?,?,?,?,?)");
+    if (ok)
+    {
+        sqlite3_bind_text(stmt, 1, ws_path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, project && project[0] ? project : ws_path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, checkout ? checkout : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 5, JsonEq(&doc, JsonObjGet(&doc, 0, "worktree"), "true"));
+        sqlite3_bind_text(stmt, 6, name ? name : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 7, JsonEq(&doc, JsonObjGet(&doc, 0, "collapsed"), "true"));
+        sqlite3_bind_int(stmt, 8, JsonObjInt(&doc, 0, "order", 0));
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt);
+    free(ws_path); free(project); free(checkout); free(name);
+    JsonFree(&doc);
+    free(raw);
+    return ok;
+}
+
+static bool CatalogDbImportProject(sqlite3 *db, const char *path)
+{
+    char *raw;
+    size_t len = 0;
+    JsonDoc doc;
+    sqlite3_stmt *stmt = NULL;
+    bool ok;
+    raw = Pico_ReadFile(path, &len);
+    if (!raw) return false;
+    if (JsonParse(&doc, raw, len) != 0) { free(raw); return false; }
+    char *project = JsonObjStr(&doc, 0, "path");
+    char *name = JsonObjStr(&doc, 0, "name");
+    ok = project && project[0] && JsonIsObject(&doc, 0) &&
+         CatalogDbPrepare(db, &stmt, "INSERT INTO projects(path,name,stashed) VALUES(?,?,?)");
+    if (ok)
+    {
+        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, name ? name : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, JsonEq(&doc, JsonObjGet(&doc, 0, "stashed"), "true"));
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt);
+    free(project); free(name); JsonFree(&doc); free(raw);
+    return ok;
+}
+
+static bool CatalogDbImportOrder(sqlite3 *db, const char *root)
+{
+    char path[4096];
+    size_t len = 0;
+    char *raw;
+    JsonDoc doc;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = true;
+    if (!PicoPath_Format(path, sizeof(path), "%s/.workspace-order.json", root)) return false;
+    raw = Pico_ReadFile(path, &len);
+    if (!raw) return errno == ENOENT;
+    if (JsonParse(&doc, raw, len) != 0) { free(raw); return false; }
+    int items = JsonObjGet(&doc, 0, "workspaces");
+    if (!JsonIsArray(&doc, items)) ok = false;
+    if (ok) ok = CatalogDbPrepare(db, &stmt, "INSERT OR REPLACE INTO workspace_order(path,position) VALUES(?,?)");
+    for (int i = 0; ok && i < JsonArrayLen(&doc, items); i++)
+    {
+        char *name = JsonStrDup(&doc, JsonArrayAt(&doc, items, i));
+        if (!name) { ok = false; break; }
+        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, i);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+        free(name);
+    }
+    sqlite3_finalize(stmt); JsonFree(&doc); free(raw);
+    return ok;
+}
+
+static bool CatalogDbImport(sqlite3 *db, const char *root)
+{
+    DIR *d = opendir(root);
+    struct dirent *ent;
+    bool ok = d != NULL;
+    if (!ok) return false;
+    while (ok)
+    {
+        errno = 0;
+        ent = readdir(d);
+        if (!ent) { if (errno != 0) ok = false; break; }
+        char path[4096];
+        struct stat st;
+        if (ent->d_name[0] != '.')
+        {
+            if (PicoPath_Format(path, sizeof(path), "%s/%s", root, ent->d_name) &&
+                lstat(path, &st) == 0 && S_ISDIR(st.st_mode))
+                ok = CatalogDbImportWorkspace(db, path, ent->d_name);
+        }
+        else if (strncmp(ent->d_name, ".project-", 9) == 0 &&
+                 strlen(ent->d_name) > 14 &&
+                 strcmp(ent->d_name + strlen(ent->d_name) - 5, ".json") == 0)
+        {
+            if (PicoPath_Format(path, sizeof(path), "%s/%s", root, ent->d_name))
+                ok = CatalogDbImportProject(db, path);
+        }
+    }
+    closedir(d);
+    return ok && CatalogDbImportOrder(db, root);
+}
+
+static pthread_mutex_t g_catalog_retire_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_catalog_retired_root[4096];
+
+static void CatalogDbRetireLegacy(const char *root)
+{
+    pthread_mutex_lock(&g_catalog_retire_mu);
+    if (strcmp(g_catalog_retired_root, root) == 0)
+    {
+        pthread_mutex_unlock(&g_catalog_retire_mu);
+        return;
+    }
+    DIR *d = opendir(root);
+    if (!d) { pthread_mutex_unlock(&g_catalog_retire_mu); return; }
+    struct dirent *ent;
+    while ((ent = readdir(d)))
+    {
+        char path[4096];
+        struct stat st;
+        if (!PicoPath_Format(path, sizeof(path), "%s/%s", root, ent->d_name)) continue;
+        if (ent->d_name[0] != '.')
+        {
+            if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            char old_meta[4096];
+            if (CatalogMetaPath(path, old_meta, sizeof(old_meta))) (void)unlink(old_meta);
+        }
+        else if (!strcmp(ent->d_name, ".workspace-order.json") ||
+                 (strncmp(ent->d_name, ".project-", 9) == 0 &&
+                  strlen(ent->d_name) > 14 &&
+                  strcmp(ent->d_name + strlen(ent->d_name) - 5, ".json") == 0))
+            (void)unlink(path);
+    }
+    closedir(d);
+    snprintf(g_catalog_retired_root, sizeof(g_catalog_retired_root), "%s", root);
+    pthread_mutex_unlock(&g_catalog_retire_mu);
+}
+
+static bool CatalogDbMarkInstalled(const char *root)
+{
+    char marker[4096];
+    if (!PicoPath_Format(marker, sizeof(marker), "%s/.catalog-installed", root)) return false;
+    return access(marker, F_OK) == 0 || CatalogAtomicWrite(marker, "1\n", 2);
+}
+
+enum { CATALOG_DB_VERSION = 2 };
+
+static sqlite3 *CatalogDbOpenUnlocked(void)
+{
+    char root[4096], path[4096], marker[4096], version_sql[64];
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int version = 0;
+    if (!SessionsRoot(root, sizeof(root)) ||
+        !PicoPath_Format(path, sizeof(path), "%s/.catalog.sqlite3", root) ||
+        !PicoPath_Format(marker, sizeof(marker), "%s/.catalog-installed", root)) return NULL;
+    Pico_MkdirP(root);
+    if (access(path, F_OK) != 0 && access(marker, F_OK) == 0)
+    {
+        fprintf(stderr, "Pico catalog database is missing: %s (preferences not reset)\n", path);
         return NULL;
     }
-    for (i = 0; i < ws->session_count; i++)
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                       SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) goto fail;
+    sqlite3_busy_timeout(db, 1000);
+    if (!CatalogDbExec(db, "PRAGMA foreign_keys=ON") ||
+        !CatalogDbPrepare(db, &stmt, "PRAGMA user_version")) goto fail;
+    if (sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (version == CATALOG_DB_VERSION)
     {
-        if (strcmp(ws->sessions[i].id, id) == 0)
-        {
-            return &ws->sessions[i];
-        }
+        if (!CatalogDbMarkInstalled(root))
+        { fprintf(stderr, "Could not mark Pico catalog installation in %s\n", root); goto fail; }
+        CatalogDbRetireLegacy(root);
+        return db;
+    }
+    if (version != 0) goto incompatible;
+    if (access(marker, F_OK) == 0)
+    {
+        fprintf(stderr, "Pico catalog database lost its schema: %s (preferences not reset)\n", path);
+        goto fail;
+    }
+    if (!CatalogDbExec(db, "PRAGMA journal_mode=WAL") ||
+        !CatalogDbExec(db, "BEGIN IMMEDIATE")) goto fail;
+    /* Another process may have completed initialization while BEGIN waited. */
+    if (!CatalogDbPrepare(db, &stmt, "PRAGMA user_version")) goto fail;
+    if (sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (version == CATALOG_DB_VERSION)
+    {
+        if (!CatalogDbExec(db, "COMMIT")) goto fail;
+        if (!CatalogDbMarkInstalled(root))
+        { fprintf(stderr, "Could not mark Pico catalog installation in %s\n", root); goto fail; }
+        CatalogDbRetireLegacy(root);
+        return db;
+    }
+    if (version != 0) goto incompatible;
+    snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", CATALOG_DB_VERSION);
+    bool ok = CatalogDbExec(db,
+        "CREATE TABLE workspaces("
+        "path TEXT PRIMARY KEY,key TEXT NOT NULL,project_path TEXT NOT NULL,"
+        "checkout_name TEXT NOT NULL,worktree INTEGER NOT NULL,name TEXT NOT NULL,"
+        "collapsed INTEGER NOT NULL,ord INTEGER NOT NULL,"
+        "last_reconcile INTEGER NOT NULL DEFAULT 0);"
+        "CREATE UNIQUE INDEX workspaces_key ON workspaces(key);"
+        "CREATE TABLE projects(path TEXT PRIMARY KEY,name TEXT NOT NULL,stashed INTEGER NOT NULL);"
+        "CREATE TABLE workspace_order(path TEXT PRIMARY KEY,position INTEGER NOT NULL);"
+        "CREATE TABLE sessions("
+        "workspace_path TEXT NOT NULL,project_path TEXT NOT NULL,id TEXT NOT NULL,file_path TEXT NOT NULL,"
+        "title TEXT NOT NULL,model TEXT NOT NULL,effort TEXT NOT NULL,kind INTEGER NOT NULL,"
+        "mtime INTEGER NOT NULL,mtime_nsec INTEGER NOT NULL,ctime INTEGER NOT NULL,"
+        "ctime_nsec INTEGER NOT NULL,inode INTEGER NOT NULL,size INTEGER NOT NULL,"
+        "unseen INTEGER NOT NULL,seen INTEGER NOT NULL DEFAULT 0,"
+        "PRIMARY KEY(workspace_path,id),"
+        "FOREIGN KEY(workspace_path) REFERENCES workspaces(path) ON DELETE CASCADE);"
+        "CREATE INDEX sessions_recent ON sessions(workspace_path,mtime DESC,mtime_nsec DESC,id DESC);"
+        "CREATE INDEX sessions_project_recent ON sessions(project_path,kind,mtime DESC,mtime_nsec DESC,id DESC);") &&
+        CatalogDbImport(db, root) && CatalogDbExec(db, version_sql) &&
+        CatalogDbExec(db, "COMMIT");
+    if (!ok)
+    {
+        fprintf(stderr, "Pico catalog initialization failed: %s\n", sqlite3_errmsg(db));
+        (void)CatalogDbExec(db, "ROLLBACK");
+        goto fail;
+    }
+    if (!CatalogDbMarkInstalled(root))
+    { fprintf(stderr, "Could not mark Pico catalog installation in %s\n", root); goto fail; }
+    CatalogDbRetireLegacy(root);
+    return db;
+incompatible:
+    fprintf(stderr, "Pico catalog database has incompatible schema version %d (expected %d): %s "
+                    "(preferences not reset)\n", version, CATALOG_DB_VERSION, path);
+fail:
+    sqlite3_finalize(stmt);
+    if (db)
+    {
+        if (sqlite3_errcode(db) != SQLITE_OK)
+            fprintf(stderr, "Pico catalog database %s: %s\n", path, sqlite3_errmsg(db));
+        sqlite3_close(db);
     }
     return NULL;
 }
 
-static bool CatalogSessionEqual(const PicoCatalogSession *a, const PicoCatalogSession *b)
+/* sqlite3's first WAL-mode transition can briefly lock other first opens.
+ * Serialize schema/open setup between host and catalog workers in this process. */
+static pthread_mutex_t g_catalog_open_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static sqlite3 *CatalogDbOpen(void)
 {
-    return a && b && strcmp(a->id, b->id) == 0 && strcmp(a->title, b->title) == 0 &&
-           strcmp(a->model, b->model) == 0 && strcmp(a->effort, b->effort) == 0 &&
-           a->mtime == b->mtime && a->mtime_nsec == b->mtime_nsec && a->ctime == b->ctime &&
-           a->ctime_nsec == b->ctime_nsec && a->inode == b->inode && a->size == b->size &&
-           a->unseen_complete == b->unseen_complete && a->kind == b->kind;
+    pthread_mutex_lock(&g_catalog_open_mu);
+    sqlite3 *db = CatalogDbOpenUnlocked();
+    pthread_mutex_unlock(&g_catalog_open_mu);
+    return db;
 }
 
-static bool CatalogSessionsMatch(const PicoCatalogWorkspace *a, const PicoCatalogWorkspace *b)
+static bool CatalogDbWorkspace(sqlite3 *db, const char *path, const char *key,
+                               const char *project, const char *checkout, bool worktree)
 {
-    int i;
-    if (!a || !b || a->session_count != b->session_count)
+    sqlite3_stmt *stmt = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "INSERT INTO workspaces(path,key,project_path,checkout_name,worktree,name,collapsed,ord)"
+        " VALUES(?,?,?,?,?,?,0,(SELECT count(*) FROM workspaces))"
+        " ON CONFLICT(path) DO UPDATE SET project_path=excluded.project_path,"
+        "checkout_name=excluded.checkout_name,worktree=excluded.worktree"
+        " WHERE workspaces.project_path<>excluded.project_path OR"
+        " workspaces.checkout_name<>excluded.checkout_name OR workspaces.worktree<>excluded.worktree");
+    if (ok)
     {
-        return false;
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, project, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, checkout, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 5, worktree);
+        sqlite3_bind_text(stmt, 6, "", -1, SQLITE_STATIC);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
-    for (i = 0; i < a->session_count; i++)
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+    if (ok && sqlite3_changes(db) > 0 && CatalogDbPrepare(db, &stmt,
+        "UPDATE sessions SET project_path=? WHERE workspace_path=?"))
     {
-        if (!CatalogSessionEqual(&a->sessions[i], &b->sessions[i]))
-        {
-            return false;
-        }
+        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
-    return true;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
-static bool CatalogLoadMeta(const char *path, PicoCatalogWorkspace *out)
+static bool CatalogDbSessionRead(sqlite3 *db, const char *workspace, const char *id,
+                                 PicoCatalogSession *row, const struct stat *st)
 {
-    size_t len = 0;
-    char *raw;
-    JsonDoc doc;
-    int sessions;
-    int i;
-    if (!path || !out)
+    sqlite3_stmt *stmt = NULL;
+    bool valid = false;
+    if (!CatalogDbPrepare(db, &stmt,
+        "SELECT title,model,effort,kind,mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen"
+        " FROM sessions WHERE workspace_path=? AND id=?")) return false;
+    sqlite3_bind_text(stmt, 1, workspace, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW)
     {
-        return false;
+        memset(row, 0, sizeof(*row));
+        snprintf(row->id, sizeof(row->id), "%s", id);
+        snprintf(row->title, sizeof(row->title), "%s", CatalogDbText(stmt, 0));
+        snprintf(row->model, sizeof(row->model), "%s", CatalogDbText(stmt, 1));
+        snprintf(row->effort, sizeof(row->effort), "%s", CatalogDbText(stmt, 2));
+        row->kind = (PicoAgentKind)sqlite3_column_int(stmt, 3);
+        row->mtime = (time_t)sqlite3_column_int64(stmt, 4);
+        row->mtime_nsec = (long)sqlite3_column_int64(stmt, 5);
+        row->ctime = (time_t)sqlite3_column_int64(stmt, 6);
+        row->ctime_nsec = (long)sqlite3_column_int64(stmt, 7);
+        row->inode = (uint64_t)sqlite3_column_int64(stmt, 8);
+        row->size = (uint64_t)sqlite3_column_int64(stmt, 9);
+        row->unseen_complete = sqlite3_column_int(stmt, 10) != 0;
+        valid = !st || CatalogGenerationMatches(row, st);
     }
-    memset(out, 0, sizeof(*out));
-    raw = Pico_ReadFile(path, &len);
-    if (!raw || len == 0)
+    sqlite3_finalize(stmt);
+    return valid;
+}
+
+static bool CatalogDbSessionPut(sqlite3 *db, const char *workspace, const char *path,
+                                const PicoCatalogSession *row, sqlite3_int64 seen)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "INSERT INTO sessions(workspace_path,project_path,id,file_path,title,model,effort,kind,"
+        "mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen,seen)"
+        " VALUES(?,(SELECT project_path FROM workspaces WHERE path=?),?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(workspace_path,id) DO UPDATE SET project_path=excluded.project_path,"
+        "file_path=excluded.file_path,"
+        "title=excluded.title,model=excluded.model,effort=excluded.effort,"
+        "kind=excluded.kind,mtime=excluded.mtime,mtime_nsec=excluded.mtime_nsec,"
+        "ctime=excluded.ctime,ctime_nsec=excluded.ctime_nsec,inode=excluded.inode,"
+        "size=excluded.size,unseen=excluded.unseen,seen=excluded.seen");
+    if (ok)
     {
-        free(raw);
-        return false;
+        sqlite3_bind_text(stmt, 1, workspace, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, workspace, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, row->id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, row->title, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, row->model, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, row->effort, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 8, row->kind);
+        sqlite3_bind_int64(stmt, 9, (sqlite3_int64)row->mtime);
+        sqlite3_bind_int64(stmt, 10, (sqlite3_int64)row->mtime_nsec);
+        sqlite3_bind_int64(stmt, 11, (sqlite3_int64)row->ctime);
+        sqlite3_bind_int64(stmt, 12, (sqlite3_int64)row->ctime_nsec);
+        sqlite3_bind_int64(stmt, 13, (sqlite3_int64)row->inode);
+        sqlite3_bind_int64(stmt, 14, (sqlite3_int64)row->size);
+        sqlite3_bind_int(stmt, 15, row->unseen_complete);
+        sqlite3_bind_int64(stmt, 16, seen);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
-    if (JsonParse(&doc, raw, len) != 0 || !JsonIsObject(&doc, 0))
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool CatalogDbReconcileDir(sqlite3 *db, const char *dir, const char *workspace,
+                                  const atomic_bool *cancelled, bool force)
+{
+    sqlite3_stmt *status = NULL;
+    sqlite3_stmt *mark = NULL;
+    if (!force)
     {
-        JsonFree(&doc);
-        free(raw);
-        return false;
-    }
-    {
-        char *key = JsonObjStr(&doc, 0, "key");
-        char *ws_path = JsonObjStr(&doc, 0, "path");
-        char *project_path = JsonObjStr(&doc, 0, "project_path");
-        char *checkout_name = JsonObjStr(&doc, 0, "checkout_name");
-        char *name = JsonObjStr(&doc, 0, "name");
-        if (key)
+        sqlite3_stmt *last_reconcile = NULL;
+        bool recent = false;
+        if (CatalogDbPrepare(db, &last_reconcile,
+                "SELECT last_reconcile FROM workspaces WHERE path=?"))
         {
-            snprintf(out->key, sizeof(out->key), "%s", key);
+            sqlite3_bind_text(last_reconcile, 1, workspace, -1, SQLITE_TRANSIENT);
+            time_t now = time(NULL);
+            bool found = sqlite3_step(last_reconcile) == SQLITE_ROW;
+            time_t last = found ? (time_t)sqlite3_column_int64(last_reconcile, 0) : 0;
+            recent = found && last > 0 && last <= now && now - last < 60;
         }
-        if (ws_path)
-        {
-            snprintf(out->path, sizeof(out->path), "%s", ws_path);
-        }
-        if (project_path && project_path[0])
-            snprintf(out->project_path, sizeof(out->project_path), "%s", project_path);
-        if (checkout_name && checkout_name[0])
-            snprintf(out->checkout_name, sizeof(out->checkout_name), "%s", checkout_name);
-        if (name && name[0])
-        {
-            snprintf(out->name, sizeof(out->name), "%s", name);
-        }
-        {
-            int worktree = JsonObjGet(&doc, 0, "worktree");
-            out->worktree = JsonEq(&doc, worktree, "true") || JsonEq(&doc, worktree, "1");
-        }
-        free(key);
-        free(ws_path);
-        free(project_path);
-        free(checkout_name);
-        free(name);
+        sqlite3_finalize(last_reconcile);
+        if (recent) return true;
     }
-    out->order = JsonObjInt(&doc, 0, "order", 0);
+    DIR *d = opendir(dir);
+    struct dirent *ent;
+    bool ok = d != NULL;
+    if (!ok) return false;
+    /* Unique per scan: a failed/cancelled scan never sweeps unseen rows. */
+    bool writing = false;
+    int batch = 0;
+    sqlite3_int64 epoch = 0;
+    sqlite3_randomness((int)sizeof(epoch), &epoch);
+    if (!epoch) epoch = 1;
+    while (ok && (ent = readdir(d)))
     {
-        int tok = JsonObjGet(&doc, 0, "collapsed");
-        out->collapsed = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
-    }
-    sessions = JsonObjGet(&doc, 0, "sessions");
-    if (JsonIsArray(&doc, sessions))
-    {
-        int count = JsonArrayLen(&doc, sessions);
-        for (i = 0; i < count && out->session_count < PICO_MAX_CATALOG_SESSIONS; i++)
+        char path[4096], id[40];
+        struct stat st, after;
+        PicoCatalogSession row;
+        if (CatalogCancelled(cancelled)) { ok = false; break; }
+        if (!IsSessionJsonl(ent->d_name)) continue;
+        if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, ent->d_name) ||
+            stat(path, &st) != 0)
         {
-            int item = JsonArrayAt(&doc, sessions, i);
-            PicoCatalogSession s;
-            char *id;
-            char *model;
-            char *effort;
-            char *title;
-            char *kind;
-            if (!JsonIsObject(&doc, item))
+            ok = false;
+            break;
+        }
+        if (!S_ISREG(st.st_mode)) continue;
+        IdFromName(ent->d_name, id, sizeof(id));
+        if (!id[0])
+        {
+            PicoSessionInfo header = {0};
+            ScanSessionFile(path, &header, true);
+            snprintf(id, sizeof(id), "%s", header.id);
+        }
+        if (!id[0]) { ok = false; break; }
+        bool cached = CatalogDbSessionRead(db, workspace, id, &row, &st);
+        if (!cached)
+        {
+            /* A cache miss may parse a long transcript. Never hold a SQLite
+             * write transaction across that file read. */
+            if (writing)
             {
-                continue;
+                ok = CatalogDbExec(db, "COMMIT");
+                writing = false; batch = 0;
+                if (!ok) break;
             }
-            memset(&s, 0, sizeof(s));
-            id = JsonObjStr(&doc, item, "id");
-            model = JsonObjStr(&doc, item, "model");
-            effort = JsonObjStr(&doc, item, "effort");
-            title = JsonObjStr(&doc, item, "title");
-            kind = JsonObjStr(&doc, item, "kind");
-            if (id)
+            memset(&row, 0, sizeof(row));
+            CatalogRowFromFile(path, &row);
+            if (!row.id[0]) snprintf(row.id, sizeof(row.id), "%s", id);
+            CopyStatToCatalog(&row, &st);
+            /* A file modified during parsing cannot publish a stale row. */
+            if (stat(path, &after) != 0 || after.st_ino != st.st_ino ||
+                after.st_size != st.st_size || after.st_mtime != st.st_mtime ||
+                StatMtimeNsec(&after) != StatMtimeNsec(&st) ||
+                StatCtimeNsec(&after) != StatCtimeNsec(&st))
             {
-                snprintf(s.id, sizeof(s.id), "%s", id);
-            }
-            if (title)
-            {
-                snprintf(s.title, sizeof(s.title), "%s", title);
-            }
-            if (model)
-            {
-                snprintf(s.model, sizeof(s.model), "%s", model);
-            }
-            if (effort)
-            {
-                snprintf(s.effort, sizeof(s.effort), "%s", effort);
-            }
-            if (kind && strcmp(kind, "subagent") == 0)
-            {
-                s.kind = PICO_AGENT_SUBAGENT;
-            }
-            {
-                char *raw_number = JsonObjRaw(&doc, item, "mtime");
-                if (raw_number)
-                {
-                    s.mtime = (time_t)strtoll(raw_number, NULL, 10);
-                }
-                free(raw_number);
-                raw_number = JsonObjRaw(&doc, item, "mtime_nsec");
-                if (raw_number)
-                {
-                    s.mtime_nsec = strtol(raw_number, NULL, 10);
-                }
-                free(raw_number);
-                raw_number = JsonObjRaw(&doc, item, "ctime");
-                if (raw_number)
-                {
-                    s.ctime = (time_t)strtoll(raw_number, NULL, 10);
-                }
-                free(raw_number);
-                raw_number = JsonObjRaw(&doc, item, "ctime_nsec");
-                if (raw_number)
-                {
-                    s.ctime_nsec = strtol(raw_number, NULL, 10);
-                }
-                free(raw_number);
-                raw_number = JsonObjRaw(&doc, item, "inode");
-                if (raw_number)
-                {
-                    s.inode = (uint64_t)strtoull(raw_number, NULL, 10);
-                }
-                free(raw_number);
-                raw_number = JsonObjRaw(&doc, item, "size");
-                if (raw_number)
-                {
-                    s.size = (uint64_t)strtoull(raw_number, NULL, 10);
-                }
-                free(raw_number);
-            }
-            {
-                int tok = JsonObjGet(&doc, item, "unseen_complete");
-                s.unseen_complete = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
-            }
-            free(id);
-            free(model);
-            free(effort);
-            free(title);
-            free(kind);
-            if (s.id[0])
-            {
-                (void)CatalogCopySession(out, &s);
+                ok = false;
+                break;
             }
         }
+        if (!writing)
+        {
+            ok = CatalogDbExec(db, "BEGIN IMMEDIATE");
+            if (!ok) break;
+            writing = true;
+        }
+        if (cached)
+        {
+            if (!mark)
+                ok = CatalogDbPrepare(db, &mark,
+                    "UPDATE sessions SET seen=? WHERE workspace_path=? AND id=?");
+            if (ok)
+            {
+                sqlite3_bind_int64(mark, 1, epoch);
+                sqlite3_bind_text(mark, 2, workspace, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(mark, 3, id, -1, SQLITE_TRANSIENT);
+                ok = sqlite3_step(mark) == SQLITE_DONE;
+                sqlite3_reset(mark);
+                sqlite3_clear_bindings(mark);
+            }
+        }
+        else ok = CatalogDbSessionPut(db, workspace, path, &row, epoch);
+        if (ok && ++batch == 128)
+        {
+            ok = CatalogDbExec(db, "COMMIT");
+            writing = false; batch = 0;
+        }
     }
-    JsonFree(&doc);
-    free(raw);
-    return out->path[0] || out->key[0];
+    closedir(d);
+    sqlite3_finalize(mark);
+    if (writing)
+    {
+        if (ok && !CatalogCancelled(cancelled)) ok = CatalogDbExec(db, "COMMIT");
+        else (void)CatalogDbExec(db, "ROLLBACK");
+    }
+    if (ok && !CatalogCancelled(cancelled))
+        ok = CatalogDbExec(db, "BEGIN IMMEDIATE");
+    if (ok && !CatalogCancelled(cancelled))
+    {
+        sqlite3_stmt *sweep = NULL;
+        ok = CatalogDbPrepare(db, &sweep, "DELETE FROM sessions WHERE workspace_path=? AND seen<>?");
+        if (ok)
+        {
+            sqlite3_bind_text(sweep, 1, workspace, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(sweep, 2, epoch);
+            ok = sqlite3_step(sweep) == SQLITE_DONE;
+        }
+        sqlite3_finalize(sweep);
+    }
+    if (ok && !CatalogCancelled(cancelled))
+    {
+        ok = CatalogDbPrepare(db, &status,
+            "UPDATE workspaces SET last_reconcile=? WHERE path=?");
+        if (ok)
+        {
+            sqlite3_bind_int64(status, 1, (sqlite3_int64)time(NULL));
+            sqlite3_bind_text(status, 2, workspace, -1, SQLITE_TRANSIENT);
+            ok = sqlite3_step(status) == SQLITE_DONE;
+        }
+    }
+    sqlite3_finalize(status);
+    if (ok && !CatalogCancelled(cancelled)) ok = CatalogDbExec(db, "COMMIT");
+    else (void)CatalogDbExec(db, "ROLLBACK");
+    return ok && !CatalogCancelled(cancelled);
+}
+
+static void CatalogDbFillInfo(sqlite3_stmt *stmt, PicoSessionInfo *info)
+{
+    memset(info, 0, sizeof(*info));
+    snprintf(info->path, sizeof(info->path), "%s", CatalogDbText(stmt, 0));
+    snprintf(info->id, sizeof(info->id), "%s", CatalogDbText(stmt, 1));
+    snprintf(info->title, sizeof(info->title), "%s", CatalogDbText(stmt, 2));
+    snprintf(info->model, sizeof(info->model), "%s", CatalogDbText(stmt, 3));
+    snprintf(info->effort, sizeof(info->effort), "%s", CatalogDbText(stmt, 4));
+    info->kind = (PicoAgentKind)sqlite3_column_int(stmt, 5);
+    info->mtime = (time_t)sqlite3_column_int64(stmt, 6);
+    info->mtime_nsec = (long)sqlite3_column_int64(stmt, 7);
+    info->ctime = (time_t)sqlite3_column_int64(stmt, 8);
+    info->ctime_nsec = (long)sqlite3_column_int64(stmt, 9);
+    info->inode = (uint64_t)sqlite3_column_int64(stmt, 10);
+    info->size = (uint64_t)sqlite3_column_int64(stmt, 11);
+    info->unseen_complete = sqlite3_column_int(stmt, 12) != 0;
+}
+
+static int CatalogDbList(sqlite3 *db, const char *workspace, const char *search,
+                         PicoSessionInfo **out, bool parents_only, int maximum)
+{
+    sqlite3_stmt *stmt = NULL;
+    PicoSessionInfo *list = NULL;
+    int count = 0;
+    int cap = 0;
+    *out = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "SELECT file_path,id,title,model,effort,kind,mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen"
+        " FROM sessions WHERE workspace_path=? AND (?=0 OR kind=0)"
+        " AND (?='' OR instr(lower(title),lower(?))>0 OR instr(lower(id),lower(?))>0)"
+        " ORDER BY mtime DESC,mtime_nsec DESC,file_path DESC LIMIT ?");
+    if (!ok) return 0;
+    sqlite3_bind_text(stmt, 1, workspace, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, parents_only);
+    sqlite3_bind_text(stmt, 3, search ? search : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, search ? search : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, search ? search : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, maximum > 0 ? maximum : INT_MAX);
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        if (count >= cap)
+        {
+            int next_cap = cap ? cap * 2 : 16;
+            if (maximum > 0 && next_cap > maximum) next_cap = maximum;
+            PicoSessionInfo *next = realloc(list, (size_t)next_cap * sizeof(*next));
+            if (!next) { ok = false; break; }
+            list = next; cap = next_cap;
+        }
+        CatalogDbFillInfo(stmt, &list[count++]);
+    }
+    if (rc != SQLITE_DONE) ok = false;
+    sqlite3_finalize(stmt);
+    if (!ok) { free(list); return -1; }
+    *out = list;
+    return count;
+}
+
+static void CatalogDbFillWorkspace(sqlite3_stmt *stmt, PicoCatalogWorkspace *ws)
+{
+    memset(ws, 0, sizeof(*ws));
+    snprintf(ws->path, sizeof(ws->path), "%s", CatalogDbText(stmt, 0));
+    snprintf(ws->key, sizeof(ws->key), "%s", CatalogDbText(stmt, 1));
+    snprintf(ws->project_path, sizeof(ws->project_path), "%s", CatalogDbText(stmt, 2));
+    snprintf(ws->checkout_name, sizeof(ws->checkout_name), "%s", CatalogDbText(stmt, 3));
+    ws->worktree = sqlite3_column_int(stmt, 4) != 0;
+    snprintf(ws->name, sizeof(ws->name), "%s", CatalogDbText(stmt, 5));
+    ws->collapsed = sqlite3_column_int(stmt, 6) != 0;
+    ws->order = sqlite3_column_int(stmt, 7);
+}
+
+static int CatalogDbReadWorkspace(sqlite3 *db, const char *key, PicoCatalogWorkspace *ws)
+{
+    sqlite3_stmt *stmt = NULL;
+    int found = 0;
+    if (!CatalogDbPrepare(db, &stmt,
+        "SELECT path,key,project_path,checkout_name,worktree,name,collapsed,ord"
+        " FROM workspaces WHERE key=?")) return -1;
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW)
+    {
+        CatalogDbFillWorkspace(stmt, ws);
+        found = 1;
+    }
+    else if (rc != SQLITE_DONE) found = -1;
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+static bool CatalogDbSeed(sqlite3 *db, const char *path)
+{
+    char key[4096], checkout[256];
+    PicoCatalogWorkspace existing = {0};
+    PicoWorktreeInfo info;
+    if (!path || !path[0] || !CatalogKeyFromPath(path, key, sizeof(key))) return false;
+    int existing_state = CatalogDbReadWorkspace(db, key, &existing);
+    if (existing_state < 0) return false;
+    if (existing_state > 0) return strcmp(existing.path, path) == 0;
+    bool linked = PicoWorktree_Discover(path, &info) && info.linked;
+    PathBasename(path, checkout, sizeof(checkout));
+    return CatalogDbWorkspace(db, path, key, linked ? info.project_path : path, checkout, linked);
+}
+
+static bool CatalogDbReadProject(sqlite3 *db, const char *path, PicoCatalogWorkspace *ws)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (!CatalogDbPrepare(db, &stmt, "SELECT name,stashed FROM projects WHERE path=?")) return false;
+    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW)
+    {
+        if (CatalogDbText(stmt, 0)[0])
+            snprintf(ws->name, sizeof(ws->name), "%s", CatalogDbText(stmt, 0));
+        ws->stashed = sqlite3_column_int(stmt, 1) != 0;
+    }
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
 }
 
 static int CmpCatalogOrder(const void *a, const void *b)
@@ -3894,149 +4217,78 @@ void PicoCatalog_Free(PicoCatalogWorkspace *list, int n)
 
 int PicoCatalog_Ensure(const char *workspace_path)
 {
-    char canonical[4096];
-    char root[4096];
-    char dir[4096];
-    char meta[4096];
-    char key[4096];
-    PicoCatalogWorkspace loaded;
-    PicoCatalogWorkspace fresh;
-    int lock_fd;
-    int result = -1;
+    char canonical[4096], dir[4096], key[4096], checkout[256];
+    PicoWorktreeInfo worktree;
+    sqlite3 *db;
+    bool ok;
     if (!CanonicalWorkspacePath(workspace_path, canonical, sizeof(canonical)) ||
-        !SessionsRoot(root, sizeof(root)) || !CatalogKeyFromPath(canonical, key, sizeof(key)) ||
-        !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, key))
-    {
-        return -1;
-    }
+        !CatalogDirForPath(canonical, dir, sizeof(dir)) ||
+        !CatalogKeyFromPath(canonical, key, sizeof(key))) return -1;
     Pico_MkdirP(dir);
-    if (!CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
-    {
-        return -1;
-    }
-    memset(&fresh, 0, sizeof(fresh));
-    snprintf(fresh.key, sizeof(fresh.key), "%s", key);
-    snprintf(fresh.path, sizeof(fresh.path), "%s", canonical);
-    {
-        PicoWorktreeInfo info;
-        if (PicoWorktree_Discover(canonical, &info))
-        {
-            snprintf(fresh.project_path, sizeof(fresh.project_path), "%s", info.project_path);
-            snprintf(fresh.checkout_name, sizeof(fresh.checkout_name), "%s", info.checkout_name);
-            fresh.worktree = info.linked;
-        }
-        else snprintf(fresh.project_path, sizeof(fresh.project_path), "%s", canonical);
-    }
-    PathBasename(fresh.project_path[0] ? fresh.project_path : canonical,
-                 fresh.name, sizeof(fresh.name));
-    memset(&loaded, 0, sizeof(loaded));
-    if (CatalogLoadMeta(meta, &loaded))
-    {
-        bool same_path = strcmp(loaded.path, canonical) == 0;
-        if (same_path && loaded.name[0] && loaded.project_path[0] &&
-            strcmp(loaded.project_path, fresh.project_path) == 0 &&
-            loaded.worktree == fresh.worktree)
-        {
-            result = 0;
-            goto done;
-        }
-        snprintf(fresh.key, sizeof(fresh.key), "%s", loaded.key[0] ? loaded.key : key);
-        snprintf(fresh.name, sizeof(fresh.name), "%s", loaded.name[0] ? loaded.name : fresh.name);
-        fresh.order = loaded.order;
-        fresh.collapsed = loaded.collapsed;
-        fresh.sessions = loaded.sessions;
-        fresh.session_count = loaded.session_count;
-        loaded.sessions = NULL;
-        loaded.session_count = 0;
-        result = CatalogWriteChanged(&fresh, dir) ? 0 : -1;
-        goto done;
-    }
-    fresh.order = CountSessionDirs(root) - 1;
-    if (fresh.order < 0)
-    {
-        fresh.order = 0;
-    }
-    result = CatalogWriteChanged(&fresh, dir) ? 0 : -1;
-
-done:
-    CatalogClearSessions(&loaded);
-    CatalogClearSessions(&fresh);
-    CatalogLockRelease(lock_fd);
-    return result;
+    db = CatalogDbOpen();
+    if (!db) return -1;
+    bool linked = PicoWorktree_Discover(canonical, &worktree) && worktree.linked;
+    const char *project = linked ? worktree.project_path : canonical;
+    PathBasename(canonical, checkout, sizeof(checkout));
+    int changes_before = sqlite3_total_changes(db);
+    ok = CatalogDbWorkspace(db, canonical, key, project, checkout, linked);
+    bool changed = sqlite3_total_changes(db) != changes_before;
+    sqlite3_close(db);
+    if (ok && changed) CatalogMarkChanged();
+    return ok ? 0 : -1;
 }
 
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed)
 {
-    char dir[4096];
-    char meta[4096];
-    PicoCatalogWorkspace ws;
-    int lock_fd;
-    int result = -1;
-    if (PicoCatalog_Ensure(workspace_path) != 0 || !CatalogDirForPath(workspace_path, dir, sizeof(dir)) ||
-        !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    bool ok;
+    if (!workspace_path || !(db = CatalogDbOpen())) return -1;
+    sqlite3_busy_timeout(db, 30);
+    ok = CatalogDbPrepare(db, &stmt, "UPDATE workspaces SET collapsed=? WHERE path=?");
+    if (ok)
     {
-        return -1;
+        sqlite3_bind_int(stmt, 1, collapsed);
+        sqlite3_bind_text(stmt, 2, workspace_path, -1, SQLITE_TRANSIENT);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
-    memset(&ws, 0, sizeof(ws));
-    if (CatalogLoadMeta(meta, &ws))
-    {
-        ws.collapsed = collapsed;
-        result = CatalogWriteChanged(&ws, dir) ? 0 : -1;
-    }
-    CatalogClearSessions(&ws);
-    CatalogLockRelease(lock_fd);
-    return result;
+    sqlite3_finalize(stmt);
+    bool changed = sqlite3_changes(db) != 0;
+    sqlite3_close(db);
+    if (ok && changed) CatalogMarkChanged();
+    return ok && changed ? 0 : -1;
 }
 
 int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_id,
                                 const char *model, const char *effort)
 {
     char dir[4096];
-    char meta[4096];
-    PicoCatalogWorkspace ws;
-    int i;
-    int lock_fd;
-    int result = -1;
-    bool found = false;
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    int lock;
+    bool ok = false;
     if (!session_id || !session_id[0] || PicoCatalog_Ensure(workspace_path) != 0 ||
         !CatalogDirForPath(workspace_path, dir, sizeof(dir)) ||
-        !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
+        (lock = CatalogLockAcquire(dir)) < 0) return -1;
+    db = CatalogDbOpen();
+    if (db)
     {
-        return -1;
-    }
-    memset(&ws, 0, sizeof(ws));
-    if (!CatalogLoadMeta(meta, &ws))
-    {
-        goto done;
-    }
-    for (i = 0; i < ws.session_count; i++)
-    {
-        if (strcmp(ws.sessions[i].id, session_id) == 0)
+        ok = CatalogDbPrepare(db, &stmt,
+            "UPDATE sessions SET model=?,effort=? WHERE workspace_path=? AND id=?");
+        if (ok)
         {
-            snprintf(ws.sessions[i].model, sizeof(ws.sessions[i].model), "%s", model ? model : "");
-            snprintf(ws.sessions[i].effort, sizeof(ws.sessions[i].effort), "%s", effort ? effort : "");
-            found = true;
-            break;
+            sqlite3_bind_text(stmt, 1, model ? model : "", -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, effort ? effort : "", -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 3, workspace_path, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 4, session_id, -1, SQLITE_TRANSIENT);
+            ok = sqlite3_step(stmt) == SQLITE_DONE;
         }
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
     }
-    if (!found)
-    {
-        PicoCatalogSession s;
-        memset(&s, 0, sizeof(s));
-        snprintf(s.id, sizeof(s.id), "%s", session_id);
-        snprintf(s.model, sizeof(s.model), "%s", model ? model : "");
-        snprintf(s.effort, sizeof(s.effort), "%s", effort ? effort : "");
-        if (!CatalogCopySession(&ws, &s))
-        {
-            goto done;
-        }
-    }
-    result = CatalogWriteChanged(&ws, dir) ? 0 : -1;
-
-done:
-    CatalogClearSessions(&ws);
-    CatalogLockRelease(lock_fd);
-    return result;
+    CatalogLockRelease(lock);
+    if (ok) CatalogMarkChanged();
+    return ok ? 0 : -1;
 }
 
 static bool CatalogApplyEvent(PicoCatalogSession *row, const char *event_json)
@@ -4148,191 +4400,128 @@ static void CatalogWriteThroughFields(PicoAgentKind kind, PicoSessionPersistence
                                       const char *event_json, const struct stat *previous_stat)
 {
     char dir[4096];
-    char meta[4096];
-    PicoCatalogWorkspace ws;
-    PicoCatalogSession row;
-    const PicoCatalogSession *previous;
     struct stat current_stat;
-    int lock_fd;
-    int index = -1;
-    bool row_ready = false;
-    if (kind != PICO_AGENT_MAIN || persistence != PICO_SESSION_DURABLE || !session_id ||
-        !session_id[0] || !session_path || !session_path[0])
+    PicoCatalogSession row = {0};
+    sqlite3 *db = NULL;
+    bool ready = false;
+    int lock;
+    if (kind != PICO_AGENT_MAIN || persistence != PICO_SESSION_DURABLE ||
+        !session_id || !session_id[0] || !session_path || !ws_path ||
+        stat(session_path, &current_stat) != 0 || !S_ISREG(current_stat.st_mode) ||
+        PicoCatalog_Ensure(ws_path) != 0 || !CatalogDirForPath(ws_path, dir, sizeof(dir)) ||
+        (lock = CatalogLockAcquire(dir)) < 0) return;
+    db = CatalogDbOpen();
+    if (!db) goto done;
+    if (previous_stat && CatalogDbSessionRead(db, ws_path, session_id, &row, previous_stat))
     {
-        return;
+        ready = title_override && title_override[0];
+        if (ready) snprintf(row.title, sizeof(row.title), "%s", title_override);
+        else ready = CatalogApplyEventLines(&row, event_json);
     }
-    if (!ws_path || !ws_path[0] || stat(session_path, &current_stat) != 0 ||
-        !S_ISREG(current_stat.st_mode) || PicoCatalog_Ensure(ws_path) != 0 ||
-        !CatalogDirForPath(ws_path, dir, sizeof(dir)) ||
-        !CatalogMetaPath(dir, meta, sizeof(meta)) || (lock_fd = CatalogLockAcquire(dir)) < 0)
-    {
-        return;
-    }
-#ifdef PICO_SESSION_TEST_HOOKS
-    (void)PicoSession_TestHook("catalog_before_upsert");
-#endif
-    memset(&ws, 0, sizeof(ws));
-    memset(&row, 0, sizeof(row));
-    if (!CatalogLoadMeta(meta, &ws))
-    {
-        goto done;
-    }
-    previous = CatalogFindSession(&ws, session_id);
-    if (previous && previous_stat && CatalogGenerationMatches(previous, previous_stat))
-    {
-        row = *previous;
-        row_ready = title_override && title_override[0];
-        if (row_ready)
-        {
-            snprintf(row.title, sizeof(row.title), "%s", title_override);
-        }
-        else
-        {
-            row_ready = CatalogApplyEventLines(&row, event_json);
-        }
-    }
-    if (!row_ready)
-    {
-        CatalogRowFromFile(session_path, &row);
-    }
-    if (!row.id[0])
-    {
-        snprintf(row.id, sizeof(row.id), "%s", session_id);
-    }
+    if (!ready) CatalogRowFromFile(session_path, &row);
+    if (!row.id[0]) snprintf(row.id, sizeof(row.id), "%s", session_id);
     row.kind = kind;
     CopyStatToCatalog(&row, &current_stat);
-    for (int i = 0; i < ws.session_count; i++)
-    {
-        if (strcmp(ws.sessions[i].id, row.id) == 0)
-        {
-            index = i;
-            break;
-        }
-    }
-    if (index >= 0)
-    {
-        ws.sessions[index] = row;
-    }
-    else if (!CatalogCopySession(&ws, &row))
-    {
-        goto done;
-    }
-    (void)CatalogWrite(&ws, dir);
-
+    (void)CatalogDbSessionPut(db, ws_path, session_path, &row, 1);
 done:
-    CatalogClearSessions(&ws);
-    CatalogLockRelease(lock_fd);
+    if (db) sqlite3_close(db);
+    CatalogLockRelease(lock);
 }
 
 static void CatalogWriteThrough(PicoHost *app, const PicoAgent *agent,
                                 const char *title_override, const char *event_json,
                                 const struct stat *previous_stat)
 {
-    if (!app || !agent)
-    {
-        return;
-    }
+    if (!app || !agent) return;
     CatalogWriteThroughFields(agent->kind, agent->persistence, agent->session_id, agent->session_path,
                               PicoWorkspace_Path(SessionWorkspace(app, agent)), title_override, event_json,
                               previous_stat);
 }
 
-static bool CatalogScanDir(const char *dir, const char *key, PicoCatalogWorkspace *out)
+static bool CatalogScanDir(sqlite3 *db, const char *dir, const char *key, PicoCatalogWorkspace *out,
+                           const atomic_bool *cancelled, int session_limit, bool *failed)
 {
-    char meta[4096];
+    PicoCatalogWorkspace ws = {0};
+    PicoSessionInfo *rows = NULL;
+    int lock_fd, count;
+    bool ok = false;
+    if (failed) *failed = false;
+    if (!dir || !key || !out || CatalogCancelled(cancelled)) return false;
+    lock_fd = CatalogLockAcquire(dir);
+    if (lock_fd < 0) { if (failed) *failed = true; return false; }
+    int workspace_state = CatalogDbReadWorkspace(db, key, &ws);
+    if (workspace_state < 0) { if (failed) *failed = true; goto done_db; }
+    if (!workspace_state)
+    {
+        /* Metadata can be reconstructed after a missing index from a session
+         * header, but an empty checkout must first be registered by Ensure. */
+        DIR *d = opendir(dir);
+        struct dirent *ent;
+        bool recovered = false;
+        if (d)
+        {
+            while (!recovered && (ent = readdir(d)))
+            {
+                char file[4096];
+                PicoSessionInfo header = {0};
+                if (!IsSessionJsonl(ent->d_name) ||
+                    !PicoPath_Format(file, sizeof(file), "%s/%s", dir, ent->d_name)) continue;
+                ScanSessionFile(file, &header, true);
+                if (!header.cwd[0]) continue;
+                char checkout[256] = {0};
+                const char *project = header.project_path[0] ? header.project_path : header.cwd;
+                PathBasename(header.cwd, checkout, sizeof(checkout));
+                recovered = CatalogDbWorkspace(db, header.cwd, key, project, checkout, header.worktree);
+            }
+            closedir(d);
+        }
+        if (!recovered) goto done_db;
+        workspace_state = CatalogDbReadWorkspace(db, key, &ws);
+        if (workspace_state < 0) { if (failed) *failed = true; goto done_db; }
+        if (!workspace_state) goto done_db;
+    }
+    if (!ws.path[0]) goto done_db;
     char canonical[4096];
-    PicoCatalogWorkspace ws;
-    PicoCatalogWorkspace loaded;
-    PicoSessionInfo *files = NULL;
-    int lock_fd;
-    int file_n;
-    bool recovered = false;
-    bool had_meta;
-    bool result = false;
-    if (!dir || !key || !out || (lock_fd = CatalogLockAcquire(dir)) < 0)
-    {
-        return false;
-    }
-    memset(&ws, 0, sizeof(ws));
-    memset(&loaded, 0, sizeof(loaded));
-    snprintf(ws.key, sizeof(ws.key), "%s", key);
-    had_meta = CatalogMetaPath(dir, meta, sizeof(meta)) && CatalogLoadMeta(meta, &loaded);
-    if (had_meta)
-    {
-        snprintf(ws.path, sizeof(ws.path), "%s", loaded.path);
-        snprintf(ws.project_path, sizeof(ws.project_path), "%s", loaded.project_path);
-        snprintf(ws.checkout_name, sizeof(ws.checkout_name), "%s", loaded.checkout_name);
-        ws.worktree = loaded.worktree;
-        snprintf(ws.name, sizeof(ws.name), "%s", loaded.name);
-        ws.order = loaded.order;
-        ws.collapsed = loaded.collapsed;
-        if (loaded.key[0])
-        {
-            snprintf(ws.key, sizeof(ws.key), "%s", loaded.key);
-        }
-    }
-    file_n = ListSessionsInDir(dir, &files, true, had_meta ? &loaded : NULL,
-                               PICO_MAX_CATALOG_SESSIONS);
-    for (int i = 0; i < file_n; i++)
-    {
-        PicoCatalogSession s;
-        memset(&s, 0, sizeof(s));
-        snprintf(s.id, sizeof(s.id), "%s", files[i].id);
-        snprintf(s.title, sizeof(s.title), "%s", files[i].title);
-        snprintf(s.model, sizeof(s.model), "%s", files[i].model);
-        snprintf(s.effort, sizeof(s.effort), "%s", files[i].effort);
-        s.mtime = files[i].mtime;
-        s.mtime_nsec = files[i].mtime_nsec;
-        s.ctime = files[i].ctime;
-        s.ctime_nsec = files[i].ctime_nsec;
-        s.inode = files[i].inode;
-        s.size = files[i].size;
-        s.unseen_complete = files[i].unseen_complete;
-        s.kind = files[i].kind;
-        if (!ws.path[0] && files[i].cwd[0])
-        {
-            snprintf(ws.path, sizeof(ws.path), "%s", files[i].cwd);
-            recovered = true;
-        }
-        if (!ws.project_path[0] && files[i].project_path[0])
-        {
-            snprintf(ws.project_path, sizeof(ws.project_path), "%s", files[i].project_path);
-            ws.worktree = files[i].worktree;
-            recovered = true;
-        }
-        (void)CatalogCopySession(&ws, &s);
-    }
-    free(files);
-    if (!ws.path[0]) goto done;
     if (!CanonicalWorkspacePath(ws.path, canonical, sizeof(canonical)))
     {
-        if (!ws.worktree) goto done;
+        if (!ws.worktree) goto done_db;
         ws.missing = true;
     }
-    if (!ws.project_path[0]) snprintf(ws.project_path, sizeof(ws.project_path), "%s", ws.path);
+    else if (strcmp(canonical, ws.path) != 0) goto done_db;
+    if (!ws.name[0]) PathBasename(ws.path, ws.name, sizeof(ws.name));
     if (!ws.checkout_name[0]) PathBasename(ws.path, ws.checkout_name, sizeof(ws.checkout_name));
-    if (!ws.name[0])
+    if (!CatalogDbReconcileDir(db, dir, ws.path, cancelled, cancelled == NULL))
+    { if (failed && !CatalogCancelled(cancelled)) *failed = true; goto done_db; }
+    count = session_limit > 0 ? CatalogDbList(db, ws.path, NULL, &rows, true, session_limit) : 0;
+    if (count < 0) { if (failed) *failed = true; goto done_db; }
+    for (int i = 0; i < count; i++)
     {
-        PathBasename(ws.path, ws.name, sizeof(ws.name));
-    }
-    if (!had_meta || recovered || !CatalogSessionsMatch(&ws, &loaded))
-    {
-        (void)CatalogWrite(&ws, dir);
+        PicoCatalogSession row = {0};
+        snprintf(row.id, sizeof(row.id), "%s", rows[i].id);
+        snprintf(row.title, sizeof(row.title), "%s", rows[i].title);
+        snprintf(row.model, sizeof(row.model), "%s", rows[i].model);
+        snprintf(row.effort, sizeof(row.effort), "%s", rows[i].effort);
+        row.kind = rows[i].kind;
+        row.mtime = rows[i].mtime; row.mtime_nsec = rows[i].mtime_nsec;
+        row.ctime = rows[i].ctime; row.ctime_nsec = rows[i].ctime_nsec;
+        row.inode = rows[i].inode; row.size = rows[i].size;
+        row.unseen_complete = rows[i].unseen_complete;
+        if (!CatalogAppendSession(&ws, &row))
+        { if (failed) *failed = true; goto done_db; }
     }
     *out = ws;
     ws.sessions = NULL;
     ws.session_count = 0;
-    result = true;
-
-done:
+    ok = true;
+done_db:
+    free(rows);
     CatalogClearSessions(&ws);
-    CatalogClearSessions(&loaded);
     CatalogLockRelease(lock_fd);
-    return result;
+    return ok;
 }
 
 /* limit <= 0 enumerates every catalog; project deletion must not truncate. */
-static int CatalogScanN(PicoCatalogWorkspace **out, int limit)
+static int CatalogScanN(sqlite3 *db, PicoCatalogWorkspace **out, int limit, const atomic_bool *cancelled, int session_limit)
 {
 #ifdef PICO_SESSION_TEST_HOOKS
     (void)PicoSession_TestHook("catalog_scan");
@@ -4346,13 +4535,22 @@ static int CatalogScanN(PicoCatalogWorkspace **out, int limit)
     {
         *out = NULL;
     }
-    if (!out || !SessionsRoot(root, sizeof(root)))
+    if (!out || CatalogCancelled(cancelled) || !SessionsRoot(root, sizeof(root)))
     {
+#ifdef PICO_SESSION_TEST_HOOKS
+        if (!CatalogCancelled(cancelled))
+        {
+            (void)PicoSession_TestHook("catalog_scan_done");
+        }
+#endif
         return 0;
     }
     d = opendir(root);
     if (!d)
     {
+#ifdef PICO_SESSION_TEST_HOOKS
+        (void)PicoSession_TestHook("catalog_scan_done");
+#endif
         return 0;
     }
     while ((ent = readdir(d)) && (limit <= 0 || n < limit))
@@ -4361,35 +4559,77 @@ static int CatalogScanN(PicoCatalogWorkspace **out, int limit)
         struct stat st;
         PicoCatalogWorkspace ws;
         PicoCatalogWorkspace *next;
+        bool failed = false;
+        if (CatalogCancelled(cancelled))
+        {
+            closedir(d);
+            PicoCatalog_Free(list, n);
+            if (out)
+            {
+                *out = NULL;
+            }
+            return 0;
+        }
         if (!ent->d_name[0] || ent->d_name[0] == '.' ||
             !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, ent->d_name) ||
             stat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
-            !CatalogScanDir(dir, ent->d_name, &ws))
+            !CatalogScanDir(db, dir, ent->d_name, &ws, cancelled, session_limit, &failed))
         {
+            if (failed)
+            {
+                closedir(d);
+                PicoCatalog_Free(list, n);
+                *out = NULL;
+                return -1;
+            }
             continue;
         }
         next = (PicoCatalogWorkspace *)realloc(list, (size_t)(n + 1) * sizeof(*next));
         if (!next)
         {
             CatalogClearSessions(&ws);
-            break;
+            closedir(d);
+            PicoCatalog_Free(list, n);
+            return -1;
         }
         list = next;
         list[n++] = ws;
     }
     closedir(d);
+    if (CatalogCancelled(cancelled))
+    {
+        PicoCatalog_Free(list, n);
+        if (out)
+        {
+            *out = NULL;
+        }
+        return 0;
+    }
     if (n > 1)
     {
         qsort(list, (size_t)n, sizeof(*list), CmpCatalogOrder);
-        CatalogApplyOrderFile(list, n);
+        if (!CatalogApplyOrder(db, list, n))
+        {
+            PicoCatalog_Free(list, n);
+            return -1;
+        }
     }
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_scan_done");
+#endif
     *out = list;
     return n;
 }
 
 int PicoCatalog_Scan(PicoCatalogWorkspace **out)
 {
-    return CatalogScanN(out, PICO_MAX_CATALOG_WORKSPACES);
+    if (out) *out = NULL;
+    if (!out) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    int count = CatalogScanN(db, out, PICO_MAX_CATALOG_WORKSPACES, NULL, PICO_MAX_CATALOG_SESSIONS);
+    sqlite3_close(db);
+    return count;
 }
 
 /* Pico-owned catalog root files: meta, sessions, and atomic-write residue
@@ -4498,7 +4738,7 @@ done:
     return ok;
 }
 
-int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
+static int CatalogDeleteProjectLocked(PicoHost *host, const char *project)
 {
     PicoCatalogWorkspace *leaves = NULL;
     char project_meta[4096];
@@ -4527,14 +4767,17 @@ int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
         pthread_mutex_unlock(&host->persist_mu);
         if (busy) return -1;
     }
-    count = CatalogScanN(&leaves, 0); /* deletion must see every checkout in the group */
-    for (int i = 0; i < count; i++)
-        if ((!strcmp(leaves[i].project_path[0] ? leaves[i].project_path : leaves[i].path, project)) &&
-            leaves[i].session_count >= PICO_MAX_CATALOG_SESSIONS)
-        {
-            PicoCatalog_Free(leaves, count);
-            return -1;
-        }
+    sqlite3 *scan_db = CatalogDbOpen();
+    if (!scan_db) return -1;
+    count = CatalogScanN(scan_db, &leaves, 0, NULL, 0); /* deletion must see every checkout in the group */
+    sqlite3_close(scan_db);
+    if (count < 0) return -1;
+    int *locks = malloc((size_t)(count > 0 ? count : 1) * sizeof(*locks));
+    if (!locks) { PicoCatalog_Free(leaves, count); return -1; }
+    for (int i = 0; i < count; i++) locks[i] = -1;
+    /* All catalog access uses this mutex and the stable per-checkout lock
+     * inode. No scan/write can interleave with validation and removal. */
+    pthread_mutex_lock(&g_catalog_mutex);
     /* Fail before touching any checkout if a catalog contains unknown data. */
     for (int i = 0; i < count; i++)
     {
@@ -4542,28 +4785,101 @@ int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
         char dir[4096];
         const char *group = ws->project_path[0] ? ws->project_path : ws->path;
         if (strcmp(group, project)) continue;
-        if (!CatalogDirForPath(ws->path, dir, sizeof(dir)) || !CatalogValidateDataTree(dir))
+        char root[4096];
+        char meta[4096], error[256] = {0};
+        if (!SessionsRoot(root, sizeof(root)) ||
+            !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, ws->key) ||
+            !CatalogMetaPath(dir, meta, sizeof(meta)) ||
+            (locks[i] = SessionLockAcquire(meta, error, sizeof(error))) < 0 ||
+            !CatalogValidateDataTree(dir))
         {
-            PicoCatalog_Free(leaves, count);
-            return -1;
+            ok = false;
+            goto unlock;
         }
     }
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) { ok = false; goto unlock; }
     for (int i = 0; i < count; i++)
     {
         const PicoCatalogWorkspace *ws = &leaves[i];
-        char dir[4096];
         const char *group = ws->project_path[0] ? ws->project_path : ws->path;
         if (strcmp(group, project)) continue;
         matched++;
         if (!CatalogRemoveSessionMedia(ws->path, "composer")) ok = false;
-        for (int j = 0; j < ws->session_count; j++)
-            if (!CatalogRemoveSessionMedia(ws->path, ws->sessions[j].id)) ok = false;
-        if (!CatalogDirForPath(ws->path, dir, sizeof(dir)) ||
-            !CatalogRemoveDataTree(dir, true)) ok = false;
+        sqlite3_stmt *items = NULL;
+        if (!CatalogDbPrepare(db, &items,
+            "SELECT id FROM sessions WHERE workspace_path=?")) ok = false;
+        if (items)
+        {
+            sqlite3_bind_text(items, 1, ws->path, -1, SQLITE_TRANSIENT);
+            int rc;
+            while ((rc = sqlite3_step(items)) == SQLITE_ROW)
+                if (!CatalogRemoveSessionMedia(ws->path, CatalogDbText(items, 0))) ok = false;
+            if (rc != SQLITE_DONE) ok = false;
+            sqlite3_finalize(items);
+        }
     }
-    PicoCatalog_Free(leaves, count);
+    if (!ok || !matched) goto close_db;
+    /* Once media cleanup succeeds everywhere, remove each checkout's history. */
+    for (int i = 0; i < count; i++)
+    {
+        const PicoCatalogWorkspace *ws = &leaves[i];
+        const char *group = ws->project_path[0] ? ws->project_path : ws->path;
+        if (strcmp(group, project)) continue;
+        char dir[4096], root[4096];
+        if (!SessionsRoot(root, sizeof(root)) ||
+            !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, ws->key) ||
+            !CatalogRemoveDataTree(dir, true)) ok = false;
+        else
+        {
+            sqlite3_stmt *order = NULL;
+            if (!CatalogDbPrepare(db, &order, "DELETE FROM workspace_order WHERE path=?")) ok = false;
+            else
+            {
+                sqlite3_bind_text(order, 1, ws->path, -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(order) != SQLITE_DONE) ok = false;
+            }
+            sqlite3_finalize(order);
+            sqlite3_stmt *delete = NULL;
+            if (!CatalogDbPrepare(db, &delete, "DELETE FROM workspaces WHERE path=?")) ok = false;
+            else
+            {
+                sqlite3_bind_text(delete, 1, ws->path, -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(delete) != SQLITE_DONE) ok = false;
+            }
+            sqlite3_finalize(delete);
+        }
+        if (!ok) break;
+    }
+    if (ok && matched)
+    {
+        sqlite3_stmt *order = NULL;
+        if (CatalogDbPrepare(db, &order,
+            "DELETE FROM workspace_order WHERE path=?"))
+        {
+            sqlite3_bind_text(order, 1, project, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(order) != SQLITE_DONE) ok = false;
+        }
+        else ok = false;
+        sqlite3_finalize(order);
+        sqlite3_stmt *delete = NULL;
+        if (!CatalogDbPrepare(db, &delete, "DELETE FROM projects WHERE path=?")) ok = false;
+        else
+        {
+            sqlite3_bind_text(delete, 1, project, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(delete) != SQLITE_DONE) ok = false;
+        }
+        sqlite3_finalize(delete);
+    }
+close_db:
+    sqlite3_close(db);
     if (matched) CatalogMarkChanged(); /* also publish partially deleted catalogs */
-    if (!matched) return -1;
+unlock:
+    for (int i = 0; i < count; i++) SessionLockRelease(locks[i]);
+    pthread_mutex_unlock(&g_catalog_mutex);
+    free(locks);
+    PicoCatalog_Free(leaves, count);
+    if (!matched || !ok) return -1;
     if (ok)
     {
         char error[256];
@@ -4579,105 +4895,280 @@ int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
     return ok ? 0 : -1;
 }
 
-static bool CatalogCopyGroupedSession(PicoCatalogWorkspace *ws,
-                                      const PicoCatalogSession *src)
+int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
 {
-    const int maximum = PICO_MAX_CATALOG_WORKSPACES * PICO_MAX_CATALOG_SESSIONS;
-    if (!ws || !src || !src->id[0] || ws->session_count >= maximum) return false;
-    PicoCatalogSession *next = realloc(ws->sessions,
-        (size_t)(ws->session_count + 1) * sizeof(*next));
-    if (!next) return false;
-    ws->sessions = next;
-    ws->sessions[ws->session_count++] = *src;
-    return true;
+    char error[256] = {0};
+    if (!host || !project) return -1;
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_delete_before_lock");
+#endif
+    int lock = CatalogDeletionGuardAcquire(error, sizeof(error));
+    if (lock < 0) return -1;
+    int result = CatalogDeleteProjectLocked(host, project);
+    CatalogDeletionGuardRelease(lock);
+    return result;
 }
 
-static int CmpCatalogSessionMtimeDesc(const void *a, const void *b)
+static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int requested,
+                               const atomic_bool *cancelled)
 {
-    const PicoCatalogSession *x = (const PicoCatalogSession *)a;
-    const PicoCatalogSession *y = (const PicoCatalogSession *)b;
-    if (x->mtime != y->mtime) return x->mtime > y->mtime ? -1 : 1;
-    if (x->mtime_nsec != y->mtime_nsec) return x->mtime_nsec > y->mtime_nsec ? -1 : 1;
-    return strcmp(y->id, x->id);
+    sqlite3_stmt *stmt = NULL;
+    if (!CatalogDbPrepare(db, &stmt,
+        "SELECT s.id,s.title,s.model,s.effort,s.kind,s.mtime,s.mtime_nsec,s.ctime,s.ctime_nsec,"
+        "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree"
+        " FROM sessions s JOIN workspaces w ON w.path=s.workspace_path"
+        " WHERE s.project_path=? AND s.kind=0"
+        " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC")) return false;
+    sqlite3_bind_text(stmt, 1, group->path, -1, SQLITE_TRANSIENT);
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW && !CatalogCancelled(cancelled))
+    {
+        PicoCatalogSession row = {0};
+        snprintf(row.id, sizeof(row.id), "%s", CatalogDbText(stmt, 0));
+        snprintf(row.title, sizeof(row.title), "%s", CatalogDbText(stmt, 1));
+        snprintf(row.model, sizeof(row.model), "%s", CatalogDbText(stmt, 2));
+        snprintf(row.effort, sizeof(row.effort), "%s", CatalogDbText(stmt, 3));
+        row.kind = (PicoAgentKind)sqlite3_column_int(stmt, 4);
+        row.mtime = (time_t)sqlite3_column_int64(stmt, 5);
+        row.mtime_nsec = (long)sqlite3_column_int64(stmt, 6);
+        row.ctime = (time_t)sqlite3_column_int64(stmt, 7);
+        row.ctime_nsec = (long)sqlite3_column_int64(stmt, 8);
+        row.inode = (uint64_t)sqlite3_column_int64(stmt, 9);
+        row.size = (uint64_t)sqlite3_column_int64(stmt, 10);
+        row.unseen_complete = sqlite3_column_int(stmt, 11) != 0;
+        snprintf(row.checkout_path, sizeof(row.checkout_path), "%s", CatalogDbText(stmt, 12));
+        snprintf(row.checkout_name, sizeof(row.checkout_name), "%s", CatalogDbText(stmt, 13));
+        row.worktree = sqlite3_column_int(stmt, 14) != 0;
+        struct stat st;
+        row.missing_checkout = stat(row.checkout_path, &st) != 0 || !S_ISDIR(st.st_mode);
+        if (row.missing_checkout && !row.worktree) continue;
+        char canonical[4096];
+        if (!row.missing_checkout &&
+            (!CanonicalWorkspacePath(row.checkout_path, canonical, sizeof(canonical)) ||
+             strcmp(canonical, row.checkout_path))) continue;
+        /* Count the look-ahead row only after filtering unavailable normal
+         * checkouts, so they cannot consume a page or its has-more indicator. */
+        if (group->session_count >= requested) { group->has_more_sessions = true; break; }
+        if (!CatalogAppendSession(group, &row)) break;
+    }
+    bool ok = group->has_more_sessions || rc == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
-int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out)
+static int CatalogGroupSnapshot(sqlite3 *db, PicoCatalogWorkspace *leaves, int count,
+                                 PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count)
 {
-    PicoCatalogWorkspace *leaves = NULL;
     PicoCatalogWorkspace *groups = NULL;
-    int leaf_count;
     int group_count = 0;
     if (out) *out = NULL;
-    if (!out) return 0;
-    leaf_count = PicoCatalog_Scan(&leaves);
-    for (int i = 0; i < leaf_count; i++)
+    if (!out) { PicoCatalog_Free(leaves, count); return 0; }
+    if (CatalogCancelled(cancelled) || count < 0) { PicoCatalog_Free(leaves, count); return count < 0 ? -1 : 0; }
+    for (int i = 0; i < count; i++)
     {
         PicoCatalogWorkspace *leaf = &leaves[i];
         const char *project = leaf->project_path[0] ? leaf->project_path : leaf->path;
         int gi = -1;
         for (int j = 0; j < group_count; j++)
-        {
-            if (strcmp(groups[j].path, project) == 0)
-            {
-                gi = j;
-                break;
-            }
-        }
+            if (strcmp(groups[j].path, project) == 0) { gi = j; break; }
         if (gi < 0)
         {
             PicoCatalogWorkspace *next = realloc(groups, (size_t)(group_count + 1) * sizeof(*next));
-            if (!next) break;
+            if (!next)
+            {
+                PicoCatalog_Free(leaves, count);
+                PicoCatalog_Free(groups, group_count);
+                return -1;
+            }
             groups = next;
             gi = group_count++;
             memset(&groups[gi], 0, sizeof(groups[gi]));
-            snprintf(groups[gi].key, sizeof(groups[gi].key), "%s", project);
             snprintf(groups[gi].path, sizeof(groups[gi].path), "%s", project);
             snprintf(groups[gi].project_path, sizeof(groups[gi].project_path), "%s", project);
+            snprintf(groups[gi].key, sizeof(groups[gi].key), "%s", project);
             PathBasename(project, groups[gi].name, sizeof(groups[gi].name));
             groups[gi].order = leaf->order;
             groups[gi].collapsed = leaf->collapsed;
             struct stat st;
             groups[gi].missing = stat(project, &st) != 0 || !S_ISDIR(st.st_mode);
         }
-        PicoCatalogWorkspace *group = &groups[gi];
-        if (leaf->order < group->order) group->order = leaf->order;
-        if (strcmp(leaf->path, project) == 0) group->collapsed = leaf->collapsed;
-        for (int j = 0; j < leaf->session_count; j++)
-        {
-            PicoCatalogSession row = leaf->sessions[j];
-            snprintf(row.checkout_path, sizeof(row.checkout_path), "%s", leaf->path);
-            snprintf(row.checkout_name, sizeof(row.checkout_name), "%s",
-                     leaf->checkout_name[0] ? leaf->checkout_name : leaf->name);
-            row.worktree = leaf->worktree;
-            row.missing_checkout = leaf->missing;
-            if (!CatalogCopyGroupedSession(group, &row)) break;
-        }
+        if (leaf->order < groups[gi].order) groups[gi].order = leaf->order;
+        if (strcmp(leaf->path, project) == 0) groups[gi].collapsed = leaf->collapsed;
     }
-    PicoCatalog_Free(leaves, leaf_count);
-    for (int i = 0; i < group_count; i++)
-        CatalogProjectLoad(groups[i].path, &groups[i]);
+    PicoCatalog_Free(leaves, count);
+    if (CatalogCancelled(cancelled)) { PicoCatalog_Free(groups, group_count); return 0; }
+    bool failed = false;
     for (int i = 0; i < group_count; i++)
     {
-        if (groups[i].session_count > 1)
-            qsort(groups[i].sessions, (size_t)groups[i].session_count,
-                  sizeof(*groups[i].sessions), CmpCatalogSessionMtimeDesc);
+        if (!CatalogDbReadProject(db, groups[i].path, &groups[i]))
+        { failed = true; break; }
+        int requested = 10;
+        for (int j = 0; j < page_count; j++)
+            if (!strcmp(pages[j].path, groups[i].path) && pages[j].shown > requested)
+                requested = pages[j].shown;
+        if (requested >= INT_MAX) requested = INT_MAX - 1;
+        if (!CatalogDbGroupRows(db, &groups[i], requested, cancelled))
+        { failed = true; break; }
     }
-    if (group_count > 1)
-        qsort(groups, (size_t)group_count, sizeof(*groups), CmpCatalogOrder);
+    if (failed) { PicoCatalog_Free(groups, group_count); return -1; }
+    if (group_count > 1) qsort(groups, (size_t)group_count, sizeof(*groups), CmpCatalogOrder);
+    if (CatalogCancelled(cancelled)) { PicoCatalog_Free(groups, group_count); return 0; }
     *out = groups;
     return group_count;
 }
 
+/* Snapshot reads never enumerate or reconcile transcripts. A read transaction
+ * keeps workspace preferences, project grouping and pages from one generation. */
+int PicoCatalog_ReadGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count)
+{
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_snapshot");
+#endif
+    PicoCatalogWorkspace *leaves = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int count = 0, rc = SQLITE_DONE, result = -1;
+    if (out) *out = NULL;
+    if (!out || CatalogCancelled(cancelled)) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    bool ok = CatalogDbExec(db, "BEGIN") && CatalogDbPrepare(db, &stmt,
+        "SELECT path,key,project_path,checkout_name,worktree,name,collapsed,ord"
+        " FROM workspaces ORDER BY ord,path");
+    while (ok && count < PICO_MAX_CATALOG_WORKSPACES &&
+           (rc = sqlite3_step(stmt)) == SQLITE_ROW && !CatalogCancelled(cancelled))
+    {
+        PicoCatalogWorkspace ws = {0};
+        char canonical[4096];
+        CatalogDbFillWorkspace(stmt, &ws);
+        if (!CanonicalWorkspacePath(ws.path, canonical, sizeof(canonical)))
+        {
+            if (!ws.worktree) continue;
+            ws.missing = true;
+        }
+        else if (strcmp(canonical, ws.path) != 0) continue;
+        if (!ws.name[0]) PathBasename(ws.path, ws.name, sizeof(ws.name));
+        if (!ws.checkout_name[0]) PathBasename(ws.path, ws.checkout_name, sizeof(ws.checkout_name));
+        PicoCatalogWorkspace *next = realloc(leaves, (size_t)(count + 1) * sizeof(*next));
+        if (!next) { ok = false; break; }
+        leaves = next;
+        leaves[count++] = ws;
+    }
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) ok = false;
+    sqlite3_finalize(stmt);
+    if (ok) ok = CatalogApplyOrder(db, leaves, count);
+    if (ok)
+    {
+        result = CatalogGroupSnapshot(db, leaves, count, out, cancelled, pages, page_count);
+        leaves = NULL;
+    }
+    PicoCatalog_Free(leaves, count);
+    if (!CatalogDbExec(db, "COMMIT"))
+    {
+        PicoCatalog_Free(*out, result);
+        *out = NULL;
+        result = -1;
+    }
+    sqlite3_close(db);
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("catalog_snapshot_done");
+#endif
+    return result;
+}
+
+int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count)
+{
+    PicoCatalogWorkspace *leaves = NULL;
+    if (out) *out = NULL;
+    if (!out || CatalogCancelled(cancelled)) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    int count = CatalogScanN(db, &leaves, PICO_MAX_CATALOG_WORKSPACES, cancelled, 0);
+    int result = CatalogGroupSnapshot(db, leaves, count, out, cancelled, pages, page_count);
+    sqlite3_close(db);
+    return result;
+}
+
+int PicoCatalog_ScanGroupedInterruptible(PicoCatalogWorkspace **out, const atomic_bool *cancelled)
+{
+    return PicoCatalog_ScanGroupedPaged(out, cancelled, NULL, 0);
+}
+
+int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out)
+{
+    return PicoCatalog_ScanGroupedInterruptible(out, NULL);
+}
+
+
 static void PersistJobClear(PicoSessionPersistJob *job)
 {
+    PicoSessionPersistJob *chain;
     if (!job)
     {
         return;
     }
+    chain = job->next;
+    job->next = NULL;
     free(job->header_json);
     free(job->event_json);
+    free(job->title);
     free(job->catalog_order_json);
     memset(job, 0, sizeof(*job));
+    while (chain)
+    {
+        PicoSessionPersistJob *next = chain->next;
+        chain->next = NULL;
+        PersistJobClear(chain);
+        free(chain);
+        chain = next;
+    }
+}
+
+static PicoSessionPersistJob *PersistJobTail(PicoSessionPersistJob *job)
+{
+    if (!job)
+    {
+        return NULL;
+    }
+    while (job->next)
+    {
+        job = job->next;
+    }
+    return job;
+}
+
+static PicoSessionPersistJob *PersistJobExtend(PicoSessionPersistJob *last, PicoSessionPersistJob *src)
+{
+    PicoSessionPersistJob *node;
+    if (!last || !src)
+    {
+        return NULL;
+    }
+    node = (PicoSessionPersistJob *)calloc(1, sizeof(*node));
+    if (!node)
+    {
+        return NULL;
+    }
+    node->job_kind = PICO_PERSIST_JOB_SESSION;
+    node->agent_id = src->agent_id;
+    node->kind = src->kind;
+    node->persistence = src->persistence;
+    snprintf(node->session_id, sizeof(node->session_id), "%s", src->session_id);
+    snprintf(node->session_path, sizeof(node->session_path), "%s", src->session_path);
+    snprintf(node->workspace_path, sizeof(node->workspace_path), "%s", src->workspace_path);
+    node->header_json = src->header_json;
+    node->event_json = src->event_json;
+    node->event_len = src->event_len;
+    node->event_capacity = src->event_capacity;
+    node->title = src->title;
+    src->header_json = NULL;
+    src->event_json = NULL;
+    src->event_len = src->event_capacity = 0;
+    src->title = NULL;
+    last->next = node;
+    return node;
 }
 
 static PicoAgent *PersistFindAgent(PicoHost *host, PicoAgentId id)
@@ -4795,7 +5286,7 @@ static PicoSessionPersistJob *PersistPendingForAgentLocked(PicoHost *host, PicoA
     {
         return NULL;
     }
-    for (i = 0; i < host->persist_pending_count; i++)
+    for (i = host->persist_pending_count - 1; i >= 0; i--)
     {
         if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_SESSION &&
             host->persist_pending[i].agent_id == id &&
@@ -4832,6 +5323,7 @@ static bool PersistTakeNextLocked(PicoHost *host, PicoSessionPersistJob *out)
         return false;
     }
     *out = host->persist_pending[0];
+    host->persist_pending_bytes -= out->queued_bytes;
     for (i = 1; i < host->persist_pending_count; i++)
     {
         host->persist_pending[i - 1] = host->persist_pending[i];
@@ -4857,6 +5349,7 @@ static void PersistDropPendingForAgentLocked(PicoHost *host, PicoAgentId agent_i
             i++;
             continue;
         }
+        host->persist_pending_bytes -= host->persist_pending[i].queued_bytes;
         PersistJobClear(&host->persist_pending[i]);
         for (int j = i + 1; j < host->persist_pending_count; j++)
         {
@@ -4954,18 +5447,35 @@ static void *PersistThreadMain(void *arg)
         {
             failed = !CatalogWriteOrderJson(job.catalog_order_json, error, sizeof(error));
         }
-        else if (job.header_json && job.header_json[0] &&
-                 (!EnsureSessionParent(job.session_path, error, sizeof(error)) ||
-                  !WriteLineAtPath(job.session_path, job.header_json, false, job.kind, job.persistence,
-                                   job.session_id, job.workspace_path, error, sizeof(error))))
+        else
         {
-            failed = true;
-        }
-        else if (job.event_json && job.event_json[0] &&
-                 !WriteLineAtPath(job.session_path, job.event_json, true, job.kind, job.persistence,
-                                  job.session_id, job.workspace_path, error, sizeof(error)))
-        {
-            failed = true;
+            PicoSessionPersistJob *cur = &job;
+            while (cur && !failed)
+            {
+                if (cur->header_json && cur->header_json[0] &&
+                    (!EnsureSessionParent(cur->session_path, error, sizeof(error)) ||
+                     !WriteLineAtPath(cur->session_path, cur->header_json, false, cur->kind,
+                                      cur->persistence, cur->session_id, cur->workspace_path, error,
+                                      sizeof(error))))
+                {
+                    failed = true;
+                }
+                else if (cur->event_json && cur->event_json[0] &&
+                         !WriteLineAtPath(cur->session_path, cur->event_json, true, cur->kind,
+                                          cur->persistence, cur->session_id, cur->workspace_path, error,
+                                          sizeof(error)))
+                {
+                    failed = true;
+                }
+                else if (cur->title && cur->title[0] &&
+                         !RewriteSessionTitleAtPath(cur->session_path, cur->title, cur->kind,
+                                                    cur->persistence, cur->session_id,
+                                                    cur->workspace_path, error, sizeof(error)))
+                {
+                    failed = true;
+                }
+                cur = cur->next;
+            }
         }
 
         pthread_mutex_lock(&host->persist_mu);
@@ -5026,6 +5536,7 @@ void PicoSessionPersist_Init(PicoHost *host)
     }
     host->persist_stop = false;
     host->persist_pending_count = 0;
+    host->persist_pending_bytes = 0;
     host->persist_flight_agent_id = 0;
     host->persist_flight_catalog_order = false;
     host->persist_catalog_next_generation = 0;
@@ -5281,8 +5792,23 @@ PicoCatalogPersistStatus PicoCatalog_OrderPersistStatus(PicoHost *host,
 /* Queue one JSONL record on the persist thread. Lines queued for the same
  * agent accumulate in FIFO order in its pending slot, so the on-disk order
  * always matches the call order and the calling thread never touches the
- * session file. Write failures surface asynchronously through the persist
- * failure pump, which moves the agent to PICO_SESSION_FAILED. */
+ * session file. A pending title rewrite is a barrier: later appends start a
+ * new job so they cannot land inside that rewrite. Write failures surface
+ * asynchronously through the persist failure pump, which moves the agent to
+ * PICO_SESSION_FAILED. */
+/* Byte budgets cover queued session payloads, including title continuations.
+ * In-flight work is owned by the writer and no longer consumes queue space. */
+#define PICO_PERSIST_SESSION_BYTES (16u * 1024u * 1024u)
+#define PICO_PERSIST_TOTAL_BYTES (64u * 1024u * 1024u)
+
+static bool PersistCanQueueLocked(const PicoHost *app, const PicoSessionPersistJob *pending,
+                                  size_t bytes)
+{
+    size_t session = pending ? pending->queued_bytes : 0;
+    return bytes <= PICO_PERSIST_SESSION_BYTES - session &&
+           bytes <= PICO_PERSIST_TOTAL_BYTES - app->persist_pending_bytes;
+}
+
 static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, const char *json)
 {
     PicoSessionPersistJob *pending;
@@ -5307,6 +5833,8 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
 
     memset(&job, 0, sizeof(job));
     job.job_kind = PICO_PERSIST_JOB_SESSION;
+    job.event_len = strlen(json);
+    job.event_capacity = job.event_len + 1;
     job.event_json = JsonDup(json);
     if (!job.event_json)
     {
@@ -5337,6 +5865,7 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
     snprintf(job.workspace_path, sizeof(job.workspace_path), "%s",
              PicoWorkspace_Path(SessionWorkspace(app, agent)));
 
+    job.queued_bytes = job.event_len + (job.header_json ? strlen(job.header_json) : 0);
     pthread_mutex_lock(&app->persist_mu);
     /* A write failure already recorded for this session (not yet applied to
      * the agent) rejects further appends so no records are written past a
@@ -5348,35 +5877,206 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
         return PICO_SESSION_WRITE_FAILED;
     }
     pending = PersistPendingForAgentLocked(app, agent->id, agent->session_id);
+    if (pending && job.header_json && PersistJobTail(pending)->header_json)
+    {
+        job.queued_bytes -= strlen(job.header_json);
+        free(job.header_json);
+        job.header_json = NULL;
+    }
+    if (!PersistCanQueueLocked(app, pending, job.queued_bytes +
+                               (pending && !PersistJobTail(pending)->title &&
+                                PersistJobTail(pending)->event_len ? 1 : 0)))
+    {
+        pthread_mutex_unlock(&app->persist_mu);
+        PersistJobClear(&job);
+        PersistenceFailed(app, agent, "session persist pending-byte budget exceeded");
+        return PICO_SESSION_WRITE_FAILED;
+    }
     if (pending)
     {
-        size_t have = pending->event_json ? strlen(pending->event_json) : 0;
-        size_t add = strlen(job.event_json);
-        char *merged = (char *)realloc(pending->event_json, have + (have ? 1 : 0) + add + 1);
-        if (!merged)
+        PicoSessionPersistJob *last = PersistJobTail(pending);
+        if (last && !last->title)
+        {
+            size_t have = last->event_len;
+            size_t add = job.event_len;
+            size_t need = have + (have ? 1 : 0) + add + 1;
+            if (need > last->event_capacity)
+            {
+                size_t capacity = last->event_capacity ? last->event_capacity : 64;
+                while (capacity < need)
+                    capacity = capacity > PICO_PERSIST_SESSION_BYTES / 2 ? need : capacity * 2;
+                char *merged = (char *)realloc(last->event_json, capacity);
+                if (!merged)
+                {
+                    pthread_mutex_unlock(&app->persist_mu);
+                    PersistJobClear(&job);
+                    PersistenceFailed(app, agent, "out of memory while queueing the session write");
+                    return PICO_SESSION_WRITE_FAILED;
+                }
+                last->event_json = merged;
+                last->event_capacity = capacity;
+            }
+            if (have) last->event_json[have] = '\n';
+            memcpy(last->event_json + have + (have ? 1 : 0), job.event_json, add + 1);
+            last->event_len = need - 1;
+            if (!last->header_json && job.header_json)
+            {
+                last->header_json = job.header_json;
+                job.header_json = NULL;
+            }
+            pending->queued_bytes += job.queued_bytes + (have ? 1 : 0);
+            app->persist_pending_bytes += job.queued_bytes + (have ? 1 : 0);
+            PersistJobClear(&job);
+        }
+        else if (!PersistJobExtend(last, &job))
         {
             pthread_mutex_unlock(&app->persist_mu);
             PersistJobClear(&job);
             PersistenceFailed(app, agent, "out of memory while queueing the session write");
             return PICO_SESSION_WRITE_FAILED;
         }
-        if (have)
+        else
         {
-            merged[have] = '\n';
+            pending->queued_bytes += job.queued_bytes;
+            app->persist_pending_bytes += job.queued_bytes;
+            PersistJobClear(&job);
         }
-        memcpy(merged + have + (have ? 1 : 0), job.event_json, add + 1);
-        pending->event_json = merged;
-        if (!pending->header_json && job.header_json)
-        {
-            pending->header_json = job.header_json;
-            job.header_json = NULL;
-        }
-        PersistJobClear(&job);
     }
     else if (app->persist_pending &&
              app->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY)
     {
         app->persist_pending[app->persist_pending_count++] = job;
+        app->persist_pending_bytes += job.queued_bytes;
+        pthread_cond_signal(&app->persist_cv);
+    }
+    else
+    {
+        pthread_mutex_unlock(&app->persist_mu);
+        PersistJobClear(&job);
+        PersistenceFailed(app, agent, "session persist queue is full");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    pthread_mutex_unlock(&app->persist_mu);
+    return PICO_SESSION_WRITE_OK;
+}
+
+/* Queue a title rewrite behind earlier records for this session. Distinct
+ * titles are not coalesced: each accepted change is its own rewrite/event.
+ * A title can ride on the current pending append job when that job does not
+ * already have a rewrite, which keeps FIFO order without cutting in front of
+ * already-queued events. Later appends start a new job so they cannot land
+ * inside the rewrite. */
+static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent, const char *title)
+{
+    PicoSessionPersistJob *pending;
+    PicoSessionPersistJob job;
+    bool new_identity;
+    if (!app || !agent || !title || !title[0])
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (agent->persistence == PICO_SESSION_EPHEMERAL)
+    {
+        return PICO_SESSION_WRITE_SKIPPED;
+    }
+    if (agent->persistence == PICO_SESSION_FAILED)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (!app->persist_ready)
+    {
+        return PICO_SESSION_WRITE_FAILED;
+    }
+
+    memset(&job, 0, sizeof(job));
+    job.job_kind = PICO_PERSIST_JOB_SESSION;
+    job.title = JsonDup(title);
+    if (!job.title)
+    {
+        PersistenceFailed(app, agent, "out of memory while queueing the session title");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    new_identity = !agent->session_path[0];
+    if (AssignSessionIdentity(app, agent) != 0 || !agent->session_path[0] || agent->id == 0)
+    {
+        PersistJobClear(&job);
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (new_identity)
+    {
+        job.header_json = BuildSessionHeaderJson(app, agent);
+        if (!job.header_json)
+        {
+            PersistJobClear(&job);
+            PersistenceFailed(app, agent, "out of memory while creating the session header");
+            return PICO_SESSION_WRITE_FAILED;
+        }
+    }
+    job.agent_id = agent->id;
+    job.kind = agent->kind;
+    job.persistence = agent->persistence;
+    snprintf(job.session_id, sizeof(job.session_id), "%s", agent->session_id);
+    snprintf(job.session_path, sizeof(job.session_path), "%s", agent->session_path);
+    snprintf(job.workspace_path, sizeof(job.workspace_path), "%s",
+             PicoWorkspace_Path(SessionWorkspace(app, agent)));
+
+    job.queued_bytes = strlen(job.title) + (job.header_json ? strlen(job.header_json) : 0);
+    pthread_mutex_lock(&app->persist_mu);
+    if (PersistHasFailureLocked(app, agent->id, agent->session_id))
+    {
+        pthread_mutex_unlock(&app->persist_mu);
+        PersistJobClear(&job);
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    pending = PersistPendingForAgentLocked(app, agent->id, agent->session_id);
+    if (pending && job.header_json && PersistJobTail(pending)->header_json)
+    {
+        job.queued_bytes -= strlen(job.header_json);
+        free(job.header_json);
+        job.header_json = NULL;
+    }
+    if (!PersistCanQueueLocked(app, pending, job.queued_bytes))
+    {
+        pthread_mutex_unlock(&app->persist_mu);
+        PersistJobClear(&job);
+        PersistenceFailed(app, agent, "session persist pending-byte budget exceeded");
+        return PICO_SESSION_WRITE_FAILED;
+    }
+    if (pending)
+    {
+        PicoSessionPersistJob *last = PersistJobTail(pending);
+        if (last && !last->title)
+        {
+            last->title = job.title;
+            job.title = NULL;
+            if (!last->header_json && job.header_json)
+            {
+                last->header_json = job.header_json;
+                job.header_json = NULL;
+            }
+            pending->queued_bytes += job.queued_bytes;
+            app->persist_pending_bytes += job.queued_bytes;
+            PersistJobClear(&job);
+        }
+        else if (!PersistJobExtend(last, &job))
+        {
+            pthread_mutex_unlock(&app->persist_mu);
+            PersistJobClear(&job);
+            PersistenceFailed(app, agent, "out of memory while queueing the session title");
+            return PICO_SESSION_WRITE_FAILED;
+        }
+        else
+        {
+            pending->queued_bytes += job.queued_bytes;
+            app->persist_pending_bytes += job.queued_bytes;
+            PersistJobClear(&job);
+        }
+    }
+    else if (app->persist_pending &&
+             app->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY)
+    {
+        app->persist_pending[app->persist_pending_count++] = job;
+        app->persist_pending_bytes += job.queued_bytes;
         pthread_cond_signal(&app->persist_cv);
     }
     else

@@ -8,7 +8,9 @@
 #include "usage.h"
 #include "host_internal.h"
 
+#include <sqlite3.h>
 #include <stdbool.h>
+#include <poll.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +39,7 @@ static int g_order_ready_fd = -1;
 static int g_order_continue_fd = -1;
 static int g_lock_attempt_fd = -1;
 static int g_scan_session_calls;
+static int g_delete_attempt_fd = -1;
 
 static const PicoCatalogWorkspace *FindCatalogPath(PicoCatalogWorkspace *list, int n,
                                                     const char *path);
@@ -83,6 +86,12 @@ bool PicoSession_TestHook(const char *stage)
         {
             return true;
         }
+    }
+    if (stage && strcmp(stage, "catalog_delete_before_lock") == 0 && g_delete_attempt_fd >= 0)
+    {
+        int fd = g_delete_attempt_fd;
+        g_delete_attempt_fd = -1;
+        return !TransferByte(fd, true);
     }
     if (stage && strcmp(stage, "catalog_order_before_write") == 0 &&
         g_order_ready_fd >= 0 && g_order_continue_fd >= 0)
@@ -1590,10 +1599,7 @@ static int TestCatalog(void)
     int n = 0;
     const PicoCatalogWorkspace *found;
     char key[4096];
-    char meta[4096];
     char jsonl[4096];
-    char *raw;
-    size_t raw_len = 0;
     const char *slash;
 
     if (!mkdtemp(ws))
@@ -1613,21 +1619,12 @@ static int TestCatalog(void)
         return Fail("ensure did not create a catalog workspace named after the folder");
     }
     snprintf(key, sizeof(key), "%s", found->key);
-    if (!PicoPath_Format(meta, sizeof(meta), "%s/sessions/%s/.workspace.json", g_config_dir, key) ||
-        !PicoPath_Format(jsonl, sizeof(jsonl), "%s/sessions/%s/2026-01-01T00-00-00Z_catalogsess.jsonl",
+    if (!PicoPath_Format(jsonl, sizeof(jsonl), "%s/sessions/%s/2026-01-01T00-00-00Z_catalogsess.jsonl",
                          g_config_dir, key))
     {
         PicoCatalog_Free(list, n);
         return Fail("catalog paths");
     }
-    raw = Pico_ReadFile(meta, &raw_len);
-    if (!raw || !strstr(raw, ws) || !strstr(raw, found->name))
-    {
-        free(raw);
-        PicoCatalog_Free(list, n);
-        return Fail("workspace.json missing path or name");
-    }
-    free(raw);
     PicoCatalog_Free(list, n);
 
     {
@@ -1660,28 +1657,6 @@ static int TestCatalog(void)
     }
     PicoCatalog_Free(list, n);
 
-    {
-        FILE *f = fopen(meta, "wb");
-        if (!f)
-        {
-            return Fail("open meta for ghost");
-        }
-        fprintf(f,
-                "{\"version\":1,\"key\":\"%s\",\"path\":\"%s\",\"name\":\"%s\",\"order\":0,"
-                "\"collapsed\":false,\"sessions\":[{\"id\":\"ghostid\",\"model\":\"x\","
-                "\"effort\":\"\",\"mtime\":1}]}",
-                key, ws, slash + 1);
-        fclose(f);
-    }
-    n = PicoCatalog_Scan(&list);
-    found = FindCatalogPath(list, n, ws);
-    if (!found || found->session_count != 1 || strcmp(found->sessions[0].id, "catalogsess") != 0)
-    {
-        PicoCatalog_Free(list, n);
-        return Fail("session-only metadata id must not appear without jsonl");
-    }
-    PicoCatalog_Free(list, n);
-
     if (PicoCatalog_SetCollapsed(ws, true) != 0)
     {
         return Fail("set collapsed");
@@ -1693,19 +1668,6 @@ static int TestCatalog(void)
         PicoCatalog_Free(list, n);
         return Fail("collapsed did not persist");
     }
-    PicoCatalog_Free(list, n);
-
-    unlink(meta);
-    n = PicoCatalog_Scan(&list);
-    found = FindCatalogPath(list, n, ws);
-    raw = Pico_ReadFile(meta, &raw_len);
-    if (!found || !raw || !strstr(raw, ws))
-    {
-        free(raw);
-        PicoCatalog_Free(list, n);
-        return Fail("legacy folder without metadata was not recovered from jsonl cwd");
-    }
-    free(raw);
     PicoCatalog_Free(list, n);
 
     if (PicoCatalog_SetSessionModel(ws, "catalogsess", "overlay-model", "low") != 0)
@@ -2079,18 +2041,12 @@ static int TestCatalogListingCache(void)
 
     n = PicoCatalog_Scan(&list);
     found = FindCatalogPath(list, n, ws);
-    raw = Pico_ReadFile(meta, &raw_len);
     if (!found || found->session_count != 1 || strcmp(found->sessions[0].id, "cachesess") != 0 ||
-        !strstr(found->sessions[0].title, "cached title source") || !raw ||
-        !strstr(raw, "cached title source") || !strstr(raw, "\"mtime_nsec\":") ||
-        !strstr(raw, "\"ctime_nsec\":") || !strstr(raw, "\"inode\":") ||
-        !strstr(raw, "\"size\":"))
+        !strstr(found->sessions[0].title, "cached title source"))
     {
-        free(raw);
         PicoCatalog_Free(list, n);
-        return Fail("first scan must cache title and size in workspace.json");
+        return Fail("first catalog scan must recover the session title");
     }
-    free(raw);
     PicoCatalog_Free(list, n);
 
     g_scan_session_calls = 0;
@@ -2279,6 +2235,436 @@ static int TestSessionListCompleteness(void)
         return Fail("complete listing must fully parse subagent events");
     }
     return 0;
+}
+
+static int TestCatalogCacheCoversOlderSessions(void)
+{
+    char ws[] = "/tmp/pico-catalog-older-XXXXXX";
+    char key[4096];
+    char sessions_dir[4096];
+    PicoCatalogWorkspace *catalog = NULL;
+    const PicoCatalogWorkspace *found;
+    int catalog_n;
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0)
+    {
+        return Fail("older cache setup");
+    }
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (!found)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("older cache catalog workspace");
+    }
+    snprintf(key, sizeof(key), "%s", found->key);
+    PicoCatalog_Free(catalog, catalog_n);
+    if (!PicoPath_Format(sessions_dir, sizeof(sessions_dir), "%s/sessions/%s", g_config_dir, key))
+    {
+        return Fail("older cache session directory");
+    }
+    for (int i = 0; i < PICO_MAX_CATALOG_SESSIONS + 4; i++)
+    {
+        char path[4096];
+        FILE *f;
+        if (!PicoPath_Format(path, sizeof(path), "%s/2026-01-01T00-00-%03dZ_old%03d.jsonl",
+                             sessions_dir, i, i))
+        {
+            return Fail("older cache path");
+        }
+        f = fopen(path, "wb");
+        if (!f)
+        {
+            return Fail("older cache file");
+        }
+        fprintf(f,
+                "{\"type\":\"session\",\"version\":4,\"id\":\"old%03d\","
+                "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n"
+                "{\"type\":\"message\",\"role\":\"user\",\"content\":\"old-%03d\"}\n",
+                i, ws, i);
+        fclose(f);
+    }
+    catalog_n = PicoCatalog_Scan(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (!found || found->session_count != PICO_MAX_CATALOG_SESSIONS)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("catalog listing stays at the visible session limit");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    catalog_n = PicoCatalog_ScanGrouped(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    if (!found || found->session_count != 10 || !found->has_more_sessions)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("sidebar initially loads only the newest session page");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    PicoCatalogPage page = {0};
+    snprintf(page.path, sizeof(page.path), "%s", ws);
+    page.shown = PICO_MAX_CATALOG_SESSIONS + 10;
+    catalog_n = PicoCatalog_ScanGroupedPaged(&catalog, NULL, &page, 1);
+    found = FindCatalogPath(catalog, catalog_n, ws);
+    bool older_visible = false;
+    if (found)
+        for (int i = 0; i < found->session_count; i++)
+            if (strcmp(found->sessions[i].id, "old000") == 0) older_visible = true;
+    if (!found || !older_visible || found->has_more_sessions)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        return Fail("sidebar More can reach older sessions beyond the former catalog cap");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    /* Updating an old session must not depend on it being in the visible page. */
+    if (PicoCatalog_SetSessionModel(ws, "old000", "new-model", "") != 0)
+        return Fail("update older session");
+    PicoWorkspace lookup = {0};
+    PicoSessionInfo *results = NULL;
+    snprintf(lookup.path, sizeof(lookup.path), "%s", ws);
+    int matches = PicoSession_Search(&lookup, "old-000", &results, true, 10);
+    bool old_found = matches == 1 && results && strcmp(results[0].id, "old000") == 0 &&
+                     strcmp(results[0].model, "new-model") == 0;
+    free(results);
+    if (!old_found) return Fail("older session must remain searchable after update");
+    return 0;
+}
+
+static int TestCatalogRejectsCollidingPaths(void)
+{
+    char root[] = "/tmp/pico-catalog-collision-XXXXXX";
+    char first[4096], second[4096];
+    if (!mkdtemp(root) || !PicoPath_Format(first, sizeof(first), "%s/a-b/c", root) ||
+        !PicoPath_Format(second, sizeof(second), "%s/a/b-c", root))
+        return Fail("catalog collision paths");
+    Pico_MkdirP(first);
+    Pico_MkdirP(second);
+    if (PicoCatalog_Ensure(first) != 0 || PicoCatalog_Ensure(second) == 0)
+        return Fail("ambiguous checkout keys must not share a session directory");
+    return 0;
+}
+
+static int TestProjectDeleteWaitsForCrossProcessWriter(void)
+{
+    char ws[] = "/tmp/pico-cat-delete-race-XXXXXX";
+    int ready[2], resume[2], attempted[2], finished[2], writer_status = 0, delete_status = 0;
+    PicoHost host = {0};
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0 || pipe(ready) != 0 ||
+        pipe(resume) != 0 || pipe(attempted) != 0 || pipe(finished) != 0)
+        return Fail("cross-process deletion setup");
+    pid_t writer = fork();
+    if (writer < 0) return Fail("cross-process writer fork");
+    if (writer == 0)
+    {
+        close(ready[0]); close(resume[1]);
+        close(attempted[0]); close(attempted[1]); close(finished[0]); close(finished[1]);
+        PicoHost app = {0};
+        PicoAgent agent = {0};
+        PicoHost_SetPath(&app, ws);
+        agent.persistence = PICO_SESSION_DURABLE;
+        snprintf(agent.model, sizeof(agent.model), "saved-model");
+        g_catalog_ready_fd = ready[1];
+        g_catalog_continue_fd = resume[0];
+        _exit(PicoSession_LogUser(&app, &agent, "seed", "seed", NULL) == PICO_SESSION_WRITE_OK ? 0 : 2);
+    }
+    close(ready[1]); close(resume[0]);
+    if (!TransferByte(ready[0], false)) return Fail("cross-process writer did not reach catalog update");
+    pid_t deleter = fork();
+    if (deleter < 0) return Fail("cross-process deleter fork");
+    if (deleter == 0)
+    {
+        close(attempted[0]); close(finished[0]); close(resume[1]);
+        g_delete_attempt_fd = attempted[1];
+        int result = PicoCatalog_DeleteProject(&host, ws);
+        (void)TransferByte(finished[1], true);
+        _exit(result == 0 ? 0 : 3);
+    }
+    close(attempted[1]); close(finished[1]);
+    if (!TransferByte(attempted[0], false)) return Fail("cross-process delete did not start");
+    struct pollfd check = {.fd = finished[0], .events = POLLIN};
+    int premature = poll(&check, 1, 100);
+    (void)TransferByte(resume[1], true);
+    waitpid(writer, &writer_status, 0);
+    waitpid(deleter, &delete_status, 0);
+    if (premature != 0 || !WIFEXITED(writer_status) || WEXITSTATUS(writer_status) != 0 ||
+        !WIFEXITED(delete_status) || WEXITSTATUS(delete_status) != 0)
+        return Fail("project deletion must wait for a writer in another process");
+    return 0;
+}
+
+static int TestCatalogScanFailureKeepsIndexedSession(void)
+{
+    char ws[] = "/tmp/pico-catalog-failed-stat-XXXXXX";
+    char path[4096];
+    PicoCatalogWorkspace *list = NULL;
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0) return Fail("failed-stat setup");
+    int n = PicoCatalog_Scan(&list);
+    const PicoCatalogWorkspace *found = FindCatalogPath(list, n, ws);
+    if (!found || !PicoPath_Format(path, sizeof(path), "%s/sessions/%s/2026-01-01T00-00-00Z_stable.jsonl",
+                                   g_config_dir, found->key))
+    { PicoCatalog_Free(list, n); return Fail("failed-stat path"); }
+    PicoCatalog_Free(list, n);
+    if (!AppendRaw(path, "{\"type\":\"session\",\"version\":4,\"id\":\"stable\",\"kind\":\"normal\"}") ||
+        !AppendRaw(path, "{\"type\":\"message\",\"role\":\"user\",\"content\":\"stable title\"}"))
+        return Fail("failed-stat session");
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1)
+    { PicoCatalog_Free(list, n); return Fail("failed-stat index"); }
+    PicoCatalog_Free(list, n);
+    if (unlink(path) != 0 || symlink("missing-transcript", path) != 0)
+        return Fail("failed-stat broken link");
+    list = NULL;
+    n = PicoCatalog_Scan(&list);
+    PicoCatalog_Free(list, n);
+    if (n >= 0) return Fail("failed-stat scan must not publish a partial catalog");
+    PicoWorkspace lookup = {0};
+    PicoSessionInfo *results = NULL;
+    snprintf(lookup.path, sizeof(lookup.path), "%s", ws);
+    int matches = PicoSession_Search(&lookup, "stable title", &results, true, 1);
+    free(results);
+    (void)unlink(path);
+    if (matches != 1) return Fail("failed scan must not discard indexed session");
+    return 0;
+}
+
+static int TestCatalogSnapshotDoesNotReconcile(void)
+{
+    char config[] = "/tmp/pico-catalog-snapshot-cfg-XXXXXX";
+    char ws[] = "/tmp/pico-catalog-snapshot-ws-XXXXXX";
+    char original[4096];
+    PicoHost host = {0};
+    PicoWorkspace workspace = {0};
+    PicoAgent agent = {0};
+    PicoCatalogWorkspace *list = NULL;
+    int result = 1, n = 0;
+    const char *phase = "seed";
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(ws)) return Fail("snapshot fixture directories");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    workspace.host = &host;
+    snprintf(workspace.path, sizeof(workspace.path), "%s", ws);
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    agent.workspace = &workspace;
+    agent.persistence = PICO_SESSION_DURABLE;
+    if (PicoSession_LogUser(&host, &agent, "cached title", "cached title", NULL) !=
+        PICO_SESSION_WRITE_OK) goto done;
+    FILE *file = fopen(agent.session_path, "wb");
+    if (!file) goto done;
+    fprintf(file, "{\"type\":\"session\",\"version\":4,\"id\":\"%s\","
+                  "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"external title\"}\n",
+                  agent.session_id, ws);
+    fclose(file);
+    phase = "cached external title";
+    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    const PicoCatalogWorkspace *found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        strcmp(found->sessions[0].title, "cached title")) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    phase = "reconciled external title";
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1 ||
+        strcmp(found->sessions[0].title, "external title")) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    phase = "deleted transcript";
+    if (unlink(agent.session_path) != 0) goto done;
+    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 1) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found || found->session_count != 0) goto done;
+    PicoCatalog_Free(list, n); list = NULL;
+    phase = "missing checkout";
+    if (rmdir(ws) != 0) goto done;
+    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    if (n != 0) goto done;
+    result = 0;
+done:
+    PicoCatalog_Free(list, n);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    if (result) fprintf(stderr, "snapshot test phase: %s\n", phase);
+    return result ? Fail("indexed snapshots must defer transcript changes to reconciliation and omit missing checkouts") : 0;
+}
+
+static int TestSidebarScanFailureKeepsIndexedSession(void)
+{
+    char config[] = "/tmp/pico-sidebar-failed-scan-cfg-XXXXXX";
+    char ws[] = "/tmp/pico-sidebar-failed-scan-ws-XXXXXX";
+    char original[4096], broken[4096], resolved[4096];
+    PicoHost host = {0};
+    PicoWorkspace workspace = {0};
+    PicoAgent agent = {0};
+    PicoCatalogWorkspace *list = NULL;
+    atomic_bool cancelled = false;
+    int result = 1, n = 0;
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(ws)) return Fail("sidebar failed-scan setup");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    workspace.host = &host;
+    snprintf(workspace.path, sizeof(workspace.path), "%s", ws);
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    agent.workspace = &workspace;
+    agent.persistence = PICO_SESSION_DURABLE;
+    /* Write-through indexes a session without a prior successful reconciliation. */
+    if (PicoSession_LogUser(&host, &agent, "stable title", "stable title", NULL) !=
+        PICO_SESSION_WRITE_OK ||
+        !PicoPath_Format(broken, sizeof(broken), "%s", agent.session_path)) goto done;
+    char *slash = strrchr(broken, '/');
+    if (!slash) goto done;
+    slash[1] = '\0';
+    size_t used = strlen(broken);
+    if (!PicoPath_Format(broken + used, sizeof(broken) - used, "broken.jsonl") ||
+        symlink("missing-transcript", broken) != 0) goto done;
+    /* A non-NULL cancellation token exercises the sidebar's non-forced scan. */
+    n = PicoCatalog_ScanGroupedInterruptible(&list, &cancelled);
+    if (n >= 0 || list != NULL) goto done;
+    /* Exact lookup must still work while the failed transcript remains broken. */
+    if (PicoSession_Resolve(&workspace, agent.session_id, false,
+                            resolved, sizeof(resolved)) != 0 ||
+        strcmp(resolved, agent.session_path) != 0) goto done;
+    result = 0;
+done:
+    PicoCatalog_Free(list, n);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    return result ? Fail("sidebar scan failure must preserve indexed session lookup") : 0;
+}
+
+static int TestCatalogDeleteRejectsSwappedCheckout(void)
+{
+    char first[] = "/tmp/pico-cat-swap-first-XXXXXX";
+    char second[] = "/tmp/pico-cat-swap-second-XXXXXX";
+    char moved[4096], file[4096];
+    PicoCatalogWorkspace *list = NULL;
+    PicoHost host = {0};
+    if (!mkdtemp(first) || !mkdtemp(second) || PicoCatalog_Ensure(first) != 0 ||
+        PicoCatalog_Ensure(second) != 0)
+        return Fail("swapped checkout setup");
+    int n = PicoCatalog_Scan(&list);
+    const PicoCatalogWorkspace *target = FindCatalogPath(list, n, second);
+    if (!target || !PicoPath_Format(file, sizeof(file), "%s/sessions/%s/foreign.jsonl",
+                                    g_config_dir, target->key))
+    { PicoCatalog_Free(list, n); return Fail("swapped checkout paths"); }
+    PicoCatalog_Free(list, n);
+    if (!AppendRaw(file, "{\"type\":\"session\",\"version\":4,\"id\":\"foreign\"}") ||
+        !PicoPath_Format(moved, sizeof(moved), "%s-moved", first) ||
+        rename(first, moved) != 0 || symlink(second, first) != 0)
+        return Fail("swapped checkout fixture");
+    if (PicoCatalog_DeleteProject(&host, first) == 0 || access(file, F_OK) != 0)
+        return Fail("deleting a swapped checkout touched another checkout's history");
+    return 0;
+}
+
+static int TestCatalogRejectsIncompatibleSchema(void)
+{
+    char config[] = "/tmp/pico-catalog-version-cfg-XXXXXX";
+    char ws[] = "/tmp/pico-catalog-version-ws-XXXXXX";
+    char original[4096], path[4096], version_sql[64];
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    PicoCatalogWorkspace *list = NULL;
+    int result = 1, n = 0, version = 0;
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(ws)) return Fail("catalog version setup");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    if (PicoCatalog_Ensure(ws) != 0 ||
+        PicoCatalog_SetProjectName(ws, "Keep this project name") != 0 ||
+        !PicoPath_Format(path, sizeof(path), "%s/sessions/.catalog.sqlite3", config) ||
+        sqlite3_open(path, &db) != SQLITE_OK ||
+        sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, NULL) != SQLITE_OK ||
+        sqlite3_step(stmt) != SQLITE_ROW) goto done;
+    version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt); stmt = NULL;
+    /* Version 1 was the development schema before project-indexed sessions. */
+    if (sqlite3_exec(db, "PRAGMA user_version=1", NULL, NULL, NULL) != SQLITE_OK)
+        goto done;
+    sqlite3_close(db); db = NULL;
+    if (PicoCatalog_Ensure(ws) == 0) goto done;
+    /* Restore only the fixture's version: rejection must not have reset preferences. */
+    snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", version);
+    if (sqlite3_open(path, &db) != SQLITE_OK ||
+        sqlite3_exec(db, version_sql, NULL, NULL, NULL) != SQLITE_OK) goto done;
+    sqlite3_close(db); db = NULL;
+    n = PicoCatalog_ScanGrouped(&list);
+    const PicoCatalogWorkspace *found = FindCatalogPath(list, n, ws);
+    if (!found || strcmp(found->name, "Keep this project name") != 0) goto done;
+    result = 0;
+done:
+    sqlite3_finalize(stmt);
+    if (db) sqlite3_close(db);
+    PicoCatalog_Free(list, n);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    return result ? Fail("incompatible catalog must be rejected without resetting preferences") : 0;
+}
+
+static int TestCatalogSQLiteImport(void)
+{
+    char config[] = "/tmp/pico-catalog-import-cfg-XXXXXX";
+    char first[] = "/tmp/pico-catalog-import-first-XXXXXX";
+    char second[] = "/tmp/pico-catalog-import-second-XXXXXX";
+    char original[4096], root[4096], key[4096], dir[4096], meta[4096];
+    char project[4096], order[4096], jsonl[4096], db[4096], marker[4096];
+    PicoCatalogWorkspace *catalog = NULL;
+    const PicoCatalogWorkspace *group;
+    int result = 1, count = 0;
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(first) || !mkdtemp(second))
+        return Fail("catalog migration setup");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    if (!PicoPath_Format(root, sizeof(root), "%s/sessions", config) ||
+        !PicoPath_Format(key, sizeof(key), "--%s--", first + 1)) goto done;
+    for (char *p = key; *p; p++) if (*p == '/') *p = '-';
+    if (!PicoPath_Format(dir, sizeof(dir), "%s/%s", root, key) ||
+        !PicoPath_Format(meta, sizeof(meta), "%s/.workspace.json", dir) ||
+        !PicoPath_Format(jsonl, sizeof(jsonl), "%s/2026-01-01T00-00-00Z_imported.jsonl", dir) ||
+        !PicoPath_Format(project, sizeof(project), "%s/.project-%s.json", root, key) ||
+        !PicoPath_Format(order, sizeof(order), "%s/.workspace-order.json", root) ||
+        !PicoPath_Format(db, sizeof(db), "%s/.catalog.sqlite3", root) ||
+        !PicoPath_Format(marker, sizeof(marker), "%s/.catalog-installed", root)) goto done;
+    Pico_MkdirP(dir);
+    FILE *f = fopen(meta, "wb");
+    if (!f) goto done;
+    fprintf(f, "{\"version\":1,\"key\":\"%s\",\"path\":\"%s\","
+            "\"name\":\"Imported workspace\",\"collapsed\":true,\"sessions\":[]}", key, first);
+    fclose(f);
+    f = fopen(project, "wb");
+    if (!f) goto done;
+    fprintf(f, "{\"path\":\"%s\",\"name\":\"Imported project\",\"stashed\":true}", first);
+    fclose(f);
+    f = fopen(order, "wb");
+    if (!f) goto done;
+    fprintf(f, "{\"version\":1,\"workspaces\":[\"%s\",\"%s\"]}", second, first);
+    fclose(f);
+    f = fopen(jsonl, "wb");
+    if (!f) goto done;
+    fprintf(f, "{\"type\":\"session\",\"version\":4,\"id\":\"imported\","
+            "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":\"import title\"}\n", first);
+    fclose(f);
+    if (PicoCatalog_Ensure(second) != 0) goto done; /* initializes and imports existing preferences */
+    count = PicoCatalog_ScanGrouped(&catalog);
+    group = FindCatalogPath(catalog, count, first);
+    if (!group || count < 2 || strcmp(catalog[0].path, second) != 0 ||
+        strcmp(group->name, "Imported project") != 0 || !group->stashed ||
+        !group->collapsed || group->session_count != 1 ||
+        strcmp(group->sessions[0].id, "imported") != 0 ||
+        access(meta, F_OK) == 0 || access(project, F_OK) == 0 || access(order, F_OK) == 0 ||
+        access(marker, F_OK) != 0)
+        goto done;
+    PicoCatalog_Free(catalog, count); catalog = NULL;
+    /* A lost database must not quietly reset preferences from JSONL. */
+    if (unlink(db) != 0 || PicoCatalog_Ensure(first) == 0) goto done;
+    f = fopen(db, "wb");
+    if (!f) goto done;
+    fclose(f);
+    if (PicoCatalog_Ensure(first) == 0) goto done;
+    result = 0;
+done:
+    PicoCatalog_Free(catalog, count);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    return result ? Fail("catalog import must preserve presentation and refuse lost preferences") : 0;
 }
 
 static int TestUnseenCompleteRoundTrip(void)
@@ -2708,6 +3094,201 @@ static int TestQueuedModelChangeDrainDeadline(void)
     return timed_out ? 0 : Fail("blocked persistence must report the shared drain deadline");
 }
 
+static int TestQueuedTitleOrdersAfterUserWrite(void)
+{
+    char ws[] = "/tmp/pico-title-order-XXXXXX";
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent blocker;
+    PicoAgent agent;
+    int ready[2];
+    int proceed[2];
+    size_t file_len = 0;
+    char *file = NULL;
+    const char *user;
+    const char *title;
+    const char *header;
+    const char *after;
+
+    if (!mkdtemp(ws))
+    {
+        return Fail("queued title order workspace");
+    }
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&blocker, 0, sizeof(blocker));
+    memset(&agent, 0, sizeof(agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "%s", ws);
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    blocker.workspace = agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &blocker;
+    writer_ws.agents[1] = &agent;
+    writer_ws.count = 2;
+    blocker.persistence = agent.persistence = PICO_SESSION_DURABLE;
+    blocker.kind = agent.kind = PICO_AGENT_MAIN;
+    blocker.id = 6;
+    agent.id = 7;
+    snprintf(blocker.model, sizeof(blocker.model), "blocker-model");
+    snprintf(agent.model, sizeof(agent.model), "title-model");
+    if (pipe(ready) != 0 || pipe(proceed) != 0)
+    {
+        return Fail("queued title order pipes");
+    }
+
+    PicoSessionPersist_Init(&writer);
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = proceed[0];
+    PicoSession_EnqueueModelChange(&writer, &blocker);
+    if (!TransferByte(ready[0], false))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("queued title order did not block the persist worker");
+    }
+    if (PicoSession_LogUser(&writer, &agent, "hello", "hello", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogTitle(&writer, &agent, "Queued title") != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(&writer, &agent, "after title", "after title", NULL) !=
+            PICO_SESSION_WRITE_OK)
+    {
+        (void)TransferByte(proceed[1], true);
+        PicoSessionPersist_Shutdown(&writer);
+        unlink(blocker.session_path);
+        unlink(agent.session_path);
+        return Fail("title rewrite was not accepted behind a blocked persist worker");
+    }
+    if (!TransferByte(proceed[1], true))
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("could not release the blocked persist worker");
+    }
+    PicoSession_DrainPersist(&writer, &blocker);
+    PicoSession_DrainPersist(&writer, &agent);
+    PicoSessionPersist_Shutdown(&writer);
+    close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+    file = Pico_ReadFile(agent.session_path, &file_len);
+    unlink(blocker.session_path);
+    unlink(agent.session_path);
+    rmdir(ws);
+    if (!file)
+    {
+        return Fail("queued title rewrite did not create a session file");
+    }
+    header = strstr(file, "\"type\":\"session\"");
+    user = strstr(file, "\"content\":\"hello\"");
+    title = strstr(file, "\"type\":\"title\"");
+    after = strstr(file, "\"content\":\"after title\"");
+    bool ok = header && user && title && after && header < user && user < title && title < after &&
+              strstr(file, "\"title\":\"Queued title\"") && CountType(file, "title") == 1;
+    free(file);
+    return ok ? 0 : Fail("queued title must rewrite after earlier records and before later appends");
+}
+
+static int TestQueuedTitleFailureThenDrain(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    size_t file_len = 0;
+    char *before = NULL;
+    char *after = NULL;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &writer_agent;
+    writer_ws.count = 1;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.id = 7;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "fail-title-model");
+    PicoSessionPersist_Init(&writer);
+    if (PicoSession_LogUser(&writer, &writer_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        return Fail("queued title failure test could not log the seed");
+    }
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    before = Pico_ReadFile(writer_agent.session_path, &file_len);
+    g_status_warning[0] = '\0';
+    g_session_fail_stage = "title_before_rename";
+    if (PicoSession_LogTitle(&writer, &writer_agent, "Should fail") != PICO_SESSION_WRITE_OK)
+    {
+        g_session_fail_stage = NULL;
+        PicoSessionPersist_Shutdown(&writer);
+        free(before);
+        unlink(writer_agent.session_path);
+        return Fail("title rewrite was not accepted before the injected failure");
+    }
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    g_session_fail_stage = NULL;
+    after = Pico_ReadFile(writer_agent.session_path, &file_len);
+    bool intact = before && after && strcmp(before, after) == 0;
+    bool ok = writer_agent.persistence == PICO_SESSION_FAILED &&
+              strstr(g_status_warning, "no longer resumable") && intact &&
+              PicoSession_LogUser(&writer, &writer_agent, "hello", "hello", NULL) ==
+                  PICO_SESSION_WRITE_FAILED;
+    PicoSessionPersist_Shutdown(&writer);
+    free(before);
+    free(after);
+    unlink(writer_agent.session_path);
+    return ok ? 0 : Fail("queued title rewrite failure was not applied on drain");
+}
+
+static int TestQueuedDistinctTitlesPreserveEvents(void)
+{
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    size_t file_len = 0;
+    char *file = NULL;
+
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "/workspace");
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_ws.agents[0] = &writer_agent;
+    writer_ws.count = 1;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    writer_agent.id = 8;
+    snprintf(writer_agent.model, sizeof(writer_agent.model), "titles-model");
+    PicoSessionPersist_Init(&writer);
+    if (PicoSession_LogTitle(&writer, &writer_agent, "First title") != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogTitle(&writer, &writer_agent, "Second title") != PICO_SESSION_WRITE_OK)
+    {
+        PicoSessionPersist_Shutdown(&writer);
+        if (writer_agent.session_path[0])
+        {
+            unlink(writer_agent.session_path);
+        }
+        return Fail("distinct queued titles were not accepted");
+    }
+    PicoSession_DrainPersist(&writer, &writer_agent);
+    PicoSessionPersist_Shutdown(&writer);
+    file = Pico_ReadFile(writer_agent.session_path, &file_len);
+    unlink(writer_agent.session_path);
+    const char *first_event = file ? strstr(file, "\"type\":\"title\"") : NULL;
+    const char *second_event = first_event ? strstr(first_event + 1, "\"type\":\"title\"") : NULL;
+    bool ok = file && CountType(file, "title") == 2 && first_event && second_event &&
+              first_event < second_event &&
+              strstr(first_event, "\"title\":\"First title\"") &&
+              strstr(first_event, "\"title\":\"First title\"") < second_event &&
+              strstr(second_event, "\"title\":\"Second title\"");
+    int rc = ok ? 0 : Fail("distinct queued titles must each append an event in call order");
+    free(file);
+    return rc;
+}
+
 static int TestModelResumeReplay(void)
 {
     PicoHost writer;
@@ -3108,11 +3689,23 @@ int main(void)
         TestCatalogProjectDeleteBeyondScanLimit() != 0 ||
         TestCatalogWorkspaceReorder() != 0 ||
         TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
+        TestCatalogCacheCoversOlderSessions() != 0 ||
         TestUnseenCompleteRoundTrip() != 0 ||
         TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||
         TestQueuedModelChangeOrdersUserWrite() != 0 || TestQueuedModelChangeFailureThenDrain() != 0 ||
         TestQueuedModelChangeCreatesHeaderPerAgent() != 0 ||
-        TestQueuedModelChangeDrainDeadline() != 0)
+        TestQueuedModelChangeDrainDeadline() != 0 ||
+        TestQueuedTitleOrdersAfterUserWrite() != 0 ||
+        TestQueuedTitleFailureThenDrain() != 0 ||
+        TestQueuedDistinctTitlesPreserveEvents() != 0 ||
+        TestProjectDeleteWaitsForCrossProcessWriter() != 0 ||
+        TestCatalogScanFailureKeepsIndexedSession() != 0 ||
+        TestSidebarScanFailureKeepsIndexedSession() != 0 ||
+        TestCatalogSnapshotDoesNotReconcile() != 0 ||
+        TestCatalogDeleteRejectsSwappedCheckout() != 0 ||
+        TestCatalogRejectsCollidingPaths() != 0 ||
+        TestCatalogSQLiteImport() != 0 ||
+        TestCatalogRejectsIncompatibleSchema() != 0)
     {
         return 1;
     }

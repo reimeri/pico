@@ -20,7 +20,6 @@ bool pico_composer_submit_ready(const char *text, int length);
 
 #if defined(__linux__)
 void PicoComposer_BeginClipboardPaste(PicoHost *app);
-void PicoComposer_PumpClipboardPaste(PicoHost *app);
 void PicoComposer_CancelClipboardPaste(void);
 bool PicoComposer_ClipboardPasteBusy(void);
 #endif

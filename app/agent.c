@@ -1014,26 +1014,8 @@ static void RunLlmHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool in
     }
     bool exclude[PICO_MAX_TOOLS];
     memset(exclude, 0, sizeof(exclude));
-    /* Filtering pass: collect exclusions so every hook sees the final catalog. */
-    for (int i = 0; registration && i < registration->llm_hook_count; i++)
-    {
-        if (!registration->llm_hooks[i].fn)
-        {
-            continue;
-        }
-        PicoLlmEvent ev;
-        memset(&ev, 0, sizeof(ev));
-        ev.compact = compact;
-        ev.include_tools = include_tools;
-        ev.tools = eligible;
-        ev.tool_count = ntools;
-        ev.exclude = include_tools ? exclude : NULL;
-        ev.instructions = instr ? instr : "";
-        registration->llm_hooks[i].fn(workspace, agent ? agent->id : 0, &ev,
-                                       registration->llm_hooks[i].state);
-        free(ev.extra_instructions);
-    }
-    /* Instructions pass: extras go under one heading; later hooks see the section. */
+    /* One invocation per hook: filter tools and append extras together.
+     * Later hooks see earlier exclusions and any extra-instruction section. */
     bool extras = false;
     for (int i = 0; registration && i < registration->llm_hook_count; i++)
     {
@@ -1631,6 +1613,8 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     return true;
 }
 
+static void TranscriptTouchCall(PicoAgent *agent, const char *call_id);
+
 static bool QueueTool(PicoAgent *agent, int index, const PicoTool *tool)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -1675,6 +1659,7 @@ static bool QueueTool(PicoAgent *agent, int index, const PicoTool *tool)
     job->started = true;
     pthread_mutex_unlock(&rt->mu);
     call->progress = PICO_TOOL_CALL_RUNNING;
+    TranscriptTouchCall(agent, call->call_id);
     rt->running_tools++;
     return true;
 }
@@ -1751,6 +1736,51 @@ static char *BuildAssistantItemFromParts(const char *parts_json, const char *thi
 static bool Blank(const char *s);
 static int FreezeTrailingThinkMs(PicoMessage *m);
 
+void PicoAgent_TranscriptChanged(PicoAgent *agent, int index)
+{
+    if (!agent || index < 0 || index >= agent->message_count) return;
+    uint64_t seq = ++agent->transcript_change_seq;
+    agent->transcript_changes[seq % PICO_TRANSCRIPT_CHANGE_CAP] = index;
+}
+
+static void MessageTouch(PicoAgent *agent, int index)
+{
+    if (!agent || index < 0 || index >= agent->message_count) return;
+    agent->messages[index].revision++;
+    PicoAgent_TranscriptChanged(agent, index);
+}
+
+static bool MessageReserve(PicoMessage *m, size_t need)
+{
+    size_t cap;
+    char *next;
+    if (!m)
+    {
+        return false;
+    }
+    if (m->source_cap >= need)
+    {
+        return true;
+    }
+    cap = m->source_cap ? m->source_cap : 16;
+    while (cap < need)
+    {
+        if (cap > SIZE_MAX / 2)
+        {
+            return false;
+        }
+        cap *= 2;
+    }
+    next = (char *)realloc(m->source, cap);
+    if (!next)
+    {
+        return false;
+    }
+    m->source = next;
+    m->source_cap = cap;
+    return true;
+}
+
 static void AppendMessageText(PicoHost *app, PicoAgent *agent, int idx, const char *s, size_t n)
 {
     if (idx < 0 || idx >= agent->message_count || !s || n == 0)
@@ -1758,19 +1788,19 @@ static void AppendMessageText(PicoHost *app, PicoAgent *agent, int idx, const ch
         return;
     }
     PicoMessage *m = &agent->messages[idx];
-    size_t old = m->source ? strlen(m->source) : 0;
+    size_t old = m->source_len;
     if (old == 0)
     {
         FreezeTrailingThinkMs(m);
     }
-    char *next = (char *)realloc(m->source, old + n + 1);
-    if (!next)
+    if (!MessageReserve(m, old + n + 1))
     {
         return;
     }
-    memcpy(next + old, s, n);
-    next[old + n] = '\0';
-    m->source = next;
+    memcpy(m->source + old, s, n);
+    m->source[old + n] = '\0';
+    m->source_len = old + n;
+    MessageTouch(agent, idx);
 }
 
 static void ReparseMessage(PicoHost *app, PicoAgent *agent, int idx)
@@ -1781,8 +1811,7 @@ static void ReparseMessage(PicoHost *app, PicoAgent *agent, int idx)
     }
     PicoMessage *m = &agent->messages[idx];
     MdDocument_Free(&m->doc);
-    size_t len = m->source ? strlen(m->source) : 0;
-    m->doc = MdDocument_ParseEx(m->source ? m->source : "", len, MD_PARSE_DEFAULT);
+    m->doc = MdDocument_ParseEx(m->source ? m->source : "", m->source_len, MD_PARSE_DEFAULT);
 }
 
 /* While a message streams, reparsing on every landed delta discards the
@@ -1818,6 +1847,9 @@ static void SetMessageText(PicoHost *app, PicoAgent *agent, int idx, const char 
     }
     free(m->source);
     m->source = Dup(text ? text : "");
+    m->source_len = m->source ? strlen(m->source) : 0;
+    m->source_cap = m->source ? m->source_len + 1 : 0;
+    MessageTouch(agent, idx);
     ReparseMessage(app, agent, idx);
     if (agent->runtime && agent->runtime->stream_msg == idx)
     {
@@ -2038,8 +2070,9 @@ static int FreezeTrailingThinkMs(PicoMessage *m)
     return line->think_ms;
 }
 
-static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
+static PicoTraceLine *TracePush(PicoAgent *agent, int idx, bool is_tool)
 {
+    PicoMessage *m = &agent->messages[idx];
     PicoTraceLine *next =
         (PicoTraceLine *)realloc(m->trace, (size_t)(m->trace_count + 1) * sizeof(PicoTraceLine));
     if (!next)
@@ -2050,6 +2083,7 @@ static PicoTraceLine *TracePush(PicoMessage *m, bool is_tool)
     PicoTraceLine *line = &m->trace[m->trace_count++];
     memset(line, 0, sizeof(*line));
     line->is_tool = is_tool;
+    MessageTouch(agent, idx);
     return line;
 }
 
@@ -2063,7 +2097,7 @@ static void TraceAppendThink(PicoHost *app, PicoAgent *agent, int idx, const cha
     PicoTraceLine *line = TrailingThinkLine(m);
     if (!line || line->think_steps != 0)
     {
-        line = TracePush(m, false);
+        line = TracePush(agent, idx, false);
     }
     if (!line)
     {
@@ -2079,6 +2113,7 @@ static void TraceAppendThink(PicoHost *app, PicoAgent *agent, int idx, const cha
     memcpy(next + old, s, n);
     next[old + n] = '\0';
     line->text = next;
+    MessageTouch(agent, idx);
 }
 
 static void ReparseThinkSummary(PicoTraceLine *line)
@@ -2138,7 +2173,7 @@ static void TraceSetThinkSummary(PicoHost *app, PicoAgent *agent, int idx, const
     PicoTraceLine *line = TrailingThinkLine(m);
     if (!line || line->think_steps <= 0)
     {
-        line = TracePush(m, false);
+        line = TracePush(agent, idx, false);
         if (line)
         {
             line->think_steps = 1;
@@ -2159,6 +2194,7 @@ static void TraceSetThinkSummary(PicoHost *app, PicoAgent *agent, int idx, const
         return;
     }
     line->think_steps = line->think_part_count;
+    MessageTouch(agent, idx);
     char *latest = line->think_parts[line->think_part_count - 1];
     size_t latest_n = latest ? strlen(latest) : 0;
     char *next = (char *)realloc(line->text, latest_n + 1);
@@ -2207,6 +2243,22 @@ static bool TraceHasToolCall(const PicoAgent *agent, int idx, const char *call_i
     return false;
 }
 
+/* Progress is runtime-owned rather than part of a trace line. Dispatch
+ * transitions are rare; resolve the owning row once instead of inspecting
+ * every trace on every layout while tool batches remain pending. */
+static void TranscriptTouchCall(PicoAgent *agent, const char *call_id)
+{
+    if (!agent || !call_id || !call_id[0]) return;
+    for (int i = agent->message_count - 1; i >= 0; i--)
+    {
+        if (TraceHasToolCall(agent, i, call_id))
+        {
+            PicoAgent_TranscriptChanged(agent, i);
+            return;
+        }
+    }
+}
+
 static void TraceSetLastToolOutput(PicoHost *app, PicoAgent *agent, int idx, const char *output, bool is_error)
 {
     if (idx < 0 || idx >= agent->message_count)
@@ -2222,6 +2274,7 @@ static void TraceSetLastToolOutput(PicoHost *app, PicoAgent *agent, int idx, con
             m->trace[t].tool_output = Dup(output ? output : "");
             m->trace[t].tool_error = is_error;
             pico_trace_line_stamp_tool_done(&m->trace[t]);
+            MessageTouch(agent, idx);
             return;
         }
     }
@@ -2783,6 +2836,7 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
                     line->tool_name = Dup(row->name);
                 }
                 ApplyProvArgs(line, row);
+                MessageTouch(agent, row->msg_idx);
             }
         }
         return;
@@ -2805,6 +2859,7 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
     line->tool_streaming = true;
     line->tool_stream_bytes = row->args_bytes;
     ApplyProvArgs(line, row);
+    MessageTouch(agent, agent->message_count - 1);
     row->msg_idx = agent->message_count - 1;
     row->trace_idx = m->trace_count - 1;
 }
@@ -2865,12 +2920,14 @@ static bool TraceReconcileProvisional(PicoAgent *agent, const char *call_id, con
     line->tool_args_json = Dup(args_json ? args_json : "");
     line->tool_streaming = false;
     line->tool_stream_bytes = 0;
+    MessageTouch(agent, row->msg_idx);
     row->reconciled = true;
     return true;
 }
 
-static void TraceRemoveLine(PicoMessage *m, int trace_idx)
+static void TraceRemoveLine(PicoAgent *agent, int msg_idx, int trace_idx)
 {
+    PicoMessage *m = &agent->messages[msg_idx];
     PicoTraceLine_Release(&m->trace[trace_idx]);
     if (trace_idx + 1 < m->trace_count)
     {
@@ -2878,6 +2935,7 @@ static void TraceRemoveLine(PicoMessage *m, int trace_idx)
                 (size_t)(m->trace_count - trace_idx - 1) * sizeof(PicoTraceLine));
     }
     m->trace_count--;
+    MessageTouch(agent, msg_idx);
 }
 
 /* Drop provisional rows the completed result never claimed. An interrupted
@@ -2896,7 +2954,7 @@ static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt)
         if (row->trace_idx < m->trace_count && m->trace[row->trace_idx].is_tool &&
             m->trace[row->trace_idx].tool_streaming)
         {
-            TraceRemoveLine(m, row->trace_idx);
+            TraceRemoveLine(agent, row->msg_idx, row->trace_idx);
             /* Rows can receive names (and acquire trace indices) in a different
              * order from their first argument fragments. Keep every remaining
              * index valid rather than relying on provider arrival order. */
@@ -3272,6 +3330,7 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
     }
     call->completed = true;
     call->progress = PICO_TOOL_CALL_IDLE;
+    TranscriptTouchCall(agent, call->call_id);
     rt->running_tools--;
     free(output);
     free(apply_error);

@@ -4,6 +4,8 @@
 #include "clay/clay.h"
 #include "raylib.h"
 
+#include <stdint.h>
+
 enum {
     FONT_REGULAR = 0,
     FONT_BOLD,
@@ -84,6 +86,7 @@ enum {
 
 Clay_Dimensions Pico_MeasureTextUtf8(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 Font Pico_FontAt(uint16_t fontId, uint16_t fontSize);
+uint64_t Pico_FontGeneration(void);
 float Pico_FontScale(void);
 /* Device (framebuffer:window) scale the font atlas is rasterized for. Managed
  * by the host from the window's framebuffer; layout stays logical. */

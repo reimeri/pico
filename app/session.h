@@ -4,6 +4,7 @@
 #include "agent_internal.h"
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <time.h>
 
 #define PICO_SESSION_TITLE_MAX_BYTES (72 * 4)
@@ -64,17 +65,33 @@ typedef struct PicoCatalogWorkspace {
     bool stashed; /* logical project group presentation state */
     PicoCatalogSession *sessions;
     int session_count;
+    int session_capacity;
+    bool has_more_sessions;
 } PicoCatalogWorkspace;
 
+typedef struct PicoCatalogPage {
+    char path[4096];
+    int shown;
+} PicoCatalogPage;
+
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
-/* Scan ~/.config/pico/sessions. jsonl files are authoritative for sessions.
- * Recovers missing .workspace.json from jsonl cwd. Omits entries whose path is
- * not an existing directory. .workspace-order.json is the canonical path order;
- * .workspace.json caches listing rows keyed by id plus the JSONL stat generation
- * so unchanged jsonl is not re-parsed. Caller frees with PicoCatalog_Free. */
+/* JSONL remains authoritative for session contents. One SQLite catalog under the
+ * sessions root stores workspace/project preferences, order and a rebuildable
+ * session index. Explicit scans reconcile JSONL; sidebar workers reconcile
+ * periodically. Only the newest 256 checkout sessions are returned here.
+ * Caller frees with PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
-/* Sidebar presentation: exact-checkout catalogs grouped by logical Git project. */
+/* Sidebar presentation grouped by logical Git project; Paged returns at most
+ * the requested newest rows plus a has-more indicator for each project. */
 int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out);
+int PicoCatalog_ScanGroupedInterruptible(PicoCatalogWorkspace **out, const atomic_bool *cancelled);
+int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count);
+/* Indexed sidebar snapshot: no JSONL enumeration or reconciliation. Filters
+ * missing normal checkout directories, retains missing linked worktrees, and
+ * returns cached sessions until a successful background scan refreshes them. */
+int PicoCatalog_ReadGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
+                                 const PicoCatalogPage *pages, int page_count);
 /* Missing token files report a valid empty token. Read failures return false. */
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);
@@ -116,6 +133,9 @@ bool PicoSession_LoadTarget(const PicoHost *host, const char **workspace_path,
 bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id);
 /* `/resume` passes parents_only to hide subagents; resolve still lists all. */
 int PicoSession_List(const PicoWorkspace *workspace, PicoSessionInfo **out, bool parents_only);
+/* Bounded, worker-side indexed completion search; caller frees *out. */
+int PicoSession_Search(const PicoWorkspace *workspace, const char *search,
+                       PicoSessionInfo **out, bool parents_only, int maximum);
 int PicoSession_Open(PicoHost *app, PicoAgent *agent, const char *id);
 /* Resolve a durable session to a canonical path. Manager callers use exact IDs. */
 int PicoSession_Resolve(const PicoWorkspace *workspace, const char *id, bool allow_prefix,

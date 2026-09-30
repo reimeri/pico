@@ -9,12 +9,104 @@
 #endif
 
 #include <curl/curl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 #include <errno.h>
+
+/* Curl's connection cache lives on its easy handle. Borrow one per transfer,
+ * never concurrently use a handle, and retain at most four idle handles.
+ * Reset request options on return so callbacks, credentials and body pointers
+ * cannot outlive their caller. No transfer holds the pool mutex. */
+#define HTTP_IDLE_HANDLES 4
+static pthread_mutex_t http_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+static CURL *http_idle[HTTP_IDLE_HANDLES];
+static int http_idle_count;
+static int http_borrowed;
+static int http_hosts;
+static bool http_closing;
+
+static CURL *HttpAcquire(void)
+{
+    pthread_mutex_lock(&http_pool_mu);
+    if (http_closing)
+    {
+        pthread_mutex_unlock(&http_pool_mu);
+        return NULL;
+    }
+    http_borrowed++;
+    CURL *curl = http_idle_count ? http_idle[--http_idle_count] : NULL;
+    pthread_mutex_unlock(&http_pool_mu);
+    if (!curl) curl = curl_easy_init();
+    if (!curl)
+    {
+        pthread_mutex_lock(&http_pool_mu);
+        http_borrowed--;
+        pthread_mutex_unlock(&http_pool_mu);
+    }
+    if (curl) curl_easy_setopt(curl, CURLOPT_MAXCONNECTS, 4L);
+    return curl;
+}
+
+static void HttpRelease(CURL *curl)
+{
+    if (!curl) return;
+    curl_easy_reset(curl);
+    pthread_mutex_lock(&http_pool_mu);
+    bool retain = !http_closing && http_idle_count < HTTP_IDLE_HANDLES;
+    if (retain)
+    {
+        http_idle[http_idle_count++] = curl;
+        http_borrowed--;
+    }
+    pthread_mutex_unlock(&http_pool_mu);
+    if (!retain)
+    {
+        curl_easy_cleanup(curl);
+        pthread_mutex_lock(&http_pool_mu);
+        http_borrowed--;
+        pthread_mutex_unlock(&http_pool_mu);
+    }
+}
+
+void PicoHttp_HostStarted(void)
+{
+    pthread_mutex_lock(&http_pool_mu);
+    if (http_hosts == 0 && http_borrowed == 0) http_closing = false;
+    http_hosts++;
+    pthread_mutex_unlock(&http_pool_mu);
+}
+
+/* Called after this host's workers have stopped, before its curl_global_cleanup.
+ * Other live hosts keep the shared pool open. */
+bool PicoHttp_ShutdownConnections(void)
+{
+    pthread_mutex_lock(&http_pool_mu);
+    /* A public helper can run on an extension-owned thread, and there is no
+     * host identity on its request. Conservatively retain this host while any
+     * transfer is outstanding, even if another host is also running. */
+    if (http_borrowed > 0)
+    {
+        http_closing = true;
+        pthread_mutex_unlock(&http_pool_mu);
+        return false;
+    }
+    if (http_hosts > 1)
+    {
+        http_hosts--;
+        pthread_mutex_unlock(&http_pool_mu);
+        return true;
+    }
+    http_closing = true;
+    for (int i = 0; i < http_idle_count; i++) curl_easy_cleanup(http_idle[i]);
+    http_idle_count = 0;
+    if (http_hosts > 0) http_hosts--;
+    pthread_mutex_unlock(&http_pool_mu);
+    return true;
+}
 
 /* Never replay after headers (including redirects/interim responses) or body. */
 static CURLcode PerformWithRetries(CURL *curl, bool *received, PicoHttpCancelFn cancel,
@@ -263,7 +355,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     JsonBuf_Init(&ctx.acc);
     PicoHttpCapture_Begin(&ctx.capture);
 
-    CURL *curl = curl_easy_init();
+    CURL *curl = HttpAcquire();
     if (!curl)
     {
         PicoHttpCapture_Finish(&ctx.capture, req->url, 0, "transport_error",
@@ -308,7 +400,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    HttpRelease(curl);
 
     if (out_http)
     {
@@ -438,7 +530,7 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     ctx.user = req->user;
     JsonBuf_Init(&ctx.acc);
 
-    CURL *curl = curl_easy_init();
+    CURL *curl = HttpAcquire();
     if (!curl)
     {
         JsonBuf_Free(&ctx.acc);
@@ -489,7 +581,7 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    HttpRelease(curl);
 
     if (out_http)
     {

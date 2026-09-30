@@ -34,6 +34,7 @@ typedef struct ResumeListCache {
     uint64_t serial;
     PicoWorkspaceId workspace_id;
     char workspace_path[4096];
+    char query[512];
     PicoSessionInfo *items;
     int count;
     bool pending;
@@ -44,8 +45,10 @@ typedef struct ResumeListTask {
     uint64_t serial;
     PicoWorkspaceId workspace_id;
     char workspace_path[4096];
+    char query[512];
     PicoSessionInfo *items;
     int count;
+    int maximum;
     ResumeListCache *owner; /* compared only after verifying live builtin state */
 } ResumeListTask;
 
@@ -55,7 +58,7 @@ static void *ResumeListRead(void *arg)
     PicoWorkspace *lookup = calloc(1, sizeof(*lookup));
     if (!lookup) return NULL;
     snprintf(lookup->path, sizeof(lookup->path), "%s", task->workspace_path);
-    task->count = PicoSession_List(lookup, &task->items, true);
+    task->count = PicoSession_Search(lookup, task->query, &task->items, true, task->maximum);
     free(lookup);
     return NULL;
 }
@@ -66,6 +69,7 @@ static void ResumeListDone(PicoHost *host, void *arg)
     ResumeListCache *cache = PicoPlugins_HostState(host, "commands");
     if (!cache || cache != task->owner || cache->serial != task->serial) return;
     cache->pending = false;
+    if (strcmp(cache->query, task->query) != 0) { cache->next_refresh = 0; return; }
     PicoWorkspace *ws = PicoHost_SelectedWorkspace(host);
     if (!ws || ws->id != task->workspace_id ||
         strcmp(ws->path, task->workspace_path) != 0)
@@ -1013,7 +1017,7 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
         ResumeListCache *cache = state;
         const PicoAgent *selected = PicoHost_SelectedAgentConst(app);
         PicoWorkspace *workspace = PicoAgent_Workspace(selected);
-        if (!cache || !workspace) return 0;
+        if (!cache || !workspace || strlen(rest) >= sizeof(cache->query)) return 0;
         if (cache->workspace_id != workspace->id ||
             strcmp(cache->workspace_path, workspace->path) != 0)
         {
@@ -1024,12 +1028,20 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
             snprintf(cache->workspace_path, sizeof(cache->workspace_path), "%s", workspace->path);
             cache->next_refresh = 0;
         }
+        if (strcmp(cache->query, rest) != 0)
+        {
+            snprintf(cache->query, sizeof(cache->query), "%s", rest);
+            free(cache->items); cache->items = NULL; cache->count = 0;
+            cache->next_refresh = 0;
+        }
         if (!cache->pending && GetTime() >= cache->next_refresh)
         {
             ResumeListTask *task = calloc(1, sizeof(*task));
             if (task)
             {
                 task->owner = cache;
+                task->maximum = max;
+                snprintf(task->query, sizeof(task->query), "%s", cache->query);
                 task->serial = cache->serial;
                 task->workspace_id = workspace->id;
                 snprintf(task->workspace_path, sizeof(task->workspace_path), "%s", workspace->path);

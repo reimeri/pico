@@ -101,6 +101,9 @@ typedef struct PicoSessionPersistJob {
     char workspace_path[4096];
     char *header_json;
     char *event_json;
+    size_t event_len, event_capacity, queued_bytes;
+    char *title; /* Rewrite after header/event writes; not coalesced with later titles. */
+    struct PicoSessionPersistJob *next; /* Same-session work after a title barrier. */
     char *catalog_order_json;
     uint64_t catalog_order_generation;
 } PicoSessionPersistJob;
@@ -215,6 +218,7 @@ struct PicoHost {
     pthread_cond_t persist_cv;
     PicoSessionPersistJob *persist_pending;
     int persist_pending_count;
+    size_t persist_pending_bytes;
     PicoAgentId persist_flight_agent_id;
     bool persist_flight_catalog_order;
     uint64_t persist_catalog_next_generation;

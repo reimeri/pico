@@ -11,6 +11,9 @@ typedef struct PicoRegistrationGeneration PicoRegistrationGeneration;
 void PicoAgent_RefreshRegistration(PicoHost *app, PicoAgent *agent);
 PicoRegistrationGeneration *PicoAgent_Registration(PicoAgent *agent);
 
+/* A delayed selected-transcript reader reconciles if this ring wraps. */
+#define PICO_TRANSCRIPT_CHANGE_CAP 256
+
 struct PicoAgent {
     PicoWorkspace *workspace;
     PicoAgentId id;
@@ -25,6 +28,11 @@ struct PicoAgent {
     PicoMessage *messages;
     int message_count;
     int message_capacity;
+    /* Main-thread transcript invalidations. Old readers detect journal overflow
+     * and do a full reconciliation rather than losing an offscreen edit. */
+    uint64_t transcript_reset_generation;
+    uint64_t transcript_change_seq;
+    int transcript_changes[PICO_TRANSCRIPT_CHANGE_CAP];
 
     PicoAgentState state;
     bool unseen_complete;

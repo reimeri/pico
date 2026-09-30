@@ -8,6 +8,7 @@
 #include "raylib.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,6 +18,7 @@ typedef struct SelBuf {
     int cap;
     int first_hit;
     int end_hit;
+    uint64_t frame_stamp;
 } SelBuf;
 
 typedef struct WrapLine {
@@ -46,6 +48,7 @@ typedef struct SelHit {
 static SelBuf *s_msgs;
 static int s_msg_n;
 static int s_msg_cap;
+static uint64_t s_frame_stamp;
 static int s_cur_msg = -1;
 static PicoChatSearch *s_search;
 static Clay_ElementId s_horizontal_clip;
@@ -329,14 +332,11 @@ void PicoChatSel_BeginFrame(int message_count)
         s_msg_cap = message_count;
     }
     s_msg_n = message_count;
-    for (int i = 0; i < s_msg_n; i++)
+    if (++s_frame_stamp == 0)
     {
-        s_msgs[i].len = 0;
-        s_msgs[i].first_hit = s_msgs[i].end_hit = 0;
-        if (s_msgs[i].text)
-        {
-            s_msgs[i].text[0] = '\0';
-        }
+        /* Only wraparound after 2^64 layouts needs a full reset. */
+        for (int i = 0; i < s_msg_cap; i++) s_msgs[i].frame_stamp = 0;
+        s_frame_stamp = 1;
     }
     s_search = NULL;
     s_hit_count = 0;
@@ -352,7 +352,17 @@ void PicoChatSel_SetMessage(int msg)
         PicoChatSearch_SetText(s_search, s_cur_msg, s_msgs[s_cur_msg].text);
     }
     s_cur_msg = (msg >= 0 && msg < s_msg_n) ? msg : -1;
-    if (s_cur_msg >= 0) s_msgs[s_cur_msg].first_hit = s_msgs[s_cur_msg].end_hit = s_hit_count;
+    if (s_cur_msg >= 0)
+    {
+        SelBuf *b = &s_msgs[s_cur_msg];
+        if (b->frame_stamp != s_frame_stamp)
+        {
+            b->frame_stamp = s_frame_stamp;
+            b->len = 0;
+            if (b->text) b->text[0] = '\0';
+        }
+        b->first_hit = b->end_hit = s_hit_count;
+    }
 }
 
 void PicoChatSel_Break(void)
@@ -476,7 +486,7 @@ void PicoChatSel_Copy(PicoHost *app)
         return;
     }
     int msg = app->chat_sel.msg;
-    if (msg < 0 || msg >= s_msg_n || !s_msgs[msg].text)
+    if (msg < 0 || msg >= s_msg_n || s_msgs[msg].frame_stamp != s_frame_stamp || !s_msgs[msg].text)
     {
         return;
     }
@@ -517,6 +527,7 @@ void PicoChatSel_Clamp(PicoHost *app)
         PicoChatSel_Clear(app);
         return;
     }
+    if (s_msgs[app->chat_sel.msg].frame_stamp != s_frame_stamp) return;
     int len = s_msgs[app->chat_sel.msg].len;
     if (app->chat_sel.anchor > len)
     {
@@ -538,7 +549,7 @@ void PicoChatSel_Clamp(PicoHost *app)
 
 static bool MsgText(int msg, const char **text, int *len)
 {
-    if (msg < 0 || msg >= s_msg_n || !s_msgs[msg].text)
+    if (msg < 0 || msg >= s_msg_n || s_msgs[msg].frame_stamp != s_frame_stamp || !s_msgs[msg].text)
     {
         return false;
     }
@@ -750,7 +761,7 @@ bool PicoChatSel_PointerOverText(void)
 
 void PicoChatSel_VisitRange(int msg, int from, int to, PicoChatRangeFn visit, void *user)
 {
-    if (!visit || msg < 0 || msg >= s_msg_n || !s_msgs[msg].text || to <= from) return;
+    if (!visit || msg < 0 || msg >= s_msg_n || s_msgs[msg].frame_stamp != s_frame_stamp || !s_msgs[msg].text || to <= from) return;
     SelBuf *buffer = &s_msgs[msg];
     /* Runs are ordered by byte range. A common one-character query must not
      * rescan the entire message for each match. */

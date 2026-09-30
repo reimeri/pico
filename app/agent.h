@@ -91,6 +91,8 @@ void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                                    const char *args);
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                                      const char *output, bool is_error);
+/* Main-thread notification for internal transcript edits (including UI trace toggles). */
+void PicoAgent_TranscriptChanged(PicoAgent *agent, int index);
 void PicoAgent_ClearMessages(PicoAgent *agent);
 void PicoMessages_Free(PicoMessage *messages, int count);
 bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int *dst_count);

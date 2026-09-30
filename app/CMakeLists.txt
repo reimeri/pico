@@ -231,6 +231,7 @@ pico_warnings_are_errors(pico)
 
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
 
 target_include_directories(pico PUBLIC
@@ -248,7 +249,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_CC=\"cc\""
     "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
-target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite3::SQLite3 Threads::Threads ${CMAKE_DL_LIBS})
 target_link_options(pico PRIVATE "-rdynamic")
 
 # GLFW dlopens Wayland/Xcursor instead of linking them. On Nix those .so files are
@@ -555,6 +556,8 @@ if(BUILD_TESTING)
         tests/clay_impl.c
         chat_find.c
         app.c
+        http.c
+        http_capture.c
         ui.c
         scrollbar.c
         text_range.c
@@ -608,7 +611,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_session_usage_tests)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_session_usage_tests PRIVATE Threads::Threads)
+    target_link_libraries(pico_session_usage_tests PRIVATE SQLite3::SQLite3 Threads::Threads)
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
 
     add_executable(pico_files_tests
@@ -654,7 +657,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_files_tests)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto)
+    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite3::SQLite3)
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
     add_executable(pico_composer_tests
@@ -700,7 +703,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_composer_tests)
     target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto)
+    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite3::SQLite3)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
 
     add_executable(pico_spell_tests
@@ -850,6 +853,7 @@ if(BUILD_TESTING)
     add_test(NAME pico_docs_path_tests COMMAND pico_docs_path_tests)
 
     add_executable(pico_host_workspace_tests
+        tests/clipboard_test.c
         tests/host_workspace_test.c
         render_scale.c
         tests/clay_impl.c
@@ -937,7 +941,7 @@ if(BUILD_TESTING)
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
-    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite3::SQLite3 Threads::Threads ${CMAKE_DL_LIBS})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(pico_host_workspace_tests PRIVATE
             PICO_CLAY_FRAME_FAULT_TESTS=1 PICO_OPENAI_LOGIN_TESTS=1)
@@ -952,7 +956,8 @@ if(BUILD_TESTING)
             -Wl,--wrap=GetCharPressed -Wl,--wrap=IsMouseButtonPressed
             -Wl,--wrap=IsMouseButtonDown -Wl,--wrap=IsMouseButtonReleased -Wl,--wrap=GetMousePosition
             -Wl,--wrap=GetMouseWheelMoveV
-            -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx)
+            -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx
+            -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()

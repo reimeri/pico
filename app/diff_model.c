@@ -111,6 +111,7 @@ uint64_t PicoDiffModel_Signature(const DiffModel *m)
     }
     SigBytes(&h, m->workspace, strlen(m->workspace));
     SigInt(&h, m->is_repo);
+    SigInt(&h, m->partial);
     SigInt(&h, m->adds);
     SigInt(&h, m->dels);
     SigInt(&h, m->untracked);
@@ -291,7 +292,7 @@ static char *ShellQuote(const char *path)
 }
 
 /* Runs `git -C <ws> <args>`; returns malloc'd NUL-terminated stdout or NULL. */
-static char *GitRun(const char *ws, const char *args)
+static char *GitRun(const char *ws, const char *args, bool *truncated)
 {
     char *quoted = ShellQuote(ws);
     if (!quoted)
@@ -314,6 +315,8 @@ static char *GitRun(const char *ws, const char *args)
     {
         return NULL;
     }
+    const size_t limit = 16u * 1024u * 1024u;
+    if (truncated) *truncated = false;
     size_t len = 0;
     size_t buf_cap = 1 << 16;
     char *buf = malloc(buf_cap);
@@ -322,22 +325,31 @@ static char *GitRun(const char *ws, const char *args)
         pclose(fp);
         return NULL;
     }
+    char discard[8192];
     size_t n;
-    while ((n = fread(buf + len, 1, buf_cap - len, fp)) > 0)
+    while ((n = fread(discard, 1, sizeof(discard), fp)) > 0)
     {
-        len += n;
-        if (len == buf_cap)
+        size_t kept = len < limit ? limit - len : 0;
+        if (kept > n) kept = n;
+        if (kept)
         {
-            buf_cap *= 2;
-            char *next = realloc(buf, buf_cap);
-            if (!next)
+            while (buf_cap <= len + kept)
             {
-                free(buf);
-                pclose(fp);
-                return NULL;
+                size_t next_cap = buf_cap * 2;
+                char *next = realloc(buf, next_cap);
+                if (!next)
+                {
+                    free(buf);
+                    pclose(fp);
+                    return NULL;
+                }
+                buf = next;
+                buf_cap = next_cap;
             }
-            buf = next;
+            memcpy(buf + len, discard, kept);
+            len += kept;
         }
+        if (kept != n && truncated) *truncated = true;
     }
     int status = pclose(fp);
     if (status != 0)
@@ -345,13 +357,19 @@ static char *GitRun(const char *ws, const char *args)
         free(buf);
         return NULL;
     }
+    if (len == limit && buf_cap == len)
+    {
+        char *next = realloc(buf, len + 1);
+        if (!next) { free(buf); return NULL; }
+        buf = next;
+    }
     buf[len] = '\0';
     return buf;
 }
 
 static bool IsRepo(const char *ws)
 {
-    char *out = GitRun(ws, "rev-parse --is-inside-work-tree");
+    char *out = GitRun(ws, "rev-parse --is-inside-work-tree", NULL);
     if (!out)
     {
         return false;
@@ -367,7 +385,7 @@ static bool IsRepo(const char *ws)
 /* Ref to diff against: HEAD when it exists, else the empty tree. */
 static void DiffBase(const char *ws, char *out, size_t cap)
 {
-    char *head = GitRun(ws, "rev-parse --verify HEAD");
+    char *head = GitRun(ws, "rev-parse --verify HEAD", NULL);
     if (head)
     {
         free(head);
@@ -516,8 +534,14 @@ static void AddUntracked(DiffModel *m, const char *ws, const char *path, int pat
     {
         note = "(file too large to diff)";
     }
+    else if ((size_t)size > 8u * 1024u * 1024u - m->untracked_content_bytes)
+    {
+        note = "(aggregate diff content limit reached)";
+        m->partial = true;
+    }
     else
     {
+        m->untracked_content_bytes += (size_t)size;
         content = malloc((size_t)size + 1);
         if (content)
         {
@@ -581,7 +605,9 @@ static void AddUntracked(DiffModel *m, const char *ws, const char *path, int pat
 
 static void AddUntrackedFiles(DiffModel *m, const char *ws)
 {
-    char *out = GitRun(ws, "ls-files --others --exclude-standard -z");
+    bool truncated = false;
+    char *out = GitRun(ws, "ls-files --others --exclude-standard -z", &truncated);
+    m->partial |= truncated;
     if (!out)
     {
         return;
@@ -589,7 +615,10 @@ static void AddUntrackedFiles(DiffModel *m, const char *ws)
     const char *p = out;
     while (*p)
     {
+        if (m->file_count >= 1024) { m->partial = true; break; }
         int len = (int)strlen(p);
+        /* A truncated -z stream ends with an incomplete pathname. */
+        if (truncated && p + len == out + (16u * 1024u * 1024u)) break;
         AddUntracked(m, ws, p, len);
         p += len + 1;
     }
@@ -616,9 +645,17 @@ DiffModel *PicoDiffModel_Capture(const char *ws)
     char args[128];
 
     snprintf(args, sizeof(args), "diff --no-color --numstat %s", base);
-    char *numstat = GitRun(ws, args);
+    bool truncated = false;
+    char *numstat = GitRun(ws, args, &truncated);
+    m->partial |= truncated;
     if (numstat)
     {
+        if (truncated)
+        {
+            char *last = strrchr(numstat, '\n');
+            if (last) last[1] = '\0';
+            else numstat[0] = '\0';
+        }
         const char *line = numstat;
         while (*line)
         {
@@ -631,9 +668,19 @@ DiffModel *PicoDiffModel_Capture(const char *ws)
     }
 
     snprintf(args, sizeof(args), "diff --no-color -U3 %s", base);
-    m->patch = GitRun(ws, args);
+    truncated = false;
+    m->patch = GitRun(ws, args, &truncated);
+    m->partial |= truncated;
     if (m->patch)
     {
+        /* A cut-off hunk may not be syntactically complete. Parse only whole
+         * lines; the model still advertises that it is partial. */
+        if (truncated)
+        {
+            char *last = strrchr(m->patch, '\n');
+            if (last) last[1] = '\0';
+            else m->patch[0] = '\0';
+        }
         ParseUnified(m, m->patch);
     }
 

@@ -23,6 +23,7 @@
 #include "builtins/todo.h"
 #include "builtins/background_model.h"
 #include "host_internal.h"
+#include "http_internal.h"
 #include "path.h"
 #include "trace_group.h"
 #include "worktree.h"
@@ -1690,6 +1691,9 @@ void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role
     if (msg->source)
     {
         memcpy(msg->source, markdown ? markdown : "", len + 1);
+        msg->source_len = len;
+        msg->source_cap = len + 1;
+        msg->revision = 1;
     }
     if (prepared && prepared_source && strcmp(prepared_source, markdown ? markdown : "") == 0)
     {
@@ -1728,15 +1732,33 @@ void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const ch
         return;
     }
     PicoMessage *m = &agent->messages[agent->message_count - 1];
-    size_t old = m->source ? strlen(m->source) : 0;
+    size_t old = m->source_len;
     size_t n = strlen(text);
-    char *next = (char *)realloc(m->source, old + n + 1);
-    if (!next)
+    size_t need = old + n + 1;
+    if (need > m->source_cap)
     {
-        return;
+        size_t cap = m->source_cap ? m->source_cap : 16;
+        char *grown;
+        while (cap < need)
+        {
+            if (cap > (size_t)-1 / 2)
+            {
+                return;
+            }
+            cap *= 2;
+        }
+        grown = (char *)realloc(m->source, cap);
+        if (!grown)
+        {
+            return;
+        }
+        m->source = grown;
+        m->source_cap = cap;
     }
-    memcpy(next + old, text, n + 1);
-    m->source = next;
+    memcpy(m->source + old, text, n + 1);
+    m->source_len = old + n;
+    m->revision++;
+    PicoAgent_TranscriptChanged(agent, agent->message_count - 1);
     MdDocument_Free(&m->doc);
     if (prepared && prepared_source && strcmp(prepared_source, m->source) == 0)
     {
@@ -1777,6 +1799,8 @@ void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *ca
     line->tool_call_id = call_id && call_id[0] ? JsonDup(call_id) : NULL;
     line->tool_args = PicoAgent_FormatToolArgs(name, args);
     line->tool_args_json = JsonDup(args ? args : "");
+    m->revision++;
+    PicoAgent_TranscriptChanged(agent, agent->message_count - 1);
 }
 
 void PicoAgent_AddToolCall(PicoHost *app, PicoAgent *agent, const char *name, const char *args)
@@ -1799,6 +1823,8 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
             m->trace[t].tool_output = JsonDup(output ? output : "");
             m->trace[t].tool_error = is_error;
             pico_trace_line_stamp_tool_done(&m->trace[t]);
+            m->revision++;
+            PicoAgent_TranscriptChanged(agent, agent->message_count - 1);
             return;
         }
     }
@@ -1832,6 +1858,8 @@ void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                 free(line->tool_args_json);
                 line->tool_args = display;
                 line->tool_args_json = raw;
+                message->revision++;
+                PicoAgent_TranscriptChanged(agent, i);
                 return;
             }
         }
@@ -1858,6 +1886,8 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                 line->tool_output = JsonDup(output ? output : "");
                 line->tool_error = is_error;
                 pico_trace_line_stamp_tool_done(line);
+                message->revision++;
+                PicoAgent_TranscriptChanged(agent, i);
                 return;
             }
         }
@@ -2369,6 +2399,7 @@ PicoResult pico_host_init(PicoHost **out, Font *fonts, bool safe_mode)
         return PICO_NO_MEMORY;
     }
     host->curl_initialized = true;
+    PicoHttp_HostStarted();
     PicoHostPreferences_Load(host);
     PicoAuth_Load(host);
     *out = host;
@@ -2707,6 +2738,7 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
             return;
         }
         host->curl_initialized = true;
+        PicoHttp_HostStarted();
         PicoHostPreferences_Load(host);
         PicoAuth_Load(host);
     }
@@ -3242,6 +3274,14 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
     {
         copy[i].role = src[i].role;
         copy[i].source = src[i].source ? JsonDup(src[i].source) : NULL;
+        if (src[i].source && !copy[i].source)
+        {
+            PicoMessages_Free(copy, i + 1);
+            return false;
+        }
+        copy[i].source_len = copy[i].source ? strlen(copy[i].source) : 0;
+        copy[i].source_cap = copy[i].source ? copy[i].source_len + 1 : 0;
+        copy[i].revision = src[i].revision;
         copy[i].trace_group_expanded = src[i].trace_group_expanded;
         if (src[i].trace_count > 0)
         {
@@ -3302,6 +3342,7 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
     {
         return;
     }
+    agent->transcript_reset_generation++;
     PicoHost *host = agent->workspace ? agent->workspace->host : NULL;
     if (host && host->selected_agent_id == agent->id)
     {
@@ -3374,6 +3415,15 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         clean = false;
     }
     if (!clean)
+    {
+        host->terminal_shutdown = true;
+        g_pico_process_retired = true;
+        return PICO_HOST_SHUTDOWN_RETAINED;
+    }
+    /* An extension can call the public HTTP helpers from its own thread.
+     * Check before dlclose/shutdown callbacks can invalidate its code or
+     * borrowed request data; keep the whole execution host on this path. */
+    if (host->curl_initialized && !PicoHttp_ShutdownConnections())
     {
         host->terminal_shutdown = true;
         g_pico_process_retired = true;

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 /* Data model for the diff viewer: the working-tree diff against HEAD (or the
  * empty tree when unborn), parsed into per-file rows, plus lazily built
@@ -57,8 +58,10 @@ typedef struct DiffModel {
     int file_cap;
     int adds;
     int dels;
+    size_t untracked_content_bytes; /* retained across files for capture budget */
     int untracked;  /* files with no tracked counterpart (empty/binary/oversized included) */
     bool is_repo;
+    bool partial; /* Capture hit a byte/file budget; contents are incomplete. */
     char workspace[4096]; /* captured from; AdoptPending drops models for other workspaces */
     char *patch;    /* malloc'd; tracked file labels and rows borrow from this */
     DiffStash *stash; /* malloc'd buffers for untracked file labels/rows */

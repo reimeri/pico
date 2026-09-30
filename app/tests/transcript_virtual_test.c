@@ -17,6 +17,9 @@ static int Near(float actual, float expected)
 int main(void)
 {
     PicoTranscriptVirtual cache = {0};
+    /* An empty initial layout has no allocated tree. */
+    PicoTranscriptVirtual_Begin(&cache, 1, 0, 600.0f, 1.0f);
+    PicoTranscriptVirtual_FinishMeasure(&cache);
     const float gap = 8.0f;
 
     PicoTranscriptVirtual_Begin(&cache, 11, 3, 600.0f, 1.0f);
@@ -124,6 +127,22 @@ int main(void)
         return Fail("width change did not invalidate measured heights");
     }
 
+    /* Indexed prefix heights must follow edits far above the viewport,
+     * without moving an on-screen row's anchor. */
+    PicoTranscriptVirtual_Begin(&cache, 23, 10000, 600.0f, 1.0f);
+    for (int i = 0; i < 10000; i++)
+        PicoTranscriptVirtual_RecordHeight(&cache, i, 50.0f);
+    if (!Near(PicoTranscriptVirtual_AnchorDelta(&cache, 0, 70.0f, 500000.0f, gap), 20.0f))
+    {
+        PicoTranscriptVirtual_Free(&cache);
+        return Fail("distant height edit did not correct the viewport anchor");
+    }
+    PicoTranscriptVirtual_RecordHeight(&cache, 0, 70.0f);
+    if (!Near(PicoTranscriptVirtual_SpanHeight(&cache, 0, 2, gap), 136.0f))
+    {
+        PicoTranscriptVirtual_Free(&cache);
+        return Fail("indexed spacer height did not follow a distant edit");
+    }
     /* A large cold transcript must never mount its whole history in a frame,
      * even before Clay has reported usable scroll viewport dimensions. */
     const int rows = 480;
@@ -175,6 +194,36 @@ int main(void)
     {
         PicoTranscriptVirtual_Free(&cache);
         return Fail("reset reused stale heights or lost estimated anchor correction");
+    }
+
+    /* Sparse offscreen invalidations and a forced search/selection row must
+     * retain transcript order and full intervening spacer heights. */
+    PicoTranscriptVirtual_Begin(&cache, 44, 256, 600.0f, 1.0f);
+    for (int i = 0; i < 256; i++)
+        PicoTranscriptVirtual_RecordHeight(&cache, i, 50.0f);
+    PicoTranscriptVirtual_Begin(&cache, 44, 256, 600.0f, 1.0f);
+    PicoTranscriptVirtual_SetRevision(&cache, 240, 1);
+    PicoTranscriptVirtual_SetRevision(&cache, 120, 1);
+    PicoTranscriptVirtual_Plan(&cache, 0.0f, 40.0f, 0.0f, 199, gap);
+    if (PicoTranscriptVirtual_MountedCount(&cache) != 4 ||
+        PicoTranscriptVirtual_MountedIndex(&cache, 0) != 0 ||
+        PicoTranscriptVirtual_MountedIndex(&cache, 1) != 120 ||
+        PicoTranscriptVirtual_MountedIndex(&cache, 2) != 199 ||
+        PicoTranscriptVirtual_MountedIndex(&cache, 3) != 240 ||
+        !Near(PicoTranscriptVirtual_SpanHeight(&cache, 1, 120, gap), 119.0f * 58.0f))
+    {
+        PicoTranscriptVirtual_Free(&cache);
+        return Fail("sparse mounts lost ordered rows or intervening history");
+    }
+    PicoTranscriptVirtual_RecordHeight(&cache, 120, 100.0f);
+    PicoTranscriptVirtual_RecordHeight(&cache, 240, 70.0f);
+    PicoTranscriptVirtual_Begin(&cache, 44, 256, 600.0f, 1.0f);
+    PicoTranscriptVirtual_Plan(&cache, 0.0f, 40.0f, 0.0f, 199, gap);
+    if (PicoTranscriptVirtual_MountedCount(&cache) != 2 ||
+        !Near(PicoTranscriptVirtual_AnchorDelta(&cache, 120, 110.0f, 9000.0f, gap), 10.0f))
+    {
+        PicoTranscriptVirtual_Free(&cache);
+        return Fail("settled offscreen edits kept mounting or lost anchor corrections");
     }
 
     PicoTranscriptVirtual_Free(&cache);

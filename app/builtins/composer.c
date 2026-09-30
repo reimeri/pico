@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 
 #include "pico/plugin.h"
 #include "canonical.h"
@@ -19,12 +19,17 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #if defined(__linux__)
 #include <fcntl.h>
 #include <signal.h>
+#include <poll.h>
+#include <spawn.h>
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #endif
@@ -210,18 +215,31 @@ typedef struct ComposerAttach {
     bool owned;
 } ComposerAttach;
 
-typedef struct ClipboardProcess {
-    pid_t pid;
-    int fd;
-    int command;
+#if defined(__linux__)
+typedef struct ClipboardPaste {
+    atomic_bool cancelled;
+    bool wayland;
+    bool fallback;
+    bool failed;
     unsigned char *bytes;
     size_t length;
-    size_t capacity;
+    const char *image_ext;
     double deadline;
-    double terminate_deadline;
-    bool active;
-    bool terminating;
-} ClipboardProcess;
+} ClipboardPaste;
+#endif
+
+typedef struct ComposerWrapCache {
+    uint64_t text_revision;
+    uint64_t font_generation;
+    float font_scale;
+    unsigned int font_texture_id;
+    int text_length;
+    float wrap_width;
+    float line_height;
+    CompLine lines[COMPOSER_MAX_LINES];
+    int line_count;
+    bool valid;
+} ComposerWrapCache;
 
 typedef struct ComposerState {
     float wrap_width;
@@ -229,6 +247,7 @@ typedef struct ComposerState {
     int seen_cursor;
     int seen_length;
     float goal_x;
+    ComposerWrapCache wrap_cache;
     double caret_blink_at;
     PicoHost *app;
     ComposerAttach attach[COMPOSER_MAX_ATTACH];
@@ -237,9 +256,9 @@ typedef struct ComposerState {
     Texture2D preview_tex;
     Image preview_src;
     bool preview_loaded;
-    ClipboardProcess clip_process;
-    pid_t clip_reap[8];
-    int clip_reap_count;
+#if defined(__linux__)
+    ClipboardPaste *clipboard_paste; /* Borrowed until core task completion. */
+#endif
 } ComposerState;
 
 static __thread ComposerState *s_active_composer_state = NULL;
@@ -247,6 +266,39 @@ static __thread ComposerState *s_active_composer_state = NULL;
 static ComposerState *ActiveComposerState(void)
 {
     return s_active_composer_state;
+}
+
+static int WrapComposerCached(ComposerState *s, const PicoComposer *c, Font font, float max_width,
+                              CompLine *lines, int max_lines, float *line_height)
+{
+    if (s && s->wrap_cache.valid && c &&
+        s->wrap_cache.text_revision == c->revision &&
+        s->wrap_cache.text_length == c->length &&
+        s->wrap_cache.font_generation == Pico_FontGeneration() &&
+        s->wrap_cache.font_scale == Pico_FontScale() &&
+        s->wrap_cache.font_texture_id == font.texture.id &&
+        s->wrap_cache.wrap_width == max_width &&
+        s->wrap_cache.line_count <= max_lines)
+    {
+        memcpy(lines, s->wrap_cache.lines, (size_t)s->wrap_cache.line_count * sizeof(*lines));
+        *line_height = s->wrap_cache.line_height;
+        return s->wrap_cache.line_count;
+    }
+    int n = WrapComposer(c, font, max_width, lines, max_lines, line_height);
+    if (s && n > 0 && n <= COMPOSER_MAX_LINES)
+    {
+        s->wrap_cache.valid = true;
+        s->wrap_cache.text_revision = c ? c->revision : 0;
+        s->wrap_cache.text_length = c ? c->length : 0;
+        s->wrap_cache.font_generation = Pico_FontGeneration();
+        s->wrap_cache.font_scale = Pico_FontScale();
+        s->wrap_cache.font_texture_id = font.texture.id;
+        s->wrap_cache.wrap_width = max_width;
+        s->wrap_cache.line_height = *line_height;
+        s->wrap_cache.line_count = n;
+        memcpy(s->wrap_cache.lines, lines, (size_t)n * sizeof(*lines));
+    }
+    return n;
 }
 
 #define s_wrap_width (ActiveComposerState()->wrap_width)
@@ -261,9 +313,6 @@ static ComposerState *ActiveComposerState(void)
 #define g_preview_tex (ActiveComposerState()->preview_tex)
 #define g_preview_src (ActiveComposerState()->preview_src)
 #define g_preview_loaded (ActiveComposerState()->preview_loaded)
-#define g_clip_process (ActiveComposerState()->clip_process)
-#define g_clip_reap (ActiveComposerState()->clip_reap)
-#define g_clip_reap_count (ActiveComposerState()->clip_reap_count)
 
 static float ComposerFallbackWrap(PicoHost *app)
 {
@@ -751,15 +800,6 @@ static const char *ImageExtFromBytes(const unsigned char *b, size_t n)
 
 
 
-static const char *const kClipboardCommands[][8] = {
-    {"wl-paste", "--type", "image/png", NULL},
-    {"wl-paste", "--type", "image/jpeg", NULL},
-    {"wl-paste", "--type", "image/webp", NULL},
-    {"xclip", "-selection", "clipboard", "-t", "image/png", "-o", NULL},
-    {"xclip", "-selection", "clipboard", "-t", "image/jpeg", "-o", NULL},
-    {"xclip", "-selection", "clipboard", "-t", "image/webp", "-o", NULL},
-};
-
 static double MonotonicSeconds(void)
 {
     struct timespec ts;
@@ -767,195 +807,229 @@ static double MonotonicSeconds(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
-static void ClipboardProcessQueueReap(pid_t pid)
-{
-    if (pid <= 0)
-    {
-        return;
-    }
-    if (g_clip_reap_count < (int)(sizeof(g_clip_reap) / sizeof(g_clip_reap[0])))
-    {
-        g_clip_reap[g_clip_reap_count++] = pid;
-    }
-}
+/* Only the worker owns helper processes and byte buffers. It never reads the
+ * host, Raylib, or composer state. posix_spawn avoids post-fork work in this
+ * multithreaded process. All discovery/fetch attempts share one deadline. */
+typedef enum ClipboardReadResult {
+    CLIPBOARD_READ_OK,
+    CLIPBOARD_READ_UNAVAILABLE,
+    CLIPBOARD_READ_FAILED,
+} ClipboardReadResult;
 
-static void ClipboardProcessPumpReapers(void)
+static ClipboardReadResult ClipboardRead(ClipboardPaste *paste, const char *type,
+                          unsigned char **out, size_t *out_n)
 {
-    for (int i = 0; i < g_clip_reap_count;)
+    extern char **environ;
+    const char *wl[] = {"wl-paste", "--no-newline", "--type", type, NULL};
+    const char *wl_types[] = {"wl-paste", "--list-types", NULL};
+    const char *x11[] = {"xclip", "-selection", "clipboard", "-o", "-t",
+                         type ? type : "TARGETS", NULL};
+    const char **argv = paste->wayland ? (type ? wl : wl_types) : x11;
+    int fds[2];
+    if (atomic_load(&paste->cancelled) || MonotonicSeconds() >= paste->deadline ||
+        pipe2(fds, O_CLOEXEC) != 0)
+        return CLIPBOARD_READ_FAILED;
+    posix_spawn_file_actions_t actions;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc != 0)
     {
-        pid_t waited = waitpid(g_clip_reap[i], NULL, WNOHANG);
-        if (waited == g_clip_reap[i] || (waited < 0 && errno == ECHILD))
+        close(fds[0]);
+        close(fds[1]);
+        return CLIPBOARD_READ_FAILED;
+    }
+    rc = posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    if (rc == 0) rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    if (rc == 0) rc = posix_spawn_file_actions_addclose(&actions, fds[0]);
+    if (rc == 0) rc = posix_spawn_file_actions_addclose(&actions, fds[1]);
+    pid_t pid = 0;
+    if (rc == 0) rc = posix_spawnp(&pid, argv[0], &actions, NULL, (char *const *)argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+    if (rc != 0)
+    {
+        close(fds[0]);
+        return rc == ENOENT || rc == ENOTDIR || rc == EACCES
+                   ? CLIPBOARD_READ_UNAVAILABLE : CLIPBOARD_READ_FAILED;
+    }
+    bool ok = fcntl(fds[0], F_SETFL, O_NONBLOCK) == 0;
+    unsigned char *bytes = NULL;
+    size_t n = 0, capacity = 0;
+    bool eof = false, exited = false;
+    int status = 0;
+    while (ok && !(eof && exited))
+    {
+        if (atomic_load(&paste->cancelled) || MonotonicSeconds() >= paste->deadline)
         {
-            g_clip_reap[i] = g_clip_reap[--g_clip_reap_count];
+            ok = false;
+            break;
+        }
+        unsigned char chunk[8192];
+        ssize_t got = eof ? -1 : read(fds[0], chunk, sizeof(chunk));
+        if (got > 0)
+        {
+            if ((size_t)got > CLIP_IMAGE_MAX - n)
+            {
+                ok = false;
+                break;
+            }
+            if (n + (size_t)got + 1 > capacity)
+            {
+                size_t needed = n + (size_t)got + 1;
+                capacity = capacity ? capacity * 2 : 8192;
+                if (capacity < needed) capacity = needed;
+                if (capacity > CLIP_IMAGE_MAX + 1) capacity = CLIP_IMAGE_MAX + 1;
+                unsigned char *grown = realloc(bytes, capacity);
+                if (!grown)
+                {
+                    ok = false;
+                    break;
+                }
+                bytes = grown;
+            }
+            memcpy(bytes + n, chunk, (size_t)got);
+            n += (size_t)got;
             continue;
         }
-        i++;
+        if (!eof && got == 0) eof = true;
+        else if (!eof && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+        {
+            ok = false;
+            break;
+        }
+        if (!exited)
+        {
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) exited = true;
+            else if (waited < 0 && errno != EINTR) ok = false;
+        }
+        if (ok && !(eof && exited))
+        {
+            struct pollfd fd = {.fd = eof ? -1 : fds[0], .events = POLLIN};
+            /* A closed stdout can precede process exit. Avoid spinning on HUP. */
+            (void)poll(&fd, 1, 10);
+        }
     }
+    close(fds[0]);
+    if (!exited)
+    {
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+    ok = ok && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok)
+    {
+        free(bytes);
+        return CLIPBOARD_READ_FAILED;
+    }
+    if (!bytes) bytes = malloc(1);
+    if (!bytes) return CLIPBOARD_READ_FAILED;
+    bytes[n] = '\0';
+    *out = bytes;
+    *out_n = n;
+    return CLIPBOARD_READ_OK;
 }
 
-static void ClipboardProcessKillAndReap(pid_t pid)
+static bool ClipboardOffers(const unsigned char *types, const char *type)
 {
-    if (pid <= 0)
+    const char *line = (const char *)types;
+    size_t length = strlen(type);
+    while (*line)
     {
-        return;
+        size_t n = strcspn(line, "\r\n");
+        if (n == length && memcmp(line, type, n) == 0) return true;
+        line += n;
+        while (*line == '\r' || *line == '\n') line++;
     }
-    kill(pid, SIGKILL);
-    double deadline = MonotonicSeconds() + 0.05;
-    for (;;)
-    {
-        pid_t waited = waitpid(pid, NULL, WNOHANG);
-        if (waited == pid || (waited < 0 && errno == ECHILD))
-        {
-            return;
-        }
-        if (waited < 0 && errno != EINTR)
-        {
-            return;
-        }
-        if (MonotonicSeconds() >= deadline)
-        {
-            ClipboardProcessQueueReap(pid);
-            return;
-        }
-        struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
-        nanosleep(&pause, NULL);
-    }
+    return false;
 }
 
-static void ClipboardProcessResetAttempt(void)
+/* ICCCM STRING is Latin-1, unlike UTF8_STRING and UTF-8 MIME targets. */
+static bool ClipboardLatin1ToUtf8(ClipboardPaste *paste)
 {
-    if (g_clip_process.fd >= 0)
+    unsigned char *utf8 = malloc(paste->length * 2 + 1);
+    if (!utf8) return false;
+    size_t n = 0;
+    for (size_t i = 0; i < paste->length; i++)
     {
-        close(g_clip_process.fd);
+        unsigned char cp = paste->bytes[i];
+        if (cp < 0x80) utf8[n++] = cp;
+        else
+        {
+            utf8[n++] = 0xc0 | (cp >> 6);
+            utf8[n++] = 0x80 | (cp & 0x3f);
+        }
     }
-    g_clip_process.fd = -1;
-    g_clip_process.pid = 0;
-    free(g_clip_process.bytes);
-    g_clip_process.bytes = NULL;
-    g_clip_process.length = 0;
-    g_clip_process.capacity = 0;
-    g_clip_process.terminate_deadline = 0;
-    g_clip_process.terminating = false;
+    utf8[n] = '\0';
+    free(paste->bytes);
+    paste->bytes = utf8;
+    paste->length = n;
+    return true;
 }
 
-static void ClipboardProcessClear(void)
+static void *ClipboardPasteRun(void *arg)
 {
-    ClipboardProcessResetAttempt();
-    memset(&g_clip_process, 0, sizeof(g_clip_process));
-    g_clip_process.fd = -1;
+    ClipboardPaste *paste = arg;
+    unsigned char *types = NULL;
+    size_t types_n = 0;
+    ClipboardReadResult result = ClipboardRead(paste, NULL, &types, &types_n);
+    if (result != CLIPBOARD_READ_OK)
+    {
+        paste->fallback = result == CLIPBOARD_READ_UNAVAILABLE;
+        paste->failed = !paste->fallback;
+        return NULL;
+    }
+    const char *images[] = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"};
+    for (size_t i = 0; i < sizeof(images) / sizeof(images[0]); i++)
+    {
+        if (!ClipboardOffers(types, images[i])) continue;
+        result = ClipboardRead(paste, images[i], &paste->bytes, &paste->length);
+        paste->fallback = result == CLIPBOARD_READ_UNAVAILABLE;
+        paste->failed = result == CLIPBOARD_READ_FAILED;
+        if (result == CLIPBOARD_READ_OK)
+        {
+            paste->image_ext = ImageExtFromBytes(paste->bytes, paste->length);
+            paste->failed = paste->image_ext == NULL;
+        }
+        free(types);
+        return NULL;
+    }
+    const char *texts[] = {"text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING"};
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++)
+    {
+        if (!ClipboardOffers(types, texts[i])) continue;
+        result = ClipboardRead(paste, texts[i], &paste->bytes, &paste->length);
+        paste->fallback = result == CLIPBOARD_READ_UNAVAILABLE;
+        paste->failed = result == CLIPBOARD_READ_FAILED;
+        if (result == CLIPBOARD_READ_OK && strcmp(texts[i], "STRING") == 0)
+            paste->failed = !ClipboardLatin1ToUtf8(paste);
+        break;
+    }
+    free(types);
+    return NULL;
+}
+
+static void ClipboardPasteCancel(void *arg)
+{
+    atomic_store(&((ClipboardPaste *)arg)->cancelled, true);
+}
+
+static void ClipboardPasteDestroy(void *arg)
+{
+    ClipboardPaste *paste = arg;
+    free(paste->bytes);
+    free(paste);
 }
 
 void PicoComposer_CancelClipboardPaste(void)
 {
-    if (g_clip_process.pid > 0)
+    ComposerState *s = ActiveComposerState();
+    if (s && s->clipboard_paste)
     {
-        if (g_clip_process.fd >= 0)
-        {
-            close(g_clip_process.fd);
-            g_clip_process.fd = -1;
-        }
-        ClipboardProcessKillAndReap(g_clip_process.pid);
+        ClipboardPasteCancel(s->clipboard_paste);
+        s->clipboard_paste = NULL;
     }
-    ClipboardProcessClear();
 }
 
-static bool ClipboardProcessSpawn(void)
-{
-    int pipefd[2];
-    if (pipe(pipefd) != 0)
-    {
-        return false;
-    }
-    pid_t pid = fork();
-    if (pid == 0)
-    {
-        int null_fd = open("/dev/null", O_WRONLY);
-        close(pipefd[0]);
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0 ||
-            (null_fd >= 0 && dup2(null_fd, STDERR_FILENO) < 0))
-        {
-            _exit(126);
-        }
-        close(pipefd[1]);
-        if (null_fd >= 0)
-        {
-            close(null_fd);
-        }
-        execvp(kClipboardCommands[g_clip_process.command][0],
-               (char *const *)kClipboardCommands[g_clip_process.command]);
-        _exit(127);
-    }
-    close(pipefd[1]);
-    if (pid < 0)
-    {
-        close(pipefd[0]);
-        return false;
-    }
-    int flags = fcntl(pipefd[0], F_GETFL, 0);
-    if (flags < 0 || fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK) != 0)
-    {
-        close(pipefd[0]);
-        ClipboardProcessKillAndReap(pid);
-        return false;
-    }
-    g_clip_process.pid = pid;
-    g_clip_process.fd = pipefd[0];
-    return true;
-}
-
-static bool ClipboardProcessAppend(const unsigned char *bytes, size_t n)
-{
-    if (n > CLIP_IMAGE_MAX - g_clip_process.length)
-    {
-        return false;
-    }
-    size_t needed = g_clip_process.length + n;
-    if (needed > g_clip_process.capacity)
-    {
-        size_t capacity = g_clip_process.capacity ? g_clip_process.capacity : 4096;
-        while (capacity < needed)
-        {
-            size_t next = capacity * 2;
-            capacity = next > CLIP_IMAGE_MAX ? CLIP_IMAGE_MAX : next;
-        }
-        unsigned char *grown = (unsigned char *)realloc(g_clip_process.bytes, capacity);
-        if (!grown)
-        {
-            return false;
-        }
-        g_clip_process.bytes = grown;
-        g_clip_process.capacity = capacity;
-    }
-    memcpy(g_clip_process.bytes + g_clip_process.length, bytes, n);
-    g_clip_process.length += n;
-    return true;
-}
-
-static bool ClipboardProcessDrain(void)
-{
-    unsigned char chunk[8192];
-    for (;;)
-    {
-        ssize_t got = read(g_clip_process.fd, chunk, sizeof(chunk));
-        if (got > 0)
-        {
-            if (!ClipboardProcessAppend(chunk, (size_t)got))
-            {
-                return false;
-            }
-            continue;
-        }
-        if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
-        {
-            return got == 0;
-        }
-        if (errno == EINTR)
-        {
-            continue;
-        }
-        return true;
-    }
-}
 #endif
 
 static unsigned char *ClipboardImageBytes(size_t *out_n, const char **out_ext, bool *raylib_alloc)
@@ -1041,136 +1115,68 @@ static bool PasteClipboardImage(PicoHost *app)
 static void PasteClipboard(PicoComposer *c);
 
 #if defined(__linux__)
-static bool ClipboardProcessStartNext(void)
-{
-    ClipboardProcessResetAttempt();
-    int count = (int)(sizeof(kClipboardCommands) / sizeof(kClipboardCommands[0]));
-    while (g_clip_process.command < count)
-    {
-        if (ClipboardProcessSpawn())
-        {
-            return true;
-        }
-        g_clip_process.command++;
-    }
-    return false;
-}
+static void PasteClipboardText(PicoComposer *c, const char *clip);
 
-static void ClipboardProcessFallback(PicoHost *app)
+static void ClipboardPasteCompleted(PicoHost *app, void *arg)
 {
-    ClipboardProcessClear();
-    PasteClipboard(&app->composer);
+    ClipboardPaste *paste = arg;
+    ComposerState *s = PicoPlugins_HostState(app, "composer");
+    /* Reload/cancel invalidates the borrowed identity without waiting. */
+    if (!s || s->clipboard_paste != paste) return;
+    s_active_composer_state = s;
+    s->clipboard_paste = NULL;
+    if (atomic_load(&paste->cancelled)) return;
+    if (paste->image_ext)
+    {
+        if (!PersistClipboardImage(app, paste->bytes, paste->length, paste->image_ext))
+            pico_status_warn(app, "Could not attach the pasted image.");
+    }
+    else if (paste->fallback)
+        PasteClipboard(&app->composer);
+    else if (paste->failed)
+        pico_status_warn(app, "Could not read the clipboard.");
+    else if (paste->bytes)
+        PasteClipboardText(&app->composer, (const char *)paste->bytes);
     pico_host_request_redraw(app);
 }
 
 bool PicoComposer_ClipboardPasteBusy(void)
 {
-    return g_clip_process.active;
+    ComposerState *s = ActiveComposerState();
+    return s && s->clipboard_paste != NULL;
 }
 
 void PicoComposer_BeginClipboardPaste(PicoHost *app)
 {
-    s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || g_clip_process.active)
-    {
-        return;
-    }
+    s_active_composer_state = PicoPlugins_HostState(app, "composer");
+    ComposerState *s = ActiveComposerState();
+    if (!s || s->clipboard_paste) return;
     if (g_attach_n >= COMPOSER_MAX_ATTACH)
     {
         pico_status_warn(app, "Too many attached images.");
         return;
     }
-    g_clip_process.active = true;
-    g_clip_process.command = 0;
-    g_clip_process.deadline = MonotonicSeconds() + CLIP_PROCESS_TIMEOUT_SECONDS;
-    if (!ClipboardProcessStartNext())
+    int platform = glfwGetPlatform();
+    if (platform != GLFW_PLATFORM_WAYLAND && platform != GLFW_PLATFORM_X11)
     {
-        ClipboardProcessFallback(app);
+        PasteClipboard(&app->composer);
+        pico_host_request_redraw(app);
+        return;
     }
+    ClipboardPaste *paste = calloc(1, sizeof(*paste));
+    if (!paste) return;
+    atomic_init(&paste->cancelled, false);
+    paste->wayland = platform == GLFW_PLATFORM_WAYLAND;
+    paste->deadline = MonotonicSeconds() + CLIP_PROCESS_TIMEOUT_SECONDS;
+    if (!PicoHost_StartTaskCompleted(app, ClipboardPasteRun, paste, ClipboardPasteCancel,
+                                     ClipboardPasteCompleted, ClipboardPasteDestroy))
+    {
+        ClipboardPasteDestroy(paste);
+        return;
+    }
+    s->clipboard_paste = paste;
 }
 
-static void ClipboardProcessTerminate(void)
-{
-    if (g_clip_process.terminating)
-    {
-        return;
-    }
-    if (g_clip_process.pid > 0)
-    {
-        kill(g_clip_process.pid, SIGKILL);
-    }
-    g_clip_process.terminate_deadline = MonotonicSeconds() + 0.05;
-    if (g_clip_process.fd >= 0)
-    {
-        close(g_clip_process.fd);
-        g_clip_process.fd = -1;
-    }
-    g_clip_process.terminating = true;
-}
-
-void PicoComposer_PumpClipboardPaste(PicoHost *app)
-{
-    s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state)
-    {
-        return;
-    }
-    ClipboardProcessPumpReapers();
-    if (!g_clip_process.active || g_clip_process.pid <= 0)
-    {
-        return;
-    }
-    if (!g_clip_process.terminating && !ClipboardProcessDrain())
-    {
-        ClipboardProcessTerminate();
-    }
-    if (!g_clip_process.terminating && MonotonicSeconds() >= g_clip_process.deadline)
-    {
-        ClipboardProcessTerminate();
-    }
-
-    int status = 0;
-    pid_t waited = waitpid(g_clip_process.pid, &status, WNOHANG);
-    if (waited == 0 || (waited < 0 && errno == EINTR))
-    {
-        if (g_clip_process.terminating &&
-            MonotonicSeconds() >= g_clip_process.terminate_deadline)
-        {
-            ClipboardProcessQueueReap(g_clip_process.pid);
-            g_clip_process.pid = 0;
-            g_clip_process.command++;
-            if (MonotonicSeconds() >= g_clip_process.deadline || !ClipboardProcessStartNext())
-            {
-                ClipboardProcessFallback(app);
-            }
-        }
-        return;
-    }
-    bool exited_ok = waited == g_clip_process.pid && !g_clip_process.terminating &&
-                     WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    if (exited_ok && g_clip_process.fd >= 0 && !ClipboardProcessDrain())
-    {
-        exited_ok = false;
-    }
-    const char *ext = exited_ok ? ImageExtFromBytes(g_clip_process.bytes, g_clip_process.length) : NULL;
-    if (ext)
-    {
-        bool attached = PersistClipboardImage(app, g_clip_process.bytes, g_clip_process.length, ext);
-        ClipboardProcessClear();
-        if (attached) pico_host_request_redraw(app);
-        if (!attached)
-        {
-            pico_status_warn(app, "Could not attach the pasted image.");
-        }
-        return;
-    }
-
-    g_clip_process.command++;
-    if (MonotonicSeconds() >= g_clip_process.deadline || !ClipboardProcessStartNext())
-    {
-        ClipboardProcessFallback(app);
-    }
-}
 #endif
 
 static void MoveCursor(PicoComposer *c, int pos, bool extend);
@@ -1217,7 +1223,7 @@ static ComposerView GetComposerView(PicoHost *app)
     {
         v.scroll_y = scroll.scrollPosition->y;
     }
-    v.line_count = WrapComposer(c, ComposerFont(), v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
+    v.line_count = WrapComposerCached(ActiveComposerState(), c, ComposerFont(), v.wrap_width, v.lines, COMPOSER_MAX_LINES, &v.line_height);
     return v;
 }
 
@@ -1263,7 +1269,7 @@ static void MoveVertical(PicoHost *app, int dir, bool extend)
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = ComposerPx();
     float wrap = ComposerWrapWidth(app);
-    int line_count = WrapComposer(c, ComposerFont(), wrap, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_count = WrapComposerCached(ActiveComposerState(), c, ComposerFont(), wrap, lines, COMPOSER_MAX_LINES, &line_height);
     int line_i = 0;
     for (int i = 0; i < line_count; i++)
     {
@@ -1481,10 +1487,12 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     c->cursor = from;
     c->sel_anchor = from;
     c->text[c->length] = '\0';
+    c->revision++;
     ComposerState *s = ActiveComposerState();
     if (s)
     {
         s->goal_x = -1;
+        s->wrap_cache.valid = false;
     }
     NoteCaretActivity();
 }
@@ -1545,10 +1553,12 @@ static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
     c->cursor += nbytes;
     c->sel_anchor = c->cursor;
     c->text[c->length] = '\0';
+    c->revision++;
     ComposerState *s = ActiveComposerState();
     if (s)
     {
         s->goal_x = -1;
+        s->wrap_cache.valid = false;
     }
     NoteCaretActivity();
 }
@@ -1618,9 +1628,8 @@ static void OpenPreview(int index)
     UpdatePreviewDisplay();
 }
 
-static void PasteClipboard(PicoComposer *c)
+static void PasteClipboardText(PicoComposer *c, const char *clip)
 {
-    const char *clip = GetClipboardText();
     if (!clip || clip[0] == '\0')
     {
         return;
@@ -1643,6 +1652,11 @@ static void PasteClipboard(PicoComposer *c)
         }
     }
     ComposerInsert(c, clip, len);
+}
+
+static void PasteClipboard(PicoComposer *c)
+{
+    PasteClipboardText(c, GetClipboardText());
 }
 
 void PicoComposer_HandleInput(PicoHost *app)
@@ -2098,7 +2112,7 @@ void PicoComposer_Render(PicoHost *app, void *state)
     float wrap_width = ComposerWrapWidth(app);
     CompLine lines[COMPOSER_MAX_LINES];
     float line_height = ComposerPx();
-    int line_count = empty ? 1 : WrapComposer(c, ComposerFont(), wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
+    int line_count = empty ? 1 : WrapComposerCached(ActiveComposerState(), c, ComposerFont(), wrap_width, lines, COMPOSER_MAX_LINES, &line_height);
     if (line_height < 1)
     {
         line_height = ComposerPx();
@@ -2425,9 +2439,6 @@ static void ComposerFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
-#if defined(__linux__)
-    PicoComposer_PumpClipboardPaste(app);
-#endif
     PicoComposer_HandleInput(app);
     UpdatePreviewDisplay();
     if (!PicoUi_ModalOpen(app))
@@ -2448,7 +2459,6 @@ static int ComposerInit(PicoHost *app, void **state_out)
     s->seen_length = -1;
     s->goal_x = -1;
     s->preview = -1;
-    s->clip_process.fd = -1;
     if (state_out)
     {
         *state_out = s;

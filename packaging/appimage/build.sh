@@ -116,6 +116,19 @@ for plugin in "${decor_plugin_files[@]}"; do
     dependency_args+=(--deploy-deps-only "$target")
 done
 
+# SQLite is linked directly but needed even on hosts without the runtime package.
+sqlite_libdir=$(pkg-config --variable=libdir sqlite3)
+sqlite_library=$(realpath "$sqlite_libdir/libsqlite3.so")
+sqlite_soname=$(patchelf --print-soname "$sqlite_library")
+if [[ -z $sqlite_soname ]]; then
+    echo "could not locate the SQLite runtime library" >&2
+    exit 1
+fi
+sqlite_target="$appdir/usr/lib/$sqlite_soname"
+cp -L "$sqlite_library" "$sqlite_target"
+chmod u+w "$sqlite_target"
+dependency_args+=(--deploy-deps-only "$sqlite_target")
+
 rm -f "$output" "${output}.zsync"
 if [[ "${output##*/}.zsync" != "$zsync_pattern" ]]; then
     echo "update information pattern $zsync_pattern does not match ${output##*/}.zsync" >&2
@@ -138,6 +151,10 @@ fi
 
 if ! find "$appdir/usr/lib" -maxdepth 1 -name 'libcrypto.so*' -print -quit | grep -q .; then
     echo "AppImage is missing the OpenSSL Crypto runtime" >&2
+    exit 1
+fi
+if ! find "$appdir/usr/lib" -maxdepth 1 -name 'libsqlite3.so*' -print -quit | grep -q .; then
+    echo "AppImage is missing the SQLite runtime" >&2
     exit 1
 fi
 for soname in "${required_sonames[@]}"; do

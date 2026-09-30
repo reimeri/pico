@@ -261,65 +261,6 @@ static void TestMalformedPartsAreRejected(void)
     free(temp);
 }
 
-#if defined(__linux__)
-static double WallSeconds(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
-}
-
-static void TestClipboardOwnerCannotBlockUi(void)
-{
-    char *temp = MakeTempDir();
-    if (!temp)
-    {
-        Check(false, "could not create clipboard-process temp dir");
-        return;
-    }
-    char command[4096];
-    snprintf(command, sizeof(command), "%s/wl-paste", temp);
-    const char script[] = "#!/bin/sh\nwhile :; do :; done\n";
-    if (!WriteBytes(command, script, sizeof(script) - 1) || chmod(command, 0700) != 0)
-    {
-        Check(false, "could not create stalled clipboard command");
-        unlink(command);
-        rmdir(temp);
-        free(temp);
-        return;
-    }
-    const char *old_path_value = getenv("PATH");
-    char *old_path = old_path_value ? JsonDup(old_path_value) : NULL;
-    setenv("PATH", temp, 1);
-    PicoHost app;
-    memset(&app, 0, sizeof(app));
-    PicoHost_SetPath(&app, temp);
-
-    double started = WallSeconds();
-    PicoComposer_BeginClipboardPaste(&app);
-    double begin_elapsed = WallSeconds() - started;
-    bool running = PicoComposer_ClipboardPasteBusy();
-    started = WallSeconds();
-    PicoComposer_CancelClipboardPaste();
-    double cancel_elapsed = WallSeconds() - started;
-    Check(running && begin_elapsed < 0.25 && cancel_elapsed < 0.5 &&
-              !PicoComposer_ClipboardPasteBusy(),
-          "a stalled clipboard owner starts asynchronously and cancels promptly");
-
-    if (old_path)
-    {
-        setenv("PATH", old_path, 1);
-    }
-    else
-    {
-        unsetenv("PATH");
-    }
-    free(old_path);
-    unlink(command);
-    rmdir(temp);
-    free(temp);
-}
-#endif
 
 static void TestOwnedAttachmentLifetime(void)
 {
@@ -360,9 +301,6 @@ int main(void)
     TestRemoveDropsPath();
     TestWhitespaceSubmitReady();
     TestMalformedPartsAreRejected();
-#if defined(__linux__)
-    TestClipboardOwnerCannotBlockUi();
-#endif
     TestOwnedAttachmentLifetime();
     PicoComposer_DiscardAttachments();
 

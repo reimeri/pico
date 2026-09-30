@@ -36,9 +36,14 @@ after a sleep. Pico queues notify the loop on worker handoff, but a wake may arr
 before a task becomes joinable; adoption can then take another idle tick. Work
 polled without a notification (including child-process completion and extension
 state read only from `on_frame`) can also take up to the idle cap to be observed.
-The Linux clipboard-image paste subprocess has a 50 ms termination follow-up;
-while idle, its retry/fallback may run up to an idle tick late. This does not
-affect copying text to the clipboard.
+Linux composer paste discovers clipboard formats and retrieves the selected
+image or text on a core-tracked worker, using only the active display backend.
+Helper completion wakes the host; main-thread adoption inserts text or attaches
+the image and requests redraw. Cancellation or composer replacement invalidates
+the result without waiting on the UI thread. The worker owns helper processes
+and buffers and participates in the shared process-shutdown deadline. This is
+compiled-in work, not a public extension worker API, and does not affect copying
+text to the clipboard.
 Visible extension-owned state does **not** invalidate the window automatically:
 call `pico_host_request_redraw(host)` on the main thread when changing a Clay
 view or a direct after-render drawing, or

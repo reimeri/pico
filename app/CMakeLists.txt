@@ -853,6 +853,7 @@ if(BUILD_TESTING)
     add_test(NAME pico_docs_path_tests COMMAND pico_docs_path_tests)
 
     add_executable(pico_host_workspace_tests
+        tests/clipboard_test.c
         tests/host_workspace_test.c
         render_scale.c
         tests/clay_impl.c
@@ -955,7 +956,8 @@ if(BUILD_TESTING)
             -Wl,--wrap=GetCharPressed -Wl,--wrap=IsMouseButtonPressed
             -Wl,--wrap=IsMouseButtonDown -Wl,--wrap=IsMouseButtonReleased -Wl,--wrap=GetMousePosition
             -Wl,--wrap=GetMouseWheelMoveV
-            -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx)
+            -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx
+            -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()

@@ -53,6 +53,21 @@ The builtin chat window-renders very tall wrapped paragraphs (also in expanded t
 
 `z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`). Host views in a slot are process-global. Workspace views in a slot render only for the selected workspace. Builtin modal controls (`PicoExts_*`, `PicoSettingsUi_*`, and `PicoPrompt_*`) take an explicit `PicoHost *`; their open-state queries report only that host's instance.
 
+## Builtin composer clipboard
+
+On Linux, composer paste uses the active GLFW display backend: `wl-paste` on
+Wayland or `xclip` on X11. A core-managed worker discovers offered formats before
+fetching data; text-only clipboard contents do not trigger image probes. If both
+text and a supported image are offered, the image attachment takes precedence.
+Text preserves its newlines, including a trailing newline. If the clipboard helper
+is unavailable, Pico falls back to Raylib's text clipboard on the main thread.
+A helper transfer failure or timeout instead warns and leaves the composer
+unchanged; it does not retry through a potentially blocking Raylib read.
+Completion wakes the host and applies the result on the main thread, requesting
+redraw. Cancelled pastes and results from a replaced composer are discarded;
+extensions do not own the helper, its buffers, or its worker. See
+[contracts](contracts.md#threads) for worker and shutdown ownership.
+
 ## Empty state
 
 When the chat has no messages, builtin `chat` shows Tools / Context / Skills cards. With zero live workspaces it also shows a non-interactive “Open a workspace” card above them while the sidebar remains usable. If no agent is selected, workspace empty-state callbacks do not run; they resume once an agent in that workspace is selected. Extensions register extra Clay with `pico_workspace_add_empty_view` during `workspace_init`, not a shell slot — the empty state is inside the chat column.

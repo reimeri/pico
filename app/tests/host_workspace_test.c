@@ -13316,6 +13316,8 @@ static bool IsolateTestHome(void)
     return true;
 }
 
+int TestClipboardPaste(void);
+
 int main(int argc, char **argv)
 {
 #ifdef PICO_OPENAI_LOGIN_TESTS
@@ -13323,6 +13325,7 @@ int main(int argc, char **argv)
         return TestOpenAiBlockedShutdownChild();
 #endif
     if (!IsolateTestHome()) return 1;
+    if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return TestClipboardPaste();
 #ifdef PICO_OPENAI_LOGIN_TESTS
     if (argc == 2 && strcmp(argv[1], "--openai-login") == 0)
         return TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown();
@@ -13344,6 +13347,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 #endif
+    if (TestClipboardPaste() != 0) return 1;
     if (TestCopiedMessageSourceMetadata() != 0) return 1;
     if (TestWorktreeSuggestNameUsesProjectFolder() != 0) return 1;
     if (TestWorktreeDiscoveryCreationAndGrouping() != 0) return 1;

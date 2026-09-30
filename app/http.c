@@ -5,7 +5,7 @@
 #include "json.h"
 
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.3.5"
+#define PICO_VERSION "0.3.6"
 #endif
 
 #include <curl/curl.h>
@@ -40,20 +40,23 @@ static CURL *HttpAcquire(void)
     http_borrowed++;
     CURL *curl = http_idle_count ? http_idle[--http_idle_count] : NULL;
     pthread_mutex_unlock(&http_pool_mu);
-    if (!curl) curl = curl_easy_init();
+    if (!curl)
+        curl = curl_easy_init();
     if (!curl)
     {
         pthread_mutex_lock(&http_pool_mu);
         http_borrowed--;
         pthread_mutex_unlock(&http_pool_mu);
     }
-    if (curl) curl_easy_setopt(curl, CURLOPT_MAXCONNECTS, 4L);
+    if (curl)
+        curl_easy_setopt(curl, CURLOPT_MAXCONNECTS, 4L);
     return curl;
 }
 
 static void HttpRelease(CURL *curl)
 {
-    if (!curl) return;
+    if (!curl)
+        return;
     curl_easy_reset(curl);
     pthread_mutex_lock(&http_pool_mu);
     bool retain = !http_closing && http_idle_count < HTTP_IDLE_HANDLES;
@@ -75,7 +78,8 @@ static void HttpRelease(CURL *curl)
 void PicoHttp_HostStarted(void)
 {
     pthread_mutex_lock(&http_pool_mu);
-    if (http_hosts == 0 && http_borrowed == 0) http_closing = false;
+    if (http_hosts == 0 && http_borrowed == 0)
+        http_closing = false;
     http_hosts++;
     pthread_mutex_unlock(&http_pool_mu);
 }
@@ -101,9 +105,11 @@ bool PicoHttp_ShutdownConnections(void)
         return true;
     }
     http_closing = true;
-    for (int i = 0; i < http_idle_count; i++) curl_easy_cleanup(http_idle[i]);
+    for (int i = 0; i < http_idle_count; i++)
+        curl_easy_cleanup(http_idle[i]);
     http_idle_count = 0;
-    if (http_hosts > 0) http_hosts--;
+    if (http_hosts > 0)
+        http_hosts--;
     pthread_mutex_unlock(&http_pool_mu);
     return true;
 }

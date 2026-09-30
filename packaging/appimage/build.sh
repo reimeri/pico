@@ -130,7 +130,7 @@ chmod u+w "$sqlite_target"
 dependency_args+=(--deploy-deps-only "$sqlite_target")
 
 rm -f "$output" "${output}.zsync"
-if [[ "${output##*/}.zsync" != "$zsync_pattern" ]]; then
+if [[ "${output##*/}.zsync" != $zsync_pattern ]]; then
     echo "update information pattern $zsync_pattern does not match ${output##*/}.zsync" >&2
     exit 1
 fi

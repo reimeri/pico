@@ -43,6 +43,7 @@ typedef struct FooterState
     char cwd[4096];
     char state_str[64];
     char tokens[128];
+    char tps[64];
     char cache[64];
     char cache_input[64];
     char cache_cached[64];
@@ -74,6 +75,7 @@ static FooterState *ActiveFooterState(void)
 #define g_cwd (ActiveFooterState()->cwd)
 #define g_state (ActiveFooterState()->state_str)
 #define g_tokens (ActiveFooterState()->tokens)
+#define g_tps (ActiveFooterState()->tps)
 #define g_cache (ActiveFooterState()->cache)
 #define g_cache_input (ActiveFooterState()->cache_input)
 #define g_cache_cached (ActiveFooterState()->cache_cached)
@@ -937,6 +939,13 @@ void PicoFooter_Render(PicoHost *app, void *state)
     snprintf(g_state, sizeof(g_state), "%s", AgentStateName(app));
     snprintf(g_extra, sizeof(g_extra), "%s", extra);
     const PicoAgent *agent = PicoHost_SelectedAgentConst(app);
+    const PicoAgent *main_agent = agent;
+    while (main_agent && main_agent->parent_id)
+        main_agent = PicoHost_FindAgentConst(app, main_agent->parent_id);
+    if (main_agent && main_agent->kind == PICO_AGENT_MAIN && main_agent->has_tokens_per_second)
+        snprintf(g_tps, sizeof(g_tps), "TPS: %.0f", main_agent->tokens_per_second);
+    else
+        snprintf(g_tps, sizeof(g_tps), "TPS: --");
     char used[32];
     char limit[32];
     snprintf(used, sizeof(used), "%s", FormatTokens((uint64_t)agent->tokens_used));
@@ -1012,6 +1021,11 @@ void PicoFooter_Render(PicoHost *app, void *state)
         PicoDiff_RenderChip(app);
         Sep();
         MutedText(g_tokens);
+        Sep();
+        CLAY(CLAY_ID("FooterTps"), {.layout = {.sizing = {.height = CLAY_SIZING_FIXED(PICO_FONT_CAPTION)}}})
+        {
+            MutedText(g_tps);
+        }
         if (show_cache)
         {
             Sep();

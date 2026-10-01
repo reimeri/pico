@@ -37,6 +37,7 @@ typedef enum TestMode {
     TEST_PROVIDER_THINK_FAIL,
     TEST_PROVIDER_TEXT_FAIL,
     TEST_PROVIDER_TEXT_BLOCK,
+    TEST_PROVIDER_TPS,
     TEST_SIGNATURE_CONTINUATION,
     TEST_CATALOG_BLOCK,
     TEST_DUPLICATE_CALLS,
@@ -106,6 +107,8 @@ typedef struct TestState {
     int provider_cached_tokens;
     int usage_log_count;
     bool emit_think_summaries;
+    double tps_generation_seconds;
+    double tps_first_output_at;
     bool logged_thinking_parts;
     char logged_thinking[256];
     char logged_content[256];
@@ -259,6 +262,13 @@ static void SleepOneMs(void)
 {
     struct timespec delay = {.tv_nsec = 1000000L};
     nanosleep(&delay, NULL);
+}
+
+static double MonotonicSeconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
 static void SnapshotTurn(const PicoLlmTurn *turn)
@@ -490,6 +500,28 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
 
     out->input_tokens = tokens;
     out->cached_tokens = cached_tokens;
+    if (mode == TEST_PROVIDER_TPS)
+    {
+        double start = MonotonicSeconds();
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "abcd", 4);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "summary snapshot", 16);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "thinking", 8);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "summary snapshot", 16);
+        FakeToolBegin(on_delta, user, 0, "call-tps", "echo_test");
+        FakeToolBegin(on_delta, user, 0, "call-tps", "echo_test");
+        FakeToolArgs(on_delta, user, 0, "{");
+        FakeToolArgs(on_delta, user, 0, "\"x\":1}");
+        FakeToolDone(on_delta, user, 0, "call-tps", "echo_test", "{\"x\":1}");
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_STATUS, "not model output", 16);
+        for (int i = 0; i < 300; i++) SleepOneMs();
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "done", 4);
+        pthread_mutex_lock(&g_test.mu);
+        g_test.tps_first_output_at = start;
+        g_test.tps_generation_seconds = MonotonicSeconds() - start;
+        pthread_mutex_unlock(&g_test.mu);
+        pico_llm_result_add_text(out, "done");
+        return PICO_LLM_OK;
+    }
     if (mode == TEST_PROVIDER_BLOCK)
     {
         while (!cancel(user))
@@ -4735,6 +4767,65 @@ static int TestCancelledThinkingPersistence(void)
     return logged && history ? 0 : Fail(name, "cancelled thinking was not logged and replayed");
 }
 
+static int TestStreamingTpsOutput(void)
+{
+    const char *name = "streaming TPS counts model output once";
+    ResetTest(TEST_PROVIDER_TPS, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "provider did not finish");
+    }
+    pthread_mutex_lock(&g_test.mu);
+    double minimum_seconds = g_test.tps_generation_seconds;
+    double maximum_seconds = MonotonicSeconds() - g_test.tps_first_output_at;
+    pthread_mutex_unlock(&g_test.mu);
+    /* Four answer bytes, eight thinking bytes, nine name bytes, seven argument
+     * bytes, four final answer bytes. Bracket the estimator's end between the
+     * provider's last output and receipt of completion: scheduling delays in
+     * result construction or event delivery must not make this test flaky.
+     * A small allowance covers timing immediately around the first callback. */
+    double minimum_bytes = agent->tokens_per_second * 4.0 * minimum_seconds;
+    double maximum_bytes = agent->tokens_per_second * 4.0 * maximum_seconds;
+    bool counted_once = agent->has_tokens_per_second && minimum_bytes < 33.0 && maximum_bytes > 31.0;
+    double final_rate = agent->tokens_per_second;
+    PicoAgent_Compact(&app, agent);
+    bool retained = WaitForIdle(&app) && agent->has_tokens_per_second &&
+                    agent->tokens_per_second == final_rate;
+    PicoAgent_StartTurn(&app, agent, "next user message");
+    bool reset = !agent->has_tokens_per_second;
+    bool finished = WaitForIdle(&app);
+    PicoHost_Shutdown(&app);
+    if (!counted_once) return Fail(name, "text/thinking/tools were missing or repeated metadata was counted");
+    if (!retained) return Fail(name, "compaction must retain the conversation's final TPS");
+    return reset && finished ? 0 : Fail(name, "new user turn did not reset TPS");
+}
+
+static int TestSubagentDoesNotCalculateTps(void)
+{
+    const char *name = "subagents do not calculate TPS";
+    ResetTest(TEST_PROVIDER_TPS, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_SUBAGENT,
+        .parent_id = TestAgent(&app)->id, .session_start = PICO_SESSION_NONE, .select = true};
+    PicoAgentId child_id = 0;
+    if (PicoWorkspace_CreateAgent(TestWs(&app), &options, &child_id) != PICO_OK)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "could not create child");
+    }
+    PicoAgent *child = TestAgent(&app);
+    PicoAgent_StartTurn(&app, child, "start");
+    bool ok = WaitForIdle(&app) && !child->has_tokens_per_second;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "child must not publish a rate");
+}
+
 static int TestStreamingTextActivity(void)
 {
     const char *name = "streaming message text reports writing activity";
@@ -5183,6 +5274,8 @@ int main(void)
     failed |= TestProviderStatus();
     failed |= TestCancelledThinkingPersistence();
     failed |= TestStreamingTextActivity();
+    failed |= TestStreamingTpsOutput();
+    failed |= TestSubagentDoesNotCalculateTps();
     failed |= TestThinkSummaryCoalesce();
     failed |= TestRestoredThinkKeepsUnknownDuration();
     failed |= TestUiPostAppendReplace();

@@ -174,6 +174,7 @@ add_executable(pico
     http.c
     http_capture.c
     agent.c
+    streaming_tps.c
     tool_args.c
     workspace.c
     clarification.c
@@ -402,6 +403,13 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_highlight_tests)
     add_test(NAME pico_highlight_tests COMMAND pico_highlight_tests)
 
+    add_executable(pico_streaming_tps_tests
+        tests/streaming_tps_test.c
+        streaming_tps.c)
+    target_include_directories(pico_streaming_tps_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_streaming_tps_tests)
+    add_test(NAME pico_streaming_tps_tests COMMAND pico_streaming_tps_tests)
+
     add_executable(pico_diff_model_tests
         tests/diff_model_test.c
         diff_model.c
@@ -566,6 +574,7 @@ if(BUILD_TESTING)
         text_field.c
         text_field_ui.c
         agent.c
+        streaming_tps.c
         trace_group.c
         tool_args.c
         workspace.c
@@ -631,6 +640,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        streaming_tps.c
         tool_args.c
         workspace.c
         clarification.c
@@ -678,6 +688,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        streaming_tps.c
         tool_args.c
         workspace.c
         clarification.c
@@ -867,6 +878,7 @@ if(BUILD_TESTING)
         ui.c
         scrollbar.c
         agent.c
+        streaming_tps.c
         tool_args.c
         workspace.c
         clarification.c

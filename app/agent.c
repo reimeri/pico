@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "subagent_config.h"
 #include "usage.h"
+#include "streaming_tps.h"
 #include "host_internal.h"
 #include "trace_group.h"
 
@@ -170,6 +171,7 @@ struct PicoAgentRt {
     int work_tool_count;
     void *work_stream_state;
 
+    PicoStreamingTps tps; /* worker writes and main-thread sampling, under mu */
     char *stream;
     char provider_status[256];
     bool provider_status_dirty;
@@ -231,6 +233,7 @@ typedef enum PicoWorkerContext {
 } PicoWorkerContext;
 static __thread PicoWorkerContext t_worker_context;
 
+static double ThinkNow(void);
 static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg);
 static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt);
 static void ClearProvStream(PicoAgentRt *rt);
@@ -656,6 +659,12 @@ static PicoProvStream *ProvStreamFor(PicoAgentRt *rt, int call_index)
     return entry;
 }
 
+static void CountOutput(PicoAgentRt *rt, size_t bytes, bool thinking)
+{
+    if (rt->tps.enabled && rt->tps.request_open && bytes)
+        PicoStreamingTps_Output(&rt->tps, bytes, thinking, ThinkNow());
+}
+
 static void DeltaCb(void *user, const PicoLlmDelta *delta)
 {
     PicoAgentRt *rt = (PicoAgentRt *)user;
@@ -696,6 +705,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             if (delta->name && delta->name[0] &&
                 (!entry->name || strcmp(entry->name, delta->name) != 0))
             {
+                if (!entry->name) CountOutput(rt, strlen(delta->name), false);
                 free(entry->name);
                 entry->name = Dup(delta->name);
             }
@@ -718,6 +728,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
                 entry->args = NULL;
                 entry->args_done = false;
             }
+            CountOutput(rt, n, false);
             entry->args_bytes += n;
             ProvStreamDirty(entry);
             rt->prov_dirty = true;
@@ -740,6 +751,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             if (delta->name && delta->name[0] &&
                 (!entry->name || strcmp(entry->name, delta->name) != 0))
             {
+                if (!entry->name) CountOutput(rt, strlen(delta->name), false);
                 free(entry->name);
                 entry->name = Dup(delta->name);
             }
@@ -752,6 +764,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
             entry->args_done = entry->args != NULL;
             if (n > entry->args_bytes)
             {
+                CountOutput(rt, n - entry->args_bytes, false);
                 entry->args_bytes = n;
             }
             ProvStreamDirty(entry);
@@ -763,6 +776,8 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
     }
     if (kind == PICO_LLM_DELTA_THINKING_SUMMARY)
     {
+        if (rt->tps.enabled && rt->tps.request_open)
+            PicoStreamingTps_Summary(&rt->tps, s ? n : 0, ThinkNow());
         if (n == 0)
         {
             rt->summary_new_step = true;
@@ -789,6 +804,7 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
         pthread_mutex_unlock(&rt->mu);
         return;
     }
+    CountOutput(rt, n, kind == PICO_LLM_DELTA_THINKING);
     if (kind == PICO_LLM_DELTA_THINKING)
     {
         BufAppend(&rt->think, &rt->think_len, &rt->think_cap, s, n);
@@ -1252,6 +1268,7 @@ static void *WorkerMain(void *arg)
         if (kind == PICO_WORK_LLM)
         {
             pthread_mutex_lock(&rt->mu);
+            if (!compact) PicoStreamingTps_Begin(&rt->tps);
             rt->provider_status[0] = '\0';
             rt->provider_status_dirty = false;
             free(rt->summary);
@@ -1286,6 +1303,10 @@ static void *WorkerMain(void *arg)
                                : PICO_LLM_FAIL;
             t_agent_context = NULL;
             t_worker_context = PICO_WORKER_NONE;
+            pthread_mutex_lock(&rt->mu);
+            if (rt->tps.enabled && rt->tps.request_open)
+                PicoStreamingTps_End(&rt->tps, ThinkNow());
+            pthread_mutex_unlock(&rt->mu);
             if (rc == PICO_LLM_CANCEL)
             {
                 PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0, 0);
@@ -3980,6 +4001,11 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
         return;
     }
     PicoAgent_DismissError(agent);
+    pthread_mutex_lock(&agent->runtime->mu);
+    PicoStreamingTps_Reset(&agent->runtime->tps, PicoAgent_IsUserMain(agent));
+    pthread_mutex_unlock(&agent->runtime->mu);
+    agent->tokens_per_second = 0.0;
+    agent->has_tokens_per_second = false;
     agent->runtime->turn_fast = agent->fast;
     agent->running_fast = agent->fast;
     if (agent->clarification)
@@ -4070,6 +4096,12 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
                                     old->context.runtime_generation);
 
     pthread_mutex_lock(&old->mu);
+    if (old->tps.enabled)
+    {
+        PicoStreamingTps_End(&old->tps, ThinkNow());
+        agent->tokens_per_second = old->tps.rate;
+        agent->has_tokens_per_second = old->tps.valid;
+    }
     old->cancel = true;
     old->stop = true;
     old->retired = true;
@@ -4453,6 +4485,15 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     if (agent->runtime != rt) return;
 
     pthread_mutex_lock(&rt->mu);
+    if (rt->tps.enabled && rt->tps.request_open && rt->tps.clock_started)
+        PicoStreamingTps_Publish(&rt->tps, ThinkNow());
+    bool tps_changed = rt->tps.enabled &&
+        (agent->tokens_per_second != rt->tps.rate || agent->has_tokens_per_second != rt->tps.valid);
+    if (tps_changed)
+    {
+        agent->tokens_per_second = rt->tps.rate;
+        agent->has_tokens_per_second = rt->tps.valid;
+    }
     char provider_status[256];
     memcpy(provider_status, rt->provider_status, sizeof(provider_status));
     bool status_dirty = rt->provider_status_dirty;
@@ -4544,7 +4585,7 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     }
     pthread_mutex_unlock(&rt->mu);
 
-    if (status_dirty || stream_len || think_len || summary_len || prov_update_count || event_count)
+    if (tps_changed || status_dirty || stream_len || think_len || summary_len || prov_update_count || event_count)
         pico_host_request_redraw(app);
 
     if (status_dirty && agent->state == PICO_AGENT_LLM_WAIT)

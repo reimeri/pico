@@ -54,6 +54,9 @@ struct PicoAgent {
     uint64_t session_cached_tokens;
     int tokens_used;
     int tokens_cached;
+    /* Main-thread display cache, never persisted; only user main agents sample. */
+    double tokens_per_second;
+    bool has_tokens_per_second;
 
     char model[128];
     char model_name[128];

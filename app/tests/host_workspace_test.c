@@ -2081,12 +2081,16 @@ static int RunFastFooterCase(bool with_sidebar, bool cold_history)
     }
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    agent->has_tokens_per_second = true;
+    agent->tokens_per_second = 42.0;
     const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
-                           "ComposerAlign", "Footer", "FooterEffort", "FooterFastIcon", "Sidebar"};
-    Clay_BoundingBox expected[10] = {0};
-    int pane_count = with_sidebar ? 10 : 9;
+                           "ComposerAlign", "Footer", "FooterEffort", "FooterFastIcon", "FooterTps", "Sidebar"};
+    Clay_BoundingBox expected[11] = {0};
+    int pane_count = with_sidebar ? 11 : 10;
     for (int frame = 0; frame < 120; frame++)
     {
+        if (frame == 40) agent->tokens_per_second = 7.0;
+        if (frame == 80) agent->tokens_per_second = 12345.0;
         Clay_SetLayoutDimensions(viewport);
         Clay_SetPointerState((Clay_Vector2){0, 0}, false);
         Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
@@ -2106,7 +2110,9 @@ static int RunFastFooterCase(bool with_sidebar, bool cold_history)
         {
             Clay_String name = {.chars = panes[i], .length = (int32_t)strlen(panes[i])};
             Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(name));
-            if (!box.found || (frame > (cold_history ? 30 : 2) && !ShellBoxStable(expected[i], box.boundingBox)))
+            bool tps_text_changed = strcmp(panes[i], "FooterTps") == 0 && (frame == 40 || frame == 80);
+            if (!box.found || (frame > (cold_history ? 30 : 2) && !tps_text_changed &&
+                               !ShellBoxStable(expected[i], box.boundingBox)))
             {
                 Fail("batched transcript measurement changed bottom-follow shell bounds");
                 goto done;
@@ -12262,6 +12268,65 @@ static int TestWorkspaceLessHostTransition(void)
     return 0;
 }
 
+static int TestFooterMainAgentTps(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-footer-tps-XXXXXX";
+    char cfg[] = "/tmp/pico-footer-tps-cfg-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId main_id = 0, other_id = 0, child_id = 0;
+    ShellTestState state = {.composer_height = 44.0f};
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                     .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &main_id) != PICO_OK) goto done;
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    if (!FindCardText(&commands, "TPS: --"))
+    { Fail("footer must show pending TPS before generation"); goto done; }
+    PicoAgent *main_agent = PicoHost_FindAgent(host, main_id);
+    main_agent->has_tokens_per_second = true;
+    main_agent->tokens_per_second = 42.0;
+    commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    if (!FindCardText(&commands, "TPS: 42"))
+    { Fail("idle footer must show the retained main-agent rate"); goto done; }
+    options.select = false;
+    if (pico_main_agent_create(host, workspace_id, &options, &other_id) != PICO_OK) goto done;
+    PicoAgent *other = PicoHost_FindAgent(host, other_id);
+    other->has_tokens_per_second = true;
+    other->tokens_per_second = 84.0;
+    PicoAgentCreateOptions child_options = {.kind = PICO_AGENT_SUBAGENT, .parent_id = other_id,
+        .select = true, .session_start = PICO_SESSION_NONE};
+    if (PicoWorkspace_CreateAgent(other->workspace, &child_options, &child_id) != PICO_OK) goto done;
+    commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+    if (!FindCardText(&commands, "TPS: 84"))
+    { Fail("subagent footer must show its own main ancestor's TPS, not another main agent"); goto done; }
+    rc = 0;
+done:
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 static int TestFooterCacheTooltip(void)
 {
     const Clay_Dimensions viewport = {1100, 800};
@@ -13822,6 +13887,7 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (TestFooterMainAgentTps() != 0) return 1;
     if (TestFooterCacheTooltip() != 0)
     {
         return 1;

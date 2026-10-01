@@ -4,6 +4,7 @@
 #include "pico/app.h"
 #include "pico/host.h"
 
+struct PicoClarification;
 struct PicoAgentRt;
 typedef struct PicoAgentRt PicoAgentRt;
 typedef struct PicoRegistrationGeneration PicoRegistrationGeneration;
@@ -20,6 +21,10 @@ struct PicoAgent {
     PicoAgentId parent_id;
     uint64_t runtime_generation;
     PicoAgentKind kind;
+    struct PicoClarification *clarification;
+    char *turn_user_request;
+    char *originating_user_request;
+    bool running_fast;
     int depth;
     char profile[65];
     char purpose[1025];

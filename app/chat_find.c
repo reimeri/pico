@@ -1,3 +1,4 @@
+#include "clarification.h"
 #include "chat_find.h"
 #include "host_internal.h"
 #include "text_field_ui.h"
@@ -64,7 +65,7 @@ void PicoChatFind_Reset(PicoHost *app)
 
 void PicoChatFind_Sync(PicoHost *app)
 {
-    PicoAgent *agent = PicoHost_SelectedAgent(app);
+    PicoAgent *agent = PicoHost_TranscriptAgent(app);
     PicoChatFind *f = &app->find;
     uint64_t id = agent ? agent->id : 0;
     const char *session = agent ? agent->session_id : "";
@@ -81,7 +82,7 @@ void PicoChatFind_Sync(PicoHost *app)
 
 void PicoChatFind_Open(PicoHost *app)
 {
-    if (!app || PicoUi_ModalOpen(app) || !PicoHost_SelectedAgent(app)) return;
+    if (!app || PicoUi_ModalOpen(app) || !PicoHost_TranscriptAgent(app)) return;
     PicoChatFind_Sync(app);
     PicoChatFind *f = &app->find;
     bool was_open = f->open;

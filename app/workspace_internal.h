@@ -250,6 +250,9 @@ bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id)
 PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
                                      PicoAgentId *out);
 
+PicoResult PicoWorkspace_CreateClarificationAgent(PicoWorkspace *workspace, const PicoAgent *owner,
+                                                  struct PicoClarification *clarification, PicoAgent **out);
+
 void PicoWorkspace_InspectDismissFailure(PicoHost *host, const char *session_id);
 bool PicoWorkspace_InspectSubagent(PicoHost *host, const PicoTraceLine *line,
                                    PicoSubagentInspect *out);

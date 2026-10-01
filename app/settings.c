@@ -1085,7 +1085,7 @@ void PicoSettings_InitAgent(PicoAgent *agent)
 
 void PicoSettings_ReconcileIdleAgent(PicoAgent *agent)
 {
-    if (!agent || !agent->workspace || PicoAgent_IsBusy(agent))
+    if (!agent || !agent->workspace || agent->clarification || PicoAgent_IsBusy(agent))
     {
         return;
     }

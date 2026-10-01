@@ -4,6 +4,8 @@
 #include "pico/app.h"
 #include "host_internal.h"
 
+void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+
 #include "clay/clay.h"
 
 #include <math.h>

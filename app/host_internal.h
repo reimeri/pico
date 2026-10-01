@@ -125,6 +125,8 @@ struct PicoHost {
     PicoAgentId selected_agent_id;
 
     PicoComposer composer;
+    PicoAgentId clarification_view_id;
+    PicoComposer clarification_parked_composer;
     PicoChatFind find;
     PicoHostPreferences preferences;
     Font *fonts;

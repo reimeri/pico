@@ -3,6 +3,8 @@
 #include "json.h"
 #include "host_internal.h"
 
+void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

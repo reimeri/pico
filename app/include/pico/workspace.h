@@ -21,8 +21,8 @@ typedef struct PicoWorkspaceInfo {
     PicoWorkspaceId id;
     PicoWorkspaceState state;
     char path[4096];
-    int main_agent_count;
-    int total_agent_count;
+    int main_agent_count;  /* user-facing main sessions; excludes clarification helpers */
+    int total_agent_count; /* includes delegated and auxiliary agents; capacity accounting */
 } PicoWorkspaceInfo;
 
 PicoHost *pico_workspace_host(PicoWorkspace *workspace); /* owning host; main thread */

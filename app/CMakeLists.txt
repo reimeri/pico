@@ -176,6 +176,7 @@ add_executable(pico
     agent.c
     tool_args.c
     workspace.c
+    clarification.c
     worktree.c
     subagent_config.c
     session.c
@@ -540,6 +541,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_ask_user_tests)
     target_compile_options(pico_ask_user_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_ask_user_tests PRIVATE -Wl,--gc-sections)
+    target_link_libraries(pico_ask_user_tests PRIVATE m)
     add_test(NAME pico_ask_user_tests COMMAND pico_ask_user_tests)
 
     set_source_files_properties(tests/workspace_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -567,6 +569,7 @@ if(BUILD_TESTING)
         trace_group.c
         tool_args.c
         workspace.c
+        clarification.c
         worktree.c
         host_extensions.c
         workspace_extensions.c
@@ -630,6 +633,7 @@ if(BUILD_TESTING)
         agent.c
         tool_args.c
         workspace.c
+        clarification.c
         worktree.c
         host_extensions.c
         workspace_extensions.c
@@ -676,6 +680,7 @@ if(BUILD_TESTING)
         agent.c
         tool_args.c
         workspace.c
+        clarification.c
         worktree.c
         host_extensions.c
         workspace_extensions.c
@@ -864,6 +869,7 @@ if(BUILD_TESTING)
         agent.c
         tool_args.c
         workspace.c
+        clarification.c
         plugin.c
         host_extensions.c
         workspace_extensions.c

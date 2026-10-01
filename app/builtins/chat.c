@@ -1,3 +1,4 @@
+#include "clarification.h"
 #include "pico/plugin.h"
 #include "host_internal.h"
 #include "render_scale.h"
@@ -2066,7 +2067,7 @@ static void RunEmpty(PicoHost *app, PicoEmptyKind kind)
     {
         return;
     }
-    const PicoAgent *selected = PicoHost_SelectedAgentConst(app);
+    const PicoAgent *selected = PicoHost_TranscriptAgentConst(app);
     PicoAgentId selected_id = selected ? selected->id : 0;
     for (int i = 0; i < ws->empty_view_count; i++)
     {
@@ -2084,7 +2085,7 @@ static void RunEmpty(PicoHost *app, PicoEmptyKind kind)
 
 static void RenderEmptyState(PicoHost *app)
 {
-    bool has_selected_agent = PicoHost_SelectedAgentConst(app) != NULL;
+    bool has_selected_agent = PicoHost_TranscriptAgentConst(app) != NULL;
     if (has_selected_agent && EmptyReplaced(app))
     {
         RunEmpty(app, PICO_EMPTY_REPLACE);
@@ -2615,7 +2616,7 @@ void PicoChat_Render(PicoHost *app, void *state)
     {
         return;
     }
-    active = PicoHost_SelectedAgent(app);
+    active = PicoHost_TranscriptAgent(app);
     TranscriptView identity_view = {.owner = active};
     uint64_t identity = active && active->message_count
                             ? RevisionMix(TranscriptIdentity(&identity_view), app->chat_transcript_revision)
@@ -2683,7 +2684,7 @@ void PicoChat_Render(PicoHost *app, void *state)
                              .childAlignment = align,
                              .sizing = content_size}})
             {
-                if (empty)
+                if (empty && !PicoClarification_View(app))
                 {
                     RenderEmptyState(app);
                 }
@@ -2732,7 +2733,7 @@ void PicoChat_Render(PicoHost *app, void *state)
 
 static TranscriptView MainTranscriptView(PicoHost *app)
 {
-    PicoAgent *active = PicoHost_SelectedAgent(app);
+    PicoAgent *active = PicoHost_TranscriptAgent(app);
     TranscriptView view = {
         .app = app,
         .messages = active ? active->messages : NULL,
@@ -3371,7 +3372,7 @@ static void InspectHandlePointer(PicoHost *app)
 
 void PicoChat_HandleToolRelease(PicoHost *app)
 {
-    PicoAgent *active = PicoHost_SelectedAgent(app);
+    PicoAgent *active = PicoHost_TranscriptAgent(app);
     if (!app || !active || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
         !app->chat_sel.mouse_selecting || app->chat_sel.dragging || !app->chat_sel.pressed_tool ||
         app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= active->message_count)
@@ -3415,7 +3416,7 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
     {
         return;
     }
-    if (!PicoHost_SelectedAgent(app))
+    if (!PicoHost_TranscriptAgent(app))
     {
         PicoChat_InspectClose();
         PicoChatSel_Clear(app);
@@ -3459,9 +3460,9 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
         int group_msg = -1;
         int tool_msg = -1;
         int tool_idx = -1;
-        for (int i = 0; i < PicoHost_SelectedAgent(app)->message_count; i++)
+        for (int i = 0; i < PicoHost_TranscriptAgent(app)->message_count; i++)
         {
-            PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[i];
+            PicoMessage *msg = &PicoHost_TranscriptAgent(app)->messages[i];
             if (HitTraceGroup(&main, i))
             {
                 group_msg = i;
@@ -3515,14 +3516,14 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
     {
         if (app->chat_sel.mouse_selecting && !app->chat_sel.dragging &&
             app->chat_sel.tool_msg >= 0 &&
-            app->chat_sel.tool_msg < PicoHost_SelectedAgent(app)->message_count)
+            app->chat_sel.tool_msg < PicoHost_TranscriptAgent(app)->message_count)
         {
-            PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[app->chat_sel.tool_msg];
+            PicoMessage *msg = &PicoHost_TranscriptAgent(app)->messages[app->chat_sel.tool_msg];
             if (app->chat_sel.pressed_group &&
                 HitTraceGroup(&main, app->chat_sel.tool_msg))
             {
                 msg->trace_group_expanded = !msg->trace_group_expanded;
-                PicoAgent_TranscriptChanged(PicoHost_SelectedAgent(app), app->chat_sel.tool_msg);
+                PicoAgent_TranscriptChanged(PicoHost_TranscriptAgent(app), app->chat_sel.tool_msg);
                 if (!msg->trace_group_expanded && app->chat_follow_bottom)
                 {
                     PicoChat_ResetBottomSpace(app);
@@ -3536,14 +3537,14 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
                 {
                     PicoWorkspace *ws = PicoHost_SelectedWorkspace(app);
                     if (msg->trace[t].is_tool &&
-                        pico_tool_row_activate(ws, PicoHost_SelectedAgent(app)->id, &msg->trace[t]))
+                        pico_tool_row_activate(ws, PicoHost_TranscriptAgent(app)->id, &msg->trace[t]))
                     {
-                        PicoAgent_TranscriptChanged(PicoHost_SelectedAgent(app), app->chat_sel.tool_msg);
+                        PicoAgent_TranscriptChanged(PicoHost_TranscriptAgent(app), app->chat_sel.tool_msg);
                     }
                     else
                     {
                         msg->trace[t].expanded = !msg->trace[t].expanded;
-                        PicoAgent_TranscriptChanged(PicoHost_SelectedAgent(app), app->chat_sel.tool_msg);
+                        PicoAgent_TranscriptChanged(PicoHost_TranscriptAgent(app), app->chat_sel.tool_msg);
                     }
                 }
             }
@@ -3978,7 +3979,7 @@ static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, 
 
 static void PicoChat_DrawThinkSheen(PicoHost *app)
 {
-    if (!app || !app->fonts || !PicoHost_SelectedAgent(app))
+    if (!app || !app->fonts || !PicoHost_TranscriptAgent(app))
     {
         return;
     }
@@ -3993,7 +3994,7 @@ static void PicoChat_DrawThinkSheen(PicoHost *app)
     {
         return;
     }
-    PicoMessage *msg = &PicoHost_SelectedAgent(app)->messages[last];
+    PicoMessage *msg = &PicoHost_TranscriptAgent(app)->messages[last];
     if (msg->role != PICO_ROLE_ASSISTANT || (msg->source && msg->source[0]))
     {
         return;
@@ -4087,7 +4088,7 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
-    const PicoAgent *active = PicoHost_SelectedAgentConst(app);
+    const PicoAgent *active = PicoHost_TranscriptAgentConst(app);
     if (PicoAgent_IsBusy(active)) pico_host_request_redraw(app);
     for (int i = 0; i < EMPTY_CARD_COUNT; i++)
     {

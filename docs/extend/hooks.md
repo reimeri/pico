@@ -17,6 +17,16 @@ pico_add_llm_hook(workspace, MyBeforeLlm);
 
 Callbacks run in registration order. Each family has its corresponding `PICO_MAX_*_HOOKS` limit.
 
+Builtin questionnaire clarification uses an internal ephemeral helper with a
+clean, dedicated prompt. It skips ordinary submit, LLM instruction/tool-filter,
+request-context, and `ON_COMPACT` hooks; these must not inject task-execution
+instructions or parent history into clarification. Normal provider/tool execution,
+tool interceptors/apply, and turn/ask notifications remain active and identify the
+helper by its own agent ID. A helper permission ask takes UI priority only while
+clarification is displayed; the owning questionnaire remains pending. See
+[agents](agents.md#builtin-clarification-agents) and
+[tools](tools.md#clarifying-a-pending-questionnaire).
+
 ## Notifications
 
 ```c

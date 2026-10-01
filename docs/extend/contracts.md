@@ -175,15 +175,18 @@ Delegation jobs and child/session ownership survive force cancellation until eve
 
 ## Tool authorization
 
-Each request starts from registered tools, applies the agent policy, then LLM-hook exclusions. Each LLM hook runs once per request on the main thread in registration order: it may exclude eligible tools and append instructions in the same invocation. Later hooks see preceding exclusions and previously appended instructions; only the final filtered catalog reaches context hooks and the provider. For a named child, the policy is the current profile's exact allowlist snapshot; omission allows all tools and an empty array allows none. Continued sessions refresh this policy instead of restoring an old catalog. Context hooks inspect the final effective catalog. The provider receives a retained snapshot, and tool execution/apply resolve only from that snapshot—not from the live registry. A hidden or unoffered call becomes a logged tool error and bypasses before hooks, tool code, apply, and after hooks. Empty/duplicate call IDs, malformed call arrays, and calls beyond the pending-call limit fail the provider round explicitly. Pending calls follow their retained execution policies: eligible calls overlap up to the turn's limit, sequential calls act as ordering barriers, and excess calls remain queued.
+Ordinary agent requests start from registered tools, apply the agent policy, then LLM-hook exclusions. The builtin clarification helper instead uses its dedicated instructions and `sh` allowlist without ordinary LLM/context hooks (see Questionnaire UI ownership). Each LLM hook runs once per request on the main thread in registration order: it may exclude eligible tools and append instructions in the same invocation. Later hooks see preceding exclusions and previously appended instructions; only the final filtered catalog reaches context hooks and the provider. For a named child, the policy is the current profile's exact allowlist snapshot; omission allows all tools and an empty array allows none. Continued sessions refresh this policy instead of restoring an old catalog. Context hooks inspect the final effective catalog. The provider receives a retained snapshot, and tool execution/apply resolve only from that snapshot—not from the live registry. A hidden or unoffered call becomes a logged tool error and bypasses before hooks, tool code, apply, and after hooks. Empty/duplicate call IDs, malformed call arrays, and calls beyond the pending-call limit fail the provider round explicitly. Pending calls follow their retained execution policies: eligible calls overlap up to the turn's limit, sequential calls act as ordering barriers, and excess calls remain queued.
 
 ## Questionnaire UI ownership
 
 The builtin custom questionnaire (`type: "questionnaire", ui: "custom"`) is a
 non-modal composer replacement. `PicoUi_ModalOpen` excludes this surfaced ask,
 but still includes named modal claims, confirmation asks, and other custom asks.
-No worker, ask ID, answer ownership, ordering, or cancellation contract changes.
-The ordinary composer yields rendering and input while a questionnaire is pending;
+Ask IDs and answer ownership are unchanged. A pending confirmation from the
+visible clarification helper takes UI priority, without resolving the original
+questionnaire. Returning to answers restores normal selected-session ask ordering.
+The ordinary composer yields rendering and input in questionnaire-answer mode;
+in clarification mode it routes text to the isolated helper, not the selected agent;
 extension views still stack in their registered slots.
 
 Questionnaire drafts are host-owned copies keyed by ask ID, retained across
@@ -192,3 +195,22 @@ or host extensions are replaced. Borrowed `request_json` is never retained acros
 pumps. Collapsing does not answer or cancel; only the focused expanded panel
 consumes question keyboard input, and named modals/chat search take precedence.
 Questionnaire submission creates no extra transcript message beyond the tool result.
+
+Clarification runtime ownership is core/workspace-owned, keyed by the ask owner,
+runtime generation, and ask ID; UI mode and drafts never retain borrowed request
+or transcript pointers. One ephemeral helper is retained per questionnaire, counts
+against agent caps, and never publishes a result or transcript into its owner.
+Back preserves drafts and does not cancel work. Escape in the clarification view
+cancels only the helper.
+Ask end/owner cancellation/workspace close cancels and drains the helper; stale
+completion cannot reopen an ended conversation. Reload gates new helper turns
+while continuing existing work, answer routing, and cancellation.
+
+Clarification requests deliberately bypass ordinary submit, LLM, request-context,
+and `ON_COMPACT` hooks to preserve their clean instruction/context contract.
+Tool allowlisting and retained registration snapshots still govern execution;
+tool before/after hooks, apply, and lifecycle notifications remain active.
+Compaction restores the immutable questionnaire/task seed in the helper's history.
+The `sh` inspection-only policy is prompt guidance, **not filesystem or process
+isolation**. Helpers use distinct ephemeral session/cache identities and are not
+saved, resumable, or selected user sessions.

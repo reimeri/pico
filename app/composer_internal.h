@@ -3,6 +3,9 @@
 
 #include "pico/app.h"
 
+/* Invalidate cached wrapping/input state and cancel pending paste on conversation swaps. */
+void PicoComposer_ResetPresentation(PicoHost *host);
+
 bool PicoComposer_HasAttachments(const PicoHost *app);
 bool PicoComposer_PointerOverAttachments(void);
 bool PicoComposer_PointerOverAttachmentRemove(void);

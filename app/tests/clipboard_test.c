@@ -190,12 +190,12 @@ int TestClipboardPaste(void)
     ClipboardDrain(host);
     if (strcmp(host->composer.text, s_fallback) != 0) goto done;
 
-    phase = "cancellation discards a fetched result awaiting adoption";
+    phase = "presentation switch discards a fetched result awaiting adoption";
     if (!ClipboardWrite(wl, helper) || chmod(wl, 0700) != 0) goto done;
     ClipboardArmWake();
     PicoComposer_BeginClipboardPaste(host);
     if (!ClipboardWaitWake()) goto done;
-    PicoComposer_CancelClipboardPaste();
+    PicoComposer_ResetPresentation(host);
     ClipboardDrain(host);
     if (strcmp(host->composer.text, s_fallback) != 0) goto done;
 

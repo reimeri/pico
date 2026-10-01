@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include "clarification.h"
 #include "render_scale.h"
 #include "theme_internal.h"
 #include "pico/plugin.h"
@@ -1988,6 +1989,10 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
     }
     shown = display && display[0] ? display : (text ? text : "");
     /* The checkout is fixed once a turn has passed all acceptance checks. */
+    char *original_request = strdup(shown);
+    if (!original_request) { free(normalized); return PICO_NO_MEMORY; }
+    free(agent->turn_user_request);
+    agent->turn_user_request = original_request;
     agent->accepted_submit = true;
     PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, shown);
     PicoSession_LogUser(host, agent, text ? text : "", shown, parts);
@@ -2056,6 +2061,7 @@ static bool BusyCommandAllowed(const PicoHost *host, const PicoWorkspace *worksp
 
 void PicoHost_Submit(PicoHost *app)
 {
+    if (app && app->clarification_view_id) { PicoClarification_Submit(app); return; }
     PicoAgentId id = app ? app->selected_agent_id : 0;
     PicoAgent *active = PicoHost_FindAgent(app, id);
     if (!app || !active || !PicoWorkspace_AcceptsNewWork(active->workspace) ||
@@ -2207,11 +2213,12 @@ void PicoHost_RequestSubmitCancel(PicoHost *host)
 
 void PicoHost_Cancel(PicoHost *app)
 {
+    if (PicoClarification_View(app)) { PicoClarification_Stop(app); return; }
     PicoAgentId id = app ? app->selected_agent_id : 0;
     pico_agent_cancel(app, id);
 }
 
-bool PicoUi_QuestionnaireOpen(const PicoHost *app)
+static bool PendingQuestionnaire(const PicoHost *app)
 {
     PicoToolAsk ask;
     if (!pico_tool_pending_ask(app, &ask) || !ask.request_json)
@@ -2225,11 +2232,16 @@ bool PicoUi_QuestionnaireOpen(const PicoHost *app)
     return questionnaire;
 }
 
+bool PicoUi_QuestionnaireOpen(const PicoHost *app)
+{
+    return !PicoClarification_View(app) && PendingQuestionnaire(app);
+}
+
 bool PicoUi_ModalOpen(const PicoHost *app)
 {
     PicoToolAsk ask;
     return pico_ui_modal_claimed(app) ||
-           (pico_tool_pending_ask(app, &ask) && !PicoUi_QuestionnaireOpen(app));
+           (pico_tool_pending_ask(app, &ask) && !PendingQuestionnaire(app));
 }
 
 /* Coalesce posts until the main loop has completed its pump. Checking and
@@ -2427,7 +2439,7 @@ bool pico_workspace_info(const PicoHost *host, int index, PicoWorkspaceInfo *out
     out->total_agent_count = workspace->count;
     for (i = 0; i < workspace->count; i++)
     {
-        if (workspace->agents[i] && workspace->agents[i]->kind == PICO_AGENT_MAIN)
+        if (PicoAgent_IsUserMain(workspace->agents[i]))
         {
             out->main_agent_count++;
         }
@@ -2908,7 +2920,7 @@ static PicoAgent *FirstMainAgent(PicoWorkspace *workspace)
     }
     for (i = 0; i < workspace->count; i++)
     {
-        if (workspace->agents[i] && workspace->agents[i]->kind == PICO_AGENT_MAIN)
+        if (PicoAgent_IsUserMain(workspace->agents[i]))
         {
             return workspace->agents[i];
         }
@@ -3179,13 +3191,16 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
                         PicoAgentId next_id = 0;
                         for (int w2 = 0; w2 < host->workspace_count; w2++)
                         {
-                            if (w2 != i && host->workspaces[w2] && host->workspaces[w2]->count > 0 && host->workspaces[w2]->agents[0])
+                            PicoAgent *next = w2 != i ? FirstMainAgent(host->workspaces[w2]) : NULL;
+                            if (next)
                             {
-                                next_id = host->workspaces[w2]->agents[0]->id;
+                                next_id = next->id;
                                 break;
                             }
                         }
-                        host->selected_agent_id = next_id;
+                        PicoClarification_Back(host);
+                        if (next_id) pico_agent_select(host, next_id);
+                        else host->selected_agent_id = 0;
                         PicoChatSel_Clear(host);
                         host->chat_follow_bottom = true;
                     }
@@ -3383,6 +3398,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     {
         return PICO_HOST_SHUTDOWN_RETAINED;
     }
+    PicoClarification_Back(host);
     PicoPlugins_CancelCompiles(host);
     PicoPlugins_StopScanner(host);
     PicoSession_LoadCancel(host);
@@ -3913,8 +3929,8 @@ void PicoHost_Frame(PicoHost *app)
     if (PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_todo, had_modal) &&
         IsKeyPressed(KEY_ESCAPE))
     {
-        PicoAgentId id = app->selected_agent_id;
-        PicoAgent *active = PicoHost_FindAgent(app, id);
+        PicoAgent *active = PicoHost_TranscriptAgent(app);
+        PicoAgentId id = active ? active->id : 0;
         if (PicoAgent_IsBusy(active))
         {
             if (PicoAgent_CancelRequested(active))

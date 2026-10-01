@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agent.h"
+#include "clarification.h"
 #include "workspace_internal.h"
 #include "canonical.h"
 #include "json.h"
@@ -1017,7 +1018,7 @@ static void RunLlmHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool in
     /* One invocation per hook: filter tools and append extras together.
      * Later hooks see earlier exclusions and any extra-instruction section. */
     bool extras = false;
-    for (int i = 0; registration && i < registration->llm_hook_count; i++)
+    for (int i = 0; registration && !(agent && agent->clarification) && i < registration->llm_hook_count; i++)
     {
         if (!registration->llm_hooks[i].fn)
         {
@@ -1532,7 +1533,8 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     PicoTool *tools = NULL;
     int tool_count = 0;
     RunLlmHooks(rt, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
-    RunContextHooks(rt, agent, compact, tools, tool_count, &input, &input_count);
+    if (!agent->clarification)
+        RunContextHooks(rt, agent, compact, tools, tool_count, &input, &input_count);
 
     if (InputHasContextItem(input, input_count) && !p->map_context)
     {
@@ -2442,6 +2444,7 @@ static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary
 {
     int before = agent->tokens_used;
     PicoAgent_ClearInput(agent);
+    if (agent->clarification) PicoAgent_PushHistoryUser(agent, agent->clarification->seed);
     JsonBuf b;
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, "Briefing:\n");
@@ -2466,7 +2469,7 @@ static void StartCompact(PicoHost *app, PicoAgent *agent)
     SetActivity(app, agent, "Compacting…");
     free(agent->compact_summary);
     agent->compact_summary = NULL;
-    pico_run_hooks(app, PICO_HOOK_ON_COMPACT, agent->id);
+    if (!agent->clarification) pico_run_hooks(app, PICO_HOOK_ON_COMPACT, agent->id);
     if (agent->compact_summary && agent->compact_summary[0])
     {
         ApplyCompaction(app, agent, agent->compact_summary);
@@ -3862,7 +3865,14 @@ void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
         return;
     }
     agent->runtime->turn_fast = agent->fast;
-    PicoSettings_PinTurnModel(agent);
+    agent->running_fast = agent->fast;
+    if (agent->clarification)
+    {
+        agent->running_model = agent->clarification->model;
+        agent->has_running_model = true;
+        snprintf(agent->running_effort, sizeof(agent->running_effort), "%s", agent->effort);
+    }
+    else PicoSettings_PinTurnModel(agent);
     StartCompact(app, agent);
 }
 
@@ -3932,6 +3942,9 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
     free(agent->messages);
     free(agent->error);
     free(agent->compact_summary);
+    free(agent->turn_user_request);
+    free(agent->originating_user_request);
+    PicoClarification_Destroy(agent->clarification);
     for (int i = 0; i < agent->allowed_tool_count; i++)
     {
         free(agent->allowed_tools[i]);
@@ -3968,13 +3981,21 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
     }
     PicoAgent_DismissError(agent);
     agent->runtime->turn_fast = agent->fast;
-    PicoSettings_PinTurnModel(agent);
+    agent->running_fast = agent->fast;
+    if (agent->clarification)
+    {
+        agent->running_model = agent->clarification->model;
+        agent->has_running_model = true;
+        snprintf(agent->running_effort, sizeof(agent->running_effort), "%s", agent->effort);
+    }
+    else PicoSettings_PinTurnModel(agent);
     int parallel = agent->max_parallel_tools_override ? agent->max_parallel_tools_override
                                                       : agent->workspace->settings.max_parallel_tools;
     agent->runtime->max_parallel_tools = parallel >= 1 && parallel <= PICO_MAX_PARALLEL_TOOLS
                                              ? parallel : PICO_DEFAULT_PARALLEL_TOOLS;
     free(agent->runtime->instructions);
-    agent->runtime->instructions = PicoSettings_LoadSystemPrompt(PicoAgent_Workspace(agent));
+    agent->runtime->instructions = agent->clarification ? Dup(PicoClarification_Instructions()) :
+                                  PicoSettings_LoadSystemPrompt(PicoAgent_Workspace(agent));
     if (agent->kind == PICO_AGENT_SUBAGENT)
     {
         JsonBuf instructions;
@@ -3999,6 +4020,7 @@ void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text)
 
 void PicoAgent_Cancel(PicoAgent *agent)
 {
+    if (agent) PicoClarification_CancelOwner(agent->workspace, agent->id);
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt || !PicoAgent_IsBusy(agent))
     {
@@ -4017,6 +4039,7 @@ void PicoAgent_Cancel(PicoAgent *agent)
 
 void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
 {
+    if (agent) PicoClarification_CancelOwner(agent->workspace, agent->id);
     PicoAgentRt *old = agent ? agent->runtime : NULL;
     if (!old || !PicoAgent_IsBusy(agent))
     {

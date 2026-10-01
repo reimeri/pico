@@ -18,6 +18,7 @@
 #include "builtins/sidebar.h"
 #include "agent_internal.h"
 #include "agent.h"
+#include "clarification.h"
 #include "overlay.h"
 #include "worktree.h"
 #include "docs_path.h"
@@ -7942,7 +7943,21 @@ typedef struct MatrixProviderState {
     int recorded;
     char models_seen[MATRIX_RECORD_MAX][128];
     char efforts_seen[MATRIX_RECORD_MAX][PICO_EFFORT_LEN];
+    char urls_seen[MATRIX_RECORD_MAX][512];
     bool fasts_seen[MATRIX_RECORD_MAX];
+    bool clarification_fixture;
+    bool delegation_fixture;
+    PicoAgentId helper_id;
+    bool block_helper;
+    bool helper_entered;
+    bool helper_permission;
+    bool block_helper_tool;
+    int helper_calls;
+    char *inputs_seen[MATRIX_RECORD_MAX];
+    char *instructions_seen[MATRIX_RECORD_MAX];
+    char tools_seen[MATRIX_RECORD_MAX][128];
+    char keys_seen[MATRIX_RECORD_MAX][80];
+    char sessions_seen[MATRIX_RECORD_MAX][40];
 } MatrixProviderState;
 
 static void MatrixStateInit(MatrixProviderState *state, MatrixProviderMode mode)
@@ -7964,6 +7979,11 @@ static void MatrixStateRelease(MatrixProviderState *state)
 static void MatrixStateDestroy(MatrixProviderState *state)
 {
     free(state->answer);
+    for (int i = 0; i < MATRIX_RECORD_MAX; i++)
+    {
+        free(state->inputs_seen[i]);
+        free(state->instructions_seen[i]);
+    }
     pthread_mutex_destroy(&state->mu);
     pthread_cond_destroy(&state->cv);
 }
@@ -7995,6 +8015,11 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
     }
     pthread_mutex_lock(&state->mu);
     int call = state->calls++;
+    bool helper = state->clarification_fixture && pico_agent_context_id(ctx) == state->helper_id;
+    int helper_call = helper ? ++state->helper_calls : 0;
+    bool block_helper = helper && state->block_helper;
+    bool helper_permission = helper && state->helper_permission;
+    if (helper) state->helper_entered = true;
     state->entered = true;
     if (state->recorded < MATRIX_RECORD_MAX)
     {
@@ -8004,6 +8029,22 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
         snprintf(state->efforts_seen[slot], sizeof(state->efforts_seen[slot]), "%s",
                  turn && turn->effort ? turn->effort : "");
         state->fasts_seen[slot] = turn && turn->fast;
+        snprintf(state->urls_seen[slot], sizeof(state->urls_seen[slot]), "%s", turn->base_url ? turn->base_url : "");
+        if (state->clarification_fixture)
+        {
+            state->instructions_seen[slot] = DupStr(turn->instructions);
+            JsonBuf input;
+            JsonBuf_Init(&input);
+            for (int i = 0; i < turn->input_count; i++) JsonBuf_Puts(&input, turn->input_json[i]);
+            state->inputs_seen[slot] = JsonBuf_Steal(&input);
+            snprintf(state->keys_seen[slot], sizeof(state->keys_seen[slot]), "%s", turn->cache_key);
+            snprintf(state->sessions_seen[slot], sizeof(state->sessions_seen[slot]), "%s", pico_agent_context_session_id(ctx));
+            for (int i = 0; i < turn->tool_count; i++)
+            {
+                if (i) strncat(state->tools_seen[slot], ",", sizeof(state->tools_seen[slot]) - strlen(state->tools_seen[slot]) - 1);
+                strncat(state->tools_seen[slot], turn->tools[i].name, sizeof(state->tools_seen[slot]) - strlen(state->tools_seen[slot]) - 1);
+            }
+        }
     }
     pthread_cond_broadcast(&state->cv);
     MatrixProviderMode mode = state->mode;
@@ -8016,6 +8057,18 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
     }
     pthread_mutex_unlock(&state->mu);
 
+    if (block_helper)
+    {
+        while (!cancel(user)) usleep(1000);
+        return PICO_LLM_CANCEL;
+    }
+    if (helper)
+    {
+        if (helper_permission && helper_call == 1)
+            pico_llm_result_add_tool_call(out, "clarify-read", "sh", "{\"description\":\"Inspect repository context\",\"command\":\"printf clarification-inspection\"}", NULL);
+        else pico_llm_result_add_text(out, turn->compact ? "Summary of clarification discussion." : "A grounded clarification explanation.");
+        return PICO_LLM_OK;
+    }
     if (mode == MATRIX_PROVIDER_STREAM)
     {
         for (;;)
@@ -8035,7 +8088,12 @@ static int MatrixProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
             usleep(100);
         }
     }
-    if (mode == MATRIX_PROVIDER_ASK && call == 0)
+    if (state->delegation_fixture && call == 0)
+    {
+        pico_llm_result_add_tool_call(out, "clarify-delegate", "subagent",
+                                    "{\"profile\":\"clarify\",\"task\":\"DELEGATION_ASSIGNMENT\"}", NULL);
+    }
+    else if (mode == MATRIX_PROVIDER_ASK && call == (state->delegation_fixture ? 1 : 0))
     {
         pico_llm_result_add_tool_call(out, "matrix-ask", "matrix_ask", "{}", NULL);
     }
@@ -8128,6 +8186,42 @@ static bool MatrixSupportsFast(PicoHost *host, const PicoModel *model, void *opa
     return true;
 }
 
+static void ClarificationExecutionHook(PicoWorkspace *ws, PicoAgentId id, PicoLlmEvent *event, void *state)
+{
+    (void)ws; (void)id; (void)state;
+    event->extra_instructions = DupStr("MAIN_EXECUTION_HOOK_MARKER");
+}
+
+static void ClarificationContextHook(PicoWorkspace *ws, PicoAgentId id, PicoContextEvent *event, void *state)
+{
+    (void)ws; (void)id; (void)state;
+    event->extra_context = DupStr("MAIN_REQUEST_CONTEXT_MARKER");
+}
+
+static void ClarificationPermissionHook(PicoAgentContext *ctx, PicoToolEvent *event, void *state)
+{
+    (void)state;
+    if (strcmp(event->name, "sh")) return;
+    char *answer = NULL;
+    int rc = pico_tool_ask(ctx, "{\"type\":\"confirm\",\"message\":\"Allow clarification inspection?\"}", &answer);
+    if (rc != PICO_ASK_OK) { event->deny = true; event->result = DupStr("inspection not permitted"); }
+    free(answer);
+}
+
+static void ClarificationBlockingHook(PicoAgentContext *ctx, PicoToolEvent *event, void *opaque)
+{
+    MatrixProviderState *state = opaque;
+    if (!state || strcmp(event->name, "sh") || pico_agent_context_id(ctx) != state->helper_id) return;
+    pthread_mutex_lock(&state->mu);
+    if (state->block_helper_tool)
+    {
+        state->tool_entered = true;
+        pthread_cond_broadcast(&state->cv);
+        while (!state->tool_release) pthread_cond_wait(&state->cv, &state->mu);
+    }
+    pthread_mutex_unlock(&state->mu);
+}
+
 static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
                                      MatrixProviderState *state, bool add_ask_tool)
 {
@@ -8162,6 +8256,14 @@ static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
     {
         tool_ok = tool_ok && pico_add_tool(workspace, "matrix_block", "matrix block", "{}",
                                            MatrixBlockTool, NULL, PICO_TOOL_SEQUENTIAL);
+    }
+    if (state->clarification_fixture)
+    {
+        /* The compiled-in sh tool is already registered in real-host fixtures. */
+        pico_add_llm_hook(workspace, ClarificationExecutionHook);
+        pico_add_context_hook(workspace, ClarificationContextHook);
+        if (state->helper_permission) pico_add_tool_before_hook(workspace, ClarificationPermissionHook);
+        if (state->block_helper_tool) pico_add_tool_before_hook(workspace, ClarificationBlockingHook);
     }
     PicoHost_PublishRegistration(host, state);
     return tool_ok && pico_workspace_find_provider(workspace, "matrix") != NULL;
@@ -8403,6 +8505,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     char cfg[] = "/tmp/pico-question-config-XXXXXX";
     MatrixProviderState state;
     MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
+    state.clarification_fixture = true;
     state.ask_request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
         "{\"id\":\"target\",\"question\":\"Which target?\",\"kind\":\"select\","
         "\"options\":[\"one\",\"two\",\"three\",\"four\",\"five\",\"six\",\"seven\",\"eight\"]}]}";
@@ -8451,9 +8554,11 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
                            "ComposerAlign", "Composer", "Footer", "AskUserHeader", "AskUserToggle",
                            "AskUserHandle", "Sidebar"};
+    const char *clarification_panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
+        "ComposerAlign", "Composer", "Footer", "ClarificationControls", "ClarificationFocus", "ClarificationBack", "Sidebar"};
     Clay_BoundingBox expected[12];
     float expanded_height = 0;
-    for (int phase = 0; phase < 3; phase++)
+    for (int phase = 0; phase < 5; phase++)
     {
         for (int frame = 0; frame < 100; frame++)
         {
@@ -8469,10 +8574,22 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
             for (int pane = 0; pane < (with_sidebar ? 12 : 11); pane++)
             {
                 Clay_ElementData box = Clay_GetElementData(Clay_GetElementId((Clay_String){
-                    .chars = panes[pane], .length = (int32_t)strlen(panes[pane])}));
+                    .chars = phase == 3 ? clarification_panes[pane] : panes[pane],
+                    .length = (int32_t)strlen(phase == 3 ? clarification_panes[pane] : panes[pane])}));
                 if (!box.found) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
                 if (frame == 0) expected[pane] = box.boundingBox;
                 else if (!ShellBoxStable(expected[pane], box.boundingBox)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+            }
+            if (phase == 3)
+            {
+                if (!Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||
+                    Clay_GetElementData(CLAY_ID("AskUserHeader")).found ||
+                    !ShellVerticallyContains(expected[3], expected[8]) ||
+                    !ShellVerticallyContains(expected[8], expected[9]) ||
+                    !ShellVerticallyContains(expected[3], expected[6]))
+                { Fail("clarification controls and composer must remain bounded inside the shell"); goto done; }
+                ext.host_on_frame(host, ui, 0);
+                continue;
             }
             Clay_ElementData panel = Clay_GetElementData(CLAY_ID("Composer"));
             if (!ShellVerticallyContains(panel.boundingBox, expected[8]) ||
@@ -8488,13 +8605,56 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
             {
                 if (!body.found || !next.found || !ShellVerticallyContains(panel.boundingBox, next.boundingBox)) { fprintf(stderr, "question navigation escaped the panel\n"); goto done; }
                 if (phase == 0) expanded_height = panel.boundingBox.height;
-                else if (fabsf(panel.boundingBox.height - expanded_height) > .001f) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+                else if (phase == 2 && fabsf(panel.boundingBox.height - expanded_height) > .001f) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
             }
             else if (body.found || next.found || panel.boundingBox.height >= expanded_height) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
             /* Search is genuinely available without claiming the questionnaire's keys. */
             if (frame == 20) PicoChatFind_Open(host);
             if (frame == 40) PicoChatFind_Close(host);
             ext.host_on_frame(host, ui, 0);
+        }
+        if (phase == 2)
+        {
+            /* An Other answer must survive the real clarification/back actions. */
+            Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+            if (body.found && body.scrollPosition)
+                body.scrollPosition->y = -(body.contentDimensions.height - body.scrollContainerDimensions.height);
+            PicoHost_LayoutShell(host, viewport.height, 0);
+            Clay_BoundingBox other = Clay_GetElementData(CLAY_IDI("AskUserOption", 8)).boundingBox;
+            g_find_pointer = (Vector2){other.x + other.width / 2, other.y + other.height / 2};
+            g_find_press = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+            g_find_press = false;
+            PicoChatFind_HandleInput(host); /* Begin a new input frame after closing search. */
+            g_find_character = 'Z';
+            ext.host_on_frame(host, ui, 0);
+            g_find_character = 0;
+            PicoHost_LayoutShell(host, viewport.height, 0);
+            /* Use the actual question action rather than changing UI state. */
+            Clay_BoundingBox clarify = Clay_GetElementData(CLAY_ID("AskUserClarify")).boundingBox;
+            g_find_pointer = (Vector2){clarify.x + clarify.width / 2, clarify.y + clarify.height / 2};
+            g_find_press = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+            g_find_press = false;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+            PicoAgent *helper = PicoClarification_View(host);
+            if (!helper) { Fail("question action must open clarification"); goto done; }
+            for (int i = 0; i < 28; i++)
+                PicoAgent_AddMessage(host, helper, PICO_ROLE_ASSISTANT, "Clarification explanation in a separate transcript.");
+        }
+        else if (phase == 3)
+        {
+            Clay_BoundingBox back = Clay_GetElementData(CLAY_ID("ClarificationBack")).boundingBox;
+            g_find_pointer = (Vector2){back.x + back.width / 2, back.y + back.height / 2};
+            g_find_press = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+            g_find_press = false;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+            if (PicoClarification_View(host) || strcmp(host->composer.text, "unsent draft"))
+            { Fail("Back action must restore questionnaire and parent composer draft"); goto done; }
         }
         if (phase < 2)
         {
@@ -8546,9 +8706,27 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     if (pico_ui_modal_claimed(host) || PicoAgent_CancelRequested(agent) ||
         !pico_tool_pending_ask(host, &ask))
     { Fail("Escape closing a footer menu must not cancel the pending questionnaire"); goto done; }
-    /* Cancelling restores the existing composer rather than clearing its draft. */
-    pico_agent_cancel(host, agent_id);
+    /* Expand again, then Submit the preserved Other answer explicitly. */
+    toggle = Clay_GetElementData(CLAY_ID("AskUserToggle")).boundingBox;
+    g_find_pointer = (Vector2){toggle.x + toggle.width / 2, toggle.y + toggle.height / 2};
+    g_find_press = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    g_find_press = false;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    PicoHost_LayoutShell(host, viewport.height, 0);
+    Clay_BoundingBox next = Clay_GetElementData(CLAY_ID("AskUserNext")).boundingBox;
+    g_find_pointer = (Vector2){next.x + next.width / 2, next.y + next.height / 2};
+    g_find_press = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    g_find_press = false;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
     if (!PumpUntilIdle(host, agent, 3000)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    pthread_mutex_lock(&state.mu);
+    bool preserved_answer = state.answer && strstr(state.answer, "Z");
+    pthread_mutex_unlock(&state.mu);
+    if (!preserved_answer) { Fail("Other answer draft must survive clarification and submit unchanged"); goto done; }
     PicoHost_LayoutShell(host, viewport.height, 0);
     if (!Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||
         Clay_GetElementData(CLAY_ID("AskUserHeader")).found || strcmp(host->composer.text, "unsent draft")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
@@ -8567,6 +8745,290 @@ done:
                                    "question panel shell geometry/input without sidebar");
     return result;
 #endif
+}
+
+/* Provider-facing isolation and lifetime contracts, including delegated asks. */
+static int RunClarificationConversationCase(bool delegated, bool permission, bool cancel_stream, bool cancel_owner, bool block_tool)
+{
+    int result = 1;
+    PicoHost *host = NULL;
+    char dir[] = "/tmp/pico-clarification-XXXXXX";
+    char cfg[] = "/tmp/pico-clarification-config-XXXXXX";
+    MatrixProviderState state;
+    MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
+    state.clarification_fixture = true;
+    state.delegation_fixture = delegated;
+    state.helper_permission = permission;
+    state.block_helper_tool = block_tool;
+    state.ask_request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"first\",\"question\":\"What is optimistic concurrency?\",\"kind\":\"text\"},"
+        "{\"id\":\"second\",\"question\":\"Which tradeoff?\",\"kind\":\"text\"}]}";
+#define CLARIFY_CHECK(condition, message) do { if (!(condition)) { Fail(message); goto done; } } while (0)
+    CLARIFY_CHECK(mkdtemp(dir) && mkdtemp(cfg), "clarification fixture directories");
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    CLARIFY_CHECK(pico_host_init(&host, NULL, true) == PICO_OK, "clarification host initialization");
+    WaitPluginLoad(host);
+    PicoWorkspaceId ws_id;
+    CLARIFY_CHECK(pico_workspace_open(host, dir, &ws_id) == PICO_OK, "clarification workspace");
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, ws_id);
+    CLARIFY_CHECK(ConfigureMatrixWorkspace(host, ws, &state, true) && ConfigureMatrixTwoModels(ws), "clarification model setup");
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE,
+                                      .model = "matrix-a", .effort = "low", .select = true};
+    PicoAgentId root_id;
+    CLARIFY_CHECK(pico_main_agent_create(host, ws_id, &options, &root_id) == PICO_OK, "clarification root");
+    PicoAgent *owner = PicoHost_FindAgent(host, root_id);
+    if (delegated)
+    {
+        char profile_dir[4096], profile_path[4096];
+        snprintf(profile_dir, sizeof(profile_dir), "%s/pico/subagents", cfg);
+        Pico_MkdirP(profile_dir);
+        snprintf(profile_path, sizeof(profile_path), "%s/pico/subagents/clarify.json", cfg);
+        FILE *profile = fopen(profile_path, "wb");
+        CLARIFY_CHECK(profile, "clarification delegation profile file");
+        bool written = fputs("{\"purpose\":\"Ask about the assigned task\",\"tools\":[\"matrix_ask\"],\"max_parallel_tools\":2}", profile) >= 0;
+        int closed = fclose(profile);
+        CLARIFY_CHECK(written && closed == 0, "clarification delegation profile");
+        PicoWorkspace_LoadProfiles(ws);
+    }
+    PicoAgent_PushHistoryUser(owner, "PARENT_EXECUTION_HISTORY_MUST_NOT_LEAK");
+    CLARIFY_CHECK(pico_agent_submit(host, root_id, "ORIGINAL_TYPED_TASK", NULL) == PICO_OK,
+                  "start original task");
+    PicoToolAsk ask = {0};
+    for (int i = 0; i < 3000 && !ask.id; i++)
+    {
+        pico_host_pump(host);
+        pico_tool_pending_ask(host, &ask);
+        if (!ask.id) usleep(1000);
+    }
+    if (delegated && ask.id) owner = PicoHost_FindAgent(host, ask.agent_id);
+    CLARIFY_CHECK(owner && ask.id && ask.agent_id == owner->id &&
+                  (!delegated || ask.agent_id != root_id), "surface correct question owner");
+    int first_helper_slot = delegated ? 2 : 1;
+    uint64_t original_ask = ask.id;
+    int parent_messages = owner->message_count;
+    strcpy(host->composer.text, "parked parent draft");
+    host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+    strcpy(owner->model, "matrix-b");
+    strcpy(owner->effort, "medium");
+    if (!delegated && !permission && !cancel_stream)
+    {
+        PicoAgentId fillers[PICO_MAX_TOTAL_AGENTS];
+        int count = 0;
+        PicoAgentCreateOptions filler = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+        PicoResult created = PICO_OK;
+        while (count < PICO_MAX_TOTAL_AGENTS &&
+               (created = pico_main_agent_create(host, ws_id, &filler, &fillers[count])) == PICO_OK) count++;
+        CLARIFY_CHECK(created == PICO_LIMIT && PicoClarification_Open(host, &ask, "first") == PICO_LIMIT &&
+                      pico_agent_active(host) == root_id && !host->clarification_view_id &&
+                      !strcmp(host->composer.text, "parked parent draft") && PicoAgent_PendingAsk(owner, &ask),
+                      "capacity failure preserves the pending questionnaire and drafts");
+        for (int i = 0; i < count; i++)
+            CLARIFY_CHECK(pico_agent_close(host, fillers[i]) == PICO_OK, "release clarification test capacity");
+    }
+    CLARIFY_CHECK(PicoClarification_Open(host, &ask, "first") == PICO_OK, "open clarification");
+    PicoAgent *helper = PicoClarification_View(host);
+    CLARIFY_CHECK(helper && pico_agent_active(host) == root_id && !PicoUi_ModalOpen(host) &&
+                  !PicoUi_QuestionnaireOpen(host), "clarification preserves selected session and opens composer");
+    PicoAgentId helper_id = helper->id;
+    state.helper_id = helper_id;
+    CLARIFY_CHECK(!pico_agent_select(host, helper_id), "helper cannot become the selected user session");
+    int captured_concurrency = helper->max_parallel_tools_override;
+    ws->settings.max_parallel_tools = captured_concurrency == 1 ? 2 : 1;
+    strcpy(ws->models[0].provider, "replaced-provider");
+    strcpy(ws->models[0].base_url, "replaced-url");
+    CLARIFY_CHECK(helper->persistence == PICO_SESSION_EPHEMERAL && !helper->session_path[0] &&
+                  helper->session_id[0] && strcmp(helper->session_id, owner->session_id), "distinct ephemeral helper identity");
+    PicoWorkspaceInfo info;
+    CLARIFY_CHECK(pico_workspace_info(host, 0, &info) && info.main_agent_count == 1 &&
+                  info.total_agent_count > info.main_agent_count, "helper is counted but not a main session");
+    strcpy(host->composer.text = realloc(host->composer.text, 128), "EXPLAIN_FIRST");
+    host->composer.capacity = 128;
+    host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+    PicoHost_Submit(host);
+    if (permission)
+    {
+        PicoToolAsk permit = {0};
+        for (int i = 0; i < 3000 && !permit.id; i++)
+        {
+            pico_host_pump(host);
+            PicoToolAsk pending;
+            if (pico_tool_pending_ask(host, &pending) && pending.agent_id == helper_id) permit = pending;
+            if (!permit.id) usleep(1000);
+        }
+        CLARIFY_CHECK(permit.id && permit.id != original_ask && PicoUi_ModalOpen(host), "helper permission ask is visible");
+        CLARIFY_CHECK(PicoAgent_PendingAsk(owner, &ask) && ask.id == original_ask,
+                      "permission does not replace original questionnaire");
+        CLARIFY_CHECK(pico_tool_answer(host, permit.id, "{\"ok\":true}"), "answer helper permission");
+    }
+    if (block_tool)
+    {
+        bool entered = false;
+        for (int i = 0; i < 3000 && !entered; i++)
+        {
+            pico_host_pump(host);
+            pthread_mutex_lock(&state.mu); entered = state.tool_entered; pthread_mutex_unlock(&state.mu);
+            if (!entered) usleep(1000);
+        }
+        CLARIFY_CHECK(entered, "blocked helper tool entered");
+        PicoClarification_Stop(host);
+        PicoClarification_Stop(host); /* Force-stop the non-cooperative tool worker. */
+        CLARIFY_CHECK(!PicoAgent_IsBusy(helper) && PicoAgent_PendingAsk(owner, &ask) &&
+                      !PicoAgent_CancelRequested(owner), "force-stop retires helper worker without canceling owner");
+        CLARIFY_CHECK(pico_tool_answer(host, original_ask, "{\"answers\":[]}") &&
+                      PumpUntilIdle(host, owner, 3000), "answer owner while retired helper tool drains");
+        CLARIFY_CHECK(PicoHost_FindAgent(host, helper_id) && !host->clarification_view_id,
+                      "helper remains retained, but hidden, until retired worker exits");
+        pthread_mutex_lock(&state.mu); state.tool_release = true; pthread_cond_broadcast(&state.cv); pthread_mutex_unlock(&state.mu);
+        for (int i = 0; i < 3000 && PicoHost_FindAgent(host, helper_id); i++) { pico_host_pump(host); usleep(1000); }
+        CLARIFY_CHECK(!PicoHost_FindAgent(host, helper_id) && !strcmp(host->composer.text, "parked parent draft"),
+                      "retired tool completion cannot reopen clarification or affect parent drafts");
+        result = 0;
+        goto done;
+    }
+    CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification explanation completes");
+    pthread_mutex_lock(&state.mu);
+    bool isolated = state.inputs_seen[first_helper_slot] && strstr(state.inputs_seen[first_helper_slot], "ORIGINAL_TYPED_TASK") &&
+        strstr(state.inputs_seen[first_helper_slot], "optimistic concurrency") && strstr(state.inputs_seen[first_helper_slot], "EXPLAIN_FIRST") &&
+        !strstr(state.inputs_seen[first_helper_slot], "PARENT_EXECUTION_HISTORY_MUST_NOT_LEAK") &&
+        !strstr(state.inputs_seen[first_helper_slot], "MAIN_REQUEST_CONTEXT_MARKER") &&
+        strstr(state.inputs_seen[0], "MAIN_REQUEST_CONTEXT_MARKER") &&
+        (!delegated || strstr(state.inputs_seen[first_helper_slot], "DELEGATION_ASSIGNMENT")) &&
+        !strstr(state.instructions_seen[first_helper_slot], "MAIN_EXECUTION_HOOK_MARKER") &&
+        strstr(state.instructions_seen[0], "MAIN_EXECUTION_HOOK_MARKER") &&
+        !strcmp(state.tools_seen[first_helper_slot], "sh") && !strcmp(state.models_seen[first_helper_slot], "matrix-a") &&
+        !strcmp(state.efforts_seen[first_helper_slot], "low") && strcmp(state.keys_seen[0], state.keys_seen[first_helper_slot]);
+    pthread_mutex_unlock(&state.mu);
+    CLARIFY_CHECK(isolated && owner->message_count == parent_messages && PicoAgent_PendingAsk(owner, &ask),
+                  "clean helper context, restricted tools, owner snapshot, and parent isolation");
+    strcpy(host->composer.text, "unsubmitted helper draft");
+    host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+    PicoClarification_Back(host);
+    CLARIFY_CHECK(!PicoClarification_View(host) && PicoUi_QuestionnaireOpen(host) &&
+                  !strcmp(host->composer.text, "parked parent draft"), "Back restores parent draft");
+    CLARIFY_CHECK(PicoClarification_Open(host, &ask, "second") == PICO_OK &&
+                  PicoClarification_View(host)->id == helper_id && !strcmp(host->composer.text, "unsubmitted helper draft"),
+                  "questions share helper history and preserve clarification draft");
+    PicoWorkspace_SetAcceptingWork(ws, false);
+    PicoHost_Submit(host);
+    CLARIFY_CHECK(!PicoAgent_IsBusy(helper) && !strcmp(host->composer.text, "unsubmitted helper draft"),
+                  "reload gate preserves blocked clarification draft");
+    PicoWorkspace_SetAcceptingWork(ws, true);
+    strcpy(host->composer.text, "EXPLAIN_SECOND");
+    host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+    if (cancel_stream)
+    {
+        pthread_mutex_lock(&state.mu); state.block_helper = true; state.helper_entered = false; pthread_mutex_unlock(&state.mu);
+    }
+    PicoHost_Submit(host);
+    if (cancel_stream)
+    {
+        bool entered = false;
+        for (int i = 0; i < 3000 && !entered; i++)
+        {
+            pico_host_pump(host);
+            pthread_mutex_lock(&state.mu); entered = state.helper_entered; pthread_mutex_unlock(&state.mu);
+            if (!entered) usleep(1000);
+        }
+        CLARIFY_CHECK(entered, "helper stream started");
+        PicoClarification_Back(host);
+        CLARIFY_CHECK(PicoAgent_IsBusy(helper), "Back leaves explanation running");
+        CLARIFY_CHECK(PicoClarification_Open(host, &ask, "second") == PICO_OK, "return to running explanation");
+        PicoClarification_Stop(host);
+        CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000) && PicoAgent_PendingAsk(owner, &ask) &&
+                      !PicoAgent_CancelRequested(owner), "Stop cancels helper only");
+    }
+    else CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification follow-up completes");
+    int followup_slot = first_helper_slot + (permission ? 2 : 1);
+    pthread_mutex_lock(&state.mu);
+    bool followup = state.inputs_seen[followup_slot] && strstr(state.inputs_seen[followup_slot], "EXPLAIN_FIRST") &&
+                    strstr(state.inputs_seen[followup_slot], "EXPLAIN_SECOND") &&
+                    strstr(state.inputs_seen[followup_slot], "second") &&
+                    !strcmp(state.keys_seen[first_helper_slot], state.keys_seen[followup_slot]);
+    pthread_mutex_unlock(&state.mu);
+    CLARIFY_CHECK(followup && !strcmp(state.models_seen[first_helper_slot], state.models_seen[followup_slot]) &&
+                  !strcmp(state.urls_seen[first_helper_slot], state.urls_seen[followup_slot]) &&
+                  helper->max_parallel_tools_override == captured_concurrency,
+                  "follow-ups retain helper history, identity, and configuration while changing question focus");
+    if (!delegated && !permission && !cancel_stream)
+    {
+        PicoAgent_Compact(host, helper);
+        CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification compaction completes");
+        strcpy(host->composer.text, "EXPLAIN_AFTER_COMPACTION");
+        host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+        PicoHost_Submit(host);
+        CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification follow-up after compaction");
+        pthread_mutex_lock(&state.mu);
+        int compacted_followup = state.recorded - 1;
+        bool restored_seed = state.inputs_seen[compacted_followup] &&
+            strstr(state.inputs_seen[compacted_followup], "ORIGINAL_TYPED_TASK") &&
+            strstr(state.inputs_seen[compacted_followup], "optimistic concurrency") &&
+            strstr(state.inputs_seen[compacted_followup], "EXPLAIN_AFTER_COMPACTION") &&
+            !strstr(state.inputs_seen[compacted_followup], "MAIN_REQUEST_CONTEXT_MARKER") &&
+            !strstr(state.instructions_seen[compacted_followup], "MAIN_EXECUTION_HOOK_MARKER");
+        pthread_mutex_unlock(&state.mu);
+        CLARIFY_CHECK(restored_seed, "compaction restores questionnaire/task seed without execution hooks");
+    }
+    if (cancel_stream)
+    {
+        /* Submit/cancel the owner while a second helper turn is still running. */
+        pthread_mutex_lock(&state.mu); state.helper_entered = false; pthread_mutex_unlock(&state.mu);
+        strcpy(host->composer.text, "EXPLAIN_BEFORE_ASK_END");
+        host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
+        PicoHost_Submit(host);
+        bool entered = false;
+        for (int i = 0; i < 3000 && !entered; i++)
+        {
+            pico_host_pump(host);
+            pthread_mutex_lock(&state.mu); entered = state.helper_entered; pthread_mutex_unlock(&state.mu);
+            if (!entered) usleep(1000);
+        }
+        CLARIFY_CHECK(entered, "ask end while helper is running");
+    }
+    if (cancel_owner)
+    {
+        pico_agent_force_cancel(host, owner->id);
+        CLARIFY_CHECK(PumpUntilIdle(host, owner, 3000), "force-cancelled owner drains");
+        for (int i = 0; i < 3000 && PicoHost_FindAgent(host, helper_id); i++) { pico_host_pump(host); usleep(1000); }
+        CLARIFY_CHECK(!PicoHost_FindAgent(host, helper_id) && !PicoAgent_PendingAsk(owner, &ask) &&
+                      !host->clarification_view_id && !strcmp(host->composer.text, "parked parent draft"),
+                      "owner force cancellation tears down helper without losing parent draft");
+        result = 0;
+        goto done;
+    }
+    CLARIFY_CHECK(pico_tool_answer(host, original_ask, "{\"answers\":[{\"id\":\"first\",\"answer\":\"EXPLICIT_ANSWER\"}]}"),
+                  "submit explicit questionnaire answer");
+    CLARIFY_CHECK(PumpUntilIdle(host, PicoHost_FindAgent(host, root_id), 3000), "parent continues after explicit answer");
+    for (int i = 0; i < 3000 && PicoHost_FindAgent(host, helper_id); i++) { pico_host_pump(host); usleep(1000); }
+    CLARIFY_CHECK(!PicoHost_FindAgent(host, helper_id) && !host->clarification_view_id &&
+                  !strcmp(host->composer.text, "parked parent draft"), "ask completion cleans up temporary helper");
+    pthread_mutex_lock(&state.mu);
+    int last = state.recorded - 1;
+    bool parent_clean = last >= 0 && state.inputs_seen[last] &&
+                        !strstr(state.inputs_seen[last], "EXPLAIN_FIRST") &&
+                        !strstr(state.inputs_seen[last], "EXPLAIN_SECOND") &&
+                        !strstr(state.inputs_seen[last], "EXPLAIN_BEFORE_ASK_END") &&
+                        state.answer && strstr(state.answer, "EXPLICIT_ANSWER");
+    pthread_mutex_unlock(&state.mu);
+    CLARIFY_CHECK(parent_clean, "parent receives only explicit answers, never clarification transcript");
+    result = 0;
+done:
+    pthread_mutex_lock(&state.mu); state.tool_release = true; pthread_cond_broadcast(&state.cv); pthread_mutex_unlock(&state.mu);
+    if (host) pico_host_free(host);
+    MatrixStateDestroy(&state);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg); rmdir(dir);
+#undef CLARIFY_CHECK
+    return result;
+}
+
+static int TestQuestionnaireClarification(void)
+{
+    return RunClarificationConversationCase(false, false, true, false, false) ||
+           RunClarificationConversationCase(true, false, false, false, false) ||
+           RunClarificationConversationCase(false, true, false, false, false) ||
+           RunClarificationConversationCase(false, false, true, true, false) ||
+           RunClarificationConversationCase(false, false, false, false, false) ||
+           RunClarificationConversationCase(false, true, false, false, true);
 }
 
 static int TestMultiWorkspaceAskOrderingAndRouting(void)
@@ -13618,6 +14080,7 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (TestQuestionnaireClarification() != 0) return 1;
     if (TestMultiWorkspaceAskOrderingAndRouting() != 0)
     {
         return 1;

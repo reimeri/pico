@@ -2414,6 +2414,10 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     {
         agent->persistence = PICO_SESSION_DURABLE;
     }
+    free(agent->turn_user_request);
+    agent->turn_user_request = NULL;
+    free(agent->originating_user_request);
+    agent->originating_user_request = NULL;
     agent->session_id[0] = '\0';
     agent->session_path[0] = '\0';
     agent->accepted_submit = false;

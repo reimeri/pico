@@ -42,6 +42,25 @@ A public `pico_main_agent_create` with `PICO_SESSION_RESUME` remains **synchrono
 
 `pico_agent_message_count` and `pico_agent_message` provide bounded, main-thread-only borrowed transcript inspection. Tool trace rows include their provider `tool_call_id`, formatted `tool_args` for display, and original `tool_args_json`; builtin subagent rows also expose the linked runtime `child_id` and durable `child_session_id` when available. Non-tool think rows may include `think_parts` (OpenAI-style summary steps; the last part is the widget title) and `think_ms` (frozen burst duration). Durable sessions restore both from `thinking_parts` and `thinking_ms`. `PicoMessage.trace_group_expanded` and `PicoTraceLine.expanded` are host-owned, ephemeral transcript presentation state: extensions may inspect but must not mutate them, and session replay does not restore them. `PicoTraceLine.tool_done_t0` is the same class of state: it holds the monotonic completion stamp used to keep a finished tool row visible briefly before it joins the collapsed trace group, and session replay leaves it unset so restored tools group immediately. The message and all nested string pointers are invalidated by pumping, transcript mutation, close, or workspace close.
 
+## Builtin clarification agents
+
+The questionnaire UI can create an internal, ephemeral main-kind helper. It is
+counted by agent enumeration and workspace/host capacity limits, but excluded
+from user-facing session pickers and `main_agent_count`. It has its own agent,
+in-memory session, and cache identity, no durable path, and no delegation result
+publication. `pico_agent_active` remains the selected original session while the
+helper transcript is displayed. `pico_agent_select` refuses these auxiliary IDs;
+the builtin controls their presentation privately. There is no public helper
+creation API.
+
+Helpers have dedicated instructions and a `sh`-only catalog. Ordinary LLM,
+request-context, before/after-submit, and on-compaction instruction hooks do not
+seed their conversations. Provider/tool callbacks, tool interceptors/apply, and
+ordinary turn/ask lifecycle notifications still target the helper's own agent ID.
+Closing/canceling the owner or ending its ask cancels the helper; final removal
+waits for live and retired workers to drain. Other independent sessions survive.
+These conversations are not persisted or replayed.
+
 ## Named subagent profiles
 
 `pico_subagent_profile_count` and `pico_subagent_profile_info` return copied snapshots of valid profiles discovered directly under `$XDG_CONFIG_HOME/pico/subagents/` (or `~/.config/pico/subagents/`). Pico creates the directory, but does not install profiles. Only direct, regular, non-hidden `*.json` files are read. They use JSONC comment rules, and the filename stem is the profile name.
@@ -82,7 +101,7 @@ The parent remains in tool wait while the child runs. Independent sibling `subag
 
 ## Asks
 
-`pico_tool_pending_ask` returns the oldest live ask owned by the open session, where hidden delegated children surface through their ancestor: an ask is visible while its owner or a transitive parent of its owner is the selected agent. Each simultaneous tool invocation may own a pending ask; the oldest is surfaced first. Its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits, regardless of which session is open. The borrowed request remains valid only until the next pump.
+`pico_tool_pending_ask` returns the oldest live ask owned by the open session, where hidden delegated children surface through their ancestor: an ask is visible while its owner or a transitive parent of its owner is the selected agent. Each simultaneous tool invocation may own a pending ask; the oldest is surfaced first. Its `agent_id`, `profile`, and `purpose` identify the owner. `pico_tool_answer` routes by globally unique ask ID, then validates workspace, agent ID, and runtime generation, so a child ask remains answerable while its parent waits, regardless of which session is open. While the questionnaire clarification view is visible, a pending ask from its helper (for example, a shell permission confirmation) takes priority over the original questionnaire. Returning to answers restores normal selected-session ordering. The borrowed request remains valid only until the next pump.
 
 `PICO_HOOK_ON_ASK` fires on the main thread when that agent's pending-ask snapshot is published, even if another session is selected. `PICO_HOOK_ON_ASK_END` fires when that ask is no longer pending after answer, cancel, or force-cancel/stop. Multiple asks from the same agent produce separate hook notifications; do not treat `ON_ASK_END` as meaning that agent has no other pending asks. Neither hook carries `request_json`; the event is still `{hook, agent_id}`. `ON_ASK_END` is not fired on `PICO_HOOK_ON_AGENT_DESTROY`.
 

@@ -2,6 +2,7 @@
 
 /* Host builtin: desktop notifications when an agent needs attention. */
 
+#include "clarification.h"
 #include "pico/plugin.h"
 #include "session.h"
 #include "host_internal.h"
@@ -104,6 +105,8 @@ static void SendNotifySend(const char *title, const char *body)
 
 static bool AskVisibleForSelection(const PicoHost *host, PicoAgentId owner_id)
 {
+    const PicoAgent *helper = PicoClarification_View(host);
+    if (helper && helper->id == owner_id) return true;
     PicoAgentId id = owner_id;
     while (id)
     {
@@ -124,6 +127,7 @@ static bool AskVisibleForSelection(const PicoHost *host, PicoAgentId owner_id)
 static const PicoAgent *NotifyTitleAgent(const PicoHost *host, PicoAgentId id)
 {
     const PicoAgent *agent = PicoHost_FindAgentConst(host, id);
+    if (agent && agent->clarification) agent = PicoHost_FindAgentConst(host, agent->clarification->owner_id);
     while (agent && agent->kind == PICO_AGENT_SUBAGENT && agent->parent_id)
     {
         const PicoAgent *parent = PicoHost_FindAgentConst(host, agent->parent_id);
@@ -195,8 +199,7 @@ static void OnAsk(PicoWorkspace *workspace, const PicoHookEvent *event, void *st
 
 static bool IsMainAgent(PicoHost *host, PicoAgentId id)
 {
-    PicoAgentInfo info;
-    return host && id && pico_agent_find(host, id, &info) && info.kind == PICO_AGENT_MAIN;
+    return host && id && PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, id));
 }
 
 static void OnTurnEnd(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include "clarification.h"
 #include "pico/plugin.h"
 #include "canonical.h"
 #include "render_scale.h"
@@ -1126,6 +1127,7 @@ static void ClipboardPasteCompleted(PicoHost *app, void *arg)
     s_active_composer_state = s;
     s->clipboard_paste = NULL;
     if (atomic_load(&paste->cancelled)) return;
+    if (paste->image_ext && PicoClarification_View(app)) return;
     if (paste->image_ext)
     {
         if (!PersistClipboardImage(app, paste->bytes, paste->length, paste->image_ext))
@@ -1675,7 +1677,7 @@ void PicoComposer_HandleInput(PicoHost *app)
     bool repeat_back = IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE);
     bool repeat_del = IsKeyPressed(KEY_DELETE) || IsKeyPressedRepeat(KEY_DELETE);
 
-    if (PicoComplete_HandleKeys(app))
+    if (!PicoClarification_View(app) && PicoComplete_HandleKeys(app))
     {
         return;
     }
@@ -1778,7 +1780,12 @@ void PicoComposer_HandleInput(PicoHost *app)
 
     if (ctrl && Pico_ShortcutPressed('v'))
     {
-        if (!PasteClipboardImage(app))
+        if (PicoClarification_View(app))
+        {
+            const char *clip = GetClipboardText();
+            if (clip) ComposerInsert(c, clip, (int)strlen(clip));
+        }
+        else if (!PasteClipboardImage(app))
         {
 #if defined(__linux__)
             PicoComposer_BeginClipboardPaste(app);
@@ -1821,7 +1828,7 @@ void PicoComposer_HandleInput(PicoHost *app)
             pico_host_request_redraw(app);
         }
     }
-    PicoComplete_Refresh(app);
+    if (!PicoClarification_View(app)) PicoComplete_Refresh(app);
 }
 
 static void ComposerUnitRange(const PicoComposer *c, int pos, int granularity, int *from, int *to)
@@ -1992,7 +1999,7 @@ static bool ComposerVision(PicoHost *app)
 static void ComposerAttachRender(PicoHost *app, void *state)
 {
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || PicoUi_QuestionnaireOpen(app) || g_attach_n <= 0)
+    if (!s_active_composer_state || PicoClarification_View(app) || PicoUi_QuestionnaireOpen(app) || g_attach_n <= 0)
     {
         return;
     }
@@ -2107,7 +2114,8 @@ void PicoComposer_Render(PicoHost *app, void *state)
         return;
     }
     PicoComposer *c = &app->composer;
-    const char *placeholder = "Message Pico…  (Enter to send, Shift+Enter for newline)";
+    const char *placeholder = PicoClarification_View(app) ? "Ask about the question…  (Enter to send)" :
+                              "Message Pico…  (Enter to send, Shift+Enter for newline)";
     bool empty = c->length == 0;
     float wrap_width = ComposerWrapWidth(app);
     CompLine lines[COMPOSER_MAX_LINES];
@@ -2201,7 +2209,7 @@ void PicoComposer_Render(PicoHost *app, void *state)
                                      CLAY_STRING("CompScrollBarHandle"));
             }
         }
-        PicoComplete_Render(app);
+        if (!PicoClarification_View(app)) PicoComplete_Render(app);
         }
     }
 }
@@ -2387,11 +2395,11 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     }
     if (!PicoUi_ModalOpen(app))
     {
-        if (ComposerHandleAttachPointer())
+        if (!PicoClarification_View(app) && ComposerHandleAttachPointer())
         {
             /* strip consumed the click */
         }
-        else if (!PicoComplete_HandlePointer(app))
+        else if (PicoClarification_View(app) || !PicoComplete_HandlePointer(app))
         {
             PicoComposer_HandlePointer(app);
         }
@@ -2414,7 +2422,7 @@ static void ConsumeDroppedFiles(PicoHost *app)
         return;
     }
     FilePathList files = LoadDroppedFiles();
-    bool attach = app && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
+    bool attach = app && !PicoClarification_View(app) && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
     if (attach && files.paths)
     {
         for (unsigned int i = 0; i < files.count; i++)
@@ -2445,6 +2453,21 @@ static void ComposerFrame(PicoHost *app, void *state, float dt)
     {
         UpdateComposerScrollbarDrag(app);
     }
+}
+
+void PicoComposer_ResetPresentation(PicoHost *app)
+{
+    ComposerState *s = app ? PicoPlugins_HostState(app, "composer") : NULL;
+    if (!s) return;
+    s_active_composer_state = s;
+#if defined(__linux__)
+    PicoComposer_CancelClipboardPaste();
+#endif
+    s->wrap_cache.valid = false;
+    s->seen_cursor = s->seen_length = -1;
+    s->goal_x = -1;
+    app->composer.mouse_selecting = false;
+    PicoClickSeq_Reset(&app->composer.click_seq);
 }
 
 static int ComposerInit(PicoHost *app, void **state_out)

@@ -36,6 +36,15 @@ bool PicoUi_ModalOpen(const PicoHost *app) { (void)app; return false; }
 bool PicoChatFind_PointerOver(const PicoHost *app) { (void)app; return false; }
 void PicoChatSel_Clear(PicoHost *app) { (void)app; }
 
+/* Clarification runtime integration is exercised by host/workspace tests. */
+PicoAgent *PicoClarification_View(const PicoHost *host) { (void)host; return NULL; }
+PicoResult PicoClarification_Open(PicoHost *host, const PicoToolAsk *ask, const char *id)
+{ (void)host; (void)ask; (void)id; return PICO_INVALID; }
+void PicoClarification_Back(PicoHost *host) { (void)host; }
+void PicoClarification_Stop(PicoHost *host) { (void)host; }
+bool PicoAgent_IsBusy(const PicoAgent *agent) { (void)agent; return false; }
+void pico_status_warn(PicoHost *host, const char *message) { (void)host; (void)message; }
+
 static bool mouse_pressed;
 static Vector2 mouse_position;
 static bool find_focused;

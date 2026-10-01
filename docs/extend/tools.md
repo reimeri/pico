@@ -144,6 +144,37 @@ The panel preserves answers while moving Next/Back and returns them in question 
 
 Controls (while the expanded panel is focused): Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button or Shift+Tab goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Arrow keys never change questions. Text fields support the same editing shortcuts as the composer: Ctrl+Left/Right word moves, Home/End line start/end, Shift+arrows/Home/End selection, Ctrl+A select all, Ctrl+C/X copy/cut, Ctrl+V paste, Ctrl+W or Ctrl+Backspace delete word, plus drag, double-click word, and triple-click paragraph selection. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
 
+### Clarifying a pending questionnaire
+
+Each question offers **Ask about this**, which switches the chat/composer to a
+separate clarification conversation. **Back to answers** restores all questionnaire
+selections and text drafts. One conversation serves the whole questionnaire;
+opening another question changes the focus without erasing earlier exchanges.
+Back leaves an explanation running; Escape in the clarification view stops only
+the helper, not the original task.
+
+The helper receives the complete questionnaire, focused question, and the original
+text submitted for the current turn. For delegated asks it also receives the
+current assignment and the originating user request where available. Missing
+origin context is marked unavailable. It does not receive parent execution/tool
+history, and its exchanges are never sent back with answers. Only explicit
+questionnaire submission completes the original ask.
+
+The helper uses a dedicated explanation prompt and only `sh`, with instructions
+to inspect without modifying the workspace. **This is advisory, not a sandbox:**
+`sh` can still execute commands with side effects. Tool permission hooks remain
+active; a helper confirmation takes UI priority while clarification is visible,
+without completing the original questionnaire. Input is text-only; slash text
+is a clarification message, not command execution, and attachments/completion
+are disabled in this view.
+
+Clarification is temporary, not a saved session or restart-recoverable conversation.
+It retains its own history and cache identity until the questionnaire ends, then
+cancels and drains. It snapshots the owner's active provider/model, inference,
+compaction, context-limit, and tool-concurrency settings when first opened.
+Workspace/host agent caps still apply. Queued reload blocks new helper turns,
+but Back, answering, and cancellation remain usable.
+
 ### Builtin questionnaire presentation
 
 The builtin `ask_user` displays one question at a time in a bounded, content-sized

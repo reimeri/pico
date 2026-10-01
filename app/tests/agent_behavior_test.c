@@ -11,6 +11,11 @@
 #include "usage.h"
 #include "host_internal.h"
 
+#include "clarification.h"
+void PicoComplete_Close(void) {}
+void PicoComposer_ResetPresentation(PicoHost *host) { (void)host; }
+void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>

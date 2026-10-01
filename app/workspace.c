@@ -2,6 +2,7 @@
 
 #include "workspace_internal.h"
 #include "agent.h"
+#include "clarification.h"
 #include "json.h"
 #include "session.h"
 #include "settings.h"
@@ -84,6 +85,7 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     {
         return;
     }
+    if (host->selected_agent_id != id) PicoClarification_Back(host);
     if (host->selected_agent_id != id) PicoChatFind_Reset(host);
     if (host->selected_agent_id != id) pico_host_request_redraw(host);
     host->selected_agent_id = id;
@@ -611,6 +613,40 @@ PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCr
     return PICO_OK;
 }
 
+/* Auxiliary agents are configured before publication; no selected-session or reset hooks. */
+PicoResult PicoWorkspace_CreateClarificationAgent(PicoWorkspace *workspace, const PicoAgent *owner,
+                                                  PicoClarification *clarification, PicoAgent **out)
+{
+    *out = NULL;
+    if (!PicoWorkspace_AcceptsNewWork(workspace)) return PICO_BUSY;
+    PicoAgent_ReapRetired(workspace);
+    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(workspace->host) >= PICO_MAX_TOTAL_AGENTS)
+        return PICO_LIMIT;
+    PicoAgent *agent = PicoAgent_Create(workspace->host, workspace);
+    if (!agent) return PICO_NO_MEMORY;
+    const char *tools[] = {"sh"};
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .tools = tools, .tool_count = 1};
+    PicoResult result = ConfigureAgent(workspace->host, agent, &options);
+    if (result != PICO_OK) { PicoAgent_Destroy(agent); return result; }
+    agent->clarification = clarification;
+    agent->persistence = PICO_SESSION_EPHEMERAL;
+    Pico_RandomHex(agent->session_id, sizeof(agent->session_id));
+    snprintf(agent->model, sizeof(agent->model), "%s", clarification->model.id);
+    snprintf(agent->model_name, sizeof(agent->model_name), "%s", clarification->model.name);
+    snprintf(agent->effort, sizeof(agent->effort), "%s",
+             owner->has_running_model ? owner->running_effort : PicoSettings_ActiveEffort(owner));
+    agent->fast = owner->has_running_model ? owner->running_fast : owner->fast;
+    agent->context_limit = clarification->model.context_limit > 0 ? clarification->model.context_limit :
+                           workspace->settings.context_limit_fallback;
+    agent->compact_enabled = owner->compact_enabled;
+    agent->compact_ratio = owner->compact_ratio;
+    agent->max_parallel_tools_override = owner->max_parallel_tools_override ? owner->max_parallel_tools_override :
+                                         workspace->settings.max_parallel_tools;
+    workspace->agents[workspace->count++] = agent;
+    *out = agent;
+    return PICO_OK;
+}
+
 int pico_agent_count(const PicoHost *app)
 {
     return PicoHost_TotalAgentCount(app);
@@ -661,7 +697,7 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
     if (app && app->session_replay_agent && app->session_replay_agent->id == id)
         return false; /* A private replay callback cannot select its candidate. */
     PicoAgent *agent = app ? PicoHost_FindAgent(app, id) : NULL;
-    if (!app || !agent)
+    if (!app || !agent || agent->clarification)
     {
         return false;
     }
@@ -694,6 +730,8 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
     {
         return PICO_INVALID;
     }
+    PicoClarification_CancelOwner(workspace, id);
+    if (app->clarification_view_id == id) PicoClarification_Back(app);
     PicoAgent_ReapRetired(workspace);
     int index = FindIndex(workspace, id);
     if (index < 0)
@@ -767,21 +805,16 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
     if (app && app->selected_agent_id == id)
     {
         PicoAgentId next = 0;
-        if (workspace->count > 0)
+        for (int offset = 0; offset < workspace->count && !next; offset++)
         {
-            next = workspace->agents[index < workspace->count ? index : workspace->count - 1]->id;
+            int candidate = (index + offset) % workspace->count;
+            if (PicoAgent_IsUserMain(workspace->agents[candidate])) next = workspace->agents[candidate]->id;
         }
-        else
+        for (int w = 0; w < app->workspace_count && !next; w++)
         {
-            for (int w = 0; w < app->workspace_count; w++)
-            {
-                PicoWorkspace *ws = app->workspaces[w];
-                if (ws && ws->count > 0 && ws->agents[0])
-                {
-                    next = ws->agents[0]->id;
-                    break;
-                }
-            }
+            PicoWorkspace *ws = app->workspaces[w];
+            for (int i = 0; ws && i < ws->count; i++)
+                if (PicoAgent_IsUserMain(ws->agents[i])) { next = ws->agents[i]->id; break; }
         }
         SyncSelectedAgent(app, next);
         PicoChatSel_Clear(app);
@@ -853,6 +886,7 @@ void PicoWorkspace_Pump(PicoWorkspace *workspace)
     }
     LinkDelegationToolRows(workspace);
     ProcessDelegationTerminals(workspace);
+    PicoClarification_Pump(workspace);
     for (int i = 0; i < workspace->count; i++)
     {
         PicoSettings_ReconcileIdleAgent(workspace->agents[i]);
@@ -1134,6 +1168,10 @@ bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
     {
         return false;
     }
+    /* Permission/confirmation asks from the visible helper take UI priority,
+     * while its owning questionnaire remains pending in the original agent. */
+    PicoAgent *helper = PicoClarification_View(app);
+    if (helper && PicoAgent_PendingAsk(helper, out)) return true;
     bool found = false;
     PicoToolAsk oldest = {0};
     for (int w = 0; w < app->workspace_count; w++)
@@ -2019,6 +2057,11 @@ static bool StartDelegation(PicoWorkspace *workspace, PicoDelegationJob *job)
     job->child_message_start = child->message_count;
     job->state = PICO_DELEGATION_RUNNING;
     pthread_mutex_unlock(&job->mu);
+    free(child->turn_user_request);
+    child->turn_user_request = strdup(job->task);
+    free(child->originating_user_request);
+    const char *origin = parent->kind == PICO_AGENT_SUBAGENT ? parent->originating_user_request : parent->turn_user_request;
+    child->originating_user_request = origin ? strdup(origin) : NULL;
     PicoAgent_AddMessage(app, child, PICO_ROLE_USER, job->task);
     PicoSession_LogUser(app, child, job->task, job->task, NULL);
     PicoAgent_StartTurn(app, child, job->task);

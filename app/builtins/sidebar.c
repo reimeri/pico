@@ -1,5 +1,6 @@
 #define _DEFAULT_SOURCE
 
+#include "clarification.h"
 #include "../agent_internal.h"
 #define _POSIX_C_SOURCE 200809L
 #include "host_internal.h"
@@ -664,7 +665,7 @@ static PicoAgentId LiveMainAgent(PicoHost *host, const char *ws_path, const char
         PicoAgentInfo info;
         PicoAgent *agent;
         const char *agent_ws;
-        if (!pico_agent_info(host, i, &info) || info.kind != PICO_AGENT_MAIN)
+        if (!pico_agent_info(host, i, &info) || !PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, info.id)))
         {
             continue;
         }
@@ -1541,7 +1542,7 @@ static void RenderLiveExtras(PicoHost *host, SidebarState *s, const PicoCatalogW
         PicoAgentInfo info;
         PicoAgent *agent;
         const char *agent_ws;
-        if (!pico_agent_info(host, i, &info) || info.kind != PICO_AGENT_MAIN)
+        if (!pico_agent_info(host, i, &info) || !PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, info.id)))
         {
             continue;
         }
@@ -2033,7 +2034,7 @@ static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, i
         PicoAgentInfo info;
         PicoAgent *agent;
         const char *agent_ws;
-        if (!pico_agent_info(host, i, &info) || info.kind != PICO_AGENT_MAIN)
+        if (!pico_agent_info(host, i, &info) || !PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, info.id)))
         {
             continue;
         }

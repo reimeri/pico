@@ -8449,8 +8449,9 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     PicoExt ext = pico_ext_ask_user();
     void *ui = PicoPlugins_HostState(host, "ask-user");
     const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
-                           "ComposerAlign", "Composer", "Footer", "Sidebar"};
-    Clay_BoundingBox expected[9];
+                           "ComposerAlign", "Composer", "Footer", "AskUserHeader", "AskUserToggle",
+                           "AskUserHandle", "Sidebar"};
+    Clay_BoundingBox expected[12];
     float expanded_height = 0;
     for (int phase = 0; phase < 3; phase++)
     {
@@ -8465,7 +8466,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
                                          &chat.scrollPosition->y)) PicoHost_LayoutShell(host, viewport.height, 0);
             if (fabsf(chat.scrollPosition->y + chat.contentDimensions.height - chat.scrollContainerDimensions.height) > .01f)
                 { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
-            for (int pane = 0; pane < (with_sidebar ? 9 : 8); pane++)
+            for (int pane = 0; pane < (with_sidebar ? 12 : 11); pane++)
             {
                 Clay_ElementData box = Clay_GetElementData(Clay_GetElementId((Clay_String){
                     .chars = panes[pane], .length = (int32_t)strlen(panes[pane])}));
@@ -8474,6 +8475,10 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
                 else if (!ShellBoxStable(expected[pane], box.boundingBox)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
             }
             Clay_ElementData panel = Clay_GetElementData(CLAY_ID("Composer"));
+            if (!ShellVerticallyContains(panel.boundingBox, expected[8]) ||
+                !ShellVerticallyContains(expected[8], expected[9]) ||
+                fabsf(expected[9].x + expected[9].width / 2 - panel.boundingBox.x - panel.boundingBox.width / 2) > .01f)
+            { Fail("question handle must stay centered inside the bounded header"); goto done; }
             Clay_ElementData body = Clay_GetElementData(CLAY_ID("AskUserBody"));
             Clay_ElementData next = Clay_GetElementData(CLAY_ID("AskUserNext"));
             if (Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||

@@ -368,7 +368,8 @@ static int TestQuestionPanel(void)
     PanelLayout(app, ui);
     PanelClick(app, ui, CLAY_ID("AskUserToggle"));
     commands = PanelLayout(app, ui);
-    failed |= !PanelHasText(commands, "Resume") || PanelHasText(commands, "Any notes?") ||
+    failed |= !PanelHasText(commands, "Answer needed") || !PanelHasText(commands, "2 / 2") ||
+              PanelHasText(commands, "Any notes?") ||
               Clay_GetElementData(CLAY_ID("Composer")).boundingBox.height >= expanded || submitted_id != 0;
     pressed_key = KEY_ENTER;
     AskUserOnFrame(app, ui, 0);
@@ -381,7 +382,7 @@ static int TestQuestionPanel(void)
     visible_ask = 0;
     AskUserOnFrame(app, ui, 0);
     commands = PanelLayout(app, ui);
-    failed |= !PanelHasText(commands, "Resume");
+    failed |= Clay_GetElementData(CLAY_ID("AskUserBody")).found;
     PanelClick(app, ui, CLAY_ID("AskUserToggle"));
     commands = PanelLayout(app, ui);
     failed |= !PanelHasText(commands, "Any notes?") || !PanelHasText(commands, "A");
@@ -421,6 +422,90 @@ static int TestQuestionPanel(void)
     Clay_SetCurrentContext(NULL);
     free(memory);
     if (failed) fprintf(stderr, "question panel: navigation, collapse, draft retention, focus, or submission failed\n");
+    return failed;
+}
+
+static char *BuildQuestionList(int count);
+
+/* The handle stays at the container's center, even when unequal labels fit
+ * or the title disappears. Its invisible hit area must remain usable folded. */
+static int TestQuestionPanelHandle(void)
+{
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *app = calloc(1, sizeof(*app));
+    AskUiState *ui = calloc(1, sizeof(*ui));
+    AskHostState *host_ui = calloc(1, sizeof(*host_ui));
+    if (!memory || !app || !ui || !host_ui) abort();
+    test_glyph_width = 7.0f;
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                    (Clay_Dimensions){800, 800}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+    s_active_ask_state = ui;
+    host_ui->requests = host_ui->active = ui;
+    char error[192];
+    char *args = BuildQuestionList(24);
+    char *request = PicoAskUser_BuildRequest(args, error, sizeof(error));
+    free(args);
+    if (!request || LoadUiRequest(request, error, sizeof(error)) != 1) abort();
+    free(request);
+    ui->current = 23; /* Last question of a full questionnaire: two-digit progress. */
+    int failed = 0;
+    /* Wide, title-hidden, compact-progress, and sidebar-constrained columns. */
+    const float widths[] = {800, 220, 170, 124};
+    const char *progress[] = {"24 / 24", "24 / 24", "24/24", NULL};
+    for (int collapsed = 0; collapsed < 2; collapsed++)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            Clay_SetLayoutDimensions((Clay_Dimensions){widths[i], 800});
+            Clay_RenderCommandArray commands = PanelLayout(app, host_ui);
+            Clay_ElementData panel = Clay_GetElementData(CLAY_ID("Composer"));
+            Clay_ElementData header = Clay_GetElementData(CLAY_ID("AskUserHeader"));
+            Clay_ElementData toggle = Clay_GetElementData(CLAY_ID("AskUserToggle"));
+            Clay_ElementData handle = Clay_GetElementData(CLAY_ID("AskUserHandle"));
+            Clay_BoundingBox h = handle.boundingBox, t = toggle.boundingBox, r = header.boundingBox;
+            failed |= !panel.found || !header.found || !toggle.found || !handle.found ||
+                      fabsf(h.x + h.width / 2 - panel.boundingBox.x - panel.boundingBox.width / 2) > .01f ||
+                      fabsf(h.y + h.height / 2 - r.y - r.height / 2) > .01f ||
+                      t.x < r.x || t.x + t.width > r.x + r.width ||
+                      t.y < r.y || t.y + t.height > r.y + r.height ||
+                      h.width >= t.width || h.height >= t.height;
+            failed |= PanelHasText(commands, "Answer needed") != (i == 0) ||
+                      Clay_GetElementData(CLAY_ID("AskUserBody")).found == (bool)collapsed;
+            if (progress[i]) failed |= !PanelHasText(commands, progress[i]);
+            else failed |= PanelHasText(commands, "24 / 24") || PanelHasText(commands, "24/24");
+            /* Visible header labels cannot crowd the centered handle. */
+            for (int c = 0; c < commands.length; c++)
+            {
+                Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, c);
+                if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+                Clay_BoundingBox b = cmd->boundingBox;
+                if (b.y < r.y || b.y + b.height > r.y + r.height) continue;
+                failed |= b.x < r.x || b.x + b.width > r.x + r.width ||
+                          (b.x < t.x + t.width && b.x + b.width > t.x);
+            }
+        }
+        if (!collapsed)
+        {
+            /* Click above the visible handle but within its larger target. */
+            Clay_BoundingBox t = Clay_GetElementData(CLAY_ID("AskUserToggle")).boundingBox;
+            Clay_BoundingBox h = Clay_GetElementData(CLAY_ID("AskUserHandle")).boundingBox;
+            mouse_position = (Vector2){t.x + t.width / 2, (t.y + h.y) / 2};
+            Clay_SetPointerState((Clay_Vector2){mouse_position.x, mouse_position.y}, false);
+            app->hovered_clickable = app->hovered_text = false;
+            AskUserAfterLayout(app, NULL, host_ui);
+            failed |= !app->hovered_clickable || app->hovered_text;
+            mouse_pressed = true;
+            AskUserAfterLayout(app, NULL, host_ui);
+            mouse_pressed = false;
+        }
+    }
+    AskUserHostShutdown(app, host_ui);
+    test_glyph_width = 1.0f;
+    free(app);
+    Clay_SetCurrentContext(NULL);
+    free(memory);
+    if (failed) fprintf(stderr, "question handle: centering, responsive labels, or larger hit area failed\n");
     return failed;
 }
 
@@ -583,6 +668,7 @@ int main(void)
     int failed = TestTextInput();
     failed |= TestHoverCursor();
     failed |= TestQuestionPanel();
+    failed |= TestQuestionPanelHandle();
     failed |= TestLongQuestionScroll();
     failed |= TestWrappedQuestionPanel();
     failed |= ExpectRequest(

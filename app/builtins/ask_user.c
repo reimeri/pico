@@ -1789,26 +1789,64 @@ static void AskUserRender(PicoHost *app, void *state)
               .backgroundColor = COLOR_COMPOSER_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(8)})
         {
+            /* Equal bounded side regions center the handle on the container,
+             * independently of the title and progress label widths. */
+            float toggle_width = row_width < 48 ? row_width : 48;
+            float side_width = (row_width - toggle_width) * 0.5f;
             CLAY(CLAY_ID("AskUserHeader"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .childGap = 8,
                              .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(header_h)}}})
             {
-                float header_width = MeasureTextEx(Pico_FontAt(FONT_REGULAR, PICO_FONT_UI),
-                                                   "Answer needed  24 / 24  Collapse",
-                                                   Pico_FontPx(PICO_FONT_UI), 0).x + 64;
-                if (width >= header_width)
+                CLAY(CLAY_ID("AskUserTitle"),
+                     {.layout = {.childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(side_width),
+                                            .height = CLAY_SIZING_FIXED(header_h)}}})
                 {
-                    CLAY_TEXT(CLAY_STRING("Answer needed"),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    float title_width = MeasureTextEx(Pico_FontAt(FONT_BOLD, PICO_FONT_UI), "Answer needed",
+                                                      Pico_FontPx(PICO_FONT_UI), 0).x;
+                    if (side_width >= title_width + 8)
+                    {
+                        CLAY_TEXT(CLAY_STRING("Answer needed"),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI,
+                                                    .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
                 }
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
-                CLAY_TEXT(CStr(g_ui.progress),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED,
-                                            .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                RenderButton(CLAY_STRING("AskUserToggle"), g_ui.collapsed ? "Resume" : "Collapse", true, false);
+                bool hover = Clay_PointerOver(CLAY_ID("AskUserToggle"));
+                CLAY(CLAY_ID("AskUserToggle"),
+                     {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(toggle_width),
+                                            .height = CLAY_SIZING_FIXED(header_h)}}})
+                {
+                    CLAY(CLAY_ID("AskUserHandle"),
+                         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(toggle_width < 24 ? toggle_width : 24),
+                                                .height = CLAY_SIZING_FIXED(3)}},
+                          .backgroundColor = hover ? COLOR_TEXT : COLOR_MUTED,
+                          .cornerRadius = CLAY_CORNER_RADIUS(2)}) {}
+                }
+                CLAY(CLAY_ID("AskUserProgress"),
+                     {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_RIGHT, .y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(side_width),
+                                            .height = CLAY_SIZING_FIXED(header_h)}}})
+                {
+                    float progress_width = MeasureTextEx(Pico_FontAt(FONT_REGULAR, PICO_FONT_CAPTION),
+                                                         g_ui.progress, Pico_FontPx(PICO_FONT_CAPTION), 0).x;
+                    if (side_width < progress_width + 8)
+                    {
+                        snprintf(g_ui.progress, sizeof(g_ui.progress), "%d/%d",
+                                 g_ui.current + 1, g_ui.question_count);
+                        progress_width = MeasureTextEx(Pico_FontAt(FONT_REGULAR, PICO_FONT_CAPTION),
+                                                       g_ui.progress, Pico_FontPx(PICO_FONT_CAPTION), 0).x;
+                    }
+                    /* At sidebar-constrained widths, preserve the centered hit
+                     * target rather than letting progress spill into it. */
+                    if (side_width >= progress_width + 8)
+                    {
+                        CLAY_TEXT(CStr(g_ui.progress),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                                    .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
+                }
             }
 
             if (!g_ui.collapsed)

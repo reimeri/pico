@@ -45,9 +45,7 @@ target_compile_options(raylib PRIVATE
 # native-resolution rendering (app/render_scale.c). The rcore include (which
 # pulls in the desktop backend) wraps glfwCreateWindow so
 # PICO_DISABLE_NATIVE_SCALE=1 can restore the 1:1 logical framebuffer.
-set_property(SOURCE "${raylib_SOURCE_DIR}/src/rcore.c"
-    TARGET_DIRECTORY raylib
-    PROPERTY COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/pico_glfw_scale.h")
+include(cmake/PicoRaylibStartup.cmake)
 
 # GLFW 3.4 (bundled in raylib 5.5) aborts on Wayland file drag-over: dataOfferListener
 # only implements `offer`, so wl_data_offer.source_actions/action dispatch through a
@@ -281,6 +279,20 @@ endif()
 set(DART_TESTING_TIMEOUT 1500 CACHE STRING "Overall test executable hang watchdog (seconds)")
 include(CTest)
 if(BUILD_TESTING)
+    if(UNIX AND NOT APPLE)
+        add_executable(pico_raylib_startup_tests tests/raylib_startup_test.c)
+        target_include_directories(pico_raylib_startup_tests PRIVATE
+            ${raylib_SOURCE_DIR}/src/external/glfw/include)
+        target_link_libraries(pico_raylib_startup_tests PRIVATE raylib)
+        target_link_options(pico_raylib_startup_tests PRIVATE
+            "LINKER:--wrap=glfwInit,--wrap=glfwDefaultWindowHints,--wrap=glfwWindowHint,--wrap=glfwSetJoystickCallback,--wrap=glfwCreateWindow,--wrap=glfwTerminate")
+        pico_warnings_are_errors(pico_raylib_startup_tests)
+        add_test(NAME pico_raylib_startup_tests COMMAND pico_raylib_startup_tests)
+        add_test(NAME pico_startup_no_display
+            COMMAND ${CMAKE_COMMAND} -DPICO=$<TARGET_FILE:pico>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_no_display.cmake)
+    endif()
+
     add_executable(pico_json_tests
         tests/json_test.c
         json.c)

@@ -154,6 +154,12 @@ int main(int argc, char **argv)
         return 1;
     }
     Clay_Raylib_Initialize(1100, 800, "Pico", FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    if (!IsWindowReady())
+    {
+        fprintf(stderr, "Pico could not initialize its window. Check the display and OpenGL/EGL driver setup.\n");
+        Pico_FreeClay();
+        return 1;
+    }
     /* Sync the native viewport before fonts load so the first atlas is
      * rasterized at device pixels. */
     Pico_RenderScaleInit();

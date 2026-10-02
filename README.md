@@ -63,7 +63,10 @@ For a declarative NixOS install, add Pico as an input and package in your system
 
 ```nix
 {
-  inputs.pico.url = "github:reimeri/pico";
+  inputs.pico = {
+     url = "github:reimeri/pico";
+     inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs = { nixpkgs, pico, ... }: {
     nixosConfigurations.hostname = nixpkgs.lib.nixosSystem {
@@ -83,6 +86,8 @@ For a declarative NixOS install, add Pico as an input and package in your system
   };
 }
 ```
+
+The `follows` setting makes Pico use your system flake's existing `nixpkgs` input, keeping its glibc aligned with the system graphics-driver package set. It does not affect standalone `nix run`/profile installs or `nix develop` in Pico's repository, which use Pico's own dependency pin.
 
 Then apply the configuration:
 
@@ -147,6 +152,13 @@ Ubuntu 22.04's repository CMake is too old, so the commands above install a curr
 ```bash
 cmake -S app --preset debug && cmake --build app/build/debug
 ./app/build/debug/pico
+```
+
+On NixOS, Pico's pinned toolchain must be new enough to load the host graphics driver. An EGL startup failure after a system upgrade can indicate a glibc mismatch; `LD_DEBUG=libs ./app/build/debug/pico` shows driver loading errors. Update the pin with `nix flake update nixpkgs`, then enter a new `nix develop` shell and recreate the build directory before rebuilding (CMake caches compiler and library paths):
+
+```bash
+rm -rf app/build/debug
+nix develop --command bash -c 'cmake -S app --preset debug && cmake --build app/build/debug'
 ```
 
 Release:

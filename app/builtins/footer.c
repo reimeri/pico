@@ -1,7 +1,7 @@
 #define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 200809L
 
 #include "../agent_internal.h"
-#define _POSIX_C_SOURCE 200809L
 #include "host_internal.h"
 
 #include "pico/plugin.h"

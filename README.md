@@ -165,17 +165,6 @@ cmake --build app/build/release --target package
 
 The install includes the desktop entry and `app/resources/logo.png` as its icon. Tests: `ctest --test-dir app/build/debug --output-on-failure`
 
-Run tests through CTest so its overall watchdog catches stuck workers. Fixture
-readiness waits check actual completion rather than a local time budget. `RUN:`
-and `WAIT:` lines identify the active case and wait in `--output-on-failure`
-reports, including `***Timeout` failures. Adjust the watchdog with
-`ctest --timeout <seconds>` or CMake's `DART_TESTING_TIMEOUT`; running a test
-executable directly does not apply this watchdog. Product timeout/cancellation
-checks keep their explicit deadlines. Linux test-only syscall/clock probes make
-streaming, lock contention, and interruption checks independent of scheduling;
-probe-dependent tests report a skip on platforms without the required wrapping.
-
-
 Debug builds save each raw SSE response under
 `$XDG_CONFIG_HOME/pico/debug/sse/` (or `~/.config/pico/debug/sse/`) as a private
 `.sse` file with companion `.json` metadata. Only the newest 100 completed capture

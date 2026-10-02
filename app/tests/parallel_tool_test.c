@@ -40,14 +40,13 @@ static void ParallelRelease(unsigned mask)
 
 static bool ParallelWait(PicoHost *app, unsigned mask, bool exited)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(TestWs(app));
         pthread_mutex_lock(&g_parallel.mu);
         unsigned value = exited ? g_parallel.exited : g_parallel.entered;
         pthread_mutex_unlock(&g_parallel.mu);
         if ((value & mask) == mask) return true;
-        SleepOneMs();
     }
     return false;
 }
@@ -218,12 +217,11 @@ static bool ParallelResult(PicoHost *app, int index)
 {
     char id[32];
     snprintf(id, sizeof(id), "parallel-%d", index);
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(TestWs(app));
         PicoTraceLine *row = ToolTraceByCallId(app, id);
         if (row && row->tool_output) return true;
-        SleepOneMs();
     }
     return false;
 }
@@ -398,11 +396,10 @@ static int TestParallelForceCancelReload(void)
     bool retained = ws->state == PICO_WORKSPACE_RELOADING && !PicoWorkspace_AcceptsNewWork(ws);
     ParallelRelease(~0u);
     bool reloaded = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pico_host_pump(&app);
         if (ws->state == PICO_WORKSPACE_OPEN) { reloaded = true; break; }
-        SleepOneMs();
     }
     bool no_queued_work = (g_parallel.entered & 4) == 0;
     bool no_late_results = strcmp(g_test.logged_tool_ids, "parallel-0,parallel-1,parallel-2,") == 0;
@@ -471,7 +468,7 @@ static int TestParallelResumeReservation(void)
     ConfigureFakeSession("exploration");
     PicoAgent_StartTurn(&app, TestAgent(&app), "two continuations of the same child");
     bool exclusive = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(TestWs(&app));
         PicoTraceLine *a = ToolTraceByCallId(&app, "parallel-0");
@@ -482,7 +479,6 @@ static int TestParallelResumeReservation(void)
                         (a->child_id != 0) != (b->child_id != 0);
             break;
         }
-        SleepOneMs();
     }
     ParallelRelease(~0u);
     bool drained = WaitForManagerIdle(&app);

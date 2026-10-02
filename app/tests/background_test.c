@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "test_wait.h"
 #include "builtins/background_model.h"
 
 #include <errno.h>
@@ -17,10 +18,9 @@ static int Fail(const char *test, const char *message)
     return 1;
 }
 
-static bool PumpUntilExited(PicoBgTable *table, PicoAgentId agent, const char *id, int tries)
+static bool PumpUntilExited(PicoBgTable *table, PicoAgentId agent, const char *id)
 {
-    int i;
-    for (i = 0; i < tries; i++)
+    PICO_TEST_WAIT_LOOP("background job progress")
     {
         PicoBgJobInfo info[PICO_BG_MAX_RECORDS];
         int n;
@@ -34,19 +34,13 @@ static bool PumpUntilExited(PicoBgTable *table, PicoAgentId agent, const char *i
                 return true;
             }
         }
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-            nanosleep(&req, NULL);
-        }
     }
     return false;
 }
 
-static bool WaitForLog(PicoBgTable *table, PicoAgentId agent, const char *id, const char *needle,
-                       int tries)
+static bool WaitForLog(PicoBgTable *table, PicoAgentId agent, const char *id, const char *needle)
 {
-    int i;
-    for (i = 0; i < tries; i++)
+    PICO_TEST_WAIT_LOOP("background job progress")
     {
         char *log;
         char *error = NULL;
@@ -59,10 +53,6 @@ static bool WaitForLog(PicoBgTable *table, PicoAgentId agent, const char *id, co
             return true;
         }
         free(log);
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-            nanosleep(&req, NULL);
-        }
     }
     return false;
 }
@@ -71,7 +61,7 @@ static int TestSpawnAndList(PicoBgTable *table, const char *cwd)
 {
     const char *test = "spawn_and_list";
     char *error = NULL;
-    char *json = PicoBgTable_Spawn(table, 1, cwd, "sleep", "sleep 30", &error);
+    char *json = PicoBgTable_Spawn(table, 1, cwd, "sleep", "while :; do sleep 3600; done", &error);
     char *list;
     int running;
     if (!json || error)
@@ -120,7 +110,7 @@ static int TestCap(PicoBgTable *table, const char *cwd)
     for (;;)
     {
         error = NULL;
-        json = PicoBgTable_Spawn(table, 3, cwd, "cap", "sleep 30", &error);
+        json = PicoBgTable_Spawn(table, 3, cwd, "cap", "while :; do sleep 3600; done", &error);
         if (!json)
         {
             free(error);
@@ -138,7 +128,7 @@ static int TestCap(PicoBgTable *table, const char *cwd)
         return Fail(test, "could not spawn a job");
     }
     error = NULL;
-    json = PicoBgTable_Spawn(table, 3, cwd, "cap", "sleep 30", &error);
+    json = PicoBgTable_Spawn(table, 3, cwd, "cap", "while :; do sleep 3600; done", &error);
     if (json)
     {
         free(json);
@@ -171,7 +161,7 @@ static int TestSmallLog(PicoBgTable *table, const char *cwd)
         return Fail(test, "spawn failed");
     }
     free(json);
-    if (!WaitForLog(table, 4, "bg_1", "hello", 200) || !PumpUntilExited(table, 4, "bg_1", 200))
+    if (!WaitForLog(table, 4, "bg_1", "hello") || !PumpUntilExited(table, 4, "bg_1"))
     {
         return Fail(test, "output did not appear");
     }
@@ -193,7 +183,6 @@ static int TestRollingLog(PicoBgTable *table, const char *cwd)
     const char *test = "rolling_log";
     char path[4096];
     FILE *file;
-    int i;
     char *error = NULL;
     char *json;
     char *log;
@@ -206,7 +195,7 @@ static int TestRollingLog(PicoBgTable *table, const char *cwd)
         return Fail(test, "could not write rolling input");
     }
     fprintf(file, "FIRST_LINE\n");
-    for (i = 0; i < PICO_BG_LOG_MAX; i++)
+    for (int i = 0; i < PICO_BG_LOG_MAX; i++)
     {
         fprintf(file, "PAD-%05d\n", i);
     }
@@ -221,7 +210,7 @@ static int TestRollingLog(PicoBgTable *table, const char *cwd)
         return Fail(test, "spawn failed");
     }
     free(json);
-    if (!WaitForLog(table, 5, "bg_1", "LAST_LINE", 400))
+    if (!WaitForLog(table, 5, "bg_1", "LAST_LINE"))
     {
         error = NULL;
         log = PicoBgTable_Log(table, 5, "bg_1", &error);
@@ -230,7 +219,7 @@ static int TestRollingLog(PicoBgTable *table, const char *cwd)
         free(error);
         return Fail(test, "rolling output missing LAST_LINE");
     }
-    if (!PumpUntilExited(table, 5, "bg_1", 200))
+    if (!PumpUntilExited(table, 5, "bg_1"))
     {
         return Fail(test, "rolling job did not exit");
     }
@@ -263,7 +252,6 @@ static int TestKillAndReap(PicoBgTable *table, const char *cwd)
     pid_t child = 0;
     char pid_path[4096];
     FILE *pid_file;
-    int tries;
 
     snprintf(pid_path, sizeof(pid_path), "%s/child.pid", cwd);
     json = PicoBgTable_Spawn(table, 6, cwd, "loop",
@@ -275,7 +263,7 @@ static int TestKillAndReap(PicoBgTable *table, const char *cwd)
     }
     free(json);
 
-    for (tries = 0; tries < 200; tries++)
+    PICO_TEST_WAIT_LOOP("background job progress")
     {
         PicoBgTable_Pump(table);
         pid_file = fopen(pid_path, "r");
@@ -291,10 +279,6 @@ static int TestKillAndReap(PicoBgTable *table, const char *cwd)
             {
                 break;
             }
-        }
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-            nanosleep(&req, NULL);
         }
     }
     if (child <= 0)
@@ -319,19 +303,14 @@ static int TestKillAndReap(PicoBgTable *table, const char *cwd)
     free(killed);
 
     {
-        int waited;
         bool gone = false;
-        for (waited = 0; waited < 200; waited++)
+        PICO_TEST_WAIT_LOOP("background job progress")
         {
             PicoBgTable_Pump(table);
             if (kill(child, 0) != 0 && errno == ESRCH)
             {
                 gone = true;
                 break;
-            }
-            {
-                struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-                nanosleep(&req, NULL);
             }
         }
         if (!gone)
@@ -360,7 +339,7 @@ static int TestNaturalExit(PicoBgTable *table, const char *cwd)
         return Fail(test, "spawn failed");
     }
     free(json);
-    if (!PumpUntilExited(table, 7, "bg_1", 200))
+    if (!PumpUntilExited(table, 7, "bg_1"))
     {
         return Fail(test, "job did not exit");
     }
@@ -390,7 +369,7 @@ static int TestResetClears(PicoBgTable *table, const char *cwd)
 {
     const char *test = "reset_clears";
     char *error = NULL;
-    char *json = PicoBgTable_Spawn(table, 8, cwd, "sleep", "sleep 30", &error);
+    char *json = PicoBgTable_Spawn(table, 8, cwd, "sleep", "while :; do sleep 3600; done", &error);
     char *list;
     if (!json)
     {
@@ -416,7 +395,6 @@ static int TestResetReaps(PicoBgTable *table, const char *cwd)
     char *error = NULL;
     char *json;
     pid_t child = 0;
-    int tries;
 
     snprintf(pid_path, sizeof(pid_path), "%s/reset.pid", cwd);
     json = PicoBgTable_Spawn(table, 9, cwd, "loop",
@@ -427,7 +405,7 @@ static int TestResetReaps(PicoBgTable *table, const char *cwd)
         return Fail(test, "spawn failed");
     }
     free(json);
-    for (tries = 0; tries < 200 && child <= 0; tries++)
+    PICO_TEST_WAIT(child <= 0)
     {
         FILE *pid_file;
         PicoBgTable_Pump(table);
@@ -441,11 +419,6 @@ static int TestResetReaps(PicoBgTable *table, const char *cwd)
             }
             fclose(pid_file);
         }
-        if (child <= 0)
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-            nanosleep(&req, NULL);
-        }
     }
     if (child <= 0)
     {
@@ -453,15 +426,11 @@ static int TestResetReaps(PicoBgTable *table, const char *cwd)
     }
     PicoBgTable_ResetAgent(table, 9);
     /* A reaped child is gone entirely; a leaked zombie still answers kill(pid, 0). */
-    for (tries = 0; tries < 100; tries++)
+    PICO_TEST_WAIT_LOOP("background job progress")
     {
         if (kill(child, 0) != 0 && errno == ESRCH)
         {
             return 0;
-        }
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-            nanosleep(&req, NULL);
         }
     }
     return Fail(test, "reset left a zombie child");
@@ -470,10 +439,9 @@ static int TestResetReaps(PicoBgTable *table, const char *cwd)
 static int TestAgentChurn(PicoBgTable *table, const char *cwd)
 {
     const char *test = "agent_churn";
-    int i;
     /* More distinct agents than can ever be live at once must not exhaust spawns:
      * resetting an agent recycles its id serial. */
-    for (i = 0; i < PICO_MAX_TOTAL_AGENTS * 2; i++)
+    for (int i = 0; i < PICO_MAX_TOTAL_AGENTS * 2; i++)
     {
         PicoAgentId id = 100 + (PicoAgentId)i;
         char *error = NULL;
@@ -506,17 +474,17 @@ int main(void)
         return Fail("setup", "create table");
     }
 
-    rc |= TestEmptyPump();
-    rc |= TestSpawnAndList(table, cwd);
-    rc |= TestIsolation(table);
-    rc |= TestCap(table, cwd);
-    rc |= TestSmallLog(table, cwd);
-    rc |= TestRollingLog(table, cwd);
-    rc |= TestKillAndReap(table, cwd);
-    rc |= TestNaturalExit(table, cwd);
-    rc |= TestResetClears(table, cwd);
-    rc |= TestResetReaps(table, cwd);
-    rc |= TestAgentChurn(table, cwd);
+    rc |= PICO_TEST_RUN(TestEmptyPump());
+    rc |= PICO_TEST_RUN(TestSpawnAndList(table, cwd));
+    rc |= PICO_TEST_RUN(TestIsolation(table));
+    rc |= PICO_TEST_RUN(TestCap(table, cwd));
+    rc |= PICO_TEST_RUN(TestSmallLog(table, cwd));
+    rc |= PICO_TEST_RUN(TestRollingLog(table, cwd));
+    rc |= PICO_TEST_RUN(TestKillAndReap(table, cwd));
+    rc |= PICO_TEST_RUN(TestNaturalExit(table, cwd));
+    rc |= PICO_TEST_RUN(TestResetClears(table, cwd));
+    rc |= PICO_TEST_RUN(TestResetReaps(table, cwd));
+    rc |= PICO_TEST_RUN(TestAgentChurn(table, cwd));
 
     PicoBgTable_Destroy(table);
     unlink("rolling.txt");

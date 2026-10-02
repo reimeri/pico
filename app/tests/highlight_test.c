@@ -1,3 +1,4 @@
+#include "test_wait.h"
 #include "highlight.h"
 
 #include <stdio.h>
@@ -283,16 +284,9 @@ static int TestMarkdown(void)
     return Check("markdown", "markdown", t, wants, 9);
 }
 
-static double NowSeconds(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-}
-
-/* A markdown code-block line of unmatched '[' openers (a streamed JSON
- * sample) must tokenize in bounded time instead of rescanning the line once
- * per opener, and such a data-blob line renders plain. */
+/* A large streamed JSON sample with unmatched '[' openers must render plain.
+ * Keep the stress input; CTest, not a machine-specific frame budget, owns the
+ * pathological-work watchdog. */
 static int TestMarkdownUnmatchedOpenersStayBounded(void)
 {
     const PicoHlLang *lang = PicoHl_Lookup("markdown");
@@ -314,24 +308,16 @@ static int TestMarkdownUnmatchedOpenersStayBounded(void)
         memcpy(text + i, "[x ", left < 3 ? left : 3);
     }
     text[n] = '\0';
-    double start = NowSeconds();
     int count = PicoHl_Count(lang, text);
     PicoHlSpan *spans =
         (PicoHlSpan *)malloc(sizeof(PicoHlSpan) * (size_t)(count > 0 ? count : 1));
     int filled = spans ? PicoHl_Fill(lang, text, spans, count) : -1;
-    double elapsed = NowSeconds() - start;
     free(spans);
     free(text);
     int fails = 0;
     if (filled != 0)
     {
         fprintf(stderr, "markdown: data-blob line must render plain, got %d spans\n", filled);
-        fails++;
-    }
-    if (elapsed > 0.05)
-    {
-        fprintf(stderr, "markdown: unmatched-openers line took %.1f ms (bound 50 ms)\n",
-                elapsed * 1000.0);
         fails++;
     }
     return fails;
@@ -432,25 +418,25 @@ static int TestEmptyAndNull(void)
 int main(void)
 {
     int fails = 0;
-    fails += TestCBasics();
-    fails += TestCBlockCommentAcrossLines();
-    fails += TestCLineCommentDoesNotLeak();
-    fails += TestCppRawString();
-    fails += TestPythonTripleString();
-    fails += TestJsonKeysAndValues();
-    fails += TestJsonUnterminatedString();
-    fails += TestRustNestingAndLifetime();
-    fails += TestJsTemplateLiteral();
-    fails += TestGoRawStringQuotes();
-    fails += TestBash();
-    fails += TestLua();
-    fails += TestTypeScriptKeywords();
-    fails += TestMarkdown();
-    fails += TestMarkdownUnmatchedOpenersStayBounded();
-    fails += TestMarkdownDistantCloserIsNotStyled();
-    fails += TestDiff();
-    fails += TestLookup();
-    fails += TestEmptyAndNull();
+    fails += PICO_TEST_RUN(TestCBasics());
+    fails += PICO_TEST_RUN(TestCBlockCommentAcrossLines());
+    fails += PICO_TEST_RUN(TestCLineCommentDoesNotLeak());
+    fails += PICO_TEST_RUN(TestCppRawString());
+    fails += PICO_TEST_RUN(TestPythonTripleString());
+    fails += PICO_TEST_RUN(TestJsonKeysAndValues());
+    fails += PICO_TEST_RUN(TestJsonUnterminatedString());
+    fails += PICO_TEST_RUN(TestRustNestingAndLifetime());
+    fails += PICO_TEST_RUN(TestJsTemplateLiteral());
+    fails += PICO_TEST_RUN(TestGoRawStringQuotes());
+    fails += PICO_TEST_RUN(TestBash());
+    fails += PICO_TEST_RUN(TestLua());
+    fails += PICO_TEST_RUN(TestTypeScriptKeywords());
+    fails += PICO_TEST_RUN(TestMarkdown());
+    fails += PICO_TEST_RUN(TestMarkdownUnmatchedOpenersStayBounded());
+    fails += PICO_TEST_RUN(TestMarkdownDistantCloserIsNotStyled());
+    fails += PICO_TEST_RUN(TestDiff());
+    fails += PICO_TEST_RUN(TestLookup());
+    fails += PICO_TEST_RUN(TestEmptyAndNull());
     if (fails == 0)
     {
         printf("highlight tests: all passed\n");

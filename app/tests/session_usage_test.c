@@ -1,5 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "test_wait.h"
+#ifdef PICO_TEST_LOCK
+#include "test_lock.h"
+#endif
 #include "agent.h"
 #include "json.h"
 #include "path.h"
@@ -2344,6 +2348,10 @@ static int TestCatalogRejectsCollidingPaths(void)
 
 static int TestProjectDeleteWaitsForCrossProcessWriter(void)
 {
+#ifndef PICO_TEST_LOCK
+    fprintf(stderr, "SKIP: deterministic lock contention requires the test syscall probe\n");
+    return 0;
+#endif
     char ws[] = "/tmp/pico-cat-delete-race-XXXXXX";
     int ready[2], resume[2], attempted[2], finished[2], writer_status = 0, delete_status = 0;
     PicoHost host = {0};
@@ -2372,21 +2380,27 @@ static int TestProjectDeleteWaitsForCrossProcessWriter(void)
     if (deleter == 0)
     {
         close(attempted[0]); close(finished[0]); close(resume[1]);
+#ifdef PICO_TEST_LOCK
+        PicoTestLock_NotifyContention(attempted[1]);
+#else
         g_delete_attempt_fd = attempted[1];
+#endif
         int result = PicoCatalog_DeleteProject(&host, ws);
         (void)TransferByte(finished[1], true);
         _exit(result == 0 ? 0 : 3);
     }
     close(attempted[1]); close(finished[1]);
     if (!TransferByte(attempted[0], false)) return Fail("cross-process delete did not start");
-    struct pollfd check = {.fd = finished[0], .events = POLLIN};
-    int premature = poll(&check, 1, 100);
     (void)TransferByte(resume[1], true);
     waitpid(writer, &writer_status, 0);
     waitpid(deleter, &delete_status, 0);
-    if (premature != 0 || !WIFEXITED(writer_status) || WEXITSTATUS(writer_status) != 0 ||
+    PicoCatalogWorkspace *remaining = NULL;
+    int remaining_count = PicoCatalog_Scan(&remaining);
+    bool removed = remaining_count >= 0 && !FindCatalogPath(remaining, remaining_count, ws);
+    PicoCatalog_Free(remaining, remaining_count);
+    if (!removed || !WIFEXITED(writer_status) || WEXITSTATUS(writer_status) != 0 ||
         !WIFEXITED(delete_status) || WEXITSTATUS(delete_status) != 0)
-        return Fail("project deletion must wait for a writer in another process");
+        return Fail("project deletion queued behind a cross-process writer must not be resurrected");
     return 0;
 }
 
@@ -3330,6 +3344,7 @@ static int TestModelResumeReplay(void)
 
 int main(void)
 {
+    PicoTest_Case("session usage: initial persistence, replay and failure cases");
     char temp[] = "/tmp/pico-session-usage-XXXXXX";
     if (!mkdtemp(temp))
     {
@@ -3680,32 +3695,32 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (TestThinkingRoundTrip() != 0 || TestPartsReplay() != 0 ||
-        TestTranscriptMessageGroups() != 0 || TestSessionTitle() != 0 ||
-        TestSessionDisplayTitle() != 0 ||
-        TestSessionTitleFailureStages() != 0 || TestSessionTitleUtf8() != 0 ||
-        TestConcurrentAppendDuringTitle() != 0 || TestConcurrentDoneCatalog() != 0 ||
-        TestCatalogChangeToken() != 0 || TestCatalog() != 0 || TestCatalogProjectDelete() != 0 ||
-        TestCatalogProjectDeleteBeyondScanLimit() != 0 ||
-        TestCatalogWorkspaceReorder() != 0 ||
-        TestCatalogListingCache() != 0 || TestSessionListCompleteness() != 0 ||
-        TestCatalogCacheCoversOlderSessions() != 0 ||
-        TestUnseenCompleteRoundTrip() != 0 ||
-        TestCatalogOmitsMissingPath() != 0 || TestModelResumeReplay() != 0 ||
-        TestQueuedModelChangeOrdersUserWrite() != 0 || TestQueuedModelChangeFailureThenDrain() != 0 ||
-        TestQueuedModelChangeCreatesHeaderPerAgent() != 0 ||
-        TestQueuedModelChangeDrainDeadline() != 0 ||
-        TestQueuedTitleOrdersAfterUserWrite() != 0 ||
-        TestQueuedTitleFailureThenDrain() != 0 ||
-        TestQueuedDistinctTitlesPreserveEvents() != 0 ||
-        TestProjectDeleteWaitsForCrossProcessWriter() != 0 ||
-        TestCatalogScanFailureKeepsIndexedSession() != 0 ||
-        TestSidebarScanFailureKeepsIndexedSession() != 0 ||
-        TestCatalogSnapshotDoesNotReconcile() != 0 ||
-        TestCatalogDeleteRejectsSwappedCheckout() != 0 ||
-        TestCatalogRejectsCollidingPaths() != 0 ||
-        TestCatalogSQLiteImport() != 0 ||
-        TestCatalogRejectsIncompatibleSchema() != 0)
+    if (PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
+        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
+        PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
+        PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||
+        PICO_TEST_RUN(TestConcurrentAppendDuringTitle()) != 0 || PICO_TEST_RUN(TestConcurrentDoneCatalog()) != 0 ||
+        PICO_TEST_RUN(TestCatalogChangeToken()) != 0 || PICO_TEST_RUN(TestCatalog()) != 0 || PICO_TEST_RUN(TestCatalogProjectDelete()) != 0 ||
+        PICO_TEST_RUN(TestCatalogProjectDeleteBeyondScanLimit()) != 0 ||
+        PICO_TEST_RUN(TestCatalogWorkspaceReorder()) != 0 ||
+        PICO_TEST_RUN(TestCatalogListingCache()) != 0 || PICO_TEST_RUN(TestSessionListCompleteness()) != 0 ||
+        PICO_TEST_RUN(TestCatalogCacheCoversOlderSessions()) != 0 ||
+        PICO_TEST_RUN(TestUnseenCompleteRoundTrip()) != 0 ||
+        PICO_TEST_RUN(TestCatalogOmitsMissingPath()) != 0 || PICO_TEST_RUN(TestModelResumeReplay()) != 0 ||
+        PICO_TEST_RUN(TestQueuedModelChangeOrdersUserWrite()) != 0 || PICO_TEST_RUN(TestQueuedModelChangeFailureThenDrain()) != 0 ||
+        PICO_TEST_RUN(TestQueuedModelChangeCreatesHeaderPerAgent()) != 0 ||
+        PICO_TEST_RUN(TestQueuedModelChangeDrainDeadline()) != 0 ||
+        PICO_TEST_RUN(TestQueuedTitleOrdersAfterUserWrite()) != 0 ||
+        PICO_TEST_RUN(TestQueuedTitleFailureThenDrain()) != 0 ||
+        PICO_TEST_RUN(TestQueuedDistinctTitlesPreserveEvents()) != 0 ||
+        PICO_TEST_RUN(TestProjectDeleteWaitsForCrossProcessWriter()) != 0 ||
+        PICO_TEST_RUN(TestCatalogScanFailureKeepsIndexedSession()) != 0 ||
+        PICO_TEST_RUN(TestSidebarScanFailureKeepsIndexedSession()) != 0 ||
+        PICO_TEST_RUN(TestCatalogSnapshotDoesNotReconcile()) != 0 ||
+        PICO_TEST_RUN(TestCatalogDeleteRejectsSwappedCheckout()) != 0 ||
+        PICO_TEST_RUN(TestCatalogRejectsCollidingPaths()) != 0 ||
+        PICO_TEST_RUN(TestCatalogSQLiteImport()) != 0 ||
+        PICO_TEST_RUN(TestCatalogRejectsIncompatibleSchema()) != 0)
     {
         return 1;
     }

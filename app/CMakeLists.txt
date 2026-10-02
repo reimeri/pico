@@ -276,6 +276,9 @@ if(UNIX AND NOT APPLE)
     unset(_dir)
 endif()
 
+# One configurable watchdog per test executable. Readiness waits intentionally
+# have no shorter storage/CPU-speed deadline. ctest --timeout can override it.
+set(DART_TESTING_TIMEOUT 1500 CACHE STRING "Overall test executable hang watchdog (seconds)")
 include(CTest)
 if(BUILD_TESTING)
     add_executable(pico_json_tests
@@ -316,6 +319,10 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src)
     pico_warnings_are_errors(pico_shell_tests)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_shell_tests PRIVATE PICO_TEST_EINTR=1)
+        target_link_options(pico_shell_tests PRIVATE -Wl,--wrap=read -Wl,--wrap=waitpid)
+    endif()
     add_test(NAME pico_shell_tests COMMAND pico_shell_tests)
 
     add_executable(pico_http_tests tests/http_test.c http.c http_capture.c json.c)
@@ -323,7 +330,6 @@ if(BUILD_TESTING)
     target_link_libraries(pico_http_tests PRIVATE CURL::libcurl Threads::Threads)
     pico_warnings_are_errors(pico_http_tests)
     add_test(NAME pico_http_tests COMMAND pico_http_tests)
-    set_tests_properties(pico_http_tests PROPERTIES TIMEOUT 90)
 
     add_executable(pico_http_capture_tests
         tests/http_capture_test.c
@@ -604,6 +610,11 @@ if(BUILD_TESTING)
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads OpenSSL::Crypto)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(pico_agent_behavior_tests PRIVATE tests/test_clock.c)
+        target_compile_definitions(pico_agent_behavior_tests PRIVATE PICO_TEST_CLOCK=1)
+        target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait)
+    endif()
     add_test(NAME pico_agent_behavior_tests COMMAND pico_agent_behavior_tests)
 
     add_executable(pico_session_usage_tests
@@ -624,6 +635,11 @@ if(BUILD_TESTING)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_session_usage_tests PRIVATE SQLite::SQLite3 Threads::Threads)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(pico_session_usage_tests PRIVATE tests/test_lock.c)
+        target_compile_definitions(pico_session_usage_tests PRIVATE PICO_TEST_LOCK=1)
+        target_link_options(pico_session_usage_tests PRIVATE -Wl,--wrap=fcntl)
+    endif()
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
 
     add_executable(pico_files_tests
@@ -749,6 +765,11 @@ if(BUILD_TESTING)
         PICO_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
     target_compile_options(pico_settings_agent_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_settings_agent_tests PRIVATE -Wl,--gc-sections)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(pico_settings_agent_tests PRIVATE tests/test_lock.c)
+        target_compile_definitions(pico_settings_agent_tests PRIVATE PICO_TEST_LOCK=1)
+        target_link_options(pico_settings_agent_tests PRIVATE -Wl,--wrap=fcntl)
+    endif()
     add_test(NAME pico_settings_agent_tests COMMAND pico_settings_agent_tests)
 
     add_executable(pico_clay_capacity_tests
@@ -961,6 +982,9 @@ if(BUILD_TESTING)
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
     target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(pico_host_workspace_tests PRIVATE tests/test_clock.c tests/test_io.c)
+        target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_TEST_CLOCK=1 PICO_TEST_IO=1)
+        target_link_options(pico_host_workspace_tests PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait -Wl,--wrap=fopen -Wl,--wrap=sqlite3_open_v2)
         target_compile_definitions(pico_host_workspace_tests PRIVATE
             PICO_CLAY_FRAME_FAULT_TESTS=1 PICO_OPENAI_LOGIN_TESTS=1)
         target_link_options(pico_host_workspace_tests PRIVATE

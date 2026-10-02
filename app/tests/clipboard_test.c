@@ -1,3 +1,4 @@
+#include "test_wait.h"
 #include "pico/host.h"
 #include "composer_internal.h"
 #include "host_internal.h"
@@ -50,10 +51,9 @@ static bool ClipboardWrite(const char *path, const char *text)
 
 static void ClipboardDrain(PicoHost *host)
 {
-    for (int i = 0; i < 5000 && host->tasks; i++)
+    PICO_TEST_WAIT(host->tasks)
     {
         pico_host_pump(host);
-        usleep(1000);
     }
 }
 
@@ -61,10 +61,9 @@ static void ClipboardDrain(PicoHost *host)
  * against clipboard progress depending on successive UI frame intervals. */
 static bool ClipboardWaitWake(void)
 {
-    for (int i = 0; i < 5000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         if (atomic_load(&s_woken)) return true;
-        usleep(1000);
     }
     return false;
 }
@@ -114,10 +113,9 @@ int TestClipboardPaste(void)
         chmod(wl, 0700) != 0 || chmod(xclip, 0700) != 0) goto done;
     setenv("XDG_CONFIG_HOME", cfg, 1);
     if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
-    for (int i = 0; i < 5000 && !PicoPlugins_HostState(host, "composer"); i++)
+    PICO_TEST_WAIT(!PicoPlugins_HostState(host, "composer"))
     {
         PicoPlugins_Load(host);
-        usleep(1000);
     }
     if (!PicoPlugins_HostState(host, "composer")) goto done;
     PicoWorkspaceId ws;
@@ -203,7 +201,7 @@ int TestClipboardPaste(void)
     if (!ClipboardWrite(wl, helper) || chmod(wl, 0700) != 0) goto done;
     setenv("PICO_CLIP_MODE", "stall", 1);
     PicoComposer_BeginClipboardPaste(host);
-    for (int i = 0; i < 5000 && access(started, F_OK) != 0; i++) usleep(1000);
+    PICO_TEST_WAIT(access(started, F_OK) != 0) ;
     if (access(started, F_OK) != 0) goto done;
     PicoComposer_CancelClipboardPaste();
     if (PicoComposer_ClipboardPasteBusy()) goto done;

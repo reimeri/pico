@@ -110,7 +110,7 @@ static int TestManagerConcurrencyAndIsolation(void)
     PicoAgent_StartTurn(&app, second, "second");
 
     bool reverse_observed = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         pthread_mutex_lock(&g_test.mu);
@@ -127,7 +127,6 @@ static int TestManagerConcurrencyAndIsolation(void)
                 break;
             }
         }
-        SleepOneMs();
     }
     if (!reverse_observed)
     {
@@ -154,10 +153,9 @@ static int TestManagerConcurrencyAndIsolation(void)
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    for (int i = 0; i < 3000 && (PicoAgent_IsBusy(first) || PicoAgent_IsBusy(second)); i++)
+    PICO_TEST_WAIT((PicoAgent_IsBusy(first) || PicoAgent_IsBusy(second)))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     bool isolated = !PicoAgent_IsBusy(first) && !PicoAgent_IsBusy(second) &&
                     first->session_input_tokens == 10 && second->session_input_tokens == 10 &&
@@ -166,26 +164,23 @@ static int TestManagerConcurrencyAndIsolation(void)
     ResetTest(TEST_PROVIDER_BLOCK, 0);
     PicoAgent_StartTurn(&app, first, "cancel first");
     PicoAgent_StartTurn(&app, second, "leave second running");
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pthread_mutex_lock(&g_test.mu);
         int entered = g_test.provider_tools_issued;
         pthread_mutex_unlock(&g_test.mu);
         if (entered >= 2) break;
-        SleepOneMs();
     }
     PicoAgent_Cancel(first);
-    for (int i = 0; i < 3000 && PicoAgent_IsBusy(first); i++)
+    PICO_TEST_WAIT(PicoAgent_IsBusy(first))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     bool cancel_isolated = !PicoAgent_IsBusy(first) && PicoAgent_IsBusy(second);
     PicoAgent_Cancel(second);
-    for (int i = 0; i < 3000 && PicoAgent_IsBusy(second); i++)
+    PICO_TEST_WAIT(PicoAgent_IsBusy(second))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     PicoHost_Shutdown(&app);
     return isolated && cancel_isolated
@@ -220,7 +215,7 @@ static int TestSubmitTargetsExplicitAgentWithoutChangingSelection(void)
     PicoAgent *first = PicoHost_FindAgent(&app, first_id);
     PicoAgent *second = PicoHost_FindAgent(&app, second_id);
     bool targeted = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         if (PicoAgent_IsBusy(second) && !PicoAgent_IsBusy(first) && pico_agent_active(&app) == first_id)
@@ -228,16 +223,15 @@ static int TestSubmitTargetsExplicitAgentWithoutChangingSelection(void)
             targeted = true;
             break;
         }
-        SleepOneMs();
     }
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    for (int i = 0; i < 3000 && PicoAgent_IsBusy(second); i++)
+    PicoAgent_Cancel(second);
+    PICO_TEST_WAIT(PicoAgent_IsBusy(second))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     PicoHost_Shutdown(&app);
     return targeted ? 0 : Fail(name, "submit retargeted UI selection or ran on the selected agent");
@@ -269,10 +263,9 @@ static int TestSubmitIsCompleteExplicitTurn(void)
         return Fail(name, "explicit submit failed");
     }
     PicoAgent *second = PicoHost_FindAgent(&app, second_id);
-    for (int i = 0; i < 3000 && second && PicoAgent_IsBusy(second); i++)
+    PICO_TEST_WAIT(second && PicoAgent_IsBusy(second))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     const PicoMessage *user = pico_agent_message(&app, second_id, 0);
     pthread_mutex_lock(&g_test.mu);
@@ -308,20 +301,19 @@ static int TestSubmitReportsResultCodes(void)
         return Fail(name, "submit did not report missing/empty results or start the turn");
     }
     PicoAgent *first = PicoHost_FindAgent(&app, first_id);
-    for (int i = 0; i < 3000 && first && !PicoAgent_IsBusy(first); i++)
+    PICO_TEST_WAIT(first && !PicoAgent_IsBusy(first))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     bool busy = pico_agent_submit(&app, first_id, "again", NULL) == PICO_BUSY;
     pthread_mutex_lock(&g_test.mu);
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    for (int i = 0; i < 3000 && first && PicoAgent_IsBusy(first); i++)
+    PicoAgent_Cancel(first);
+    PICO_TEST_WAIT(first && PicoAgent_IsBusy(first))
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
-        SleepOneMs();
     }
     PicoHost_Shutdown(&app);
     return busy ? 0 : Fail(name, "busy submit did not return PICO_BUSY");

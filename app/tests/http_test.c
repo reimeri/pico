@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "test_wait.h"
 #include "pico/http.h"
 #include "http_internal.h"
 #include <arpa/inet.h>
@@ -201,7 +202,7 @@ static void *ServeKeepAlive(void *arg)
         struct pollfd fds[2] = {{.fd = fd, .events = POLLIN},
                                 {.fd = s->listener, .events = POLLIN}};
         if (fd < 0) { fds[0].fd = -1; }
-        if (poll(fds, 2, 3000) <= 0) break;
+        if (poll(fds, 2, -1) <= 0) break;
         if (fds[1].revents & POLLIN)
         {
             if (fd >= 0) close(fd);
@@ -348,30 +349,36 @@ int main(void)
     const char *error = "{\"error\":\"invalid data: bad event: request\"}";
     const char *events = "event: first\r\ndata: {\"a\":1}\r\n\r\ndata: {\"b\":\n"
                          "data: 2}\n\ndata: {\"c\":3}\r\r";
+    PicoTest_Case("HTTP JSON framing");
     int fail = Request("application/json", error, &json) || json.count != 1 || strcmp(json.json[0], error);
+    PicoTest_Case("HTTP framing and callback cancellation");
     fail |= Request("text/event-stream; charset=utf-8", events, &sse) || sse.count != 3 ||
             strcmp(sse.json[0], "{\"a\":1}") || strcmp(sse.event[0], "first") ||
             strcmp(sse.json[1], "{\"b\":\n2}") || strcmp(sse.json[2], "{\"c\":3}");
+    PicoTest_Case("HTTP framing and callback cancellation");
     fail |= Request("text/event-stream", events, &stopped) || stopped.count != 1;
     Result untyped = {0}, untyped_json = {0};
+    PicoTest_Case("HTTP framing and callback cancellation");
     fail |= Request(NULL, events, &untyped) || untyped.count != 3 ||
             strcmp(untyped.event[0], "first") || strcmp(untyped.json[0], "{\"a\":1}") ||
             strcmp(untyped.json[1], "{\"b\":\n2}") || strcmp(untyped.json[2], "{\"c\":3}");
+    PicoTest_Case("HTTP framing and callback cancellation");
     fail |= Request(NULL, error, &untyped_json) || untyped_json.count != 1 ||
             strcmp(untyped_json.json[0], error);
     Result explicit_json = {0};
     const char *sse_body = "data: {}\n\n";
+    PicoTest_Case("HTTP framing and callback cancellation");
     fail |= Request("application/json", sse_body, &explicit_json) || explicit_json.count != 1 ||
             strcmp(explicit_json.json[0], sse_body);
-    fail |= RetryRequest(true, true, false);
-    fail |= RetryRequest(false, true, false);
-    fail |= RetryRequest(true, false, true);
-    fail |= RetryRequest(false, false, false);
-    fail |= NoReplayAfterHeaders();
-    fail |= RetryTlsHandshake();
-    fail |= KeepAliveReuse();
-    fail |= CleanHostCycles();
-    fail |= ShutdownWhileBorrowed();
+    fail |= PICO_TEST_RUN(RetryRequest(true, true, false));
+    fail |= PICO_TEST_RUN(RetryRequest(false, true, false));
+    fail |= PICO_TEST_RUN(RetryRequest(true, false, true));
+    fail |= PICO_TEST_RUN(RetryRequest(false, false, false));
+    fail |= PICO_TEST_RUN(NoReplayAfterHeaders());
+    fail |= PICO_TEST_RUN(RetryTlsHandshake());
+    fail |= PICO_TEST_RUN(KeepAliveReuse());
+    fail |= PICO_TEST_RUN(CleanHostCycles());
+    fail |= PICO_TEST_RUN(ShutdownWhileBorrowed());
     curl_global_cleanup();
     if (fail) fprintf(stderr, "HTTP framing or callback cancellation failed\n");
     return fail;

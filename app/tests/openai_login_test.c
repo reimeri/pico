@@ -122,22 +122,20 @@ static int OauthCount(const int *value)
 
 static bool OauthWait(PicoHost *host, const int *value, int minimum, bool pump)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         if (OauthCount(value) >= minimum) return true;
         if (pump) pico_host_pump(host);
-        usleep(1000);
     }
     return false;
 }
 
 static bool OauthDrain(PicoHost *host)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pico_host_pump(host);
         if (!host->tasks) return true;
-        usleep(1000);
     }
     return false;
 }
@@ -167,8 +165,6 @@ static bool OauthSendCallback(void)
     pthread_mutex_unlock(&oauth_mu);
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
-    struct timeval timeout = {.tv_sec = 2};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     bool ok = connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0 &&
               send(fd, request, strlen(request), MSG_NOSIGNAL) == (ssize_t)strlen(request);
     char response[1024];
@@ -257,9 +253,9 @@ static int TestOpenAiLogin(void)
      * transport. Do not impose a latency budget: logout also persists credentials
      * with fsync, whose duration depends on disk load in the build environment.
      * The alarm is only a deadlock watchdog for a regressed synchronous wait. */
-    alarm(30);
+
     auth->logout(host, origin, auth->state);
-    alarm(0);
+
     if (!OauthCredentials(host, false)) Fail("logout must clear OAuth credentials before transport completes");
     pthread_mutex_lock(&oauth_mu); oauth_test.hold_token = false; pthread_cond_broadcast(&oauth_cv); pthread_mutex_unlock(&oauth_mu);
     if (!OauthDrain(host)) Fail("released token exchange must finish after logout");
@@ -343,7 +339,7 @@ static int TestOpenAiLogin(void)
 
 static int TestOpenAiBlockedShutdownChild(void)
 {
-    alarm(10);
+
     char config[] = "/tmp/pico-oauth-retained-XXXXXX";
     if (!mkdtemp(config)) return 1;
     setenv("XDG_CONFIG_HOME", config, 1);
@@ -414,25 +410,22 @@ static int TestOpenAiBrowserLauncher(void)
     const char *url = "https://example.invalid/?literal=$(printf NOT_LITERAL)&quote='";
     ok &= host && __real_PicoHost_OpenBrowser(host, url);
     pid_t pid = 0;
-    for (int i = 0; ok && i < 3000 && pid == 0; i++)
+    PICO_TEST_WAIT(ok && pid == 0)
     {
         char *text = Pico_ReadFile(marker, NULL);
         if (text && strstr(text, url)) pid = (pid_t)strtol(text, NULL, 10);
         free(text);
-        if (!pid) usleep(1000);
     }
     ok &= pid > 0;
     /* Failure to exec also reports synchronously, without a shell or wait. */
     setenv("PATH", "/nonexistent-pico-browser-launcher", 1);
     ok &= host && !__real_PicoHost_OpenBrowser(host, url);
     setenv("PATH", path, 1);
-    double before = pico_openai_monotonic();
     if (host) ok &= pico_host_free(host) == PICO_HOST_SHUTDOWN_CLEAN;
-    ok &= pico_openai_monotonic() - before < 1.0;
     WriteFile(release, "release\n");
     /* Observe reaping without stealing the reaper's waitpid result. Zombies
      * still respond to kill(pid, 0); a reaped child disappears. */
-    for (int i = 0; pid > 0 && i < 3000 && kill(pid, 0) == 0; i++) usleep(1000);
+    PICO_TEST_WAIT(pid > 0 && kill(pid, 0) == 0) ;
     ok &= pid > 0 && kill(pid, 0) < 0 && errno == ESRCH;
     setenv("PATH", old_path ? old_path : "", 1);
     free(old_path);

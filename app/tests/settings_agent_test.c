@@ -1,5 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "test_wait.h"
+#ifdef PICO_TEST_LOCK
+#include "test_lock.h"
+#endif
 #include "docs_path.h"
 #include "json.h"
 #include "settings.h"
@@ -297,6 +301,10 @@ static int WriteFile(const char *path, const char *contents)
 
 static int TestConcurrentHostSettingsWritePreservesUpdate(void)
 {
+#ifndef PICO_TEST_LOCK
+    fprintf(stderr, "SKIP: deterministic lock contention requires the test syscall probe\n");
+    return 0;
+#endif
     char temp[] = "/tmp/pico-settings-lock-XXXXXX";
     if (!mkdtemp(temp))
     {
@@ -343,12 +351,13 @@ static int TestConcurrentHostSettingsWritePreservesUpdate(void)
         PicoHost host;
         memset(&host, 0, sizeof(host));
         pthread_mutex_init(&host.settings_mu, NULL);
-        if (write(ready[1], "x", 1) != 1)
-        {
-            _exit(2);
-        }
-        close(ready[1]);
+#ifdef PICO_TEST_LOCK
+        PicoTestLock_NotifyContention(ready[1]);
+#else
+        (void)write(ready[1], "x", 1);
+#endif
         bool ok = PicoHost_SetExtensionDisabled(&host, "footer", true);
+        close(ready[1]);
         pthread_mutex_destroy(&host.settings_mu);
         _exit(ok ? 0 : 3);
     }
@@ -356,20 +365,13 @@ static int TestConcurrentHostSettingsWritePreservesUpdate(void)
     char token = '\0';
     int failed = child < 0 || read(ready[0], &token, 1) != 1;
     close(ready[0]);
-    struct timespec delay = {.tv_sec = 0, .tv_nsec = 200000000L};
-    nanosleep(&delay, NULL);
     int status = 0;
-    pid_t early = child > 0 ? waitpid(child, &status, WNOHANG) : -1;
-    if (early != 0)
-    {
-        failed = 1;
-    }
     if (WriteFile(settings_path, "{\n  \"model\": \"after\"\n}\n"))
     {
         failed = 1;
     }
     close(lock_fd);
-    if (child > 0 && early == 0 &&
+    if (child > 0 &&
         (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0))
     {
         failed = 1;
@@ -1339,91 +1341,91 @@ static int TestParallelSettingsResolution(void)
 
 int main(void)
 {
-    if (TestParallelSettingsResolution()) return 1;
-    int rc = TestPerAgentSelection();
+    if (PICO_TEST_RUN(TestParallelSettingsResolution())) return 1;
+    int rc = PICO_TEST_RUN(TestPerAgentSelection());
     if (rc)
     {
         return rc;
     }
-    rc = TestModelContextBeatsFallback();
+    rc = PICO_TEST_RUN(TestModelContextBeatsFallback());
     if (rc)
     {
         return rc;
     }
-    rc = TestFallbackWhenModelHasNoLimit();
+    rc = PICO_TEST_RUN(TestFallbackWhenModelHasNoLimit());
     if (rc)
     {
         return rc;
     }
-    rc = TestSelectionTracksWhileTurnPinned();
+    rc = PICO_TEST_RUN(TestSelectionTracksWhileTurnPinned());
     if (rc)
     {
         return rc;
     }
-    rc = TestDisabledExtensionsFromUserSettings();
+    rc = PICO_TEST_RUN(TestDisabledExtensionsFromUserSettings());
     if (rc)
     {
         return rc;
     }
-    rc = TestConcurrentHostSettingsWritePreservesUpdate();
+    rc = PICO_TEST_RUN(TestConcurrentHostSettingsWritePreservesUpdate());
     if (rc)
     {
         return rc;
     }
-    rc = TestCreatesUserSettingsFromBundledExample();
+    rc = PICO_TEST_RUN(TestCreatesUserSettingsFromBundledExample());
     if (rc)
     {
         return rc;
     }
-    rc = TestPreservesExistingUserSettings();
+    rc = PICO_TEST_RUN(TestPreservesExistingUserSettings());
     if (rc)
     {
         return rc;
     }
-    rc = TestMissingBundledSettingsIsNonFatal();
+    rc = PICO_TEST_RUN(TestMissingBundledSettingsIsNonFatal());
     if (rc)
     {
         return rc;
     }
-    rc = TestConcurrentSettingsCreationPublishesOneCompleteTemplate();
+    rc = PICO_TEST_RUN(TestConcurrentSettingsCreationPublishesOneCompleteTemplate());
     if (rc)
     {
         return rc;
     }
-    rc = TestBundledSettingsTemplateIsValid();
+    rc = PICO_TEST_RUN(TestBundledSettingsTemplateIsValid());
     if (rc)
     {
         return rc;
     }
-    rc = TestPromptSourceSpans();
+    rc = PICO_TEST_RUN(TestPromptSourceSpans());
     if (rc)
     {
         return rc;
     }
-    rc = TestDocsHintIsBaseSpan();
+    rc = PICO_TEST_RUN(TestDocsHintIsBaseSpan());
     if (rc)
     {
         return rc;
     }
-    rc = TestUserDraftSeedsEmptyModelsAndPreservesDisabled();
+    rc = PICO_TEST_RUN(TestUserDraftSeedsEmptyModelsAndPreservesDisabled());
     if (rc)
     {
         return rc;
     }
-    rc = TestUserDraftModelOrder();
+    rc = PICO_TEST_RUN(TestUserDraftModelOrder());
     if (rc)
     {
         return rc;
     }
-    rc = TestUserDraftDoesNotWriteWorkspaceSettings();
+    rc = PICO_TEST_RUN(TestUserDraftDoesNotWriteWorkspaceSettings());
     if (rc)
     {
         return rc;
     }
-    rc = TestUserDraftValidationAndPreservation();
+    rc = PICO_TEST_RUN(TestUserDraftValidationAndPreservation());
     if (rc)
     {
         return rc;
     }
-    return TestRunningAgentKeepsModelUntilIdle();
+    return PICO_TEST_RUN(TestRunningAgentKeepsModelUntilIdle());
 }

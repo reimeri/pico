@@ -1,3 +1,4 @@
+#include "test_wait.h"
 #include "canonical.h"
 #include "json.h"
 #include "sanitizer_detect.h"
@@ -259,7 +260,7 @@ static void TestBoundedMentions(void)
     pid_t pid = fork();
     if (pid == 0)
     {
-        alarm(3);
+        PicoTest_Wait(__func__, "file completion query returns while FIFO is held");
         struct rlimit limit = {128u * 1024u * 1024u, 128u * 1024u * 1024u};
 #if PICO_TEST_ASAN
         /* ASan shadow mapping needs the full address space; a hard cap aborts

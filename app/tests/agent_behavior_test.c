@@ -1,5 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "test_wait.h"
+#ifdef PICO_TEST_CLOCK
+#include "test_clock.h"
+#endif
 #include "agent.h"
 #include "workspace_internal.h"
 #include "json.h"
@@ -107,8 +111,6 @@ typedef struct TestState {
     int provider_cached_tokens;
     int usage_log_count;
     bool emit_think_summaries;
-    double tps_generation_seconds;
-    double tps_first_output_at;
     bool logged_thinking_parts;
     char logged_thinking[256];
     char logged_content[256];
@@ -262,13 +264,6 @@ static void SleepOneMs(void)
 {
     struct timespec delay = {.tv_nsec = 1000000L};
     nanosleep(&delay, NULL);
-}
-
-static double MonotonicSeconds(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
 static void SnapshotTurn(const PicoLlmTurn *turn)
@@ -502,7 +497,6 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     out->cached_tokens = cached_tokens;
     if (mode == TEST_PROVIDER_TPS)
     {
-        double start = MonotonicSeconds();
         FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "abcd", 4);
         FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "summary snapshot", 16);
         FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "thinking", 8);
@@ -513,12 +507,10 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         FakeToolArgs(on_delta, user, 0, "\"x\":1}");
         FakeToolDone(on_delta, user, 0, "call-tps", "echo_test", "{\"x\":1}");
         FakeDelta(on_delta, user, PICO_LLM_DELTA_STATUS, "not model output", 16);
-        for (int i = 0; i < 300; i++) SleepOneMs();
+#ifdef PICO_TEST_CLOCK
+        PicoTestClock_Advance(102.0);
+#endif
         FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "done", 4);
-        pthread_mutex_lock(&g_test.mu);
-        g_test.tps_first_output_at = start;
-        g_test.tps_generation_seconds = MonotonicSeconds() - start;
-        pthread_mutex_unlock(&g_test.mu);
         pico_llm_result_add_text(out, "done");
         return PICO_LLM_OK;
     }
@@ -2008,7 +2000,7 @@ static void TestAddProvider(PicoHost *app, const PicoProvider *provider)
 
 static bool WaitForPending(PicoHost *app, uint64_t different_from, PicoToolAsk *out)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(app, TestAgent(app));
         PicoToolAsk ask;
@@ -2017,21 +2009,19 @@ static bool WaitForPending(PicoHost *app, uint64_t different_from, PicoToolAsk *
             *out = ask;
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
 
 static bool WaitForIdle(PicoHost *app)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(app, TestAgent(app));
         if (!PicoAgent_IsBusy(TestAgent(app)))
         {
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
@@ -2077,21 +2067,20 @@ static PicoTraceLine *ToolTraceByCallId(PicoHost *app, const char *call_id)
 
 static bool WaitForBlockCount(PicoHost *app, int count)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(app, TestAgent(app));
         pthread_mutex_lock(&g_test.mu);
         bool entered = g_test.block_entered_count >= count;
         pthread_mutex_unlock(&g_test.mu);
         if (entered) return true;
-        SleepOneMs();
     }
     return false;
 }
 
 static bool WaitForBlock(PicoHost *app)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(app, TestAgent(app));
         pthread_mutex_lock(&g_test.mu);
@@ -2101,7 +2090,6 @@ static bool WaitForBlock(PicoHost *app)
         {
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
@@ -2659,7 +2647,6 @@ static int TestDeferredWorkspaceChange(void)
     PicoWorkspace *new_ws;
     PicoWorkspaceId old_ws_id;
     PicoAgent *old_agent;
-    int i;
     if (!old_dir || !new_dir)
     {
         return Fail(name, "could not create workspaces");
@@ -2698,10 +2685,9 @@ static int TestDeferredWorkspaceChange(void)
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    for (i = 0; i < 3000 && PicoAgent_IsBusy(old_agent); i++)
+    PICO_TEST_WAIT(PicoAgent_IsBusy(old_agent))
     {
         pico_host_pump(&app);
-        SleepOneMs();
     }
     if (PicoAgent_IsBusy(old_agent) || pico_agent_count(&app) != 2 ||
         PicoHost_FindAgent(&app, old_id) != old_agent)
@@ -2763,10 +2749,9 @@ static int TestSubmitHookCannotRetarget(void)
 
     PicoHost_Submit(&app);
     PicoAgent *first = PicoHost_FindAgent(&app, first_id);
-    for (int i = 0; i < 3000 && first && PicoAgent_IsBusy(first); i++)
+    PICO_TEST_WAIT(first && PicoAgent_IsBusy(first))
     {
         PicoAgent_Pump(&app, first);
-        SleepOneMs();
     }
     if (first && PicoAgent_IsBusy(first))
     {
@@ -3059,7 +3044,7 @@ static int TestBeforeForceCancel(void)
     pthread_mutex_unlock(&g_test.mu);
 
     bool reaped = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(&app, TestAgent(&app));
         if (!PicoAgent_BlocksReload(TestAgent(&app)))
@@ -3067,7 +3052,6 @@ static int TestBeforeForceCancel(void)
             reaped = true;
             break;
         }
-        SleepOneMs();
     }
     pthread_mutex_lock(&g_test.mu);
     bool skipped = g_test.followup_hook_calls == 0;
@@ -3740,7 +3724,7 @@ static int TestAskReplaceNotification(void)
         return FinishAskReplace(&app, "first answer was rejected");
     }
     bool first_done = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pthread_mutex_lock(&g_test.mu);
         first_done = g_test.ask_rc[0][0] == PICO_ASK_OK;
@@ -3749,7 +3733,6 @@ static int TestAskReplaceNotification(void)
         {
             break;
         }
-        SleepOneMs();
     }
     if (!first_done)
     {
@@ -3758,7 +3741,7 @@ static int TestAskReplaceNotification(void)
     /* The next pico_tool_ask is entered as soon as the first returns. Wait for
      * that entry, then pump once, so one snapshot pass replaces old-id → new-id. */
     bool second_entered = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pthread_mutex_lock(&g_test.mu);
         second_entered = g_test.ask_entered >= 2;
@@ -3767,7 +3750,6 @@ static int TestAskReplaceNotification(void)
         {
             break;
         }
-        SleepOneMs();
     }
     if (!second_entered)
     {
@@ -4122,7 +4104,7 @@ static int TestTodoApplyRenamesSession(void)
     /* The fixture owns this extension instance: drain its agent hooks before freeing state. */
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 1;
+    deadline.tv_sec = (time_t)(INT64_MAX / 2);
     ok = PicoWorkspace_QuiesceBefore(ws, &deadline) && ok;
     if (ext.workspace_shutdown)
     {
@@ -4479,10 +4461,9 @@ static int TestWorkerContextCapturesRegistrationGeneration(void)
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    for (int i = 0; i < 3000 && PicoAgent_IsBusy(TestAgent(&app)); i++)
+    PICO_TEST_WAIT(PicoAgent_IsBusy(TestAgent(&app)))
     {
         PicoAgent_Pump(&app, TestAgent(&app));
-        SleepOneMs();
     }
     PicoHost_Shutdown(&app);
     return captured == 7 ? 0 : Fail(name, "turn worker did not retain the workspace registration generation");
@@ -4590,10 +4571,9 @@ static int TestMalformedCanonicalResult(void)
     PicoHost app;
     InitApp(&app);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
-    for (int i = 0; i < 3000 && TestAgent(&app)->state != PICO_AGENT_ERROR; i++)
+    PICO_TEST_WAIT(TestAgent(&app)->state != PICO_AGENT_ERROR)
     {
         PicoAgent_Pump(&app, TestAgent(&app));
-        SleepOneMs();
     }
     bool ok = TestAgent(&app)->state == PICO_AGENT_ERROR &&
               TestAgent(&app)->error &&
@@ -4609,10 +4589,9 @@ static int TestMediaPersistenceFailureIsAtomic(void)
     PicoHost app;
     InitApp(&app);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
-    for (int i = 0; i < 3000 && TestAgent(&app)->state != PICO_AGENT_ERROR; i++)
+    PICO_TEST_WAIT(TestAgent(&app)->state != PICO_AGENT_ERROR)
     {
         PicoAgent_Pump(&app, TestAgent(&app));
-        SleepOneMs();
     }
     pthread_mutex_lock(&g_test.mu);
     bool no_result_events = g_test.session_item_order[0] == '\0';
@@ -4770,6 +4749,12 @@ static int TestCancelledThinkingPersistence(void)
 static int TestStreamingTpsOutput(void)
 {
     const char *name = "streaming TPS counts model output once";
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Set(100.0);
+#else
+    fprintf(stderr, "SKIP: deterministic streaming TPS requires the test clock\n");
+    return 0;
+#endif
     ResetTest(TEST_PROVIDER_TPS, 0);
     PicoHost app;
     InitApp(&app);
@@ -4778,20 +4763,18 @@ static int TestStreamingTpsOutput(void)
     if (!WaitForIdle(&app))
     {
         PicoHost_Shutdown(&app);
+#ifdef PICO_TEST_CLOCK
+        PicoTestClock_Reset();
+#endif
         return Fail(name, "provider did not finish");
     }
-    pthread_mutex_lock(&g_test.mu);
-    double minimum_seconds = g_test.tps_generation_seconds;
-    double maximum_seconds = MonotonicSeconds() - g_test.tps_first_output_at;
-    pthread_mutex_unlock(&g_test.mu);
-    /* Four answer bytes, eight thinking bytes, nine name bytes, seven argument
-     * bytes, four final answer bytes. Bracket the estimator's end between the
-     * provider's last output and receipt of completion: scheduling delays in
-     * result construction or event delivery must not make this test flaky.
-     * A small allowance covers timing immediately around the first callback. */
-    double minimum_bytes = agent->tokens_per_second * 4.0 * minimum_seconds;
-    double maximum_bytes = agent->tokens_per_second * 4.0 * maximum_seconds;
-    bool counted_once = agent->has_tokens_per_second && minimum_bytes < 33.0 && maximum_bytes > 31.0;
+    /* Text, raw thinking, tool name/arguments and final text total 32 bytes.
+     * The controlled two-second generation ignores scheduler/dispatch latency. */
+    bool counted_once = agent->has_tokens_per_second && agent->tokens_per_second > 0;
+#ifdef PICO_TEST_CLOCK
+    counted_once = counted_once && agent->tokens_per_second == 4.0;
+    PicoTestClock_Reset();
+#endif
     double final_rate = agent->tokens_per_second;
     PicoAgent_Compact(&app, agent);
     bool retained = WaitForIdle(&app) && agent->has_tokens_per_second &&
@@ -4839,14 +4822,10 @@ static int TestStreamingTextActivity(void)
         return Fail(name, "streaming provider did not start");
     }
     bool writing = false;
-    for (int i = 0; i < 3000 && !writing; i++)
+    PICO_TEST_WAIT(!writing)
     {
         PicoAgent_Pump(&app, TestAgent(&app));
         writing = strcmp(TestAgent(&app)->activity, "Writing…") == 0;
-        if (!writing)
-        {
-            SleepOneMs();
-        }
     }
     PicoAgent_Cancel(TestAgent(&app));
     if (!WaitForIdle(&app))
@@ -4923,15 +4902,13 @@ static int TestRestoredThinkKeepsUnknownDuration(void)
 
 static bool WaitForUi(PicoHost *app, const char *box_name, PicoUiPost *out)
 {
-    int i;
-    for (i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(app, TestAgent(app));
         if (pico_ui_latest(app, box_name, out))
         {
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
@@ -5017,7 +4994,6 @@ static int TestUiPostForceCancel(void)
     PicoHost app;
     PicoUiPost post;
     bool reaped = false;
-    int i;
 
     ResetTest(TEST_UI_POST_BLOCK, 1);
     InitApp(&app);
@@ -5038,7 +5014,7 @@ static int TestUiPostForceCancel(void)
     g_test.block_release = true;
     pthread_cond_broadcast(&g_test.cv);
     pthread_mutex_unlock(&g_test.mu);
-    for (i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoAgent_Pump(&app, TestAgent(&app));
         if (!PicoAgent_BlocksReload(TestAgent(&app)))
@@ -5046,7 +5022,6 @@ static int TestUiPostForceCancel(void)
             reaped = true;
             break;
         }
-        SleepOneMs();
     }
     if (!reaped || !pico_ui_latest(&app, "stream", &post) || !post.text ||
         strcmp(post.text, "live") != 0)
@@ -5060,8 +5035,7 @@ static int TestUiPostForceCancel(void)
 
 static bool WaitForFlagNoPump(bool *flag)
 {
-    int i;
-    for (i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pthread_mutex_lock(&g_test.mu);
         bool done = *flag;
@@ -5070,7 +5044,6 @@ static bool WaitForFlagNoPump(bool *flag)
         {
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
@@ -5158,132 +5131,132 @@ static int TestUiPostLimit(void)
 int main(void)
 {
     int failed = 0;
-    failed |= TestProfileParallelSafeValidation();
-    failed |= TestProfileFastValidation();
-    failed |= TestSubagentProfileBarrier();
-    failed |= TestSubagentIdentityRewrite();
-    failed |= TestSubagentParallelSettingValidation();
-    failed |= TestParallelScheduling();
-    failed |= TestParallelLimitOne();
-    failed |= TestParallelAsks();
-    failed |= TestParallelForceCancelReload();
-    failed |= TestParallelCancelKeepsCompleted();
-    failed |= TestParallelProcessCancellation();
-    failed |= TestParallelBeforeHooks();
-    failed |= TestParallelDelegations();
-    failed |= TestParallelResumeReservation();
-    failed |= TestSequential();
-    failed |= TestCancellation();
-    failed |= TestProvisionalToolRow();
-    failed |= TestProvisionalToolRowBatchDone();
-    failed |= TestProvisionalToolRowCancel();
-    failed |= TestStaleId();
-    failed |= TestToolSchemaValidation();
-    failed |= TestToolRegistrationFailureWarns();
-    failed |= TestToolGroupTitleRegistration();
-    failed |= TestProductionInit();
-    failed |= TestReloadQuiescence();
-    failed |= TestDeferredWorkspaceChange();
-    failed |= TestInvalidRestrictedPolicyPreservesSubmit();
-    failed |= TestImageOnlySubmitStartsTurn();
-    failed |= TestNonVisionSubmitPreservesDraft();
-    failed |= TestInvalidPayload();
-    failed |= TestRetiredRuntimeCap();
-    failed |= TestForceCancelToolPreservesCanonicalHistory();
-    failed |= TestBeforeForceCancel();
-    failed |= TestBeforeDeny();
-    failed |= TestBeforeAskCancel();
-    failed |= TestBeforeRewriteArgs();
-    failed |= TestAfterRewriteOutput();
-    failed |= TestRewriteThenDenyArgs();
-    failed |= TestStructuredToolDetails();
-    failed |= TestInvalidDetailsFailClosed();
-    failed |= TestDeniedDetailsDoNotApply();
-    failed |= TestRequestOnlyContext();
-    failed |= TestUnmappedContextFails();
-    failed |= TestLlmExtraInstructions();
-    failed |= TestBuildInstructionsExtraSpan();
-    failed |= TestBuildInstructionsMatchTurn();
-    failed |= TestAgentPolicyPrecedesLlmHooks();
-    failed |= TestLlmExcludeTool();
-    failed |= TestHiddenToolCallIsControlled();
-    failed |= TestOfferedCatalogSnapshot();
-    failed |= TestMalformedToolCalls();
-    failed |= TestTurnEnd();
-    failed |= TestCancelNotification();
-    failed |= TestErrorNotification();
-    failed |= TestAskNotification();
-    failed |= TestAskForceCancelNotification();
-    failed |= TestAskReplaceNotification();
-    failed |= TestCancelledProviderUsage();
-    failed |= TestSessionUsageAccumulation();
-    failed |= TestFastTurnSnapshot();
-    failed |= TestUsageNormalizationAndSaturation();
-    failed |= TestAfterCompact();
-    failed |= TestToolTraceError();
-    failed |= TestQueuedToolCallProgress();
-    failed |= TestTodoAgentIsolation();
-    failed |= TestTodoApplyRenamesSession();
-    failed |= TestAskUserHiddenOmitsGuidance();
-    failed |= TestAskUserRegistrationReload();
-    failed |= TestAskUserToolSuccess();
-    failed |= TestAskUserToolCancellation();
-    failed |= TestResumedToolCallArgs();
-    failed |= TestShToolCallDescriptionArgs();
-    failed |= TestBackgroundToolCallDescriptionArgs();
-    failed |= TestBackgroundToolCallCommandExtraction();
-    failed |= TestShToolCallCommandExtraction();
-    failed |= TestShToolCallTimeoutLabel();
-    failed |= TestToolActivityDescriptionScope();
-    failed |= TestToolCallListArgs();
-    failed |= TestManagerProfileRegistry();
-    failed |= TestManagerConcurrencyAndIsolation();
-    failed |= TestSubmitTargetsExplicitAgentWithoutChangingSelection();
-    failed |= TestSubmitIsCompleteExplicitTurn();
-    failed |= TestSubmitReportsResultCodes();
-    failed |= TestLoginRoutesToSnapshottedAgent();
-    failed |= TestResumeMissingAgentReturnsNotFound();
-    failed |= TestResumeLeavesUnselectedAgentSelection();
-    failed |= TestWorkerContextCapturesRegistrationGeneration();
-    failed |= TestSubmitHookCannotRetarget();
-    failed |= TestSubagentProfileResolution();
-    failed |= TestSubagentProfileDiscovery();
-    failed |= TestNamedSubagentDelegation();
-    failed |= TestSubagentParentGuidance();
-    failed |= TestSubagentParentCancellation();
-    failed |= TestSubagentCancellationBeforeEnqueue();
-    failed |= TestSubagentDirectChildCancellation();
-    failed |= TestSubagentLiveInspect();
-    failed |= TestSubagentInspectRetention();
-    failed |= TestSubagentInspectThenContinue();
-    failed |= TestSubagentSessionContinuation();
-    failed |= TestSubagentContinuationEmptyAnswer();
-    failed |= TestSubagentResumeFailures();
-    failed |= TestSubagentChildAsk();
-    failed |= TestSubagentDelegationCaps();
-    failed |= TestCanonicalContinuationState();
-    failed |= TestResultItemOrder(TEST_ITEM_ORDER, true, "assistant then tool_call history order");
-    failed |= TestResultItemOrder(TEST_ITEM_ORDER_REVERSE, false, "tool_call then assistant history order");
-    failed |= TestMultipleAssistantItemsShareMessageGroup();
-    failed |= TestInterleavedTraceItemsKeepCanonicalOrder();
-    failed |= TestMalformedCanonicalResult();
-    failed |= TestMediaPersistenceFailureIsAtomic();
-    failed |= TestNonVisionMediaRejected();
-    failed |= TestFailedStreamPersistence(TEST_PROVIDER_THINK_FAIL);
-    failed |= TestFailedStreamPersistence(TEST_PROVIDER_TEXT_FAIL);
-    failed |= TestProviderStatus();
-    failed |= TestCancelledThinkingPersistence();
-    failed |= TestStreamingTextActivity();
-    failed |= TestStreamingTpsOutput();
-    failed |= TestSubagentDoesNotCalculateTps();
-    failed |= TestThinkSummaryCoalesce();
-    failed |= TestRestoredThinkKeepsUnknownDuration();
-    failed |= TestUiPostAppendReplace();
-    failed |= TestUiPostCap();
-    failed |= TestUiPostForceCancel();
-    failed |= TestUiPostUnpublishedIdentity();
-    failed |= TestUiPostLimit();
+    failed |= PICO_TEST_RUN(TestProfileParallelSafeValidation());
+    failed |= PICO_TEST_RUN(TestProfileFastValidation());
+    failed |= PICO_TEST_RUN(TestSubagentProfileBarrier());
+    failed |= PICO_TEST_RUN(TestSubagentIdentityRewrite());
+    failed |= PICO_TEST_RUN(TestSubagentParallelSettingValidation());
+    failed |= PICO_TEST_RUN(TestParallelScheduling());
+    failed |= PICO_TEST_RUN(TestParallelLimitOne());
+    failed |= PICO_TEST_RUN(TestParallelAsks());
+    failed |= PICO_TEST_RUN(TestParallelForceCancelReload());
+    failed |= PICO_TEST_RUN(TestParallelCancelKeepsCompleted());
+    failed |= PICO_TEST_RUN(TestParallelProcessCancellation());
+    failed |= PICO_TEST_RUN(TestParallelBeforeHooks());
+    failed |= PICO_TEST_RUN(TestParallelDelegations());
+    failed |= PICO_TEST_RUN(TestParallelResumeReservation());
+    failed |= PICO_TEST_RUN(TestSequential());
+    failed |= PICO_TEST_RUN(TestCancellation());
+    failed |= PICO_TEST_RUN(TestProvisionalToolRow());
+    failed |= PICO_TEST_RUN(TestProvisionalToolRowBatchDone());
+    failed |= PICO_TEST_RUN(TestProvisionalToolRowCancel());
+    failed |= PICO_TEST_RUN(TestStaleId());
+    failed |= PICO_TEST_RUN(TestToolSchemaValidation());
+    failed |= PICO_TEST_RUN(TestToolRegistrationFailureWarns());
+    failed |= PICO_TEST_RUN(TestToolGroupTitleRegistration());
+    failed |= PICO_TEST_RUN(TestProductionInit());
+    failed |= PICO_TEST_RUN(TestReloadQuiescence());
+    failed |= PICO_TEST_RUN(TestDeferredWorkspaceChange());
+    failed |= PICO_TEST_RUN(TestInvalidRestrictedPolicyPreservesSubmit());
+    failed |= PICO_TEST_RUN(TestImageOnlySubmitStartsTurn());
+    failed |= PICO_TEST_RUN(TestNonVisionSubmitPreservesDraft());
+    failed |= PICO_TEST_RUN(TestInvalidPayload());
+    failed |= PICO_TEST_RUN(TestRetiredRuntimeCap());
+    failed |= PICO_TEST_RUN(TestForceCancelToolPreservesCanonicalHistory());
+    failed |= PICO_TEST_RUN(TestBeforeForceCancel());
+    failed |= PICO_TEST_RUN(TestBeforeDeny());
+    failed |= PICO_TEST_RUN(TestBeforeAskCancel());
+    failed |= PICO_TEST_RUN(TestBeforeRewriteArgs());
+    failed |= PICO_TEST_RUN(TestAfterRewriteOutput());
+    failed |= PICO_TEST_RUN(TestRewriteThenDenyArgs());
+    failed |= PICO_TEST_RUN(TestStructuredToolDetails());
+    failed |= PICO_TEST_RUN(TestInvalidDetailsFailClosed());
+    failed |= PICO_TEST_RUN(TestDeniedDetailsDoNotApply());
+    failed |= PICO_TEST_RUN(TestRequestOnlyContext());
+    failed |= PICO_TEST_RUN(TestUnmappedContextFails());
+    failed |= PICO_TEST_RUN(TestLlmExtraInstructions());
+    failed |= PICO_TEST_RUN(TestBuildInstructionsExtraSpan());
+    failed |= PICO_TEST_RUN(TestBuildInstructionsMatchTurn());
+    failed |= PICO_TEST_RUN(TestAgentPolicyPrecedesLlmHooks());
+    failed |= PICO_TEST_RUN(TestLlmExcludeTool());
+    failed |= PICO_TEST_RUN(TestHiddenToolCallIsControlled());
+    failed |= PICO_TEST_RUN(TestOfferedCatalogSnapshot());
+    failed |= PICO_TEST_RUN(TestMalformedToolCalls());
+    failed |= PICO_TEST_RUN(TestTurnEnd());
+    failed |= PICO_TEST_RUN(TestCancelNotification());
+    failed |= PICO_TEST_RUN(TestErrorNotification());
+    failed |= PICO_TEST_RUN(TestAskNotification());
+    failed |= PICO_TEST_RUN(TestAskForceCancelNotification());
+    failed |= PICO_TEST_RUN(TestAskReplaceNotification());
+    failed |= PICO_TEST_RUN(TestCancelledProviderUsage());
+    failed |= PICO_TEST_RUN(TestSessionUsageAccumulation());
+    failed |= PICO_TEST_RUN(TestFastTurnSnapshot());
+    failed |= PICO_TEST_RUN(TestUsageNormalizationAndSaturation());
+    failed |= PICO_TEST_RUN(TestAfterCompact());
+    failed |= PICO_TEST_RUN(TestToolTraceError());
+    failed |= PICO_TEST_RUN(TestQueuedToolCallProgress());
+    failed |= PICO_TEST_RUN(TestTodoAgentIsolation());
+    failed |= PICO_TEST_RUN(TestTodoApplyRenamesSession());
+    failed |= PICO_TEST_RUN(TestAskUserHiddenOmitsGuidance());
+    failed |= PICO_TEST_RUN(TestAskUserRegistrationReload());
+    failed |= PICO_TEST_RUN(TestAskUserToolSuccess());
+    failed |= PICO_TEST_RUN(TestAskUserToolCancellation());
+    failed |= PICO_TEST_RUN(TestResumedToolCallArgs());
+    failed |= PICO_TEST_RUN(TestShToolCallDescriptionArgs());
+    failed |= PICO_TEST_RUN(TestBackgroundToolCallDescriptionArgs());
+    failed |= PICO_TEST_RUN(TestBackgroundToolCallCommandExtraction());
+    failed |= PICO_TEST_RUN(TestShToolCallCommandExtraction());
+    failed |= PICO_TEST_RUN(TestShToolCallTimeoutLabel());
+    failed |= PICO_TEST_RUN(TestToolActivityDescriptionScope());
+    failed |= PICO_TEST_RUN(TestToolCallListArgs());
+    failed |= PICO_TEST_RUN(TestManagerProfileRegistry());
+    failed |= PICO_TEST_RUN(TestManagerConcurrencyAndIsolation());
+    failed |= PICO_TEST_RUN(TestSubmitTargetsExplicitAgentWithoutChangingSelection());
+    failed |= PICO_TEST_RUN(TestSubmitIsCompleteExplicitTurn());
+    failed |= PICO_TEST_RUN(TestSubmitReportsResultCodes());
+    failed |= PICO_TEST_RUN(TestLoginRoutesToSnapshottedAgent());
+    failed |= PICO_TEST_RUN(TestResumeMissingAgentReturnsNotFound());
+    failed |= PICO_TEST_RUN(TestResumeLeavesUnselectedAgentSelection());
+    failed |= PICO_TEST_RUN(TestWorkerContextCapturesRegistrationGeneration());
+    failed |= PICO_TEST_RUN(TestSubmitHookCannotRetarget());
+    failed |= PICO_TEST_RUN(TestSubagentProfileResolution());
+    failed |= PICO_TEST_RUN(TestSubagentProfileDiscovery());
+    failed |= PICO_TEST_RUN(TestNamedSubagentDelegation());
+    failed |= PICO_TEST_RUN(TestSubagentParentGuidance());
+    failed |= PICO_TEST_RUN(TestSubagentParentCancellation());
+    failed |= PICO_TEST_RUN(TestSubagentCancellationBeforeEnqueue());
+    failed |= PICO_TEST_RUN(TestSubagentDirectChildCancellation());
+    failed |= PICO_TEST_RUN(TestSubagentLiveInspect());
+    failed |= PICO_TEST_RUN(TestSubagentInspectRetention());
+    failed |= PICO_TEST_RUN(TestSubagentInspectThenContinue());
+    failed |= PICO_TEST_RUN(TestSubagentSessionContinuation());
+    failed |= PICO_TEST_RUN(TestSubagentContinuationEmptyAnswer());
+    failed |= PICO_TEST_RUN(TestSubagentResumeFailures());
+    failed |= PICO_TEST_RUN(TestSubagentChildAsk());
+    failed |= PICO_TEST_RUN(TestSubagentDelegationCaps());
+    failed |= PICO_TEST_RUN(TestCanonicalContinuationState());
+    failed |= PICO_TEST_RUN(TestResultItemOrder(TEST_ITEM_ORDER, true, "assistant then tool_call history order"));
+    failed |= PICO_TEST_RUN(TestResultItemOrder(TEST_ITEM_ORDER_REVERSE, false, "tool_call then assistant history order"));
+    failed |= PICO_TEST_RUN(TestMultipleAssistantItemsShareMessageGroup());
+    failed |= PICO_TEST_RUN(TestInterleavedTraceItemsKeepCanonicalOrder());
+    failed |= PICO_TEST_RUN(TestMalformedCanonicalResult());
+    failed |= PICO_TEST_RUN(TestMediaPersistenceFailureIsAtomic());
+    failed |= PICO_TEST_RUN(TestNonVisionMediaRejected());
+    failed |= PICO_TEST_RUN(TestFailedStreamPersistence(TEST_PROVIDER_THINK_FAIL));
+    failed |= PICO_TEST_RUN(TestFailedStreamPersistence(TEST_PROVIDER_TEXT_FAIL));
+    failed |= PICO_TEST_RUN(TestProviderStatus());
+    failed |= PICO_TEST_RUN(TestCancelledThinkingPersistence());
+    failed |= PICO_TEST_RUN(TestStreamingTextActivity());
+    failed |= PICO_TEST_RUN(TestStreamingTpsOutput());
+    failed |= PICO_TEST_RUN(TestSubagentDoesNotCalculateTps());
+    failed |= PICO_TEST_RUN(TestThinkSummaryCoalesce());
+    failed |= PICO_TEST_RUN(TestRestoredThinkKeepsUnknownDuration());
+    failed |= PICO_TEST_RUN(TestUiPostAppendReplace());
+    failed |= PICO_TEST_RUN(TestUiPostCap());
+    failed |= PICO_TEST_RUN(TestUiPostForceCancel());
+    failed |= PICO_TEST_RUN(TestUiPostUnpublishedIdentity());
+    failed |= PICO_TEST_RUN(TestUiPostLimit());
     /* Retained shutdown permanently retires Pico in this process, so run last. */
-    failed |= TestShutdownTimeout();
+    failed |= PICO_TEST_RUN(TestShutdownTimeout());
     return failed ? 1 : 0;
 }

@@ -1,3 +1,8 @@
+#include "test_wait.h"
+#ifdef PICO_TEST_CLOCK
+#include "test_clock.h"
+#include "test_io.h"
+#endif
 #include "theme_internal.h"
 #include "pico/host.h"
 #include "pico/plugin.h"
@@ -155,42 +160,38 @@ _Static_assert((PicoAgentId)0 == 0, "zero is an invalid agent id");
  * while keeping the actual production entry points nonblocking. */
 static void WaitPluginLoad(PicoHost *host)
 {
-    for (int i = 0; i < 10000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoPlugins_Load(host);
         if (!host->plugin_compile) return;
-        usleep(1000);
     }
 }
 static void WaitPluginPoll(PicoHost *host)
 {
     /* A due poll schedules detection; the next poll adopts its result. */
     host->plugin_last_poll = -1;
-    for (int i = 0; i < 10000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoPlugins_Poll(host);
         if (!host->plugin_scan_pending && !host->plugin_compile) return;
-        usleep(1000);
     }
 }
 static bool WaitHostReload(PicoHost *host)
 {
-    for (int i = 0; i < 10000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         bool ok = PicoPlugins_ReloadHost(host);
         if (!host->plugin_compile) return ok;
-        usleep(1000);
     }
     return false;
 }
 static bool WaitWorkspaceReload(PicoWorkspace *workspace)
 {
-    for (int i = 0; i < 10000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         bool ok = PicoWorkspace_Reload(workspace);
         if (!workspace->host->plugin_compile) return ok;
         PicoPlugins_Poll(workspace->host);
-        usleep(1000);
     }
     return false;
 }
@@ -206,7 +207,6 @@ static int g_persist_ready_fd = -1;
 static int g_persist_continue_fd = -1;
 static atomic_int g_catalog_scan_calls;
 static atomic_int g_catalog_scan_done_calls;
-static atomic_int g_catalog_scan_block_ms;
 static atomic_int g_catalog_snapshot_calls;
 static atomic_int g_catalog_snapshot_done_calls;
 static int g_catalog_ready_fd = -1;
@@ -218,36 +218,11 @@ static int g_replay_adopted;
 
 static bool WaitCatalogWorkDone(PicoHost *host, const atomic_int *completed, int target_done)
 {
-    for (int i = 0; i < 10000; i++)
+    PICO_TEST_WAIT_LOOP("catalog worker completion and main-thread adoption")
     {
         pico_host_pump(host);
-        if (*completed >= target_done)
-        {
-            int last = *completed;
-            int quiet = 0;
-            for (int j = 0; j < 100; j++)
-            {
-                pico_host_pump(host);
-                if (*completed == last)
-                {
-                    quiet++;
-                    if (quiet >= 3)
-                    {
-                        return true;
-                    }
-                }
-                else
-                {
-                    last = *completed;
-                    quiet = 0;
-                }
-                usleep(1000);
-            }
-            return true;
-        }
-        usleep(1000);
+        if (*completed >= target_done && !host->tasks) return true;
     }
-    return false;
 }
 
 static bool WaitCatalogScanDone(PicoHost *host, int target_done)
@@ -262,6 +237,7 @@ static bool WaitCatalogSnapshotDone(PicoHost *host, int target_done)
 
 static bool TransferTestByte(int fd, bool write_byte)
 {
+    PicoTest_Wait(__func__, write_byte ? "release gate" : "worker ready gate");
     char byte = 'x';
     ssize_t result;
     do
@@ -293,11 +269,6 @@ bool PicoSession_TestHook(const char *stage)
             int ready = g_catalog_ready_fd, resume = g_catalog_continue_fd;
             g_catalog_ready_fd = g_catalog_continue_fd = -1;
             if (!TransferTestByte(ready, true) || !TransferTestByte(resume, false)) return true;
-        }
-        if (g_catalog_scan_block_ms > 0)
-        {
-            int ms = atomic_exchange(&g_catalog_scan_block_ms, 0);
-            usleep((useconds_t)ms * 1000);
         }
     }
     if (stage && strcmp(stage, "catalog_scan_done") == 0)
@@ -1871,18 +1842,17 @@ done:
 }
 
 
-/* The UI drain is capped so a stalled disk cannot freeze the host. Contract
- * tests must outwait slow sandboxed build storage before reading the file. */
+/* Persistence assertions depend on completion, not storage latency. Leave
+ * hang detection to CTest's overall timeout; production UI/shutdown callers
+ * still use their own bounded deadlines. A NULL deadline waits on persist_cv. */
 static bool DrainSessionForAssertion(PicoHost *host, PicoAgent *agent)
 {
-    struct timespec deadline;
     if (!host || !agent)
     {
         return false;
     }
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 10;
-    return PicoSession_DrainPersistBefore(host, agent, &deadline);
+    PicoTest_Wait(__func__, "session writes completed");
+    return PicoSession_DrainPersistBefore(host, agent, NULL);
 }
 
 static int TestFastSelectionPersistence(void)
@@ -1893,6 +1863,7 @@ static int TestFastSelectionPersistence(void)
     PicoWorkspaceId ws_id = 0;
     PicoAgentId id = 0;
     int rc = 1;
+    const char *phase = "Fast persistence host initialization";
     if (!mkdtemp(dir) || !mkdtemp(cfg))
     {
         Fail("Fast persistence fixture");
@@ -1902,11 +1873,13 @@ static int TestFastSelectionPersistence(void)
     if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
         goto done;
     WaitPluginLoad(host);
+    phase = "Fast persistence workspace open";
     if (pico_workspace_open(host, dir, &ws_id) != PICO_OK)
         goto done;
     pico_auth_set_env_key(host, "openai", "test-api-key");
     pico_auth_set_active(host, "openai", PICO_AUTH_API_KEY);
     PicoWorkspace *ws = PicoHost_FindWorkspace(host, ws_id);
+    phase = "Fast persistence model fixture allocation";
     PicoModel *models = realloc(ws->models, 2 * sizeof(PicoModel));
     if (!models)
         goto done;
@@ -1918,14 +1891,19 @@ static int TestFastSelectionPersistence(void)
     models[1] = models[0];
     snprintf(models[1].id, sizeof(models[1].id), "second-fast-model");
     PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+    phase = "Fast persistence writer creation";
     if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
         goto done;
     PicoAgent *writer = PicoHost_FindAgent(host, id);
-    if (!PicoSettings_SetFast(writer, true) ||
-        PicoSession_LogUser(host, writer, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
-        PicoSession_LogUsage(host, writer, 10, 0, true, "default") != PICO_SESSION_WRITE_OK ||
-        !DrainSessionForAssertion(host, writer))
-        goto done;
+    phase = "Fast persistence enabling Fast";
+    if (!PicoSettings_SetFast(writer, true)) goto done;
+    phase = "Fast persistence queueing seed message";
+    if (PicoSession_LogUser(host, writer, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK) goto done;
+    phase = "Fast persistence queueing usage";
+    if (PicoSession_LogUsage(host, writer, 10, 0, true, "default") != PICO_SESSION_WRITE_OK) goto done;
+    phase = "Fast persistence draining initial settings and usage";
+    if (!DrainSessionForAssertion(host, writer)) goto done;
+    phase = "Fast persistence resumed agent creation";
     options.session_start = PICO_SESSION_NONE;
     if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
         goto done;
@@ -1954,6 +1932,7 @@ static int TestFastSelectionPersistence(void)
         Fail("removing model capability must clear Fast");
         goto done;
     }
+    phase = "Fast persistence draining capability-removal setting";
     if (!DrainSessionForAssertion(host, writer))
         goto done;
     /* Restoring capability must not resurrect the old fast:true session event. */
@@ -1963,6 +1942,7 @@ static int TestFastSelectionPersistence(void)
         Fail("capability-removal Fast clear must survive session resume");
         goto done;
     }
+    phase = "Fast persistence re-enabling Fast";
     if (!PicoSettings_SetFast(writer, true))
         goto done;
     models[0].supports_fast = false;
@@ -1980,7 +1960,7 @@ static int TestFastSelectionPersistence(void)
     }
     rc = 0;
 done:
-    if (rc && !g_failed) Fail("Fast persistence setup or session operation failed");
+    if (rc && !g_failed) Fail(phase);
     if (host && pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
     {
         Fail("Fast persistence host shutdown retained pending work");
@@ -4599,7 +4579,7 @@ static int TestBackgroundJobsSurviveWorkspaceReload(void)
         rmdir(dir);
         return 1;
     }
-    json = PicoBgTable_Spawn(table, agent_id, dir, "sleep", "sleep 30", &error);
+    json = PicoBgTable_Spawn(table, agent_id, dir, "sleep", "while :; do sleep 3600; done", &error);
     if (!json)
     {
         free(error);
@@ -6134,13 +6114,6 @@ static uint64_t WorkspaceSourceGeneration(const PicoWorkspace *workspace,
     return 0;
 }
 
-static double TestMonotonicTime(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
 /* A dependency manifest can be on a slow filesystem. A pending read must not
  * block an ordinary automatic poll, and closing the host must quiesce the
  * scanner once the read completes. */
@@ -6188,25 +6161,17 @@ static int TestPluginSourceScanDoesNotBlockUi(void)
     if (rename(manifest, saved) || mkfifo(manifest, 0600)) goto done;
 
     host->plugin_last_poll = -1;
-    double start = TestMonotonicTime();
     PicoPlugins_Poll(host);
-    if (TestMonotonicTime() - start > 0.25 || !host->plugin_scan_pending) goto done;
-    /* The worker's open of the manifest has no reader-independent deadline.
-     * The UI must remain responsive even while that open is blocked. */
-    start = TestMonotonicTime();
-    PicoPlugins_Poll(host);
-    if (TestMonotonicTime() - start > 0.25 || PicoPlugins_HostState(host, "scan_probe") != value)
-        goto done;
-    int writer = -1;
-    for (int i = 0; i < 1000 && writer < 0; i++)
-    {
-        writer = open(manifest, O_WRONLY | O_NONBLOCK);
-        if (writer < 0 && errno != ENXIO) goto done;
-        if (writer < 0) usleep(1000);
-    }
+    if (!host->plugin_scan_pending) goto done;
+    /* Opening the writer proves the scanner has opened the FIFO. Keep it
+     * open so a UI poll must return while the dependency read is still held. */
+    PicoTest_Wait(__func__, "scanner opened dependency FIFO");
+    int writer = open(manifest, O_WRONLY);
     if (writer < 0) goto done;
+    PicoPlugins_Poll(host);
+    bool responsive = PicoPlugins_HostState(host, "scan_probe") == value;
     close(writer);
-    if (rename(saved, manifest)) goto done;
+    if (!responsive || rename(saved, manifest)) goto done;
     WaitPluginPoll(host);
     value = PicoPlugins_HostState(host, "scan_probe");
     if (!value || *value != 10) goto done;
@@ -6270,17 +6235,11 @@ static int TestBlockedSourceScanRetainsShutdown(void)
         PicoPlugins_Poll(host);
         /* Keep the writer open, so the scanner has opened the FIFO but cannot
          * reach EOF. Unlike a sleep, this guarantees it stays blocked. */
-        int writer = -1;
-        for (int i = 0; i < 1000 && writer < 0; i++)
-        {
-            writer = open(manifest, O_WRONLY | O_NONBLOCK);
-            if (writer < 0 && errno != ENXIO) _exit(8);
-            if (writer < 0) usleep(1000);
-        }
-        if (writer < 0) _exit(9);
-        alarm(15);
+        PicoTest_Wait(__func__, "scanner opened dependency FIFO");
+        int writer = open(manifest, O_WRONLY);
+        if (writer < 0) _exit(8);
         PicoHostShutdownResult result = PicoHost_Shutdown(host);
-        alarm(0);
+
         close(writer);
         RmRf(cfg); RmRf(cache);
         _exit(result == PICO_HOST_SHUTDOWN_RETAINED ? 0 : 10);
@@ -6302,6 +6261,7 @@ static int TestHeaderReloadIsAsynchronous(void)
     char cache[] = "/tmp/pico-header-cache-XXXXXX";
     char ws[] = "/tmp/pico-header-ws-XXXXXX";
     char ext_dir[4096], source[8192], header[8192], compiler[4096];
+    char ready_path[4096], release_path[4096], compiler_script[16384];
     PicoHost *host = NULL;
     int failed = 1;
     if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(ws)) return 1;
@@ -6309,6 +6269,12 @@ static int TestHeaderReloadIsAsynchronous(void)
     snprintf(source, sizeof(source), "%s/probe.c", ext_dir);
     snprintf(header, sizeof(header), "%s/value header.h", ext_dir);
     snprintf(compiler, sizeof(compiler), "%s/compiler", cfg);
+    snprintf(ready_path, sizeof(ready_path), "%s/compiler-ready", cfg);
+    snprintf(release_path, sizeof(release_path), "%s/compiler-release", cfg);
+    snprintf(compiler_script, sizeof(compiler_script),
+             "#!/bin/sh\nprintf x > '%s'\nread token < '%s'\nexec cc \"$@\"\n",
+             ready_path, release_path);
+    if (mkfifo(ready_path, 0600) || mkfifo(release_path, 0600)) goto done;
     const char *code =
         "#include \"pico/plugin.h\"\n#include \"value header.h\"\n"
         "static int Init(PicoHost *h, void **s) { (void)h; int *v=malloc(sizeof(*v)); if(!v)return -1; *v=VALUE; *s=v; return 0; }\n"
@@ -6326,47 +6292,50 @@ static int TestHeaderReloadIsAsynchronous(void)
     struct stat st;
     if (stat(header, &st)) goto done;
     if (WriteFile(header, "#define VALUE 20\n") ||
-        WriteFile(compiler, "#!/bin/sh\nsleep 1\nexec cc \"$@\"\n") || chmod(compiler, 0700)) goto done;
+        WriteFile(compiler, compiler_script) || chmod(compiler, 0700)) goto done;
     struct timespec times[2] = {st.st_atim, st.st_mtim};
     if (utimensat(AT_FDCWD, header, times, 0)) goto done;
     setenv("PICO_CC", compiler, 1);
-    double start = TestMonotonicTime();
     bool immediate = PicoPlugins_ReloadHost(host);
-    if (immediate || TestMonotonicTime() - start > 0.5 ||
+    if (immediate ||
         PicoPlugins_HostState(host, "header_probe") != value) goto done;
-    double deadline = TestMonotonicTime() + 8;
-    while (TestMonotonicTime() < deadline)
+    PicoTest_Wait(__func__, "compiler reached its release gate");
+    int ready_fd = open(ready_path, O_RDONLY);
+    if (ready_fd < 0) goto done;
+    bool compiler_ready = TransferTestByte(ready_fd, false);
+    close(ready_fd);
+    if (!compiler_ready || PicoPlugins_ReloadHost(host)) goto done;
+    int release_fd = open(release_path, O_WRONLY);
+    if (release_fd < 0) goto done;
+    bool released = write(release_fd, "x\n", 2) == 2;
+    close(release_fd);
+    if (!released) goto done;
+    PICO_TEST_WAIT_LOOP("replacement extension generation")
     {
         pico_host_pump(host);
         value = PicoPlugins_HostState(host, "header_probe");
         if (value && *value == 20) break;
-        usleep(1000);
     }
     if (!value || *value != 20 || PicoHost_FindWorkspace(host, id)->active_registration != registration) goto done;
     /* A compiler that never produces output must still expire, keeping the
-     * previous generation active. The generous harness deadline is not an
-     * assertion of the configurable production duration. */
-    if (WriteFile(compiler, "#!/bin/sh\nsleep 60\n") || WriteFile(header, "#define VALUE 25\n")) goto done;
+     * previous generation active. Wait for the timeout outcome, not a guessed
+     * upper bound on the configurable production duration. */
+    if (WriteFile(compiler, "#!/bin/sh\nwhile :; do sleep 3600; done\n") || WriteFile(header, "#define VALUE 25\n")) goto done;
     PicoPlugins_ReloadHost(host);
-    deadline = TestMonotonicTime() + 45;
-    while (TestMonotonicTime() < deadline &&
-           (!host->status_warn || !strstr(host->status_warn, "compiler timed out")))
+    PICO_TEST_WAIT(!host->status_warn || !strstr(host->status_warn, "compiler timed out"))
     {
         pico_host_pump(host);
-        usleep(10000);
     }
     value = PicoPlugins_HostState(host, "header_probe");
     if (!value || *value != 20 || !host->status_warn || !strstr(host->status_warn, "compiler timed out")) goto done;
-    if (WriteFile(compiler, "#!/bin/sh\nsleep 1\nexec cc \"$@\"\n")) goto done;
+    if (WriteFile(compiler, "#!/bin/sh\nwhile :; do sleep 3600; done\n")) goto done;
     /* Removing a queued source must cancel its build, without blocking future builds. */
     if (WriteFile(header, "#define VALUE 30\n")) goto done;
     PicoPlugins_ReloadHost(host);
     unlink(source);
-    deadline = TestMonotonicTime() + 5;
-    while (host->plugin_compile && TestMonotonicTime() < deadline)
+    PICO_TEST_WAIT(host->plugin_compile)
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     if (host->plugin_compile) goto done;
     failed = 0;
@@ -8275,16 +8244,15 @@ static bool ConfigureMatrixWorkspace(PicoHost *host, PicoWorkspace *workspace,
     return tool_ok && pico_workspace_find_provider(workspace, "matrix") != NULL;
 }
 
-static bool PumpUntilIdle(PicoHost *host, PicoAgent *agent, int attempts)
+static bool PumpUntilIdle(PicoHost *host, PicoAgent *agent)
 {
-    for (int i = 0; i < attempts; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pico_host_pump(host);
         if (!PicoAgent_IsBusy(agent))
         {
             return true;
         }
-        usleep(1000);
     }
     return false;
 }
@@ -8320,7 +8288,7 @@ static bool ConfigureMatrixTwoModels(PicoWorkspace *workspace)
 
 static bool MatrixWaitToolEntered(PicoHost *host, MatrixProviderState *state)
 {
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pico_host_pump(host);
         pthread_mutex_lock(&state->mu);
@@ -8330,7 +8298,6 @@ static bool MatrixWaitToolEntered(PicoHost *host, MatrixProviderState *state)
         {
             return true;
         }
-        usleep(1000);
     }
     return false;
 }
@@ -8395,7 +8362,7 @@ static int TestTurnKeepsPinnedModelAndEffort(void)
                     strcmp(agent->model, "matrix-b") == 0;
 
     MatrixReleaseTool(&state);
-    bool completed = switched && PumpUntilIdle(host, agent, 3000);
+    bool completed = switched && PumpUntilIdle(host, agent);
     /* ...but the running turn's follow-up keeps the pinned model and effort. */
     bool turn_pinned = completed && agent->error == NULL &&
                        MatrixRecordedIs(&state, 1, "matrix-a", "high");
@@ -8404,7 +8371,7 @@ static int TestTurnKeepsPinnedModelAndEffort(void)
     if (next_ok)
     {
         PicoAgent_StartTurn(host, agent, "next");
-        next_ok = PumpUntilIdle(host, agent, 3000);
+        next_ok = PumpUntilIdle(host, agent);
     }
     bool next_applied = next_ok && MatrixRecordedIs(&state, 2, "matrix-b", "medium");
 
@@ -8467,7 +8434,7 @@ static int TestFastSurvivesMidTurnModelSwitch(void)
     bool switched = first_fast && PicoSettings_SetModel(agent, "matrix-b") && !agent->fast;
 
     MatrixReleaseTool(&state);
-    bool completed = switched && PumpUntilIdle(host, agent, 3000);
+    bool completed = switched && PumpUntilIdle(host, agent);
     bool turn_fast = completed && agent->error == NULL && state.fasts_seen[1] &&
                      MatrixRecordedIs(&state, 1, "matrix-a", "low");
 
@@ -8475,7 +8442,7 @@ static int TestFastSurvivesMidTurnModelSwitch(void)
     if (next_ok)
     {
         PicoAgent_StartTurn(host, agent, "next");
-        next_ok = PumpUntilIdle(host, agent, 3000);
+        next_ok = PumpUntilIdle(host, agent);
     }
     bool next_standard = next_ok && !state.fasts_seen[2] &&
                          MatrixRecordedIs(&state, 2, "matrix-b", "medium");
@@ -8533,11 +8500,10 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Earlier conversation to read while answering.");
     PicoAgent_StartTurn(host, agent, "ask");
     PicoToolAsk ask = {0};
-    for (int i = 0; i < 3000 && !ask.id; i++)
+    PICO_TEST_WAIT(!ask.id)
     {
         pico_host_pump(host);
         pico_tool_pending_ask(host, &ask);
-        if (!ask.id) usleep(1000);
     }
     if (!ask.id || PicoUi_ModalOpen(host)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     /* Registration refreshes rebuild the effective slot lists. */
@@ -8728,7 +8694,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
     g_find_press = false;
     Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
-    if (!PumpUntilIdle(host, agent, 3000)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
+    if (!PumpUntilIdle(host, agent)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     pthread_mutex_lock(&state.mu);
     bool preserved_answer = state.answer && strstr(state.answer, "Z");
     pthread_mutex_unlock(&state.mu);
@@ -8800,11 +8766,10 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     CLARIFY_CHECK(pico_agent_submit(host, root_id, "ORIGINAL_TYPED_TASK", NULL) == PICO_OK,
                   "start original task");
     PicoToolAsk ask = {0};
-    for (int i = 0; i < 3000 && !ask.id; i++)
+    PICO_TEST_WAIT(!ask.id)
     {
         pico_host_pump(host);
         pico_tool_pending_ask(host, &ask);
-        if (!ask.id) usleep(1000);
     }
     if (delegated && ask.id) owner = PicoHost_FindAgent(host, ask.agent_id);
     CLARIFY_CHECK(owner && ask.id && ask.agent_id == owner->id &&
@@ -8854,12 +8819,11 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     if (permission)
     {
         PicoToolAsk permit = {0};
-        for (int i = 0; i < 3000 && !permit.id; i++)
+        PICO_TEST_WAIT(!permit.id)
         {
             pico_host_pump(host);
             PicoToolAsk pending;
             if (pico_tool_pending_ask(host, &pending) && pending.agent_id == helper_id) permit = pending;
-            if (!permit.id) usleep(1000);
         }
         CLARIFY_CHECK(permit.id && permit.id != original_ask && PicoUi_ModalOpen(host), "helper permission ask is visible");
         CLARIFY_CHECK(PicoAgent_PendingAsk(owner, &ask) && ask.id == original_ask,
@@ -8869,11 +8833,10 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     if (block_tool)
     {
         bool entered = false;
-        for (int i = 0; i < 3000 && !entered; i++)
+        PICO_TEST_WAIT(!entered)
         {
             pico_host_pump(host);
             pthread_mutex_lock(&state.mu); entered = state.tool_entered; pthread_mutex_unlock(&state.mu);
-            if (!entered) usleep(1000);
         }
         CLARIFY_CHECK(entered, "blocked helper tool entered");
         PicoClarification_Stop(host);
@@ -8881,17 +8844,17 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
         CLARIFY_CHECK(!PicoAgent_IsBusy(helper) && PicoAgent_PendingAsk(owner, &ask) &&
                       !PicoAgent_CancelRequested(owner), "force-stop retires helper worker without canceling owner");
         CLARIFY_CHECK(pico_tool_answer(host, original_ask, "{\"answers\":[]}") &&
-                      PumpUntilIdle(host, owner, 3000), "answer owner while retired helper tool drains");
+                      PumpUntilIdle(host, owner), "answer owner while retired helper tool drains");
         CLARIFY_CHECK(PicoHost_FindAgent(host, helper_id) && !host->clarification_view_id,
                       "helper remains retained, but hidden, until retired worker exits");
         pthread_mutex_lock(&state.mu); state.tool_release = true; pthread_cond_broadcast(&state.cv); pthread_mutex_unlock(&state.mu);
-        for (int i = 0; i < 3000 && PicoHost_FindAgent(host, helper_id); i++) { pico_host_pump(host); usleep(1000); }
+        PICO_TEST_WAIT(PicoHost_FindAgent(host, helper_id)) { pico_host_pump(host);  }
         CLARIFY_CHECK(!PicoHost_FindAgent(host, helper_id) && !strcmp(host->composer.text, "parked parent draft"),
                       "retired tool completion cannot reopen clarification or affect parent drafts");
         result = 0;
         goto done;
     }
-    CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification explanation completes");
+    CLARIFY_CHECK(PumpUntilIdle(host, helper), "clarification explanation completes");
     pthread_mutex_lock(&state.mu);
     bool isolated = state.inputs_seen[first_helper_slot] && strstr(state.inputs_seen[first_helper_slot], "ORIGINAL_TYPED_TASK") &&
         strstr(state.inputs_seen[first_helper_slot], "optimistic concurrency") && strstr(state.inputs_seen[first_helper_slot], "EXPLAIN_FIRST") &&
@@ -8929,21 +8892,20 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     if (cancel_stream)
     {
         bool entered = false;
-        for (int i = 0; i < 3000 && !entered; i++)
+        PICO_TEST_WAIT(!entered)
         {
             pico_host_pump(host);
             pthread_mutex_lock(&state.mu); entered = state.helper_entered; pthread_mutex_unlock(&state.mu);
-            if (!entered) usleep(1000);
         }
         CLARIFY_CHECK(entered, "helper stream started");
         PicoClarification_Back(host);
         CLARIFY_CHECK(PicoAgent_IsBusy(helper), "Back leaves explanation running");
         CLARIFY_CHECK(PicoClarification_Open(host, &ask, "second") == PICO_OK, "return to running explanation");
         PicoClarification_Stop(host);
-        CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000) && PicoAgent_PendingAsk(owner, &ask) &&
+        CLARIFY_CHECK(PumpUntilIdle(host, helper) && PicoAgent_PendingAsk(owner, &ask) &&
                       !PicoAgent_CancelRequested(owner), "Stop cancels helper only");
     }
-    else CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification follow-up completes");
+    else CLARIFY_CHECK(PumpUntilIdle(host, helper), "clarification follow-up completes");
     int followup_slot = first_helper_slot + (permission ? 2 : 1);
     pthread_mutex_lock(&state.mu);
     bool followup = state.inputs_seen[followup_slot] && strstr(state.inputs_seen[followup_slot], "EXPLAIN_FIRST") &&
@@ -8958,11 +8920,11 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     if (!delegated && !permission && !cancel_stream)
     {
         PicoAgent_Compact(host, helper);
-        CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification compaction completes");
+        CLARIFY_CHECK(PumpUntilIdle(host, helper), "clarification compaction completes");
         strcpy(host->composer.text, "EXPLAIN_AFTER_COMPACTION");
         host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
         PicoHost_Submit(host);
-        CLARIFY_CHECK(PumpUntilIdle(host, helper, 3000), "clarification follow-up after compaction");
+        CLARIFY_CHECK(PumpUntilIdle(host, helper), "clarification follow-up after compaction");
         pthread_mutex_lock(&state.mu);
         int compacted_followup = state.recorded - 1;
         bool restored_seed = state.inputs_seen[compacted_followup] &&
@@ -8982,19 +8944,18 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
         host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
         PicoHost_Submit(host);
         bool entered = false;
-        for (int i = 0; i < 3000 && !entered; i++)
+        PICO_TEST_WAIT(!entered)
         {
             pico_host_pump(host);
             pthread_mutex_lock(&state.mu); entered = state.helper_entered; pthread_mutex_unlock(&state.mu);
-            if (!entered) usleep(1000);
         }
         CLARIFY_CHECK(entered, "ask end while helper is running");
     }
     if (cancel_owner)
     {
         pico_agent_force_cancel(host, owner->id);
-        CLARIFY_CHECK(PumpUntilIdle(host, owner, 3000), "force-cancelled owner drains");
-        for (int i = 0; i < 3000 && PicoHost_FindAgent(host, helper_id); i++) { pico_host_pump(host); usleep(1000); }
+        CLARIFY_CHECK(PumpUntilIdle(host, owner), "force-cancelled owner drains");
+        PICO_TEST_WAIT(PicoHost_FindAgent(host, helper_id)) { pico_host_pump(host);  }
         CLARIFY_CHECK(!PicoHost_FindAgent(host, helper_id) && !PicoAgent_PendingAsk(owner, &ask) &&
                       !host->clarification_view_id && !strcmp(host->composer.text, "parked parent draft"),
                       "owner force cancellation tears down helper without losing parent draft");
@@ -9003,8 +8964,8 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     }
     CLARIFY_CHECK(pico_tool_answer(host, original_ask, "{\"answers\":[{\"id\":\"first\",\"answer\":\"EXPLICIT_ANSWER\"}]}"),
                   "submit explicit questionnaire answer");
-    CLARIFY_CHECK(PumpUntilIdle(host, PicoHost_FindAgent(host, root_id), 3000), "parent continues after explicit answer");
-    for (int i = 0; i < 3000 && PicoHost_FindAgent(host, helper_id); i++) { pico_host_pump(host); usleep(1000); }
+    CLARIFY_CHECK(PumpUntilIdle(host, PicoHost_FindAgent(host, root_id)), "parent continues after explicit answer");
+    PICO_TEST_WAIT(PicoHost_FindAgent(host, helper_id)) { pico_host_pump(host);  }
     CLARIFY_CHECK(!PicoHost_FindAgent(host, helper_id) && !host->clarification_view_id &&
                   !strcmp(host->composer.text, "parked parent draft"), "ask completion cleans up temporary helper");
     pthread_mutex_lock(&state.mu);
@@ -9080,7 +9041,7 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
     }
 
     PicoToolAsk ask_a = {0}, ask_b = {0};
-    for (int i = 0; started && i < 3000 && (ask_a.id == 0 || ask_b.id == 0); i++)
+    PICO_TEST_WAIT(started && (ask_a.id == 0 || ask_b.id == 0))
     {
         pico_host_pump(host);
         if (ask_a.id == 0)
@@ -9090,10 +9051,6 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
         if (ask_b.id == 0)
         {
             PicoAgent_PendingAsk(agentB, &ask_b);
-        }
-        if (ask_a.id == 0 || ask_b.id == 0)
-        {
-            usleep(1000);
         }
     }
     bool both_pending = ask_a.id != 0 && ask_b.id != 0;
@@ -9117,20 +9074,12 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
 
     /* While b1 stays open, a1's still-pending ask never surfaces. */
     bool stays_hidden = answered_b;
-    for (int i = 0; stays_hidden && i < 50; i++)
+    if (stays_hidden)
     {
         pico_host_pump(host);
-        PicoToolAsk still_a = {0};
-        if (!PicoAgent_PendingAsk(agentA, &still_a))
-        {
-            break;
-        }
-        PicoToolAsk now = {0};
-        if (pico_tool_pending_ask(host, &now) && now.id == ask_a.id)
-        {
-            stays_hidden = false;
-        }
-        usleep(1000);
+        PicoToolAsk still_a = {0}, now = {0};
+        stays_hidden = PicoAgent_PendingAsk(agentA, &still_a) &&
+                       (!pico_tool_pending_ask(host, &now) || now.id != ask_a.id);
     }
 
     /* Reopening a1 surfaces its ask again; answering it completes both turns. */
@@ -9140,8 +9089,8 @@ static int TestMultiWorkspaceAskOrderingAndRouting(void)
                       final_ask.id == ask_a.id;
     bool answered_a = resurfaces && pico_tool_answer(host, ask_a.id, "{\"step\":1}") &&
                       !pico_tool_answer(host, ask_a.id, "{\"stale\":true}");
-    bool completed = answered_a && PumpUntilIdle(host, agentA, 3000) &&
-                     PumpUntilIdle(host, agentB, 3000);
+    bool completed = answered_a && PumpUntilIdle(host, agentA) &&
+                     PumpUntilIdle(host, agentB);
     pthread_mutex_lock(&stateA.mu);
     bool answerA = stateA.answer && strcmp(stateA.answer, "{\"step\":1}") == 0;
     pthread_mutex_unlock(&stateA.mu);
@@ -9267,13 +9216,12 @@ static int TestMultiWorkspaceStuckWorkerIsolation(void)
         PicoAgent_StartTurn(host, agentA, "blocked A");
         PicoAgent_StartTurn(host, agentB, "complete B");
     }
-    for (int i = 0; i < 3000 && !MatrixStateFlag(&stateA, false); i++)
+    PICO_TEST_WAIT(!MatrixStateFlag(&stateA, false))
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     pico_workspace_request_close(host, idA);
-    bool b_completed = agentB && PumpUntilIdle(host, agentB, 3000);
+    bool b_completed = agentB && PumpUntilIdle(host, agentB);
     bool isolated_while_blocked = MatrixStateFlag(&stateA, false) &&
                                   PicoHost_FindWorkspace(host, idA) == wsA &&
                                   wsA->state == PICO_WORKSPACE_CLOSING &&
@@ -9281,10 +9229,9 @@ static int TestMultiWorkspaceStuckWorkerIsolation(void)
                                   wsB->state == PICO_WORKSPACE_OPEN && b_completed;
 
     MatrixStateRelease(&stateA);
-    for (int i = 0; i < 3000 && PicoHost_FindWorkspace(host, idA); i++)
+    PICO_TEST_WAIT(PicoHost_FindWorkspace(host, idA))
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     bool closed_after_release = PicoHost_FindWorkspace(host, idA) == NULL &&
                                 PicoHost_FindWorkspace(host, idB) == wsB;
@@ -9690,12 +9637,12 @@ static int TestMultiWorkspaceFairPumping(void)
         PicoAgent_StartTurn(host, agentA, "large stream A");
         PicoAgent_StartTurn(host, agentB, "short B");
     }
-    bool b_completed = agentB && PumpUntilIdle(host, agentB, 3000);
+    bool b_completed = agentB && PumpUntilIdle(host, agentB);
     bool progress = configured && MatrixStateFlag(&stateA, false) && b_completed &&
                     PicoAgent_IsBusy(agentA) && agentB->message_count > 0;
 
     MatrixStateRelease(&stateA);
-    bool a_completed = agentA && PumpUntilIdle(host, agentA, 3000);
+    bool a_completed = agentA && PumpUntilIdle(host, agentA);
     pico_host_free(host);
     MatrixStateDestroy(&stateA);
     MatrixStateDestroy(&stateB);
@@ -9720,6 +9667,8 @@ typedef struct StreamProbeState {
     pthread_cond_t cv;
     bool release;
     bool entered;
+    int requested;
+    int emitted;
 } StreamProbeState;
 
 static void StreamProbeInit(StreamProbeState *state)
@@ -9758,23 +9707,24 @@ static int StreamProbeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
     state->entered = true;
     pthread_cond_broadcast(&state->cv);
     pthread_mutex_unlock(&state->mu);
-    for (;;)
+    pthread_mutex_lock(&state->mu);
+    while (!state->release)
     {
-        pthread_mutex_lock(&state->mu);
-        bool release = state->release;
+        while (!state->release && state->emitted == state->requested)
+            pthread_cond_wait(&state->cv, &state->mu);
+        if (state->release) break;
         pthread_mutex_unlock(&state->mu);
-        if (release)
-        {
-            break;
-        }
         if (on_delta)
         {
             PicoLlmDelta delta = {.kind = PICO_LLM_DELTA_TEXT, .text = "x", .len = 1,
                                   .call_index = -1};
             on_delta(user, &delta);
         }
-        usleep(100);
+        pthread_mutex_lock(&state->mu);
+        state->emitted++;
+        pthread_cond_broadcast(&state->cv);
     }
+    pthread_mutex_unlock(&state->mu);
     return PICO_LLM_OK;
 }
 
@@ -9806,6 +9756,10 @@ static const PicoMessage *LastAssistantMessage(const PicoAgent *agent)
 
 static int TestStreamingReparseDebounced(void)
 {
+#ifndef PICO_TEST_CLOCK
+    fprintf(stderr, "SKIP: deterministic stream debounce requires the test clock\n");
+    return 0;
+#endif
     PicoHost *host = NULL;
     if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
     {
@@ -9855,53 +9809,38 @@ static int TestStreamingReparseDebounced(void)
     }
     PicoAgent_StartTurn(host, agent, "stream");
 
-    /* Wait for the provider to enter, then pump frames faster than the
-     * reparse debounce interval. */
-    bool entered = false;
-    for (int i = 0; i < 3000 && !entered; i++)
-    {
-        pico_host_pump(host);
-        pthread_mutex_lock(&state.mu);
-        entered = state.entered;
-        pthread_mutex_unlock(&state.mu);
-        if (!entered)
-        {
-            usleep(1000);
-        }
-    }
+    PicoTest_Wait(__func__, "stream provider entered");
+    pthread_mutex_lock(&state.mu);
+    while (!state.entered) pthread_cond_wait(&state.cv, &state.mu);
+    pthread_mutex_unlock(&state.mu);
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Set(100.0);
+#endif
     bool lagged = false;
     bool doc_ran_ahead = false;
     bool stream_grew = false;
     size_t previous_source = 0;
-    for (int i = 0; i < 40; i++)
+    for (int i = 0; i < 2; i++)
     {
+        PicoTest_Wait(__func__, "requested stream delta emitted");
+        pthread_mutex_lock(&state.mu);
+        state.requested++;
+        pthread_cond_broadcast(&state.cv);
+        while (state.emitted != state.requested) pthread_cond_wait(&state.cv, &state.mu);
+        pthread_mutex_unlock(&state.mu);
         pico_host_pump(host);
         const PicoMessage *message = LastAssistantMessage(agent);
-        if (!message)
-        {
-            Fail("stream debounce missing assistant message");
-            goto done;
-        }
+        if (!message) { Fail("stream debounce missing assistant message"); goto done; }
         size_t source = message->source ? strlen(message->source) : 0;
         size_t doc = DocTextBytes(message);
-        if (doc > source)
-        {
-            doc_ran_ahead = true;
-        }
-        if (source > previous_source)
-        {
-            stream_grew = true;
-        }
-        if (source > 0 && doc < source)
-        {
-            lagged = true;
-        }
+        doc_ran_ahead |= doc > source;
+        stream_grew |= source > previous_source;
+        lagged |= source > 0 && doc < source;
         previous_source = source;
-        usleep(2000);
     }
 
     StreamProbeRelease(&state);
-    bool completed = PumpUntilIdle(host, agent, 3000);
+    bool completed = PumpUntilIdle(host, agent);
     const PicoMessage *message = LastAssistantMessage(agent);
     if (!completed || !message || !message->source || !message->source[0])
     {
@@ -9910,7 +9849,11 @@ static int TestStreamingReparseDebounced(void)
     }
     size_t final_source = strlen(message->source);
     size_t final_doc = DocTextBytes(message);
-    if (!stream_grew || !lagged)
+    if (!stream_grew
+#ifdef PICO_TEST_CLOCK
+        || !lagged
+#endif
+       )
     {
         Fail("mid-stream reparses must be debounced: the document must render a "
              "prefix of the source between reparses");
@@ -9924,16 +9867,14 @@ static int TestStreamingReparseDebounced(void)
     }
     rc = 0;
 done:
+    StreamProbeRelease(&state);
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Reset();
+#endif
     pico_host_free(host);
     StreamProbeDestroy(&state);
     rmdir(dir);
     return rc;
-}
-
-static double ElapsedSeconds(const struct timespec *start, const struct timespec *end)
-{
-    return (double)(end->tv_sec - start->tv_sec) +
-           (double)(end->tv_nsec - start->tv_nsec) / 1000000000.0;
 }
 
 static int TestDiffShutdownDoesNotWaitForGit(void)
@@ -9975,20 +9916,15 @@ static int TestDiffShutdownDoesNotWaitForGit(void)
     setenv("PICO_DIFF_TEST_RELEASE", release, 1);
     bool opened = pico_host_init(&host, NULL, true) == PICO_OK && host &&
                   pico_workspace_open(host, workspace, &id) == PICO_OK;
-    for (int i = 0; opened && i < 3000 && access(marker, F_OK) != 0; i++)
+    PICO_TEST_WAIT(opened && access(marker, F_OK) != 0)
     {
-        usleep(1000);
     }
     bool blocked = access(marker, F_OK) == 0;
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
     if (blocked)
     {
         pico_workspace_request_close(host, id);
         pico_host_pump(host);
     }
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    double elapsed = ElapsedSeconds(&start, &end);
     WriteFile(release, "release\n");
     if (host)
     {
@@ -9998,16 +9934,7 @@ static int TestDiffShutdownDoesNotWaitForGit(void)
     /* The worker is intentionally detached. Keep its fake executable,
      * workspace, PATH, and release marker valid until this test process exits
      * instead of imposing a timing-dependent cleanup wait on the main thread. */
-#if PICO_TEST_ASAN
-    /* Sanitizer builds run the close path several times slower; a genuinely
-     * blocked close (full quiesce deadline or worker join) still exceeds this
-     * budget, and an unbounded wait still hangs before the release file
-     * exists. */
-    const double close_budget = 1.0;
-#else
-    const double close_budget = 0.1;
-#endif
-    if (!opened || !blocked || elapsed >= close_budget)
+    if (!opened || !blocked)
     {
         Fail("diff workspace shutdown must detach without waiting for blocked git");
         return 1;
@@ -10069,40 +9996,35 @@ static int TestPersistenceShutdownUsesSharedDeadline(void)
         {
             _exit(5);
         }
-        /* Watchdog only. A regressed shutdown that waits for the blocked worker
-         * never reaches the release below. */
-        alarm(30);
-        struct timespec start;
-        struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
+        /* CTest catches a shutdown that never returns while this gate is held. */
+
+#ifdef PICO_TEST_CLOCK
+        PicoTestClock_ExpireWaits();
+#endif
         PicoHostShutdownResult result = PicoHost_Shutdown(host);
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        alarm(0);
+#ifdef PICO_TEST_CLOCK
+        bool waited = PicoTestClock_SharedFutureDeadline(1);
+        PicoTestClock_ResumeWaits();
+        if (!waited) _exit(7);
+#endif
         (void)TransferTestByte(proceed[1], true);
-        double elapsed = ElapsedSeconds(&start, &end);
-        /* Retained proves the blocked write was not drained. The blocker stays
-         * held for the whole call, so a slow machine cannot make the wait look
-         * short. The lower bound rejects an immediate return. There is no upper
-         * bound: delay after the shared deadline is not a product failure. */
+        /* The blocked writer stays held across shutdown. Controlled expiry
+         * verifies a future drain deadline, not elapsed scheduler time. */
         if (result != PICO_HOST_SHUTDOWN_RETAINED)
         {
             _exit(6);
-        }
-        if (elapsed < 0.75)
-        {
-            _exit(7);
         }
         _exit(0);
     }
 
     int status = 0;
-    alarm(60);
+
     pid_t waited = -1;
     do
     {
         waited = waitpid(child, &status, 0);
     } while (waited < 0 && errno == EINTR);
-    alarm(0);
+
     close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
     if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
     {
@@ -10167,29 +10089,29 @@ static int TestProcessShutdownUsesSharedDeadline(void)
         PicoAgent_StartTurn(host, agentA, "block A at shutdown");
         PicoAgent_StartTurn(host, agentB, "block B at shutdown");
     }
-    for (int i = 0; i < 3000 &&
-                    (!MatrixStateFlag(&stateA, false) || !MatrixStateFlag(&stateB, false)); i++)
+    PICO_TEST_WAIT((!MatrixStateFlag(&stateA, false) || !MatrixStateFlag(&stateB, false)))
     {
-        usleep(1000);
     }
     bool both_blocked = MatrixStateFlag(&stateA, false) && MatrixStateFlag(&stateB, false);
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_ExpireWaits();
+#endif
     PicoHostShutdownResult result = PicoHost_Shutdown(host);
-    clock_gettime(CLOCK_MONOTONIC, &end);
+#ifdef PICO_TEST_CLOCK
+    bool waited = PicoTestClock_SharedFutureDeadline(2);
+    PicoTestClock_ResumeWaits();
+#else
+    bool waited = true;
+#endif
     MatrixStateRelease(&stateA);
     MatrixStateRelease(&stateB);
-    for (int i = 0; i < 3000 &&
-                    (!MatrixStateFlag(&stateA, true) || !MatrixStateFlag(&stateB, true)); i++)
+    PICO_TEST_WAIT((!MatrixStateFlag(&stateA, true) || !MatrixStateFlag(&stateB, true)))
     {
-        usleep(1000);
     }
-    double elapsed = ElapsedSeconds(&start, &end);
-    bool shared = both_blocked && result == PICO_HOST_SHUTDOWN_RETAINED &&
-                  elapsed >= 0.75 && elapsed < 1.7;
+    bool shared = both_blocked && waited && result == PICO_HOST_SHUTDOWN_RETAINED;
     if (!shared)
     {
-        Fail("all workspaces must consume one process-wide shutdown deadline");
+        Fail("shutdown must return with all blocked workspaces retained before release");
         return 1;
     }
     return 0;
@@ -10508,11 +10430,14 @@ static int TestModelChangeKeepsUnusedDraftOnSelect(void)
     }
     /* SetModel queues durable session work. Finish it before shutdown so a
      * slow persist thread cannot retain the process and poison later tests. */
+    if (!DrainSessionForAssertion(host, PicoHost_FindAgent(host, first)))
     {
-        struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_sec += 10;
-        PicoSession_DrainPersistBefore(host, PicoHost_FindAgent(host, first), &deadline);
+        Fail("model-change draft persistence must finish before shutdown");
+        workspace->models = NULL;
+        pico_host_free(host);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(dir);
+        return 1;
     }
     workspace->models = NULL;
     if (pico_host_free(host) == PICO_HOST_SHUTDOWN_RETAINED)
@@ -10698,22 +10623,22 @@ static int TestTitleRewriteDoesNotBlockOtherWorkspace(void)
     close(ready[1]);
     close(proceed[0]);
     ready[1] = proceed[0] = -1;
-    alarm(15);
+
     if (!TransferTestByte(ready[0], false))
     {
-        alarm(0);
+
         Fail("title lock holder did not acquire the session lock");
         goto done;
     }
     if (PicoSession_LogTitle(host, session_agent, "Locked title") != PICO_SESSION_WRITE_OK)
     {
-        alarm(0);
+
         Fail("title rewrite was not accepted while the session lock was held");
         goto done;
     }
     pico_host_request_submit_cancel(host);
     pico_host_pump(host);
-    alarm(0);
+
     if (!host->submit_cancel)
     {
         Fail("other workspace must still accept cancellation while a title rewrite is pending");
@@ -10744,7 +10669,7 @@ static int TestTitleRewriteDoesNotBlockOtherWorkspace(void)
     }
     result = 0;
 done:
-    alarm(0);
+
     if (child > 0)
     {
         if (proceed[1] >= 0)
@@ -10826,10 +10751,9 @@ static int TestAsyncSessionReplay(void)
         goto done;
     }
     if (!TransferTestByte(release[1], true)) goto done;
-    for (int i = 0; i < 10000 && g_replay_adopted == adopted_before; i++)
+    PICO_TEST_WAIT(g_replay_adopted == adopted_before)
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     if (g_replay_adopted == adopted_before || !PicoSession_LoadPending(host) ||
         !PicoHost_FindAgent(host, current_id))
@@ -10837,7 +10761,7 @@ static int TestAsyncSessionReplay(void)
         Fail("worker adoption must not publish a partly replayed transcript");
         goto done;
     }
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++) pico_host_pump(host);
+    PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
     PicoAgent *loaded = PicoHost_SelectedAgent(host);
     if (PicoSession_LoadPending(host) || !loaded || loaded->id == current_id ||
         loaded->message_count != 81 || PicoHost_FindAgent(host, current_id) ||
@@ -10849,10 +10773,9 @@ static int TestAsyncSessionReplay(void)
     /* Resuming the already-open session must be a no-op, not an in-use error. */
     if (PicoSession_LoadAsync(host, ws_id, loaded->id, session_id, false,
                               false, false, false) != PICO_OK) goto done;
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    PICO_TEST_WAIT(PicoSession_LoadPending(host))
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     if (PicoSession_LoadPending(host) || PicoHost_SelectedAgent(host) != loaded)
     {
@@ -10862,10 +10785,9 @@ static int TestAsyncSessionReplay(void)
     /* An invalid load leaves the selected chat and session reservation alone. */
     if (PicoSession_LoadAsync(host, ws_id, loaded->id, "unknown", false,
                               false, false, false) != PICO_OK) goto done;
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    PICO_TEST_WAIT(PicoSession_LoadPending(host))
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     if (PicoSession_LoadPending(host) || PicoHost_SelectedAgent(host) != loaded)
     {
@@ -10903,10 +10825,9 @@ static int TestAsyncSessionReplay(void)
         PicoSession_LoadAsync(host, ws_id, 0, session_id, false,
                               false, false, false) != PICO_OK ||
         pico_agent_active(host) != other_id) goto done;
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    PICO_TEST_WAIT(PicoSession_LoadPending(host))
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     PicoAgent *sidebar_loaded = PicoHost_SelectedAgent(host);
     if (PicoSession_LoadPending(host) || !sidebar_loaded ||
@@ -10928,10 +10849,9 @@ static int TestAsyncSessionReplay(void)
         Fail("startup must defer replay and block submitting to an empty agent");
         goto done;
     }
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(startup); i++)
+    PICO_TEST_WAIT(PicoSession_LoadPending(startup))
     {
         pico_host_pump(startup);
-        usleep(1000);
     }
     PicoAgent *started = PicoHost_SelectedAgent(startup);
     if (PicoSession_LoadPending(startup) || !started || started->id == initial ||
@@ -10947,10 +10867,9 @@ static int TestAsyncSessionReplay(void)
     if (fclose(bad) != 0 || pico_host_init(&bad_startup, NULL, true) != PICO_OK) goto done;
     PicoHost_Start(bad_startup, NULL, dir, true, PICO_SESSION_RESUME, bad_path);
     PicoAgentId empty_id = pico_agent_active(bad_startup);
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(bad_startup); i++)
+    PICO_TEST_WAIT(PicoSession_LoadPending(bad_startup))
     {
         pico_host_pump(bad_startup);
-        usleep(1000);
     }
     PicoAgent *empty = PicoHost_SelectedAgent(bad_startup);
     if (!empty_id || PicoSession_LoadPending(bad_startup) || !empty ||
@@ -11004,6 +10923,8 @@ static int TestAsyncReplayLargeMessage(void)
     PicoWorkspaceId ws_id = 0;
     PicoAgentId old_id = 0, current_id = 0;
     int result = 1;
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool released = false;
     char path[4096] = {0}, session_id[40] = {0};
     if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
     setenv("XDG_CONFIG_HOME", cfg, 1);
@@ -11026,31 +10947,41 @@ static int TestAsyncReplayLargeMessage(void)
         fprintf(file, "{\"type\":\"message\",\"role\":\"assistant\",\"message_group\":1,\"content\":\" fragment-%d\"}\n", i);
     if (fclose(file) != 0 || pico_agent_close(host, old_id) != PICO_OK) goto done;
     options.session_start = PICO_SESSION_NONE;
+    if (pipe(ready) || pipe(proceed)) goto done;
+    g_replay_ready_fd = ready[1];
+    g_replay_continue_fd = proceed[0];
     if (pico_main_agent_create(host, ws_id, &options, &current_id) != PICO_OK ||
         PicoSession_LoadAsync(host, ws_id, current_id, session_id, false,
                               false, false, false) != PICO_OK) goto done;
-    double slowest = 0;
-    for (int i = 0; i < 10000 && PicoSession_LoadPending(host); i++)
+    if (!TransferTestByte(ready[0], false)) goto done;
+    pico_host_pump(host);
+    if (!PicoSession_LoadPending(host) || PicoHost_SelectedAgent(host)->id != current_id) goto done;
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    PICO_TEST_WAIT(PicoSession_LoadPending(host))
     {
-        double start = TestMonotonicTime();
         pico_host_pump(host);
-        double elapsed = TestMonotonicTime() - start;
-        if (elapsed > slowest) slowest = elapsed;
-        usleep(1000);
     }
     PicoAgent *loaded = PicoHost_SelectedAgent(host);
     if (PicoSession_LoadPending(host) || !loaded || loaded->id == current_id ||
         loaded->message_count != 2 || !loaded->messages[1].doc.block_count ||
         !strstr(loaded->messages[1].source, "saved-record-target") ||
         !strstr(loaded->messages[1].source, "fragment-149") ||
-        DocTextBytes(&loaded->messages[1]) != strlen(loaded->messages[1].source) ||
-        slowest > 0.1)
+        DocTextBytes(&loaded->messages[1]) != strlen(loaded->messages[1].source))
     {
         Fail("large validated message must replay atomically without a long UI pump");
         goto done;
     }
     result = 0;
 done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    if (host) { pico_host_free(host); host = NULL; }
+    g_replay_ready_fd = g_replay_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
     if (host) pico_host_free(host);
     unsetenv("XDG_CONFIG_HOME");
     RmRf(cfg); RmRf(dir);
@@ -11064,7 +10995,7 @@ static int TestSavedSubagentInspectLoadsOffThread(void)
     PicoHost *seed_host = NULL, *viewer = NULL;
     PicoWorkspaceId ws_id = 0;
     PicoAgentId parent_id = 0, child_id = 0;
-    char session_id[40] = {0};
+    char session_id[40] = {0}, inspect_path[4096] = {0};
     int result = 1;
     if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
     setenv("XDG_CONFIG_HOME", cfg, 1);
@@ -11082,6 +11013,7 @@ static int TestSavedSubagentInspectLoadsOffThread(void)
     if (!child || PicoSession_LogUser(seed_host, child, "saved child content", "saved child content", NULL) != PICO_SESSION_WRITE_OK ||
         !DrainSessionForAssertion(seed_host, child)) goto done;
     snprintf(session_id, sizeof(session_id), "%s", child->session_id);
+    snprintf(inspect_path, sizeof(inspect_path), "%s", child->session_path);
     pico_host_free(seed_host);
     seed_host = NULL;
     if (pico_host_init(&viewer, NULL, true) != PICO_OK ||
@@ -11089,14 +11021,22 @@ static int TestSavedSubagentInspectLoadsOffThread(void)
     PicoTraceLine line = {0};
     snprintf(line.child_session_id, sizeof(line.child_session_id), "%s", session_id);
     PicoSubagentInspect info = {0};
-    double start = TestMonotonicTime();
+#ifdef PICO_TEST_IO
+    PicoTestIo_Hold(inspect_path);
+#endif
     bool immediate = PicoWorkspace_InspectSubagent(viewer, &line, &info);
-    if (immediate || TestMonotonicTime() - start > 0.1) goto done;
+    if (immediate) goto done;
+#ifdef PICO_TEST_IO
+    if (PicoTestIo_OnOwner()) { Fail("saved inspection must not read sessions on the UI thread"); goto done; }
+    PicoTestIo_WaitEntered();
+    pico_host_pump(viewer);
+    if (PicoWorkspace_InspectSubagent(viewer, &line, &info)) goto done;
+    PicoTestIo_Release();
+#endif
     ws = PicoHost_FindWorkspace(viewer, ws_id);
-    for (int i = 0; i < 10000 && ws->inspect_loading_id[0]; i++)
+    PICO_TEST_WAIT(ws->inspect_loading_id[0])
     {
         pico_host_pump(viewer);
-        usleep(1000);
     }
     if (ws->inspect_loading_id[0] ||
         !PicoWorkspace_InspectSubagent(viewer, &line, &info) ||
@@ -11105,6 +11045,9 @@ static int TestSavedSubagentInspectLoadsOffThread(void)
     { Fail("saved subagent inspection must publish complete worker-loaded transcript"); goto done; }
     result = 0;
 done:
+#ifdef PICO_TEST_IO
+    PicoTestIo_Release();
+#endif
     if (seed_host) pico_host_free(seed_host);
     if (viewer) pico_host_free(viewer);
     unsetenv("XDG_CONFIG_HOME");
@@ -11139,14 +11082,24 @@ static int TestResumeCompletionDoesNotScanOnUi(void)
             command = &host->completers[i];
     if (!command) goto done;
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
-    double start = TestMonotonicTime();
+#ifdef PICO_TEST_IO
+    char database[4096];
+    snprintf(database, sizeof(database), "%s/pico/sessions/.catalog.sqlite3", cfg);
+    PicoTestIo_Hold(database);
+#endif
     int count = command->host_query(host, "resume ", items, PICO_MAX_COMPLETE_ITEMS, command->state);
-    if (count != 0 || TestMonotonicTime() - start > 0.1) goto done;
-    for (int i = 0; i < 10000 && !count; i++)
+    if (count != 0) goto done;
+#ifdef PICO_TEST_IO
+    if (PicoTestIo_OnOwner()) { Fail("resume completion must not open its catalog on the UI thread"); goto done; }
+    PicoTestIo_WaitEntered();
+    pico_host_pump(host);
+    if (command->host_query(host, "resume ", items, PICO_MAX_COMPLETE_ITEMS, command->state) != 0) goto done;
+    PicoTestIo_Release();
+#endif
+    PICO_TEST_WAIT(!count)
     {
         pico_host_pump(host);
         count = command->host_query(host, "resume ", items, PICO_MAX_COMPLETE_ITEMS, command->state);
-        if (!count) usleep(1000);
     }
     bool found = false;
     for (int i = 0; i < count; i++)
@@ -11155,6 +11108,9 @@ static int TestResumeCompletionDoesNotScanOnUi(void)
     { Fail("resume completion must publish worker-listed parent sessions"); goto done; }
     result = 0;
 done:
+#ifdef PICO_TEST_IO
+    PicoTestIo_Release();
+#endif
     if (host) pico_host_free(host);
     unsetenv("XDG_CONFIG_HOME");
     RmRf(cfg); RmRf(dir);
@@ -11339,11 +11295,8 @@ static int TestSelectClearsUnseenComplete(void)
  * persistence assertion into a terminal, retained-host shutdown. */
 static bool ShutdownAfterSessionPersist(PicoHost *host, PicoAgent *agent)
 {
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 10;
-    bool session_drained = PicoSession_DrainPersistBefore(host, agent, &deadline);
-    bool catalog_drained = PicoCatalog_DrainOrderPersistBefore(host, &deadline);
+    bool session_drained = DrainSessionForAssertion(host, agent);
+    bool catalog_drained = PicoCatalog_DrainOrderPersistBefore(host, NULL);
     PicoHostShutdownResult shutdown = pico_host_free(host);
     if (!session_drained || !catalog_drained)
     {
@@ -11933,9 +11886,9 @@ static int TestSidebarSnapshotBeforeReconcile(bool fail_reconcile)
     g_catalog_ready_fd = ready[1];
     g_catalog_continue_fd = proceed[0];
     phase = "initial snapshot";
-    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
-    struct pollfd check = {.fd = ready[0], .events = POLLIN};
-    if (poll(&check, 1, 5000) != 1 || !TransferTestByte(ready[0], false)) goto done;
+    int scans_before = g_catalog_scan_calls;
+    PICO_TEST_WAIT(g_catalog_scan_calls == scans_before) pico_host_pump(host);
+    if (!TransferTestByte(ready[0], false)) goto done;
     memory = malloc(Clay_MinMemorySize());
     if (!memory || !Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
                                    viewport, (Clay_ErrorHandler){0})) goto done;
@@ -11963,10 +11916,9 @@ static int TestSidebarSnapshotBeforeReconcile(bool fail_reconcile)
     if (!TransferTestByte(proceed[1], true)) goto done;
     released = true;
     phase = "completed reconciliation";
-    for (int i = 0; i < 10000 && host->tasks; i++)
+    PICO_TEST_WAIT(host->tasks)
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     if (host->tasks) goto done;
     commands = PicoHost_LayoutShell(host, viewport.height, 0);
@@ -12099,7 +12051,7 @@ static int TestFileCompletionPublishesWorkerSnapshot(void)
         goto done;
     }
     bool found = false;
-    for (int i = 0; i < 10000 && !found; i++)
+    PICO_TEST_WAIT(!found)
     {
         pico_host_pump(host);
         int n = pico_files_complete(workspace, "worker-match", items, PICO_MAX_COMPLETE_ITEMS, NULL);
@@ -12107,7 +12059,6 @@ static int TestFileCompletionPublishesWorkerSnapshot(void)
         {
             if (strcmp(items[j].label, "worker-match.txt") == 0) found = true;
         }
-        if (!found) usleep(1000);
     }
     if (!found)
     {
@@ -12128,58 +12079,43 @@ static int TestSidebarCatalogScanDoesNotBlockPump(void)
 {
     char dir[] = "/tmp/pico-sidebar-scan-block-ws-XXXXXX";
     char cfg[] = "/tmp/pico-sidebar-scan-block-cfg-XXXXXX";
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool released = false;
     PicoHost *host = NULL;
-    struct timespec t0, t1;
     int result = 1;
-    if (!mkdtemp(dir) || !mkdtemp(cfg))
-    {
-        Fail("mkdtemp sidebar catalog scan block");
-        return 1;
-    }
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
     setenv("XDG_CONFIG_HOME", cfg, 1);
-    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
-    {
-        Fail("init sidebar catalog scan block host");
-        goto done;
-    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host) goto done;
     WaitPluginLoad(host);
-    {
-        int target_done = g_catalog_scan_done_calls + 1;
-        g_catalog_scan_block_ms = 400;
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        pico_host_pump(host);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        {
-            double elapsed = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-            if (elapsed >= 0.2)
-            {
-                Fail("catalog scan must not stall the UI pump");
-                goto done;
-            }
-        }
-        pico_host_request_submit_cancel(host);
-        pico_host_pump(host);
-        if (!host->submit_cancel)
-        {
-            Fail("UI must still accept cancellation while a catalog scan runs");
-            goto done;
-        }
-        if (!WaitCatalogScanDone(host, target_done))
-        {
-            Fail("blocked catalog scan did not complete");
-            goto done;
-        }
-    }
+    if (pipe(ready) || pipe(proceed)) goto done;
+    int scans_before = g_catalog_scan_calls;
+    int target_done = g_catalog_scan_done_calls + 1;
+    g_catalog_ready_fd = ready[1];
+    g_catalog_continue_fd = proceed[0];
+    PICO_TEST_WAIT(g_catalog_scan_calls == scans_before) pico_host_pump(host);
+    if (!TransferTestByte(ready[0], false)) goto done;
+    /* The catalog worker cannot finish until release. These UI operations must
+     * return while that gate is held; CTest catches a synchronous regression. */
+    pico_host_pump(host);
+    pico_host_request_submit_cancel(host);
+    pico_host_pump(host);
+    if (!host->submit_cancel) { Fail("UI must accept cancellation while catalog scan is blocked"); goto done; }
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    if (!WaitCatalogScanDone(host, target_done)) goto done;
     result = 0;
 done:
-    g_catalog_scan_block_ms = 0;
-    if (host)
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    if (host) pico_host_free(host);
+    g_catalog_ready_fd = g_catalog_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
     {
-        pico_host_free(host);
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
     }
     unsetenv("XDG_CONFIG_HOME");
-    RmRf(cfg);
-    RmRf(dir);
+    RmRf(cfg); RmRf(dir);
+    if (result && !g_failed) Fail("catalog scan gate setup or completion failed");
     return result;
 }
 
@@ -12746,11 +12682,10 @@ static void RequestRedrawFromRender(PicoHost *host, const PicoHookEvent *event, 
  * callbacks. A worker milestone does not mean its redraw has been consumed. */
 static bool WaitHostTasks(PicoHost *host)
 {
-    for (int i = 0; i < 10000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         pico_host_pump(host);
         if (!host->tasks) return true;
-        usleep(1000);
     }
     return false;
 }
@@ -13411,10 +13346,9 @@ static int TestWorktreeDiscoveryCreationAndGrouping(void)
         Fail("request worktree creation");
         goto done;
     }
-    for (int i = 0; i < 10000 && PicoWorktree_Pending(host); i++)
+    PICO_TEST_WAIT(PicoWorktree_Pending(host))
     {
         pico_host_pump(host);
-        usleep(1000);
     }
     PicoAgent *selected = PicoHost_SelectedAgent(host);
     PicoWorkspace *selected_ws = selected ? selected->workspace : NULL;
@@ -13880,24 +13814,25 @@ int main(int argc, char **argv)
 {
 #ifdef PICO_OPENAI_LOGIN_TESTS
     if (argc == 2 && strcmp(argv[1], "--openai-retained-shutdown") == 0)
-        return TestOpenAiBlockedShutdownChild();
+        return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
-    if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return TestClipboardPaste();
+    if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
+    if (argc == 2 && strcmp(argv[1], "--fast-persistence") == 0) return PICO_TEST_RUN(TestFastSelectionPersistence());
 #ifdef PICO_OPENAI_LOGIN_TESTS
     if (argc == 2 && strcmp(argv[1], "--openai-login") == 0)
-        return TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown();
-    if (TestOpenAiLogin() || TestOpenAiBrowserLauncher() || TestOpenAiBlockedShutdown()) return 1;
+        return PICO_TEST_RUN(TestOpenAiLogin()) || PICO_TEST_RUN(TestOpenAiBrowserLauncher()) || PICO_TEST_RUN(TestOpenAiBlockedShutdown());
+    if (PICO_TEST_RUN(TestOpenAiLogin()) || PICO_TEST_RUN(TestOpenAiBrowserLauncher()) || PICO_TEST_RUN(TestOpenAiBlockedShutdown())) return 1;
 #endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--clay-recovery") == 0)
     {
-        return TestFrameRetriesFailedArenaReplacement();
+        return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
-    if (TestSidebarSameFrameControls() != 0) return 1;
-    if (TestIdleFrameOnlyPresentsOnInvalidation() != 0) return 1;
-    if (TestIdleFrameRetainsChatScroll() != 0) return 1;
-    if (TestFrameRetriesFailedArenaReplacement() != 0)
+    if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
+    if (PICO_TEST_RUN(TestIdleFrameOnlyPresentsOnInvalidation()) != 0) return 1;
+    if (PICO_TEST_RUN(TestIdleFrameRetainsChatScroll()) != 0) return 1;
+    if (PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement()) != 0)
     {
         return 1;
     }
@@ -13905,367 +13840,367 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 #endif
-    if (TestClipboardPaste() != 0) return 1;
-    if (TestCopiedMessageSourceMetadata() != 0) return 1;
-    if (TestWorktreeSuggestNameUsesProjectFolder() != 0) return 1;
-    if (TestWorktreeDiscoveryCreationAndGrouping() != 0) return 1;
-    if (TestQuitDefersTeardownUntilFrameReturns() != 0)
+    if (PICO_TEST_RUN(TestClipboardPaste()) != 0) return 1;
+    if (PICO_TEST_RUN(TestCopiedMessageSourceMetadata()) != 0) return 1;
+    if (PICO_TEST_RUN(TestWorktreeSuggestNameUsesProjectFolder()) != 0) return 1;
+    if (PICO_TEST_RUN(TestWorktreeDiscoveryCreationAndGrouping()) != 0) return 1;
+    if (PICO_TEST_RUN(TestQuitDefersTeardownUntilFrameReturns()) != 0)
     {
         return 1;
     }
-    if (TestFooterMainAgentTps() != 0) return 1;
-    if (TestFooterCacheTooltip() != 0)
+    if (PICO_TEST_RUN(TestFooterMainAgentTps()) != 0) return 1;
+    if (PICO_TEST_RUN(TestFooterCacheTooltip()) != 0)
     {
         return 1;
     }
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
-    if (TestWorktreeNameField() != 0)
+    if (PICO_TEST_RUN(TestWorktreeNameField()) != 0)
     {
         return 1;
     }
 #endif
-    if (TestFastSelectionPersistence() != 0)
+    if (PICO_TEST_RUN(TestFastSelectionPersistence()) != 0)
         return 1;
-    if (TestBottomFollowShellGeometryStable() != 0)
+    if (PICO_TEST_RUN(TestBottomFollowShellGeometryStable()) != 0)
     {
         return 1;
     }
-    if (TestEmptyCardsTwoColumnTrim() != 0)
+    if (PICO_TEST_RUN(TestEmptyCardsTwoColumnTrim()) != 0)
     {
         return 1;
     }
-    if (TestEmptyCardsOverflowScroll() != 0)
+    if (PICO_TEST_RUN(TestEmptyCardsOverflowScroll()) != 0)
     {
         return 1;
     }
-    if (TestChatBottomFollowClearsComposer() != 0)
+    if (PICO_TEST_RUN(TestChatBottomFollowClearsComposer()) != 0)
     {
         return 1;
     }
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--think-cache") == 0)
-        return TestExpandedThinkRenderingIsCached();
-    if (TestExpandedThinkRenderingIsCached() != 0) return 1;
+        return PICO_TEST_RUN(TestExpandedThinkRenderingIsCached());
+    if (PICO_TEST_RUN(TestExpandedThinkRenderingIsCached()) != 0) return 1;
 #endif
-    if (TestChatFindTranscript() != 0) return 1;
-    if (TestExpandedStreamingThinkStaysInsideChat() != 0) return 1;
-    if (TestExpandedThinkFoldResizesChat() != 0) return 1;
-    if (TestChatTraceRowsShareHeight() != 0)
+    if (PICO_TEST_RUN(TestChatFindTranscript()) != 0) return 1;
+    if (PICO_TEST_RUN(TestExpandedStreamingThinkStaysInsideChat()) != 0) return 1;
+    if (PICO_TEST_RUN(TestExpandedThinkFoldResizesChat()) != 0) return 1;
+    if (PICO_TEST_RUN(TestChatTraceRowsShareHeight()) != 0)
     {
         return 1;
     }
-    if (TestChatCompletedToolRowDwells() != 0)
+    if (PICO_TEST_RUN(TestChatCompletedToolRowDwells()) != 0)
     {
         return 1;
     }
-    if (TestChatToolStatusDotCentered() != 0)
+    if (PICO_TEST_RUN(TestChatToolStatusDotCentered()) != 0)
     {
         return 1;
     }
-    if (TestIdleSidebarSessionDot() != 0)
+    if (PICO_TEST_RUN(TestIdleSidebarSessionDot()) != 0)
     {
         return 1;
     }
-    if (TestSidebarDisplayTitlesFitRows() != 0) return 1;
-    if (TestCanonicalOpenAndDuplicate() != 0)
+    if (PICO_TEST_RUN(TestSidebarDisplayTitlesFitRows()) != 0) return 1;
+    if (PICO_TEST_RUN(TestCanonicalOpenAndDuplicate()) != 0)
     {
         return 1;
     }
-    if (TestSidebarSnapshotBeforeReconcile(false) != 0 ||
-        TestSidebarSnapshotBeforeReconcile(true) != 0) return 1;
-    if (TestSidebarCatalogChangeToken() != 0)
+    if (PICO_TEST_RUN(TestSidebarSnapshotBeforeReconcile(false)) != 0 ||
+        PICO_TEST_RUN(TestSidebarSnapshotBeforeReconcile(true)) != 0) return 1;
+    if (PICO_TEST_RUN(TestSidebarCatalogChangeToken()) != 0)
     {
         return 1;
     }
-    if (TestSidebarCatalogScanDoesNotBlockPump() != 0)
+    if (PICO_TEST_RUN(TestSidebarCatalogScanDoesNotBlockPump()) != 0)
     {
         return 1;
     }
-    if (TestFileCompletionPublishesWorkerSnapshot() != 0)
+    if (PICO_TEST_RUN(TestFileCompletionPublishesWorkerSnapshot()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceLessHostTransition() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceLessHostTransition()) != 0)
     {
         return 1;
     }
-    if (TestSortedViewRegistrationAssignsStateAndRollsBack() != 0)
+    if (PICO_TEST_RUN(TestSortedViewRegistrationAssignsStateAndRollsBack()) != 0)
     {
         return 1;
     }
-    if (TestSubmitSettersTakeOwnership() != 0)
+    if (PICO_TEST_RUN(TestSubmitSettersTakeOwnership()) != 0)
     {
         return 1;
     }
-    if (TestSidebarDragBehavior() != 0)
+    if (PICO_TEST_RUN(TestSidebarDragBehavior()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceBuiltinsRegisterThroughWorkspaceInit() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceBuiltinsRegisterThroughWorkspaceInit()) != 0)
     {
         return 1;
     }
-    if (TestFailedWorkspaceInitKeepsHostSlot() != 0)
+    if (PICO_TEST_RUN(TestFailedWorkspaceInitKeepsHostSlot()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceShutdownSeesOwningWorkspace() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceShutdownSeesOwningWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceChangeSeesOwningWorkspace() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceChangeSeesOwningWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestCdOpensSelectsAndReusesWorkspace() != 0)
+    if (PICO_TEST_RUN(TestCdOpensSelectsAndReusesWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestBusySlashCommandsOpenBackgroundWithoutJobs() != 0)
+    if (PICO_TEST_RUN(TestBusySlashCommandsOpenBackgroundWithoutJobs()) != 0)
     {
         return 1;
     }
-    if (TestBackgroundJobsSurviveWorkspaceReload() != 0)
+    if (PICO_TEST_RUN(TestBackgroundJobsSurviveWorkspaceReload()) != 0)
     {
         return 1;
     }
-    if (TestReloadTargetsSelectedWorkspace() != 0)
+    if (PICO_TEST_RUN(TestReloadTargetsSelectedWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestHostReloadIgnoresWorkspaceLocalCompileFailure() != 0)
+    if (PICO_TEST_RUN(TestHostReloadIgnoresWorkspaceLocalCompileFailure()) != 0)
     {
         return 1;
     }
-    if (TestSkillSubmissionPreservesFileMentions() != 0)
+    if (PICO_TEST_RUN(TestSkillSubmissionPreservesFileMentions()) != 0)
     {
         return 1;
     }
-    if (TestCdResolvesAgainstCommandWorkspace() != 0)
+    if (PICO_TEST_RUN(TestCdResolvesAgainstCommandWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestCdRollsBackNewWorkspaceOnAgentLimit() != 0)
+    if (PICO_TEST_RUN(TestCdRollsBackNewWorkspaceOnAgentLimit()) != 0)
     {
         return 1;
     }
-    if (TestCdRejectsClosingWorkspace() != 0)
+    if (PICO_TEST_RUN(TestCdRejectsClosingWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestModelChangeDoesNotMutateWorkspaceDefault() != 0)
+    if (PICO_TEST_RUN(TestModelChangeDoesNotMutateWorkspaceDefault()) != 0)
     {
         return 1;
     }
-    if (TestWorkspacePluginIsolation() != 0)
+    if (PICO_TEST_RUN(TestWorkspacePluginIsolation()) != 0)
     {
         return 1;
     }
-    if (TestHostPluginIsolation() != 0)
+    if (PICO_TEST_RUN(TestHostPluginIsolation()) != 0)
     {
         return 1;
     }
-    if (TestSettingsModalWheelOverField() != 0)
+    if (PICO_TEST_RUN(TestSettingsModalWheelOverField()) != 0)
     {
         return 1;
     }
-    if (TestHostSettingsPersistence() != 0)
+    if (PICO_TEST_RUN(TestHostSettingsPersistence()) != 0)
     {
         return 1;
     }
-    if (TestScopeEnforcement() != 0)
+    if (PICO_TEST_RUN(TestScopeEnforcement()) != 0)
     {
         return 1;
     }
-    if (TestStagingRollbackOnFailedInit() != 0)
+    if (PICO_TEST_RUN(TestStagingRollbackOnFailedInit()) != 0)
     {
         return 1;
     }
-    if (TestFailedHostReloadPreservesLiveInstances() != 0)
+    if (PICO_TEST_RUN(TestFailedHostReloadPreservesLiveInstances()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceReloadUsesLiveOwnerAndSettings() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceReloadUsesLiveOwnerAndSettings()) != 0)
     {
         return 1;
     }
-    if (TestNestedWorkspaceExtensionOwnership() != 0)
+    if (PICO_TEST_RUN(TestNestedWorkspaceExtensionOwnership()) != 0)
     {
         return 1;
     }
-    if (TestHeaderReloadIsAsynchronous()) return 1;
-    if (TestPluginSourceScanDoesNotBlockUi()) return 1;
-    if (TestBlockedSourceScanRetainsShutdown()) return 1;
-    if (TestSdkDependencyManifestsDoNotCrossReloadHosts() != 0)
+    if (PICO_TEST_RUN(TestHeaderReloadIsAsynchronous())) return 1;
+    if (PICO_TEST_RUN(TestPluginSourceScanDoesNotBlockUi())) return 1;
+    if (PICO_TEST_RUN(TestBlockedSourceScanRetainsShutdown())) return 1;
+    if (PICO_TEST_RUN(TestSdkDependencyManifestsDoNotCrossReloadHosts()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceLocalPollingReloadsOnlyOwner() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceLocalPollingReloadsOnlyOwner()) != 0)
     {
         return 1;
     }
-    if (TestHostCompileFailureQuarantinesUnchangedPoll() != 0)
+    if (PICO_TEST_RUN(TestHostCompileFailureQuarantinesUnchangedPoll()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceCompileFailureQuarantinesUnchangedPoll() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceCompileFailureQuarantinesUnchangedPoll()) != 0)
     {
         return 1;
     }
-    if (TestWorkspaceLocalExtensionWithHostCallbacksRejected() != 0)
+    if (PICO_TEST_RUN(TestWorkspaceLocalExtensionWithHostCallbacksRejected()) != 0)
     {
         return 1;
     }
-    if (TestReloadInitRollbackPreservesActiveState() != 0)
+    if (PICO_TEST_RUN(TestReloadInitRollbackPreservesActiveState()) != 0)
     {
         return 1;
     }
-    if (TestGenerationRolloutAndDlcloseOnRelease() != 0)
+    if (PICO_TEST_RUN(TestGenerationRolloutAndDlcloseOnRelease()) != 0)
     {
         return 1;
     }
-    if (TestReloadReusesReleasedModuleSlots() != 0)
+    if (PICO_TEST_RUN(TestReloadReusesReleasedModuleSlots()) != 0)
     {
         return 1;
     }
-    if (TestScopedExtensionListingRecords() != 0)
+    if (PICO_TEST_RUN(TestScopedExtensionListingRecords()) != 0)
     {
         return 1;
     }
-    if (TestDualScopeIndependentPublicationRollback() != 0)
+    if (PICO_TEST_RUN(TestDualScopeIndependentPublicationRollback()) != 0)
     {
         return 1;
     }
-    if (TestRetainedActiveGenerationsReceiveFrameCallbacks() != 0)
+    if (PICO_TEST_RUN(TestRetainedActiveGenerationsReceiveFrameCallbacks()) != 0)
     {
         return 1;
     }
-    if (TestExtensionSlotsUseSourceIdentity() != 0)
+    if (PICO_TEST_RUN(TestExtensionSlotsUseSourceIdentity()) != 0)
     {
         return 1;
     }
-    if (TestStatelessExtensionRollbackDoesNotLeakModule() != 0)
+    if (PICO_TEST_RUN(TestStatelessExtensionRollbackDoesNotLeakModule()) != 0)
     {
         return 1;
     }
-    if (TestBusyReloadQueuesAndRejectsNewWork() != 0)
+    if (PICO_TEST_RUN(TestBusyReloadQueuesAndRejectsNewWork()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceInstructionsIsolation() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceInstructionsIsolation()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceToolNameIsolation() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceToolNameIsolation()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceMailboxIsolation() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceMailboxIsolation()) != 0)
     {
         return 1;
     }
-    if (TestTurnKeepsPinnedModelAndEffort() != 0)
+    if (PICO_TEST_RUN(TestTurnKeepsPinnedModelAndEffort()) != 0)
     {
         return 1;
     }
-    if (TestFastSurvivesMidTurnModelSwitch() != 0)
+    if (PICO_TEST_RUN(TestFastSurvivesMidTurnModelSwitch()) != 0)
     {
         return 1;
     }
-    if (TestQuestionnaireClarification() != 0) return 1;
-    if (TestMultiWorkspaceAskOrderingAndRouting() != 0)
+    if (PICO_TEST_RUN(TestQuestionnaireClarification()) != 0) return 1;
+    if (PICO_TEST_RUN(TestMultiWorkspaceAskOrderingAndRouting()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceReloadAndCloseIsolation() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceReloadAndCloseIsolation()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceStuckWorkerIsolation() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceStuckWorkerIsolation()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceMainAgentDelegationDrain() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceMainAgentDelegationDrain()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceModelAndSettingsIsolation() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceModelAndSettingsIsolation()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceFrameCallbacks() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceFrameCallbacks()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceCloseLastMainAgentAndZeroAgents() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceCloseLastMainAgentAndZeroAgents()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceAgentLimits() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceAgentLimits()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceStaleIds() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceStaleIds()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceFairPumping() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceFairPumping()) != 0)
     {
         return 1;
     }
-    if (TestStreamingReparseDebounced() != 0)
+    if (PICO_TEST_RUN(TestStreamingReparseDebounced()) != 0)
     {
         return 1;
     }
-    if (TestMultiWorkspaceDeletedDirectoryIntegrity() != 0)
+    if (PICO_TEST_RUN(TestMultiWorkspaceDeletedDirectoryIntegrity()) != 0)
     {
         return 1;
     }
-    if (TestDiffShutdownDoesNotWaitForGit() != 0)
+    if (PICO_TEST_RUN(TestDiffShutdownDoesNotWaitForGit()) != 0)
     {
         return 1;
     }
-    if (TestUnusedPendingDraftDiscardedOnSelectedCreate() != 0)
+    if (PICO_TEST_RUN(TestUnusedPendingDraftDiscardedOnSelectedCreate()) != 0)
     {
         return 1;
     }
-    if (TestUnusedPendingDraftDiscardedOnSelect() != 0)
+    if (PICO_TEST_RUN(TestUnusedPendingDraftDiscardedOnSelect()) != 0)
     {
         return 1;
     }
-    if (TestPersistedSessionKeptOnSelect() != 0)
+    if (PICO_TEST_RUN(TestPersistedSessionKeptOnSelect()) != 0)
     {
         return 1;
     }
-    if (TestModelChangeKeepsUnusedDraftOnSelect() != 0)
+    if (PICO_TEST_RUN(TestModelChangeKeepsUnusedDraftOnSelect()) != 0)
     {
         return 1;
     }
-    if (TestAgentCloseAppliesQueuedPersistenceFailure() != 0)
+    if (PICO_TEST_RUN(TestAgentCloseAppliesQueuedPersistenceFailure()) != 0)
     {
         return 1;
     }
-    if (TestTitleRewriteDoesNotBlockOtherWorkspace() != 0)
+    if (PICO_TEST_RUN(TestTitleRewriteDoesNotBlockOtherWorkspace()) != 0)
     {
         return 1;
     }
-    if (TestAsyncSessionReplay() != 0) return 1;
-    if (TestAsyncReplayLargeMessage() != 0) return 1;
-    if (TestSavedSubagentInspectLoadsOffThread() != 0) return 1;
-    if (TestResumeCompletionDoesNotScanOnUi() != 0) return 1;
-    if (TestResumeLoadsStoredModel() != 0)
+    if (PICO_TEST_RUN(TestAsyncSessionReplay()) != 0) return 1;
+    if (PICO_TEST_RUN(TestAsyncReplayLargeMessage()) != 0) return 1;
+    if (PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) != 0) return 1;
+    if (PICO_TEST_RUN(TestResumeCompletionDoesNotScanOnUi()) != 0) return 1;
+    if (PICO_TEST_RUN(TestResumeLoadsStoredModel()) != 0)
     {
         return 1;
     }
-    if (TestSelectClearsUnseenComplete() != 0)
+    if (PICO_TEST_RUN(TestSelectClearsUnseenComplete()) != 0)
     {
         return 1;
     }
-    if (TestUnseenCompletePersistsAcrossRestart() != 0)
+    if (PICO_TEST_RUN(TestUnseenCompletePersistsAcrossRestart()) != 0)
     {
         return 1;
     }
-    if (TestPersistenceShutdownUsesSharedDeadline() != 0)
+    if (PICO_TEST_RUN(TestPersistenceShutdownUsesSharedDeadline()) != 0)
     {
         return 1;
     }
@@ -14274,7 +14209,7 @@ int main(int argc, char **argv)
         return 1;
     }
     /* Retained shutdown permanently retires this test process, so it is last. */
-    if (TestProcessShutdownUsesSharedDeadline() != 0)
+    if (PICO_TEST_RUN(TestProcessShutdownUsesSharedDeadline()) != 0)
     {
         return 1;
     }

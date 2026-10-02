@@ -18,7 +18,7 @@ static bool WriteSubagentProfile(const char *root, const char *json,
 
 static bool WaitForManagerIdle(PicoHost *app)
 {
-    for (int i = 0; i < 4000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(app));
         PicoAgent *parent = TestAgent(app);
@@ -26,7 +26,6 @@ static bool WaitForManagerIdle(PicoHost *app)
         {
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
@@ -141,7 +140,7 @@ static int TestSubagentParentCancellation(void)
     PicoAgent *parent = TestAgent(&app);
     PicoAgent_StartTurn(&app, parent, "delegate and cancel");
     bool child_running = false;
-    for (int i = 0; i < 3000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         if (pico_agent_count(&app) == 2)
@@ -149,7 +148,6 @@ static int TestSubagentParentCancellation(void)
             child_running = true;
             break;
         }
-        SleepOneMs();
     }
     PicoAgent_Cancel(parent);
     bool cancelled = WaitForManagerIdle(&app);
@@ -447,7 +445,7 @@ static int TestSubagentChildAsk(void)
 
     PicoToolAsk ask;
     bool pending = false;
-    for (int i = 0; i < 4000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         if (pico_tool_pending_ask(&app, &ask))
@@ -455,7 +453,6 @@ static int TestSubagentChildAsk(void)
             pending = true;
             break;
         }
-        SleepOneMs();
     }
     bool routed = pending && ask.agent_id != parent->id &&
                   strcmp(ask.profile, "exploration") == 0 &&
@@ -469,7 +466,7 @@ static int TestSubagentChildAsk(void)
     bool hidden = routed &&
                   PicoWorkspace_CreateAgent(PicoHost_PrimaryWorkspace(&app), &other_opt, &other_id) == PICO_OK &&
                   pico_agent_select(&app, other_id);
-    for (int i = 0; hidden && i < 50; i++)
+    if (hidden)
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         PicoToolAsk now;
@@ -477,7 +474,6 @@ static int TestSubagentChildAsk(void)
         {
             hidden = false;
         }
-        SleepOneMs();
     }
     bool resurfaces = hidden && pico_agent_select(&app, parent->id) &&
                       pico_tool_pending_ask(&app, &ask) && ask.agent_id != parent->id;
@@ -514,7 +510,7 @@ static int TestSubagentChildAsk(void)
 
 static bool WaitForAgentIdle(PicoHost *app, PicoAgentId id, int expected_count)
 {
-    for (int i = 0; i < 4000; i++)
+    PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(app));
         PicoAgent *agent = PicoHost_FindAgent(app, id);
@@ -522,7 +518,6 @@ static bool WaitForAgentIdle(PicoHost *app, PicoAgentId id, int expected_count)
         {
             return true;
         }
-        SleepOneMs();
     }
     return false;
 }
@@ -655,7 +650,7 @@ static int TestSubagentDirectChildCancellation(void)
     PicoAgent_StartTurn(&app, parent, "delegate and cancel child");
 
     PicoAgentId child_id = 0;
-    for (int i = 0; i < 3000 && !child_id; i++)
+    PICO_TEST_WAIT(!child_id)
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
@@ -667,7 +662,6 @@ static int TestSubagentDirectChildCancellation(void)
                 break;
             }
         }
-        SleepOneMs();
     }
     bool cancelled = child_id &&
                      pico_agent_cancel(&app, child_id) == PICO_OK &&
@@ -723,7 +717,7 @@ static int TestSubagentLiveInspect(void)
 
     PicoAgentId child_id = 0;
     PicoTraceLine *live_line = NULL;
-    for (int i = 0; i < 3000 && !child_id; i++)
+    PICO_TEST_WAIT(!child_id)
     {
         PicoWorkspace_Pump(PicoHost_PrimaryWorkspace(&app));
         live_line = LastToolTrace(&app);
@@ -732,7 +726,6 @@ static int TestSubagentLiveInspect(void)
             child_id = live_line->child_id;
             break;
         }
-        SleepOneMs();
     }
 
     PicoSubagentInspect live;

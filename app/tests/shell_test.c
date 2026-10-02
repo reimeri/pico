@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "test_wait.h"
 #include "pico/plugin.h"
 #include "json.h"
 
@@ -28,7 +29,34 @@ static size_t capture_limit;
 static PicoToolFn g_shell_run;
 static const char *g_shell_params_json;
 static void *g_shell_state;
-static volatile sig_atomic_t g_alarm_count;
+static int g_interrupt_count;
+#ifdef PICO_TEST_EINTR
+static bool interrupt_read, interrupt_wait;
+ssize_t __real_read(int fd, void *buffer, size_t size);
+ssize_t __wrap_read(int fd, void *buffer, size_t size)
+{
+    if (interrupt_read)
+    {
+        interrupt_read = false;
+        g_interrupt_count++;
+        errno = EINTR;
+        return -1;
+    }
+    return __real_read(fd, buffer, size);
+}
+pid_t __real_waitpid(pid_t pid, int *status, int options);
+pid_t __wrap_waitpid(pid_t pid, int *status, int options)
+{
+    if (interrupt_wait)
+    {
+        interrupt_wait = false;
+        g_interrupt_count++;
+        errno = EINTR;
+        return -1;
+    }
+    return __real_waitpid(pid, status, options);
+}
+#endif
 
 bool pico_add_tool(PicoWorkspace *workspace, const char *name, const char *description,
                    const char *params_json, PicoToolFn run, PicoToolApplyFn apply, PicoToolExecution execution)
@@ -101,31 +129,6 @@ static PicoToolResult RunCommandTimeout(const char *description, const char *jso
         return result;
     }
     return Run(args);
-}
-
-static void AlarmHandler(int signal_number)
-{
-    (void)signal_number;
-    g_alarm_count++;
-}
-
-static PicoToolResult RunInterrupted(const char *description, const char *json_command)
-{
-    struct sigaction action;
-    struct sigaction previous;
-    memset(&action, 0, sizeof(action));
-    action.sa_handler = AlarmHandler;
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGALRM, &action, &previous);
-    struct itimerval timer;
-    memset(&timer, 0, sizeof(timer));
-    timer.it_value.tv_usec = 50000;
-    setitimer(ITIMER_REAL, &timer, NULL);
-    PicoToolResult result = RunCommand(description, json_command);
-    memset(&timer, 0, sizeof(timer));
-    setitimer(ITIMER_REAL, &timer, NULL);
-    sigaction(SIGALRM, &previous, NULL);
-    return result;
 }
 
 static bool Repeated(const char *text, size_t len, char expected)
@@ -345,21 +348,34 @@ static bool TestLargeOutput(void)
 
 static bool TestInterruptedRead(void)
 {
-    g_alarm_count = 0;
-    PicoToolResult result = RunInterrupted("interrupt shell read", "sleep 1; printf complete");
-    bool ok = result.output && !result.is_error && g_alarm_count > 0 &&
+#ifndef PICO_TEST_EINTR
+    fprintf(stderr, "SKIP: deterministic syscall interruption requires linker wrapping\n");
+    return true;
+#else
+    g_interrupt_count = 0;
+    interrupt_read = true;
+    PicoToolResult result = RunCommand("interrupt shell read", "printf complete");
+    interrupt_read = false;
+    bool ok = result.output && !result.is_error && g_interrupt_count > 0 &&
               strcmp(result.output, "complete") == 0;
     free(result.output);
     return ok;
+#endif
 }
 
 static bool TestInterruptedWait(void)
 {
-    g_alarm_count = 0;
-    PicoToolResult result = RunInterrupted("interrupt shell wait", "exec 1>&- 2>&-; sleep 1");
+#ifndef PICO_TEST_EINTR
+    fprintf(stderr, "SKIP: deterministic syscall interruption requires linker wrapping\n");
+    return true;
+#else
+    g_interrupt_count = 0;
+    interrupt_wait = true;
+    PicoToolResult result = RunCommand("interrupt shell wait", "exec 1>&- 2>&-");
+    interrupt_wait = false;
     errno = 0;
     pid_t stray_child = waitpid(-1, NULL, WNOHANG);
-    bool ok = result.output && !result.is_error && g_alarm_count > 0 &&
+    bool ok = result.output && !result.is_error && g_interrupt_count > 0 &&
               strcmp(result.output, "(no output)") == 0 && stray_child == -1 && errno == ECHILD;
     free(result.output);
     if (stray_child == 0)
@@ -367,6 +383,7 @@ static bool TestInterruptedWait(void)
         waitpid(-1, NULL, 0);
     }
     return ok;
+#endif
 }
 
 static bool TestCommandFailure(void)
@@ -457,55 +474,55 @@ int main(void)
     {
         failure = "builtin did not register";
     }
-    else if (!failure && !TestTimeoutSchema())
+    else if (!failure && !PICO_TEST_RUN(TestTimeoutSchema()))
     {
         failure = "schema does not define optional timeout property";
     }
-    else if (!TestLargeOutput())
+    else if (!PICO_TEST_RUN(TestLargeOutput()))
     {
         failure = "large output was not saved completely with bounded memory";
     }
-    else if (!TestExactLimit())
+    else if (!PICO_TEST_RUN(TestExactLimit()))
     {
         failure = "output at the capture limit was not preserved exactly";
     }
-    else if (!TestFirstSpooledByte())
+    else if (!PICO_TEST_RUN(TestFirstSpooledByte()))
     {
         failure = "the first byte beyond the capture limit was not saved completely";
     }
-    else if (!TestTempFallback(temp))
+    else if (!PICO_TEST_RUN(TestTempFallback(temp)))
     {
         failure = "invalid TMPDIR did not fall back to /tmp";
     }
-    else if (!TestInterruptedRead())
+    else if (!PICO_TEST_RUN(TestInterruptedRead()))
     {
         failure = "interrupted pipe read lost command output";
     }
-    else if (!TestInterruptedWait())
+    else if (!PICO_TEST_RUN(TestInterruptedWait()))
     {
         failure = "interrupted wait did not reap the command";
     }
-    else if (!TestCommandFailure())
+    else if (!PICO_TEST_RUN(TestCommandFailure()))
     {
         failure = "command failure annotation changed";
     }
-    else if (!TestCustomTimeoutExceeded())
+    else if (!PICO_TEST_RUN(TestCustomTimeoutExceeded()))
     {
         failure = "exceeded timeout was not terminated or annotated correctly";
     }
-    else if (!TestCustomTimeoutPreservesOutput())
+    else if (!PICO_TEST_RUN(TestCustomTimeoutPreservesOutput()))
     {
         failure = "output produced before timeout was not preserved";
     }
-    else if (!TestCustomTimeoutSuccess())
+    else if (!PICO_TEST_RUN(TestCustomTimeoutSuccess()))
     {
         failure = "command within timeout failed";
     }
-    else if (!TestTimeoutPluralSeconds())
+    else if (!PICO_TEST_RUN(TestTimeoutPluralSeconds()))
     {
         failure = "plural seconds timeout annotation incorrect";
     }
-    else if (!TestTimeoutClosedPipes())
+    else if (!PICO_TEST_RUN(TestTimeoutClosedPipes()))
     {
         failure = "timeout with closed pipes failed to terminate and reap child";
     }

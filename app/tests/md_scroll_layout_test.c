@@ -1,3 +1,4 @@
+#include "test_wait.h"
 #include "pico/md_view.h"
 #include "pico/theme.h"
 #include "chat_sel.h"
@@ -12,10 +13,13 @@
 #include <string.h>
 #include <time.h>
 
+static size_t measured_bytes;
+
 static Clay_Dimensions MeasureRichText(Clay_StringSlice text, Clay_TextElementConfig *config,
                                        void *user_data)
 {
     (void)user_data;
+    measured_bytes += (size_t)text.length;
     int codepoints = 0;
     for (int i = 0; i < text.length; i++)
     {
@@ -379,13 +383,6 @@ static int TestLongUnspacedWordWrapsInsideWidth(void)
     return result;
 }
 
-static double NowSeconds(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-}
-
 /* A pathologically long unbroken word (a streamed base64 blob) must wrap in
  * bounded time instead of re-measuring the whole remaining word for every
  * fragment, and it must wrap into thousands of lines, each inside the
@@ -426,9 +423,9 @@ static int TestHugeUnspacedWordWrapsInsideBudget(void)
     }
     Clay_SetMeasureTextFunction(MeasureRichText, NULL);
 
-    double start = NowSeconds();
+    measured_bytes = 0;
     Clay_RenderCommandArray commands = RenderDocument(&doc, 7000, width, false);
-    double elapsed = NowSeconds() - start;
+    size_t wrapping_work = measured_bytes;
 
     Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("MdScrollTestChat"));
 
@@ -453,6 +450,13 @@ static int TestHugeUnspacedWordWrapsInsideBudget(void)
             break;
         }
     }
+    /* Re-measuring every growing prefix is quadratic. A small multiple of
+     * input bytes permits normal word/line measurement without a CPU budget. */
+    if (wrapping_work > strlen(source) * 16)
+    {
+        Fail("huge-word wrapping must not repeatedly measure growing prefixes");
+        goto done;
+    }
     if (!inside_width || text_cmds < 2)
     {
         Fail("huge unspaced word must wrap inside the container");
@@ -461,12 +465,6 @@ static int TestHugeUnspacedWordWrapsInsideBudget(void)
     if (!chat.found || chat.contentDimensions.height < 100.0f * 600.0f)
     {
         Fail("a 256 KB word must wrap into thousands of lines, not one screenful");
-        goto done;
-    }
-    if (elapsed > 0.075)
-    {
-        fprintf(stderr, "huge word wrap took %.1f ms (bound 75 ms)\n", elapsed * 1000.0);
-        Fail("wrapping a 256 KB word must stay inside the frame budget");
         goto done;
     }
     result = 0;
@@ -528,29 +526,29 @@ int main(void)
     Clay_SetMeasureTextFunction(MeasureRichText, NULL);
     RichText_SetMeasureFunction(MeasureRichText, NULL);
 
-    int result = TestWideCodeBlock();
+    int result = PICO_TEST_RUN(TestWideCodeBlock());
     if (result == 0)
     {
-        result = TestWideTable();
+        result = PICO_TEST_RUN(TestWideTable());
     }
     if (result == 0)
     {
-        result = TestUnorderedListMarkerCentersOnFirstLine();
+        result = PICO_TEST_RUN(TestUnorderedListMarkerCentersOnFirstLine());
     }
     if (result == 0)
     {
-        result = TestListItemsUseInnerWidth();
+        result = PICO_TEST_RUN(TestListItemsUseInnerWidth());
     }
     if (result == 0)
     {
-        result = TestQuoteUsesInnerWidth();
+        result = PICO_TEST_RUN(TestQuoteUsesInnerWidth());
     }
     if (result == 0)
     {
-        result = TestLongUnspacedWordWrapsInsideWidth();
+        result = PICO_TEST_RUN(TestLongUnspacedWordWrapsInsideWidth());
     }
-    if (result == 0) result = TestSearchRenderedText();
-    if (result == 0) result = TestHugeUnspacedWordWrapsInsideBudget();
+    if (result == 0) result = PICO_TEST_RUN(TestSearchRenderedText());
+    if (result == 0) result = PICO_TEST_RUN(TestHugeUnspacedWordWrapsInsideBudget());
     free(memory);
     return result;
 }

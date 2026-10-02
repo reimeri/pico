@@ -99,9 +99,9 @@ static void CommandsHostShutdown(PicoHost *host, void *state)
     if (cache) { free(cache->items); free(cache); }
 }
 
-static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
+static void Note(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity, const char *text)
 {
-    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddNotice(app, agent_id, severity, text);
 }
 
 static void ClearComposer(PicoHost *app)
@@ -344,7 +344,7 @@ static void CmdResume(PicoWorkspace *workspace, PicoAgentId agent_id, const char
     }
     if (PicoAgent_IsBusy(agent))
     {
-        Note(app, agent_id, "Wait until the agent is idle before resuming a session.");
+        Note(app, agent_id, PICO_NOTICE_WARNING, "Wait until the agent is idle before resuming a session.");
         ClearComposer(app);
         if (app)
         {
@@ -361,7 +361,7 @@ static void CmdResume(PicoWorkspace *workspace, PicoAgentId agent_id, const char
                  result == PICO_SESSION_IN_USE
                      ? "Session `%s` is already open by another agent."
                      : "Unknown session `%s`. Try `/resume`.", args);
-        Note(app, agent_id, line);
+        Note(app, agent_id, PICO_NOTICE_WARNING, line);
         ClearComposer(app);
         if (app)
         {
@@ -388,7 +388,7 @@ static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void 
 
 static const char *const kDocTopics[] = {
     "README", "subagents", "skills", "anatomy", "host", "workspace", "agents", "views", "hooks",
-    "context", "tools", "commands", "completers", "providers", "auth", "contracts",
+    "context", "tools", "commands", "notices", "completers", "providers", "auth", "contracts",
 };
 
 static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);
@@ -401,7 +401,7 @@ static void CmdDocs(PicoHost *app, PicoAgentId agent_id, const char *args, void 
     char rel[256];
     if (!Pico_DocsRelPath(args, rel, sizeof(rel)))
     {
-        Note(app, agent_id, "Unknown docs topic. Try `/docs`.");
+        Note(app, agent_id, PICO_NOTICE_WARNING, "Unknown docs topic. Try `/docs`.");
         return;
     }
     const char *dir = Pico_DocsAppDir();
@@ -412,7 +412,7 @@ static void CmdDocs(PicoHost *app, PicoAgentId agent_id, const char *args, void 
     char path[4096];
     if (!Pico_DocsJoin(dir, rel, path, sizeof(path)))
     {
-        Note(app, agent_id, "Extension docs path is not configured.");
+        Note(app, agent_id, PICO_NOTICE_ERROR, "Extension docs path is not configured.");
         return;
     }
     size_t len = 0;
@@ -425,10 +425,10 @@ static void CmdDocs(PicoHost *app, PicoAgentId agent_id, const char *args, void 
         {
             n = Append(buf, sizeof(buf), n, i == 0 ? " `%s`" : ", `%s`", kDocTopics[i]);
         }
-        Note(app, agent_id, buf);
+        Note(app, agent_id, PICO_NOTICE_INFO, buf);
         return;
     }
-    Note(app, agent_id, src);
+    Note(app, agent_id, PICO_NOTICE_INFO, src);
     free(src);
 }
 
@@ -450,7 +450,7 @@ static void CmdHelp(PicoHost *app, PicoAgentId agent_id, const char *args, void 
         n += (size_t)snprintf(buf + n, sizeof(buf) - n, "`/%s` — %s\n", ws->commands[i].name,
                               ws->commands[i].help ? ws->commands[i].help : "");
     }
-    Note(app, agent_id, buf);
+    Note(app, agent_id, PICO_NOTICE_INFO, buf);
     ClearComposer(app);
     app->submit_cancel = true;
 }
@@ -487,7 +487,7 @@ static void ListAuthProviders(PicoHost *app, PicoAgentId agent_id, const char *p
     if (app->auth_count == 0)
     {
         Append(buf, sizeof(buf), n, " No providers registered.");
-        Note(app, agent_id, buf);
+        Note(app, agent_id, PICO_NOTICE_INFO, buf);
         return;
     }
     for (int i = 0; i < app->auth_count; i++)
@@ -495,14 +495,14 @@ static void ListAuthProviders(PicoHost *app, PicoAgentId agent_id, const char *p
         n = Append(buf, sizeof(buf), n, "\n- `%s` — %s", app->auths[i].provider,
                    app->auths[i].help ? app->auths[i].help : "");
     }
-    Note(app, agent_id, buf);
+    Note(app, agent_id, PICO_NOTICE_INFO, buf);
 }
 
 static void RunLogin(PicoHost *app, PicoAgentId agent_id, const PicoAuth *a, const char *args)
 {
     if (!a || !a->login)
     {
-        Note(app, agent_id, "That provider has no login.");
+        Note(app, agent_id, PICO_NOTICE_WARNING, "That provider has no login.");
         return;
     }
     a->login(app, agent_id, args ? args : "", a->state);
@@ -562,7 +562,8 @@ static void CmdLogout(PicoHost *app, PicoAgentId agent_id, const char *args, voi
     }
     else
     {
-        Note(app, agent_id, pico_auth_clear_oauth(app, a->provider)
+        bool cleared = pico_auth_clear_oauth(app, a->provider);
+        Note(app, agent_id, cleared ? PICO_NOTICE_INFO : PICO_NOTICE_WARNING, cleared
                       ? "Logged out."
                       : "Logged out, but `~/.config/pico/auth.json` could not be written, so the "
                         "stored credentials may still be on disk.");
@@ -581,7 +582,7 @@ static void CmdReload(PicoHost *app, PicoAgentId agent_id, const char *args, voi
     {
         pico_workspace_request_reload(app, agent->workspace->id);
     }
-    Note(app, agent_id, "Reloading extensions…");
+    Note(app, agent_id, PICO_NOTICE_INFO, "Reloading extensions…");
     ClearComposer(app);
     app->submit_cancel = true;
 }

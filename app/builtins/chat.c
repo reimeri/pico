@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "workspace_internal.h"
 #include "pico/md_view.h"
+#include "md_view_internal.h"
 #include "chat_sel.h"
 #include "chat.h"
 #include "json.h"
@@ -72,6 +73,13 @@ typedef struct TranscriptView {
     int id_ns;
     bool selectable;
 } TranscriptView;
+
+static int LastConversationMessage(const TranscriptView *view)
+{
+    int last = view ? view->message_count - 1 : -1;
+    while (last >= 0 && view->messages[last].role == PICO_ROLE_NOTICE) last--;
+    return last;
+}
 
 typedef struct ToolWrapCacheEntry {
     int message_index;
@@ -1064,7 +1072,7 @@ static void RenderThinkBody(const TranscriptView *view, PicoTraceLine *line, int
 
 static bool ThinkBurstLive(const TranscriptView *view, int message_index, int trace_index)
 {
-    if (!view || message_index != view->message_count - 1 || view->state != PICO_AGENT_LLM_WAIT)
+    if (!view || message_index != LastConversationMessage(view) || view->state != PICO_AGENT_LLM_WAIT)
     {
         return false;
     }
@@ -1203,7 +1211,7 @@ static PicoToolCallProgress ToolProgress(const TranscriptView *view, const PicoT
 
 static bool ToolFallbackLive(const TranscriptView *view, int message_index, int trace_index)
 {
-    return view && message_index == view->message_count - 1 && message_index >= 0 &&
+    return view && message_index == LastConversationMessage(view) && message_index >= 0 &&
            trace_index == view->messages[message_index].trace_count - 1 && OwnerWaiting(view);
 }
 
@@ -1265,7 +1273,8 @@ static bool TranscriptExpandedThinkBody(const TranscriptView *view, int *message
     {
         return false;
     }
-    msg_i = view->message_count - 1;
+    msg_i = LastConversationMessage(view);
+    if (msg_i < 0) return false;
     msg = &view->messages[msg_i];
     for (int t = 0; t < msg->trace_count; t++)
     {
@@ -2144,6 +2153,7 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index, b
     hash = RevisionMix(hash, (uint64_t)msg->role);
     hash = RevisionPointer(hash, msg->source);
     hash = RevisionPointer(hash, msg->trace);
+    hash = RevisionMix(hash, (uint64_t)msg->notice_severity);
     hash = RevisionMix(hash, (uint64_t)msg->trace_count);
     for (int t = 0; t < msg->trace_count; t++)
     {
@@ -2177,7 +2187,7 @@ static uint64_t MessageRevision(const TranscriptView *view, int message_index, b
     hash = RevisionMix(hash, msg->trace_group_expanded ? 1 : 0);
     hash = RevisionMix(hash, msg->revision);
     hash = RevisionMix(hash, (uint64_t)msg->source_len);
-    if (message_index == view->message_count - 1)
+    if (message_index == LastConversationMessage(view))
     {
         hash = RevisionMix(hash, (uint64_t)view->state);
         hash = RevisionText(hash, view->activity);
@@ -2236,9 +2246,28 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
 {
     PicoMessage *msg = (PicoMessage *)&view->messages[i];
     bool user = msg->role == PICO_ROLE_USER;
+    bool notice = msg->role == PICO_ROLE_NOTICE;
+    Clay_Color accent = COLOR_LINK;
+    Clay_Color notice_bg = COLOR_CONTENT_BG;
+    Clay_String label = CLAY_STRING("Info");
+    if (notice && msg->notice_severity == PICO_NOTICE_ERROR)
+    {
+        accent = COLOR_NOTICE_ERROR;
+        notice_bg = COLOR_ERROR_BG;
+        label = CLAY_STRING("Error");
+    }
+    else if (notice && msg->notice_severity == PICO_NOTICE_WARNING)
+    {
+        accent = COLOR_NOTICE_WARNING;
+        notice_bg = COLOR_NOTICE_WARNING_BG;
+        label = CLAY_STRING("Warning");
+    }
     bool overlay = view->id_ns != 0;
     Clay_Color bg = user ? (overlay ? COLOR_USER_BG_OVERLAY : COLOR_USER_BG) : COLOR_ASSISTANT_BG;
-    Clay_Padding pad = user ? (Clay_Padding){CHAT_USER_PAD_X, CHAT_USER_PAD_X, 12, 12} : (Clay_Padding){8, 8, 0, 0};
+    Clay_Padding pad = user ? (Clay_Padding){CHAT_USER_PAD_X, CHAT_USER_PAD_X, 12, 12}
+                           : notice ? (Clay_Padding){12, 12, 10, 10}
+                                    : (Clay_Padding){8, 8, 0, 0};
+    if (notice) bg = notice_bg;
     float msg_max = available_width + (float)(pad.left + pad.right);
     if (msg_max < 50.0f)
     {
@@ -2250,8 +2279,15 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
                      .childGap = 8,
                      .sizing = {.width = CLAY_SIZING_GROW(0, msg_max)}},
           .backgroundColor = bg,
-          .cornerRadius = user ? CLAY_CORNER_RADIUS(8) : CLAY_CORNER_RADIUS(0)})
+          .cornerRadius = user || notice ? CLAY_CORNER_RADIUS(8) : CLAY_CORNER_RADIUS(0),
+          .border = {.color = accent, .width = {.left = notice ? 3 : 0}}})
     {
+        if (notice)
+        {
+            CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                               .fontSize = PICO_FONT_CAPTION,
+                                              .textColor = accent}));
+        }
         if (view->selectable)
         {
             PicoChatSel_SetMessage(i);
@@ -2277,7 +2313,8 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
             if (match.message == i) RichText_SetTarget(match.from, match.to);
         }
         bool has_source = msg->source && msg->source[0];
-        bool live = !user && i == view->message_count - 1 && OwnerWaiting(view);
+        bool live = msg->role == PICO_ROLE_ASSISTANT &&
+                    i == LastConversationMessage(view) && OwnerWaiting(view);
         bool live_llm = live && view->state == PICO_AGENT_LLM_WAIT;
         RenderMessageTrace(view, msg, i, available_width);
         bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
@@ -2290,7 +2327,10 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
         {
             uint64_t markdown_identity = RevisionMix(view->virtual_identity, (uint64_t)(i + 1));
             int markdown_id_base = (int)(uint32_t)(markdown_identity ^ (markdown_identity >> 32));
-            MdView_RenderDocument(&msg->doc, markdown_id_base, available_width);
+            if (notice && msg->notice_severity != PICO_NOTICE_INFO)
+                MdView_RenderNoticeDocument(&msg->doc, markdown_id_base, available_width, accent);
+            else
+                MdView_RenderDocument(&msg->doc, markdown_id_base, available_width);
         }
         RichText_ClearViewport();
         if (view->selectable)
@@ -2363,8 +2403,8 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
         /* Live state, activity, tool progress and timed dwell are not owned
          * by a message edit. Recheck the live edge every layout; visible rows
          * are rechecked below before rendering, including historical dwell. */
-        if (view->message_count > 0)
-            RefreshMessageRevision(view, cache, view->message_count - 1);
+        int live_edge = LastConversationMessage(view);
+        if (live_edge >= 0) RefreshMessageRevision(view, cache, live_edge);
     }
     /* Completed tool rows change shape on dwell expiry without a mutation.
      * Recheck only those currently dwelling, then unwatch after expiry. */
@@ -3805,7 +3845,7 @@ static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox cli
             DrawLiveTimerLabel(row.boundingBox, chevron.found ? &chevron.boundingBox : NULL, live_ms);
         }
         bool has_source = msg->source && msg->source[0];
-        bool live_llm = i == view->message_count - 1 && view->state == PICO_AGENT_LLM_WAIT;
+        bool live_llm = i == LastConversationMessage(view) && view->state == PICO_AGENT_LLM_WAIT;
         bool trailing_think = msg->trace_count > 0 && !msg->trace[msg->trace_count - 1].is_tool &&
                               ThinkHasBody(&msg->trace[msg->trace_count - 1]);
         if (live_llm && !has_source && !trailing_think)
@@ -3989,7 +4029,7 @@ static void PicoChat_DrawThinkSheen(PicoHost *app)
         return;
     }
     TranscriptView main = MainTranscriptView(app);
-    int last = main.message_count - 1;
+    int last = LastConversationMessage(&main);
     if (last < 0 || main.state != PICO_AGENT_LLM_WAIT)
     {
         return;
@@ -4041,7 +4081,8 @@ static void PicoChat_DrawInspectSheen(PicoHost *app)
         .id_ns = g_inspect_n,
         .selectable = false,
     };
-    int last = inspect.message_count - 1;
+    int last = LastConversationMessage(&view);
+    if (last < 0) return;
     const PicoMessage *msg = &inspect.messages[last];
     if (msg->role != PICO_ROLE_ASSISTANT || (msg->source && msg->source[0]))
     {

@@ -1055,6 +1055,16 @@ static bool ReplayThinkParts(PicoHost *app, PicoAgent *agent, const JsonDoc *doc
     return restored;
 }
 
+static bool ReadNoticeSeverity(const JsonDoc *doc, int obj, PicoNoticeSeverity *out)
+{
+    int token = JsonObjGet(doc, obj, "severity");
+    if (JsonEq(doc, token, "info")) *out = PICO_NOTICE_INFO;
+    else if (JsonEq(doc, token, "warning")) *out = PICO_NOTICE_WARNING;
+    else if (JsonEq(doc, token, "error")) *out = PICO_NOTICE_ERROR;
+    else return false;
+    return true;
+}
+
 typedef struct ReplayPreparedMessage {
     char *content;
     char *display;
@@ -1083,6 +1093,15 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         char *tier = JsonObjStr(doc, obj, "service_tier");
         snprintf(agent->last_service_tier, sizeof(agent->last_service_tier), "%s", tier ? tier : "");
         free(tier);
+    }
+    else if (strcmp(type, "notice") == 0)
+    {
+        PicoNoticeSeverity severity;
+        if (active_group) *active_group = -1;
+        char *content = JsonObjStr(doc, obj, "content");
+        if (content && ReadNoticeSeverity(doc, obj, &severity))
+            PicoAgent_AddNotice(app, agent, severity, content);
+        free(content);
     }
     else if (strcmp(type, "message") == 0)
     {
@@ -1501,6 +1520,10 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
                         }
                     }
                 }
+            }
+            else if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "notice"))
+            {
+                free(assembled); assembled = NULL; assembled_len = 0; group = -1;
             }
             else if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "tool_call"))
             {
@@ -2198,6 +2221,18 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
         {
             valid_header = JsonObjInt(&doc, 0, "version", 0) == 4;
         }
+        else if (type && strcmp(type, "notice") == 0)
+        {
+            PicoNoticeSeverity severity;
+            active_group = -1;
+            char *content = JsonObjStr(&doc, 0, "content");
+            if (content && ReadNoticeSeverity(&doc, 0, &severity))
+            {
+                failed = !LoadedAddMessage(&messages, &count, &capacity, PICO_ROLE_NOTICE, content);
+                if (!failed) messages[count - 1].notice_severity = severity;
+            }
+            free(content);
+        }
         else if (type && strcmp(type, "message") == 0)
         {
             char *role = JsonObjStr(&doc, 0, "role");
@@ -2422,6 +2457,33 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->session_path[0] = '\0';
     agent->accepted_submit = false;
     agent->unseen_complete = false;
+}
+
+PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
+                                            PicoNoticeSeverity severity, const char *content)
+{
+    const char *name;
+    switch (severity)
+    {
+    case PICO_NOTICE_INFO: name = "info"; break;
+    case PICO_NOTICE_WARNING: name = "warning"; break;
+    case PICO_NOTICE_ERROR: name = "error"; break;
+    default: return PICO_SESSION_WRITE_FAILED;
+    }
+    char *pre = EventPrefix("notice");
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    JsonBuf_Puts(&b, ",\"severity\":");
+    JsonBuf_String(&b, name);
+    JsonBuf_Puts(&b, ",\"content\":");
+    JsonBuf_String(&b, content ? content : "");
+    JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
+    free(line);
+    free(pre);
+    return result;
 }
 
 PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent,

@@ -214,3 +214,19 @@ Compaction restores the immutable questionnaire/task seed in the helper's histor
 The `sh` inspection-only policy is prompt guidance, **not filesystem or process
 isolation**. Helpers use distinct ephemeral session/cache identities and are not
 saved, resumable, or selected user sessions.
+
+## Transcript notices
+
+- `PicoHost_AddNotice` is main-thread-only and copies the Markdown and severity;
+  the caller retains ownership of its input. Invalid IDs/severities are ignored.
+- `PICO_ROLE_NOTICE` messages carry `notice_severity`. They are application
+  feedback, never assistant/model content. `PicoHost_AddMessage` accepts only
+  user and assistant roles; emit notices using the dedicated API.
+- Notices fire `PICO_HOOK_ON_MESSAGE` after their role and severity are set.
+  They persist for durable agents, restore in transcript order with severity,
+  and remain excluded from provider history and compaction. Ephemeral agents
+  do not write session records. A notice emitted during streaming is displayed
+  immediately but written after the preceding assistant record is finalized.
+- Snapshot notice text and metadata have the same borrowed lifetime as other
+  transcript messages. No extension pointer or state is retained; reload does
+  not remove notices already emitted. See [notices](notices.md).

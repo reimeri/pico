@@ -17,7 +17,7 @@ static void TimeCmd(PicoHost *host, PicoAgentId agent_id, const char *args, void
     (void)args;
     time_t now = time(NULL);
     char *line = ctime(&now);
-    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, line ? line : "(no time)");
     PicoComposer_SetText(host, "");
     PicoHost_RequestSubmitCancel(host);
 }
@@ -44,3 +44,8 @@ Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types 
 - Builtin `/` completer (`bol_only`) lists your command automatically.
 
 To offer argument completions (`/docs topic`), add a `pico_host_add_completer` or `pico_workspace_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`. `/resume` completions list parent sessions from an asynchronously refreshed core snapshot, so the popup may initially be empty or briefly stale while disk scanning completes; a subagent session can still be opened by typing its session ID.
+
+## Application notices
+
+Use `PicoHost_AddNotice` for command feedback instead of assistant messages.
+See [notices](notices.md) for severity, persistence, and model-context contracts.

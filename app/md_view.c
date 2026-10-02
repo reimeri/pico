@@ -36,6 +36,7 @@ static RichTextStyle BaseStyle = {
 };
 
 static const char *hovered_link = NULL;
+static bool notice_tinted;
 
 /* Highlight span cache stored in the document arena (MdBlock.hl_cache);
  * computed once per block, freed with the document. */
@@ -639,7 +640,8 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                                          .childGap = 8,
                                          .sizing = {.width = CLAY_SIZING_GROW(0)}},
                               .backgroundColor = COLOR_QUOTE_BG,
-                              .border = {.color = COLOR_QUOTE_BORDER, .width = {.left = 4}}})
+                              .border = {.color = notice_tinted ? BaseStyle.text_color : COLOR_QUOTE_BORDER,
+                                         .width = {.left = 4}}})
                 {
                     RichText_RenderParagraphWindowed(block, &doc->arena, content_width, &style, emit, NULL,
                                                       CLAY_IDI("MdParagraph", id_base + index));
@@ -661,7 +663,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     .fontSize = style.font_size,
                     .lineHeight = Pico_FontPxU16(style.line_height > 0 ? style.line_height
                                                                       : style.font_size),
-                    .textColor = block->list_item_task
+                    .textColor = notice_tinted ? BaseStyle.text_color : block->list_item_task
                                      ? (block->list_item_done ? COLOR_MUTED : COLOR_LINK)
                                      : COLOR_MUTED,
                     .wrapMode = CLAY_TEXT_WRAP_NONE,
@@ -825,9 +827,9 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                         }
                         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIT()}}})
                         {
-                            if (!hl || length == 0)
+                            if (notice_tinted || !hl || length == 0)
                             {
-                                CodeLineSegment(line, length, COLOR_CODE_TEXT);
+                                CodeLineSegment(line, length, BaseStyle.code_text_color);
                             }
                             else
                             {
@@ -1025,4 +1027,19 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
     {
         hovered_link = emit.hovered_link;
     }
+}
+
+void MdView_RenderNoticeDocument(MdDocument *doc, int id_base, float available_width,
+                                 Clay_Color color)
+{
+    RichTextStyle saved = BaseStyle;
+    bool saved_tint = notice_tinted;
+    notice_tinted = true;
+    BaseStyle.text_color = color;
+    BaseStyle.link_color = color;
+    BaseStyle.link_hover_color = color;
+    BaseStyle.code_text_color = color;
+    MdView_RenderDocument(doc, id_base, available_width);
+    BaseStyle = saved;
+    notice_tinted = saved_tint;
 }

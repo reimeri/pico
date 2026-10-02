@@ -1,6 +1,7 @@
 // Example host-scoped slash command. Copy to ~/.config/pico/extensions/
 // (a subfolder is fine) then press F5. Workspace-local sources must not set
-// host callbacks.
+// host callbacks. Feedback follows docs/extend/notices.md and contracts.md:
+// copied on the main thread, saved to the transcript, never sent to the model.
 //
 //   mkdir -p ~/.config/pico/extensions/time
 //   cp examples/time_cmd.c ~/.config/pico/extensions/time/
@@ -15,7 +16,7 @@ static void TimeCmd(PicoHost *host, PicoAgentId agent_id, const char *args, void
     (void)args;
     time_t now = time(NULL);
     char *line = ctime(&now);
-    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, line ? line : "(no time)");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, line ? line : "(no time)");
     PicoComposer_SetText(host, "");
     PicoHost_RequestSubmitCancel(host);
 }

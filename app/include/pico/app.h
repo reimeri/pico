@@ -42,7 +42,14 @@
 typedef enum PicoRole {
     PICO_ROLE_USER = 0,
     PICO_ROLE_ASSISTANT,
+    PICO_ROLE_NOTICE, /* transcript-only application feedback */
 } PicoRole;
+
+typedef enum PicoNoticeSeverity {
+    PICO_NOTICE_INFO = 0,
+    PICO_NOTICE_WARNING,
+    PICO_NOTICE_ERROR,
+} PicoNoticeSeverity;
 
 typedef enum PicoUiSlot {
     PICO_SLOT_SIDEBAR = 0,
@@ -115,6 +122,7 @@ typedef struct PicoTraceLine {
 
 typedef struct PicoMessage {
     PicoRole role;
+    PicoNoticeSeverity notice_severity; /* meaningful only for PICO_ROLE_NOTICE */
     char *source;
     size_t source_len;
     size_t source_cap;
@@ -646,7 +654,11 @@ void PicoHost_Start(PicoHost *host, Font *fonts, const char *workspace, bool saf
                     PicoSessionStart session_start, const char *session_file);
 PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host);
 void PicoHost_ClearMessages(PicoHost *host, PicoAgentId agent_id);
+/* Main thread. AddMessage accepts user/assistant roles; use AddNotice for notices. */
 void PicoHost_AddMessage(PicoHost *host, PicoAgentId agent_id, PicoRole role, const char *markdown);
+/* Main thread. Copies markdown; saves for durable agents, never provider history. */
+void PicoHost_AddNotice(PicoHost *host, PicoAgentId agent_id, PicoNoticeSeverity severity,
+                        const char *markdown);
 void PicoHost_AddToolCall(PicoHost *host, PicoAgentId agent_id, const char *name, const char *args);
 void PicoHost_SetLastToolOutput(PicoHost *host, PicoAgentId agent_id, const char *output, bool is_error);
 void PicoHost_AppendAssistant(PicoHost *host, PicoAgentId agent_id, const char *text);

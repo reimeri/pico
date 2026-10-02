@@ -164,6 +164,8 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
 void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent);
 void PicoSession_Reset(PicoHost *app, PicoAgent *agent);
 void PicoSession_ReplayToolDetails(PicoHost *app, PicoAgent *agent);
+PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
+                                            PicoNoticeSeverity severity, const char *content);
 PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent,
                                              const char *content, const char *display,
                                              const char *parts_json);

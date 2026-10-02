@@ -13,6 +13,7 @@
 #include "streaming_tps.h"
 #include "host_internal.h"
 #include "trace_group.h"
+#include "chat_sel.h"
 
 #include <curl/curl.h>
 #include <errno.h>
@@ -218,6 +219,8 @@ struct PicoAgentRt {
     int offered_tool_count;
 
     int stream_msg;
+    bool stream_notices_pending;
+    bool llm_started; /* current stream was dispatched, not merely prepared */
     bool stream_dirty;
     double stream_reparse_at; /* main thread only: last debounced reparse */
     double action_t0;
@@ -1609,6 +1612,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->turn_think = NULL;
     rt->turn_think_len = 0;
     rt->turn_think_cap = 0;
+    rt->llm_started = true;
     rt->work = PICO_WORK_LLM;
     rt->work_stream = p->stream;
     rt->work_stream_state = p->state;
@@ -1880,13 +1884,21 @@ static void SetMessageText(PicoHost *app, PicoAgent *agent, int idx, const char 
     }
 }
 
-static void PopLastMessage(PicoHost *app, PicoAgent *agent)
+static void RemoveMessage(PicoHost *app, PicoAgent *agent, int i)
 {
-    if (agent->message_count <= 0)
+    if (i < 0 || i >= agent->message_count) return;
+    if (PicoHost_TranscriptAgent(app) == agent)
     {
-        return;
+        if (app->chat_sel.msg == i ||
+            ((app->chat_sel.pressed_tool || app->chat_sel.pressed_group) && app->chat_sel.tool_msg == i))
+            PicoChatSel_Clear(app);
+        else
+        {
+            if (app->chat_sel.msg > i) app->chat_sel.msg--;
+            if (app->chat_sel.tool_msg > i) app->chat_sel.tool_msg--;
+        }
     }
-    int i = --agent->message_count;
+    agent->transcript_reset_generation++;
     free(agent->messages[i].source);
     for (int t = 0; t < agent->messages[i].trace_count; t++)
     {
@@ -1894,7 +1906,10 @@ static void PopLastMessage(PicoHost *app, PicoAgent *agent)
     }
     free(agent->messages[i].trace);
     MdDocument_Free(&agent->messages[i].doc);
-    memset(&agent->messages[i], 0, sizeof(agent->messages[i]));
+    memmove(&agent->messages[i], &agent->messages[i + 1],
+            (size_t)(agent->message_count - i - 1) * sizeof(agent->messages[i]));
+    agent->message_count--;
+    memset(&agent->messages[agent->message_count], 0, sizeof(agent->messages[0]));
 }
 
 static bool Blank(const char *s)
@@ -2245,7 +2260,7 @@ static void TraceAddTool(PicoHost *app, PicoAgent *agent, int idx, const char *c
     {
         return;
     }
-    PicoAgent_AddToolCallWithId(app, agent, call_id, name, args_json);
+    PicoAgent_AddToolCallToMessage(agent, idx, call_id, name, args_json);
 }
 
 static bool TraceHasToolCall(const PicoAgent *agent, int idx, const char *call_id)
@@ -2401,6 +2416,33 @@ static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
     pico_run_hooks(app, PICO_HOOK_ON_TURN_END, agent->id);
 }
 
+/* A notice arriving during streaming is visible immediately, but the assistant
+ * record must land first so replay retains the live transcript order. */
+void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index)
+{
+    PicoAgentRt *rt = agent->runtime;
+    if (rt && agent->state == PICO_AGENT_LLM_WAIT && !rt->compacting && rt->stream_msg >= 0)
+    {
+        rt->stream_notices_pending = true;
+        return;
+    }
+    PicoMessage *message = &agent->messages[message_index];
+    PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+}
+
+static void FlushStreamNotices(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    if (!rt->stream_notices_pending) return;
+    rt->stream_notices_pending = false;
+    for (int i = rt->stream_msg + 1; i < agent->message_count; i++)
+    {
+        PicoMessage *message = &agent->messages[i];
+        if (message->role == PICO_ROLE_NOTICE)
+            PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+    }
+}
+
 static void SavePartialAssistant(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -2423,6 +2465,7 @@ static void SavePartialAssistant(PicoHost *app, PicoAgent *agent)
     }
     free(thinking_parts);
     free(thinking);
+    FlushStreamNotices(app, agent);
 }
 
 static void ApplyCancel(PicoHost *app, PicoAgent *agent)
@@ -2441,9 +2484,11 @@ static void ApplyCancel(PicoHost *app, PicoAgent *agent)
         SavePartialAssistant(app, agent);
     }
     SweepProvisionalRows(agent, rt);
+    FlushStreamReparse(app, agent);
+    FlushStreamNotices(app, agent);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
-        PopLastMessage(app, agent);
+        RemoveMessage(app, agent, rt->stream_msg);
     }
     /* Completed calls may be anywhere in a parallel batch; never rewrite them. */
     AbortRemainingCalls(app, agent, rt);
@@ -2510,7 +2555,7 @@ static void FinishTurn(PicoHost *app, PicoAgent *agent)
     PicoAgentRt *rt = agent->runtime;
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
-        PopLastMessage(app, agent);
+        RemoveMessage(app, agent, rt->stream_msg);
     }
     if (CompactThreshold(agent) > 0 && agent->tokens_used >= CompactThreshold(agent))
     {
@@ -2523,21 +2568,25 @@ static void FinishTurn(PicoHost *app, PicoAgent *agent)
 static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
 {
     PicoAgentRt *rt = agent->runtime;
+    SweepProvisionalRows(agent, rt);
+    if (agent->state == PICO_AGENT_LLM_WAIT && rt->llm_started && !rt->compacting)
+        SavePartialAssistant(app, agent);
+    FlushStreamReparse(app, agent);
+    FlushStreamNotices(app, agent);
     free(agent->error);
     agent->error = Dup(msg ? msg : "agent error");
     agent->state = PICO_AGENT_ERROR;
-    SweepProvisionalRows(agent, rt);
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
-        SetMessageText(app, agent, rt->stream_msg, agent->error);
+        RemoveMessage(app, agent, rt->stream_msg);
     }
-    FlushStreamReparse(app, agent);
     rt->stream_msg = -1;
     ClearPending(rt);
     ClearOfferedTools(rt);
     rt->compacting = false;
     rt->compact_no_tools = false;
     agent->activity[0] = '\0';
+    PicoHost_AddNotice(app, agent->id, PICO_NOTICE_ERROR, agent->error);
     pico_run_hooks(app, PICO_HOOK_ON_ERROR, agent->id);
 }
 
@@ -2642,6 +2691,8 @@ static void StartNextTool(PicoHost *app, PicoAgent *agent)
 static void StartLlm(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
+    rt->llm_started = false;
+    agent->state = PICO_AGENT_LLM_WAIT;
     int last = agent->message_count - 1;
     if (last >= 0 && agent->messages[last].role == PICO_ROLE_ASSISTANT && MessageSourceEmpty(agent, last))
     {
@@ -2649,13 +2700,14 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
     }
     else
     {
+        /* Hooks may append notices; retain the assistant index, not the tail. */
+        rt->stream_msg = agent->message_count;
         PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
-        rt->stream_msg = agent->message_count - 1;
+        if (rt->stream_msg >= agent->message_count) rt->stream_msg = -1;
     }
     rt->stream_dirty = false;
     rt->stream_reparse_at = 0; /* first streamed delta renders immediately */
     ClearProvStream(rt);
-    agent->state = PICO_AGENT_LLM_WAIT;
     StampActionT0(rt);
     SetActivity(app, agent, "Thinking…");
     free(agent->error);
@@ -2869,13 +2921,11 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
     {
         return; /* a row needs a name; arguments may stream before BEGIN lands */
     }
-    PicoAgent_AddToolCallWithId(app, agent, row->call_id, row->name, NULL);
-    if (agent->message_count <= 0)
-    {
-        return;
-    }
-    PicoMessage *m = &agent->messages[agent->message_count - 1];
-    if (m->trace_count <= 0)
+    PicoMessage *m = &agent->messages[rt->stream_msg];
+    int previous_count = m->trace_count;
+    TraceAddTool(app, agent, rt->stream_msg, row->call_id, row->name, NULL);
+    m = &agent->messages[rt->stream_msg];
+    if (m->trace_count <= previous_count)
     {
         return;
     }
@@ -2883,8 +2933,8 @@ static void ProvRowSync(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt,
     line->tool_streaming = true;
     line->tool_stream_bytes = row->args_bytes;
     ApplyProvArgs(line, row);
-    MessageTouch(agent, agent->message_count - 1);
-    row->msg_idx = agent->message_count - 1;
+    MessageTouch(agent, rt->stream_msg);
+    row->msg_idx = rt->stream_msg;
     row->trace_idx = m->trace_count - 1;
 }
 
@@ -3007,7 +3057,7 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
     PicoAgentRt *rt = agent->runtime;
     if (!payload)
     {
-        FinishAssistantHistory(app, agent, NULL, NULL);
+        SavePartialAssistant(app, agent);
         return true;
     }
     JsonDoc doc;
@@ -3015,7 +3065,7 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
     if (items < 0)
     {
         JsonFree(&doc);
-        FinishAssistantHistory(app, agent, NULL, NULL);
+        SavePartialAssistant(app, agent);
         return true;
     }
 
@@ -3166,6 +3216,7 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
     JsonBuf_Free(&visible);
     JsonFree(&doc);
     free(staged_json);
+    FlushStreamNotices(app, agent);
     return true;
 }
 
@@ -4669,10 +4720,6 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
             OnLlmDone(app, agent, ev);
             break;
         case PICO_AEV_LLM_FAIL:
-            if (!rt->compacting)
-            {
-                SavePartialAssistant(app, agent);
-            }
             SetErrorState(app, agent, ev->text ? ev->text : "LLM request failed");
             break;
         case PICO_AEV_LLM_CANCEL:

@@ -2188,6 +2188,122 @@ done:
 
 static int RunQuestionPanelShellCase(bool with_sidebar);
 
+static bool NoticeTextHasColor(Clay_RenderCommandArray *commands, const char *text,
+                               PicoNoticeSeverity severity)
+{
+    Clay_RenderCommand *command = FindCardText(commands, text);
+    if (!command) return false;
+    Clay_Color color = command->renderData.text.textColor;
+    if (severity == PICO_NOTICE_ERROR) return color.r > color.g && color.r > color.b;
+    if (severity == PICO_NOTICE_WARNING) return color.r > color.b && color.g > color.b;
+    return true;
+}
+
+static int RunNoticeTranscriptCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-notice-layout-XXXXXX";
+    char cfg[] = "/tmp/pico-notice-cfg-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    ChatStabilitySnapshot expected = {0};
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("notice layout setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                     .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    for (int i = 0; i < 40; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "notice layout history");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_ERROR,
+                       "error-prose [error-url](https://chatgpt.com/backend-api/codex/responses)\n\n```\nerror-code\n```");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_WARNING, "warning-prose");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, "info-prose");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT,
+                         "HTTP 504 from [normal-url](https://chatgpt.com/backend-api/codex/responses)");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    int live_index = agent->message_count - 1;
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, "trailing-notice");
+    agent->state = PICO_AGENT_LLM_WAIT;
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    host->chat_follow_bottom = true;
+    PicoChat_ResetBottomSpace(host);
+    for (int frame = 0; frame < 120; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition ||
+            scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height)
+        {
+            Fail("notice test must exercise overflowing bottom-follow chat");
+            goto done;
+        }
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                   scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        PicoChat_HarvestVirtualHeights(host);
+        ChatStabilitySnapshot current;
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
+        if (frame == 30) expected = current;
+        if (frame > 30 && !ChatStabilitySnapshotStable(&expected, &current, with_sidebar))
+        {
+            Fail("notice blocks changed stable bottom-follow geometry");
+            goto done;
+        }
+        if (frame == 119)
+        {
+            Clay_RenderCommand *ordinary = FindCardText(&commands, "normal-url");
+            if (!NoticeTextHasColor(&commands, "Error", PICO_NOTICE_ERROR) ||
+                !NoticeTextHasColor(&commands, "error-prose", PICO_NOTICE_ERROR) ||
+                !NoticeTextHasColor(&commands, "error-url", PICO_NOTICE_ERROR) ||
+                !NoticeTextHasColor(&commands, "error-code", PICO_NOTICE_ERROR) ||
+                !NoticeTextHasColor(&commands, "Warning", PICO_NOTICE_WARNING) ||
+                !NoticeTextHasColor(&commands, "warning-prose", PICO_NOTICE_WARNING) ||
+                !FindCardText(&commands, "Info") || !ordinary ||
+                ordinary->renderData.text.textColor.b <= ordinary->renderData.text.textColor.r ||
+                !Clay_GetElementData(MainTraceRowId(live_index, 0, "ThinkSynthRow")).found)
+            {
+                Fail("notice labels/body/link severity or ordinary chat/live assistant styling is incorrect");
+                goto done;
+            }
+        }
+    }
+    rc = 0;
+done:
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    if (rc && !g_failed) Fail("notice transcript layout");
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -2211,6 +2327,7 @@ static int TestBottomFollowShellGeometryStable(void)
     if (RunFastFooterCase(false, false) != 0 || RunFastFooterCase(true, false) != 0 ||
         RunFastFooterCase(false, true) != 0 || RunFastFooterCase(true, true) != 0)
         return 1;
+    if (RunNoticeTranscriptCase(false) != 0 || RunNoticeTranscriptCase(true) != 0) return 1;
     return RunWorkspaceLessShellCase();
 }
 
@@ -13772,12 +13889,14 @@ done:
 
 static int TestCopiedMessageSourceMetadata(void)
 {
-    PicoMessage source = {.role = PICO_ROLE_ASSISTANT, .source = "copied answer",
+    PicoMessage source = {.role = PICO_ROLE_NOTICE, .notice_severity = PICO_NOTICE_ERROR,
+                          .source = "copied answer",
                           .source_len = strlen("copied answer"), .revision = 7};
     PicoMessage *copy = NULL;
     int count = 0;
     if (!PicoMessages_Copy(&source, 1, &copy, &count)) return 1;
-    bool ok = count == 1 && copy[0].source &&
+    bool ok = count == 1 && copy[0].role == PICO_ROLE_NOTICE &&
+              copy[0].notice_severity == PICO_NOTICE_ERROR && copy[0].source &&
               strcmp(copy[0].source, source.source) == 0 &&
               copy[0].source_len == strlen(copy[0].source) &&
               copy[0].source_cap >= copy[0].source_len + 1 &&

@@ -65,6 +65,10 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text);
+/* Replay-only notice insertion; persistence is handled by the public host API. */
+void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
+                         const char *markdown);
+void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index);
 /* Replay-only: transfer worker-prepared markdown to the private candidate.
  * On allocation failure the caller still owns the document. */
 void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
@@ -78,6 +82,8 @@ void PicoAgent_AppendThinkSummary(PicoHost *app, PicoAgent *agent, const char *t
 void PicoTraceLine_Release(PicoTraceLine *line);
 void PicoTraceLine_FreezeThink(PicoTraceLine *line);
 void PicoAgent_AddToolCall(PicoHost *app, PicoAgent *agent, const char *name, const char *args);
+void PicoAgent_AddToolCallToMessage(PicoAgent *agent, int index, const char *call_id,
+                                    const char *name, const char *args);
 void PicoAgent_AddToolCallWithId(PicoHost *app, PicoAgent *agent, const char *call_id,
                                 const char *name, const char *args);
 /* Malloc'd transcript display string for tool args. Caller frees. */

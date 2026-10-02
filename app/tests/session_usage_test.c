@@ -29,7 +29,14 @@ static int g_restored_value;
 static int g_reset_hooks;
 static char g_status_warning[512];
 static int g_reserve_calls;
+static char g_replayed_history[16384];
 static char g_last_think[2048];
+
+static void TrackHistory(const char *text)
+{
+    strncat(g_replayed_history, text ? text : "",
+            sizeof(g_replayed_history) - strlen(g_replayed_history) - 1);
+}
 static char g_last_sig[4096];
 static char g_last_item_id[128];
 static char g_last_user_parts[4096];
@@ -246,13 +253,13 @@ void PicoAgent_ClearInput(PicoAgent *agent)
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
 {
     (void)agent;
-    (void)text;
+    TrackHistory(text);
 }
 
 void PicoAgent_PushHistoryUserParts(PicoAgent *agent, const char *text, const char *parts_json)
 {
     (void)agent;
-    (void)text;
+    TrackHistory(text);
     snprintf(g_last_user_parts, sizeof(g_last_user_parts), "%s", parts_json ? parts_json : "");
 }
 
@@ -262,7 +269,7 @@ void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const ch
     (void)agent;
     snprintf(g_last_think, sizeof(g_last_think), "%s", thinking ? thinking : "");
     snprintf(g_last_sig, sizeof(g_last_sig), "%s", signature ? signature : "");
-    (void)text;
+    TrackHistory(text);
 }
 
 void PicoAgent_PushHistoryAssistantParts(PicoAgent *agent, const char *text, const char *thinking,
@@ -477,6 +484,13 @@ void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const 
     memset(message, 0, sizeof(*message));
     message->role = role;
     message->source = JsonDup(text ? text : "");
+}
+
+void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
+                         const char *text)
+{
+    PicoAgent_AddMessage(app, agent, PICO_ROLE_NOTICE, text);
+    agent->messages[agent->message_count - 1].notice_severity = severity;
 }
 
 void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text)
@@ -1479,6 +1493,53 @@ static int TestTranscriptMessageGroups(void)
     PicoAgent_ClearMessages(&reader_agent);
     unlink(writer_agent.session_path);
     return 0;
+}
+
+static bool NoticeTranscriptMatches(const PicoMessage *messages, int count)
+{
+    return count == 7 && messages[0].role == PICO_ROLE_USER &&
+           messages[1].role == PICO_ROLE_ASSISTANT && strcmp(messages[1].source, "draft") == 0 &&
+           messages[2].role == PICO_ROLE_NOTICE && messages[2].notice_severity == PICO_NOTICE_ERROR &&
+           strcmp(messages[2].source, "notice-only-error") == 0 &&
+           messages[3].role == PICO_ROLE_ASSISTANT && strcmp(messages[3].source, "continued") == 0 &&
+           messages[4].role == PICO_ROLE_NOTICE && messages[4].notice_severity == PICO_NOTICE_INFO &&
+           strcmp(messages[4].source, "notice-only-info") == 0 &&
+           messages[5].role == PICO_ROLE_NOTICE && messages[5].notice_severity == PICO_NOTICE_WARNING &&
+           strcmp(messages[5].source, "notice-only-warning") == 0 &&
+           messages[6].role == PICO_ROLE_ASSISTANT && strcmp(messages[6].source, "done") == 0;
+}
+
+static int TestNoticePersistence(void)
+{
+    PicoHost writer = {0}, reader = {0};
+    PicoAgent source = {.persistence = PICO_SESSION_DURABLE};
+    PicoAgent restored = {.persistence = PICO_SESSION_DURABLE};
+    PicoHost_SetPath(&writer, "/workspace");
+    PicoHost_SetPath(&reader, "/workspace");
+    PicoSession_LogUser(&writer, &source, "task", NULL, NULL);
+    PicoSession_LogAssistant(&writer, &source, 1, "draft", NULL, NULL, NULL, NULL, 0);
+    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_ERROR, "notice-only-error");
+    PicoSession_LogAssistant(&writer, &source, 1, "continued", NULL, NULL, NULL, NULL, 0);
+    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_INFO, "notice-only-info");
+    PicoSession_LogCompaction(&writer, &source, "summary", 0);
+    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_WARNING, "notice-only-warning");
+    PicoSession_LogAssistant(&writer, &source, 6, "done", NULL, NULL, NULL, NULL, 0);
+    PicoMessage *loaded = NULL;
+    int count = 0;
+    bool ok = PicoSession_LoadTranscript(PicoHost_PrimaryWorkspace(&writer), source.session_id,
+                                         &loaded, &count) == 0 &&
+              NoticeTranscriptMatches(loaded, count);
+    PicoMessages_Free(loaded, count);
+    g_replayed_history[0] = '\0';
+    PicoSession_Start(&reader, &restored, PICO_SESSION_NEW, source.session_path);
+    ok &= NoticeTranscriptMatches(restored.messages, restored.message_count) &&
+          !strstr(g_replayed_history, "notice-only-") && strstr(g_replayed_history, "done");
+    PicoAgent_ClearMessages(&restored);
+    unlink(source.session_path);
+    PicoAgent ephemeral = {.persistence = PICO_SESSION_EPHEMERAL};
+    ok &= PicoSession_LogNotice(&writer, &ephemeral, PICO_NOTICE_INFO, "temporary") ==
+          PICO_SESSION_WRITE_SKIPPED && !ephemeral.session_path[0];
+    return ok ? 0 : Fail("notices lost severity/order, entered history, or persisted an ephemeral agent");
 }
 
 static int TestPartsReplay(void)
@@ -3696,7 +3757,7 @@ int main(void)
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
     if (PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
-        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
+        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||
         PICO_TEST_RUN(TestConcurrentAppendDuringTitle()) != 0 || PICO_TEST_RUN(TestConcurrentDoneCatalog()) != 0 ||

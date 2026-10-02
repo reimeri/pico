@@ -58,6 +58,8 @@ typedef enum TestMode {
     TEST_INTERLEAVED_TRACE_ITEMS,
     TEST_MALFORMED_RESULT,
     TEST_MEDIA_PERSIST_FAIL,
+    TEST_MEDIA_STREAM_PERSIST_FAIL,
+    TEST_THINK_TOOL,
     TEST_UI_POST,
     TEST_UI_POST_BLOCK,
     TEST_UI_POST_CAP,
@@ -110,6 +112,8 @@ typedef struct TestState {
     int provider_tokens;
     int provider_cached_tokens;
     int usage_log_count;
+    int notice_log_count;
+    char notice_log_text[2048];
     bool emit_think_summaries;
     bool logged_thinking_parts;
     char logged_thinking[256];
@@ -223,6 +227,8 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.provider_tokens = 0;
     g_test.provider_cached_tokens = 0;
     g_test.usage_log_count = 0;
+    g_test.notice_log_count = 0;
+    g_test.notice_log_text[0] = '\0';
     g_test.emit_think_summaries = false;
     g_test.logged_thinking_parts = false;
     g_test.logged_thinking[0] = '\0';
@@ -434,8 +440,10 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         out->items = NULL;
         return PICO_LLM_OK;
     }
-    if (mode == TEST_MEDIA_PERSIST_FAIL)
+    if (mode == TEST_MEDIA_PERSIST_FAIL || mode == TEST_MEDIA_STREAM_PERSIST_FAIL)
     {
+        if (mode == TEST_MEDIA_STREAM_PERSIST_FAIL)
+            FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "draft", 5);
         pico_llm_result_add_text(out, "must not commit");
         PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
         if (item)
@@ -678,6 +686,12 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     if (mode == TEST_BLOCK_WITH_ASSISTANT)
     {
         pico_llm_result_add_text(out, "working");
+    }
+    if (mode == TEST_THINK_TOOL)
+    {
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "round-one-think", 15);
+        PicoLlmItem *item = pico_llm_result_add_item(out, PICO_LLM_ITEM_ASSISTANT);
+        if (item) item->thinking = JsonDup("round-one-think");
     }
     if (mode == TEST_SIGNATURE_CONTINUATION)
     {
@@ -1386,6 +1400,18 @@ void MdDocument_Free(MdDocument *doc)
     {
         memset(doc, 0, sizeof(*doc));
     }
+}
+
+PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
+                                            PicoNoticeSeverity severity, const char *content)
+{
+    (void)app; (void)agent; (void)severity;
+    g_test.notice_log_count++;
+    strncat(g_test.notice_log_text, content ? content : "",
+            sizeof(g_test.notice_log_text) - strlen(g_test.notice_log_text) - 1);
+    strncat(g_test.session_item_order, "N",
+            sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
+    return PICO_SESSION_WRITE_OK;
 }
 
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
@@ -3614,11 +3640,191 @@ static int TestErrorNotification(void)
     }
     bool ok = g_test.life_error == 1 && g_test.life_turn_end == 0 && g_test.life_cancel == 0 &&
               TestAgent(&app)->state == PICO_AGENT_ERROR && TestAgent(&app)->error && TestAgent(&app)->session_input_tokens == 0 &&
-              TestAgent(&app)->session_cached_tokens == 0 && g_test.usage_log_count == 0;
+              TestAgent(&app)->session_cached_tokens == 0 && g_test.usage_log_count == 0 &&
+              TestAgent(&app)->message_count == 1 &&
+              TestAgent(&app)->messages[0].role == PICO_ROLE_NOTICE &&
+              TestAgent(&app)->messages[0].notice_severity == PICO_NOTICE_ERROR &&
+              strcmp(TestAgent(&app)->messages[0].source, "provider failed") == 0 &&
+              g_test.notice_log_count == 1;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "failed request changed usage or did not fire ON_ERROR");
 }
 
+
+static void NoticeOnMessage(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    PicoAgent *agent = PicoWorkspace_FindAgent(workspace, event->agent_id);
+    if (!agent || agent->message_count == 0) return;
+    const PicoMessage *last = &agent->messages[agent->message_count - 1];
+    if (last->role == PICO_ROLE_ASSISTANT && !last->source[0])
+        PicoHost_AddNotice(workspace->host, agent->id, PICO_NOTICE_INFO, "hook-notice");
+    else if (last->role == PICO_ROLE_NOTICE && strcmp(last->source, "outer-notice") == 0)
+        PicoHost_AddNotice(workspace->host, agent->id, PICO_NOTICE_WARNING, "inner-notice");
+}
+
+static int TestNoticeHooksAndHistory(void)
+{
+    const char *name = "notice hooks preserve assistant ownership and order";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, NoticeOnMessage);
+    PicoAgent *agent = TestAgent(&app);
+    PicoHost_AddNotice(&app, agent->id, PICO_NOTICE_INFO, "outer-notice");
+    bool ok = strcmp(g_test.notice_log_text, "outer-noticeinner-notice") == 0;
+    g_test.session_item_order[0] = '\0';
+    PicoAgent_StartTurn(&app, agent, "start");
+    ok &= WaitForIdle(&app) && agent->message_count == 4 &&
+          agent->messages[2].role == PICO_ROLE_ASSISTANT &&
+          agent->messages[2].source[0] &&
+          agent->messages[3].role == PICO_ROLE_NOTICE &&
+          strcmp(agent->messages[3].source, "hook-notice") == 0 &&
+          strcmp(g_test.session_item_order, "AN") == 0;
+    PicoAgent_StartTurn(&app, agent, "continue");
+    ok &= WaitForIdle(&app);
+    pthread_mutex_lock(&g_test.mu);
+    ok &= g_test.last_input && !strstr(g_test.last_input, "hook-notice") &&
+          !strstr(g_test.last_input, "outer-notice") && !strstr(g_test.last_input, "inner-notice");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "notice changed assistant output, durable order, or provider history");
+}
+
+static int TestNoticeDuringStreamedToolCalls(void)
+{
+    const char *name = "notices preserve streamed tool ownership";
+    ResetTest(TEST_PROVIDER_TOOL_STREAM_BLOCK, 1);
+    PicoHost app;
+    InitApp(&app);
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, NoticeOnMessage);
+    if (!TestAddTool(&app, "echo_test", "test", "{\"type\":\"object\"}", EchoTool, NULL))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "tool registration failed");
+    }
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "provider did not stream calls");
+    }
+    PicoAgent_Pump(&app, agent);
+    bool ok = agent->message_count == 2 && agent->messages[0].trace_count == 3 &&
+              agent->messages[0].trace[1].is_tool &&
+              agent->messages[0].trace[1].tool_streaming &&
+              agent->messages[1].role == PICO_ROLE_NOTICE && !agent->messages[1].trace_count;
+    ReleaseBlock();
+    ok &= WaitForIdle(&app) && agent->message_count == 4 &&
+          agent->messages[0].trace_count == 2 && agent->messages[0].trace[1].tool_output &&
+          strcmp(agent->messages[0].trace[1].tool_output, "echo-out") == 0 &&
+          agent->messages[2].role == PICO_ROLE_ASSISTANT &&
+          strcmp(agent->messages[2].source, "done") == 0 &&
+          g_test.session_message_group_count == 3 && g_test.session_message_groups[0] == 0 &&
+          g_test.session_message_groups[1] == 0 && g_test.session_message_groups[2] == 2;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "notice split tool traces from their assistant or changed durable groups");
+}
+
+static void FollowupOnlyContext(PicoWorkspace *workspace, PicoAgentId agent_id,
+                                PicoContextEvent *event, void *state)
+{
+    (void)workspace; (void)agent_id; (void)state;
+    if (event->history_count > 0 &&
+        strstr(event->history_json[event->history_count - 1], "\"type\":\"tool_result\""))
+        event->extra_context = JsonDup("followup-only-context");
+}
+
+static int TestNoticeOnRejectedFollowup(void)
+{
+    const char *name = "rejected followup does not resave previous thinking";
+    ResetTest(TEST_THINK_TOOL, 1);
+    PicoHost app;
+    InitApp(&app);
+    TestAddProvider(&app, &(PicoProvider){.name = "unmapped", .stream = FakeProvider});
+    snprintf(TestWs(&app)->models[0].provider, sizeof(TestWs(&app)->models[0].provider), "unmapped");
+    TestAddContextHook(&app, FollowupOnlyContext);
+    PicoAgent *agent = TestAgent(&app);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "missing_tool");
+    PicoAgent_StartTurn(&app, agent, "start");
+    bool ok = WaitForIdle(&app) && agent->state == PICO_AGENT_ERROR &&
+              strstr(agent->error, "does not map context") &&
+              strcmp(g_test.session_item_order, "ATN") == 0 &&
+              strcmp(g_test.logged_thinking, "round-one-think") == 0 &&
+              g_test.notice_log_count == 1;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "request preparation failure duplicated prior assistant reasoning");
+}
+
+static int TestNoticeSelectionAfterEmptyStream(void)
+{
+    const char *name = "notice selection survives empty stream removal";
+    ResetTest(TEST_PROVIDER_BLOCK, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    PicoHost_AddNotice(&app, agent->id, PICO_NOTICE_INFO, "first-notice");
+    PicoHost_AddNotice(&app, agent->id, PICO_NOTICE_INFO, "second-notice");
+    app.chat_sel.msg = 1;
+    app.chat_sel.anchor = 0;
+    app.chat_sel.cursor = 5;
+    PicoAgent_Cancel(agent);
+    bool ok = WaitForIdle(&app) && agent->message_count == 2 && app.chat_sel.msg == 0 &&
+              strcmp(agent->messages[app.chat_sel.msg].source, "first-notice") == 0 &&
+              app.chat_sel.anchor == 0 && app.chat_sel.cursor == 5;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "removing an empty assistant transferred selection to another notice");
+}
+
+static int TestNoticeDuringMediaFailure(void)
+{
+    const char *name = "notice during streamed media failure";
+    ResetTest(TEST_MEDIA_STREAM_PERSIST_FAIL, 0);
+    PicoHost app;
+    InitApp(&app);
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, NoticeOnMessage);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    bool ok = WaitForIdle(&app) && agent->state == PICO_AGENT_ERROR &&
+              agent->message_count == 3 &&
+              agent->messages[0].role == PICO_ROLE_ASSISTANT &&
+              strcmp(agent->messages[0].source, "draft") == 0 &&
+              agent->messages[1].role == PICO_ROLE_NOTICE &&
+              strcmp(agent->messages[1].source, "hook-notice") == 0 &&
+              agent->messages[2].notice_severity == PICO_NOTICE_ERROR &&
+              strcmp(g_test.logged_content, "draft") == 0 &&
+              strcmp(g_test.session_item_order, "ANN") == 0;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "terminal ingest failure lost partial output or deferred notices");
+}
+
+static int TestNoticeDuringCancelledStream(void)
+{
+    const char *name = "notice during cancelled stream";
+    ResetTest(TEST_PROVIDER_TEXT_BLOCK, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    if (!WaitForBlock(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "streaming provider did not start");
+    }
+    PicoAgent_Pump(&app, agent);
+    PicoHost_AddNotice(&app, agent->id, PICO_NOTICE_WARNING, "stream-warning");
+    bool ok = g_test.notice_log_count == 0 && agent->messages[1].role == PICO_ROLE_NOTICE;
+    PicoAgent_Cancel(agent);
+    ok &= WaitForIdle(&app) && agent->message_count == 2 &&
+          strcmp(agent->messages[0].source, "draft") == 0 &&
+          agent->messages[1].notice_severity == PICO_NOTICE_WARNING &&
+          strcmp(g_test.session_item_order, "AN") == 0;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "notice lost or ordered before partial assistant output");
+}
 
 static int TestAskNotification(void)
 {
@@ -4594,7 +4800,7 @@ static int TestMediaPersistenceFailureIsAtomic(void)
         PicoAgent_Pump(&app, TestAgent(&app));
     }
     pthread_mutex_lock(&g_test.mu);
-    bool no_result_events = g_test.session_item_order[0] == '\0';
+    bool no_result_events = strcmp(g_test.session_item_order, "N") == 0;
     pthread_mutex_unlock(&g_test.mu);
     bool ok = no_result_events && TestAgent(&app)->state == PICO_AGENT_ERROR &&
               TestAgent(&app)->error &&
@@ -4652,7 +4858,11 @@ static int TestFailedStreamPersistence(TestMode mode)
         return Fail(name, "failed provider did not finish");
     }
     bool logged = TestAgent(&app)->state == PICO_AGENT_ERROR &&
-                  strcmp(g_test.session_item_order, "A") == 0 &&
+                  strcmp(g_test.session_item_order, "AN") == 0 &&
+                  TestAgent(&app)->message_count == 2 &&
+                  TestAgent(&app)->messages[0].role == PICO_ROLE_ASSISTANT &&
+                  TestAgent(&app)->messages[1].role == PICO_ROLE_NOTICE &&
+                  TestAgent(&app)->messages[1].notice_severity == PICO_NOTICE_ERROR &&
                   strcmp(g_test.logged_thinking, "partial-think") == 0 &&
                   strcmp(g_test.logged_content, mode == TEST_PROVIDER_TEXT_FAIL ? "draft" : "") == 0;
     pthread_mutex_lock(&g_test.mu);
@@ -4665,7 +4875,8 @@ static int TestFailedStreamPersistence(TestMode mode)
         return Fail(name, "follow-up after failure did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
-    bool history = g_test.last_input && strstr(g_test.last_input, "\"thinking\":\"partial-think\"") &&
+    bool history = g_test.last_input && !strstr(g_test.last_input, "Timeout was reached") &&
+                   strstr(g_test.last_input, "\"thinking\":\"partial-think\"") &&
                    (mode != TEST_PROVIDER_TEXT_FAIL || strstr(g_test.last_input, "draft"));
     pthread_mutex_unlock(&g_test.mu);
     PicoHost_Shutdown(&app);
@@ -5185,6 +5396,12 @@ int main(void)
     failed |= PICO_TEST_RUN(TestTurnEnd());
     failed |= PICO_TEST_RUN(TestCancelNotification());
     failed |= PICO_TEST_RUN(TestErrorNotification());
+    failed |= PICO_TEST_RUN(TestNoticeHooksAndHistory());
+    failed |= PICO_TEST_RUN(TestNoticeDuringCancelledStream());
+    failed |= PICO_TEST_RUN(TestNoticeDuringMediaFailure());
+    failed |= PICO_TEST_RUN(TestNoticeDuringStreamedToolCalls());
+    failed |= PICO_TEST_RUN(TestNoticeOnRejectedFollowup());
+    failed |= PICO_TEST_RUN(TestNoticeSelectionAfterEmptyStream());
     failed |= PICO_TEST_RUN(TestAskNotification());
     failed |= PICO_TEST_RUN(TestAskForceCancelNotification());
     failed |= PICO_TEST_RUN(TestAskReplaceNotification());

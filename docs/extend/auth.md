@@ -12,14 +12,14 @@ static void MyLogin(PicoHost *host, PicoAgentId agent_id, const char *args, void
     (void)args;
     (void)state;
     pico_auth_set_active(host, "myllm", PICO_AUTH_API_KEY);
-    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, "Logged in.");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, "Logged in.");
 }
 
 static void MyLogout(PicoHost *host, PicoAgentId agent_id, void *state)
 {
     (void)state;
     pico_auth_clear_oauth(host, "myllm");
-    PicoHost_AddMessage(host, agent_id, PICO_ROLE_ASSISTANT, "Logged out.");
+    PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, "Logged out.");
 }
 
 static int MyInit(PicoHost *host, void **state_out)
@@ -93,3 +93,7 @@ extensions to leave their own threads running across frames. See
 - If shutdown detaches a callback, Pico retains the auth store and skips auth destruction so callback-scoped access cannot observe freed credentials. Pico then rejects reinitialization and must exit.
 - Max 16 auth providers (`PICO_MAX_AUTH`).
 - Builtin OpenAI, Hyper, and xAI: [`../../builtins/openai.c`](../../builtins/openai.c) (uses [`openai_auth.c`](../../builtins/openai_auth.c)), [`../../builtins/hyper.c`](../../builtins/hyper.c) (`HYPER_API_KEY`, `/login hyper`), [`../../builtins/xai.c`](../../builtins/xai.c) (`XAI_API_KEY`, `/login xai`).
+
+Emit authentication feedback using [`PicoHost_AddNotice`](notices.md) on the main
+thread. Preserve severity when posting worker feedback to a main-thread queue;
+use Warning for non-fatal credential-storage failures and Error for login failures.

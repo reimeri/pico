@@ -51,6 +51,7 @@ typedef struct DeviceLogin {
     bool cancel;
     PicoAgentId agent_id;
     char *notes[PICO_DEVICE_MAX_NOTES];
+    PicoNoticeSeverity severities[PICO_DEVICE_MAX_NOTES];
     int note_count;
 } DeviceLogin;
 
@@ -59,7 +60,7 @@ typedef struct HostAuthState {
     DeviceLogin login;
 } HostAuthState;
 
-static void LoginNote(HostAuthState *s, const char *text)
+static void LoginNote(HostAuthState *s, PicoNoticeSeverity severity, const char *text)
 {
     if (!s || !text || !text[0])
     {
@@ -71,6 +72,7 @@ static void LoginNote(HostAuthState *s, const char *text)
         s->login.notes[s->login.note_count] = JsonDup(text);
         if (s->login.notes[s->login.note_count])
         {
+            s->login.severities[s->login.note_count] = severity;
             s->login.note_count++;
         }
     }
@@ -138,9 +140,9 @@ static void StopDeviceLogin(HostAuthState *s)
     }
 }
 
-static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
+static void Note(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity, const char *text)
 {
-    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddNotice(app, agent_id, severity, text);
 }
 
 typedef struct TurnCancel {
@@ -313,7 +315,7 @@ static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *
         if (!saved && !ctx)
         {
             HostAuthState *s = (HostAuthState *)PicoPlugins_HostState(app, "hyper");
-            LoginNote(s, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
+            LoginNote(s, PICO_NOTICE_WARNING, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
                          "signed in, but the login will not survive a restart.");
         }
         if (auth)
@@ -559,7 +561,7 @@ static bool RequestDeviceAuth(HostAuthState *s, char *device_code, size_t code_c
         char buf[512];
         snprintf(buf, sizeof(buf), "Could not start Hyper login: %s", detail ? detail : "unknown error");
         free(detail);
-        LoginNote(s, buf);
+        LoginNote(s, PICO_NOTICE_ERROR, buf);
         free(body);
         free(err);
         return false;
@@ -567,7 +569,7 @@ static bool RequestDeviceAuth(HostAuthState *s, char *device_code, size_t code_c
     JsonDoc doc;
     if (!body || JsonParse(&doc, body, strlen(body)) != 0)
     {
-        LoginNote(s, "Could not start Hyper login: bad response.");
+        LoginNote(s, PICO_NOTICE_ERROR, "Could not start Hyper login: bad response.");
         free(body);
         free(err);
         return false;
@@ -594,7 +596,7 @@ static bool RequestDeviceAuth(HostAuthState *s, char *device_code, size_t code_c
     }
     else
     {
-        LoginNote(s, "Could not start Hyper login: missing device code.");
+        LoginNote(s, PICO_NOTICE_ERROR, "Could not start Hyper login: missing device code.");
     }
     free(got_code);
     free(got_user);
@@ -626,7 +628,7 @@ static void *DeviceLoginMain(void *arg)
                  "Sign in at %s\nEnter code: `%s`\n\nThe code expires in %d minutes. "
                  "`/login hyper cancel` to stop.",
                  verify_url, user_code, expires_in / 60);
-        LoginNote(s, msg);
+        LoginNote(s, PICO_NOTICE_INFO, msg);
 
         time_t deadline = time(NULL) + expires_in;
         int fails = 0;
@@ -634,7 +636,7 @@ static void *DeviceLoginMain(void *arg)
         {
             if (time(NULL) >= deadline)
             {
-                LoginNote(s, "Hyper login timed out. Run `/login hyper` to try again.");
+                LoginNote(s, PICO_NOTICE_ERROR, "Hyper login timed out. Run `/login hyper` to try again.");
                 break;
             }
             char *refresh = NULL;
@@ -648,11 +650,11 @@ static void *DeviceLoginMain(void *arg)
                 int rc = ExchangeRefreshToken(app, NULL, NULL, refresh, team, NULL);
                 if (rc == PICO_HTTP_OK)
                 {
-                    LoginNote(s, "Signed in with Charm Hyper.");
+                    LoginNote(s, PICO_NOTICE_INFO, "Signed in with Charm Hyper.");
                 }
                 else if (rc != PICO_HTTP_CANCEL)
                 {
-                    LoginNote(s, "Hyper token exchange failed. Run `/login hyper` to try again.");
+                    LoginNote(s, PICO_NOTICE_ERROR, "Hyper token exchange failed. Run `/login hyper` to try again.");
                 }
             }
             else if (state == DEVICE_PENDING)
@@ -683,7 +685,7 @@ static void *DeviceLoginMain(void *arg)
             {
                 char buf[512];
                 snprintf(buf, sizeof(buf), "Hyper login failed: %s", error ? error : "unknown error");
-                LoginNote(s, buf);
+                LoginNote(s, PICO_NOTICE_ERROR, buf);
             }
             free(refresh);
             free(team);
@@ -729,7 +731,7 @@ static void StartDeviceLogin(HostAuthState *s, PicoAgentId agent_id)
     pthread_mutex_unlock(&s->login.mu);
     if (!spawned)
     {
-        Note(app, agent_id, "Could not start Hyper login: thread creation failed.");
+        Note(app, agent_id, PICO_NOTICE_ERROR, "Could not start Hyper login: thread creation failed.");
     }
 }
 
@@ -744,13 +746,16 @@ static void DrainLoginNotes(HostAuthState *s)
     {
         pthread_mutex_lock(&s->login.mu);
         char *text = NULL;
+        PicoNoticeSeverity severity = PICO_NOTICE_INFO;
         PicoAgentId agent_id = s->login.agent_id;
         if (s->login.note_count > 0)
         {
             text = s->login.notes[0];
+            severity = s->login.severities[0];
             for (int i = 1; i < s->login.note_count; i++)
             {
                 s->login.notes[i - 1] = s->login.notes[i];
+                s->login.severities[i - 1] = s->login.severities[i];
             }
             s->login.note_count--;
         }
@@ -758,7 +763,7 @@ static void DrainLoginNotes(HostAuthState *s)
         pthread_mutex_unlock(&s->login.mu);
         if (text)
         {
-            Note(app, agent_id, text);
+            Note(app, agent_id, severity, text);
             free(text);
             continue;
         }
@@ -826,7 +831,7 @@ static void HyperLogin(PicoHost *app, PicoAgentId agent_id, const char *args, vo
     }
     if (tail[0] || (verb[0] && !IsCancelArg(verb) && !IsKeyArg(verb)))
     {
-        Note(app, agent_id, "Usage: `/login hyper`, `/login hyper key`, or `/login hyper cancel`.");
+        Note(app, agent_id, PICO_NOTICE_INFO, "Usage: `/login hyper`, `/login hyper key`, or `/login hyper cancel`.");
         return;
     }
     if (IsCancelArg(verb))
@@ -834,11 +839,11 @@ static void HyperLogin(PicoHost *app, PicoAgentId agent_id, const char *args, vo
         if (LoginActive(s))
         {
             StopDeviceLogin(s);
-            Note(app, agent_id, "Login cancelled.");
+            Note(app, agent_id, PICO_NOTICE_INFO, "Login cancelled.");
         }
         else
         {
-            Note(app, agent_id, "No login in progress.");
+            Note(app, agent_id, PICO_NOTICE_WARNING, "No login in progress.");
         }
         return;
     }
@@ -849,17 +854,17 @@ static void HyperLogin(PicoHost *app, PicoAgentId agent_id, const char *args, vo
         pico_auth_copy(app, "hyper", &e);
         if (!e.api_key || !e.api_key[0])
         {
-            Note(app, agent_id, "No API key. Set `HYPER_API_KEY`.");
+            Note(app, agent_id, PICO_NOTICE_WARNING, "No API key. Set `HYPER_API_KEY`.");
             pico_auth_entry_free(&e);
             return;
         }
         if (pico_auth_set_active(app, "hyper", PICO_AUTH_API_KEY))
         {
-            Note(app, agent_id, "Using Hyper API key.");
+            Note(app, agent_id, PICO_NOTICE_INFO, "Using Hyper API key.");
         }
         else
         {
-            Note(app, agent_id, "Using Hyper API key, but `~/.config/pico/auth.json` could not be written, so "
+            Note(app, agent_id, PICO_NOTICE_WARNING, "Using Hyper API key, but `~/.config/pico/auth.json` could not be written, so "
                                 "this choice will not survive a restart.");
         }
         pico_auth_entry_free(&e);
@@ -877,16 +882,16 @@ static void HyperLogout(PicoHost *app, PicoAgentId agent_id, void *state)
     pico_auth_copy(app, "hyper", &e);
     if (!saved)
     {
-        Note(app, agent_id, "Logged out of Charm Hyper, but `~/.config/pico/auth.json` could not be written, so the "
+        Note(app, agent_id, PICO_NOTICE_WARNING, "Logged out of Charm Hyper, but `~/.config/pico/auth.json` could not be written, so the "
                             "stored tokens may still be on disk.");
     }
     else if (e.api_key && e.api_key[0])
     {
-        Note(app, agent_id, "Logged out of Charm Hyper. Using API key.");
+        Note(app, agent_id, PICO_NOTICE_INFO, "Logged out of Charm Hyper. Using API key.");
     }
     else
     {
-        Note(app, agent_id, "Logged out of Charm Hyper.");
+        Note(app, agent_id, PICO_NOTICE_INFO, "Logged out of Charm Hyper.");
     }
     pico_auth_entry_free(&e);
 }

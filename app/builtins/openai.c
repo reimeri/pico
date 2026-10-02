@@ -65,6 +65,7 @@ typedef struct LoginAttempt {
     int wake[2];
     PicoAgentId agent_id;
     char *notes[PICO_LOGIN_MAX_NOTES];
+    PicoNoticeSeverity severities[PICO_LOGIN_MAX_NOTES];
     int note_count;
     char *authorize_url;
     char *token_body;
@@ -97,14 +98,18 @@ static void ReleaseLogin(void *user)
     free(login);
 }
 
-static void LoginNote(LoginAttempt *login, const char *text)
+static void LoginNote(LoginAttempt *login, PicoNoticeSeverity severity, const char *text)
 {
     if (!text || !text[0]) return;
     pthread_mutex_lock(&login->mu);
     if (!login->cancel && login->note_count < PICO_LOGIN_MAX_NOTES)
     {
         char *copy = JsonDup(text);
-        if (copy) login->notes[login->note_count++] = copy;
+        if (copy)
+        {
+            login->severities[login->note_count] = severity;
+            login->notes[login->note_count++] = copy;
+        }
     }
     pthread_mutex_unlock(&login->mu);
 }
@@ -152,9 +157,9 @@ static void StopLogin(HostAuthState *s)
     ReleaseLogin(login);
 }
 
-static void Note(PicoHost *app, PicoAgentId agent_id, const char *text)
+static void Note(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity, const char *text)
 {
-    PicoHost_AddMessage(app, agent_id, PICO_ROLE_ASSISTANT, text);
+    PicoHost_AddNotice(app, agent_id, severity, text);
 }
 
 static int B64UrlVal(char c)
@@ -398,7 +403,7 @@ static bool ApplyTokenBody(PicoHost *app, PicoAgentContext *ctx, PicoAuthEntry *
                          : pico_auth_set_oauth(app, "openai", access, use_refresh, account, expires_at);
         if (!saved && !ctx)
         {
-            Note(app, agent_id, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
+            Note(app, agent_id, PICO_NOTICE_WARNING, "Warning: could not write `~/.config/pico/auth.json`. This session stays "
                          "signed in, but the login will not survive a restart.");
         }
         if (auth)
@@ -487,7 +492,7 @@ static int IntervalOf(const JsonDoc *doc, int obj)
 static bool ExchangeCode(LoginAttempt *login, const char *redirect, const char *code, const char *verifier)
 {
     char *form = pico_openai_code_form(kClientId, redirect, code, verifier);
-    if (!form) { LoginNote(login, "Could not prepare token exchange."); return false; }
+    if (!form) { LoginNote(login, PICO_NOTICE_ERROR, "Could not prepare token exchange."); return false; }
     char url[256];
     snprintf(url, sizeof(url), "%s/oauth/token", kIssuer);
     long http = 0;
@@ -509,7 +514,7 @@ static bool ExchangeCode(LoginAttempt *login, const char *redirect, const char *
     else if (rc != PICO_HTTP_CANCEL)
     {
         /* Never put a token endpoint response (which may contain secrets) in chat. */
-        LoginNote(login, "Token exchange failed. Run `/login openai` to try again.");
+        LoginNote(login, PICO_NOTICE_ERROR, "Token exchange failed. Run `/login openai` to try again.");
     }
     FreeSecret(body);
     free(err);
@@ -630,7 +635,7 @@ static bool RequestUserCode(LoginAttempt *s, char *id, size_t id_cap, char *code
     {
         if (http == 404)
         {
-            LoginNote(s, "Device-code login is not enabled for this ChatGPT account. Enable it in your "
+            LoginNote(s, PICO_NOTICE_ERROR, "Device-code login is not enabled for this ChatGPT account. Enable it in your "
                          "ChatGPT security settings, or ask a workspace admin.");
         }
         else
@@ -640,7 +645,7 @@ static bool RequestUserCode(LoginAttempt *s, char *id, size_t id_cap, char *code
             snprintf(buf, sizeof(buf), "Could not start device login: %s",
                      detail ? detail : "unknown error");
             free(detail);
-            LoginNote(s, buf);
+            LoginNote(s, PICO_NOTICE_ERROR, buf);
         }
         free(body);
         free(err);
@@ -649,7 +654,7 @@ static bool RequestUserCode(LoginAttempt *s, char *id, size_t id_cap, char *code
     JsonDoc doc;
     if (!body || JsonParse(&doc, body, strlen(body)) != 0)
     {
-        LoginNote(s, "Could not start device login: bad response.");
+        LoginNote(s, PICO_NOTICE_ERROR, "Could not start device login: bad response.");
         free(body);
         free(err);
         return false;
@@ -671,7 +676,7 @@ static bool RequestUserCode(LoginAttempt *s, char *id, size_t id_cap, char *code
     }
     else
     {
-        LoginNote(s, "Could not start device login: missing or oversized device code.");
+        LoginNote(s, PICO_NOTICE_ERROR, "Could not start device login: missing or oversized device code.");
     }
     free(got_id);
     free(got_code);
@@ -691,7 +696,7 @@ static void DeviceLoginRun(LoginAttempt *login)
     snprintf(msg, sizeof(msg),
              "Sign in at %s/codex/device\nEnter code: `%s`\n\nThe code expires in %d minutes. "
              "`/login openai cancel` to stop.", kIssuer, user_code, PICO_LOGIN_TIMEOUT_SEC / 60);
-    LoginNote(login, msg);
+    LoginNote(login, PICO_NOTICE_INFO, msg);
     int fails = 0;
     while (LoginSleep(login, interval))
     {
@@ -708,7 +713,7 @@ static void DeviceLoginRun(LoginAttempt *login)
         else if (result == DEVICE_UNREACHABLE && ++fails < PICO_DEVICE_MAX_TRANSPORT_FAILS) keep_polling = true;
         else if (result == DEVICE_UNREACHABLE || result == DEVICE_FAILED)
         {
-            LoginNote(login, "Device login failed. Run `/login openai device` to try again.");
+            LoginNote(login, PICO_NOTICE_ERROR, "Device login failed. Run `/login openai device` to try again.");
         }
         FreeSecret(code);
         FreeSecret(verifier);
@@ -722,7 +727,7 @@ static void BrowserLoginRun(LoginAttempt *login)
     PicoOpenAiPkce pkce;
     if (!pico_openai_pkce_generate(&pkce))
     {
-        LoginNote(login, "Could not generate secure OAuth login material. Login was not started.");
+        LoginNote(login, PICO_NOTICE_ERROR, "Could not generate secure OAuth login material. Login was not started.");
         return;
     }
     const unsigned short ports[] = {1455, 1457};
@@ -730,7 +735,7 @@ static void BrowserLoginRun(LoginAttempt *login)
     int listener = pico_openai_listen(ports, sizeof(ports) / sizeof(ports[0]), &port);
     if (listener < 0)
     {
-        LoginNote(login, errno == EADDRINUSE ?
+        LoginNote(login, PICO_NOTICE_ERROR, errno == EADDRINUSE ?
                   "Browser login needs a local callback, but ports 1455 and 1457 are occupied. "
                   "Close the other login attempt and retry, or use `/login openai device`." :
                   "Could not start the local login callback listener. Retry or use `/login openai device`.");
@@ -742,7 +747,7 @@ static void BrowserLoginRun(LoginAttempt *login)
     char *url = pico_openai_authorize_url(kIssuer, kClientId, redirect, &pkce);
     if (!url)
     {
-        LoginNote(login, "Could not prepare browser login.");
+        LoginNote(login, PICO_NOTICE_ERROR, "Could not prepare browser login.");
         close(listener);
         OPENSSL_cleanse(&pkce, sizeof(pkce));
         return;
@@ -758,9 +763,9 @@ static void BrowserLoginRun(LoginAttempt *login)
     if (result == PICO_OPENAI_CALLBACK_CODE && !LoginCancelled(login))
         ExchangeCode(login, redirect, code, pkce.verifier);
     else if (result == PICO_OPENAI_CALLBACK_DENIED)
-        LoginNote(login, "OpenAI did not authorize sign-in. Run `/login openai` to try again.");
+        LoginNote(login, PICO_NOTICE_ERROR, "OpenAI did not authorize sign-in. Run `/login openai` to try again.");
     else if (result == PICO_OPENAI_CALLBACK_FAILED)
-        LoginNote(login, "The local login callback failed. Retry or use `/login openai device`.");
+        LoginNote(login, PICO_NOTICE_ERROR, "The local login callback failed. Retry or use `/login openai device`.");
     FreeSecret(code);
     OPENSSL_cleanse(&pkce, sizeof(pkce));
 }
@@ -771,7 +776,7 @@ static void *LoginMain(void *user)
     if (login->browser) BrowserLoginRun(login);
     else DeviceLoginRun(login);
     if (pico_openai_monotonic() >= login->deadline)
-        LoginNote(login, login->browser ? "Browser login timed out. Run `/login openai` to try again." :
+        LoginNote(login, PICO_NOTICE_ERROR, login->browser ? "Browser login timed out. Run `/login openai` to try again." :
                                          "Device login timed out. Run `/login openai device` to try again.");
     pthread_mutex_lock(&login->mu);
     login->done = true;
@@ -783,18 +788,18 @@ static void StartLogin(HostAuthState *s, PicoAgentId agent_id, bool browser)
 {
     StopLogin(s);
     LoginAttempt *login = calloc(1, sizeof(*login));
-    if (!login) { Note(s->host, agent_id, "Could not allocate login attempt."); return; }
+    if (!login) { Note(s->host, agent_id, PICO_NOTICE_ERROR, "Could not allocate login attempt."); return; }
     if (pthread_mutex_init(&login->mu, NULL) != 0)
     {
         free(login);
-        Note(s->host, agent_id, "Could not initialize login attempt.");
+        Note(s->host, agent_id, PICO_NOTICE_ERROR, "Could not initialize login attempt.");
         return;
     }
     if (!pico_openai_wake_pipe(login->wake))
     {
         pthread_mutex_destroy(&login->mu);
         free(login);
-        Note(s->host, agent_id, "Could not initialize login cancellation.");
+        Note(s->host, agent_id, PICO_NOTICE_ERROR, "Could not initialize login cancellation.");
         return;
     }
     login->agent_id = agent_id;
@@ -807,7 +812,7 @@ static void StartLogin(HostAuthState *s, PicoAgentId agent_id, bool browser)
         s->login = NULL;
         ReleaseLogin(login);
         ReleaseLogin(login);
-        Note(s->host, agent_id, "Could not start login worker. Try again when the previous login has stopped.");
+        Note(s->host, agent_id, PICO_NOTICE_ERROR, "Could not start login worker. Try again when the previous login has stopped.");
     }
 }
 
@@ -821,8 +826,10 @@ static void DrainLoginNotes(HostAuthState *s)
     char *body = login->token_body;
     login->token_body = NULL;
     char *notes[PICO_LOGIN_MAX_NOTES];
+    PicoNoticeSeverity severities[PICO_LOGIN_MAX_NOTES];
     int count = login->note_count;
     memcpy(notes, login->notes, (size_t)count * sizeof(notes[0]));
+    memcpy(severities, login->severities, (size_t)count * sizeof(severities[0]));
     login->note_count = 0;
     bool done = login->done;
     bool cancelled = login->cancel || pico_openai_monotonic() >= login->deadline;
@@ -837,22 +844,22 @@ static void DrainLoginNotes(HostAuthState *s)
         {
             snprintf(message, cap, "[Sign in with OpenAI](%s)\n\nOpening your browser. "
                      "If it does not open, use the link above. `/login openai cancel` to stop.", url);
-            Note(s->host, login->agent_id, message);
+            Note(s->host, login->agent_id, PICO_NOTICE_INFO, message);
             free(message);
         }
         if (!PicoHost_OpenBrowser(s->host, url))
-            Note(s->host, login->agent_id, "Could not open your browser automatically. Use the sign-in link above.");
+            Note(s->host, login->agent_id, PICO_NOTICE_WARNING, "Could not open your browser automatically. Use the sign-in link above.");
     }
     for (int i = 0; i < count; i++)
     {
-        if (!login->cancel) Note(s->host, login->agent_id, notes[i]);
+        if (!login->cancel) Note(s->host, login->agent_id, severities[i], notes[i]);
         free(notes[i]);
     }
     if (body && !cancelled)
     {
         if (ApplyTokenBody(s->host, NULL, NULL, body, login->agent_id))
-            Note(s->host, login->agent_id, "Signed in with ChatGPT. Pico will use your Codex subscription.");
-        else Note(s->host, login->agent_id, "OpenAI returned an invalid token response. Run `/login openai` to try again.");
+            Note(s->host, login->agent_id, PICO_NOTICE_INFO, "Signed in with ChatGPT. Pico will use your Codex subscription.");
+        else Note(s->host, login->agent_id, PICO_NOTICE_ERROR, "OpenAI returned an invalid token response. Run `/login openai` to try again.");
     }
     free(url);
     FreeSecret(body);
@@ -917,7 +924,7 @@ static void OpenAiLogin(PicoHost *app, PicoAgentId agent_id, const char *args, v
     }
     if (tail[0] || (verb[0] && !IsCancelArg(verb) && !IsKeyArg(verb) && !FoldEq(verb, "browser") && !FoldEq(verb, "device")))
     {
-        Note(app, agent_id, "Usage: `/login openai [browser|device|key|cancel]`.");
+        Note(app, agent_id, PICO_NOTICE_INFO, "Usage: `/login openai [browser|device|key|cancel]`.");
         return;
     }
     if (IsCancelArg(verb))
@@ -925,11 +932,11 @@ static void OpenAiLogin(PicoHost *app, PicoAgentId agent_id, const char *args, v
         if (s->login)
         {
             StopLogin(s);
-            Note(app, agent_id, "Login cancelled.");
+            Note(app, agent_id, PICO_NOTICE_INFO, "Login cancelled.");
         }
         else
         {
-            Note(app, agent_id, "No login in progress.");
+            Note(app, agent_id, PICO_NOTICE_WARNING, "No login in progress.");
         }
         return;
     }
@@ -940,17 +947,17 @@ static void OpenAiLogin(PicoHost *app, PicoAgentId agent_id, const char *args, v
         pico_auth_copy(app, "openai", &e);
         if (!e.api_key || !e.api_key[0])
         {
-            Note(app, agent_id, "No API key. Set `PICO_API_KEY` or `OPENAI_API_KEY`.");
+            Note(app, agent_id, PICO_NOTICE_WARNING, "No API key. Set `PICO_API_KEY` or `OPENAI_API_KEY`.");
             pico_auth_entry_free(&e);
             return;
         }
         if (pico_auth_set_active(app, "openai", PICO_AUTH_API_KEY))
         {
-            Note(app, agent_id, "Using OpenAI API key.");
+            Note(app, agent_id, PICO_NOTICE_INFO, "Using OpenAI API key.");
         }
         else
         {
-            Note(app, agent_id, "Using OpenAI API key, but `~/.config/pico/auth.json` could not be written, so "
+            Note(app, agent_id, PICO_NOTICE_WARNING, "Using OpenAI API key, but `~/.config/pico/auth.json` could not be written, so "
                                 "this choice will not survive a restart.");
         }
         pico_auth_entry_free(&e);
@@ -968,16 +975,16 @@ static void OpenAiLogout(PicoHost *app, PicoAgentId agent_id, void *state)
     pico_auth_copy(app, "openai", &e);
     if (!saved)
     {
-        Note(app, agent_id, "Logged out of ChatGPT, but `~/.config/pico/auth.json` could not be written, so the "
+        Note(app, agent_id, PICO_NOTICE_WARNING, "Logged out of ChatGPT, but `~/.config/pico/auth.json` could not be written, so the "
                             "stored tokens may still be on disk.");
     }
     else if (e.api_key && e.api_key[0])
     {
-        Note(app, agent_id, "Logged out of ChatGPT. Using API key.");
+        Note(app, agent_id, PICO_NOTICE_INFO, "Logged out of ChatGPT. Using API key.");
     }
     else
     {
-        Note(app, agent_id, "Logged out of ChatGPT.");
+        Note(app, agent_id, PICO_NOTICE_INFO, "Logged out of ChatGPT.");
     }
     pico_auth_entry_free(&e);
 }

@@ -12742,6 +12742,19 @@ static void RequestRedrawFromRender(PicoHost *host, const PicoHookEvent *event, 
     if (++g_redraw_render_callbacks == 1) pico_host_request_redraw(host);
 }
 
+/* Pump through completion/adoption, including follow-up tasks queued by host
+ * callbacks. A worker milestone does not mean its redraw has been consumed. */
+static bool WaitHostTasks(PicoHost *host)
+{
+    for (int i = 0; i < 10000; i++)
+    {
+        pico_host_pump(host);
+        if (!host->tasks) return true;
+        usleep(1000);
+    }
+    return false;
+}
+
 /* Several unchanged host pumps must not expire the scroll container belonging
  * to the last laid-out shell. A fresh layout after idle needs its dimensions
  * to mount even a clean, short transcript; a long transcript needs its offset. */
@@ -12779,9 +12792,13 @@ static int TestIdleFrameRetainsChatScroll(void)
         !(agent = PicoHost_FindAgent(host, agent_id)))
         goto done;
     PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "A short visible reply.");
-    pico_host_pump(host);
-    usleep(50000);
-    pico_host_pump(host);
+    /* Finish sidebar catalog work before testing idle frames or entering the
+     * bounded shutdown path. A fixed sleep races slow/loaded build hosts. */
+    if (!WaitHostTasks(host))
+    {
+        Fail("idle chat test background setup must finish");
+        goto done;
+    }
     g_clay_frame_test = g_find_input_test = true;
     g_find_key = -1;
     PicoHost_Frame(host);
@@ -12843,7 +12860,16 @@ done:
     g_find_wheel = (Vector2){0};
     g_clay_frame_test = g_find_input_test = false;
     g_find_key = 0;
-    if (host) pico_host_free(host);
+    if (host && !WaitHostTasks(host))
+    {
+        Fail("idle chat test background tasks must finish before teardown");
+        good = false;
+    }
+    if (host && pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        Fail("idle chat test host teardown must be clean");
+        good = false;
+    }
     Pico_FreeClay();
     Clay_SetCurrentContext(previous);
     unsetenv("XDG_CONFIG_HOME");

@@ -216,6 +216,27 @@ bool PicoAgent_IsBusy(const PicoAgent *agent)
     return false;
 }
 
+PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
+{
+    (void)app;
+    (void)id;
+    return PICO_NOT_FOUND;
+}
+
+bool PicoAgent_RetiredReferences(const PicoWorkspace *workspace, PicoAgentId id)
+{
+    (void)workspace;
+    (void)id;
+    return false;
+}
+
+bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id)
+{
+    (void)workspace;
+    (void)id;
+    return false;
+}
+
 void PicoAgent_DismissError(PicoAgent *agent)
 {
     if (agent) { free(agent->error); agent->error = NULL; }
@@ -1821,6 +1842,85 @@ static int TestCatalogProjectDelete(void)
         return Fail("delete keeps project directory but clears Pico data");
     }
     PicoCatalog_Free(list, n);
+    return 0;
+}
+
+static int TestCatalogSessionDelete(void)
+{
+    char ws[] = "/tmp/pico-cat-sess-del-XXXXXX";
+    char parent[4096], child[4096], grandchild[4096], sibling[4096], notes[4096];
+    char residue[4096], parent_media[4096], child_media[4096], composer[4096];
+    PicoCatalogWorkspace *list = NULL;
+    const PicoCatalogWorkspace *found;
+    PicoHost host = {0};
+    int n;
+    bool parent_left = false, child_left = false, grand_left = false, sibling_left = true;
+    if (!mkdtemp(ws) || PicoCatalog_Ensure(ws) != 0)
+        return Fail("session delete setup");
+    n = PicoCatalog_Scan(&list);
+    found = FindCatalogPath(list, n, ws);
+    if (!found ||
+        !PicoPath_Format(parent, sizeof(parent), "%s/sessions/%s/2026-01-01T00-00-00Z_parentsess.jsonl", g_config_dir, found->key) ||
+        !PicoPath_Format(child, sizeof(child), "%s/sessions/%s/2026-01-01T00-00-00Z_childsess.jsonl", g_config_dir, found->key) ||
+        !PicoPath_Format(grandchild, sizeof(grandchild), "%s/sessions/%s/2026-01-01T00-00-00Z_grandsess.jsonl", g_config_dir, found->key) ||
+        !PicoPath_Format(sibling, sizeof(sibling), "%s/sessions/%s/2026-01-01T00-00-00Z_siblingsess.jsonl", g_config_dir, found->key) ||
+        !PicoPath_Format(notes, sizeof(notes), "%s/sessions/%s/notes.txt", g_config_dir, found->key) ||
+        !PicoPath_Format(residue, sizeof(residue), "%s/sessions/%s/2026-01-01T00-00-00Z_parentsess.jsonl.tmp.a1b2c3", g_config_dir, found->key) ||
+        !PicoPath_Format(parent_media, sizeof(parent_media), "%s/.pico/media/parentsess", ws) ||
+        !PicoPath_Format(child_media, sizeof(child_media), "%s/.pico/media/childsess", ws) ||
+        !PicoPath_Format(composer, sizeof(composer), "%s/.pico/media/composer", ws))
+    {
+        PicoCatalog_Free(list, n);
+        return Fail("session delete paths");
+    }
+    PicoCatalog_Free(list, n);
+    if (!AppendRaw(parent, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"parentsess\"}") ||
+        !AppendRaw(child, "{\"type\":\"session\",\"version\":4,\"kind\":\"subagent\",\"id\":\"childsess\",\"parent_session_id\":\"parentsess\",\"profile\":\"review\",\"initial_purpose\":\"look\"}") ||
+        !AppendRaw(grandchild, "{\"type\":\"session\",\"version\":4,\"kind\":\"subagent\",\"id\":\"grandsess\",\"parent_session_id\":\"childsess\",\"profile\":\"review\",\"initial_purpose\":\"deeper\"}") ||
+        !AppendRaw(sibling, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"siblingsess\"}") ||
+        !AppendRaw(notes, "keep") || !AppendRaw(residue, "partial"))
+        return Fail("session delete fixtures");
+    Pico_MkdirP(parent_media);
+    Pico_MkdirP(child_media);
+    Pico_MkdirP(composer);
+    {
+        char artifact[4096], child_artifact[4096], draft[4096];
+        if (!PicoPath_Format(artifact, sizeof(artifact), "%s/image.bin", parent_media) ||
+            !PicoPath_Format(child_artifact, sizeof(child_artifact), "%s/image.bin", child_media) ||
+            !PicoPath_Format(draft, sizeof(draft), "%s/draft.txt", composer) ||
+            !AppendRaw(artifact, "artifact") || !AppendRaw(child_artifact, "artifact") ||
+            !AppendRaw(draft, "draft"))
+            return Fail("session delete media");
+        if (PicoCatalog_DeleteSession(&host, ws, "parentsess") != PICO_OK)
+            return Fail("session delete");
+        n = PicoCatalog_ScanGrouped(&list);
+        found = FindCatalogPath(list, n, ws);
+        if (found)
+        {
+            for (int i = 0; i < found->session_count; i++)
+            {
+                if (!strcmp(found->sessions[i].id, "parentsess")) parent_left = true;
+                if (!strcmp(found->sessions[i].id, "childsess")) child_left = true;
+                if (!strcmp(found->sessions[i].id, "grandsess")) grand_left = true;
+                if (!strcmp(found->sessions[i].id, "siblingsess")) sibling_left = true;
+            }
+            if (found->session_count == 0) sibling_left = false;
+        }
+        else sibling_left = false;
+        PicoCatalog_Free(list, n);
+        if (parent_left || child_left || grand_left || !sibling_left ||
+            access(parent, F_OK) == 0 || access(child, F_OK) == 0 || access(grandchild, F_OK) == 0 ||
+            access(sibling, F_OK) != 0 || access(notes, F_OK) != 0 || access(residue, F_OK) == 0 ||
+            access(artifact, F_OK) == 0 || access(child_artifact, F_OK) == 0 ||
+            access(draft, F_OK) != 0 || access(ws, F_OK) != 0)
+            return Fail("session delete must remove the parent chain and keep the checkout");
+        unlink(sibling);
+        unlink(notes);
+        unlink(draft);
+        rmdir(composer);
+        rmdir(parent_media);
+        rmdir(child_media);
+    }
     return 0;
 }
 
@@ -3761,7 +3861,7 @@ int main(void)
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||
         PICO_TEST_RUN(TestConcurrentAppendDuringTitle()) != 0 || PICO_TEST_RUN(TestConcurrentDoneCatalog()) != 0 ||
-        PICO_TEST_RUN(TestCatalogChangeToken()) != 0 || PICO_TEST_RUN(TestCatalog()) != 0 || PICO_TEST_RUN(TestCatalogProjectDelete()) != 0 ||
+        PICO_TEST_RUN(TestCatalogChangeToken()) != 0 || PICO_TEST_RUN(TestCatalog()) != 0 || PICO_TEST_RUN(TestCatalogProjectDelete()) != 0 || PICO_TEST_RUN(TestCatalogSessionDelete()) != 0 ||
         PICO_TEST_RUN(TestCatalogProjectDeleteBeyondScanLimit()) != 0 ||
         PICO_TEST_RUN(TestCatalogWorkspaceReorder()) != 0 ||
         PICO_TEST_RUN(TestCatalogListingCache()) != 0 || PICO_TEST_RUN(TestSessionListCompleteness()) != 0 ||

@@ -6524,3 +6524,704 @@ done:
     load->processing = false;
     if (load->cancelled) SessionLoadDiscard(host, load);
 }
+
+typedef struct CatalogDeleteRef {
+    char id[40];
+    char parent[40];
+    char path[4096];
+    char checkout[4096];
+    bool selected;
+} CatalogDeleteRef;
+
+static bool SessionIdSafe(const char *id)
+{
+    size_t n;
+    size_t i;
+    if (!id || !id[0]) return false;
+    n = strlen(id);
+    if (n >= 40) return false;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)id[i];
+        if (!isalnum(c) && c != '-' && c != '_') return false;
+    }
+    return true;
+}
+
+static bool ReadSessionLink(const char *path, char *id, size_t id_cap, char *parent, size_t parent_cap)
+{
+    FILE *f;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t got;
+    JsonDoc doc;
+    char *type = NULL;
+    char *sid = NULL;
+    char *parent_id = NULL;
+    const char *slash;
+    if (id && id_cap) id[0] = '\0';
+    if (parent && parent_cap) parent[0] = '\0';
+    if (!path || !path[0]) return false;
+    f = fopen(path, "rb");
+    if (!f) return false;
+    got = getline(&line, &cap, f);
+    fclose(f);
+    if (got > 0 && JsonParse(&doc, line, (size_t)got) == 0) {
+        type = JsonObjStr(&doc, 0, "type");
+        if (type && !strcmp(type, "session")) {
+            sid = JsonObjStr(&doc, 0, "id");
+            parent_id = JsonObjStr(&doc, 0, "parent_session_id");
+            if (sid && sid[0] && id && id_cap) snprintf(id, id_cap, "%s", sid);
+            if (parent_id && parent_id[0] && parent && parent_cap)
+                snprintf(parent, parent_cap, "%s", parent_id);
+        }
+        JsonFree(&doc);
+    }
+    free(type);
+    free(sid);
+    free(parent_id);
+    free(line);
+    if (id && !id[0]) {
+        slash = strrchr(path, '/');
+        IdFromName(slash ? slash + 1 : path, id, id_cap);
+    }
+    if (parent && parent[0] && !SessionIdSafe(parent)) parent[0] = '\0';
+    return id && SessionIdSafe(id);
+}
+
+static bool CatalogDeletePush(CatalogDeleteRef **refs, int *count, int *cap, const CatalogDeleteRef *row)
+{
+    CatalogDeleteRef *grown;
+    int next;
+    int i;
+    if (!row || !SessionIdSafe(row->id)) return true;
+    for (i = 0; i < *count; i++) {
+        if (row->path[0] && (*refs)[i].path[0] && !strcmp((*refs)[i].path, row->path)) {
+            if (row->selected) (*refs)[i].selected = true;
+            if (!(*refs)[i].parent[0] && row->parent[0])
+                snprintf((*refs)[i].parent, sizeof((*refs)[i].parent), "%s", row->parent);
+            return true;
+        }
+        if (!row->path[0] && !(*refs)[i].path[0] && !strcmp((*refs)[i].id, row->id) &&
+            !strcmp((*refs)[i].checkout, row->checkout)) {
+            if (row->selected) (*refs)[i].selected = true;
+            return true;
+        }
+    }
+    if (*count == *cap) {
+        next = *cap ? *cap * 2 : 16;
+        grown = realloc(*refs, (size_t)next * sizeof(*grown));
+        if (!grown) return false;
+        *refs = grown;
+        *cap = next;
+    }
+    (*refs)[(*count)++] = *row;
+    return true;
+}
+
+static bool CatalogCollectDir(const char *dir, const char *checkout, CatalogDeleteRef **refs, int *count, int *cap)
+{
+    DIR *d;
+    struct dirent *ent;
+    bool ok = true;
+    if (!dir || !dir[0]) return true;
+    d = opendir(dir);
+    if (!d) return errno == ENOENT || errno == ENOTDIR;
+    while (ok && (ent = readdir(d))) {
+        char path[4096];
+        CatalogDeleteRef row;
+        if (!IsSessionJsonl(ent->d_name)) continue;
+        if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, ent->d_name)) {
+            ok = false;
+            break;
+        }
+        memset(&row, 0, sizeof(row));
+        if (!ReadSessionLink(path, row.id, sizeof(row.id), row.parent, sizeof(row.parent))) continue;
+        snprintf(row.path, sizeof(row.path), "%s", path);
+        if (checkout) snprintf(row.checkout, sizeof(row.checkout), "%s", checkout);
+        if (!CatalogDeletePush(refs, count, cap, &row)) ok = false;
+    }
+    closedir(d);
+    return ok;
+}
+
+static bool CatalogDeleteIdSelected(const CatalogDeleteRef *refs, int count, const char *id)
+{
+    int i;
+    if (!SessionIdSafe(id)) return false;
+    for (i = 0; i < count; i++)
+        if (refs[i].selected && !strcmp(refs[i].id, id)) return true;
+    return false;
+}
+
+static void CatalogDeleteExpand(CatalogDeleteRef *refs, int count)
+{
+    bool changed = true;
+    while (changed) {
+        int i;
+        changed = false;
+        for (i = 0; i < count; i++) {
+            if (refs[i].selected || !refs[i].parent[0]) continue;
+            if (!CatalogDeleteIdSelected(refs, count, refs[i].parent)) continue;
+            refs[i].selected = true;
+            changed = true;
+        }
+    }
+}
+
+static bool CheckoutMatches(const char *stored, const char *requested, const char *canonical)
+{
+    if (!stored || !stored[0] || !requested || !requested[0]) return false;
+    if (!strcmp(stored, requested)) return true;
+    return canonical && canonical[0] && !strcmp(stored, canonical);
+}
+
+static PicoAgent *HostFindAgent(PicoHost *host, PicoAgentId id)
+{
+    int w;
+    int i;
+    if (!host || !id) return NULL;
+    for (w = 0; w < host->workspace_count; w++) {
+        PicoWorkspace *ws = host->workspaces[w];
+        if (!ws) continue;
+        for (i = 0; i < ws->count; i++)
+            if (ws->agents[i] && ws->agents[i]->id == id) return ws->agents[i];
+    }
+    return NULL;
+}
+
+static bool AgentDeleteBlocked(PicoHost *host, const PicoAgent *agent)
+{
+    if (!agent) return false;
+    if (host->session_replay_agent == agent) return true;
+    if (PicoAgent_IsBusy(agent)) return true;
+    if (!agent->workspace) return false;
+    return PicoAgent_RetiredReferences(agent->workspace, agent->id) ||
+           PicoWorkspace_JobReferences(agent->workspace, agent->id);
+}
+
+static bool PersistBlocksSessionDelete(PicoHost *host, const PicoAgentId *agents, int agent_n,
+                                       const CatalogDeleteRef *refs, int ref_n)
+{
+    bool busy = false;
+    int i;
+    int j;
+    if (!host || !host->persist_ready) return false;
+    pthread_mutex_lock(&host->persist_mu);
+    if (host->persist_flight_agent_id) {
+        for (i = 0; i < agent_n; i++)
+            if (agents[i] == host->persist_flight_agent_id) busy = true;
+    }
+    for (j = 0; host->persist_pending && j < host->persist_pending_count; j++) {
+        const PicoSessionPersistJob *job = &host->persist_pending[j];
+        if (job->job_kind != PICO_PERSIST_JOB_SESSION) continue;
+        if (CatalogDeleteIdSelected(refs, ref_n, job->session_id)) busy = true;
+        for (i = 0; i < agent_n; i++)
+            if (job->agent_id == agents[i]) busy = true;
+    }
+    pthread_mutex_unlock(&host->persist_mu);
+    return busy;
+}
+
+static bool LoadBlocksSessionDelete(PicoHost *host, const PicoAgentId *agents, int agent_n,
+                                    const CatalogDeleteRef *refs, int ref_n, const char *checkout,
+                                    const char *canonical)
+{
+    PicoSessionLoad *load;
+    int i;
+    if (!host || !host->session_load) return false;
+    load = host->session_load;
+    for (i = 0; i < agent_n; i++)
+        if (load->replace_id == agents[i]) return true;
+    if (load->target_id[0] && CatalogDeleteIdSelected(refs, ref_n, load->target_id)) return true;
+    if (load->path[0]) {
+        char file_id[40] = {0};
+        const char *slash = strrchr(load->path, '/');
+        IdFromName(slash ? slash + 1 : load->path, file_id, sizeof(file_id));
+        if (CatalogDeleteIdSelected(refs, ref_n, file_id)) return true;
+    }
+    /* An unresolved load in this checkout might still be the session being deleted. */
+    if (!load->target_id[0]) {
+        for (i = 0; i < host->workspace_count; i++) {
+            PicoWorkspace *workspace = host->workspaces[i];
+            if (!workspace || workspace->id != load->workspace_id) continue;
+            if (CheckoutMatches(workspace->path, checkout, canonical)) return true;
+        }
+    }
+    return false;
+}
+
+static bool CollectCloseAgents(PicoHost *host, const CatalogDeleteRef *refs, int ref_n,
+                               PicoAgentId **out, int *out_n)
+{
+    bool changed = true;
+    int cap = 0;
+    *out = NULL;
+    *out_n = 0;
+    while (changed) {
+        int w;
+        changed = false;
+        for (w = 0; host && w < host->workspace_count; w++) {
+            PicoWorkspace *ws = host->workspaces[w];
+            int i;
+            if (!ws) continue;
+            for (i = 0; i < ws->count; i++) {
+                PicoAgent *agent = ws->agents[i];
+                bool match;
+                int k;
+                if (!agent || !agent->id) continue;
+                match = CatalogDeleteIdSelected(refs, ref_n, agent->session_id) ||
+                        CatalogDeleteIdSelected(refs, ref_n, agent->parent_session_id);
+                if (!match) continue;
+                for (k = 0; k < *out_n; k++)
+                    if ((*out)[k] == agent->id) match = false;
+                if (!match) continue;
+                if (*out_n == cap) {
+                    int next = cap ? cap * 2 : 8;
+                    PicoAgentId *grown = realloc(*out, (size_t)next * sizeof(*grown));
+                    if (!grown) return false;
+                    *out = grown;
+                    cap = next;
+                }
+                (*out)[(*out_n)++] = agent->id;
+                changed = true;
+            }
+        }
+    }
+    return true;
+}
+
+static bool CloseSetBlocked(PicoHost *host, const PicoAgentId *agents, int agent_n)
+{
+    int i;
+    for (i = 0; i < agent_n; i++) {
+        PicoAgent *agent = HostFindAgent(host, agents[i]);
+        PicoWorkspace *ws;
+        int c;
+        if (!agent) continue;
+        if (AgentDeleteBlocked(host, agent)) return true;
+        ws = agent->workspace;
+        if (!ws) continue;
+        for (c = 0; c < ws->count; c++) {
+            PicoAgent *child = ws->agents[c];
+            if (child && child->parent_id == agent->id && AgentDeleteBlocked(host, child))
+                return true;
+        }
+    }
+    return false;
+}
+
+static PicoResult CloseDeleteAgents(PicoHost *host, PicoAgentId *agents, int agent_n)
+{
+    int left = agent_n;
+    bool progress = true;
+    while (left > 0 && progress) {
+        int i;
+        progress = false;
+        for (i = 0; i < agent_n; i++) {
+            PicoAgent *agent;
+            bool has_child = false;
+            int c;
+            PicoResult closed;
+            if (!agents[i]) continue;
+            agent = HostFindAgent(host, agents[i]);
+            if (!agent) {
+                agents[i] = 0;
+                left--;
+                progress = true;
+                continue;
+            }
+            if (agent->workspace) {
+                for (c = 0; c < agent->workspace->count; c++) {
+                    PicoAgent *child = agent->workspace->agents[c];
+                    int k;
+                    if (!child || child->parent_id != agent->id) continue;
+                    for (k = 0; k < agent_n; k++)
+                        if (agents[k] == child->id) has_child = true;
+                }
+            }
+            if (has_child) continue;
+            closed = pico_agent_close(host, agents[i]);
+            if (closed == PICO_NOT_FOUND) closed = PICO_OK;
+            if (closed != PICO_OK) return closed;
+            agents[i] = 0;
+            left--;
+            progress = true;
+        }
+    }
+    return left ? PICO_BUSY : PICO_OK;
+}
+
+static bool RemoveSessionFile(const char *jsonl_path)
+{
+    char dir[4096];
+    char prefix[4600];
+    const char *slash;
+    const char *base;
+    DIR *d;
+    struct dirent *ent;
+    bool ok = true;
+    size_t prefix_len;
+    if (!jsonl_path || !jsonl_path[0]) return true;
+    slash = strrchr(jsonl_path, '/');
+    if (!slash || slash == jsonl_path) return false;
+    base = slash + 1;
+    if ((size_t)(slash - jsonl_path) >= sizeof(dir)) return false;
+    memcpy(dir, jsonl_path, (size_t)(slash - jsonl_path));
+    dir[slash - jsonl_path] = '\0';
+    if ((size_t)snprintf(prefix, sizeof(prefix), "%s.tmp.", base) >= sizeof(prefix)) return false;
+    prefix_len = strlen(prefix);
+    d = opendir(dir);
+    if (!d) return errno == ENOENT || errno == ENOTDIR;
+    while ((ent = readdir(d))) {
+        char path[4096];
+        if (strncmp(ent->d_name, prefix, prefix_len) != 0) continue;
+        if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, ent->d_name) ||
+            (unlink(path) != 0 && errno != ENOENT))
+            ok = false;
+    }
+    closedir(d);
+    if (unlink(jsonl_path) != 0 && errno != ENOENT) ok = false;
+    return ok;
+}
+
+static bool CatalogDeleteIndexedSession(sqlite3 *db, const char *project, const char *checkout, const char *id)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok = true;
+    if (!db || !SessionIdSafe(id)) return false;
+    if (checkout && checkout[0]) {
+        ok = CatalogDbPrepare(db, &stmt, "DELETE FROM sessions WHERE workspace_path=? AND id=?");
+        if (!ok) return false;
+        sqlite3_bind_text(stmt, 1, checkout, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+        if (!ok) return false;
+    }
+    if (!project || !project[0]) return ok;
+    ok = CatalogDbPrepare(db, &stmt, "DELETE FROM sessions WHERE project_path=? AND id=?");
+    if (!ok) return false;
+    sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
+    ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool RememberLockedDir(char ***dirs, int *count, int *cap, const char *dir, int **locks)
+{
+    int i;
+    char **next_dirs;
+    int *next_locks;
+    int next;
+    if (!dir || !dir[0]) return true;
+    for (i = 0; i < *count; i++)
+        if (!strcmp((*dirs)[i], dir)) return true;
+    if (*count == *cap) {
+        next = *cap ? *cap * 2 : 4;
+        next_dirs = realloc(*dirs, (size_t)next * sizeof(*next_dirs));
+        if (!next_dirs) return false;
+        *dirs = next_dirs;
+        next_locks = realloc(*locks, (size_t)next * sizeof(*next_locks));
+        if (!next_locks) return false;
+        *locks = next_locks;
+        *cap = next;
+    }
+    (*dirs)[*count] = strdup(dir);
+    if (!(*dirs)[*count]) return false;
+    (*locks)[*count] = -1;
+    (*count)++;
+    return true;
+}
+
+static PicoResult CatalogDeleteSessionFiles(const char *project, CatalogDeleteRef *refs, int count)
+{
+    char error[256];
+    char **dirs = NULL;
+    int *locks = NULL;
+    int dir_count = 0;
+    int dir_cap = 0;
+    int guard = -1;
+    sqlite3 *db = NULL;
+    bool ok = true;
+    bool changed = false;
+    int i;
+    PicoResult result = PICO_OK;
+    for (i = 0; i < count; i++) {
+        char dir[4096];
+        const char *slash;
+        if (!refs[i].selected || !refs[i].path[0]) continue;
+        slash = strrchr(refs[i].path, '/');
+        if (!slash || slash == refs[i].path || (size_t)(slash - refs[i].path) >= sizeof(dir)) {
+            ok = false;
+            continue;
+        }
+        memcpy(dir, refs[i].path, (size_t)(slash - refs[i].path));
+        dir[slash - refs[i].path] = '\0';
+        if (!RememberLockedDir(&dirs, &dir_count, &dir_cap, dir, &locks)) {
+            ok = false;
+            result = PICO_NO_MEMORY;
+        }
+    }
+    if (result != PICO_OK) goto done;
+    guard = CatalogDeletionGuardAcquire(error, sizeof(error));
+    if (guard < 0) {
+        result = PICO_INVALID;
+        goto done;
+    }
+    for (i = 0; i < dir_count; i++) {
+        char meta[4096];
+        if (!CatalogMetaPath(dirs[i], meta, sizeof(meta))) {
+            ok = false;
+            continue;
+        }
+        locks[i] = SessionLockAcquire(meta, error, sizeof(error));
+        if (locks[i] < 0) ok = false;
+    }
+    if (!ok) {
+        result = PICO_INVALID;
+        goto done;
+    }
+    db = CatalogDbOpen();
+    if (!db) {
+        result = PICO_INVALID;
+        goto done;
+    }
+    for (i = 0; i < count; i++) {
+        if (!refs[i].selected) continue;
+        if (refs[i].path[0] && !RemoveSessionFile(refs[i].path)) ok = false;
+        else if (refs[i].path[0]) changed = true;
+        if (refs[i].checkout[0] && !CatalogRemoveSessionMedia(refs[i].checkout, refs[i].id)) ok = false;
+        else if (refs[i].checkout[0]) changed = true;
+        if (!CatalogDeleteIndexedSession(db, project, refs[i].checkout, refs[i].id)) ok = false;
+        else changed = true;
+    }
+    if (changed) CatalogMarkChanged();
+    result = ok ? PICO_OK : PICO_INVALID;
+done:
+    if (db) sqlite3_close(db);
+    for (i = 0; i < dir_count; i++) {
+        if (locks && locks[i] >= 0) SessionLockRelease(locks[i]);
+        free(dirs ? dirs[i] : NULL);
+    }
+    free(dirs);
+    free(locks);
+    if (guard >= 0) CatalogDeletionGuardRelease(guard);
+    return result;
+}
+
+static bool CatalogAddIndexedSessions(sqlite3 *db, const char *project, const char *checkout,
+                                      CatalogDeleteRef **refs, int *count, int *cap)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok;
+    if (!db) return false;
+    ok = CatalogDbPrepare(db, &stmt,
+                          "SELECT id, workspace_path, file_path FROM sessions "
+                          "WHERE project_path=? OR workspace_path=?");
+    if (!ok) return false;
+    sqlite3_bind_text(stmt, 1, project && project[0] ? project : checkout, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, checkout, -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        CatalogDeleteRef row;
+        memset(&row, 0, sizeof(row));
+        snprintf(row.id, sizeof(row.id), "%s", CatalogDbText(stmt, 0));
+        snprintf(row.checkout, sizeof(row.checkout), "%s", CatalogDbText(stmt, 1));
+        snprintf(row.path, sizeof(row.path), "%s", CatalogDbText(stmt, 2));
+        if (row.path[0] && access(row.path, F_OK) == 0)
+            ReadSessionLink(row.path, row.id, sizeof(row.id), row.parent, sizeof(row.parent));
+        else
+            row.path[0] = '\0';
+        if (!SessionIdSafe(row.id)) continue;
+        if (!CatalogDeletePush(refs, count, cap, &row)) {
+            sqlite3_finalize(stmt);
+            return false;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+static bool CatalogDiscoverSessions(PicoHost *host, const char *checkout, const char *canonical,
+                                    const char *session_id, char *project, size_t project_cap,
+                                    CatalogDeleteRef **refs, int *count, bool *target_found)
+{
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    int cap = 0;
+    int i;
+    bool ok = true;
+    char fallback_dir[4096];
+    char root[4096];
+    *refs = NULL;
+    *count = 0;
+    *target_found = false;
+    if (project && project_cap) project[0] = '\0';
+    /* Do not reconcile every catalog here. A sidebar scan may already hold those
+     * checkout locks; waiting on them from the UI thread deadlocks adoption. */
+    db = CatalogDbOpen();
+    if (!db) return false;
+    if (CatalogDbPrepare(db, &stmt, "SELECT project_path FROM workspaces WHERE path=? OR path=?")) {
+        sqlite3_bind_text(stmt, 1, checkout, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, canonical && canonical[0] ? canonical : checkout, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW && CatalogDbText(stmt, 0)[0])
+            snprintf(project, project_cap, "%s", CatalogDbText(stmt, 0));
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+    }
+    if (project && !project[0])
+        snprintf(project, project_cap, "%s", canonical && canonical[0] ? canonical : checkout);
+    if (SessionsRoot(root, sizeof(root)) &&
+        CatalogDbPrepare(db, &stmt, "SELECT path, key FROM workspaces WHERE project_path=? OR path=?")) {
+        sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, project, -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            char dir[4096];
+            const char *path = CatalogDbText(stmt, 0);
+            const char *key = CatalogDbText(stmt, 1);
+            if (!key[0] || !PicoPath_Format(dir, sizeof(dir), "%s/%s", root, key) ||
+                !CatalogCollectDir(dir, path, refs, count, &cap))
+                ok = false;
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (CatalogDirForPath(checkout, fallback_dir, sizeof(fallback_dir)) &&
+        !CatalogCollectDir(fallback_dir, checkout, refs, count, &cap))
+        ok = false;
+    if (canonical && canonical[0] && strcmp(canonical, checkout) &&
+        CatalogDirForPath(canonical, fallback_dir, sizeof(fallback_dir)) &&
+        !CatalogCollectDir(fallback_dir, canonical, refs, count, &cap))
+        ok = false;
+    if (!CatalogAddIndexedSessions(db, project, checkout, refs, count, &cap)) ok = false;
+    sqlite3_close(db);
+    if (!ok) return false;
+    for (i = 0; i < *count; i++) {
+        if (strcmp((*refs)[i].id, session_id)) continue;
+        if (CheckoutMatches((*refs)[i].checkout, checkout, canonical) || !(*refs)[i].checkout[0])
+            (*refs)[i].selected = true;
+    }
+    if (host) {
+        for (i = 0; i < host->workspace_count; i++) {
+            PicoWorkspace *ws = host->workspaces[i];
+            int a;
+            if (!ws || !CheckoutMatches(ws->path, checkout, canonical)) continue;
+            for (a = 0; a < ws->count; a++) {
+                PicoAgent *agent = ws->agents[a];
+                CatalogDeleteRef row;
+                if (!agent || strcmp(agent->session_id, session_id)) continue;
+                *target_found = true;
+                memset(&row, 0, sizeof(row));
+                snprintf(row.id, sizeof(row.id), "%s", agent->session_id);
+                snprintf(row.checkout, sizeof(row.checkout), "%s", ws->path);
+                if (agent->session_path[0]) snprintf(row.path, sizeof(row.path), "%s", agent->session_path);
+                row.selected = true;
+                if (!CatalogDeletePush(refs, count, &cap, &row)) return false;
+            }
+        }
+    }
+    CatalogDeleteExpand(*refs, *count);
+    for (i = 0; i < *count; i++)
+        if ((*refs)[i].selected && !strcmp((*refs)[i].id, session_id)) *target_found = true;
+    return true;
+}
+
+static bool AddLiveDescendantRefs(PicoHost *host, CatalogDeleteRef **refs, int *count)
+{
+    bool changed = true;
+    int cap = *count;
+    while (host && changed) {
+        int w;
+        changed = false;
+        for (w = 0; w < host->workspace_count; w++) {
+            PicoWorkspace *ws = host->workspaces[w];
+            int i;
+            if (!ws) continue;
+            for (i = 0; i < ws->count; i++) {
+                PicoAgent *agent = ws->agents[i];
+                CatalogDeleteRef row;
+                bool already;
+                if (!agent || !SessionIdSafe(agent->session_id)) continue;
+                already = CatalogDeleteIdSelected(*refs, *count, agent->session_id);
+                if (!already && !CatalogDeleteIdSelected(*refs, *count, agent->parent_session_id))
+                    continue;
+                memset(&row, 0, sizeof(row));
+                snprintf(row.id, sizeof(row.id), "%s", agent->session_id);
+                if (agent->parent_session_id[0])
+                    snprintf(row.parent, sizeof(row.parent), "%s", agent->parent_session_id);
+                snprintf(row.checkout, sizeof(row.checkout), "%s", ws->path);
+                if (agent->session_path[0]) snprintf(row.path, sizeof(row.path), "%s", agent->session_path);
+                row.selected = true;
+                if (!CatalogDeletePush(refs, count, &cap, &row)) return false;
+                if (!already) changed = true;
+            }
+        }
+        CatalogDeleteExpand(*refs, *count);
+    }
+    return true;
+}
+
+PicoResult PicoCatalog_DeleteSession(PicoHost *host, const char *checkout_path, const char *session_id)
+{
+    char canonical[4096] = {0};
+    char project[4096];
+    CatalogDeleteRef *refs = NULL;
+    PicoAgentId *agents = NULL;
+    int count = 0;
+    int agent_n = 0;
+    bool target_found = false;
+    PicoResult result = PICO_OK;
+    if (!host || !checkout_path || checkout_path[0] != '/' || !SessionIdSafe(session_id))
+        return PICO_INVALID;
+    CanonicalWorkspacePath(checkout_path, canonical, sizeof(canonical));
+    if (!CatalogDiscoverSessions(host, checkout_path, canonical, session_id, project, sizeof(project),
+                                 &refs, &count, &target_found) ||
+        !AddLiveDescendantRefs(host, &refs, &count)) {
+        free(refs);
+        return PICO_NO_MEMORY;
+    }
+    CatalogDeleteExpand(refs, count);
+    if (!target_found) {
+        free(refs);
+        return PICO_NOT_FOUND;
+    }
+    if (!CollectCloseAgents(host, refs, count, &agents, &agent_n)) {
+        free(refs);
+        free(agents);
+        return PICO_NO_MEMORY;
+    }
+    if (CloseSetBlocked(host, agents, agent_n) ||
+        PersistBlocksSessionDelete(host, agents, agent_n, refs, count) ||
+        LoadBlocksSessionDelete(host, agents, agent_n, refs, count, checkout_path, canonical)) {
+        free(refs);
+        free(agents);
+        return PICO_BUSY;
+    }
+    result = CloseDeleteAgents(host, agents, agent_n);
+    free(agents);
+    if (result != PICO_OK) {
+        free(refs);
+        return result;
+    }
+    /* Close drains persist and may write descendant session files. */
+    {
+        CatalogDeleteRef *rescanned = NULL;
+        int rescan_count = 0;
+        bool ignored = false;
+        if (!CatalogDiscoverSessions(host, checkout_path, canonical, session_id, project, sizeof(project),
+                                     &rescanned, &rescan_count, &ignored)) {
+            free(refs);
+            return PICO_NO_MEMORY;
+        }
+        free(refs);
+        refs = rescanned;
+        count = rescan_count;
+        CatalogDeleteExpand(refs, count);
+        for (int i = 0; i < count; i++)
+            if (!strcmp(refs[i].id, session_id)) refs[i].selected = true;
+        CatalogDeleteExpand(refs, count);
+    }
+    result = CatalogDeleteSessionFiles(project, refs, count);
+    free(refs);
+    return result;
+}

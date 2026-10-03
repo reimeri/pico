@@ -53,6 +53,7 @@ static int g_find_character;
 static bool g_find_press;
 static bool g_find_down;
 static bool g_find_released;
+static int g_find_button = MOUSE_BUTTON_LEFT;
 static Vector2 g_find_pointer;
 static Vector2 g_find_wheel;
 
@@ -75,17 +76,17 @@ int __wrap_GetCharPressed(void)
 bool __real_IsMouseButtonPressed(int button);
 bool __wrap_IsMouseButtonPressed(int button)
 {
-    return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_press : __real_IsMouseButtonPressed(button);
+    return g_find_input_test ? button == g_find_button && g_find_press : __real_IsMouseButtonPressed(button);
 }
 bool __real_IsMouseButtonDown(int button);
 bool __wrap_IsMouseButtonDown(int button)
 {
-    return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_down : __real_IsMouseButtonDown(button);
+    return g_find_input_test ? button == g_find_button && g_find_down : __real_IsMouseButtonDown(button);
 }
 bool __real_IsMouseButtonReleased(int button);
 bool __wrap_IsMouseButtonReleased(int button)
 {
-    return g_find_input_test ? button == MOUSE_BUTTON_LEFT && g_find_released : __real_IsMouseButtonReleased(button);
+    return g_find_input_test ? button == g_find_button && g_find_released : __real_IsMouseButtonReleased(button);
 }
 Vector2 __real_GetMousePosition(void);
 Vector2 __wrap_GetMousePosition(void) { return g_find_input_test ? g_find_pointer : __real_GetMousePosition(); }
@@ -13916,16 +13917,23 @@ static int SidebarVisibleSessionRows(void)
     return count;
 }
 
-static bool SidebarFrameClick(PicoHost *host, Clay_ElementData element)
+static bool SidebarFrameClickButton(PicoHost *host, Clay_ElementData element, int button)
 {
     if (!host || !element.found) return false;
+    g_find_button = button;
     g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2.0f,
                                element.boundingBox.y + element.boundingBox.height / 2.0f};
     Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
     g_find_press = true;
     PicoHost_Frame(host);
     g_find_press = false;
+    g_find_button = MOUSE_BUTTON_LEFT;
     return host->frame_presented;
+}
+
+static bool SidebarFrameClick(PicoHost *host, Clay_ElementData element)
+{
+    return SidebarFrameClickButton(host, element, MOUSE_BUTTON_LEFT);
 }
 
 static bool SidebarFrameClickWorkspace(PicoHost *host, Clay_ElementData element)
@@ -13946,6 +13954,153 @@ static bool SidebarFrameClickWorkspace(PicoHost *host, Clay_ElementData element)
 
 /* Exercise sidebar changes through actual host input frames. The selected
  * session stays pinned when collapsed; nonselected live sessions fill More. */
+static int TestSidebarContextMenus(void)
+{
+    char dir[] = "/tmp/pico-sidebar-menu-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-sidebar-menu-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    bool good = false;
+    const char *phase = "setup";
+    char session_file[4096];
+    int rows_before = 0;
+    if (!mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        Fail("sidebar menu fixture directories");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
+    WaitPluginLoad(host);
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+    host->preferences.chat_width = 0;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    if (PicoCatalog_Ensure(dir) != 0 ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK) goto done;
+    {
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_NONE, .select = true};
+        if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK)
+            goto done;
+    }
+    PicoCatalogWorkspace *fixture = NULL;
+    int fixture_count = PicoCatalog_Scan(&fixture);
+    const PicoCatalogWorkspace *fixture_ws = NULL;
+    for (int j = 0; j < fixture_count; j++)
+        if (strcmp(fixture[j].path, dir) == 0) fixture_ws = &fixture[j];
+    if (!fixture_ws) { PicoCatalog_Free(fixture, fixture_count); goto done; }
+    bool fixture_ok = PicoPath_Format(session_file, sizeof(session_file),
+                                      "%s/pico/sessions/%s/2026-01-01T00-00-00Z_menusess.jsonl",
+                                      cfg, fixture_ws->key);
+    PicoCatalog_Free(fixture, fixture_count);
+    if (!fixture_ok) goto done;
+    {
+        FILE *f = fopen(session_file, "wb");
+        if (!f) goto done;
+        fprintf(f, "{\"type\":\"session\",\"version\":4,\"id\":\"menusess\","
+                   "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
+                   "{\"type\":\"message\",\"role\":\"user\",\"content\":\"menu-title\"}\n",
+                dir);
+        fclose(f);
+    }
+    fixture_count = PicoCatalog_Scan(&fixture);
+    PicoCatalog_Free(fixture, fixture_count);
+    if (fixture_count < 1) goto done;
+    g_sidebar_poll_due = true;
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    phase = "catalog";
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
+    PicoHost_Frame(host);
+    rows_before = SidebarVisibleSessionRows();
+    phase = "workspace right-click";
+    if (rows_before < 2 ||
+        !SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0)), MOUSE_BUTTON_RIGHT) ||
+        !Clay_GetElementData(CLAY_ID("SidebarEditPopup")).found ||
+        SidebarVisibleSessionRows() != rows_before) goto done;
+    phase = "pen still opens editor";
+    g_find_key = KEY_ESCAPE;
+    PicoHost_Frame(host);
+    g_find_key = -1;
+    if (Clay_GetElementData(CLAY_ID("SidebarEditPopup")).found) goto done;
+    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_IDI("SidebarEdit", 0))) ||
+        !Clay_GetElementData(CLAY_ID("SidebarEditPopup")).found) goto done;
+    g_find_key = KEY_ESCAPE;
+    PicoHost_Frame(host);
+    g_find_key = -1;
+    phase = "new session has no menu";
+    if (!SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("SidebarSess", 0)), MOUSE_BUTTON_RIGHT) ||
+        Clay_GetElementData(CLAY_ID("SidebarSessionPopup")).found) goto done;
+    phase = "session menu";
+    if (!SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("SidebarSess", 1)), MOUSE_BUTTON_RIGHT) ||
+        !Clay_GetElementData(CLAY_ID("SidebarSessionPopup")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarSessionCopy")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarSessionDelete")).found) goto done;
+    phase = "copy click";
+    if (!Clay_GetElementData(CLAY_ID("SidebarSessionCopy")).found) goto done;
+    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SidebarSessionCopy")))) goto done;
+    phase = "copy clipboard";
+    if (!GetClipboardText() || strcmp(GetClipboardText(), "menusess") != 0) goto done;
+    phase = "delete confirm";
+    if (!SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("SidebarSess", 1)), MOUSE_BUTTON_RIGHT) ||
+        !SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SidebarSessionDelete"))) ||
+        !Clay_GetElementData(CLAY_ID("SidebarSessionConfirm")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarSessionCancel")).found) goto done;
+    g_find_key = KEY_ESCAPE;
+    PicoHost_Frame(host);
+    g_find_key = -1;
+    phase = "busy session stays";
+    {
+        PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+        if (!agent) goto done;
+        snprintf(agent->session_id, sizeof(agent->session_id), "menusess");
+        snprintf(agent->session_path, sizeof(agent->session_path), "%s", session_file);
+        agent->persistence = PICO_SESSION_DURABLE;
+        agent->state = PICO_AGENT_LLM_WAIT;
+        if (PicoCatalog_DeleteSession(host, dir, "menusess") != PICO_BUSY ||
+            PicoHost_FindAgent(host, agent_id) == NULL || access(session_file, F_OK) != 0)
+            goto done;
+        agent->state = PICO_AGENT_IDLE;
+        phase = "idle delete closes agent";
+        if (PicoCatalog_DeleteSession(host, dir, "menusess") != PICO_OK ||
+            PicoHost_FindAgent(host, agent_id) != NULL || access(session_file, F_OK) == 0)
+            goto done;
+    }
+    good = true;
+done:
+    g_find_input_test = g_find_press = g_find_down = g_find_released = false;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    g_find_key = 0;
+    g_clay_frame_test = false;
+    g_sidebar_poll_due = false;
+    if (host) pico_host_free(host);
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    if (!good)
+    {
+        fprintf(stderr, "sidebar context menu phase: %s\n", phase);
+        Fail("sidebar right-click opens workspace and session actions");
+    }
+    return good ? 0 : 1;
+}
+
 static int TestSidebarSameFrameControls(void)
 {
     char dir[] = "/tmp/pico-sidebar-frame-ws-XXXXXX";
@@ -14925,6 +15080,7 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
+    if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameOnlyPresentsOnInvalidation()) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameRetainsChatScroll()) != 0) return 1;

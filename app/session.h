@@ -102,6 +102,12 @@ int PicoCatalog_SetProjectStashed(const char *project_path, bool stashed);
 /* Removes Pico session data for the group, never checkout directories.
  * Refuses while any agent in the project is live. */
 int PicoCatalog_DeleteProject(PicoHost *host, const char *project_path);
+/* Removes one session and every session whose parent_session_id chain names it.
+ * Never removes checkout directories. Closes idle agents for those sessions
+ * first. Returns PICO_BUSY, changing nothing, when an agent, load, or persist
+ * for the set is in flight. */
+PicoResult PicoCatalog_DeleteSession(PicoHost *host, const char *checkout_path,
+                                     const char *session_id);
 int PicoCatalog_SetSessionModel(const char *workspace_path, const char *session_id,
                                 const char *model, const char *effort);
 

@@ -26,12 +26,26 @@ int __wrap_glfwGetPlatform(void)
     return s_platform ? s_platform : __real_glfwGetPlatform();
 }
 
+static char *s_recorded_clipboard;
+
 const char *__real_GetClipboardText(void);
 const char *__wrap_GetClipboardText(void)
 {
-    if (!s_platform) return __real_GetClipboardText();
-    s_fallback_calls++;
-    return s_fallback;
+    if (s_platform) {
+        s_fallback_calls++;
+        return s_fallback;
+    }
+    if (s_recorded_clipboard) return s_recorded_clipboard;
+    return __real_GetClipboardText();
+}
+
+void __real_SetClipboardText(const char *text);
+void __wrap_SetClipboardText(const char *text)
+{
+    free(s_recorded_clipboard);
+    s_recorded_clipboard = text ? strdup(text) : NULL;
+    if (!s_platform)
+        __real_SetClipboardText(text ? text : "");
 }
 
 void __real_glfwPostEmptyEvent(void);

@@ -1011,7 +1011,7 @@ if(BUILD_TESTING)
             -Wl,--wrap=IsMouseButtonDown -Wl,--wrap=IsMouseButtonReleased -Wl,--wrap=GetMousePosition
             -Wl,--wrap=GetMouseWheelMoveV
             -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx
-            -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
+            -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=SetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
 endif()

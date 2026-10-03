@@ -120,6 +120,10 @@ struct PicoWorkspace {
     bool worktree;
     bool can_create_worktree;
     PicoWorkspaceState state;
+    /* Monotonic seconds of the last user-facing activity in this workspace
+     * (selection, submit, session commit). Drives least-recently-active
+     * eviction when the host reaches its live-workspace cap. */
+    double last_activity;
     uint64_t registration_generation;
     PicoRegistrationGeneration *active_registration;
 
@@ -249,6 +253,10 @@ bool PicoWorkspace_JobReferences(const PicoWorkspace *workspace, PicoAgentId id)
 
 PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
                                      PicoAgentId *out);
+/* User-facing creation validates/prepares before evicting for capacity. Caller
+ * holds the workspace across preparation, eviction, and publication. */
+PicoResult PicoWorkspace_CreateMainAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                         PicoAgentId *out);
 
 PicoResult PicoWorkspace_CreateClarificationAgent(PicoWorkspace *workspace, const PicoAgent *owner,
                                                   struct PicoClarification *clarification, PicoAgent **out);

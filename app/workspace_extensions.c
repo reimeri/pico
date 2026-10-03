@@ -381,6 +381,9 @@ void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt)
     {
         return;
     }
+    /* An on_frame callback may open workspaces at a cap; this workspace must
+     * survive the inline eviction that can follow. */
+    int hold = PicoHost_EvictHoldPush(workspace->host, workspace, 0);
     for (int i = 0; i < workspace->workspace_plugin_count; i++)
     {
         PicoPluginSlot *slot = &workspace->workspace_plugins[i];
@@ -390,6 +393,7 @@ void PicoWorkspaceExtensions_OnFrame(PicoWorkspace *workspace, float dt)
             slot->module->ext.workspace_on_frame(workspace, slot->state, dt);
         }
     }
+    PicoHost_EvictHoldPop(workspace->host, hold);
 }
 
 void *PicoWorkspaceExtensions_State(const PicoWorkspace *workspace, const char *name)
@@ -423,6 +427,9 @@ void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId
     const PicoRegistrationGeneration *registration = workspace->active_registration;
     if (registration)
     {
+        /* A hook may open workspaces or create agents at a cap; the
+         * dispatching agent and this workspace must survive that. */
+        int hold = PicoHost_EvictHoldPush(workspace->host, workspace, agent_id);
         for (int i = 0; i < registration->hook_count; i++)
         {
             if (registration->hooks[i].hook == hook && registration->hooks[i].workspace_fn)
@@ -430,6 +437,7 @@ void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId
                 registration->hooks[i].workspace_fn(workspace, &event, registration->hooks[i].state);
             }
         }
+        PicoHost_EvictHoldPop(workspace->host, hold);
     }
 }
 

@@ -296,7 +296,11 @@ void PicoComplete_Refresh(PicoHost *app)
     }
     else if (comp->workspace_query && comp->workspace)
     {
+        /* A completer may open workspaces or create agents at a cap; the
+         * dispatching workspace must survive inline eviction. */
+        int hold = PicoHost_EvictHoldPush(app, comp->workspace, 0);
         n = comp->workspace_query(comp->workspace, prefix, raw, PICO_MAX_COMPLETE_ITEMS, comp->state);
+        PicoHost_EvictHoldPop(app, hold);
     }
     if (n < 0)
     {
@@ -352,10 +356,16 @@ static void Accept(PicoHost *app)
         PicoComplete_Refresh(app);
         return;
     }
-    if (comp && comp->workspace_accept && comp->workspace && comp->workspace_accept(comp->workspace, item, comp->state))
+    if (comp && comp->workspace_accept && comp->workspace)
     {
-        PicoComplete_Refresh(app);
-        return;
+        int hold = PicoHost_EvictHoldPush(app, comp->workspace, 0);
+        bool accepted = comp->workspace_accept(comp->workspace, item, comp->state);
+        PicoHost_EvictHoldPop(app, hold);
+        if (accepted)
+        {
+            PicoComplete_Refresh(app);
+            return;
+        }
     }
     const char *ins = item->insert[0] ? item->insert : item->label;
     PicoComposer_ReplaceRange(app, start, end, ins);

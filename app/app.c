@@ -1569,6 +1569,9 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
             const PicoRegistrationGeneration *registration = agent_registration
                                                                  ? agent_registration
                                                                  : ws->active_registration;
+            /* A hook may open workspaces or create agents at a cap; the
+             * dispatching agent and its workspace must survive that. */
+            int hold = PicoHost_EvictHoldPush(host, ws, agent_id);
             for (int i = 0; i < registration->hook_count; i++)
             {
                 if (registration->hooks[i].hook == hook && registration->hooks[i].workspace_fn)
@@ -1576,6 +1579,7 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
                     registration->hooks[i].workspace_fn(ws, &event, registration->hooks[i].state);
                 }
             }
+            PicoHost_EvictHoldPop(host, hold);
         }
     }
 }
@@ -1979,6 +1983,79 @@ void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text
     PicoAgent_AppendAssistantPrepared(app, agent, text, NULL, NULL);
 }
 
+int PicoHost_EvictHoldPush(PicoHost *host, const PicoWorkspace *workspace, PicoAgentId agent)
+{
+    int mark;
+    if (!host)
+    {
+        return 0;
+    }
+    mark = host->evict_hold_count;
+    if (mark >= (int)(sizeof(host->evict_hold_workspaces) / sizeof(host->evict_hold_workspaces[0])))
+    {
+        host->evict_hold_overflow = true;
+        return mark;
+    }
+    host->evict_hold_workspaces[mark] = workspace ? workspace->id : 0;
+    host->evict_hold_agents[mark] = agent;
+    host->evict_hold_count = mark + 1;
+    return mark;
+}
+
+void PicoHost_EvictHoldPop(PicoHost *host, int mark)
+{
+    if (!host)
+    {
+        return;
+    }
+    host->evict_hold_count = mark > 0 ? mark : 0;
+    if (host->evict_hold_count == 0)
+    {
+        host->evict_hold_overflow = false;
+    }
+}
+
+bool PicoHost_EvictHoldBlocksWorkspace(const PicoHost *host, PicoWorkspaceId id)
+{
+    int i;
+    if (!host || !id)
+    {
+        return host && host->evict_hold_overflow;
+    }
+    for (i = 0; i < host->evict_hold_count; i++)
+    {
+        if (host->evict_hold_workspaces[i] == id)
+        {
+            return true;
+        }
+    }
+    return host->evict_hold_overflow;
+}
+
+bool PicoHost_EvictHoldBlocksAgent(const PicoHost *host, PicoAgentId id)
+{
+    int i;
+    if (!host || !id)
+    {
+        return host && host->evict_hold_overflow;
+    }
+    for (i = 0; i < host->evict_hold_count; i++)
+    {
+        if (host->evict_hold_agents[i] == id)
+        {
+            return true;
+        }
+    }
+    return host->evict_hold_overflow;
+}
+
+double PicoClock_Monotonic(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const char *text,
                                      const char *display, const char *parts_json)
 {
@@ -2022,6 +2099,11 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
         pico_status_warn(host, "This agent's restricted tool policy references a tool that is not currently registered.");
         free(normalized);
         return PICO_INVALID;
+    }
+    agent->last_activity = PicoClock_Monotonic();
+    if (agent->workspace)
+    {
+        agent->workspace->last_activity = agent->last_activity;
     }
     shown = display && display[0] ? display : (text ? text : "");
     /* The checkout is fixed once a turn has passed all acceptance checks. */
@@ -2483,6 +2565,289 @@ bool pico_workspace_info(const PicoHost *host, int index, PicoWorkspaceInfo *out
     return true;
 }
 
+static PicoAgent *FirstMainAgent(PicoWorkspace *workspace);
+
+static bool AgentTreeHasActiveWork(const PicoWorkspace *workspace, PicoAgentId root_id);
+
+/* Advance one CLOSING workspace through quiescent agent destruction to the
+ * CLOSED state. Shared by the lifecycle pump and inline capacity eviction. */
+static void PicoHost_AdvanceClosingWorkspace(PicoHost *host, PicoWorkspace *workspace)
+{
+    (void)host;
+    if (!workspace || workspace->state != PICO_WORKSPACE_CLOSING)
+    {
+        return;
+    }
+    if (!PicoWorkspace_IsQuiescent(workspace))
+    {
+        return;
+    }
+    bool all_destroyed = true;
+    for (int a = 0; a < workspace->count; a++)
+    {
+        if (workspace->agents[a])
+        {
+            PicoAgentId aid = workspace->agents[a]->id;
+            PicoWorkspace_ReleaseSessions(workspace, aid);
+            PicoWorkspace_DropAgentMailboxes(workspace, aid, 0);
+            PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, aid);
+            if (!PicoAgent_Destroy(workspace->agents[a]))
+            {
+                all_destroyed = false;
+                break;
+            }
+            workspace->agents[a] = NULL;
+        }
+    }
+    if (all_destroyed)
+    {
+        workspace->count = 0;
+        PicoWorkspaceExtensions_Shutdown(workspace);
+        workspace->state = PICO_WORKSPACE_CLOSED;
+    }
+}
+
+/* Free and drop CLOSED workspaces from the host array, reselecting a main
+ * agent elsewhere when the selection lived in a removed workspace. */
+static void PicoHost_RemoveClosedWorkspaces(PicoHost *host)
+{
+    if (!host)
+    {
+        return;
+    }
+    for (int i = 0; i < host->workspace_count;)
+    {
+        PicoWorkspace *ws = host->workspaces[i];
+        if (ws && ws->state == PICO_WORKSPACE_CLOSED)
+        {
+            if (host->selected_agent_id)
+            {
+                PicoAgent *sel = PicoHost_FindAgent(host, host->selected_agent_id);
+                if (!sel)
+                {
+                    PicoAgentId next_id = 0;
+                    for (int w2 = 0; w2 < host->workspace_count; w2++)
+                    {
+                        PicoAgent *next = w2 != i ? FirstMainAgent(host->workspaces[w2]) : NULL;
+                        if (next)
+                        {
+                            next_id = next->id;
+                            break;
+                        }
+                    }
+                    PicoClarification_Back(host);
+                    if (next_id) pico_agent_select(host, next_id);
+                    else host->selected_agent_id = 0;
+                    PicoChatSel_Clear(host);
+                    host->chat_follow_bottom = true;
+                }
+            }
+            PicoWorkspace_Free(ws);
+            for (int j = i + 1; j < host->workspace_count; j++)
+            {
+                host->workspaces[j - 1] = host->workspaces[j];
+            }
+            host->workspaces[--host->workspace_count] = NULL;
+            pico_host_request_redraw(host);
+            continue;
+        }
+        i++;
+    }
+}
+
+/* True when the workspace has anything in flight that close would destroy:
+ * a busy agent, a delegation job, a running background job, a retired runtime
+ * waiting to be reaped, the live replay agent, or an in-flight session load. */
+static bool WorkspaceHasActiveWork(PicoHost *host, const PicoWorkspace *workspace)
+{
+    int i;
+    if (!workspace)
+    {
+        return true;
+    }
+    if (host->session_replay_agent && host->session_replay_agent->workspace == workspace)
+    {
+        return true;
+    }
+    if (PicoSession_LoadTargetsWorkspace(host, workspace->id))
+    {
+        return true;
+    }
+    for (i = 0; i < workspace->count; i++)
+    {
+        PicoAgent *agent = workspace->agents[i];
+        if (!agent)
+        {
+            continue;
+        }
+        if (PicoAgent_IsBusy(agent) || PicoAgent_RetiredReferences(workspace, agent->id) ||
+            PicoWorkspace_JobReferences(workspace, agent->id) ||
+            PicoBgTable_RunningCount(workspace->background, agent->id) > 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Bounded seconds an inline capacity eviction waits for the victim's close to
+ * quiesce before giving up and surfacing the capacity failure instead. */
+#define PICO_EVICT_DRAIN_SECONDS 0.25
+
+/* Close the least-recently-active idle workspace and drain its close inline so
+ * the freed slot serves the pending open. The workspace stays `CLOSING` and the
+ * slot frees on a later pump when the drain budget expires. */
+static bool PicoHost_EvictIdleWorkspace(PicoHost *host)
+{
+    PicoWorkspace *victim = NULL;
+    PicoWorkspace *selected_ws = NULL;
+    int i;
+    if (!host)
+    {
+        return false;
+    }
+    {
+        PicoAgent *selected = PicoHost_FindAgent(host, host->selected_agent_id);
+        selected_ws = selected ? selected->workspace : NULL;
+    }
+    for (i = 0; i < host->workspace_count; i++)
+    {
+        PicoWorkspace *ws = host->workspaces[i];
+        if (!ws || ws->state != PICO_WORKSPACE_OPEN || ws == selected_ws)
+        {
+            continue;
+        }
+        if (PicoHost_EvictHoldBlocksWorkspace(host, ws->id))
+        {
+            continue;
+        }
+        if (WorkspaceHasActiveWork(host, ws))
+        {
+            continue;
+        }
+        if (!victim || ws->last_activity < victim->last_activity)
+        {
+            victim = ws;
+        }
+    }
+    if (!victim || pico_workspace_request_close(host, victim->id) != PICO_OK)
+    {
+        return false;
+    }
+    {
+        const double deadline = PicoClock_Monotonic() + PICO_EVICT_DRAIN_SECONDS;
+        struct timespec pause = {0, 2 * 1000 * 1000};
+        while (victim->state == PICO_WORKSPACE_CLOSING)
+        {
+            PicoWorkspace_Pump(victim);
+            PicoHost_AdvanceClosingWorkspace(host, victim);
+            if (victim->state != PICO_WORKSPACE_CLOSING)
+            {
+                break;
+            }
+            if (PicoClock_Monotonic() >= deadline)
+            {
+                return false;
+            }
+            nanosleep(&pause, NULL);
+        }
+        if (victim->state != PICO_WORKSPACE_CLOSED)
+        {
+            return false;
+        }
+    }
+    PicoHost_RemoveClosedWorkspaces(host);
+    return host->workspace_count < PICO_MAX_WORKSPACES;
+}
+
+static bool ExcludedAgent(const PicoAgentId *excluded, int count, PicoAgentId id)
+{
+    int i;
+    for (i = 0; i < count; i++)
+    {
+        if (excluded[i] == id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Close the least-recently-active idle main agent to free capacity at the
+ * per-workspace (16) or host-wide (32) agent cap. When `target` is at its
+ * per-workspace cap only its own agents qualify; otherwise any live workspace
+ * contributes. The selected agent and the live replay agent are never closed,
+ * and an agent with anything in flight anywhere in its delegation tree is
+ * skipped so close never cancels running work. */
+bool PicoHost_EvictIdleAgent(PicoHost *host, PicoWorkspace *target)
+{
+    PicoAgentId excluded[PICO_MAX_TOTAL_AGENTS];
+    int excluded_count = 0;
+    if (!host)
+    {
+        return false;
+    }
+    for (;;)
+    {
+        bool per_workspace = target && target->count >= PICO_MAX_AGENTS;
+        PicoAgent *victim = NULL;
+        for (int w = 0; w < host->workspace_count; w++)
+        {
+            PicoWorkspace *ws = host->workspaces[w];
+            if (!ws || (per_workspace && ws != target))
+            {
+                continue;
+            }
+            if (ws->state != PICO_WORKSPACE_OPEN)
+            {
+                continue;
+            }
+            for (int i = 0; i < ws->count; i++)
+            {
+                PicoAgent *agent = ws->agents[i];
+                if (!agent || !PicoAgent_IsUserMain(agent))
+                {
+                    continue;
+                }
+                if (agent->id == host->selected_agent_id || agent == host->session_replay_agent ||
+                    PicoSession_LoadReplacesAgent(host, agent->id))
+                {
+                    continue;
+                }
+                if (PicoHost_EvictHoldBlocksAgent(host, agent->id))
+                {
+                    continue;
+                }
+                if (ExcludedAgent(excluded, excluded_count, agent->id))
+                {
+                    continue;
+                }
+                if (AgentTreeHasActiveWork(ws, agent->id))
+                {
+                    continue;
+                }
+                if (!victim || agent->last_activity < victim->last_activity)
+                {
+                    victim = agent;
+                }
+            }
+        }
+        if (!victim)
+        {
+            return false;
+        }
+        if (pico_agent_close(host, victim->id) == PICO_OK)
+        {
+            return true;
+        }
+        if (excluded_count >= PICO_MAX_TOTAL_AGENTS)
+        {
+            return false;
+        }
+        excluded[excluded_count++] = victim->id;
+    }
+}
+
 PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId *out)
 {
     char canonical[4096];
@@ -2514,7 +2879,23 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     }
     if (host->workspace_count >= PICO_MAX_WORKSPACES)
     {
-        return PICO_LIMIT;
+        /* At the live-workspace cap, close the least-recently-active idle
+         * workspace to make room instead of failing the open outright. */
+        if (!PicoHost_EvictIdleWorkspace(host))
+        {
+            return PICO_LIMIT;
+        }
+        /* Destroy/shutdown callbacks may have opened this same checkout. */
+        for (i = 0; i < host->workspace_count; i++)
+        {
+            workspace = host->workspaces[i];
+            if (workspace && workspace->state != PICO_WORKSPACE_CLOSED &&
+                strcmp(workspace->path, canonical) == 0)
+            {
+                if (out) *out = workspace->id;
+                return PICO_ALREADY_OPEN;
+            }
+        }
     }
     workspace = (PicoWorkspace *)calloc(1, sizeof(PicoWorkspace));
     if (!workspace)
@@ -2523,6 +2904,7 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
     }
     workspace->host = host;
     workspace->id = host->next_workspace_id++;
+    workspace->last_activity = PicoClock_Monotonic();
     snprintf(workspace->path, sizeof(workspace->path), "%s", canonical);
     {
         PicoWorktreeInfo info;
@@ -2560,7 +2942,13 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
         PicoWorkspace_Free(workspace);
         return PICO_NO_MEMORY;
     }
-    PicoPlugins_InitWorkspace(host, workspace);
+    /* A workspace_init callback may open workspaces or create agents at a
+     * cap; this workspace must survive the inline eviction that can follow. */
+    {
+        int hold = PicoHost_EvictHoldPush(host, workspace, 0);
+        PicoPlugins_InitWorkspace(host, workspace);
+        PicoHost_EvictHoldPop(host, hold);
+    }
     pico_host_request_redraw(host);
     if (out)
     {
@@ -2629,6 +3017,8 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
 {
     PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
     PicoAgentCreateOptions copy;
+    PicoResult result;
+    int hold;
     if (out)
     {
         *out = 0;
@@ -2645,14 +3035,16 @@ PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
     {
         return PICO_BUSY;
     }
-    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS)
-    {
-        return PICO_LIMIT;
-    }
+    /* Hold the target workspace across the cap check, the eviction, and the
+     * create: the victim's destroy hooks and the new agent's own session hooks
+     * can open workspaces at the live-workspace cap, and inline eviction must
+     * not free the workspace this create is targeting. */
+    hold = PicoHost_EvictHoldPush(host, workspace, 0);
     copy = *options;
     copy.kind = PICO_AGENT_MAIN;
     copy.parent_id = 0;
-    PicoResult result = PicoWorkspace_CreateAgent(workspace, &copy, out);
+    result = PicoWorkspace_CreateMainAgent(workspace, &copy, out);
+    PicoHost_EvictHoldPop(host, hold);
     if (result == PICO_OK)
         pico_host_request_redraw(host);
     return result;
@@ -3186,72 +3578,10 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
             }
             else if (workspace->state == PICO_WORKSPACE_CLOSING)
             {
-                if (PicoWorkspace_IsQuiescent(workspace))
-                {
-                    bool all_destroyed = true;
-                    for (int a = 0; a < workspace->count; a++)
-                    {
-                        if (workspace->agents[a])
-                        {
-                            PicoAgentId aid = workspace->agents[a]->id;
-                            PicoWorkspace_ReleaseSessions(workspace, aid);
-                            PicoWorkspace_DropAgentMailboxes(workspace, aid, 0);
-                            PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, aid);
-                            if (!PicoAgent_Destroy(workspace->agents[a]))
-                            {
-                                all_destroyed = false;
-                                break;
-                            }
-                            workspace->agents[a] = NULL;
-                        }
-                    }
-                    if (all_destroyed)
-                    {
-                        workspace->count = 0;
-                        PicoWorkspaceExtensions_Shutdown(workspace);
-                        workspace->state = PICO_WORKSPACE_CLOSED;
-                    }
-                }
+                PicoHost_AdvanceClosingWorkspace(host, workspace);
             }
         }
-        for (int i = 0; i < host->workspace_count;)
-        {
-            PicoWorkspace *ws = host->workspaces[i];
-            if (ws && ws->state == PICO_WORKSPACE_CLOSED)
-            {
-                if (host->selected_agent_id)
-                {
-                    PicoAgent *sel = PicoHost_FindAgent(host, host->selected_agent_id);
-                    if (!sel)
-                    {
-                        PicoAgentId next_id = 0;
-                        for (int w2 = 0; w2 < host->workspace_count; w2++)
-                        {
-                            PicoAgent *next = w2 != i ? FirstMainAgent(host->workspaces[w2]) : NULL;
-                            if (next)
-                            {
-                                next_id = next->id;
-                                break;
-                            }
-                        }
-                        PicoClarification_Back(host);
-                        if (next_id) pico_agent_select(host, next_id);
-                        else host->selected_agent_id = 0;
-                        PicoChatSel_Clear(host);
-                        host->chat_follow_bottom = true;
-                    }
-                }
-                PicoWorkspace_Free(ws);
-                for (int j = i + 1; j < host->workspace_count; j++)
-                {
-                    host->workspaces[j - 1] = host->workspaces[j];
-                }
-                host->workspaces[--host->workspace_count] = NULL;
-                pico_host_request_redraw(host);
-                continue;
-            }
-            i++;
-        }
+        PicoHost_RemoveClosedWorkspaces(host);
     }
 }
 

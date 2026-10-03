@@ -3974,6 +3974,7 @@ PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace)
     agent->kind = PICO_AGENT_MAIN;
     agent->state = PICO_AGENT_IDLE;
     agent->persistence = PICO_SESSION_EPHEMERAL;
+    agent->last_activity = PicoClock_Monotonic();
     agent->tool_policy_valid = true;
     PicoSettings_InitAgent(agent);
     agent->runtime = CreateRt(app, agent);

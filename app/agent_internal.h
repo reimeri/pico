@@ -26,6 +26,9 @@ struct PicoAgent {
     char *originating_user_request;
     bool running_fast;
     int depth;
+    /* Monotonic seconds of the last user-facing activity (selection, submit,
+     * session commit). Drives least-recently-active eviction at the agent caps. */
+    double last_activity;
     char profile[65];
     char purpose[1025];
     char parent_session_id[40];

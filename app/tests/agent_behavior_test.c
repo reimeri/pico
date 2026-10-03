@@ -1740,8 +1740,26 @@ void PicoSession_LoadCancel(PicoHost *host) { (void)host; }
 void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id)
 { (void)host; (void)id; }
 void PicoSession_LoadPump(PicoHost *host) { (void)host; }
+bool PicoSession_LoadTargetsWorkspace(const PicoHost *host, PicoWorkspaceId id)
+{ (void)host; (void)id; return false; }
+bool PicoSession_LoadReplacesAgent(const PicoHost *host, PicoAgentId id)
+{ (void)host; (void)id; return false; }
 bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
 { (void)host; (void)id; return false; }
+
+PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind)
+{
+    (void)kind;
+    return g_fake_session.enabled && g_fake_session.resolve_ok && path &&
+           strcmp(path, g_fake_session.path) == 0 ? (PicoSessionReplay *)&g_fake_session : NULL;
+}
+void PicoSession_ReplayFree(PicoSessionReplay *replay) { (void)replay; }
+void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
+                                 PicoSessionReplay *replay, bool append_interrupted)
+{
+    (void)replay;
+    (void)PicoSession_Replay(app, agent, path, append_interrupted);
+}
 
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path, bool append_interrupted)
 {

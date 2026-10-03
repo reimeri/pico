@@ -229,10 +229,37 @@ struct PicoHost {
     char persist_catalog_error[256];
     PicoSessionPersistFailure persist_failures[PICO_MAX_TOTAL_AGENTS];
     int persist_failure_count;
+
+    /* Dispatch scopes currently on the stack whose workspace/agent must
+     * survive capacity eviction, so a callback or hook can never return into
+     * freed memory after triggering an open/create at a cap. Pushed and popped
+     * around every extension callback and hook dispatch; eviction skips the
+     * held objects. Overflow degrades to suppressing eviction entirely. */
+    PicoWorkspaceId evict_hold_workspaces[16];
+    PicoAgentId evict_hold_agents[16];
+    int evict_hold_count;
+    bool evict_hold_overflow;
 };
 
 bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
                                  bool had_complete, bool had_todo, bool had_modal);
+
+/* Monotonic wall clock in seconds; used for least-recently-activity stamps. */
+double PicoClock_Monotonic(void);
+
+/* Scoped capacity-eviction protection for the workspace/agent whose extension
+ * callback or hook dispatch is running. Push returns the previous depth to
+ * hand back to the matching Pop. */
+int PicoHost_EvictHoldPush(PicoHost *host, const PicoWorkspace *workspace, PicoAgentId agent);
+void PicoHost_EvictHoldPop(PicoHost *host, int mark);
+bool PicoHost_EvictHoldBlocksWorkspace(const PicoHost *host, PicoWorkspaceId id);
+bool PicoHost_EvictHoldBlocksAgent(const PicoHost *host, PicoAgentId id);
+
+/* Close one least-recently-active idle main agent to free capacity. `target`
+ * is the workspace that needs the slot; when it is at its per-workspace agent
+ * cap only its own agents are considered, otherwise any live workspace.
+ * Returns true when an agent was closed. */
+bool PicoHost_EvictIdleAgent(PicoHost *host, PicoWorkspace *target);
 
 static inline bool PicoHost_ShouldExit(const PicoHost *host)
 {

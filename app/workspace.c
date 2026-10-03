@@ -93,6 +93,11 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     if (agent)
     {
         PicoSession_SetUnseenComplete(host, agent, false);
+        agent->last_activity = PicoClock_Monotonic();
+        if (agent->workspace)
+        {
+            agent->workspace->last_activity = agent->last_activity;
+        }
     }
 }
 
@@ -535,8 +540,8 @@ static void PublishAgent(PicoWorkspace *workspace, PicoAgent *agent, bool select
     }
 }
 
-PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
-                                     PicoAgentId *out)
+static PicoResult CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                              PicoAgentId *out, bool evict)
 {
     if (out)
     {
@@ -552,7 +557,8 @@ PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCr
         return PICO_BUSY;
     }
     PicoAgent_ReapRetired(workspace);
-    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS)
+    if (!evict && (workspace->count >= PICO_MAX_AGENTS ||
+                   PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS))
     {
         return PICO_LIMIT;
     }
@@ -568,30 +574,32 @@ PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCr
         return result;
     }
 
+    PicoSessionReplay *replay = NULL;
+    bool replayed = false;
+    char path[4096] = {0};
     if (options->session_start == PICO_SESSION_NONE)
     {
         PicoSession_Start(app, agent, PICO_SESSION_NONE, NULL);
     }
     else if (options->session_start == PICO_SESSION_RESUME)
     {
-        char path[4096];
         if (!options->session_id || PicoSession_Resolve(workspace, options->session_id, false,
                                                        path, sizeof(path)) != 0)
         {
-            FreeAgentFieldsOnCreateFailure(agent);
-            return PICO_SESSION_INVALID;
+            result = PICO_SESSION_INVALID;
+            goto discard;
         }
         if (!PicoWorkspace_ReserveSession(workspace, agent->id, path))
         {
-            FreeAgentFieldsOnCreateFailure(agent);
-            return PICO_SESSION_IN_USE;
+            result = PICO_SESSION_IN_USE;
+            goto discard;
         }
         agent->persistence = PICO_SESSION_DURABLE;
-        if (PicoSession_Replay(app, agent, path, false) != 0)
+        replay = PicoSession_ReplayPrepare(path, agent->kind);
+        if (!replay)
         {
-            PicoWorkspace_ReleaseSessions(workspace, agent->id);
-            FreeAgentFieldsOnCreateFailure(agent);
-            return PICO_SESSION_INVALID;
+            result = PICO_SESSION_INVALID;
+            goto discard;
         }
     }
     else
@@ -599,7 +607,37 @@ PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCr
         agent->persistence = PICO_SESSION_DURABLE;
     }
 
+    /* Validate options, reservation, and the entire resume file before any
+     * destructive capacity action. Replay callbacks wait until a slot exists. */
+    if (evict && (workspace->count >= PICO_MAX_AGENTS ||
+                  PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS))
+    {
+        if (!PicoHost_EvictIdleAgent(app, workspace))
+        {
+            result = PICO_LIMIT;
+            goto discard;
+        }
+    }
+    /* Eviction hooks may themselves fill the slot that was just freed. */
+    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS)
+    {
+        result = PICO_LIMIT;
+        goto discard;
+    }
     if (options->select) PicoSession_LoadCancel(app);
+    if (replay)
+    {
+        PicoSession_ReplayPrepared(app, agent, path, replay, false);
+        replayed = true;
+        PicoSession_ReplayFree(replay);
+        replay = NULL;
+    }
+    /* Cancellation and replay callbacks can consume capacity too. */
+    if (workspace->count >= PICO_MAX_AGENTS || PicoHost_TotalAgentCount(app) >= PICO_MAX_TOTAL_AGENTS)
+    {
+        result = PICO_LIMIT;
+        goto discard;
+    }
     PublishAgent(workspace, agent, options->select);
     if (options->session_start == PICO_SESSION_RESUME)
     {
@@ -611,6 +649,25 @@ PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCr
         *out = agent->id;
     }
     return PICO_OK;
+
+discard:
+    PicoSession_ReplayFree(replay);
+    PicoWorkspace_ReleaseSessions(workspace, agent->id);
+    if (replayed) PicoWorkspace_RunHooks(workspace, PICO_HOOK_ON_AGENT_DESTROY, agent->id);
+    FreeAgentFieldsOnCreateFailure(agent);
+    return result;
+}
+
+PicoResult PicoWorkspace_CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                     PicoAgentId *out)
+{
+    return CreateAgent(workspace, options, out, false);
+}
+
+PicoResult PicoWorkspace_CreateMainAgent(PicoWorkspace *workspace, const PicoAgentCreateOptions *options,
+                                         PicoAgentId *out)
+{
+    return CreateAgent(workspace, options, out, true);
 }
 
 /* Auxiliary agents are configured before publication; no selected-session or reset hooks. */
@@ -1277,6 +1334,8 @@ bool PicoWorkspace_CommitLoadedSession(PicoHost *host, PicoWorkspaceId workspace
     if (!ws || !candidate || candidate->workspace != ws ||
         ws->state != PICO_WORKSPACE_OPEN) return false;
     PicoAgentId candidate_id = candidate->id;
+    candidate->last_activity = PicoClock_Monotonic();
+    ws->last_activity = candidate->last_activity;
     if (replace_id)
     {
         int index = FindIndex(ws, replace_id);

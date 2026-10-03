@@ -3925,13 +3925,33 @@ static int TestCanonicalOpenAndDuplicate(void)
             Fail("workspace count should reach PICO_MAX_WORKSPACES");
         }
 
+        /* Opening past the live-workspace cap closes the least-recently-active
+         * idle workspace (the first-opened one, never touched since) and the
+         * open succeeds; the live count stays at the cap. */
         char overflow[] = "/tmp/pico-ws-overflow-XXXXXX";
         PicoWorkspaceId overflow_id = 0;
         if (mkdtemp(overflow))
         {
-            if (pico_workspace_open(host, overflow, &overflow_id) != PICO_LIMIT || overflow_id != 0)
+            bool oldest_gone = true;
+            PicoWorkspaceInfo probe;
+            if (pico_workspace_open(host, overflow, &overflow_id) != PICO_OK || overflow_id == 0)
             {
-                Fail("opening a workspace beyond capacity should return PICO_LIMIT");
+                Fail("opening a workspace beyond capacity should evict an idle workspace");
+            }
+            else if (pico_workspace_count(host) != PICO_MAX_WORKSPACES)
+            {
+                Fail("eviction should keep the live workspace count at the cap");
+            }
+            for (int i = 0; i < pico_workspace_count(host); i++)
+            {
+                if (pico_workspace_info(host, i, &probe) && probe.id == first)
+                {
+                    oldest_gone = false;
+                }
+            }
+            if (!oldest_gone)
+            {
+                Fail("eviction should close the least-recently-active idle workspace");
             }
             rmdir(overflow);
         }
@@ -5128,83 +5148,6 @@ static int TestCdResolvesAgainstCommandWorkspace(void)
     rmdir(dirA);
     rmdir(dirB);
     return 0;
-}
-
-static int TestCdRollsBackNewWorkspaceOnAgentLimit(void)
-{
-    const int workspace_count = (PICO_MAX_TOTAL_AGENTS + PICO_MAX_AGENTS - 1) / PICO_MAX_AGENTS;
-    /* This scenario needs room to open a workspace after filling the agent
-     * budget. Otherwise workspace capacity rejects /cd before agent creation. */
-    if (workspace_count >= PICO_MAX_WORKSPACES)
-    {
-        return 0;
-    }
-    PicoHost *host = NULL;
-    char root[] = "/tmp/pico-cdlim-XXXXXX";
-    char directories[PICO_MAX_WORKSPACES][128] = {{0}};
-    int created = 0;
-    PicoWorkspaceId first = 0;
-    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
-    if (!mkdtemp(root))
-    {
-        Fail("mkdtemp cd rollback");
-        return 1;
-    }
-    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
-    {
-        Fail("host init cd rollback");
-        rmdir(root);
-        return 1;
-    }
-    int total = 0;
-    for (int w = 0; w <= workspace_count; w++)
-    {
-        snprintf(directories[w], sizeof(directories[w]), "%s/workspace-%d", root, w);
-        if (mkdir(directories[w], 0700) != 0)
-        {
-            Fail("mkdir cd rollback workspace");
-            goto done;
-        }
-        created++;
-        if (w == workspace_count)
-        {
-            break;
-        }
-        PicoWorkspaceId workspace = 0;
-        if (pico_workspace_open(host, directories[w], &workspace) != PICO_OK)
-        {
-            Fail("open workspace cd rollback");
-            goto done;
-        }
-        if (w == 0)
-        {
-            first = workspace;
-        }
-        for (int i = 0; i < PICO_MAX_AGENTS && total < PICO_MAX_TOTAL_AGENTS; i++, total++)
-        {
-            PicoAgentId id = 0;
-            if (pico_main_agent_create(host, workspace, &opt, &id) != PICO_OK)
-            {
-                Fail("fill host agent budget for cd rollback");
-                goto done;
-            }
-        }
-    }
-    int count_before = pico_workspace_count(host);
-    if (PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, first), directories[workspace_count]) ||
-        pico_workspace_count(host) != count_before)
-    {
-        Fail("cd must roll back a newly opened workspace when agent creation fails");
-    }
-
-done:
-    pico_host_free(host);
-    for (int i = 0; i < created; i++)
-    {
-        rmdir(directories[i]);
-    }
-    rmdir(root);
-    return g_failed ? 1 : 0;
 }
 
 static int TestCdRejectsClosingWorkspace(void)
@@ -8374,6 +8317,850 @@ static bool PumpUntilIdle(PicoHost *host, PicoAgent *agent)
     return false;
 }
 
+/* Selecting an agent stamps its workspace as active; the live-workspace cap
+ * then evicts the oldest workspace with no recent activity, not the one the
+ * user most recently selected. */
+static int TestWorkspaceOpenEvictsLeastRecentlyActiveIdle(void)
+{
+    PicoHost *host = NULL;
+    char dirs[PICO_MAX_WORKSPACES][64] = {{0}};
+    PicoWorkspaceId ids[PICO_MAX_WORKSPACES] = {0};
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId rescued = 0;
+    PicoAgentId untouched = 0;
+    int i;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init lru eviction");
+        return 1;
+    }
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        snprintf(dirs[i], sizeof(dirs[i]), "/tmp/pico-ws-lru-%d-XXXXXX", i);
+        if (!mkdtemp(dirs[i]) || pico_workspace_open(host, dirs[i], &ids[i]) != PICO_OK)
+        {
+            Fail("open workspaces for lru eviction");
+            goto done;
+        }
+    }
+    /* Selecting the first workspace's agent re-stamps it, making it more
+     * recent than every never-touched workspace even though it opened first. */
+    if (pico_main_agent_create(host, ids[0], &opt, &rescued) != PICO_OK ||
+        pico_main_agent_create(host, ids[1], &opt, &untouched) != PICO_OK)
+    {
+        Fail("create agents for lru eviction");
+        goto done;
+    }
+    if (!pico_agent_select(host, rescued))
+    {
+        Fail("select rescued agent for lru eviction");
+        goto done;
+    }
+    {
+        char extra[] = "/tmp/pico-ws-lru-extra-XXXXXX";
+        PicoWorkspaceId extra_id = 0;
+        if (mkdtemp(extra))
+        {
+            bool rescued_live = false;
+            bool victim_gone = true;
+            PicoWorkspaceInfo probe;
+            if (pico_workspace_open(host, extra, &extra_id) != PICO_OK || extra_id == 0)
+            {
+                Fail("opening past the workspace cap should evict an idle workspace");
+            }
+            else if (pico_workspace_count(host) != PICO_MAX_WORKSPACES)
+            {
+                Fail("eviction should keep the live workspace count at the cap");
+            }
+            for (i = 0; i < pico_workspace_count(host); i++)
+            {
+                if (!pico_workspace_info(host, i, &probe))
+                {
+                    continue;
+                }
+                if (probe.id == ids[0])
+                {
+                    rescued_live = true;
+                }
+                if (probe.id == ids[1])
+                {
+                    victim_gone = false;
+                }
+            }
+            if (!rescued_live || !victim_gone)
+            {
+                Fail("eviction should target the never-touched workspace, not the recently selected one");
+            }
+            rmdir(extra);
+        }
+    }
+done:
+    pico_host_free(host);
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        if (dirs[i][0])
+        {
+            rmdir(dirs[i]);
+        }
+    }
+    return g_failed ? 1 : 0;
+}
+
+/* The workspace cap still surfaces PICO_LIMIT when every live workspace is
+ * either the selected one or has an agent mid-turn. */
+static int TestWorkspaceOpenLimitWhenAllBusy(void)
+{
+    PicoHost *host = NULL;
+    char dirs[PICO_MAX_WORKSPACES][64];
+    PicoWorkspaceId ids[PICO_MAX_WORKSPACES];
+    MatrixProviderState states[PICO_MAX_WORKSPACES] = {{0}};
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId agents[PICO_MAX_WORKSPACES] = {0};
+    int i;
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        snprintf(dirs[i], sizeof(dirs[i]), "/tmp/pico-ws-busy-%d-XXXXXX", i);
+        if (!mkdtemp(dirs[i]))
+        {
+            Fail("mkdtemp busy cap");
+            for (i = i - 1; i >= 0; i--)
+            {
+                rmdir(dirs[i]);
+            }
+            return 1;
+        }
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init busy cap");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        PicoWorkspace *ws;
+        if (pico_workspace_open(host, dirs[i], &ids[i]) != PICO_OK)
+        {
+            Fail("open workspace busy cap");
+            goto done;
+        }
+        ws = PicoHost_FindWorkspace(host, ids[i]);
+        MatrixStateInit(&states[i], MATRIX_PROVIDER_BLOCK);
+        if (!ConfigureMatrixWorkspace(host, ws, &states[i], false))
+        {
+            Fail("configure matrix provider busy cap");
+            goto done;
+        }
+        if (pico_main_agent_create(host, ids[i], &opt, &agents[i]) != PICO_OK)
+        {
+            Fail("create agent busy cap");
+            goto done;
+        }
+    }
+    if (!pico_agent_select(host, agents[0]))
+    {
+        Fail("select agent busy cap");
+        goto done;
+    }
+    for (i = 1; i < PICO_MAX_WORKSPACES; i++)
+    {
+        PicoAgent_StartTurn(host, PicoHost_FindAgent(host, agents[i]), "busy");
+        PICO_TEST_WAIT(!MatrixStateFlag(&states[i], false))
+        {
+            pico_host_pump(host);
+        }
+        if (!PicoAgent_IsBusy(PicoHost_FindAgent(host, agents[i])))
+        {
+            Fail("busy-cap fixture should keep agents mid-turn");
+            goto done;
+        }
+    }
+    {
+        char extra[] = "/tmp/pico-ws-busy-extra-XXXXXX";
+        PicoWorkspaceId extra_id = 0;
+        if (mkdtemp(extra))
+        {
+            if (pico_workspace_open(host, extra, &extra_id) != PICO_LIMIT || extra_id != 0)
+            {
+                Fail("opening past the workspace cap should fail when nothing is evictable");
+            }
+            else if (pico_workspace_count(host) != PICO_MAX_WORKSPACES)
+            {
+                Fail("failed capacity open must not change the live workspace count");
+            }
+            rmdir(extra);
+        }
+    }
+done:
+    if (host)
+    {
+        for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+        {
+            MatrixStateRelease(&states[i]);
+        }
+        for (i = 1; i < PICO_MAX_WORKSPACES; i++)
+        {
+            if (agents[i])
+            {
+                PumpUntilIdle(host, PicoHost_FindAgent(host, agents[i]));
+            }
+        }
+        pico_host_free(host);
+    }
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        MatrixStateDestroy(&states[i]);
+        if (dirs[i][0]) rmdir(dirs[i]);
+    }
+    return g_failed ? 1 : 0;
+}
+
+/* At the host-wide agent cap, creating another main agent closes the
+ * least-recently-active idle agent; the selected agent is never the victim. */
+static int TestMainAgentCreateEvictsIdleAgent(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-agent-evict-A-XXXXXX";
+    char dirB[] = "/tmp/pico-agent-evict-B-XXXXXX";
+    char dirC[] = "/tmp/pico-agent-evict-C-XXXXXX";
+    PicoWorkspaceId idA = 0, idB = 0, idC = 0;
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId ids[PICO_MAX_TOTAL_AGENTS];
+    int i;
+    if (!mkdtemp(dirA) || !mkdtemp(dirB) || !mkdtemp(dirC))
+    {
+        Fail("mkdtemp agent eviction");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init agent eviction");
+        goto done;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK ||
+        pico_workspace_open(host, dirB, &idB) != PICO_OK ||
+        pico_workspace_open(host, dirC, &idC) != PICO_OK)
+    {
+        Fail("open workspaces agent eviction");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_TOTAL_AGENTS; i++)
+    {
+        if (pico_main_agent_create(host, i < PICO_MAX_AGENTS ? idA : idB, &opt, &ids[i]) != PICO_OK)
+        {
+            Fail("fill host agent budget for eviction");
+            goto done;
+        }
+    }
+    /* The first published agent is auto-selected and therefore protected even
+     * though it is the oldest; the second-oldest is the eviction victim. The
+     * overflow agent is created in an empty workspace, so the host-wide budget,
+     * not a per-workspace cap, is what triggers the eviction. */
+    {
+        PicoAgentId created = 0;
+        if (pico_main_agent_create(host, idC, &opt, &created) != PICO_OK || created == 0)
+        {
+            Fail("creating past the agent cap should evict an idle agent");
+            goto done;
+        }
+        if (pico_agent_count(host) != PICO_MAX_TOTAL_AGENTS)
+        {
+            Fail("agent eviction should keep the live count at the cap");
+            goto done;
+        }
+        if (PicoHost_FindAgent(host, ids[0]) == NULL)
+        {
+            Fail("agent eviction must never close the selected agent");
+            goto done;
+        }
+        if (PicoHost_FindAgent(host, ids[1]) != NULL)
+        {
+            Fail("agent eviction should close the least-recently-active idle agent");
+            goto done;
+        }
+    }
+done:
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    rmdir(dirC);
+    return g_failed ? 1 : 0;
+}
+
+/* At the per-workspace agent cap, eviction only closes idle agents inside that
+ * workspace; an older idle agent elsewhere survives. */
+static int TestMainAgentCreateEvictsPerWorkspaceCap(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-agent-ws-evict-A-XXXXXX";
+    char dirB[] = "/tmp/pico-agent-ws-evict-B-XXXXXX";
+    PicoWorkspaceId idA = 0, idB = 0;
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId older_elsewhere = 0;
+    PicoAgentId ids[PICO_MAX_AGENTS];
+    int i;
+    if (!mkdtemp(dirA) || !mkdtemp(dirB))
+    {
+        Fail("mkdtemp per-workspace eviction");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init per-workspace eviction");
+        goto done;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK ||
+        pico_workspace_open(host, dirB, &idB) != PICO_OK)
+    {
+        Fail("open workspaces per-workspace eviction");
+        goto done;
+    }
+    /* The oldest agent overall lives in the other workspace; it must survive. */
+    if (pico_main_agent_create(host, idB, &opt, &older_elsewhere) != PICO_OK)
+    {
+        Fail("create older agent elsewhere");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        if (pico_main_agent_create(host, idA, &opt, &ids[i]) != PICO_OK)
+        {
+            Fail("fill workspace agent budget for eviction");
+            goto done;
+        }
+    }
+    {
+        PicoAgentId created = 0;
+        PicoWorkspaceInfo probe;
+        int ws_a_count = -1;
+        if (pico_main_agent_create(host, idA, &opt, &created) != PICO_OK || created == 0)
+        {
+            Fail("creating past the workspace agent cap should evict an idle agent");
+            goto done;
+        }
+        for (i = 0; i < pico_workspace_count(host); i++)
+        {
+            if (pico_workspace_info(host, i, &probe) && probe.id == idA)
+            {
+                ws_a_count = probe.total_agent_count;
+            }
+        }
+        if (ws_a_count != PICO_MAX_AGENTS)
+        {
+            Fail("workspace agent eviction should keep the workspace at its cap");
+            goto done;
+        }
+        /* The selected agent lives in the other workspace, so the oldest agent
+         * in the capped workspace is the least-recently-active victim. */
+        if (PicoHost_FindAgent(host, ids[0]) != NULL)
+        {
+            Fail("workspace agent eviction should close a victim in that workspace");
+            goto done;
+        }
+        if (PicoHost_FindAgent(host, older_elsewhere) == NULL)
+        {
+            Fail("workspace agent eviction must not close agents in other workspaces");
+            goto done;
+        }
+    }
+done:
+    pico_host_free(host);
+    rmdir(dirA);
+    rmdir(dirB);
+    return g_failed ? 1 : 0;
+}
+
+static int TestCdRollsBackNewWorkspaceOnAgentLimit(void)
+{
+    const int workspace_count = (PICO_MAX_TOTAL_AGENTS + PICO_MAX_AGENTS - 1) / PICO_MAX_AGENTS;
+    /* This scenario needs room to open a workspace after filling the agent
+     * budget with busy agents. Otherwise workspace capacity rejects /cd
+     * before agent creation. */
+    if (workspace_count >= PICO_MAX_WORKSPACES)
+    {
+        return 0;
+    }
+    PicoHost *host = NULL;
+    char root[] = "/tmp/pico-cdlim-XXXXXX";
+    char directories[PICO_MAX_WORKSPACES][128] = {{0}};
+    int created = 0;
+    PicoWorkspaceId first = 0;
+    MatrixProviderState states[PICO_MAX_WORKSPACES] = {{0}};
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    if (!mkdtemp(root))
+    {
+        Fail("mkdtemp cd rollback");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init cd rollback");
+        rmdir(root);
+        return 1;
+    }
+    int total = 0;
+    for (int w = 0; w <= workspace_count; w++)
+    {
+        snprintf(directories[w], sizeof(directories[w]), "%s/workspace-%d", root, w);
+        if (mkdir(directories[w], 0700) != 0)
+        {
+            Fail("mkdir cd rollback workspace");
+            goto done;
+        }
+        created++;
+        if (w == workspace_count)
+        {
+            break;
+        }
+        PicoWorkspaceId workspace = 0;
+        if (pico_workspace_open(host, directories[w], &workspace) != PICO_OK)
+        {
+            Fail("open workspace cd rollback");
+            goto done;
+        }
+        if (w == 0)
+        {
+            first = workspace;
+        }
+        /* Every agent must be mid-turn: idle agents would be evicted to make
+         * room and the creation failure under test would not happen. */
+        MatrixStateInit(&states[w], MATRIX_PROVIDER_BLOCK);
+        if (!ConfigureMatrixWorkspace(host, PicoHost_FindWorkspace(host, workspace),
+                                      &states[w], false))
+        {
+            Fail("configure matrix provider cd rollback");
+            goto done;
+        }
+        for (int i = 0; i < PICO_MAX_AGENTS && total < PICO_MAX_TOTAL_AGENTS; i++, total++)
+        {
+            PicoAgentId id = 0;
+            if (pico_main_agent_create(host, workspace, &opt, &id) != PICO_OK)
+            {
+                Fail("fill host agent budget for cd rollback");
+                goto done;
+            }
+            PicoAgent *busy_agent = PicoHost_FindAgent(host, id);
+            PicoAgent_StartTurn(host, busy_agent, "busy");
+            if (!PicoAgent_IsBusy(busy_agent))
+            {
+                Fail("cd rollback fixture should keep agents mid-turn");
+                goto done;
+            }
+        }
+    }
+    for (int w = 0; w < workspace_count; w++)
+    {
+        PICO_TEST_WAIT(!MatrixStateFlag(&states[w], false))
+        {
+            pico_host_pump(host);
+        }
+    }
+    int count_before = pico_workspace_count(host);
+    if (PicoHost_ChangeWorkspace(host, PicoHost_FindWorkspace(host, first), directories[workspace_count]) ||
+        pico_workspace_count(host) != count_before)
+    {
+        Fail("cd must roll back a newly opened workspace when agent creation fails");
+    }
+
+done:
+    if (host)
+    {
+        for (int w = 0; w < workspace_count; w++)
+        {
+            MatrixStateRelease(&states[w]);
+        }
+        pico_host_free(host);
+    }
+    for (int w = 0; w < workspace_count; w++)
+    {
+        MatrixStateDestroy(&states[w]);
+    }
+    for (int i = 0; i < created; i++)
+    {
+        rmdir(directories[i]);
+    }
+    rmdir(root);
+    return g_failed ? 1 : 0;
+}
+
+
+/* The agent cap still surfaces PICO_LIMIT when every candidate in scope is
+ * mid-turn. */
+static int TestMainAgentCreateLimitWhenAllBusy(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-agent-busy-A-XXXXXX";
+    PicoWorkspaceId idA = 0;
+    MatrixProviderState state = {0};
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId ids[PICO_MAX_AGENTS] = {0};
+    int i;
+    if (!mkdtemp(dirA))
+    {
+        Fail("mkdtemp busy agent cap");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init busy agent cap");
+        goto done;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK)
+    {
+        Fail("open workspace busy agent cap");
+        goto done;
+    }
+    MatrixStateInit(&state, MATRIX_PROVIDER_BLOCK);
+    if (!ConfigureMatrixWorkspace(host, PicoHost_FindWorkspace(host, idA), &state, false))
+    {
+        Fail("configure matrix provider busy agent cap");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        if (pico_main_agent_create(host, idA, &opt, &ids[i]) != PICO_OK)
+        {
+            Fail("fill workspace agent budget busy cap");
+            goto done;
+        }
+        PicoAgent_StartTurn(host, PicoHost_FindAgent(host, ids[i]), "busy");
+    }
+    PICO_TEST_WAIT(!MatrixStateFlag(&state, false))
+    {
+        pico_host_pump(host);
+    }
+    for (i = 0; i < PICO_MAX_AGENTS; i++)
+    {
+        if (!PicoAgent_IsBusy(PicoHost_FindAgent(host, ids[i])))
+        {
+            Fail("busy agent-cap fixture should keep agents mid-turn");
+            goto done;
+        }
+    }
+    {
+        PicoAgentId created = 0;
+        if (pico_main_agent_create(host, idA, &opt, &created) != PICO_LIMIT || created != 0)
+        {
+            Fail("creating past the workspace agent cap should fail when nothing is evictable");
+            goto done;
+        }
+    }
+done:
+    if (host)
+    {
+        MatrixStateRelease(&state);
+        for (i = 0; i < PICO_MAX_AGENTS; i++)
+        {
+            if (ids[i])
+            {
+                PumpUntilIdle(host, PicoHost_FindAgent(host, ids[i]));
+            }
+        }
+        pico_host_free(host);
+    }
+    MatrixStateDestroy(&state);
+    rmdir(dirA);
+    return g_failed ? 1 : 0;
+}
+
+/* A session-reset hook that creates an agent at the cap must fail rather than
+ * evict the agent whose hook dispatch is still on the stack. */
+static PicoResult g_reset_hook_create_result;
+static PicoAgentId g_reset_hook_created;
+
+static void SessionResetCreatingHook(PicoWorkspace *workspace, const PicoHookEvent *event,
+                                     void *state)
+{
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    (void)state;
+    if (!workspace || !workspace->host || !event || !event->agent_id)
+    {
+        return;
+    }
+    g_reset_hook_create_result = pico_main_agent_create(workspace->host, workspace->id, &opt,
+                                                        &g_reset_hook_created);
+}
+
+static int TestSessionResetHookCreateProtectsDispatchingAgent(void)
+{
+    PicoHost *host = NULL;
+    char dirA[] = "/tmp/pico-hook-evict-A-XXXXXX";
+    PicoWorkspaceId idA = 0;
+    PicoWorkspace *wsA;
+    MatrixProviderState state = {0};
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId fillers[PICO_MAX_AGENTS] = {0};
+    PicoAgentId created = 0;
+    int i;
+    if (!mkdtemp(dirA))
+    {
+        Fail("mkdtemp hook agent eviction");
+        return 1;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init hook agent eviction");
+        goto done;
+    }
+    if (pico_workspace_open(host, dirA, &idA) != PICO_OK)
+    {
+        Fail("open workspace hook agent eviction");
+        goto done;
+    }
+    wsA = PicoHost_FindWorkspace(host, idA);
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, wsA);
+    pico_workspace_add_hook(wsA, PICO_HOOK_ON_SESSION_RESET, SessionResetCreatingHook);
+    PicoHost_PublishRegistration(host, NULL);
+    /* Every filler except the selected first is mid-turn, so the newly
+     * published agent is the only evictable candidate when its own
+     * session-reset hook tries to create another agent at the cap. */
+    MatrixStateInit(&state, MATRIX_PROVIDER_BLOCK);
+    if (!ConfigureMatrixWorkspace(host, wsA, &state, false))
+    {
+        Fail("configure matrix provider hook agent eviction");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_AGENTS - 1; i++)
+    {
+        PicoAgent *filler_agent;
+        if (pico_main_agent_create(host, idA, &opt, &fillers[i]) != PICO_OK)
+        {
+            Fail("fill workspace for hook agent eviction");
+            goto done;
+        }
+        if (i == 0)
+        {
+            continue;
+        }
+        filler_agent = PicoHost_FindAgent(host, fillers[i]);
+        PicoAgent_StartTurn(host, filler_agent, "busy");
+        if (!PicoAgent_IsBusy(filler_agent))
+        {
+            Fail("hook agent eviction fixture should keep agents mid-turn");
+            goto done;
+        }
+    }
+    PICO_TEST_WAIT(!MatrixStateFlag(&state, false))
+    {
+        pico_host_pump(host);
+    }
+    g_reset_hook_create_result = PICO_INVALID;
+    g_reset_hook_created = 0;
+    if (pico_main_agent_create(host, idA, &opt, &created) != PICO_OK || created == 0)
+    {
+        Fail("create agent whose hook creates another agent");
+        goto done;
+    }
+    /* The dispatching agent survives; the hook's create refused to evict it
+     * and failed with PICO_LIMIT instead. */
+    if (PicoHost_FindAgent(host, created) == NULL)
+    {
+        Fail("a hook-triggered create must not evict the agent whose hook is running");
+        goto done;
+    }
+    if (g_reset_hook_create_result != PICO_LIMIT || g_reset_hook_created != 0)
+    {
+        Fail("the hook create must fail rather than evict the dispatching agent");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_AGENTS - 1; i++)
+    {
+        if (PicoHost_FindAgent(host, fillers[i]) == NULL)
+        {
+            Fail("a hook-triggered create must not close fixture agents");
+            goto done;
+        }
+    }
+done:
+    if (host)
+    {
+        MatrixStateRelease(&state);
+        for (i = 1; i < PICO_MAX_AGENTS - 1; i++)
+        {
+            if (fillers[i])
+            {
+                PumpUntilIdle(host, PicoHost_FindAgent(host, fillers[i]));
+            }
+        }
+        pico_host_free(host);
+    }
+    MatrixStateDestroy(&state);
+    rmdir(dirA);
+    return g_failed ? 1 : 0;
+}
+
+/* A hook that opens a workspace at the workspace cap must not close the
+ * workspace whose hook dispatch is on the stack; after the dispatch pops, that
+ * same idle workspace becomes evictable again. */
+static PicoResult g_reset_hook_open_result;
+static char g_reset_hook_open_path[4096];
+static PicoWorkspaceId g_reset_hook_open_id;
+
+static void SessionResetOpeningHook(PicoWorkspace *workspace, const PicoHookEvent *event,
+                                    void *state)
+{
+    (void)state;
+    if (!workspace || !workspace->host || !event || !event->agent_id)
+    {
+        return;
+    }
+    g_reset_hook_open_result = pico_workspace_open(workspace->host, g_reset_hook_open_path,
+                                                   &g_reset_hook_open_id);
+}
+
+static int TestSessionResetHookOpenProtectsDispatchingWorkspace(void)
+{
+    PicoHost *host = NULL;
+    char dirs[PICO_MAX_WORKSPACES][64] = {{0}};
+    char extra[] = "/tmp/pico-hook-ws-extra-XXXXXX";
+    MatrixProviderState states[PICO_MAX_WORKSPACES] = {{0}};
+    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    PicoAgentId agents[PICO_MAX_WORKSPACES] = {0};
+    PicoWorkspaceId ids[PICO_MAX_WORKSPACES] = {0};
+    int i;
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        snprintf(dirs[i], sizeof(dirs[i]), "/tmp/pico-hook-ws-%d-XXXXXX", i);
+        if (!mkdtemp(dirs[i]))
+        {
+            Fail("mkdtemp hook workspace eviction");
+            goto done;
+        }
+    }
+    if (!mkdtemp(extra))
+    {
+        Fail("mkdtemp hook workspace extra");
+        goto done;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("host init hook workspace eviction");
+        goto done;
+    }
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        if (pico_workspace_open(host, dirs[i], &ids[i]) != PICO_OK)
+        {
+            Fail("open workspace hook workspace eviction");
+            goto done;
+        }
+    }
+    /* Workspace 0 is the idle dispatching workspace (oldest, so it is the LRU
+     * victim). Workspace 1 holds the selected agent. The rest stay busy. */
+    {
+        PicoWorkspace *ws0 = PicoHost_FindWorkspace(host, ids[0]);
+        PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, ws0);
+        pico_workspace_add_hook(ws0, PICO_HOOK_ON_SESSION_RESET, SessionResetOpeningHook);
+        PicoHost_PublishRegistration(host, NULL);
+    }
+    for (i = 1; i < PICO_MAX_WORKSPACES; i++)
+    {
+        PicoWorkspace *ws = PicoHost_FindWorkspace(host, ids[i]);
+        MatrixStateInit(&states[i], MATRIX_PROVIDER_BLOCK);
+        if (!ConfigureMatrixWorkspace(host, ws, &states[i], false))
+        {
+            Fail("configure matrix provider hook workspace eviction");
+            goto done;
+        }
+        if (pico_main_agent_create(host, ids[i], &opt, &agents[i]) != PICO_OK)
+        {
+            Fail("create agent hook workspace eviction");
+            goto done;
+        }
+        if (i == 1)
+        {
+            if (!pico_agent_select(host, agents[1]))
+            {
+                Fail("select agent hook workspace eviction");
+                goto done;
+            }
+        }
+        else
+        {
+            PicoAgent_StartTurn(host, PicoHost_FindAgent(host, agents[i]), "busy");
+        }
+    }
+    for (i = 2; i < PICO_MAX_WORKSPACES; i++)
+    {
+        PICO_TEST_WAIT(!MatrixStateFlag(&states[i], false))
+        {
+            pico_host_pump(host);
+        }
+    }
+    snprintf(g_reset_hook_open_path, sizeof(g_reset_hook_open_path), "%s", extra);
+    g_reset_hook_open_result = PICO_INVALID;
+    g_reset_hook_open_id = 0;
+    if (pico_main_agent_create(host, ids[0], &opt, &agents[0]) != PICO_OK)
+    {
+        Fail("create agent whose hook opens a workspace");
+        goto done;
+    }
+    {
+        PicoWorkspace *ws0 = PicoHost_FindWorkspace(host, ids[0]);
+        if (g_reset_hook_open_result != PICO_LIMIT || g_reset_hook_open_id != 0)
+        {
+            Fail("a hook-triggered open must fail rather than close the dispatching workspace");
+            goto done;
+        }
+        if (!ws0 || ws0->state != PICO_WORKSPACE_OPEN || pico_workspace_count(host) != PICO_MAX_WORKSPACES)
+        {
+            Fail("the dispatching workspace must survive a hook-triggered capacity open");
+            goto done;
+        }
+    }
+    /* Outside any dispatch the hold is gone: the same idle workspace is now
+     * the LRU victim and the open succeeds. */
+    {
+        PicoWorkspaceId extra_id = 0;
+        bool ws0_gone = true;
+        PicoWorkspaceInfo probe;
+        if (pico_workspace_open(host, extra, &extra_id) != PICO_OK || extra_id == 0)
+        {
+            Fail("open after the hook should evict the now-unheld idle workspace");
+            goto done;
+        }
+        for (i = 0; i < pico_workspace_count(host); i++)
+        {
+            if (pico_workspace_info(host, i, &probe) && probe.id == ids[0])
+            {
+                ws0_gone = false;
+            }
+        }
+        if (!ws0_gone || pico_workspace_count(host) != PICO_MAX_WORKSPACES)
+        {
+            Fail("the previously held workspace should be evictable after its dispatch popped");
+            goto done;
+        }
+    }
+done:
+    if (host)
+    {
+        for (i = 1; i < PICO_MAX_WORKSPACES; i++)
+        {
+            MatrixStateRelease(&states[i]);
+        }
+        for (i = 2; i < PICO_MAX_WORKSPACES; i++)
+        {
+            if (agents[i])
+            {
+                PumpUntilIdle(host, PicoHost_FindAgent(host, agents[i]));
+            }
+        }
+        pico_host_free(host);
+    }
+    for (i = 0; i < PICO_MAX_WORKSPACES; i++)
+    {
+        if (i >= 1)
+        {
+            MatrixStateDestroy(&states[i]);
+        }
+        rmdir(dirs[i]);
+    }
+    rmdir(extra);
+    return g_failed ? 1 : 0;
+}
+
+
+
 
 static bool ConfigureMatrixTwoModels(PicoWorkspace *workspace)
 {
@@ -8900,13 +9687,16 @@ static int RunClarificationConversationCase(bool delegated, bool permission, boo
     strcpy(owner->effort, "medium");
     if (!delegated && !permission && !cancel_stream)
     {
-        PicoAgentId fillers[PICO_MAX_TOTAL_AGENTS];
+        PicoAgentId fillers[PICO_MAX_AGENTS];
         int count = 0;
         PicoAgentCreateOptions filler = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
-        PicoResult created = PICO_OK;
-        while (count < PICO_MAX_TOTAL_AGENTS &&
-               (created = pico_main_agent_create(host, ws_id, &filler, &fillers[count])) == PICO_OK) count++;
-        CLARIFY_CHECK(created == PICO_LIMIT && PicoClarification_Open(host, &ask, "first") == PICO_LIMIT &&
+        /* Fill this workspace to its per-workspace agent cap with idle agents.
+         * Clarification helper creation must refuse to evict user agents and
+         * fail at the cap without disturbing pending state. */
+        while (pico_agent_count(host) < PICO_MAX_AGENTS &&
+               pico_main_agent_create(host, ws_id, &filler, &fillers[count]) == PICO_OK) count++;
+        CLARIFY_CHECK(count == PICO_MAX_AGENTS - 1 && pico_agent_count(host) == PICO_MAX_AGENTS &&
+                      PicoClarification_Open(host, &ask, "first") == PICO_LIMIT &&
                       pico_agent_active(host) == root_id && !host->clarification_view_id &&
                       !strcmp(host->composer.text, "parked parent draft") && PicoAgent_PendingAsk(owner, &ask),
                       "capacity failure preserves the pending questionnaire and drafts");
@@ -9591,70 +10381,6 @@ static int TestMultiWorkspaceCloseLastMainAgentAndZeroAgents(void)
     pico_host_free(host);
     rmdir(dirA);
     return 0;
-}
-
-static int TestMultiWorkspaceAgentLimits(void)
-{
-    PicoHost *host = NULL;
-    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
-    {
-        Fail("host init limits test");
-        return 1;
-    }
-
-    char directories[PICO_MAX_WORKSPACES][64] = {{0}};
-    int opened = 0;
-    int total = 0;
-    PicoAgentCreateOptions opt = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
-
-    /* Fill workspaces until both the per-workspace and shared host limits have
-     * been exercised. A fresh workspace must still reject at the host limit. */
-    for (int w = 0; w < PICO_MAX_WORKSPACES; w++)
-    {
-        snprintf(directories[w], sizeof(directories[w]), "/tmp/pico-ws-limit-%d-XXXXXX", w);
-        if (!mkdtemp(directories[w]))
-        {
-            Fail("mkdtemp limits test");
-            break;
-        }
-        opened++;
-        PicoWorkspaceId workspace = 0;
-        if (pico_workspace_open(host, directories[w], &workspace) != PICO_OK)
-        {
-            Fail("open workspace for capacity test");
-            break;
-        }
-        int available = PICO_MAX_TOTAL_AGENTS - total;
-        int count = available < PICO_MAX_AGENTS ? available : PICO_MAX_AGENTS;
-        for (int i = 0; i < count; i++)
-        {
-            PicoAgentId id = 0;
-            if (pico_main_agent_create(host, workspace, &opt, &id) != PICO_OK || id == 0)
-            {
-                Fail("create agent within workspace and host capacity");
-                goto done;
-            }
-            total++;
-        }
-        PicoAgentId overflow = 0;
-        if (pico_main_agent_create(host, workspace, &opt, &overflow) != PICO_LIMIT ||
-            overflow != 0 || PicoHost_TotalAgentCount(host) != total)
-        {
-            Fail("capacity overflow must reject creation without adding an agent");
-        }
-        if (count < PICO_MAX_AGENTS)
-        {
-            break;
-        }
-    }
-
-done:
-    pico_host_free(host);
-    for (int i = 0; i < opened; i++)
-    {
-        rmdir(directories[i]);
-    }
-    return g_failed ? 1 : 0;
 }
 
 static int TestMultiWorkspaceStaleIds(void)
@@ -10807,6 +11533,257 @@ done:
     RmRf(dirB);
     if (result && !g_failed) Fail("title lock workspace pump setup failed");
     return result;
+}
+
+/* Opening at capacity can reenter through the victim's destroy hook. */
+typedef struct CapacityOpenState {
+    const char *path;
+    PicoResult result;
+    PicoWorkspaceId opened;
+    bool called;
+} CapacityOpenState;
+
+static void CapacityDestroyOpen(PicoWorkspace *workspace, const PicoHookEvent *event, void *opaque)
+{
+    CapacityOpenState *state = opaque;
+    (void)event;
+    if (state->called) return;
+    state->called = true;
+    state->result = pico_workspace_open(workspace->host, state->path, &state->opened);
+}
+
+static void RegisterCapacityDestroyOpen(PicoHost *host, PicoWorkspaceId id, CapacityOpenState *state)
+{
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, id);
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_workspace_add_hook(workspace, PICO_HOOK_ON_AGENT_DESTROY, CapacityDestroyOpen);
+    PicoHost_PublishRegistration(host, state);
+}
+
+static int TestCapacityOpenRechecksCanonicalPath(void)
+{
+    char root[] = "/tmp/pico-capacity-reentrant-XXXXXX";
+    char dirs[PICO_MAX_WORKSPACES + 1][128] = {{0}};
+    PicoWorkspaceId ids[PICO_MAX_WORKSPACES] = {0}, opened = 0;
+    PicoHost *host = NULL;
+    PicoAgentId selected = 0, victim = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    CapacityOpenState state = {.result = PICO_INVALID};
+    int rc = 1;
+    if (!mkdtemp(root)) return 1;
+    for (int i = 0; i <= PICO_MAX_WORKSPACES; i++)
+    {
+        snprintf(dirs[i], sizeof(dirs[i]), "%s/%d", root, i);
+        if (mkdir(dirs[i], 0700)) goto done;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    for (int i = 0; i < PICO_MAX_WORKSPACES; i++)
+        if (pico_workspace_open(host, dirs[i], &ids[i]) != PICO_OK) goto done;
+    if (pico_main_agent_create(host, ids[PICO_MAX_WORKSPACES - 1], &options, &selected) != PICO_OK ||
+        pico_main_agent_create(host, ids[0], &options, &victim) != PICO_OK) goto done;
+    state.path = dirs[PICO_MAX_WORKSPACES];
+    RegisterCapacityDestroyOpen(host, ids[0], &state);
+    PicoResult result = pico_workspace_open(host, state.path, &opened);
+    int matches = 0;
+    PicoWorkspaceInfo info;
+    for (int i = 0; i < pico_workspace_count(host); i++)
+        if (pico_workspace_info(host, i, &info) && !strcmp(info.path, state.path)) matches++;
+    if (state.result != PICO_OK || result != PICO_ALREADY_OPEN ||
+        opened != state.opened || matches != 1)
+    {
+        Fail("an open reentered during eviction must reuse the newly opened canonical workspace");
+        goto done;
+    }
+    rc = 0;
+done:
+    if (host) pico_host_free(host);
+    RmRf(root);
+    if (rc && !g_failed) Fail("reentrant capacity open fixture failed");
+    return rc;
+}
+
+static int TestInvalidCreateAtCapacityPreservesAgents(void)
+{
+    char dir[] = "/tmp/pico-capacity-invalid-XXXXXX";
+    char cfg[] = "/tmp/pico-capacity-invalid-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentId ids[PICO_MAX_AGENTS] = {0}, corrupt = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+    char session_id[40] = {0}, corrupt_id[40] = {0}, corrupt_path[4096] = {0};
+    int rc = 1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws) != PICO_OK) goto done;
+    /* A durable idle agent is itself the oldest eligible eviction victim. */
+    options.session_start = PICO_SESSION_NONE;
+    if (pico_main_agent_create(host, ws, &options, &ids[0]) != PICO_OK) goto done;
+    options.session_start = PICO_SESSION_NEW;
+    if (pico_main_agent_create(host, ws, &options, &ids[1]) != PICO_OK ||
+        pico_main_agent_create(host, ws, &options, &corrupt) != PICO_OK) goto done;
+    PicoAgent *durable = PicoHost_FindAgent(host, ids[1]);
+    PicoAgent *bad = PicoHost_FindAgent(host, corrupt);
+    if (PicoSession_LogUser(host, durable, "saved", "saved", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(host, bad, "corrupt", "corrupt", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, durable) || !DrainSessionForAssertion(host, bad)) goto done;
+    snprintf(session_id, sizeof(session_id), "%s", durable->session_id);
+    snprintf(corrupt_id, sizeof(corrupt_id), "%s", bad->session_id);
+    snprintf(corrupt_path, sizeof(corrupt_path), "%s", bad->session_path);
+    if (pico_agent_close(host, corrupt) != PICO_OK) goto done;
+    FILE *file = fopen(corrupt_path, "ab");
+    if (!file) goto done;
+    fputs("{invalid json}\n", file);
+    if (fclose(file)) goto done;
+    options.session_start = PICO_SESSION_NONE;
+    for (int i = 2; i < PICO_MAX_AGENTS; i++)
+        if (pico_main_agent_create(host, ws, &options, &ids[i]) != PICO_OK) goto done;
+    PicoAgentCreateOptions requests[] = {
+        {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE, .model = "unknown-model"},
+        {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_RESUME, .session_id = "unknown-session"},
+        {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_RESUME, .session_id = corrupt_id},
+        {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_RESUME, .session_id = session_id},
+    };
+    PicoResult expected[] = {PICO_INVALID, PICO_SESSION_INVALID, PICO_SESSION_INVALID, PICO_SESSION_IN_USE};
+    for (int request = 0; request < (int)(sizeof(requests) / sizeof(requests[0])); request++)
+    {
+        PicoAgentId created = 0;
+        if (pico_main_agent_create(host, ws, &requests[request], &created) != expected[request] || created)
+        {
+            Fail("invalid creation at capacity must report its validation error");
+            goto done;
+        }
+        for (int i = 0; i < PICO_MAX_AGENTS; i++)
+            if (!PicoHost_FindAgent(host, ids[i]))
+            {
+                Fail("invalid options and invalid or reserved resumes must not evict existing agents");
+                goto done;
+            }
+    }
+    rc = 0;
+done:
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (rc && !g_failed) Fail("invalid capacity creation fixture failed");
+    return rc;
+}
+
+static bool WriteCapacityReplay(const char *path, int messages)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    fputs("{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"capacity-replay\"}\n", file);
+    for (int i = 0; i < messages; i++)
+        fputs("{\"type\":\"message\",\"role\":\"user\",\"content\":\"capacity replay\"}\n", file);
+    return fclose(file) == 0;
+}
+
+static int TestCapacityCreateProtectsPendingReplacement(void)
+{
+    char dir[] = "/tmp/pico-capacity-replace-XXXXXX";
+    char path[128];
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws_id = 0;
+    PicoAgentId ids[PICO_MAX_AGENTS] = {0}, created = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    bool released = false;
+    int rc = 1;
+    if (!mkdtemp(dir)) return 1;
+    snprintf(path, sizeof(path), "%s/replay.jsonl", dir);
+    if (!WriteCapacityReplay(path, 1) || pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws_id) != PICO_OK) goto done;
+    for (int i = 0; i < PICO_MAX_AGENTS; i++)
+        if (pico_main_agent_create(host, ws_id, &options, &ids[i]) != PICO_OK) goto done;
+    if (pipe(ready) || pipe(release)) goto done;
+    g_replay_ready_fd = ready[1];
+    g_replay_continue_fd = release[0];
+    if (PicoSession_LoadAsync(host, ws_id, ids[1], path, false, false, true, false) != PICO_OK ||
+        !TransferTestByte(ready[0], false)) goto done;
+    if (pico_main_agent_create(host, ws_id, &options, &created) != PICO_OK ||
+        !PicoHost_FindAgent(host, ids[1]) || !PicoSession_LoadPending(host))
+    {
+        Fail("capacity creation must not evict the target of a pending replacement load");
+        goto done;
+    }
+    if (!TransferTestByte(release[1], true)) goto done;
+    released = true;
+    PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+    bool restored = false;
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, ws_id);
+    for (int i = 0; i < ws->count; i++)
+        if (ws->agents[i]->message_count == 1 &&
+            !strcmp(ws->agents[i]->messages[0].source, "capacity replay")) restored = true;
+    if (!restored || PicoHost_FindAgent(host, ids[1]))
+    {
+        Fail("a replacement load must still commit after concurrent capacity eviction");
+        goto done;
+    }
+    rc = 0;
+done:
+    if (!released && release[1] >= 0) (void)TransferTestByte(release[1], true);
+    if (host) pico_host_free(host);
+    g_replay_ready_fd = g_replay_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (release[i] >= 0) close(release[i]);
+    }
+    RmRf(dir);
+    if (rc && !g_failed) Fail("pending replacement capacity fixture failed");
+    return rc;
+}
+
+static int TestLoadTargetSurvivesPreviousLoadCancellation(void)
+{
+    char root[] = "/tmp/pico-capacity-load-XXXXXX";
+    char dirs[PICO_MAX_WORKSPACES + 1][128] = {{0}}, path[128];
+    PicoWorkspaceId ids[PICO_MAX_WORKSPACES] = {0};
+    PicoHost *host = NULL;
+    PicoAgentId selected = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    CapacityOpenState state = {.result = PICO_INVALID};
+    int rc = 1;
+    if (!mkdtemp(root)) return 1;
+    snprintf(path, sizeof(path), "%s/replay.jsonl", root);
+    if (!WriteCapacityReplay(path, 80)) goto done;
+    for (int i = 0; i <= PICO_MAX_WORKSPACES; i++)
+    {
+        snprintf(dirs[i], sizeof(dirs[i]), "%s/%d", root, i);
+        if (mkdir(dirs[i], 0700)) goto done;
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    for (int i = 0; i < PICO_MAX_WORKSPACES; i++)
+        if (pico_workspace_open(host, dirs[i], &ids[i]) != PICO_OK) goto done;
+    if (pico_main_agent_create(host, ids[PICO_MAX_WORKSPACES - 1], &options, &selected) != PICO_OK) goto done;
+    state.path = dirs[PICO_MAX_WORKSPACES];
+    RegisterCapacityDestroyOpen(host, ids[1], &state);
+    int adopted_before = g_replay_adopted;
+    if (PicoSession_LoadAsync(host, ids[1], 0, path, false, false, true, false) != PICO_OK) goto done;
+    PICO_TEST_WAIT(g_replay_adopted == adopted_before) pico_host_pump(host);
+    if (!PicoSession_LoadPending(host)) goto done;
+    /* The private candidate has received replay callbacks, so cancelling it
+     * dispatches a destroy hook. The new target is the oldest idle workspace. */
+    if (PicoSession_LoadAsync(host, ids[0], 0, path, false, false, true, false) != PICO_OK ||
+        !state.called || state.result != PICO_OK || !PicoHost_FindWorkspace(host, ids[0]))
+    {
+        Fail("the new load target must survive workspace opens from old candidate destroy hooks");
+        goto done;
+    }
+    PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+    PicoAgent *loaded = PicoHost_SelectedAgent(host);
+    if (!loaded || loaded->workspace->id != ids[0] || loaded->message_count != 80)
+    {
+        Fail("a superseding load must finish in its original target workspace");
+        goto done;
+    }
+    rc = 0;
+done:
+    if (host) pico_host_free(host);
+    RmRf(root);
+    if (rc && !g_failed) Fail("load cancellation capacity fixture failed");
+    return rc;
 }
 
 static int TestAsyncSessionReplay(void)
@@ -14099,6 +15076,34 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (PICO_TEST_RUN(TestWorkspaceOpenEvictsLeastRecentlyActiveIdle()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestWorkspaceOpenLimitWhenAllBusy()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestMainAgentCreateEvictsIdleAgent()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestMainAgentCreateEvictsPerWorkspaceCap()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestMainAgentCreateLimitWhenAllBusy()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestSessionResetHookCreateProtectsDispatchingAgent()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestSessionResetHookOpenProtectsDispatchingWorkspace()) != 0)
+    {
+        return 1;
+    }
     if (PICO_TEST_RUN(TestCdRollsBackNewWorkspaceOnAgentLimit()) != 0)
     {
         return 1;
@@ -14255,10 +15260,6 @@ int main(int argc, char **argv)
     {
         return 1;
     }
-    if (PICO_TEST_RUN(TestMultiWorkspaceAgentLimits()) != 0)
-    {
-        return 1;
-    }
     if (PICO_TEST_RUN(TestMultiWorkspaceStaleIds()) != 0)
     {
         return 1;
@@ -14303,6 +15304,10 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (PICO_TEST_RUN(TestCapacityOpenRechecksCanonicalPath()) != 0) return 1;
+    if (PICO_TEST_RUN(TestInvalidCreateAtCapacityPreservesAgents()) != 0) return 1;
+    if (PICO_TEST_RUN(TestCapacityCreateProtectsPendingReplacement()) != 0) return 1;
+    if (PICO_TEST_RUN(TestLoadTargetSurvivesPreviousLoadCancellation()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncSessionReplay()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncReplayLargeMessage()) != 0) return 1;
     if (PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) != 0) return 1;

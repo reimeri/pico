@@ -1600,6 +1600,19 @@ void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
     agent->accepted_submit = true;
 }
 
+void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
+                                 PicoSessionReplay *replay, bool append_interrupted)
+{
+    snprintf(agent->session_path, sizeof(agent->session_path), "%s", path);
+    PicoAgent_ClearInput(agent);
+    (void)PicoSession_ReplayBatch(app, agent, replay, replay->count);
+    app->chat_follow_bottom = true;
+    PicoSession_ReplayFinish(app, agent, replay, append_interrupted);
+    for (int i = 0; i < agent->message_count; i++)
+        for (int t = 0; t < agent->messages[i].trace_count; t++)
+            agent->messages[i].trace[t].tool_done_t0 = 0.0;
+}
+
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
                        bool append_interrupted)
 {
@@ -1609,14 +1622,7 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
         agent->session_path[0] = '\0';
         return -1;
     }
-    snprintf(agent->session_path, sizeof(agent->session_path), "%s", path);
-    PicoAgent_ClearInput(agent);
-    (void)PicoSession_ReplayBatch(app, agent, replay, replay->count);
-    app->chat_follow_bottom = true;
-    PicoSession_ReplayFinish(app, agent, replay, append_interrupted);
-    for (int i = 0; i < agent->message_count; i++)
-        for (int t = 0; t < agent->messages[i].trace_count; t++)
-            agent->messages[i].trace[t].tool_done_t0 = 0.0;
+    PicoSession_ReplayPrepared(app, agent, path, replay, append_interrupted);
     PicoSession_ReplayFree(replay);
     return 0;
 }
@@ -6290,6 +6296,16 @@ static void SessionLoadDiscard(PicoHost *host, PicoSessionLoad *load)
     free(load);
 }
 
+bool PicoSession_LoadTargetsWorkspace(const PicoHost *host, PicoWorkspaceId id)
+{
+    return host && host->session_load && host->session_load->workspace_id == id;
+}
+
+bool PicoSession_LoadReplacesAgent(const PicoHost *host, PicoAgentId id)
+{
+    return host && id && host->session_load && host->session_load->replace_id == id;
+}
+
 void PicoSession_LoadCancel(PicoHost *host)
 {
     if (!host || !host->session_load) return;
@@ -6349,14 +6365,25 @@ PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
         if (!old) return PICO_NOT_FOUND;
         if (PicoAgent_IsBusy(old)) return PICO_BUSY;
     }
+    /* Cancellation of the previous candidate also dispatches destroy hooks.
+     * Keep the new target alive until the installed load takes over protection. */
+    int hold = PicoHost_EvictHoldPush(host, ws, replace_id);
     if (!replace_id && (ws->count >= PICO_MAX_AGENTS ||
-                        PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS)) return PICO_LIMIT;
+                        PicoHost_TotalAgentCount(host) >= PICO_MAX_TOTAL_AGENTS))
+    {
+        if (!PicoHost_EvictIdleAgent(host, ws))
+        {
+            PicoHost_EvictHoldPop(host, hold);
+            return PICO_LIMIT;
+        }
+    }
     PicoSession_LoadCancel(host);
     PicoSessionLoad *load = calloc(1, sizeof(*load));
     PicoSessionLoadWorker *worker = calloc(1, sizeof(*worker));
     if (!load || !worker)
     {
         free(load); free(worker);
+        PicoHost_EvictHoldPop(host, hold);
         return PICO_NO_MEMORY;
     }
     worker->serial = load->serial = ++host->next_session_load_serial;
@@ -6376,10 +6403,12 @@ PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
                                       SessionLoadWorkerDestroy))
     {
         free(worker); free(load);
+        PicoHost_EvictHoldPop(host, hold);
         return PICO_NO_MEMORY;
     }
     load->worker = worker;
     host->session_load = load;
+    PicoHost_EvictHoldPop(host, hold);
     return PICO_OK;
 }
 

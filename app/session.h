@@ -126,6 +126,11 @@ PicoResult PicoSession_LoadAsync(PicoHost *host, PicoWorkspaceId workspace_id,
 void PicoSession_LoadCancel(PicoHost *host);
 void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id);
 void PicoSession_LoadPump(PicoHost *host);
+
+/* True when an in-flight asynchronous session load targets this workspace. */
+bool PicoSession_LoadTargetsWorkspace(const PicoHost *host, PicoWorkspaceId id);
+/* The existing agent participating in an asynchronous replacement load. */
+bool PicoSession_LoadReplacesAgent(const PicoHost *host, PicoAgentId id);
 bool PicoSession_LoadPending(const PicoHost *host);
 /* Borrowed target identity, if resolved; valid only until the next load pump/cancel. */
 bool PicoSession_LoadTarget(const PicoHost *host, const char **workspace_path,
@@ -158,6 +163,10 @@ bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay 
                              int max_records);
 void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
                                const PicoSessionReplay *replay, bool append_interrupted);
+/* Apply a prepared replay without re-reading its source. Borrows replay; caller
+ * frees it after replay/finish. Main thread, unpublished/reserved agent only. */
+void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
+                                 PicoSessionReplay *replay, bool append_interrupted);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
                        bool append_interrupted);

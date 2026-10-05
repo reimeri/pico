@@ -29,6 +29,7 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace);
 float Pico_ClampChatWidth(float available, float text_max);
 float Pico_ChatTextMaxPx(const PicoHost *app);
 float Pico_ChatColumnMaxPx(const PicoHost *app);
+void PicoSettings_RefreshAvailableSoftware(PicoWorkspace *workspace);
 char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace);
 char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPromptSpan *spans,
                                          int *span_count);

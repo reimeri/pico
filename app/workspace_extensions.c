@@ -688,6 +688,7 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace)
         ShutdownWorkspaceSlots(workspace, old.plugins, old.plugin_count);
         PicoWorkspace_RegistrationRelease(old.active_registration);
 
+        PicoSettings_RefreshAvailableSoftware(workspace);
         PicoWorkspace_LoadProfiles(workspace);
         PicoWorkspace_RevalidateToolPolicies(workspace);
         PicoWorkspace_NotifySessions(workspace);

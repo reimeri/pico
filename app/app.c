@@ -2942,6 +2942,7 @@ PicoResult pico_workspace_open(PicoHost *host, const char *path, PicoWorkspaceId
         PicoWorkspace_Free(workspace);
         return PICO_NO_MEMORY;
     }
+    PicoSettings_RefreshAvailableSoftware(workspace);
     /* A workspace_init callback may open workspaces or create agents at a
      * cap; this workspace must survive the inline eviction that can follow. */
     {

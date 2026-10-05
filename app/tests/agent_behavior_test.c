@@ -1224,6 +1224,11 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
     return workspace->model_count > 0;
 }
 
+void PicoSettings_RefreshAvailableSoftware(PicoWorkspace *workspace)
+{
+    (void)workspace;
+}
+
 void PicoSettings_ReconcileIdleAgent(PicoAgent *agent)
 {
     (void)agent;

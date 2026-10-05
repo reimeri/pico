@@ -174,6 +174,8 @@ struct PicoWorkspace {
     pthread_mutex_t ui_post_mu;
     PicoUiMailbox ui_mailboxes[PICO_MAX_UI_POSTS];
     int ui_mailbox_count;
+    /* Inherited PATH availability, refreshed on open and quiescent reload. */
+    unsigned int available_software;
     PicoWorkspaceSettings settings;
     pthread_mutex_t settings_mu;
     PicoModel *models;

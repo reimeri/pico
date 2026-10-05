@@ -81,6 +81,8 @@ The footer's project path and local/worktree label are UI metadata only. `PicoWo
 
 If the workspace directory is deleted after open, the workspace identity remains. Filesystem operations against it fail; Pico does not retarget to another path.
 
+The base system prompt conditionally recommends executable software found on Pico's inherited `PATH`: `rg`, `fd` (or `fdfind`), `jq`, and `plocate` (or `locate`). Availability is cached independently when each workspace opens and refreshed after a successful quiescent workspace reload, not on each model request. Relative and empty `PATH` entries resolve from that workspace, matching the shell execution directory. Detection does not run the tools or enter a development shell. Guidance remains present with custom `SYSTEM.md` instructions and warns about ignored/hidden files and stale lookup databases.
+
 ## Reload
 
 `pico_workspace_request_reload` and `/reload` / F5 (for the selected agent's workspace) queue reload until that workspace is quiescent: no live or retired runtime with provider/tool work, pending calls, offered-tool snapshot, pending ask, undrained events, retained callbacks, or delegation wait/job. As soon as reload is requested, **that** workspace refuses new external turns and delegations while continuing to pump follow-ups, cancellation, and asks. Other workspaces keep accepting work.

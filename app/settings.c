@@ -57,14 +57,17 @@ static bool MkdirP(const char *path)
     }
     for (char *p = buf + 1;; p++)
     {
-        if (*p != '/' && *p != '\0') continue;
+        if (*p != '/' && *p != '\0')
+            continue;
         char delimiter = *p;
         *p = '\0';
         if (mkdir(buf, 0755) != 0)
         {
-            if (errno != EEXIST) return false;
+            if (errno != EEXIST)
+                return false;
             struct stat st;
-            if (stat(buf, &st) != 0) return false;
+            if (stat(buf, &st) != 0)
+                return false;
             if (!S_ISDIR(st.st_mode))
             {
                 errno = ENOTDIR;
@@ -72,7 +75,8 @@ static bool MkdirP(const char *path)
             }
         }
         *p = delimiter;
-        if (!delimiter) return true;
+        if (!delimiter)
+            return true;
     }
 }
 
@@ -112,7 +116,8 @@ static bool ReadUserSettings(const char *path, char **src, size_t *len,
     *len = 0;
     if (stat(path, &st) != 0)
     {
-        if (errno == ENOENT) return true;
+        if (errno == ENOENT)
+            return true;
         return SettingsIOError(error, error_cap, path, "read settings", errno, false);
     }
     if (!S_ISREG(st.st_mode))
@@ -145,21 +150,31 @@ static bool PrepareSettingsJson(char *src, size_t len, const char *path,
         char c = src[i];
         if (in_string)
         {
-            if (escaped) escaped = false;
-            else if (c == '\\') escaped = true;
-            else if (c == '"') in_string = false;
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
             continue;
         }
-        if (c == '"') in_string = true;
+        if (c == '"')
+            in_string = true;
         else if (c == '/' && i + 1 < len && src[i + 1] == '/')
         {
-            while (i < len && src[i] != '\n' && src[i] != '\r') i++;
+            while (i < len && src[i] != '\n' && src[i] != '\r')
+                i++;
         }
         else if (c == '/' && i + 1 < len && src[i + 1] == '*')
         {
             i += 2;
-            while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/')) i++;
-            if (i + 1 >= len) { valid = false; break; }
+            while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/'))
+                i++;
+            if (i + 1 >= len)
+            {
+                valid = false;
+                break;
+            }
             i++;
         }
     }
@@ -172,24 +187,34 @@ static bool PrepareSettingsJson(char *src, size_t len, const char *path,
         char c = stripped[i];
         if (in_string)
         {
-            if (escaped) escaped = false;
-            else if (c == '\\') escaped = true;
-            else if (c == '"') { in_string = false; previous = c; }
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+            {
+                in_string = false;
+                previous = c;
+            }
             continue;
         }
-        if (c == '"') in_string = true;
+        if (c == '"')
+            in_string = true;
         if (c == ',' && previous && previous != '[' && previous != '{' &&
             previous != ',' && previous != ':')
         {
             size_t next = i + 1;
-            while (next < len && JsonWhitespace(stripped[next])) next++;
+            while (next < len && JsonWhitespace(stripped[next]))
+                next++;
             if (next < len && (stripped[next] == ']' || stripped[next] == '}'))
                 src[i] = stripped[i] = ' ';
         }
-        if (!JsonWhitespace(c)) previous = c;
+        if (!JsonWhitespace(c))
+            previous = c;
     }
     size_t start = 0;
-    while (start < len && JsonWhitespace(stripped[start])) start++;
+    while (start < len && JsonWhitespace(stripped[start]))
+        start++;
     if (!valid || !JsonValidSyntax(stripped, len) || start == len || stripped[start] != '{')
     {
         free(stripped);
@@ -456,8 +481,8 @@ static bool ParseModel(const JsonDoc *doc, int obj, PicoModel *m)
     int fast_tok = JsonObjGet(doc, obj, "supports_fast");
     int fast_start = JsonTokStart(doc, fast_tok);
     bool fast_valid = fast_tok < 0 ||
-        (!(fast_start > 0 && doc->src[fast_start - 1] == '"') &&
-         (JsonEq(doc, fast_tok, "true") || JsonEq(doc, fast_tok, "false")));
+                      (!(fast_start > 0 && doc->src[fast_start - 1] == '"') &&
+                       (JsonEq(doc, fast_tok, "true") || JsonEq(doc, fast_tok, "false")));
     ok = fast_valid && DupOptionalModelField(doc, obj, "id", &id) &&
          DupOptionalModelField(doc, obj, "name", &name) &&
          DupOptionalModelField(doc, obj, "provider", &provider) &&
@@ -1152,7 +1177,7 @@ bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoMo
 bool PicoSettings_FastAvailable(const PicoAgent *agent)
 {
     return agent && PicoSettings_ModelSupportsFast(agent->workspace,
-        PicoSettings_FindModelConst(agent->workspace, agent->model));
+                                                   PicoSettings_FindModelConst(agent->workspace, agent->model));
 }
 
 bool PicoSettings_SetFast(PicoAgent *agent, bool enabled)
@@ -1160,7 +1185,8 @@ bool PicoSettings_SetFast(PicoAgent *agent, bool enabled)
     if (!agent || !agent->workspace)
         return false;
     PicoHost *host = agent->workspace->host;
-    if (PicoSession_LoadBlocksSubmit(host, agent->id)) PicoSession_LoadCancel(host);
+    if (PicoSession_LoadBlocksSubmit(host, agent->id))
+        PicoSession_LoadCancel(host);
     if (enabled && !PicoSettings_FastAvailable(agent))
     {
         PicoOverlay_Notify(host, "Fast mode is unavailable for this model or authentication route.");
@@ -1268,7 +1294,8 @@ bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name)
     }
     PicoWorkspace *workspace = agent->workspace;
     PicoHost *host = workspace->host;
-    if (PicoSession_LoadBlocksSubmit(host, agent->id)) PicoSession_LoadCancel(host);
+    if (PicoSession_LoadBlocksSubmit(host, agent->id))
+        PicoSession_LoadCancel(host);
     PicoModel *m = FindCatalog(workspace, id_or_name);
     if (!m)
     {
@@ -1300,7 +1327,8 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
     }
     PicoWorkspace *workspace = agent->workspace;
     PicoHost *host = workspace->host;
-    if (PicoSession_LoadBlocksSubmit(host, agent->id)) PicoSession_LoadCancel(host);
+    if (PicoSession_LoadBlocksSubmit(host, agent->id))
+        PicoSession_LoadCancel(host);
     PicoModel *m = PicoSettings_SelectedModel(agent);
     if (!m)
     {
@@ -1336,8 +1364,10 @@ static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", path);
     char *slash = strrchr(dir, '/');
-    if (slash) *slash = '\0';
-    else snprintf(dir, sizeof(dir), ".");
+    if (slash)
+        *slash = '\0';
+    else
+        snprintf(dir, sizeof(dir), ".");
     char tmp[4096];
     if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp))
         return SettingsIOError(error, error_cap, path, "create temporary settings file", ENAMETOOLONG, false);
@@ -1394,7 +1424,8 @@ static bool WriteSettingsFile(const char *path, const char *data, size_t len,
 {
     mode_t mode = 0600;
     struct stat st;
-    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) mode = st.st_mode & 0777;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
+        mode = st.st_mode & 0777;
     return AtomicWriteFile(path, data, len, mode, error, error_cap);
 }
 
@@ -1875,7 +1906,8 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft, char *error, size_
     char path[4096];
     size_t len = 0;
     char *src;
-    if (error && error_cap) error[0] = '\0';
+    if (error && error_cap)
+        error[0] = '\0';
     if (!draft)
     {
         return SettingsError(error, error_cap, "Could not load settings: out of memory or invalid draft.");
@@ -1895,7 +1927,8 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft, char *error, size_
     snprintf(preferences.spell_lang, sizeof(preferences.spell_lang), "%s", next.spell_lang);
     if (!UserSettingsPath(path, sizeof(path)))
         return SettingsError(error, error_cap, "Could not resolve settings.json path: path too long.");
-    if (!ReadUserSettings(path, &src, &len, error, error_cap)) return false;
+    if (!ReadUserSettings(path, &src, &len, error, error_cap))
+        return false;
     if (src)
     {
         JsonDoc doc;
@@ -2372,7 +2405,8 @@ static char *ModelsJsonPreserving(const char *src, size_t len, const PicoUserSet
         const PicoModel *model = &draft->models[i];
         char *object = NULL;
         const char *source_id = draft->source_model_ids && draft->source_model_ids[i][0]
-                                    ? draft->source_model_ids[i] : model->id;
+                                    ? draft->source_model_ids[i]
+                                    : model->id;
         int source_index = parsed ? FindModelObjectIndex(&doc, arr, source_id) : -1;
         if (source_index < 0 && parsed && strcmp(source_id, model->id) != 0)
         {
@@ -2405,7 +2439,7 @@ static char *ModelsJsonPreserving(const char *src, size_t len, const PicoUserSet
         if (tok >= 0)
         {
             int trivia_start = source_index > 0 ? JsonTokEnd(&doc, JsonArrayAt(&doc, arr, source_index - 1))
-                                               : JsonTokStart(&doc, arr) + 1;
+                                                : JsonTokStart(&doc, arr) + 1;
             AppendTriviaWithoutComma(&b, src, trivia_start, JsonTokStart(&doc, tok));
         }
         else
@@ -2483,9 +2517,11 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     int lock_fd;
     bool catalog_matches;
     bool ok = false;
-    if (error && error_cap) error[0] = '\0';
+    if (error && error_cap)
+        error[0] = '\0';
     const char *err = PicoSettings_ValidateUserDraft(draft);
-    if (err) return SettingsError(error, error_cap, "%s", err);
+    if (err)
+        return SettingsError(error, error_cap, "%s", err);
     if (!UserSettingsPath(path, sizeof(path)) || !Pico_ConfigDir(dir, sizeof(dir)))
         return SettingsError(error, error_cap, "Could not resolve settings.json path: path too long.");
     if (!MkdirP(dir))
@@ -2524,7 +2560,8 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
         SettingsIOError(error, error_cap, path, "lock settings", errno, false);
         goto done;
     }
-    if (!ReadUserSettings(path, &src, &len, error, error_cap)) goto unlock;
+    if (!ReadUserSettings(path, &src, &len, error, error_cap))
+        goto unlock;
     if (!src)
     {
         src = JsonDup("{}\n");
@@ -2536,7 +2573,8 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
         goto unlock;
     }
     char *stripped = NULL;
-    if (!PrepareSettingsJson(src, len, path, &stripped, error, error_cap)) goto unlock;
+    if (!PrepareSettingsJson(src, len, path, &stripped, error, error_cap))
+        goto unlock;
     free(stripped);
     SettingsError(error, error_cap, "Could not edit settings in %s: out of memory or invalid generated JSON. File left unchanged.", path);
     if (!CatalogMatchesSource(src, len, draft, &catalog_matches))
@@ -2568,7 +2606,8 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
         goto unlock;
     }
     ok = WriteSettingsFile(path, src, len, error, error_cap);
-    if (ok && error && error_cap) error[0] = '\0';
+    if (ok && error && error_cap)
+        error[0] = '\0';
 unlock:
     SettingsLockRelease(lock_fd);
 done:
@@ -2766,6 +2805,102 @@ int PicoSettings_LoadedContext(const PicoWorkspace *workspace, const char **labe
     return n;
 }
 
+enum
+{
+    SOFTWARE_RG = 1u << 0,
+    SOFTWARE_FD = 1u << 1,
+    SOFTWARE_FDFIND = 1u << 2,
+    SOFTWARE_JQ = 1u << 3,
+    SOFTWARE_PLOCATE = 1u << 4,
+    SOFTWARE_LOCATE = 1u << 5,
+};
+
+static bool WorkspaceCommandOnPath(const PicoWorkspace *workspace, const char *command)
+{
+    const char *path = getenv("PATH");
+    char default_path[4096];
+    if (!path)
+    {
+        /* Match the default executable search path when PATH is unset. */
+        size_t n = confstr(_CS_PATH, default_path, sizeof(default_path));
+        if (!n || n > sizeof(default_path))
+            return false;
+        path = default_path;
+    }
+    for (const char *part = path;;)
+    {
+        const char *end = strchr(part, ':');
+        size_t len = end ? (size_t)(end - part) : strlen(part);
+        char candidate[4096];
+        bool fits = false;
+        if (len < sizeof(candidate))
+        {
+            /* sh changes to the workspace before execution. Relative and
+             * empty PATH entries must resolve there, not in Pico's cwd. */
+            if (!len)
+                fits = PicoPath_Format(candidate, sizeof(candidate), "%s/%s", workspace->path, command);
+            else if (part[0] == '/')
+                fits = PicoPath_Format(candidate, sizeof(candidate), "%.*s/%s", (int)len, part, command);
+            else
+                fits = PicoPath_Format(candidate, sizeof(candidate), "%s/%.*s/%s", workspace->path,
+                                       (int)len, part, command);
+        }
+        struct stat st;
+        if (fits && stat(candidate, &st) == 0 && S_ISREG(st.st_mode) && access(candidate, X_OK) == 0)
+            return true;
+        if (!end)
+            return false;
+        part = end + 1;
+    }
+}
+
+void PicoSettings_RefreshAvailableSoftware(PicoWorkspace *workspace)
+{
+    if (!workspace)
+        return;
+    unsigned int available = 0;
+    if (WorkspaceCommandOnPath(workspace, "rg"))
+        available |= SOFTWARE_RG;
+    if (WorkspaceCommandOnPath(workspace, "fd"))
+        available |= SOFTWARE_FD;
+    else if (WorkspaceCommandOnPath(workspace, "fdfind"))
+        available |= SOFTWARE_FDFIND;
+    if (WorkspaceCommandOnPath(workspace, "jq"))
+        available |= SOFTWARE_JQ;
+    if (WorkspaceCommandOnPath(workspace, "plocate"))
+        available |= SOFTWARE_PLOCATE;
+    else if (WorkspaceCommandOnPath(workspace, "locate"))
+        available |= SOFTWARE_LOCATE;
+    /* Main-thread publication: open or reload after all workspace work drains. */
+    workspace->available_software = available;
+}
+
+static void AppendSoftwareGuidance(JsonBuf *b, const PicoWorkspace *workspace)
+{
+    unsigned int available = workspace ? workspace->available_software : 0;
+    if (!available)
+        return;
+    if (b->len)
+        JsonBuf_Puts(b, "\n\n");
+    JsonBuf_Puts(b, "Available software (detected on workspace open/reload):");
+    if (available & SOFTWARE_RG)
+        JsonBuf_Puts(b, "\n- `rg` is available. Prefer it over `grep` for repository text searches.");
+    if (available & (SOFTWARE_FD | SOFTWARE_FDFIND))
+    {
+        JsonBuf_Puts(b, "\n- `");
+        JsonBuf_Puts(b, available & SOFTWARE_FD ? "fd" : "fdfind");
+        JsonBuf_Puts(b, "` is available. Prefer it over `find` for simple file-name searches.");
+    }
+    if (available & SOFTWARE_JQ)
+        JsonBuf_Puts(b, "\n- `jq` is available. Prefer it for querying or transforming JSON instead of parsing JSON with text tools.");
+    if (available & (SOFTWARE_PLOCATE | SOFTWARE_LOCATE))
+    {
+        JsonBuf_Puts(b, "\n- `");
+        JsonBuf_Puts(b, available & SOFTWARE_PLOCATE ? "plocate" : "locate");
+        JsonBuf_Puts(b, "` is available for fast system-wide path lookup.");
+    }
+}
+
 char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPromptSpan *spans, int *span_count)
 {
     if (span_count)
@@ -2795,6 +2930,13 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPro
                      "Prefer concise answers.");
         PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE, 0, b.len);
     }
+    size_t before_software = b.len;
+    AppendSoftwareGuidance(&b, workspace);
+    if (b.len > before_software)
+    {
+        size_t start = before_software ? before_software + 2 : 0;
+        PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE, start, b.len - start);
+    }
     if (root[0] && PicoPath_Format(path, sizeof(path), "%s/AGENTS.md", root))
     {
         AppendFileSpan(&b, path, spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_AGENTS);
@@ -2813,4 +2955,3 @@ char *PicoSettings_LoadSystemPrompt(const PicoWorkspace *workspace)
 {
     return PicoSettings_LoadSystemPromptSpans(workspace, NULL, NULL);
 }
-

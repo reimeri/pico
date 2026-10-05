@@ -4774,6 +4774,140 @@ static int TestBackgroundJobsSurviveWorkspaceReload(void)
     return 0;
 }
 
+static int TestAvailableSoftwarePrompt(void)
+{
+    char root[] = "/tmp/pico-software-prompt-XXXXXX";
+    char other[] = "/tmp/pico-software-empty-XXXXXX";
+    char bin[4096], path[4096], pico_dir[4096];
+    char *old_path = getenv("PATH") ? DupStr(getenv("PATH")) : NULL;
+    PicoHost *host = NULL;
+    PicoWorkspaceId id = 0, other_id = 0;
+    PicoWorkspace *workspace = NULL;
+    char *prompt = NULL, *cached = NULL;
+    int failed = 1;
+    const char *commands[] = {"rg", "fdfind", "jq", "locate", "fd", "plocate"};
+    if (!mkdtemp(root) || !mkdtemp(other)) goto cleanup;
+    snprintf(bin, sizeof(bin), "%s/bin", root);
+    snprintf(pico_dir, sizeof(pico_dir), "%s/.pico", root);
+    if (mkdir(bin, 0700) || mkdir(pico_dir, 0700)) goto cleanup;
+    for (int i = 0; i < 4; i++)
+    {
+        snprintf(path, sizeof(path), "%s/bin/%s", root, commands[i]);
+        if (WriteFile(path, "#!/bin/sh\nexit 1\n") || chmod(path, i == 2 ? 0600 : 0700)) goto cleanup;
+    }
+    snprintf(path, sizeof(path), "%s/bin/fd", root);
+    if (mkdir(path, 0700)) goto cleanup;
+    snprintf(path, sizeof(path), "%s/.pico/SYSTEM.md", root);
+    if (WriteFile(path, "custom-system-instructions")) goto cleanup;
+    snprintf(path, sizeof(path), "%s/AGENTS.md", root);
+    if (WriteFile(path, "workspace-agent-instructions")) goto cleanup;
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host || setenv("PATH", bin, 1) ||
+        pico_workspace_open(host, root, &id) != PICO_OK) goto cleanup;
+    workspace = PicoHost_FindWorkspace(host, id);
+    PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
+    int count = 0;
+    prompt = PicoSettings_LoadSystemPromptSpans(workspace, spans, &count);
+    if (!prompt || !strstr(prompt, "`rg`") || !strstr(prompt, "`fdfind`") || !strstr(prompt, "`locate`") ||
+        strstr(prompt, "`fd`") || strstr(prompt, "`jq`") || strstr(prompt, "`plocate`"))
+    {
+        Fail("software guidance must name executable tools, excluding directories and non-executable files");
+        goto cleanup;
+    }
+    const char *guidance = strstr(prompt, "Available software");
+    const char *last_tool = strstr(prompt, "`locate`");
+    const char *agents = strstr(prompt, "workspace-agent-instructions");
+    bool base_span = false, agents_span = false;
+    for (int i = 0; i < count; i++)
+    {
+        size_t end = spans[i].start + spans[i].length;
+        if (guidance && last_tool && agents && spans[i].source == PICO_PROMPT_SOURCE_BASE &&
+            spans[i].start <= (size_t)(guidance - prompt) &&
+            end >= (size_t)(last_tool - prompt) + strlen("`locate`") && end <= (size_t)(agents - prompt))
+            base_span = true;
+        if (agents && spans[i].source == PICO_PROMPT_SOURCE_AGENTS &&
+            spans[i].start <= (size_t)(agents - prompt) &&
+            end >= (size_t)(agents - prompt) + strlen("workspace-agent-instructions"))
+            agents_span = true;
+    }
+    if (!base_span || !agents_span || !strstr(prompt, "custom-system-instructions"))
+    {
+        Fail("software guidance must remain a base prompt section alongside custom instructions");
+        goto cleanup;
+    }
+
+    /* Availability stays fixed until reload, even after executable and PATH changes. */
+    snprintf(path, sizeof(path), "%s/bin/fd", root);
+    if (rmdir(path) || WriteFile(path, "#!/bin/sh\nexit 1\n") || chmod(path, 0700)) goto cleanup;
+    snprintf(path, sizeof(path), "%s/bin/plocate", root);
+    if (WriteFile(path, "#!/bin/sh\nexit 1\n") || chmod(path, 0700)) goto cleanup;
+    snprintf(path, sizeof(path), "%s/jq", root);
+    if (WriteFile(path, "#!/bin/sh\nexit 1\n") || chmod(path, 0700) || setenv("PATH", "bin:", 1)) goto cleanup;
+    cached = PicoSettings_LoadSystemPrompt(workspace);
+    if (!cached || strcmp(prompt, cached))
+    {
+        Fail("software guidance must use the workspace cache between reloads");
+        goto cleanup;
+    }
+    free(cached);
+    cached = NULL;
+    if (pico_workspace_request_reload(host, id) != PICO_OK) goto cleanup;
+    pico_host_pump(host);
+    free(prompt);
+    prompt = PicoSettings_LoadSystemPrompt(workspace);
+    if (!prompt || !strstr(prompt, "`rg`") || !strstr(prompt, "`fd`") || !strstr(prompt, "`jq`") ||
+        !strstr(prompt, "`plocate`") || strstr(prompt, "`fdfind`") || strstr(prompt, "`locate`"))
+    {
+        Fail("reload must refresh software guidance using workspace-relative and empty PATH entries");
+        goto cleanup;
+    }
+    /* A new workspace resolves the same relative PATH independently. */
+    if (pico_workspace_open(host, other, &other_id) != PICO_OK) goto cleanup;
+    cached = PicoSettings_LoadSystemPrompt(PicoHost_FindWorkspace(host, other_id));
+    if (!cached || strstr(cached, "Available software"))
+    {
+        Fail("a workspace without available tools must omit software guidance");
+        goto cleanup;
+    }
+    /* Refresh must also remove recommendations, not just accumulate detections. */
+    if (setenv("PATH", other, 1) || pico_workspace_request_reload(host, id) != PICO_OK) goto cleanup;
+    pico_host_pump(host);
+    free(prompt);
+    prompt = PicoSettings_LoadSystemPrompt(workspace);
+    if (!prompt || strstr(prompt, "Available software"))
+    {
+        Fail("reload must remove guidance for tools no longer available");
+        goto cleanup;
+    }
+    failed = 0;
+cleanup:
+    if (old_path) setenv("PATH", old_path, 1);
+    else unsetenv("PATH");
+    free(old_path);
+    free(prompt);
+    free(cached);
+    if (host) pico_host_free(host);
+    for (int i = 0; i < 6; i++)
+    {
+        snprintf(path, sizeof(path), "%s/bin/%s", root, commands[i]);
+        unlink(path);
+        rmdir(path);
+    }
+    snprintf(path, sizeof(path), "%s/bin", root);
+    rmdir(path);
+    snprintf(path, sizeof(path), "%s/jq", root);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/AGENTS.md", root);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/.pico/SYSTEM.md", root);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/.pico", root);
+    rmdir(path);
+    rmdir(root);
+    rmdir(other);
+    if (failed) Fail("available software prompt fixture or behavior failed");
+    return failed;
+}
+
 static int TestReloadTargetsSelectedWorkspace(void)
 {
     PicoHost *host = NULL;
@@ -15092,6 +15226,7 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 #endif
+    if (PICO_TEST_RUN(TestAvailableSoftwarePrompt()) != 0) return 1;
     if (PICO_TEST_RUN(TestClipboardPaste()) != 0) return 1;
     if (PICO_TEST_RUN(TestCopiedMessageSourceMetadata()) != 0) return 1;
     if (PICO_TEST_RUN(TestWorktreeSuggestNameUsesProjectFolder()) != 0) return 1;

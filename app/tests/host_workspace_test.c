@@ -4813,15 +4813,16 @@ static int TestAvailableSoftwarePrompt(void)
         Fail("software guidance must name executable tools, excluding directories and non-executable files");
         goto cleanup;
     }
-    const char *guidance = strstr(prompt, "Available software");
+    /* Locate guidance by detected tools, not the editable section heading. */
+    const char *first_tool = strstr(prompt, "`rg`");
     const char *last_tool = strstr(prompt, "`locate`");
     const char *agents = strstr(prompt, "workspace-agent-instructions");
     bool base_span = false, agents_span = false;
     for (int i = 0; i < count; i++)
     {
         size_t end = spans[i].start + spans[i].length;
-        if (guidance && last_tool && agents && spans[i].source == PICO_PROMPT_SOURCE_BASE &&
-            spans[i].start <= (size_t)(guidance - prompt) &&
+        if (first_tool && last_tool && agents && spans[i].source == PICO_PROMPT_SOURCE_BASE &&
+            spans[i].start <= (size_t)(first_tool - prompt) &&
             end >= (size_t)(last_tool - prompt) + strlen("`locate`") && end <= (size_t)(agents - prompt))
             base_span = true;
         if (agents && spans[i].source == PICO_PROMPT_SOURCE_AGENTS &&
@@ -4863,7 +4864,8 @@ static int TestAvailableSoftwarePrompt(void)
     /* A new workspace resolves the same relative PATH independently. */
     if (pico_workspace_open(host, other, &other_id) != PICO_OK) goto cleanup;
     cached = PicoSettings_LoadSystemPrompt(PicoHost_FindWorkspace(host, other_id));
-    if (!cached || strstr(cached, "Available software"))
+    if (!cached || strstr(cached, "`rg`") || strstr(cached, "`fd`") || strstr(cached, "`fdfind`") ||
+        strstr(cached, "`jq`") || strstr(cached, "`plocate`") || strstr(cached, "`locate`"))
     {
         Fail("a workspace without available tools must omit software guidance");
         goto cleanup;
@@ -4873,7 +4875,8 @@ static int TestAvailableSoftwarePrompt(void)
     pico_host_pump(host);
     free(prompt);
     prompt = PicoSettings_LoadSystemPrompt(workspace);
-    if (!prompt || strstr(prompt, "Available software"))
+    if (!prompt || strstr(prompt, "`rg`") || strstr(prompt, "`fd`") || strstr(prompt, "`fdfind`") ||
+        strstr(prompt, "`jq`") || strstr(prompt, "`plocate`") || strstr(prompt, "`locate`"))
     {
         Fail("reload must remove guidance for tools no longer available");
         goto cleanup;

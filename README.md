@@ -130,24 +130,22 @@ Open `~/.config/pico/settings.json`, add or uncomment the models you want to use
 
 ## Build from source
 
-Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, utf8proc, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
+Building requires a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, and Raylib's native dependencies (OpenGL, X11/Wayland, and audio).
 
-Debian/Ubuntu:
+Ubuntu 26.04 LTS:
 
 ```bash
-sudo apt install build-essential ninja-build meson pkg-config git curl python3-venv \
-  libcurl4-openssl-dev libssl-dev libutf8proc-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
+sudo apt update
+sudo apt install build-essential cmake ninja-build meson pkg-config git curl \
+  libcurl4-openssl-dev libssl-dev libsqlite3-dev libutf8proc-dev \
+  libgl1-mesa-dev libx11-dev libx11-xcb-dev \
   libxcb1-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
   libxinerama-dev libxrandr-dev libxrender-dev libxkbcommon-dev \
   libwayland-dev wayland-protocols libffi-dev libexpat1-dev \
   libdecor-0-dev libasound2-dev libpulse-dev xdg-utils
-python3 -m venv "$HOME/.local/share/pico-build-tools"
-"$HOME/.local/share/pico-build-tools/bin/pip" install 'cmake>=3.27'
-export PATH="$HOME/.local/share/pico-build-tools/bin:$PATH"
-cmake --version
 ```
 
-Ubuntu 22.04's repository CMake is too old, so the commands above install a current version in an isolated virtual environment. From the repo root, the first configure fetches Raylib unless `FETCHCONTENT_SOURCE_DIR_RAYLIB` is set. Nix users can enter the development environment with `nix develop` (or [direnv](https://direnv.net/) via `.envrc`).
+Ubuntu 26.04's repository CMake meets the minimum version requirement; no separate CMake installation is needed. From the repo root, the first configure fetches Raylib unless `FETCHCONTENT_SOURCE_DIR_RAYLIB` is set. Nix users can enter the development environment with `nix develop` (or [direnv](https://direnv.net/) via `.envrc`).
 
 ```bash
 cmake -S app --preset debug && cmake --build app/build/debug

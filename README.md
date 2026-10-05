@@ -73,7 +73,7 @@ Supports `x86_64-linux` and `aarch64-linux`; the package puts GCC on `PATH` so e
 
 </details>
 
-Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`. Browser login uses `xdg-open` (`xdg-utils`); if it is missing, open the displayed link on the same machine. SSH forwarding and pasted callback URLs are not supported.
+Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`.
 
 ## Build from source
 

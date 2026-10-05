@@ -2463,7 +2463,8 @@ static int AskUserWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     pico_add_tool(workspace, "ask_user",
                   "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
                   "in one call. Use kind 'select' with options for a single choice; select questions always include a "
-                  "required free-form Other choice. Use kind 'text' for a free-form answer. "
+                  "free-form Other choice do not include it in options. "
+                  "Use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL, PICO_TOOL_SEQUENTIAL);
     pico_add_llm_hook(workspace, AskUserLlm);

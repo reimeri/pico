@@ -2882,7 +2882,7 @@ static void AppendSoftwareGuidance(JsonBuf *b, const PicoWorkspace *workspace)
         return;
     if (b->len)
         JsonBuf_Puts(b, "\n\n");
-    JsonBuf_Puts(b, "Available software (detected on workspace open/reload):");
+    JsonBuf_Puts(b, "Additional software:");
     if (available & SOFTWARE_RG)
         JsonBuf_Puts(b, "\n- `rg` is available. Prefer it over `grep` for repository text searches.");
     if (available & (SOFTWARE_FD | SOFTWARE_FDFIND))

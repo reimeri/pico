@@ -106,7 +106,7 @@ F5 and `/reload` reload host extensions and the selected workspace. Extension AP
 
 ## Stack
 
-C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl, OpenSSL Crypto. Build: CMake 3.27+, Ninja.
+C99, [Clay](https://github.com/nicbarker/clay) layout, [Raylib](https://www.raylib.com/) 5.5, [md4c](https://github.com/mity/md4c), [tinyfiledialogs](https://github.com/native-toolkit/libtinyfiledialogs), libcurl, OpenSSL Crypto, SQLite. Build: CMake 3.27+, Ninja.
 
 ## Confused about something?
 

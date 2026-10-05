@@ -63,7 +63,7 @@
 
   // User-global only: max chat/composer column width in characters (CSS ch,
   // body font). Default 90. 0 = no cap. Range 40-200. `/settings` applies it immediately.
-  "chat_width": 90,
+  "chat_width": 90
 
   // User-global only: spell checking in the composer. dlopen()s the host's
   // libenchant-2 at startup; silently stays off when no library or matching

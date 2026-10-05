@@ -10,6 +10,7 @@
 #include "host_internal.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,24 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef PICO_TEST_SETTINGS_IO
+static bool fail_file_sync;
+static bool fail_directory_sync;
+int __real_fsync(int fd);
+int __wrap_fsync(int fd)
+{
+    struct stat st;
+    if (fstat(fd, &st) == 0 &&
+        ((fail_file_sync && S_ISREG(st.st_mode)) ||
+         (fail_directory_sync && S_ISDIR(st.st_mode))))
+    {
+        errno = EIO;
+        return -1;
+    }
+    return __real_fsync(fd);
+}
+#endif
 
 static int Fail(const char *message)
 {
@@ -673,7 +692,7 @@ static int TestBundledSettingsTemplateIsValid(void)
     JsonStripComments(source, len);
     JsonDoc doc;
     int parsed = JsonParse(&doc, source, len);
-    bool valid = parsed == 0 && JsonIsArray(&doc, JsonObjGet(&doc, 0, "models"));
+    bool valid = JsonValidSyntax(source, len) && parsed == 0 && JsonIsArray(&doc, JsonObjGet(&doc, 0, "models"));
     if (parsed == 0)
     {
         JsonFree(&doc);
@@ -843,7 +862,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     }
     setenv("XDG_CONFIG_HOME", temp, 1);
     memset(&draft, 0, sizeof(draft));
-    if (!PicoSettings_LoadUserDraft(&draft) || draft.model_count != 1 ||
+    if (!PicoSettings_LoadUserDraft(&draft, NULL, 0) || draft.model_count != 1 ||
         strcmp(draft.models[0].id, "gpt-test") != 0 || strcmp(draft.models[0].provider, "openai") != 0 ||
         !draft.spell)
     {
@@ -869,7 +888,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     const char *err = PicoSettings_ValidateUserDraft(&draft);
     memset(&host, 0, sizeof(host));
     pthread_mutex_init(&host.settings_mu, NULL);
-    if (err || !PicoSettings_SaveUserDraft(&host, &draft))
+    if (err || !PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         pthread_mutex_destroy(&host.settings_mu);
         PicoSettings_FreeUserDraft(&draft);
@@ -888,7 +907,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     free(saved);
     memset(&loaded, 0, sizeof(loaded));
     if (!failed &&
-        (!PicoSettings_LoadUserDraft(&loaded) || loaded.model_count != 1 || !loaded.models[0].vision || !loaded.models[0].supports_fast ||
+        (!PicoSettings_LoadUserDraft(&loaded, NULL, 0) || loaded.model_count != 1 || !loaded.models[0].vision || !loaded.models[0].supports_fast ||
          loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
          loaded.max_parallel_tools != draft.max_parallel_tools || loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
          loaded.spell || strcmp(loaded.spell_lang, "de_DE") != 0 ||
@@ -938,7 +957,7 @@ static int TestUserDraftModelOrder(void)
     pthread_mutex_init(&host.settings_mu, NULL);
 
     /* A modal drop is draft-only until Apply; cancelling must leave disk untouched. */
-    if (!PicoSettings_LoadUserDraft(&draft) || !PicoSettings_MoveUserDraftModel(&draft, 1, 0))
+    if (!PicoSettings_LoadUserDraft(&draft, NULL, 0) || !PicoSettings_MoveUserDraftModel(&draft, 1, 0))
     {
         failed = 1;
     }
@@ -950,7 +969,7 @@ static int TestUserDraftModelOrder(void)
     }
     free(saved);
     saved = NULL;
-    if (!failed && (!PicoSettings_LoadUserDraft(&draft) || draft.model_count != 3 ||
+    if (!failed && (!PicoSettings_LoadUserDraft(&draft, NULL, 0) || draft.model_count != 3 ||
                     strcmp(draft.models[0].id, "alpha") != 0))
     {
         failed = 1;
@@ -962,12 +981,12 @@ static int TestUserDraftModelOrder(void)
         if (!PicoSettings_MoveUserDraftModel(&draft, 1, 0) ||
             !PicoSettings_MoveUserDraftModel(&draft, 2, 1) ||
             strcmp(draft.source_model_ids[0], "beta") != 0 ||
-            PicoSettings_ValidateUserDraft(&draft) || !PicoSettings_SaveUserDraft(&host, &draft))
+            PicoSettings_ValidateUserDraft(&draft) || !PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
         {
             failed = 1;
         }
     }
-    if (!failed && (!PicoSettings_LoadUserDraft(&reloaded) || reloaded.model_count != 3 ||
+    if (!failed && (!PicoSettings_LoadUserDraft(&reloaded, NULL, 0) || reloaded.model_count != 3 ||
                     strcmp(reloaded.models[0].id, "beta-renamed") != 0 ||
                     strcmp(reloaded.models[1].id, "gamma") != 0 ||
                     strcmp(reloaded.models[2].id, "alpha") != 0 ||
@@ -1038,7 +1057,7 @@ static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
     }
     setenv("XDG_CONFIG_HOME", temp, 1);
     memset(&draft, 0, sizeof(draft));
-    if (!PicoSettings_LoadUserDraft(&draft))
+    if (!PicoSettings_LoadUserDraft(&draft, NULL, 0))
     {
         unsetenv("XDG_CONFIG_HOME");
         unlink(ws_path);
@@ -1050,7 +1069,7 @@ static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
     draft.font_scale = 2.0;
     memset(&host, 0, sizeof(host));
     pthread_mutex_init(&host.settings_mu, NULL);
-    if (!PicoSettings_SaveUserDraft(&host, &draft))
+    if (!PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         failed = 1;
     }
@@ -1069,6 +1088,248 @@ static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
     CleanupDraftTemp(path, pico, temp);
     return failed ? Fail("saving user settings wrote workspace .pico/settings.json") : 0;
 }
+
+static int TestFreshUserSettingsCanSave(void)
+{
+    char temp[] = "/tmp/pico-settings-fresh-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create fresh settings directory");
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    Pico_DocsSetAppDir(PICO_SOURCE_ROOT);
+    PicoHost host = {0};
+    PicoHostPreferences_Load(&host);
+    PicoUserSettingsDraft draft = {0};
+    PicoUserSettingsDraft reloaded = {0};
+    char error[PICO_SETTINGS_ERROR_MAX];
+    int failed = !PicoSettings_LoadUserDraft(&draft, error, sizeof(error));
+    draft.spell = !draft.spell;
+    if (!failed && (!PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error)) ||
+                    error[0] || !PicoSettings_LoadUserDraft(&reloaded, error, sizeof(error)) ||
+                    reloaded.spell != draft.spell))
+        failed = 1;
+    PicoSettings_FreeUserDraft(&draft);
+    PicoSettings_FreeUserDraft(&reloaded);
+    Pico_DocsSetAppDir(NULL);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("freshly bootstrapped bundled settings could not save an edit") : 0;
+}
+
+static int TestUserDraftSavesCommentsOnlyObject(void)
+{
+    char temp[] = "/tmp/pico-settings-comment-only-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create comments-only settings directory");
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoUserSettingsDraft draft = {0};
+    PicoUserSettingsDraft reloaded = {0};
+    char error[PICO_SETTINGS_ERROR_MAX];
+    int failed = WriteFile(path, "{\n  /* keep configuration note */\n}\n") ||
+                 !PicoSettings_LoadUserDraft(&draft, error, sizeof(error));
+    draft.spell = !draft.spell;
+    if (!failed && (!PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error)) ||
+                    !PicoSettings_LoadUserDraft(&reloaded, error, sizeof(error)) ||
+                    reloaded.spell != draft.spell)) failed = 1;
+    size_t len = 0;
+    char *saved = Pico_ReadFile(path, &len);
+    if (!saved || !strstr(saved, "keep configuration note")) failed = 1;
+    free(saved);
+    PicoSettings_FreeUserDraft(&reloaded);
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("valid comments-only settings could not save without losing their comment") : 0;
+}
+
+static int TestUserDraftRepairsTrailingCommas(void)
+{
+    static const char fixture[] =
+        "{\n"
+        "  \"model\": \"old\",\n"
+        "  \"models\": [{\"id\":\"old\",\"provider\":\"openai\",\n"
+        "    \"vendor_option\": {\"values\": [1, /* keep array comment */],},\n"
+        "    // keep model comment\n"
+        "  }, /* keep catalog comment */],\n"
+        "  \"literal\": \",} ,] \\\" // /*\",\n"
+        "  \"font_scale\": 1, // keep root comment\n"
+        "}\n";
+    char temp[] = "/tmp/pico-settings-commas-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create trailing comma directory");
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoUserSettingsDraft draft = {0};
+    char error[PICO_SETTINGS_ERROR_MAX];
+    int failed = WriteFile(path, fixture) ||
+                 !PicoSettings_LoadUserDraft(&draft, error, sizeof(error));
+    /* Loading permits repairable input but must not write it back. */
+    size_t len = 0;
+    char *saved = Pico_ReadFile(path, &len);
+    if (!saved || len != strlen(fixture) || memcmp(saved, fixture, len)) failed = 1;
+    free(saved);
+    if (!failed)
+    {
+        draft.font_scale = 1.25;
+        draft.models[0].vision = true;
+        if (!PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error))) failed = 1;
+    }
+    saved = Pico_ReadFile(path, &len);
+    if (!saved || !strstr(saved, "keep array comment") || !strstr(saved, "keep model comment") ||
+        !strstr(saved, "keep catalog comment") || !strstr(saved, "keep root comment")) failed = 1;
+    if (saved)
+    {
+        JsonStripComments(saved, len);
+        JsonDoc doc;
+        int parsed = JsonParse(&doc, saved, len);
+        if (!JsonValidSyntax(saved, len) || parsed != 0) failed = 1;
+        if (parsed == 0)
+        {
+            char *literal = JsonObjStr(&doc, 0, "literal");
+            int model = JsonArrayAt(&doc, JsonObjGet(&doc, 0, "models"), 0);
+            int vendor = JsonObjGet(&doc, model, "vendor_option");
+            int values = JsonObjGet(&doc, vendor, "values");
+            if (!literal || strcmp(literal, ",} ,] \" // /*") ||
+                JsonArrayLen(&doc, values) != 1 ||
+                JsonInt(&doc, JsonArrayAt(&doc, values, 0), -1) != 1) failed = 1;
+            free(literal);
+            JsonFree(&doc);
+        }
+    }
+    free(saved);
+    PicoUserSettingsDraft reloaded = {0};
+    if (!failed && (!PicoSettings_LoadUserDraft(&reloaded, error, sizeof(error)) ||
+                    reloaded.font_scale != draft.font_scale || !reloaded.models[0].vision)) failed = 1;
+    PicoSettings_FreeUserDraft(&reloaded);
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("trailing comma repair lost comments, strings, metadata or edits") : 0;
+}
+
+static int TestUserDraftRejectsMalformedSource(void)
+{
+    /* Distinct permissive-parser/repair hazards, not equivalent call patterns. */
+    static const char *fixtures[] = {
+        "{\"model\":\"old\" \"font_scale\":1}", // missing separator
+        "{\"vendor\":tru,}",                      // invalid primitive
+        "{\"vendor\":[,]}",                       // not a trailing comma
+        "{\"vendor\":1} /* unterminated",          // invalid JSONC comment
+        "{\"vendor\":\"unterminated}",             // invalid string
+        "[]",                                    // settings must be an object
+    };
+    char temp[] = "/tmp/pico-settings-malformed-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create malformed settings directory");
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoUserSettingsDraft draft = {0};
+    char error[PICO_SETTINGS_ERROR_MAX];
+    int failed = WriteFile(path, "{\"model\":\"old\"}") ||
+                 !PicoSettings_LoadUserDraft(&draft, error, sizeof(error));
+    for (size_t i = 0; !failed && i < sizeof(fixtures) / sizeof(fixtures[0]); i++)
+    {
+        if (WriteFile(path, fixtures[i]) ||
+            PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error)) ||
+            !strstr(error, "Invalid JSON") || !strstr(error, path)) failed = 1;
+        size_t len = 0;
+        char *after = Pico_ReadFile(path, &len);
+        if (!after || len != strlen(fixtures[i]) || memcmp(after, fixtures[i], len)) failed = 1;
+        free(after);
+    }
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("malformed settings were overwritten or lacked a useful JSON diagnostic") : 0;
+}
+
+static int TestUserDraftReportsFilesystemFailures(void)
+{
+    char temp[] = "/tmp/pico-settings-errors-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create settings error directory");
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    char lock[sizeof(temp) + 40];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    snprintf(lock, sizeof(lock), "%s.lock", path);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoUserSettingsDraft draft = {0};
+    char error[PICO_SETTINGS_ERROR_MAX];
+    int failed = WriteFile(path, "{\"model\":\"old\"}") ||
+                 !PicoSettings_LoadUserDraft(&draft, error, sizeof(error));
+    if (mkdir(lock, 0755) != 0 ||
+        PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error)) ||
+        !strstr(error, path) || !strstr(error, "lock settings") ||
+        !strstr(error, strerror(EISDIR))) failed = 1;
+    rmdir(lock);
+    unlink(path);
+    if (mkdir(path, 0755) != 0 ||
+        PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error)) ||
+        !strstr(error, path) || !strstr(error, "read settings") ||
+        !strstr(error, strerror(EINVAL))) failed = 1;
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) failed = 1;
+    rmdir(path);
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("filesystem save failures lacked path/OS diagnostics or replaced a non-file") : 0;
+}
+
+#ifdef PICO_TEST_SETTINGS_IO
+static int TestUserDraftReportsSyncFailures(void)
+{
+    static const char fixture[] = "{\"model\":\"old\",\"spell\":false}";
+    char temp[] = "/tmp/pico-settings-sync-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create settings sync directory");
+    char pico[sizeof(temp) + 8];
+    char path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoUserSettingsDraft draft = {0};
+    char error[PICO_SETTINGS_ERROR_MAX];
+    int failed = WriteFile(path, fixture) ||
+                 !PicoSettings_LoadUserDraft(&draft, error, sizeof(error));
+    draft.spell = !draft.spell;
+    fail_file_sync = true;
+    bool ok = PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error));
+    fail_file_sync = false;
+    size_t len = 0;
+    char *after = Pico_ReadFile(path, &len);
+    if (ok || !strstr(error, path) || !strstr(error, strerror(EIO)) ||
+        !strstr(error, "sync temporary settings file") || !after ||
+        len != strlen(fixture) || memcmp(after, fixture, len)) failed = 1;
+    free(after);
+    fail_directory_sync = true;
+    ok = PicoSettings_SaveUserDraft(NULL, &draft, error, sizeof(error));
+    fail_directory_sync = false;
+    PicoUserSettingsDraft reloaded = {0};
+    if (ok || !strstr(error, path) || !strstr(error, strerror(EIO)) ||
+        !strstr(error, "Settings saved") || !strstr(error, "sync settings directory") ||
+        !PicoSettings_LoadUserDraft(&reloaded, NULL, 0) || reloaded.spell != draft.spell) failed = 1;
+    PicoSettings_FreeUserDraft(&reloaded);
+    PicoSettings_FreeUserDraft(&draft);
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("sync failure did not distinguish unchanged from saved-but-not-durable settings") : 0;
+}
+#endif
 
 static int TestUserDraftValidationAndPreservation(void)
 {
@@ -1111,7 +1372,7 @@ static int TestUserDraftValidationAndPreservation(void)
     memset(&draft, 0, sizeof(draft));
     memset(&host, 0, sizeof(host));
     pthread_mutex_init(&host.settings_mu, NULL);
-    if (!PicoSettings_LoadUserDraft(&draft) || strcmp(draft.models[0].name, "null") != 0 ||
+    if (!PicoSettings_LoadUserDraft(&draft, NULL, 0) || strcmp(draft.models[0].name, "null") != 0 ||
         draft.models[0].base_url[0] != '\0' || draft.models[0].effort_count != 2 ||
         strcmp(draft.models[0].effort[1], "null") != 0)
     {
@@ -1119,12 +1380,12 @@ static int TestUserDraftValidationAndPreservation(void)
     }
     draft.models[0].supports_fast = true;
     draft.font_scale = 1.25;
-    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
+    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         failed = 1;
     }
     PicoUserSettingsDraft patched = {0};
-    if (!PicoSettings_LoadUserDraft(&patched) || patched.model_count < 1 ||
+    if (!PicoSettings_LoadUserDraft(&patched, NULL, 0) || patched.model_count < 1 ||
         !patched.models[0].supports_fast)
         failed = 1;
     PicoSettings_FreeUserDraft(&patched);
@@ -1136,7 +1397,7 @@ static int TestUserDraftValidationAndPreservation(void)
     free(after);
     after = NULL;
     snprintf(draft.models[0].name, sizeof(draft.models[0].name), "%s", "Renamed");
-    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
+    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         failed = 1;
     }
@@ -1150,7 +1411,7 @@ static int TestUserDraftValidationAndPreservation(void)
     after = NULL;
     snprintf(draft.models[0].id, sizeof(draft.models[0].id), "%s", "renamed-id");
     snprintf(draft.default_model, sizeof(draft.default_model), "%s", "renamed-id");
-    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft))
+    if (!failed && !PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         failed = 1;
     }
@@ -1164,7 +1425,7 @@ static int TestUserDraftValidationAndPreservation(void)
     before = Pico_ReadFile(path, &before_len);
     draft.compact_enabled = true;
     draft.compact_ratio = NAN;
-    if (!before || PicoSettings_SaveUserDraft(&host, &draft))
+    if (!before || PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         failed = 1;
     }
@@ -1175,7 +1436,7 @@ static int TestUserDraftValidationAndPreservation(void)
     }
     draft.compact_ratio = 0.9;
     draft.models[0].context_limit = -1;
-    if (PicoSettings_SaveUserDraft(&host, &draft))
+    if (PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
         failed = 1;
     }
@@ -1341,6 +1602,14 @@ static int TestParallelSettingsResolution(void)
 
 int main(void)
 {
+    if (PICO_TEST_RUN(TestFreshUserSettingsCanSave())) return 1;
+    if (PICO_TEST_RUN(TestUserDraftSavesCommentsOnlyObject())) return 1;
+    if (PICO_TEST_RUN(TestUserDraftRepairsTrailingCommas())) return 1;
+    if (PICO_TEST_RUN(TestUserDraftRejectsMalformedSource())) return 1;
+    if (PICO_TEST_RUN(TestUserDraftReportsFilesystemFailures())) return 1;
+#ifdef PICO_TEST_SETTINGS_IO
+    if (PICO_TEST_RUN(TestUserDraftReportsSyncFailures())) return 1;
+#endif
     if (PICO_TEST_RUN(TestParallelSettingsResolution())) return 1;
     int rc = PICO_TEST_RUN(TestPerAgentSelection());
     if (rc)

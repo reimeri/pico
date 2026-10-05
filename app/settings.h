@@ -64,6 +64,7 @@ bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabl
 bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
 
 #define PICO_SETTINGS_MODEL_MAX 64
+#define PICO_SETTINGS_ERROR_MAX 4608
 
 typedef struct PicoUserSettingsDraft {
     char default_model[128];
@@ -83,11 +84,16 @@ typedef struct PicoUserSettingsDraft {
 
 void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft);
 void PicoSettings_FreeUserDraft(PicoUserSettingsDraft *draft);
-bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft);
+bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft, char *error, size_t error_cap);
 bool PicoSettings_MoveUserDraftModel(PicoUserSettingsDraft *draft, int from, int to);
 bool PicoSettings_ParseModelContextLimit(const char *text, int *out);
 const char *PicoSettings_ValidateUserDraft(const PicoUserSettingsDraft *draft);
-bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *draft);
+/* Errors include the path and OS reason for IO failures. A false result can
+ * follow a successful replacement if directory sync fails; the error says so.
+ * Comments/unknown keys are preserved, trailing commas repaired, and other
+ * malformed input rejected without replacing the file. error may be NULL. */
+bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *draft,
+                                char *error, size_t error_cap);
 bool PicoSettings_ApplyUserDraft(PicoHost *host);
 
 #endif

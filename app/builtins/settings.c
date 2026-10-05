@@ -42,7 +42,7 @@ typedef struct SettingsState {
     char chat_width[32];
     char model_contexts[PICO_SETTINGS_MODEL_MAX][32];
     char custom_effort[PICO_EFFORT_LEN];
-    char error[256];
+    char error[PICO_SETTINGS_ERROR_MAX];
     int focus_kind;
     int focus_model;
     bool drag_press_pending;
@@ -162,7 +162,7 @@ static void SyncFieldsFromDraft(SettingsState *s)
 
 static bool LoadDraft(SettingsState *s)
 {
-    if (!s || !PicoSettings_LoadUserDraft(&s->draft) ||
+    if (!s || !PicoSettings_LoadUserDraft(&s->draft, s->error, sizeof(s->error)) ||
         s->draft.model_count > PICO_SETTINGS_MODEL_MAX || !ResetExpanded(s))
     {
         return false;
@@ -205,8 +205,8 @@ static bool Claim(void)
     {
         (void)pico_ui_modal_pop(g_host, "settings");
         g_open = false;
+        PicoOverlay_Notify(g_host, g_error[0] ? g_error : "Could not load settings.json: out of memory or too many models.");
         DiscardDraft(s_active_settings_state);
-        PicoOverlay_Notify(g_host, "Could not load settings.json.");
         return false;
     }
     return true;
@@ -395,9 +395,8 @@ static bool ApplyDraft(SettingsState *s)
         snprintf(s->error, sizeof(s->error), "%s", err);
         return false;
     }
-    if (!PicoSettings_SaveUserDraft(s->host, &s->draft))
+    if (!PicoSettings_SaveUserDraft(s->host, &s->draft, s->error, sizeof(s->error)))
     {
-        snprintf(s->error, sizeof(s->error), "%s", "Could not write settings.json.");
         return false;
     }
     if (!PicoSettings_ApplyUserDraft(s->host))

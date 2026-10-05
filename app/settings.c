@@ -18,6 +18,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -41,23 +42,162 @@ bool Pico_ConfigDir(char *out, size_t cap)
     return PicoPath_Format(out, cap, "%s/.config/pico", HomeDir());
 }
 
-void Pico_MkdirP(const char *path)
+static bool MkdirP(const char *path)
 {
     char buf[4096];
-    snprintf(buf, sizeof(buf), "%s", path);
-    for (char *p = buf + 1; *p; p++)
+    if (!path || !path[0])
     {
-        if (*p == '/')
+        errno = EINVAL;
+        return false;
+    }
+    if (!PicoPath_Format(buf, sizeof(buf), "%s", path))
+    {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    for (char *p = buf + 1;; p++)
+    {
+        if (*p != '/' && *p != '\0') continue;
+        char delimiter = *p;
+        *p = '\0';
+        if (mkdir(buf, 0755) != 0)
         {
-            *p = 0;
-            mkdir(buf, 0755);
-            *p = '/';
+            if (errno != EEXIST) return false;
+            struct stat st;
+            if (stat(buf, &st) != 0) return false;
+            if (!S_ISDIR(st.st_mode))
+            {
+                errno = ENOTDIR;
+                return false;
+            }
+        }
+        *p = delimiter;
+        if (!delimiter) return true;
+    }
+}
+
+void Pico_MkdirP(const char *path)
+{
+    (void)MkdirP(path);
+}
+
+static bool SettingsError(char *error, size_t cap, const char *format, ...)
+{
+    if (error && cap)
+    {
+        va_list args;
+        va_start(args, format);
+        vsnprintf(error, cap, format, args);
+        va_end(args);
+    }
+    return false;
+}
+
+static bool SettingsIOError(char *error, size_t cap, const char *path,
+                            const char *operation, int code, bool saved)
+{
+    if (saved)
+        return SettingsError(error, cap, "Settings saved to %s, but could not %s: %s. Durability is not confirmed.",
+                             path, operation, strerror(code));
+    return SettingsError(error, cap, "Could not %s (%s): %s.", operation, path, strerror(code));
+}
+
+/* Only a missing file may fall back to defaults. Never overwrite an unreadable
+ * file or a non-regular destination with a newly generated document. */
+static bool ReadUserSettings(const char *path, char **src, size_t *len,
+                             char *error, size_t error_cap)
+{
+    struct stat st;
+    *src = NULL;
+    *len = 0;
+    if (stat(path, &st) != 0)
+    {
+        if (errno == ENOENT) return true;
+        return SettingsIOError(error, error_cap, path, "read settings", errno, false);
+    }
+    if (!S_ISREG(st.st_mode))
+        return SettingsIOError(error, error_cap, path, "read settings", EINVAL, false);
+    *src = Pico_ReadFile(path, len);
+    return *src || SettingsIOError(error, error_cap, path, "read settings", errno, false);
+}
+
+static bool JsonWhitespace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* Normalize only trailing commas, preserving offsets, comments and strings.
+ * Strict validation afterwards rejects every other syntax error before edits. */
+static bool PrepareSettingsJson(char *src, size_t len, const char *path,
+                                char **stripped_out, char *error, size_t error_cap)
+{
+    char *stripped = malloc(len + 1);
+    if (!stripped)
+        return SettingsIOError(error, error_cap, path, "validate settings", ENOMEM, false);
+    memcpy(stripped, src, len + 1);
+    bool in_string = false;
+    bool escaped = false;
+    bool valid = true;
+    /* JsonStripComments tolerates unterminated block comments; the editor must
+     * not silently accept those as a repairable document. */
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = src[i];
+        if (in_string)
+        {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') in_string = true;
+        else if (c == '/' && i + 1 < len && src[i + 1] == '/')
+        {
+            while (i < len && src[i] != '\n' && src[i] != '\r') i++;
+        }
+        else if (c == '/' && i + 1 < len && src[i + 1] == '*')
+        {
+            i += 2;
+            while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 >= len) { valid = false; break; }
+            i++;
         }
     }
-    if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+    JsonStripComments(stripped, len);
+    in_string = false;
+    escaped = false;
+    char previous = '\0';
+    for (size_t i = 0; i < len; i++)
     {
-        return;
+        char c = stripped[i];
+        if (in_string)
+        {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') { in_string = false; previous = c; }
+            continue;
+        }
+        if (c == '"') in_string = true;
+        if (c == ',' && previous && previous != '[' && previous != '{' &&
+            previous != ',' && previous != ':')
+        {
+            size_t next = i + 1;
+            while (next < len && JsonWhitespace(stripped[next])) next++;
+            if (next < len && (stripped[next] == ']' || stripped[next] == '}'))
+                src[i] = stripped[i] = ' ';
+        }
+        if (!JsonWhitespace(c)) previous = c;
     }
+    size_t start = 0;
+    while (start < len && JsonWhitespace(stripped[start])) start++;
+    if (!valid || !JsonValidSyntax(stripped, len) || start == len || stripped[start] != '{')
+    {
+        free(stripped);
+        return SettingsError(error, error_cap,
+                             "Invalid JSON in %s. Settings must be a JSON object; comments and trailing commas are allowed. File left unchanged.", path);
+    }
+    *stripped_out = stripped;
+    return true;
 }
 
 void Pico_RandomHex(char *out, size_t cap)
@@ -1188,73 +1328,79 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level)
     return true;
 }
 
-static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode_t mode)
+static bool AtomicWriteFile(const char *path, const char *data, size_t len, mode_t mode,
+                            char *error, size_t error_cap)
 {
     if (!path || !path[0] || !data)
-    {
-        return false;
-    }
+        return SettingsIOError(error, error_cap, path ? path : "settings.json", "prepare settings", EINVAL, false);
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", path);
     char *slash = strrchr(dir, '/');
-    if (slash)
-    {
-        *slash = '\0';
-    }
-    else
-    {
-        snprintf(dir, sizeof(dir), ".");
-    }
+    if (slash) *slash = '\0';
+    else snprintf(dir, sizeof(dir), ".");
     char tmp[4096];
     if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp))
-    {
-        return false;
-    }
+        return SettingsIOError(error, error_cap, path, "create temporary settings file", ENAMETOOLONG, false);
     int fd = mkstemp(tmp);
     if (fd < 0)
+        return SettingsIOError(error, error_cap, path, "create temporary settings file", errno, false);
+    const char *operation = "set settings file permissions";
+    bool ok = fchmod(fd, mode) == 0;
+    if (ok)
     {
-        return false;
+        operation = "write settings";
+        ok = PicoIO_WriteAll(fd, data, len);
     }
-    bool ok = fchmod(fd, mode) == 0 && PicoIO_WriteAll(fd, data, len);
-    if (ok && fsync(fd) != 0)
+    if (ok)
+    {
+        operation = "sync temporary settings file";
+        ok = fsync(fd) == 0;
+    }
+    int code = errno;
+    if (close(fd) != 0 && ok)
     {
         ok = false;
+        operation = "close temporary settings file";
+        code = errno;
     }
-    if (close(fd) != 0)
-    {
-        ok = false;
-    }
-    if (!ok || rename(tmp, path) != 0)
+    if (!ok)
     {
         unlink(tmp);
-        return false;
+        return SettingsIOError(error, error_cap, path, operation, code, false);
+    }
+    if (rename(tmp, path) != 0)
+    {
+        code = errno;
+        unlink(tmp);
+        return SettingsIOError(error, error_cap, path, "replace settings file", code, false);
     }
     int dfd = open(dir, O_RDONLY | O_DIRECTORY);
     if (dfd < 0)
+        return SettingsIOError(error, error_cap, path, "open settings directory for sync", errno, true);
+    ok = fsync(dfd) == 0;
+    code = errno;
+    operation = "sync settings directory";
+    if (close(dfd) != 0 && ok)
     {
-        return false;
+        ok = false;
+        operation = "close settings directory";
+        code = errno;
     }
-    if (fsync(dfd) != 0)
-    {
-        close(dfd);
-        return false;
-    }
-    if (close(dfd) != 0)
-    {
-        return false;
-    }
-    return true;
+    return ok || SettingsIOError(error, error_cap, path, operation, code, true);
+}
+
+static bool WriteSettingsFile(const char *path, const char *data, size_t len,
+                              char *error, size_t error_cap)
+{
+    mode_t mode = 0600;
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) mode = st.st_mode & 0777;
+    return AtomicWriteFile(path, data, len, mode, error, error_cap);
 }
 
 static bool WriteFile(const char *path, const char *data, size_t len)
 {
-    mode_t mode = 0600;
-    struct stat st;
-    if (path && stat(path, &st) == 0 && S_ISREG(st.st_mode))
-    {
-        mode = st.st_mode & 0777;
-    }
-    return AtomicWriteFile(path, data, len, mode);
+    return WriteSettingsFile(path, data, len, NULL, 0);
 }
 
 static int SettingsLockAcquire(const char *settings_path)
@@ -1339,24 +1485,6 @@ static int ObjectClose(const char *src, const JsonDoc *doc, int obj)
     return src[pos] == '}' ? pos : -1;
 }
 
-static bool ObjectIsEmpty(const char *src, const JsonDoc *doc, int obj, int close_at)
-{
-    int start = JsonTokStart(doc, obj);
-    if (start < 0 || close_at <= start)
-    {
-        return true;
-    }
-    for (int i = start + 1; i < close_at; i++)
-    {
-        char c = src[i];
-        if (c != ' ' && c != '\n' && c != '\r' && c != '\t')
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 static bool InsertObjectKey(char **src, size_t *len, const JsonDoc *doc, int obj, const char *key,
                             const char *json_value)
 {
@@ -1367,7 +1495,7 @@ static bool InsertObjectKey(char **src, size_t *len, const JsonDoc *doc, int obj
     }
     JsonBuf b;
     JsonBuf_Init(&b);
-    if (!ObjectIsEmpty(*src, doc, obj, close_at))
+    if (JsonObjLen(doc, obj) > 0)
     {
         JsonBuf_Puts(&b, ",");
     }
@@ -1739,7 +1867,7 @@ static bool SeedUserDraftCatalog(PicoUserSettingsDraft *draft)
     return true;
 }
 
-bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
+bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft, char *error, size_t error_cap)
 {
     PicoUserSettingsDraft next;
     PicoWorkspaceSettings workspace;
@@ -1747,9 +1875,10 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     char path[4096];
     size_t len = 0;
     char *src;
+    if (error && error_cap) error[0] = '\0';
     if (!draft)
     {
-        return false;
+        return SettingsError(error, error_cap, "Could not load settings: out of memory or invalid draft.");
     }
     PicoSettings_InitUserDraft(&next);
     memset(&workspace, 0, sizeof(workspace));
@@ -1764,30 +1893,36 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     preferences.chat_width = next.chat_width;
     preferences.spell = next.spell;
     snprintf(preferences.spell_lang, sizeof(preferences.spell_lang), "%s", next.spell_lang);
-    if (UserSettingsPath(path, sizeof(path)))
+    if (!UserSettingsPath(path, sizeof(path)))
+        return SettingsError(error, error_cap, "Could not resolve settings.json path: path too long.");
+    if (!ReadUserSettings(path, &src, &len, error, error_cap)) return false;
+    if (src)
     {
-        src = Pico_ReadFile(path, &len);
-        if (src)
+        JsonDoc doc;
+        char *stripped = NULL;
+        if (!PrepareSettingsJson(src, len, path, &stripped, error, error_cap))
         {
-            JsonDoc doc;
-            JsonStripComments(src, len);
-            if (JsonParse(&doc, src, len) != 0)
-            {
-                free(src);
-                return false;
-            }
-            ApplyWorkspaceObject(&workspace, &doc, 0, NULL);
-            ApplyPreferencesObject(&preferences, &doc, 0);
-            if (!ReplaceModels(&next.models, &next.model_count, &doc, 0))
-            {
-                JsonFree(&doc);
-                free(src);
-                PicoSettings_FreeUserDraft(&next);
-                return false;
-            }
+            free(src);
+            return false;
+        }
+        free(src);
+        src = stripped;
+        if (JsonParse(&doc, src, len) != 0)
+        {
+            free(src);
+            return SettingsError(error, error_cap, "Could not load settings: out of memory or invalid draft.");
+        }
+        ApplyWorkspaceObject(&workspace, &doc, 0, NULL);
+        ApplyPreferencesObject(&preferences, &doc, 0);
+        if (!ReplaceModels(&next.models, &next.model_count, &doc, 0))
+        {
             JsonFree(&doc);
             free(src);
+            PicoSettings_FreeUserDraft(&next);
+            return SettingsError(error, error_cap, "Could not load settings: out of memory or invalid draft.");
         }
+        JsonFree(&doc);
+        free(src);
     }
     snprintf(next.default_model, sizeof(next.default_model), "%s", workspace.default_model);
     next.context_limit_fallback = workspace.context_limit_fallback;
@@ -1801,13 +1936,13 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft)
     snprintf(next.spell_lang, sizeof(next.spell_lang), "%s", preferences.spell_lang);
     if (next.model_count == 0 && !SeedUserDraftCatalog(&next))
     {
-        return false;
+        return SettingsError(error, error_cap, "Could not load settings: out of memory or invalid draft.");
     }
     next.source_model_ids = calloc((size_t)next.model_count, sizeof(*next.source_model_ids));
     if (!next.source_model_ids)
     {
         PicoSettings_FreeUserDraft(&next);
-        return false;
+        return SettingsError(error, error_cap, "Could not load settings: out of memory or invalid draft.");
     }
     for (int i = 0; i < next.model_count; i++)
     {
@@ -2330,7 +2465,8 @@ static bool ValidJsonc(const char *src, size_t len)
     return valid;
 }
 
-bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *draft)
+bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *draft,
+                                char *error, size_t error_cap)
 {
     char path[4096];
     char dir[4096];
@@ -2347,15 +2483,13 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     int lock_fd;
     bool catalog_matches;
     bool ok = false;
+    if (error && error_cap) error[0] = '\0';
     const char *err = PicoSettings_ValidateUserDraft(draft);
-    if (err || !UserSettingsPath(path, sizeof(path)))
-    {
-        return false;
-    }
-    if (Pico_ConfigDir(dir, sizeof(dir)))
-    {
-        Pico_MkdirP(dir);
-    }
+    if (err) return SettingsError(error, error_cap, "%s", err);
+    if (!UserSettingsPath(path, sizeof(path)) || !Pico_ConfigDir(dir, sizeof(dir)))
+        return SettingsError(error, error_cap, "Could not resolve settings.json path: path too long.");
+    if (!MkdirP(dir))
+        return SettingsIOError(error, error_cap, path, "create settings directory", errno, false);
     EnsureUserSettingsFile();
     snprintf(context_buf, sizeof(context_buf), "%d", draft->context_limit_fallback);
     snprintf(parallel_buf, sizeof(parallel_buf), "%d", draft->max_parallel_tools);
@@ -2372,13 +2506,13 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     model = JsonQuoted(draft->default_model);
     if (!model)
     {
-        return false;
+        return SettingsIOError(error, error_cap, path, "prepare settings", ENOMEM, false);
     }
     lang = JsonQuoted(draft->spell_lang);
     if (!lang)
     {
         free(model);
-        return false;
+        return SettingsIOError(error, error_cap, path, "prepare settings", ENOMEM, false);
     }
     if (host)
     {
@@ -2387,9 +2521,10 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     lock_fd = SettingsLockAcquire(path);
     if (lock_fd < 0)
     {
+        SettingsIOError(error, error_cap, path, "lock settings", errno, false);
         goto done;
     }
-    src = Pico_ReadFile(path, &len);
+    if (!ReadUserSettings(path, &src, &len, error, error_cap)) goto unlock;
     if (!src)
     {
         src = JsonDup("{}\n");
@@ -2397,8 +2532,13 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     }
     if (!src)
     {
+        SettingsIOError(error, error_cap, path, "prepare settings", ENOMEM, false);
         goto unlock;
     }
+    char *stripped = NULL;
+    if (!PrepareSettingsJson(src, len, path, &stripped, error, error_cap)) goto unlock;
+    free(stripped);
+    SettingsError(error, error_cap, "Could not edit settings in %s: out of memory or invalid generated JSON. File left unchanged.", path);
     if (!CatalogMatchesSource(src, len, draft, &catalog_matches))
     {
         goto unlock;
@@ -2427,7 +2567,8 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     {
         goto unlock;
     }
-    ok = WriteFile(path, src, len);
+    ok = WriteSettingsFile(path, src, len, error, error_cap);
+    if (ok && error && error_cap) error[0] = '\0';
 unlock:
     SettingsLockRelease(lock_fd);
 done:

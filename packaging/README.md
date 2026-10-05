@@ -27,6 +27,32 @@ OpenSSL Crypto is a direct runtime dependency. `linuxdeploy` must bundle
 the AppImage build checks that both are present. Local browser login uses the host's `xdg-open`; if unavailable,
 Pico still displays a sign-in link.
 
+### AppImage update discovery
+
+The build embeds GitHub update information in the AppImage's `.upd_info` ELF
+section so managers such as Gear Lever can populate update settings:
+
+```text
+gh-releases-zsync|reimeri|pico|latest|pico-*-linux-x86_64.AppImage.zsync
+```
+
+The owner and repository must be separate pipe-delimited fields. The source
+repository defaults to `GITHUB_REPOSITORY` (or `reimeri/pico` outside GitHub
+Actions); set `PICO_APPIMAGE_UPDATE_REPO=OWNER/REPO` to override it.
+The build verifies the embedded information and the generated `.zsync` file's
+SHA-1 against the final AppImage. Publish both the AppImage and its matching
+`.AppImage.zsync` control file on the same GitHub release; draft releases are
+not available to update managers.
+
+To inspect a built artifact:
+
+```bash
+readelf --string-dump=.upd_info --wide dist/pico-<version>-linux-x86_64.AppImage
+```
+
+Previously built AppImages with malformed metadata must be replaced by a newly
+built artifact before automatic update discovery can work.
+
 ## GitHub release
 
 Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The tag must

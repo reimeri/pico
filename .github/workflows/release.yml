@@ -90,6 +90,9 @@ jobs:
           packaging/appimage/build-wayland-runtime.sh "$runtime"
           echo "PICO_APPIMAGE_WAYLAND_PREFIX=$runtime" >> "$GITHUB_ENV"
 
+      - name: Test AppImage update metadata
+        run: bash packaging/appimage/test-update-info.sh
+
       - name: Build and smoke-test AppImage
         run: |
           packaging/appimage/build.sh \

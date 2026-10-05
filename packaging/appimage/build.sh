@@ -21,8 +21,16 @@ wayland_prefix=${PICO_APPIMAGE_WAYLAND_PREFIX:-}
 # and that .zsync must sit next to an AppImage asset with the same name minus
 # the .zsync suffix.
 update_repo=${PICO_APPIMAGE_UPDATE_REPO:-${GITHUB_REPOSITORY:-reimeri/pico}}
+if [[ ! $update_repo =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "AppImage update repository must be OWNER/REPO: $update_repo" >&2
+    exit 1
+fi
+# gh-releases-zsync requires five pipe-separated fields: transport, owner,
+# repository, release channel, and asset pattern. OWNER/REPO is not one field.
+update_owner=${update_repo%%/*}
+update_name=${update_repo#*/}
 zsync_pattern="pico-*-linux-x86_64.AppImage.zsync"
-update_info="gh-releases-zsync|${update_repo}|latest|${zsync_pattern}"
+update_info="gh-releases-zsync|${update_owner}|${update_name}|latest|${zsync_pattern}"
 
 if [[ -n $wayland_prefix ]]; then
     wayland_prefix=$(realpath "$wayland_prefix")

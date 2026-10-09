@@ -2305,6 +2305,8 @@ done:
     return rc;
 }
 
+static int RunExpandedToolFoldCase(bool with_sidebar);
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -2323,6 +2325,8 @@ static int TestBottomFollowShellGeometryStable(void)
     {
         return 1;
     }
+    if (RunExpandedToolFoldCase(false) != 0 || RunExpandedToolFoldCase(true) != 0)
+        return 1;
     if (RunQuestionPanelShellCase(false) != 0 || RunQuestionPanelShellCase(true) != 0)
         return 1;
     if (RunFastFooterCase(false, false) != 0 || RunFastFooterCase(true, false) != 0 ||
@@ -3325,6 +3329,180 @@ done:
     {
         pico_host_free(host);
     }
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
+/* Retention may smooth short rows folding, but a vanished expanded output
+ * must not leave the viewport in empty retained space. Use the real timed
+ * grouping path, with a replacement live body still present in the message. */
+static int RunExpandedToolFoldCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-tool-fold-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-tool-fold-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id;
+    PicoAgentId agent_id;
+    PicoAgent *agent;
+    ShellTestState shell = {.composer_height = 44.0f};
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("tool fold setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        Fail("tool fold host init");
+        goto done;
+    }
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    if (!with_sidebar) host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &shell);
+    PicoAgentCreateOptions options = {
+        .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("tool fold agent setup");
+        goto done;
+    }
+    for (int i = 0; i < 28; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "tool fold history message");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    int tool_message = agent->message_count - 1;
+    char output[8192] = {0};
+    for (int i = 0; i < 160; i++) strcat(output, "A long expanded tool output line.\n");
+    PicoAgent_AddToolCallWithId(host, agent, "fold-output", "read", "{}");
+    PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false);
+    PicoAgent_AppendThink(host, agent, "next thought", 0);
+    agent->messages[tool_message].trace[0].expanded = true;
+    agent->messages[tool_message].trace[1].expanded = true;
+    agent->state = PICO_AGENT_LLM_WAIT;
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory),
+                         viewport, (Clay_ErrorHandler){0}))
+    {
+        Fail("tool fold Clay initialization");
+        goto done;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    float output_read_y = 0.0f;
+    /* Bottom-follow and a reader partway through the disappearing output
+     * both need to show the remaining group on the first presented frame. */
+    for (int manual = 0; manual < 2; manual++)
+    {
+        agent->messages[tool_message].trace[0].tool_done_t0 = pico_trace_now();
+        host->chat_follow_bottom = true;
+        PicoChat_ResetBottomSpace(host);
+        for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        Clay_ElementData tool = Clay_GetElementData(CLAY_IDI("MsgMain", tool_message));
+        if (!scroll.found || !scroll.scrollPosition || !tool.found ||
+            tool.boundingBox.height <= viewport.height)
+        {
+            Fail("expanded tool output must extend beyond the viewport before folding");
+            goto done;
+        }
+        Clay_ElementData viewport_box = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        output_read_y = scroll.scrollPosition->y + viewport_box.boundingBox.y -
+                        tool.boundingBox.y - tool.boundingBox.height / 2.0f;
+        if (manual)
+        {
+            host->chat_follow_bottom = false;
+            scroll.scrollPosition->y += scroll.scrollContainerDimensions.height / 2.0f;
+            LayoutChatStabilityFrame(host, viewport);
+        }
+        agent->messages[tool_message].trace[0].tool_done_t0 = 0.0;
+        LayoutChatStabilityFrame(host, viewport);
+        Clay_ElementData group = Clay_GetElementData(MainTraceRowId(tool_message, 0, "TraceGroupRow"));
+        Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        Clay_ElementData output_row = Clay_GetElementData(MainTraceRowId(tool_message, 0, "ToolRow"));
+        Clay_ElementData next_thought = Clay_GetElementData(MainTraceRowId(tool_message, 1, "ThinkRow"));
+        if (!group.found || output_row.found || !next_thought.found || !chat.found ||
+            !ShellVerticallyContains(chat.boundingBox, group.boundingBox) ||
+            host->chat_follow_bottom != (manual == 0))
+        {
+            Fail("folding an expanded output must reveal remaining content without changing follow mode");
+            goto done;
+        }
+        ChatStabilitySnapshot folded;
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &folded)) goto done;
+        for (int frame = 0; frame < 8; frame++)
+        {
+            LayoutChatStabilityFrame(host, viewport);
+            ChatStabilitySnapshot current;
+            if (!CaptureChatStabilitySnapshot(with_sidebar, &current) ||
+                !ChatStabilitySnapshotStable(&folded, &current, with_sidebar))
+            {
+                Fail("corrected tool fold layout must remain stable on later frames");
+                goto done;
+            }
+        }
+    }
+
+    /* A disappearing output must not trigger an extra jump to its group if
+     * later content keeps the old position valid and the viewport nonempty. */
+    for (int i = 0; i < 80; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "later content below the output");
+    PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false);
+    agent->messages[tool_message].trace[0].tool_done_t0 = pico_trace_now();
+    host->chat_follow_bottom = true;
+    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    host->chat_follow_bottom = false;
+    scroll.scrollPosition->y = output_read_y;
+    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    float before_fold = scroll.scrollPosition->y;
+    agent->messages[tool_message].trace[0].tool_done_t0 = 0.0;
+    for (int frame = 0; frame < 2; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+        scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition ||
+            fabsf(scroll.scrollPosition->y - before_fold) > 0.5f || host->chat_follow_bottom)
+        {
+            Fail("folding output must not reposition a still-valid scrolled view");
+            goto done;
+        }
+    }
+    Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    bool visible_content = false;
+    for (int i = tool_message + 1; chat.found && i < agent->message_count; i++)
+    {
+        Clay_ElementData message = Clay_GetElementData(CLAY_IDI("MsgMain", i));
+        if (message.found && message.boundingBox.y < chat.boundingBox.y + chat.boundingBox.height &&
+            message.boundingBox.y + message.boundingBox.height > chat.boundingBox.y)
+        {
+            visible_content = true;
+            break;
+        }
+    }
+    if (!scroll.found || !scroll.scrollPosition || !visible_content ||
+        before_fold < scroll.scrollContainerDimensions.height - scroll.contentDimensions.height)
+    {
+        Fail("folding output must leave a valid nonempty scrolled view at its existing offset");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (host) pico_host_free(host);
     Clay_SetCurrentContext(previous);
     free(memory);
     unsetenv("XDG_CONFIG_HOME");

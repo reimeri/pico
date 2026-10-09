@@ -2594,7 +2594,9 @@ bool PicoChat_StabilizeScrollLayout(PicoHost *app)
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     Clay_ElementData spacer = Clay_GetElementData(CLAY_ID("ChatStabilizationSpacer"));
     Clay_ElementData content = Clay_GetElementData(CLAY_ID("ChatContent"));
-    if (!state || !scroll.found || !scroll.scrollPosition || !spacer.found || !content.found)
+    Clay_ElementData clearance = Clay_GetElementData(CLAY_ID("ChatBottomSpacer"));
+    if (!state || !scroll.found || !scroll.scrollPosition || !spacer.found || !content.found ||
+        !clearance.found)
     {
         return false;
     }
@@ -2638,6 +2640,18 @@ bool PicoChat_StabilizeScrollLayout(PicoHost *app)
         float needed = fmaxf(0.0f, -state->bottom_input_y + viewport - natural);
         state->bottom_space = fminf(state->bottom_space, needed);
         state->bottom_extent = natural + state->bottom_space;
+    }
+    /* Retain space to smooth grouping shifts only while real content remains
+     * in view. Exclude overlay clearance: a viewport entirely below the
+     * transcript must return to its natural scroll range, not blank padding. */
+    float transcript_end = clearance.boundingBox.y - content.boundingBox.y;
+    float wanted_top = app->chat_follow_bottom
+                           ? fmaxf(0.0f, natural + state->bottom_space - viewport)
+                           : fmaxf(0.0f, -state->bottom_input_y);
+    if (state->bottom_space > 0.0f && wanted_top >= transcript_end)
+    {
+        state->bottom_space = 0.0f;
+        state->bottom_extent = natural;
     }
     float bottom = fminf(0.0f, viewport - natural - state->bottom_space);
     float target = app->chat_follow_bottom ? bottom : fmaxf(bottom, fminf(0.0f, state->bottom_input_y));

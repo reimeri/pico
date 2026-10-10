@@ -15,6 +15,17 @@ PicoRegistrationGeneration *PicoAgent_Registration(PicoAgent *agent);
 /* A delayed selected-transcript reader reconciles if this ring wraps. */
 #define PICO_TRANSCRIPT_CHANGE_CAP 256
 
+typedef struct PicoSteeringMessage {
+    struct PicoSteeringMessage *next;
+    uint64_t id;
+    char *text;
+    char *display;
+    char *parts_json;
+    char *input_json;
+    size_t bytes;
+    MdDocument doc;
+} PicoSteeringMessage;
+
 struct PicoAgent {
     PicoWorkspace *workspace;
     PicoAgentId id;
@@ -41,6 +52,14 @@ struct PicoAgent {
     uint64_t transcript_reset_generation;
     uint64_t transcript_change_seq;
     int transcript_changes[PICO_TRANSCRIPT_CHANGE_CAP];
+
+    PicoSteeringMessage *steering_head;
+    PicoSteeringMessage *steering_tail;
+    int steering_count;
+    size_t steering_bytes;
+    uint64_t last_steering_id;
+    bool settling_error; /* no new turns/close while error callbacks are dispatched */
+    bool steering_delivery; /* prevents recursive delivery from message hooks */
 
     PicoAgentState state;
     bool unseen_complete;

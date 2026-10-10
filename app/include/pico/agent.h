@@ -8,6 +8,9 @@
 #define PICO_EFFORT_LEN 16
 #endif
 
+#define PICO_MAX_STEERING_MESSAGES 32
+#define PICO_MAX_STEERING_BYTES (1024 * 1024)
+
 #define PICO_MAX_AGENTS 16       /* per workspace, including subagents */
 #define PICO_MAX_TOTAL_AGENTS 32 /* host-wide across all workspaces */
 #define PICO_MAX_SUBAGENT_PROFILES 32
@@ -106,6 +109,7 @@ typedef struct PicoAgentInfo {
     bool busy;
     bool cancelling;
     bool resumable;
+    int pending_steering;
 } PicoAgentInfo;
 
 PicoAgentId pico_agent_id(const PicoAgent *agent);
@@ -119,6 +123,17 @@ PicoAgentId pico_agent_active(const PicoHost *host);
 bool pico_agent_select(PicoHost *host, PicoAgentId id);
 int pico_subagent_profile_count(const PicoHost *host);
 bool pico_subagent_profile_info(const PicoHost *host, int index, PicoSubagentProfileInfo *out);
+
+/* Borrowed main-thread pending input, invalidated by queue mutation, pumping,
+ * session replacement, or close. Neither acceptance nor inspection delivers it. */
+typedef struct PicoSteeringInfo {
+    uint64_t id; /* positive, session-local */
+    const char *text;
+    const char *display;
+    const char *parts_json;
+} PicoSteeringInfo;
+int pico_agent_steering_count(const PicoHost *host, PicoAgentId id);
+bool pico_agent_steering_info(const PicoHost *host, PicoAgentId id, int index, PicoSteeringInfo *out);
 
 /* Worker callback context. All returned strings are read-only and valid only
  * for the duration of the callback that received ctx. */

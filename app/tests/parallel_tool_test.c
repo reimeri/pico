@@ -23,6 +23,7 @@ typedef struct ParallelFixture {
     int rewrite_mode;
     char applied_order[64];
     char history_order[64];
+    bool steering_after_results;
 } ParallelFixture;
 
 static ParallelFixture g_parallel = {
@@ -144,12 +145,15 @@ static int ParallelProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
     int round = child ? (has_results ? 2 : 1) : ++g_parallel.calls;
     if (!child && round > 1)
     {
+        int results = 0;
         for (int i = 0; i < turn->input_count; i++)
         {
+            if (strstr(turn->input_json[i], "parallel steering")) g_parallel.steering_after_results = results == g_parallel.count;
             JsonDoc doc;
             JsonParse(&doc, turn->input_json[i], strlen(turn->input_json[i]));
             if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_result"))
             {
+                results++;
                 char *id = JsonObjStr(&doc, 0, "call_id");
                 size_t n = strlen(g_parallel.history_order);
                 snprintf(g_parallel.history_order + n, sizeof(g_parallel.history_order) - n,
@@ -192,6 +196,7 @@ static void ParallelInit(PicoHost *app, int count, int limit)
     pthread_mutex_lock(&g_parallel.mu);
     g_parallel.entered = g_parallel.released = g_parallel.exited = 0;
     g_parallel.calls = 0;
+    g_parallel.steering_after_results = false;
     g_parallel.count = count;
     g_parallel.barrier = -1;
     g_parallel.rewrite_mode = -1;
@@ -578,4 +583,20 @@ static int TestSubagentIdentityRewrite(void)
     unlink(path); unlink(worker_path); rmdir(dir); rmdir(temp);
     snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
     return ok ? 0 : Fail("delegation identity rewrite", "identity changed or an equivalent identity/task-only edit was rejected");
+}
+
+static int TestParallelSteering(void)
+{
+    PicoHost app; ParallelInit(&app, 2, 2);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "parallel batch");
+    bool ok = ParallelWait(&app, 3, false) && pico_agent_steer(&app, agent->id, "parallel steering", NULL) == PICO_OK;
+    ParallelRelease(2); ok &= ParallelResult(&app, 1);
+    pthread_mutex_lock(&g_parallel.mu);
+    ok &= g_parallel.calls == 1;
+    pthread_mutex_unlock(&g_parallel.mu);
+    ok &= pico_agent_steering_count(&app, agent->id) == 1;
+    ParallelRelease(~0u); ok &= WaitForIdle(&app) && g_parallel.steering_after_results;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("parallel steering", "steering interleaved with unfinished tool-call results");
 }

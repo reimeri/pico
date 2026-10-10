@@ -24,6 +24,7 @@ typedef enum PicoResult {
     PICO_SESSION_IN_USE,
     PICO_SESSION_INVALID,
     PICO_NO_MEMORY,
+    PICO_PERSISTENCE_FAILED,
 } PicoResult;
 
 typedef enum PicoHostShutdownResult {
@@ -55,6 +56,9 @@ PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id);
 PicoResult pico_main_agent_create(PicoHost *host, PicoWorkspaceId workspace_id,
                                   const PicoAgentCreateOptions *options, PicoAgentId *out);
 PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json);
+/* Main thread. Copies input; OK means queued, not delivered. Active user-main
+ * agents only, including compaction. Does not run composer preprocessing. */
+PicoResult pico_agent_steer(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json);
 PicoResult pico_agent_cancel(PicoHost *host, PicoAgentId id);
 PicoResult pico_agent_force_cancel(PicoHost *host, PicoAgentId id);
 PicoResult pico_agent_close(PicoHost *host, PicoAgentId id);

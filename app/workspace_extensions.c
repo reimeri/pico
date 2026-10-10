@@ -422,6 +422,7 @@ void PicoWorkspace_RunHooks(PicoWorkspace *workspace, PicoHook hook, PicoAgentId
     PicoHookEvent event;
     memset(&event, 0, sizeof(event));
     event.hook = hook;
+    event.submit_kind = PICO_SUBMIT_TURN;
     event.agent_id = agent_id;
 
     const PicoRegistrationGeneration *registration = workspace->active_registration;

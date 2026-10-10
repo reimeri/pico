@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts);
@@ -1524,7 +1525,7 @@ void pico_clear_registrations(PicoHost *app)
     }
 }
 
-void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
+static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSubmitKind submit_kind)
 {
     PicoHookEvent event;
     if (!host)
@@ -1532,6 +1533,7 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
         return;
     }
     event.hook = hook;
+    event.submit_kind = submit_kind;
     event.agent_id = agent_id;
     if (hook == PICO_HOOK_AFTER_LAYOUT || hook == PICO_HOOK_AFTER_RENDER)
     {
@@ -1582,6 +1584,11 @@ void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
             PicoHost_EvictHoldPop(host, hold);
         }
     }
+}
+
+void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
+{
+    RunHooks(host, hook, agent_id, hook == PICO_HOOK_ON_STEER ? PICO_SUBMIT_STEERING : PICO_SUBMIT_TURN);
 }
 
 static char LayoutLetter(int key)
@@ -1671,7 +1678,7 @@ static void RunSlot(PicoHost *host, PicoUiSlot slot)
 
 static void AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
                                  PicoNoticeSeverity severity, const char *markdown,
-                                 MdDocument *prepared, const char *prepared_source, bool persist_notice)
+                                 MdDocument *prepared, const char *prepared_source, bool persist_notice, uint64_t steering_id)
 {
     if (!app || !agent)
     {
@@ -1691,6 +1698,7 @@ static void AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
     PicoMessage *msg = &agent->messages[agent->message_count++];
     memset(msg, 0, sizeof(*msg));
     msg->role = role;
+    msg->steering_id = steering_id;
     msg->notice_severity = severity;
     size_t len = markdown ? strlen(markdown) : 0;
     msg->source = (char *)malloc(len + 1);
@@ -1715,22 +1723,37 @@ static void AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
 
 void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
                                   const char *markdown, MdDocument *prepared,
-                                  const char *prepared_source)
+                                  const char *prepared_source, uint64_t steering_id)
 {
     if (role != PICO_ROLE_USER && role != PICO_ROLE_ASSISTANT) return;
-    AddTranscriptMessage(app, agent, role, PICO_NOTICE_INFO, markdown, prepared, prepared_source, false);
+    AddTranscriptMessage(app, agent, role, PICO_NOTICE_INFO, markdown, prepared, prepared_source, false, steering_id);
 }
 
 void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
                          const char *markdown)
 {
     if (severity < PICO_NOTICE_INFO || severity > PICO_NOTICE_ERROR) return;
-    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, false);
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, false, 0);
+}
+
+void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)
+{
+    AddTranscriptMessage(app, agent, PICO_ROLE_USER, PICO_NOTICE_INFO, markdown, NULL, NULL, false, id);
+}
+
+void PicoAgent_AddSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)
+{
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, PICO_NOTICE_WARNING, markdown, NULL, NULL, true, id);
+}
+
+void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)
+{
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, PICO_NOTICE_WARNING, markdown, NULL, NULL, false, id);
 }
 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown)
 {
-    PicoAgent_AddMessagePrepared(app, agent, role, markdown, NULL, NULL);
+    PicoAgent_AddMessagePrepared(app, agent, role, markdown, NULL, NULL, 0);
 }
 
 void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const char *text,
@@ -1746,7 +1769,7 @@ void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const ch
     }
     if (agent->message_count <= 0 || agent->messages[agent->message_count - 1].role != PICO_ROLE_ASSISTANT)
     {
-        PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_ASSISTANT, text, prepared, prepared_source);
+        PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_ASSISTANT, text, prepared, prepared_source, 0);
         return;
     }
     if (!text[0])
@@ -1932,7 +1955,7 @@ void PicoHost_AddNotice(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity 
     PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
     if (!agent) return;
     if (severity < PICO_NOTICE_INFO || severity > PICO_NOTICE_ERROR) return;
-    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, true);
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, true, 0);
 }
 
 void PicoHost_AddMessage(PicoHost *app, PicoAgentId agent_id, PicoRole role, const char *markdown)
@@ -2088,7 +2111,7 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
         free(normalized);
         return PICO_INVALID;
     }
-    if (PicoSession_LoadBlocksSubmit(host, agent->id) || PicoAgent_IsBusy(agent) ||
+    if (agent->settling_error || PicoSession_LoadBlocksSubmit(host, agent->id) || PicoAgent_IsBusy(agent) ||
         !PicoWorkspace_AcceptsNewWork(agent->workspace))
     {
         free(normalized);
@@ -2182,13 +2205,36 @@ void PicoHost_Submit(PicoHost *app)
     if (app && app->clarification_view_id) { PicoClarification_Submit(app); return; }
     PicoAgentId id = app ? app->selected_agent_id : 0;
     PicoAgent *active = PicoHost_FindAgent(app, id);
-    if (!app || !active || !PicoWorkspace_AcceptsNewWork(active->workspace) ||
-        ((active->state == PICO_AGENT_LLM_WAIT || active->state == PICO_AGENT_TOOL_WAIT ||
-          active->state == PICO_AGENT_COMPACT_WAIT) &&
-         !BusyCommandAllowed(app, active->workspace, app->composer.text)))
+    if (!app || !active || !PicoWorkspace_AcceptsNewWork(active->workspace)) return;
+    bool busy = PicoAgent_IsBusy(active);
+    bool steering = busy && PicoAgent_IsUserMain(active);
+    /* Registered slash commands keep their explicit busy opt-in. Unrecognized
+     * slash-prefixed text remains user input, as it does on idle submission. */
+    const char *draft = app->composer.text ? app->composer.text : "";
+    while (isspace((unsigned char)*draft)) draft++;
+    bool command = false;
+    if (*draft == '/')
     {
-        return;
+        const char *name = draft + 1;
+        while (isspace((unsigned char)*name)) name++;
+        const char *end = name;
+        while (*end && !isspace((unsigned char)*end)) end++;
+        for (int scope = 0; scope < 2; scope++)
+        {
+            const PicoCommand *commands = scope == 0 ? app->commands : active->workspace->commands;
+            int count = scope == 0 ? app->command_count : active->workspace->command_count;
+            for (int i = 0; i < count; i++)
+                if (strlen(commands[i].name) == (size_t)(end - name) &&
+                    strncasecmp(commands[i].name, name, (size_t)(end - name)) == 0) command = true;
+        }
     }
+    if (busy && command)
+    {
+        if (!BusyCommandAllowed(app, active->workspace, draft)) return;
+        steering = false;
+    }
+    else if (busy && (!steering || PicoAgent_CancelRequested(active) ||
+                     PicoSession_LoadReplacesAgent(app, id))) return;
     if (!PicoAgent_RevalidateToolPolicy(app, active))
     {
         pico_status_warn(app, "This agent's restricted tool policy references a tool that is not currently registered.");
@@ -2197,7 +2243,7 @@ void PicoHost_Submit(PicoHost *app)
 
     PicoComposer *c = &app->composer;
     bool has_attach = PicoComposer_HasAttachments(app);
-    PicoModel *model = PicoSettings_SelectedModel(active);
+    PicoModel *model = steering ? PicoSettings_ActiveModel(active) : PicoSettings_SelectedModel(active);
     if (has_attach && model && !model->vision)
     {
         free(app->agent_input);
@@ -2250,7 +2296,7 @@ void PicoHost_Submit(PicoHost *app)
     free(app->agent_parts);
     app->agent_parts = NULL;
     app->submit_cancel = false;
-    pico_run_hooks(app, PICO_HOOK_BEFORE_SUBMIT, id);
+    RunHooks(app, PICO_HOOK_BEFORE_SUBMIT, id, steering ? PICO_SUBMIT_STEERING : PICO_SUBMIT_TURN);
     if (app->submit_cancel)
     {
         free(app->agent_input);
@@ -2298,8 +2344,19 @@ void PicoHost_Submit(PicoHost *app)
     char *display_owned = has_attach ? pico_composer_display_message(typed) : NULL;
     const char *display = display_owned ? display_owned : typed;
     app->chat_follow_bottom = true;
-    if (SubmitPreparedTurn(app, active, text, display, app->agent_parts) != PICO_OK)
+    PicoResult result = steering ? PicoAgent_QueueSteering(app, active, text, display, app->agent_parts)
+                                : SubmitPreparedTurn(app, active, text, display, app->agent_parts);
+    if (result != PICO_OK)
     {
+        if (steering)
+        {
+            const char *reason = result == PICO_LIMIT ? "The steering queue is full; the draft was kept." :
+                                 result == PICO_PERSISTENCE_FAILED ? "Could not persist steering; the draft was kept." :
+                                 result == PICO_NO_MEMORY ? "Could not prepare steering; the draft was kept." :
+                                 result == PICO_INVALID ? "Invalid steering input or unsupported attachments; the draft was kept." :
+                                 "This agent cannot accept steering now; the draft was kept.";
+            pico_status_warn(app, reason);
+        }
         free(display_owned);
         free(app->agent_input);
         app->agent_input = NULL;
@@ -2321,7 +2378,7 @@ void PicoHost_Submit(PicoHost *app)
     app->agent_input = NULL;
     free(app->agent_parts);
     app->agent_parts = NULL;
-    pico_run_hooks(app, PICO_HOOK_ON_SUBMIT, id);
+    if (!steering) pico_run_hooks(app, PICO_HOOK_ON_SUBMIT, id);
 }
 
 void PicoHost_RequestSubmitCancel(PicoHost *host)
@@ -2976,6 +3033,8 @@ PicoResult PicoWorkspace_RequestReload(PicoHost *host, PicoWorkspace *workspace,
     {
         workspace->state = PICO_WORKSPACE_RELOADING;
         PicoWorkspace_SetAcceptingWork(workspace, false);
+        for (int i = 0; i < workspace->count; i++)
+            PicoAgent_InvalidateSteering(host, workspace->agents[i], "workspace reload requested");
         PicoWorkspace_PrepareReload(workspace);
     }
     return PICO_OK;
@@ -3007,6 +3066,7 @@ PicoResult pico_workspace_request_close(PicoHost *host, PicoWorkspaceId id)
     {
         if (workspace->agents[i])
         {
+            PicoAgent_InvalidateSteering(host, workspace->agents[i], "workspace close requested");
             PicoAgent_Cancel(workspace->agents[i]);
         }
     }
@@ -3069,6 +3129,14 @@ PicoResult pico_agent_submit(PicoHost *host, PicoAgentId id, const char *text, c
     if (result == PICO_OK)
         pico_host_request_redraw(host);
     return result;
+}
+
+PicoResult pico_agent_steer(PicoHost *host, PicoAgentId id, const char *text, const char *parts_json)
+{
+    if (!host) return PICO_INVALID;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    if (!agent) return PICO_NOT_FOUND;
+    return PicoAgent_QueueSteering(host, agent, text, text, parts_json);
 }
 
 static void PicoHost_PumpLifecycle(PicoHost *host);
@@ -3655,6 +3723,7 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
     for (int i = 0; i < count; i++)
     {
         copy[i].role = src[i].role;
+        copy[i].steering_id = src[i].steering_id;
         copy[i].notice_severity = src[i].notice_severity;
         copy[i].source = src[i].source ? JsonDup(src[i].source) : NULL;
         if (src[i].source && !copy[i].source)

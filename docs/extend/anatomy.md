@@ -1,6 +1,6 @@
 # Anatomy
 
-Every user extension is one `.c` file that exports `pico_ext`. ABI 18 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
+Every user extension is one `.c` file that exports `pico_ext`. ABI 19 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
 
 ```c
 #include "pico/plugin.h"

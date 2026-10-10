@@ -274,11 +274,11 @@ static char *DupLen(const char *s, size_t n)
     return out;
 }
 
-static void PushInput(PicoAgentRt *rt, char *json)
+static bool PushInput(PicoAgentRt *rt, char *json)
 {
     if (!json)
     {
-        return;
+        return false;
     }
     if (rt->input_count >= rt->input_cap)
     {
@@ -287,12 +287,13 @@ static void PushInput(PicoAgentRt *rt, char *json)
         if (!next)
         {
             free(json);
-            return;
+            return false;
         }
         rt->input = next;
         rt->input_cap = cap;
     }
     rt->input[rt->input_count++].json = json;
+    return true;
 }
 
 static void ClearOfferedTools(PicoAgentRt *rt)
@@ -1595,6 +1596,12 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         }
     }
 
+    if (agent->runtime != rt || PicoAgent_CancelRequested(agent))
+    {
+        for (int i = 0; i < input_count; i++) free(input[i]);
+        free(input); free(instructions); free(tools);
+        return false;
+    }
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
     {
@@ -1634,7 +1641,6 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_input = input;
     rt->work_input_count = input_count;
     rt->busy = true;
-    rt->cancel = false;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
     return true;
@@ -2380,6 +2386,171 @@ static void AbortRemainingCalls(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt
     ClearPending(rt);
 }
 
+static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg);
+static void StartLlm(PicoHost *app, PicoAgent *agent);
+
+static void FreeSteering(PicoSteeringMessage *message)
+{
+    if (!message) return;
+    free(message->text);
+    free(message->display);
+    free(message->parts_json);
+    free(message->input_json);
+    MdDocument_Free(&message->doc);
+    free(message);
+}
+
+void PicoAgent_InvalidateSteering(PicoHost *host, PicoAgent *agent, const char *reason)
+{
+    if (!agent || !agent->steering_head) return;
+    PicoSteeringMessage *message = agent->steering_head;
+    agent->steering_head = agent->steering_tail = NULL;
+    agent->steering_count = 0;
+    agent->steering_bytes = 0;
+    while (message)
+    {
+        PicoSteeringMessage *next = message->next;
+        PicoSession_LogSteeringStopped(host, agent, message->id, reason);
+        char *notice = PicoSteering_NotDelivered(message->display, reason);
+        PicoAgent_AddSteeringNotice(host, agent, message->id, notice ? notice : "Steering not delivered");
+        free(notice);
+        FreeSteering(message);
+        message = next;
+    }
+    pico_host_request_redraw(host);
+}
+
+PicoResult PicoAgent_QueueSteering(PicoHost *host, PicoAgent *agent, const char *text,
+                                   const char *display, const char *parts_json)
+{
+    char *parts = NULL;
+    if (!host || !agent || !PicoAgent_IsUserMain(agent) || !agent->runtime) return PICO_INVALID;
+    if (agent->settling_error || !PicoAgent_IsBusy(agent) || PicoAgent_CancelRequested(agent) ||
+        !PicoWorkspace_AcceptsNewWork(agent->workspace) ||
+        PicoSession_LoadReplacesAgent(host, agent->id) || host->session_replay_agent == agent)
+        return PICO_BUSY;
+    if (parts_json && parts_json[0] && !pico_canonical_normalize_user_parts(parts_json, &parts))
+        return PICO_INVALID;
+    if ((!text || !text[0]) && !parts) { free(parts); return PICO_INVALID; }
+    char *input_json = BuildUserItem(text, parts);
+    if (!input_json) { free(parts); return PICO_NO_MEMORY; }
+    PicoModel *model = PicoSettings_ActiveModel(agent);
+    if (model && !model->vision && pico_canonical_json_has_media(input_json))
+    { free(input_json); free(parts); return PICO_INVALID; }
+    char *parts_display = NULL;
+    if ((!display || !display[0]) && (!text || !text[0]) && parts)
+    {
+        JsonDoc doc;
+        PicoLlmPart *parsed = NULL;
+        int count = 0;
+        if (JsonParse(&doc, input_json, strlen(input_json)) == 0)
+        {
+            if (pico_canonical_parse_parts(&doc, 0, &parsed, &count))
+            {
+                JsonBuf b; JsonBuf_Init(&b);
+                for (int i = 0; i < count; i++)
+                {
+                    if (i) JsonBuf_Puts(&b, "\n\n");
+                    if (parsed[i].kind == PICO_LLM_PART_TEXT) JsonBuf_Puts(&b, parsed[i].text ? parsed[i].text : "");
+                    else
+                    {
+                        JsonBuf_Puts(&b, parsed[i].kind == PICO_LLM_PART_IMAGE ? "Image: " : "Audio: ");
+                        JsonBuf_Puts(&b, parsed[i].path ? parsed[i].path : (parsed[i].url ? parsed[i].url : "attachment"));
+                    }
+                }
+                parts_display = JsonBuf_Steal(&b);
+            }
+            pico_canonical_free_parts(parsed, count);
+            JsonFree(&doc);
+        }
+        if (!parts_display) { free(input_json); free(parts); return PICO_NO_MEMORY; }
+    }
+    const char *shown = parts_display ? parts_display : (display && display[0] ? display : (text ? text : ""));
+    size_t bytes = strlen(text ? text : "") + strlen(shown) + (parts ? strlen(parts) : 0);
+    if (agent->steering_count >= PICO_MAX_STEERING_MESSAGES || bytes > PICO_MAX_STEERING_BYTES ||
+        agent->steering_bytes > PICO_MAX_STEERING_BYTES - bytes || agent->last_steering_id == UINT64_MAX)
+    { free(input_json); free(parts_display); free(parts); return PICO_LIMIT; }
+    PicoSteeringMessage *message = calloc(1, sizeof(*message));
+    if (!message) { free(input_json); free(parts_display); free(parts); return PICO_NO_MEMORY; }
+    message->text = Dup(text ? text : "");
+    message->display = Dup(shown);
+    free(parts_display);
+    message->parts_json = parts;
+    message->input_json = input_json;
+    message->bytes = bytes;
+    message->id = agent->last_steering_id + 1;
+    if (!message->text || !message->display || !message->input_json)
+    { FreeSteering(message); return PICO_NO_MEMORY; }
+    if (PicoSession_LogSteering(host, agent, message->id, message->text, message->display, parts)
+        == PICO_SESSION_WRITE_FAILED)
+    { FreeSteering(message); return PICO_PERSISTENCE_FAILED; }
+    message->doc = MdDocument_ParseEx(message->display, strlen(message->display), MD_PARSE_PRESERVE_NEWLINES);
+    agent->last_steering_id = message->id;
+    if (agent->steering_tail) agent->steering_tail->next = message;
+    else agent->steering_head = message;
+    agent->steering_tail = message;
+    agent->steering_count++;
+    agent->steering_bytes += bytes;
+    agent->last_activity = PicoClock_Monotonic();
+    agent->workspace->last_activity = agent->last_activity;
+    pico_host_request_redraw(host);
+    pico_run_hooks(host, PICO_HOOK_ON_STEER, agent->id);
+    return PICO_OK;
+}
+
+/* Snapshot membership: input enqueued from ON_MESSAGE belongs to the next
+ * boundary. Commit canonical history and persistence before invoking hooks. */
+static bool DeliverSteering(PicoHost *host, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    if (agent->steering_delivery || !agent->steering_head) return false;
+    uint64_t through = agent->steering_tail->id;
+    bool delivered = false;
+    agent->steering_delivery = true;
+    while (agent->steering_head && agent->steering_head->id <= through &&
+           agent->runtime == rt && !PicoAgent_CancelRequested(agent))
+    {
+        PicoSteeringMessage *message = agent->steering_head;
+        char *input = message->input_json;
+        message->input_json = NULL;
+        if (!PushInput(rt, input))
+        {
+            agent->steering_delivery = false;
+            SetErrorState(host, agent, "Could not deliver steering: out of memory");
+            return delivered;
+        }
+        agent->steering_head = message->next;
+        if (!agent->steering_head) agent->steering_tail = NULL;
+        agent->steering_count--;
+        agent->steering_bytes -= message->bytes;
+        delivered = true;
+        PicoSession_LogSteeringDelivered(host, agent, message->id, message->text,
+                                         message->display, message->parts_json);
+        PicoAgent_AddSteeringMessage(host, agent, message->id, message->display);
+        FreeSteering(message);
+    }
+    agent->steering_delivery = false;
+    pico_host_request_redraw(host);
+    return delivered;
+}
+
+int pico_agent_steering_count(const PicoHost *host, PicoAgentId id)
+{
+    const PicoAgent *agent = PicoHost_FindAgentConst(host, id);
+    return agent ? agent->steering_count : 0;
+}
+
+bool pico_agent_steering_info(const PicoHost *host, PicoAgentId id, int index, PicoSteeringInfo *out)
+{
+    const PicoAgent *agent = PicoHost_FindAgentConst(host, id);
+    if (!out || !agent || index < 0) return false;
+    const PicoSteeringMessage *message = agent->steering_head;
+    while (message && index-- > 0) message = message->next;
+    if (!message) return false;
+    *out = (PicoSteeringInfo){message->id, message->text, message->display, message->parts_json};
+    return true;
+}
+
 static void GoIdle(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -2427,7 +2598,8 @@ void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index)
         return;
     }
     PicoMessage *message = &agent->messages[message_index];
-    PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+    if (message->steering_id) PicoSession_LogSteeringNotice(app, agent, message->steering_id, message->source);
+    else PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
 }
 
 static void FlushStreamNotices(PicoHost *app, PicoAgent *agent)
@@ -2439,7 +2611,10 @@ static void FlushStreamNotices(PicoHost *app, PicoAgent *agent)
     {
         PicoMessage *message = &agent->messages[i];
         if (message->role == PICO_ROLE_NOTICE)
-            PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+        {
+            if (message->steering_id) PicoSession_LogSteeringNotice(app, agent, message->steering_id, message->source);
+            else PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+        }
     }
 }
 
@@ -2526,6 +2701,22 @@ static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary
     pico_run_hooks(app, PICO_HOOK_AFTER_COMPACT, agent->id);
 }
 
+/* These boundaries have no provider/tool work left. A cancellation raised
+ * by a delivery hook must settle now; there may be no later worker event. */
+static void ContinueSettled(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt, bool followup)
+{
+    if (agent->runtime != rt || agent->state == PICO_AGENT_ERROR) return;
+    if (PicoAgent_CancelRequested(agent))
+    {
+        agent->state = PICO_AGENT_TOOL_WAIT; /* assistant response is already persisted */
+        ApplyCancel(app, agent);
+    }
+    else if (followup) StartLlm(app, agent);
+    else EndTurnIdle(app, agent);
+}
+
+static void ContinueAfterCompact(PicoHost *app, PicoAgent *agent);
+
 static void StartCompact(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -2536,37 +2727,49 @@ static void StartCompact(PicoHost *app, PicoAgent *agent)
     free(agent->compact_summary);
     agent->compact_summary = NULL;
     if (!agent->clarification) pico_run_hooks(app, PICO_HOOK_ON_COMPACT, agent->id);
+    if (agent->runtime != rt) return;
+    if (PicoAgent_CancelRequested(agent)) { ApplyCancel(app, agent); return; }
     if (agent->compact_summary && agent->compact_summary[0])
     {
         ApplyCompaction(app, agent, agent->compact_summary);
-        EndTurnIdle(app, agent);
+        if (agent->runtime == rt) ContinueAfterCompact(app, agent);
         return;
     }
     rt->compacting = true;
     rt->compact_no_tools = false;
-    if (!QueueLlm(app, agent, true, true))
+    if (!QueueLlm(app, agent, true, true) && agent->runtime == rt)
     {
-        SetErrorState(app, agent, "Failed to start compaction");
+        if (PicoAgent_CancelRequested(agent)) ApplyCancel(app, agent);
+        else if (agent->state != PICO_AGENT_ERROR) SetErrorState(app, agent, "Failed to start compaction");
     }
+}
+
+static void ContinueAfterCompact(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    rt->compacting = false;
+    rt->compact_no_tools = false;
+    bool delivered = DeliverSteering(app, agent);
+    ContinueSettled(app, agent, rt, delivered);
 }
 
 static void FinishTurn(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
-    {
         RemoveMessage(app, agent, rt->stream_msg);
-    }
-    if (CompactThreshold(agent) > 0 && agent->tokens_used >= CompactThreshold(agent))
+    if (!PicoAgent_CancelRequested(agent) && CompactThreshold(agent) > 0 && agent->tokens_used >= CompactThreshold(agent))
     {
         StartCompact(app, agent);
         return;
     }
-    EndTurnIdle(app, agent);
+    bool delivered = DeliverSteering(app, agent);
+    ContinueSettled(app, agent, rt, delivered);
 }
 
 static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
 {
+    agent->settling_error = true;
     PicoAgentRt *rt = agent->runtime;
     SweepProvisionalRows(agent, rt);
     if (agent->state == PICO_AGENT_LLM_WAIT && rt->llm_started && !rt->compacting)
@@ -2576,6 +2779,7 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
     free(agent->error);
     agent->error = Dup(msg ? msg : "agent error");
     agent->state = PICO_AGENT_ERROR;
+    PicoAgent_InvalidateSteering(app, agent, "agent error");
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {
         RemoveMessage(app, agent, rt->stream_msg);
@@ -2588,6 +2792,7 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
     agent->activity[0] = '\0';
     PicoHost_AddNotice(app, agent->id, PICO_NOTICE_ERROR, agent->error);
     pico_run_hooks(app, PICO_HOOK_ON_ERROR, agent->id);
+    agent->settling_error = false;
 }
 
 static void StartLlm(PicoHost *app, PicoAgent *agent);
@@ -2684,7 +2889,8 @@ static void StartNextTool(PicoHost *app, PicoAgent *agent)
     if (!rt->running_tools)
     {
         ClearPending(rt);
-        StartLlm(app, agent);
+        DeliverSteering(app, agent);
+        ContinueSettled(app, agent, rt, true);
     }
 }
 
@@ -2705,6 +2911,8 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
         PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, "");
         if (rt->stream_msg >= agent->message_count) rt->stream_msg = -1;
     }
+    if (agent->runtime != rt) return;
+    if (PicoAgent_CancelRequested(agent)) { ContinueSettled(app, agent, rt, false); return; }
     rt->stream_dirty = false;
     rt->stream_reparse_at = 0; /* first streamed delta renders immediately */
     ClearProvStream(rt);
@@ -2712,9 +2920,10 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
     SetActivity(app, agent, "Thinking…");
     free(agent->error);
     agent->error = NULL;
-    if (!QueueLlm(app, agent, false, true) && agent->state != PICO_AGENT_ERROR)
+    if (!QueueLlm(app, agent, false, true) && agent->runtime == rt)
     {
-        SetErrorState(app, agent, "Failed to start model request");
+        if (PicoAgent_CancelRequested(agent)) ContinueSettled(app, agent, rt, false);
+        else if (agent->state != PICO_AGENT_ERROR) SetErrorState(app, agent, "Failed to start model request");
     }
 }
 
@@ -3244,9 +3453,10 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
         if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
             rt->compact_no_tools = true;
-            if (!QueueLlm(app, agent, true, false))
+            if (!QueueLlm(app, agent, true, false) && agent->runtime == rt)
             {
-                SetErrorState(app, agent, "Failed to start compaction");
+                if (PicoAgent_CancelRequested(agent)) ApplyCancel(app, agent);
+                else if (agent->state != PICO_AGENT_ERROR) SetErrorState(app, agent, "Failed to start compaction");
             }
             return;
         }
@@ -3260,7 +3470,7 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
         {
             ApplyCompaction(app, agent, text);
             free(text);
-            EndTurnIdle(app, agent);
+            if (agent->runtime == rt) ContinueAfterCompact(app, agent);
             return;
         }
         free(text);
@@ -3936,6 +4146,9 @@ void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
     {
         return;
     }
+    pthread_mutex_lock(&agent->runtime->mu);
+    agent->runtime->cancel = false;
+    pthread_mutex_unlock(&agent->runtime->mu);
     agent->runtime->turn_fast = agent->fast;
     agent->running_fast = agent->fast;
     if (agent->clarification)
@@ -3993,6 +4206,7 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
     {
         return true;
     }
+    PicoAgent_InvalidateSteering(agent->workspace ? agent->workspace->host : NULL, agent, "agent closed");
     PicoAgentRt *rt = agent->runtime;
     if (rt)
     {
@@ -4058,6 +4272,9 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
     pthread_mutex_unlock(&agent->runtime->mu);
     agent->tokens_per_second = 0.0;
     agent->has_tokens_per_second = false;
+    pthread_mutex_lock(&agent->runtime->mu);
+    agent->runtime->cancel = false;
+    pthread_mutex_unlock(&agent->runtime->mu);
     agent->runtime->turn_fast = agent->fast;
     agent->running_fast = agent->fast;
     if (agent->clarification)
@@ -4109,6 +4326,7 @@ void PicoAgent_Cancel(PicoAgent *agent)
     rt->cancel = true;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    PicoAgent_InvalidateSteering(agent->workspace->host, agent, "turn cancelled");
     PicoWorkspace_CancelDelegations(agent->workspace, agent->id,
                                     agent->runtime_generation);
     for (int i = 0; i < PICO_MAX_PENDING_CALLS; i++)
@@ -4125,6 +4343,7 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
     }
 
     PicoWorkspace *workspace = agent->workspace;
+    PicoAgent_Cancel(agent); /* invalidates steering at request time */
     PicoAgent_ReapRetired(workspace);
     if (!workspace || workspace->retired_count >= PICO_MAX_RETIRED_RUNTIMES)
     {
@@ -5083,5 +5302,6 @@ void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
     out->persistence = agent->persistence;
     out->busy = PicoAgent_IsBusy(agent);
     out->cancelling = PicoAgent_CancelRequested(agent);
+    out->pending_steering = agent->steering_count;
     out->resumable = agent->persistence == PICO_SESSION_DURABLE && agent->session_id[0];
 }

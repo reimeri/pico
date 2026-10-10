@@ -22,6 +22,10 @@ bool PicoAgent_RetiredReferences(const PicoWorkspace *workspace, PicoAgentId id)
 void PicoAgent_StartTurn(PicoHost *app, PicoAgent *agent, const char *user_text);
 void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_text,
                               const char *parts_json);
+PicoResult PicoAgent_QueueSteering(PicoHost *host, PicoAgent *agent, const char *text,
+                                   const char *display, const char *parts_json);
+void PicoAgent_InvalidateSteering(PicoHost *host, PicoAgent *agent, const char *reason);
+char *PicoSteering_NotDelivered(const char *display, const char *reason);
 void PicoAgent_Cancel(PicoAgent *agent);
 void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent);
 bool PicoAgent_IsBusy(const PicoAgent *agent);
@@ -66,6 +70,9 @@ void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text);
 /* Replay-only notice insertion; persistence is handled by the public host API. */
+void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown);
+void PicoAgent_AddSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown);
+void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown);
 void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
                          const char *markdown);
 void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index);
@@ -73,7 +80,7 @@ void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index)
  * On allocation failure the caller still owns the document. */
 void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
                                   const char *markdown, MdDocument *prepared,
-                                  const char *prepared_source);
+                                  const char *prepared_source, uint64_t steering_id);
 void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const char *text,
                                        MdDocument *prepared, const char *prepared_source);
 void PicoAgent_AppendThink(PicoHost *app, PicoAgent *agent, const char *text, int think_ms);

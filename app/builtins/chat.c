@@ -2662,6 +2662,28 @@ bool PicoChat_StabilizeScrollLayout(PicoHost *app)
     return changed || geometry_changed;
 }
 
+static void RenderPendingSteering(PicoAgent *agent, float available_width)
+{
+    if (!agent || !agent->steering_head) return;
+    CLAY(CLAY_ID("PendingSteering"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 8,
+                     .padding = {12, 12, 10, 10}, .sizing = {.width = CLAY_SIZING_GROW(0)}},
+          .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(8)})
+    {
+        CLAY_TEXT(CLAY_STRING("Steering queued — waiting for current work"),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_CAPTION,
+                                    .textColor = COLOR_MUTED}));
+        for (PicoSteeringMessage *message = agent->steering_head; message; message = message->next)
+        {
+            CLAY(CLAY_IDI("PendingSteeringMessage", (uint32_t)message->id),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+            {
+                MdView_RenderDocument(&message->doc, (int)(message->id ^ 0x73540000u), available_width - 24.0f);
+            }
+        }
+    }
+}
+
 void PicoChat_Render(PicoHost *app, void *state)
 {
     PicoAgent *active;
@@ -2760,6 +2782,7 @@ void PicoChat_Render(PicoHost *app, void *state)
                     };
                     view.virtual_identity = TranscriptIdentity(&view);
                     RenderTranscript(&view, available_width);
+                    RenderPendingSteering(active, available_width);
                 }
                 if (!empty)
                 {

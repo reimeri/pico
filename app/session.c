@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "session.h"
+#include "canonical.h"
 #include "agent.h"
 #include "workspace_internal.h"
 #include "worktree.h"
@@ -706,7 +707,7 @@ static char *BuildSessionHeaderJson(PicoHost *app, PicoAgent *agent)
     }
     Pico_IsoTime(ts, sizeof(ts), false);
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":4,\"id\":");
+    JsonBuf_Puts(&b, "{\"type\":\"session\",\"version\":5,\"id\":");
     JsonBuf_String(&b, agent->session_id);
     JsonBuf_Puts(&b, ",\"timestamp\":");
     JsonBuf_String(&b, ts);
@@ -1072,10 +1073,14 @@ typedef struct ReplayPreparedMessage {
     MdDocument doc;
 } ReplayPreparedMessage;
 
+static bool ReadSteeringId(const JsonDoc *doc, uint64_t *out);
+
 static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int obj,
                        bool into_input, int *active_group,
                        ReplayPreparedMessage *prepared)
 {
+    uint64_t steering_id = 0;
+    if (JsonObjGet(doc, obj, "steering_id") >= 0) ReadSteeringId(doc, &steering_id);
     char *type = JsonObjStr(doc, obj, "type");
     if (!type)
     {
@@ -1100,7 +1105,10 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         if (active_group) *active_group = -1;
         char *content = JsonObjStr(doc, obj, "content");
         if (content && ReadNoticeSeverity(doc, obj, &severity))
-            PicoAgent_AddNotice(app, agent, severity, content);
+        {
+            if (steering_id) PicoAgent_AddSteeringNoticeReplay(app, agent, steering_id, content);
+            else PicoAgent_AddNotice(app, agent, severity, content);
+        }
         free(content);
     }
     else if (strcmp(type, "message") == 0)
@@ -1119,7 +1127,9 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
             char *parts = JsonObjRaw(doc, obj, "parts");
             if (prepared && prepared->doc.arena.primary.memory)
                 PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_USER,
-                    display && display[0] ? display : (content ? content : ""), &prepared->doc, prepared->rendered);
+                    display && display[0] ? display : (content ? content : ""), &prepared->doc, prepared->rendered, steering_id);
+            else if (steering_id)
+                PicoAgent_AddSteeringMessage(app, agent, steering_id, display && display[0] ? display : (content ? content : ""));
             else
                 PicoAgent_AddMessage(app, agent, PICO_ROLE_USER,
                     display && display[0] ? display : (content ? content : ""));
@@ -1146,7 +1156,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
                                      message_group, active_group))
             {
                 if (prepared && prepared->doc.arena.primary.memory)
-                    PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_ASSISTANT, text, &prepared->doc, prepared->rendered);
+                    PicoAgent_AddMessagePrepared(app, agent, PICO_ROLE_ASSISTANT, text, &prepared->doc, prepared->rendered, 0);
                 else PicoAgent_AddMessage(app, agent, PICO_ROLE_ASSISTANT, text);
             }
             else
@@ -1280,6 +1290,7 @@ typedef struct PicoSessionReplay {
     int tool_results;
     int active_group;
     ReplayPreparedMessage *prepared;
+    uint64_t last_steering_id;
 } PicoSessionReplay;
 
 static void ReplayReleaseRecord(PicoSessionReplay *replay, int i)
@@ -1307,6 +1318,129 @@ void PicoSession_ReplayFree(PicoSessionReplay *replay)
     free(replay->lines);
     free(replay->prepared);
     free(replay);
+}
+
+static bool ReadSteeringId(const JsonDoc *doc, uint64_t *out)
+{
+    char *value = JsonObjStr(doc, 0, "steering_id");
+    if (!value || !value[0]) { free(value); return false; }
+    uint64_t id = 0;
+    bool valid = true;
+    for (const char *c = value; *c; c++)
+    {
+        if (*c < '0' || *c > '9' || id > (UINT64_MAX - (unsigned)(*c - '0')) / 10)
+        { valid = false; break; }
+        id = id * 10 + (unsigned)(*c - '0');
+    }
+    free(value);
+    if (!valid || !id) return false;
+    *out = id;
+    return true;
+}
+
+typedef struct ReplaySteering {
+    uint64_t id;
+    int acceptance;
+    int terminal; /* -1 if interrupted, otherwise exactly one terminal */
+    bool notified; /* stopped notice can be deferred until streaming settles */
+} ReplaySteering;
+
+/* Reconcile the entire session before sliced replay releases acceptance data.
+ * This also covers acceptance before, and delivery after, the last compaction. */
+static bool PrepareSteeringReplay(PicoSessionReplay *replay)
+{
+    ReplaySteering *records = calloc((size_t)replay->count, sizeof(*records));
+    if (!records) return false;
+    int count = 0;
+    bool valid = true;
+    for (int i = 0; i < replay->count && valid; i++)
+    {
+        JsonDoc *doc = &replay->docs[i];
+        bool acceptance = JsonEq(doc, JsonObjGet(doc, 0, "type"), "steering");
+        bool stopped = JsonEq(doc, JsonObjGet(doc, 0, "type"), "steering_stopped");
+        if (!acceptance && !stopped && JsonObjGet(doc, 0, "steering_id") < 0) continue;
+        uint64_t id;
+        if (!ReadSteeringId(doc, &id)) { valid = false; break; }
+        if (acceptance)
+        {
+            char *content = JsonObjStr(doc, 0, "content");
+            char *parts = JsonObjRaw(doc, 0, "parts");
+            char *normalized = NULL;
+            valid = content && id > replay->last_steering_id &&
+                    (!parts || pico_canonical_normalize_user_parts(parts, &normalized));
+            free(content); free(parts); free(normalized);
+            if (!valid) break;
+            records[count++] = (ReplaySteering){.id = id, .acceptance = i, .terminal = -1};
+            replay->last_steering_id = id;
+            continue;
+        }
+        int low = 0, high = count;
+        while (low < high)
+        {
+            int mid = low + (high - low) / 2;
+            if (records[mid].id < id) low = mid + 1;
+            else high = mid;
+        }
+        if (low >= count || records[low].id != id) { valid = false; break; }
+        if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "notice"))
+        {
+            valid = records[low].terminal >= 0 && !records[low].notified &&
+                    JsonEq(&replay->docs[records[low].terminal],
+                           JsonObjGet(&replay->docs[records[low].terminal], 0, "type"), "steering_stopped");
+            records[low].notified = true;
+            continue;
+        }
+        if (records[low].terminal >= 0) { valid = false; break; }
+        records[low].terminal = i;
+        if (stopped)
+        {
+            char *reason = JsonObjStr(doc, 0, "reason");
+            valid = reason != NULL;
+            free(reason);
+        }
+        else valid = JsonEq(doc, JsonObjGet(doc, 0, "type"), "message") &&
+                     JsonEq(doc, JsonObjGet(doc, 0, "role"), "user");
+    }
+    /* Append synthetic transcript-only records to the prepared replay, rather
+     * than adding an unbounded batch during ReplayFinish. They receive normal
+     * sliced replay callbacks while the private candidate is addressable. */
+    if (valid && count)
+    {
+        int capacity = replay->count + count;
+        char **lines = realloc(replay->lines, (size_t)capacity * sizeof(*lines));
+        if (!lines) { free(records); return false; }
+        replay->lines = lines;
+        JsonDoc *docs = realloc(replay->docs, (size_t)capacity * sizeof(*docs));
+        if (!docs) { free(records); return false; }
+        replay->docs = docs;
+    }
+    for (int i = 0; i < count && valid; i++)
+    {
+        if (records[i].terminal >= 0 &&
+            (records[i].notified || JsonEq(&replay->docs[records[i].terminal],
+                JsonObjGet(&replay->docs[records[i].terminal], 0, "type"), "message"))) continue;
+        JsonDoc *accepted = &replay->docs[records[i].acceptance];
+        char *display = JsonObjStr(accepted, 0, "display");
+        char *content = JsonObjStr(accepted, 0, "content");
+        char *reason = records[i].terminal >= 0 ? JsonObjStr(&replay->docs[records[i].terminal], 0, "reason") : NULL;
+        char *notice = PicoSteering_NotDelivered(display ? display : content, reason ? reason : "session restored");
+        free(display); free(content); free(reason);
+        if (!notice) { valid = false; break; }
+        char id[32]; snprintf(id, sizeof(id), "%llu", (unsigned long long)records[i].id);
+        JsonBuf b; JsonBuf_Init(&b);
+        JsonBuf_Puts(&b, "{\"type\":\"notice\",\"severity\":\"warning\",\"steering_id\":");
+        JsonBuf_String(&b, id);
+        JsonBuf_Puts(&b, ",\"content\":"); JsonBuf_String(&b, notice); JsonBuf_Putc(&b, '}');
+        free(notice);
+        char *line = JsonBuf_Steal(&b);
+        if (!line) { valid = false; break; }
+        int index = replay->count++;
+        replay->lines[index] = line;
+        memset(&replay->docs[index], 0, sizeof(replay->docs[index]));
+        valid = JsonParse(&replay->docs[index], line, strlen(line)) == 0;
+    }
+    free(records);
+    return valid;
 }
 
 /* Reading and strict validation are worker-safe. All ReplayLine calls remain
@@ -1400,7 +1534,7 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
             bool compatible_kind = (normal && kind == PICO_AGENT_MAIN) ||
                                    (subagent && kind == PICO_AGENT_SUBAGENT);
             valid_header = type && strcmp(type, "session") == 0 &&
-                           header_id && header_id[0] && version == 4 &&
+                           header_id && header_id[0] && version == 5 &&
                            compatible_kind;
             free(header_id);
             free(header_kind);
@@ -1453,10 +1587,15 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
     replay->last_tool_result = last_tool_result;
     replay->tool_calls = tool_calls;
     replay->tool_results = tool_results;
+    if (!PrepareSteeringReplay(replay))
+    {
+        PicoSession_ReplayFree(replay);
+        return NULL;
+    }
     replay->active_group = -1;
     if (prepare_messages)
     {
-        replay->prepared = calloc((size_t)n, sizeof(*replay->prepared));
+        replay->prepared = calloc((size_t)replay->count, sizeof(*replay->prepared));
         if (!replay->prepared) { PicoSession_ReplayFree(replay); return NULL; }
         int group = -1;
         int prepared_docs = 0;
@@ -1596,6 +1735,7 @@ static void ReplayAppendInterrupted(PicoHost *app, PicoAgent *agent,
 void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
                                const PicoSessionReplay *replay, bool append_interrupted)
 {
+    agent->last_steering_id = replay->last_steering_id;
     if (append_interrupted) ReplayAppendInterrupted(app, agent, replay);
     agent->accepted_submit = true;
 }
@@ -1823,7 +1963,7 @@ int PicoSession_ReadHeader(const char *path, PicoSessionHeader *out)
     if (parent) snprintf(out->parent_session_id, sizeof(out->parent_session_id), "%s", parent);
     if (model) snprintf(out->model, sizeof(out->model), "%s", model);
     if (title) snprintf(out->title, sizeof(out->title), "%s", title);
-    bool valid = out->version == 4 && out->id[0] && kind_valid &&
+    bool valid = out->version == 5 && out->id[0] && kind_valid &&
                  (out->kind == PICO_AGENT_MAIN || (out->profile[0] && out->initial_purpose[0]));
     free(id);
     free(kind);
@@ -2189,43 +2329,23 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
     {
         return -1;
     }
-    FILE *f = fopen(path, "rb");
-    if (!f)
-    {
-        return -1;
-    }
+    PicoSessionHeader info;
+    if (PicoSession_ReadHeader(path, &info) != 0) return -1;
+    PicoSessionReplay *replay = PicoSession_ReplayPrepare(path, info.kind);
+    if (!replay) return -1;
     PicoMessage *messages = NULL;
     int count = 0;
     int capacity = 0;
-    char *buf = NULL;
-    size_t buf_cap = 0;
     bool failed = false;
     bool valid_header = false;
     int active_group = -1;
-    while (getline(&buf, &buf_cap, f) != -1)
+    for (int record = 0; record < replay->count; record++)
     {
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-        {
-            buf[--len] = '\0';
-        }
-        if (len == 0)
-        {
-            continue;
-        }
-        JsonDoc doc;
-        if (JsonParse(&doc, buf, len) != 0 || !JsonIsObject(&doc, 0))
-        {
-            if (doc.toks)
-            {
-                JsonFree(&doc);
-            }
-            continue;
-        }
+        JsonDoc doc = replay->docs[record];
         char *type = JsonObjStr(&doc, 0, "type");
         if (type && strcmp(type, "session") == 0)
         {
-            valid_header = JsonObjInt(&doc, 0, "version", 0) == 4;
+            valid_header = JsonObjInt(&doc, 0, "version", 0) == 5;
         }
         else if (type && strcmp(type, "notice") == 0)
         {
@@ -2294,18 +2414,14 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
             free(output);
         }
         free(type);
-        JsonFree(&doc);
-        if (failed)
-        {
-            break;
-        }
+        if (JsonObjGet(&doc, 0, "steering_id") >= 0 && count > 0 &&
+            !JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "steering") &&
+            !JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "steering_stopped"))
+            ReadSteeringId(&doc, &messages[count - 1].steering_id);
+        if (failed) break;
     }
-    if (ferror(f) || !valid_header)
-    {
-        failed = true;
-    }
-    free(buf);
-    fclose(f);
+    if (!valid_header) failed = true;
+    PicoSession_ReplayFree(replay);
     if (failed)
     {
         LoadedTranscriptFree(messages, count);
@@ -2462,6 +2578,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->session_id[0] = '\0';
     agent->session_path[0] = '\0';
     agent->accepted_submit = false;
+    agent->last_steering_id = 0;
     agent->unseen_complete = false;
 }
 
@@ -2484,6 +2601,99 @@ PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
     JsonBuf_String(&b, name);
     JsonBuf_Puts(&b, ",\"content\":");
     JsonBuf_String(&b, content ? content : "");
+    JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
+    free(line);
+    free(pre);
+    return result;
+}
+
+char *PicoSteering_NotDelivered(const char *display, const char *reason)
+{
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "**Steering not delivered** — ");
+    JsonBuf_Puts(&b, reason ? reason : "session restored");
+    JsonBuf_Puts(&b, "\n\n");
+    JsonBuf_Puts(&b, display ? display : "");
+    return JsonBuf_Steal(&b);
+}
+
+static void SteeringId(JsonBuf *b, uint64_t id)
+{
+    char value[32];
+    snprintf(value, sizeof(value), "%llu", (unsigned long long)id);
+    JsonBuf_Puts(b, ",\"steering_id\":");
+    JsonBuf_String(b, value);
+}
+
+static PicoSessionWriteResult LogSteeringUser(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *content, const char *display, const char *parts_json, bool delivered)
+{
+    char *pre = EventPrefix(delivered ? "message" : "steering");
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    if (delivered) JsonBuf_Puts(&b, ",\"role\":\"user\"");
+    SteeringId(&b, id);
+    JsonBuf_Puts(&b, ",\"content\":");
+    JsonBuf_String(&b, content ? content : "");
+    if (display && display[0] && (!content || strcmp(display, content) != 0))
+    {
+        JsonBuf_Puts(&b, ",\"display\":");
+        JsonBuf_String(&b, display);
+    }
+    if (parts_json && parts_json[0] == '[')
+    {
+        JsonBuf_Puts(&b, ",\"parts\":");
+        JsonBuf_Puts(&b, parts_json);
+    }
+    JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
+    free(line);
+    free(pre);
+    return result;
+}
+
+PicoSessionWriteResult PicoSession_LogSteering(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *content, const char *display, const char *parts_json)
+{
+    return LogSteeringUser(app, agent, id, content, display, parts_json, false);
+}
+
+PicoSessionWriteResult PicoSession_LogSteeringDelivered(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *content, const char *display, const char *parts_json)
+{
+    return LogSteeringUser(app, agent, id, content, display, parts_json, true);
+}
+
+PicoSessionWriteResult PicoSession_LogSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *content)
+{
+    char *pre = EventPrefix("notice");
+    JsonBuf b; JsonBuf_Init(&b); JsonBuf_Puts(&b, pre);
+    SteeringId(&b, id);
+    JsonBuf_Puts(&b, ",\"severity\":\"warning\",\"content\":");
+    JsonBuf_String(&b, content ? content : "");
+    JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
+    free(line); free(pre);
+    return result;
+}
+
+PicoSessionWriteResult PicoSession_LogSteeringStopped(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *reason)
+{
+    char *pre = EventPrefix("steering_stopped");
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    SteeringId(&b, id);
+    JsonBuf_Puts(&b, ",\"reason\":");
+    JsonBuf_String(&b, reason ? reason : "not delivered");
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     PicoSessionWriteResult result = AppendLine(app, agent, line);

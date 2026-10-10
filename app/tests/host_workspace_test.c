@@ -2200,7 +2200,7 @@ static bool NoticeTextHasColor(Clay_RenderCommandArray *commands, const char *te
     return true;
 }
 
-static int RunNoticeTranscriptCase(bool with_sidebar)
+static int RunNoticeTranscriptCase(bool with_sidebar, bool with_steering)
 {
     const Clay_Dimensions viewport = {1100, 800};
     char dir[] = "/tmp/pico-notice-layout-XXXXXX";
@@ -2245,6 +2245,7 @@ static int RunNoticeTranscriptCase(bool with_sidebar)
     int live_index = agent->message_count - 1;
     PicoHost_AddNotice(host, agent_id, PICO_NOTICE_INFO, "trailing-notice");
     agent->state = PICO_AGENT_LLM_WAIT;
+    if (with_steering && pico_agent_steer(host, agent_id, "pending steering geometry test", NULL) != PICO_OK) goto done;
     Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
     if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0})) goto done;
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
@@ -2277,6 +2278,8 @@ static int RunNoticeTranscriptCase(bool with_sidebar)
         }
         if (frame == 119)
         {
+            if (with_steering && !Clay_GetElementData(CLAY_ID("PendingSteering")).found)
+            { Fail("queued steering must render inside chat"); goto done; }
             Clay_RenderCommand *ordinary = FindCardText(&commands, "normal-url");
             if (!NoticeTextHasColor(&commands, "Error", PICO_NOTICE_ERROR) ||
                 !NoticeTextHasColor(&commands, "error-prose", PICO_NOTICE_ERROR) ||
@@ -2332,7 +2335,8 @@ static int TestBottomFollowShellGeometryStable(void)
     if (RunFastFooterCase(false, false) != 0 || RunFastFooterCase(true, false) != 0 ||
         RunFastFooterCase(false, true) != 0 || RunFastFooterCase(true, true) != 0)
         return 1;
-    if (RunNoticeTranscriptCase(false) != 0 || RunNoticeTranscriptCase(true) != 0) return 1;
+    if (RunNoticeTranscriptCase(false, false) != 0 || RunNoticeTranscriptCase(true, false) != 0 ||
+        RunNoticeTranscriptCase(false, true) != 0 || RunNoticeTranscriptCase(true, true) != 0) return 1;
     return RunWorkspaceLessShellCase();
 }
 
@@ -3804,7 +3808,7 @@ static int TestChatCompletedToolRowDwells(void)
         Fail("create tool dwell replay fixture");
         goto done;
     }
-    fputs("{\"type\":\"session\",\"version\":4,\"id\":\"dwell-replay\",\"kind\":\"normal\"}\n"
+    fputs("{\"type\":\"session\",\"version\":5,\"id\":\"dwell-replay\",\"kind\":\"normal\"}\n"
           "{\"type\":\"tool_call\",\"message_group\":0,\"call_id\":\"restored\",\"name\":\"read\",\"arguments\":\"{}\"}\n"
           "{\"type\":\"tool_result\",\"call_id\":\"restored\",\"name\":\"read\",\"output\":\"ok\",\"is_error\":false}\n", replay);
     fclose(replay);
@@ -11989,7 +11993,7 @@ static bool WriteCapacityReplay(const char *path, int messages)
 {
     FILE *file = fopen(path, "wb");
     if (!file) return false;
-    fputs("{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"capacity-replay\"}\n", file);
+    fputs("{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"capacity-replay\"}\n", file);
     for (int i = 0; i < messages; i++)
         fputs("{\"type\":\"message\",\"role\":\"user\",\"content\":\"capacity replay\"}\n", file);
     return fclose(file) == 0;
@@ -12099,6 +12103,66 @@ done:
     if (host) pico_host_free(host);
     RmRf(root);
     if (rc && !g_failed) Fail("load cancellation capacity fixture failed");
+    return rc;
+}
+
+typedef struct SteeringReplayObserver {
+    unsigned seen;
+    int extra;
+} SteeringReplayObserver;
+static void ObserveSteeringReplay(PicoWorkspace *workspace, const PicoHookEvent *event, void *opaque)
+{
+    SteeringReplayObserver *observer = opaque;
+    PicoHost *host = workspace->host;
+    int count = pico_agent_message_count(host, event->agent_id);
+    const PicoMessage *message = pico_agent_message(host, event->agent_id, count - 1);
+    if (!message || !message->steering_id) return;
+    if (message->steering_id <= 3) observer->seen |= 1u << (unsigned)message->steering_id;
+    observer->extra++;
+    /* This must not steal the just-replayed record's metadata. */
+    PicoAgent_AddMessage(host, PicoHost_FindAgent(host, event->agent_id), PICO_ROLE_ASSISTANT, "extension replay side message");
+}
+static int TestSteeringAsyncReplayIdentity(void)
+{
+    char dir[] = "/tmp/pico-steering-replay-XXXXXX", cfg[] = "/tmp/pico-steering-cfg-XXXXXX";
+    PicoHost *host = NULL; PicoWorkspaceId ws_id = 0; PicoAgentId seed_id = 0, current_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW, .select = true};
+    char session_id[40] = {0}; int rc = 1; SteeringReplayObserver observer = {0};
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws_id) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    if (pico_main_agent_create(host, ws_id, &options, &seed_id) != PICO_OK) goto done;
+    PicoAgent *seed = PicoHost_FindAgent(host, seed_id);
+    if (PicoSession_LogUser(host, seed, "task", NULL, NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogSteering(host, seed, 1, "delivered replay", NULL, NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogSteeringDelivered(host, seed, 1, "delivered replay", NULL, NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogSteering(host, seed, 2, "stopped without notice", NULL, NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogSteeringStopped(host, seed, 2, "cancelled") != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogSteering(host, seed, 3, "acceptance only", NULL, NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host, seed)) goto done;
+    snprintf(session_id, sizeof(session_id), "%s", seed->session_id);
+    if (pico_agent_close(host, seed_id) != PICO_OK) goto done;
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, ws_id);
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_workspace_add_hook(workspace, PICO_HOOK_ON_MESSAGE, ObserveSteeringReplay);
+    PicoHost_PublishRegistration(host, &observer);
+    options.session_start = PICO_SESSION_NONE;
+    if (pico_main_agent_create(host, ws_id, &options, &current_id) != PICO_OK ||
+        PicoSession_LoadAsync(host, ws_id, current_id, session_id, false, false, false, false) != PICO_OK) goto done;
+    PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+    PicoAgent *loaded = PicoHost_SelectedAgent(host);
+    if (!loaded || loaded->id == current_id || observer.seen != 14 || observer.extra != 3 || loaded->steering_count != 0) goto done;
+    int side = 0;
+    for (int i = 0; i < loaded->message_count; i++)
+        if (strcmp(loaded->messages[i].source, "extension replay side message") == 0)
+        { if (loaded->messages[i].steering_id) goto done; side++; }
+    if (side != 3) goto done;
+    rc = 0;
+done:
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME"); rmdir(cfg); rmdir(dir);
+    if (rc) Fail("async replay must publish steering identity before hooks, including recovered notices");
     return rc;
 }
 
@@ -13319,7 +13383,7 @@ static int TestSidebarSnapshotBeforeReconcile(bool fail_reconcile)
     {
         FILE *file = fopen(path, "wb");
         if (!file) goto done;
-        fprintf(file, "{\"type\":\"session\",\"version\":4,\"id\":\"%s\","
+        fprintf(file, "{\"type\":\"session\",\"version\":5,\"id\":\"%s\","
                       "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"Updated row\"}\n", id, dir);
         fclose(file);
     }
@@ -14325,7 +14389,7 @@ static int TestSidebarContextMenus(void)
     {
         FILE *f = fopen(session_file, "wb");
         if (!f) goto done;
-        fprintf(f, "{\"type\":\"session\",\"version\":4,\"id\":\"menusess\","
+        fprintf(f, "{\"type\":\"session\",\"version\":5,\"id\":\"menusess\","
                    "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
                    "{\"type\":\"message\",\"role\":\"user\",\"content\":\"menu-title\"}\n",
                 dir);
@@ -14478,7 +14542,7 @@ static int TestSidebarSameFrameControls(void)
                              session_dir, j, j)) goto done;
         FILE *f = fopen(path, "wb");
         if (!f) goto done;
-        fprintf(f, "{\"type\":\"session\",\"version\":4,\"id\":\"paging%02d\","
+        fprintf(f, "{\"type\":\"session\",\"version\":5,\"id\":\"paging%02d\","
                    "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
                    "{\"type\":\"message\",\"role\":\"user\","
                    "\"content\":\"paging-title-%02d\"}\n", j, dir, j);
@@ -14871,8 +14935,8 @@ static int TestWorktreeDiscoveryCreationAndGrouping(void)
     }
     PicoCatalog_Free(leaves, leaves_count);
     if (!local_history[0] || !linked_history[0] ||
-        WriteFile(local_history, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"fixture\"}\n") != 0 ||
-        WriteFile(linked_history, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"fixture\"}\n") != 0 ||
+        WriteFile(local_history, "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"fixture\"}\n") != 0 ||
+        WriteFile(linked_history, "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"fixture\"}\n") != 0 ||
         PicoCatalog_DeleteProject(host, repo) != 0 ||
         access(local_history, F_OK) == 0 || access(linked_history, F_OK) == 0 ||
         access(repo, F_OK) != 0 || access(linked, F_OK) != 0 ||
@@ -15780,6 +15844,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestInvalidCreateAtCapacityPreservesAgents()) != 0) return 1;
     if (PICO_TEST_RUN(TestCapacityCreateProtectsPendingReplacement()) != 0) return 1;
     if (PICO_TEST_RUN(TestLoadTargetSurvivesPreviousLoadCancellation()) != 0) return 1;
+    if (PICO_TEST_RUN(TestSteeringAsyncReplayIdentity()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncSessionReplay()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncReplayLargeMessage()) != 0) return 1;
     if (PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) != 0) return 1;

@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 18 adds typed, durable transcript-only notices and includes Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 19 adds queued, durable steering and submission-kind hooks alongside typed transcript-only notices and includes Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 
@@ -24,6 +24,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
+- `steering` — user input queued for an active turn, delivery, persistence, and hooks
 - `tools` — LLM-callable tools, parallel execution policies, and structured replayable details
 - `commands` — slash commands (`/foo`)
 - `notices` — severity-labeled application feedback, transcript persistence, context exclusion
@@ -50,6 +51,7 @@ Copy-templates (paths from this README):
 - [`../../examples/permit_tool.c`](../../examples/permit_tool.c) — before-tool permission prompt
 - [`../../examples/extra_instructions.c`](../../examples/extra_instructions.c) — `pico_add_llm_hook` extra prompt line
 - [`../../examples/ephemeral_context.c`](../../examples/ephemeral_context.c) — request-only context
+- [`../../examples/steering.c`](../../examples/steering.c) — explicit-target steering from a busy-allowed command
 - [`../../examples/time_cmd.c`](../../examples/time_cmd.c) — host slash command
 - [`../../examples/modal.c`](../../examples/modal.c) — named overlay modal and tool-row click
 - [`../../examples/stream_modal.c`](../../examples/stream_modal.c) — tool worker posts into a named overlay mailbox

@@ -71,6 +71,7 @@ typedef enum PicoHook {
     PICO_HOOK_AFTER_RENDER,
     PICO_HOOK_BEFORE_SUBMIT, /* pico_host_request_submit_cancel / pico_host_set_agent_input */
     PICO_HOOK_ON_SUBMIT,
+    PICO_HOOK_ON_STEER, /* accepted pending input; not a new turn or delivery */
     PICO_HOOK_ON_MESSAGE,
     PICO_HOOK_ON_COMPACT, /* pico_agent_set_compact_summary can replace the default briefing */
     PICO_HOOK_AFTER_COMPACT,
@@ -122,6 +123,7 @@ typedef struct PicoTraceLine {
 
 typedef struct PicoMessage {
     PicoRole role;
+    uint64_t steering_id; /* session-local ID for delivered input / stopped notices; zero otherwise */
     PicoNoticeSeverity notice_severity; /* meaningful only for PICO_ROLE_NOTICE */
     char *source;
     size_t source_len;
@@ -175,8 +177,14 @@ typedef struct PicoScrollbar {
 typedef void (*PicoHostViewFn)(PicoHost *host, void *state);
 typedef void (*PicoWorkspaceViewFn)(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state);
 
+typedef enum PicoSubmitKind {
+    PICO_SUBMIT_TURN = 0,
+    PICO_SUBMIT_STEERING,
+} PicoSubmitKind;
+
 typedef struct PicoHookEvent {
     PicoHook hook;
+    PicoSubmitKind submit_kind; /* BEFORE_SUBMIT / ON_SUBMIT / ON_STEER only */
     PicoAgentId agent_id; /* zero only for host-global hooks without an agent target */
 } PicoHookEvent;
 

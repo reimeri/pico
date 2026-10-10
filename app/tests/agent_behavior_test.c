@@ -35,6 +35,7 @@ typedef enum TestMode {
     TEST_BLOCK,
     TEST_BLOCK_WITH_ASSISTANT,
     TEST_BATCH_TOOLS,
+    TEST_STEERING_BLOCK,
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
     TEST_PROVIDER_STATUS_BLOCK,
@@ -94,6 +95,7 @@ typedef struct TestState {
     int last_tool_count;
     char last_tools[512];
     char *last_input;
+    char *request_inputs[8];
     char *child_instructions;
     char *child_input;
     char child_tools[512];
@@ -203,6 +205,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.last_tools[0] = '\0';
     free(g_test.last_input);
     g_test.last_input = NULL;
+    for (int i = 0; i < 8; i++) { free(g_test.request_inputs[i]); g_test.request_inputs[i] = NULL; }
     free(g_test.child_instructions);
     g_test.child_instructions = NULL;
     free(g_test.child_input);
@@ -400,6 +403,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     bool emit_summaries = g_test.emit_think_summaries;
     bool issue_tool = !fail && g_test.provider_tools_issued < g_test.provider_tool_limit;
     int call_number = ++g_test.provider_tools_issued;
+    if (call_number <= 8) g_test.request_inputs[call_number - 1] = JsonDup(g_test.last_input);
     char tool_name[64];
     char tool_args[2048];
     snprintf(tool_name, sizeof(tool_name), "%s", g_test.issue_tool_name);
@@ -521,6 +525,23 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
         FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "done", 4);
         pico_llm_result_add_text(out, "done");
         return PICO_LLM_OK;
+    }
+    if (mode == TEST_STEERING_BLOCK && call_number == 1)
+    {
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_entered = true;
+        pthread_mutex_unlock(&g_test.mu);
+        for (;;)
+        {
+            pthread_mutex_lock(&g_test.mu);
+            bool released = g_test.block_release;
+            pthread_mutex_unlock(&g_test.mu);
+            if (cancel(user)) return PICO_LLM_CANCEL;
+            if (released) break;
+            SleepOneMs();
+        }
+        pthread_mutex_lock(&g_test.mu); bool fail_after_release = g_test.provider_fail; pthread_mutex_unlock(&g_test.mu);
+        if (fail_after_release) { out->error = JsonDup("released provider failure"); return PICO_LLM_FAIL; }
     }
     if (mode == TEST_PROVIDER_BLOCK)
     {
@@ -1460,6 +1481,37 @@ PicoSessionWriteResult PicoSession_LogAssistant(PicoHost *app, PicoAgent *agent,
         g_test.session_message_groups[g_test.session_message_group_count++] = message_group;
     }
     return PICO_SESSION_WRITE_OK;
+}
+
+PicoSessionWriteResult PicoSession_LogSteering(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *content, const char *display, const char *parts)
+{
+    (void)app; (void)agent; (void)id; (void)content; (void)display; (void)parts;
+    return PICO_SESSION_WRITE_OK;
+}
+PicoSessionWriteResult PicoSession_LogSteeringDelivered(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *content, const char *display, const char *parts)
+{
+    (void)id;
+    return PicoSession_LogUser(app, agent, content, display, parts);
+}
+PicoSessionWriteResult PicoSession_LogSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, const char *content)
+{
+    (void)id;
+    return PicoSession_LogNotice(app, agent, PICO_NOTICE_WARNING, content);
+}
+PicoSessionWriteResult PicoSession_LogSteeringStopped(PicoHost *app, PicoAgent *agent, uint64_t id,
+    const char *reason)
+{
+    (void)app; (void)agent; (void)id; (void)reason;
+    return PICO_SESSION_WRITE_OK;
+}
+char *PicoSteering_NotDelivered(const char *display, const char *reason)
+{
+    JsonBuf b; JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "Steering not delivered: "); JsonBuf_Puts(&b, reason);
+    JsonBuf_Puts(&b, "\n"); JsonBuf_Puts(&b, display);
+    return JsonBuf_Steal(&b);
 }
 
 PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent, const char *content,
@@ -5362,9 +5414,302 @@ static int TestUiPostLimit(void)
     return ok ? 0 : Fail(name, "mailbox limit was not enforced");
 }
 
+static void SteeringRelease(void)
+{
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true;
+    pthread_mutex_unlock(&g_test.mu);
+}
+
+static int TestSteeringFinalContinuation(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "original request");
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "first steering", NULL) == PICO_OK &&
+              pico_agent_steer(&app, agent->id, "second steering", NULL) == PICO_OK;
+    pthread_mutex_lock(&g_test.mu);
+    ok &= !strstr(g_test.last_input, "steering") && g_test.provider_tools_issued == 1;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoSteeringInfo queued;
+    ok &= pico_agent_steering_info(&app, agent->id, 1, &queued) && strcmp(queued.text, "second steering") == 0;
+    SteeringRelease();
+    ok &= WaitForIdle(&app);
+    const char *first = g_test.last_input ? strstr(g_test.last_input, "first steering") : NULL;
+    const char *second = g_test.last_input ? strstr(g_test.last_input, "second steering") : NULL;
+    ok &= first && second && first < second && g_test.provider_tools_issued == 2 &&
+          g_test.life_turn_end == 1 && pico_agent_steering_count(&app, agent->id) == 0;
+    int users = 0;
+    for (int i = 0; i < agent->message_count; i++) if (agent->messages[i].role == PICO_ROLE_USER) users++;
+    ok &= users == 2; /* initial StartTurn here bypasses the composer transcript */
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering final continuation", "in-flight input changed, FIFO lost, or turn ended early");
+}
+
+static int TestSteeringCompaction(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    g_test.provider_tokens = 100;
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    PicoAgent *agent = TestAgent(&app);
+    agent->compact_enabled = true; agent->compact_ratio = 0.5; agent->context_limit = 100;
+    PicoAgent_StartTurn(&app, agent, "original compacted task");
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "keep this verbatim", NULL) == PICO_OK;
+    pthread_mutex_lock(&g_test.mu); g_test.provider_tokens = 0; pthread_mutex_unlock(&g_test.mu);
+    SteeringRelease();
+    ok &= WaitForIdle(&app) && g_test.life_after_compact == 1 && g_test.life_turn_end == 1 &&
+          g_test.request_inputs[1] && !strstr(g_test.request_inputs[1], "keep this verbatim") &&
+          g_test.last_input && strstr(g_test.last_input, "Briefing:") && strstr(g_test.last_input, "keep this verbatim");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering compaction", "steering was summarized, lost, or treated as another compaction");
+}
+
+static int TestSteeringDuringManualCompaction(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_PushHistoryUser(agent, "task to summarize");
+    PicoAgent_Compact(&app, agent);
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "after manual summary", NULL) == PICO_OK;
+    SteeringRelease();
+    ok &= WaitForIdle(&app) && g_test.provider_tools_issued == 2 && g_test.life_turn_end == 1 &&
+          g_test.last_input && strstr(g_test.last_input, "after manual summary");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering manual compaction", "queue did not resume normal model work after compaction");
+}
+
+static void SteeringSummary(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    PicoHost *host = workspace->host;
+    pico_agent_steer(host, event->agent_id, "after custom summary", NULL);
+    pico_agent_set_compact_summary(host, event->agent_id, JsonDup("custom briefing"));
+    pthread_mutex_lock(&g_test.mu); g_test.provider_tokens = 0; pthread_mutex_unlock(&g_test.mu);
+}
+
+static int TestSteeringHookSummary(void)
+{
+    ResetTest(TEST_SINGLE, 0); g_test.provider_tokens = 100;
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    TestAddHook(&app, PICO_HOOK_ON_COMPACT, SteeringSummary);
+    PicoAgent *agent = TestAgent(&app);
+    agent->compact_enabled = true; agent->compact_ratio = 0.5; agent->context_limit = 100;
+    PicoAgent_StartTurn(&app, agent, "task");
+    bool ok = WaitForIdle(&app) && g_test.life_turn_end == 1 && g_test.life_after_compact == 1 &&
+              g_test.last_input && strstr(g_test.last_input, "custom briefing") && strstr(g_test.last_input, "after custom summary");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering hook summary", "custom-summary continuation failed");
+}
+
+static int g_steering_hook_action;
+static PicoResult g_steering_hook_result;
+static void SteeringMessageHook(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    PicoAgent *agent = PicoHost_FindAgent(workspace->host, event->agent_id);
+    const PicoMessage *message = pico_agent_message(workspace->host, agent->id, agent->message_count - 1);
+    if (!message || !message->steering_id || !g_steering_hook_action) return;
+    int action = g_steering_hook_action; g_steering_hook_action = 0;
+    if (action == 1) g_steering_hook_result = pico_agent_steer(workspace->host, agent->id, "hook-generated steering", NULL);
+    else if (action == 2) pico_agent_cancel(workspace->host, agent->id);
+    else g_steering_hook_result = pico_agent_submit(workspace->host, agent->id, "reentrant recovery", NULL);
+}
+
+static int TestSteeringHookBoundaries(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); TestAddHook(&app, PICO_HOOK_ON_MESSAGE, SteeringMessageHook);
+    PicoAgent *agent = TestAgent(&app);
+    g_steering_hook_action = 1;
+    PicoAgent_StartTurn(&app, agent, "task");
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "initial steering", NULL) == PICO_OK;
+    SteeringRelease();
+    ok &= WaitForIdle(&app) && g_steering_hook_result == PICO_OK && g_test.request_inputs[1] &&
+          !strstr(g_test.request_inputs[1], "hook-generated steering") && g_test.request_inputs[2] &&
+          strstr(g_test.request_inputs[2], "hook-generated steering");
+    PicoHost_Shutdown(&app);
+    ResetTest(TEST_STEERING_BLOCK, 0); InitApp(&app);
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, SteeringMessageHook);
+    agent = TestAgent(&app); g_steering_hook_action = 2;
+    PicoAgent_StartTurn(&app, agent, "task");
+    ok &= WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "delivered before cancel", NULL) == PICO_OK &&
+          pico_agent_steer(&app, agent->id, "must not deliver", NULL) == PICO_OK;
+    SteeringRelease(); ok &= WaitForIdle(&app);
+    int delivered = 0, stopped = 0;
+    for (int i = 0; i < agent->message_count; i++)
+    {
+        delivered += agent->messages[i].role == PICO_ROLE_USER && agent->messages[i].steering_id != 0;
+        stopped += agent->messages[i].role == PICO_ROLE_NOTICE && agent->messages[i].steering_id != 0;
+    }
+    ok &= delivered == 1 && stopped == 1 && g_test.provider_tools_issued == 1;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering hook boundaries", "hook arrivals drained recursively or cancellation rewrote delivered state");
+}
+
+static int TestSteeringPartsAndLifecycle(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); PicoAgent *agent = TestAgent(&app);
+    bool ok = pico_agent_steer(&app, agent->id, "idle", NULL) == PICO_BUSY &&
+              pico_agent_steer(&app, UINT64_MAX, "stale", NULL) == PICO_NOT_FOUND;
+    PicoAgent_StartTurn(&app, agent, "task"); ok &= WaitForBlock(&app);
+    const char *parts = "[{\"type\":\"text\",\"text\":\"parts-only instruction\"}]";
+    ok &= pico_agent_steer(&app, agent->id, NULL, parts) == PICO_OK;
+    PicoSteeringInfo info;
+    ok &= pico_agent_steering_info(&app, agent->id, 0, &info) && strstr(info.display, "parts-only instruction");
+    agent->kind = PICO_AGENT_SUBAGENT;
+    ok &= pico_agent_steer(&app, agent->id, "child input", NULL) == PICO_INVALID;
+    agent->kind = PICO_AGENT_MAIN;
+    pico_agent_cancel(&app, agent->id);
+    ok &= pico_agent_steering_count(&app, agent->id) == 0 &&
+          pico_agent_steer(&app, agent->id, "after cancel", NULL) == PICO_BUSY;
+    ok &= WaitForIdle(&app) && agent->messages[agent->message_count - 1].role == PICO_ROLE_NOTICE &&
+          strstr(agent->messages[agent->message_count - 1].source, "parts-only instruction");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering lifecycle and parts", "eligibility, immediate cancellation, or payload display failed");
+}
+
+static int TestSteeringErrorReentrancy(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); TestAddHook(&app, PICO_HOOK_ON_MESSAGE, SteeringMessageHook);
+    PicoAgent *agent = TestAgent(&app); g_steering_hook_action = 3;
+    PicoAgent_StartTurn(&app, agent, "task");
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "not delivered after error", NULL) == PICO_OK;
+    pthread_mutex_lock(&g_test.mu); g_test.provider_fail = true; pthread_mutex_unlock(&g_test.mu);
+    SteeringRelease(); ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_ERROR &&
+                            g_steering_hook_result == PICO_BUSY && pico_agent_steering_count(&app, agent->id) == 0;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering error", "provider-start failure did not settle the continued turn");
+}
+
+static PicoSubmitKind g_steering_submit_kind;
+static int g_steering_accepted;
+static void SteeringPreprocess(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    g_steering_submit_kind = event->submit_kind;
+    pico_host_set_agent_input(workspace->host, JsonDup("preprocessed steering"));
+}
+static void SteeringAccepted(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)workspace; (void)state;
+    if (event->submit_kind == PICO_SUBMIT_STEERING) g_steering_accepted++;
+}
+static int TestSteeringComposerPinnedModel(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app);
+    TestAddHook(&app, PICO_HOOK_BEFORE_SUBMIT, SteeringPreprocess);
+    TestAddHook(&app, PICO_HOOK_ON_STEER, SteeringAccepted);
+    PicoAgent *agent = TestAgent(&app);
+    TestWs(&app)->models[0].vision = true;
+    PicoAgent_StartTurn(&app, agent, "task");
+    bool ok = WaitForBlock(&app);
+    TestWs(&app)->models[0].vision = false; /* only changes the next turn */
+    app.composer.text = JsonDup("composer steering"); app.composer.length = (int)strlen(app.composer.text);
+    app.composer.capacity = app.composer.length + 1;
+    g_composer_has_attachment = true; g_steering_accepted = 0;
+    PicoHost_Submit(&app);
+    PicoSteeringInfo queued;
+    ok &= app.composer.length == 0 && !g_composer_has_attachment && g_steering_accepted == 1 &&
+          g_steering_submit_kind == PICO_SUBMIT_STEERING && pico_agent_steering_info(&app, agent->id, 0, &queued) &&
+          strcmp(queued.text, "preprocessed steering") == 0 && strstr(queued.parts_json, "/tmp/pasted.png");
+    SteeringRelease(); ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_IDLE &&
+                            g_test.last_input && strstr(g_test.last_input, "/tmp/pasted.png");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("composer steering pinned model", "preprocessing/attachment routing ignored the running turn");
+}
+
+static int TestSteeringLimitAndReload(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "task"); bool ok = WaitForBlock(&app);
+    int accepted = 0; PicoResult result;
+    while ((result = pico_agent_steer(&app, agent->id, "bounded queue entry", NULL)) == PICO_OK) accepted++;
+    ok &= accepted > 0 && result == PICO_LIMIT && pico_agent_steering_count(&app, agent->id) == accepted;
+    ok &= pico_workspace_request_reload(&app, TestWs(&app)->id) == PICO_OK &&
+          pico_agent_steering_count(&app, agent->id) == 0 &&
+          pico_agent_steer(&app, agent->id, "after reload", NULL) == PICO_BUSY;
+    SteeringRelease(); ok &= WaitForIdle(&app);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering limits and reload", "limit dropped accepted data or reload retained pending instructions");
+}
+
+static int TestSteeringForceCancelIsolation(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "old task");
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "stale steering", NULL) == PICO_OK;
+    pico_agent_force_cancel(&app, agent->id);
+    ok &= pico_agent_steering_count(&app, agent->id) == 0 && pico_agent_submit(&app, agent->id, "replacement task", NULL) == PICO_OK;
+    SteeringRelease(); ok &= WaitForIdle(&app) && g_test.last_input && !strstr(g_test.last_input, "stale steering");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering force cancel", "retired work delivered pending input into the replacement turn");
+}
+
+static void SteeringCancelCompact(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    pico_agent_cancel(workspace->host, event->agent_id);
+}
+static int TestSteeringCancelCompactionHook(void)
+{
+    ResetTest(TEST_SINGLE, 0); g_test.provider_tokens = 100;
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    TestAddHook(&app, PICO_HOOK_ON_COMPACT, SteeringCancelCompact);
+    PicoAgent *agent = TestAgent(&app);
+    agent->compact_enabled = true; agent->compact_ratio = 0.5; agent->context_limit = 100;
+    PicoAgent_StartTurn(&app, agent, "task");
+    bool ok = pico_agent_steer(&app, agent->id, "stopped during compact hook", NULL) == PICO_OK &&
+              WaitForIdle(&app) && g_test.provider_tools_issued == 1 && g_test.life_cancel == 1 &&
+              g_test.life_turn_end == 0 && pico_agent_steering_count(&app, agent->id) == 0;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering compaction hook cancel", "request dispatch cleared cancellation raised by the hook");
+}
+static bool g_steering_cancel_placeholder;
+static void SteeringCancelPlaceholder(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    PicoAgent *agent = PicoHost_FindAgent(workspace->host, event->agent_id);
+    const PicoMessage *message = pico_agent_message(workspace->host, agent->id, agent->message_count - 1);
+    if (g_steering_cancel_placeholder && message && message->role == PICO_ROLE_ASSISTANT && !message->source_len)
+    { g_steering_cancel_placeholder = false; pico_agent_cancel(workspace->host, agent->id); }
+}
+static int TestSteeringCancelFollowupPlaceholder(void)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, SteeringCancelPlaceholder);
+    PicoAgent *agent = TestAgent(&app); g_steering_cancel_placeholder = false;
+    PicoAgent_StartTurn(&app, agent, "task");
+    bool ok = WaitForBlock(&app) && pico_agent_steer(&app, agent->id, "delivered before hook cancel", NULL) == PICO_OK;
+    g_steering_cancel_placeholder = true; SteeringRelease();
+    ok &= WaitForIdle(&app) && g_test.provider_tools_issued == 1 && g_test.life_cancel == 1;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("steering follow-up placeholder cancel", "placeholder callback cancellation was lost");
+}
+
 int main(void)
 {
     int failed = 0;
+    failed |= PICO_TEST_RUN(TestSteeringCancelCompactionHook());
+    failed |= PICO_TEST_RUN(TestSteeringCancelFollowupPlaceholder());
+    failed |= PICO_TEST_RUN(TestSteeringComposerPinnedModel());
+    failed |= PICO_TEST_RUN(TestSteeringLimitAndReload());
+    failed |= PICO_TEST_RUN(TestSteeringForceCancelIsolation());
+    failed |= PICO_TEST_RUN(TestSteeringFinalContinuation());
+    failed |= PICO_TEST_RUN(TestSteeringCompaction());
+    failed |= PICO_TEST_RUN(TestSteeringDuringManualCompaction());
+    failed |= PICO_TEST_RUN(TestSteeringHookSummary());
+    failed |= PICO_TEST_RUN(TestSteeringHookBoundaries());
+    failed |= PICO_TEST_RUN(TestSteeringPartsAndLifecycle());
+    failed |= PICO_TEST_RUN(TestSteeringErrorReentrancy());
+    failed |= PICO_TEST_RUN(TestParallelSteering());
     failed |= PICO_TEST_RUN(TestProfileParallelSafeValidation());
     failed |= PICO_TEST_RUN(TestProfileFastValidation());
     failed |= PICO_TEST_RUN(TestSubagentProfileBarrier());

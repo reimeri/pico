@@ -13,6 +13,7 @@
 #include "spell_internal.h"
 #include "scrollbar.h"
 #include "host_internal.h"
+#include "agent.h"
 
 #include "clay/clay.h"
 
@@ -1988,7 +1989,9 @@ void PicoComposer_HandlePointer(PicoHost *app)
 static bool ComposerVision(PicoHost *app)
 {
     bool vision = true;
-    PicoModel *model = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
+    PicoAgent *agent = PicoHost_SelectedAgent(app);
+    PicoModel *model = PicoAgent_IsBusy(agent) ? PicoSettings_ActiveModel(agent)
+                                               : PicoSettings_SelectedModel(agent);
     if (model)
     {
         vision = model->vision;
@@ -2115,6 +2118,8 @@ void PicoComposer_Render(PicoHost *app, void *state)
     }
     PicoComposer *c = &app->composer;
     const char *placeholder = PicoClarification_View(app) ? "Ask about the question…  (Enter to send)" :
+                              PicoAgent_IsBusy(PicoHost_SelectedAgent(app)) ?
+                              "Steer Pico…  (Enter to queue, Shift+Enter for newline)" :
                               "Message Pico…  (Enter to send, Shift+Enter for newline)";
     bool empty = c->length == 0;
     float wrap_width = ComposerWrapWidth(app);

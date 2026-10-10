@@ -654,7 +654,8 @@ static void FilesBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *eve
         return;
     }
     bool vision = false;
-    PicoModel *model = PicoSettings_SelectedModel(agent);
+    PicoModel *model = event && event->submit_kind == PICO_SUBMIT_STEERING
+                           ? PicoSettings_ActiveModel(agent) : PicoSettings_SelectedModel(agent);
     if (model)
     {
         vision = model->vision;

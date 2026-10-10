@@ -783,10 +783,8 @@ PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
         return PICO_NOT_FOUND;
     }
     PicoWorkspace *workspace = agent->workspace;
-    if (!workspace)
-    {
-        return PICO_INVALID;
-    }
+    if (!workspace) return PICO_INVALID;
+    if (agent->settling_error || agent->steering_delivery) return PICO_BUSY;
     PicoClarification_CancelOwner(workspace, id);
     if (app->clarification_view_id == id) PicoClarification_Back(app);
     PicoAgent_ReapRetired(workspace);

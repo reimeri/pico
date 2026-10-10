@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 18 /* Typed, durable transcript-only application notices */
+#define PICO_EXT_ABI 19 /* Queued, durable steering and submission kinds */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);

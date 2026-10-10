@@ -514,6 +514,17 @@ void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity sev
     agent->messages[agent->message_count - 1].notice_severity = severity;
 }
 
+void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, const char *text)
+{
+    PicoAgent_AddMessage(app, agent, PICO_ROLE_USER, text);
+    agent->messages[agent->message_count - 1].steering_id = id;
+}
+void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *text)
+{
+    PicoAgent_AddNotice(app, agent, PICO_NOTICE_WARNING, text);
+    agent->messages[agent->message_count - 1].steering_id = id;
+}
+
 void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text)
 {
     PicoMessage *message;
@@ -552,11 +563,12 @@ void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text
 
 void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
                                   const char *markdown, MdDocument *prepared,
-                                  const char *prepared_source)
+                                  const char *prepared_source, uint64_t steering_id)
 {
     (void)prepared;
     (void)prepared_source;
     PicoAgent_AddMessage(app, agent, role, markdown);
+    agent->messages[agent->message_count - 1].steering_id = steering_id;
 }
 
 void PicoAgent_AppendAssistantPrepared(PicoHost *app, PicoAgent *agent, const char *text,
@@ -1563,6 +1575,51 @@ static int TestNoticePersistence(void)
     return ok ? 0 : Fail("notices lost severity/order, entered history, or persisted an ephemeral agent");
 }
 
+static int TestSteeringPersistence(void)
+{
+    PicoHost writer = {0}, reader = {0};
+    PicoHost_SetPath(&writer, "/workspace"); PicoHost_SetPath(&reader, "/workspace");
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(&writer);
+    PicoAgent source = {.persistence = PICO_SESSION_DURABLE, .workspace = workspace, .id = 1};
+    workspace->agents[0] = &source; workspace->count = 1;
+    PicoSessionPersist_Init(&writer);
+    bool ok = PicoSession_LogUser(&writer, &source, "original task", NULL, NULL) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogSteering(&writer, &source, 1, "delivered instruction", NULL, NULL) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogCompaction(&writer, &source, "saved summary", 0) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogSteeringDelivered(&writer, &source, 1, "delivered instruction", NULL, NULL) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogSteering(&writer, &source, 2, "cancelled instruction", NULL, NULL) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogSteeringStopped(&writer, &source, 2, "turn cancelled") == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogAssistant(&writer, &source, 2, "partial assistant", NULL, NULL, NULL, NULL, 0) == PICO_SESSION_WRITE_OK;
+    char *notice = PicoSteering_NotDelivered("cancelled instruction", "turn cancelled");
+    ok &= PicoSession_LogSteeringNotice(&writer, &source, 2, notice) == PICO_SESSION_WRITE_OK;
+    free(notice);
+    ok &= PicoSession_LogSteering(&writer, &source, 3, "interrupted instruction", NULL, NULL) == PICO_SESSION_WRITE_OK;
+    PicoSessionPersist_Shutdown(&writer);
+    PicoAgent restored = {.persistence = PICO_SESSION_DURABLE};
+    g_replayed_history[0] = '\0';
+    PicoSession_Start(&reader, &restored, PICO_SESSION_NEW, source.session_path);
+    ok &= strstr(g_replayed_history, "delivered instruction") && !strstr(g_replayed_history, "cancelled instruction") &&
+          !strstr(g_replayed_history, "interrupted instruction") && restored.steering_count == 0 && restored.last_steering_id == 3;
+    PicoMessage *loaded = NULL; int count = 0;
+    ok &= PicoSession_LoadTranscript(workspace, source.session_id, &loaded, &count) == 0 && count == restored.message_count;
+    int delivered = 0, cancelled = 0, interrupted = 0;
+    int partial_index = -1, cancelled_index = -1;
+    for (int i = 0; i < count; i++)
+    {
+        ok &= loaded[i].role == restored.messages[i].role && loaded[i].steering_id == restored.messages[i].steering_id &&
+              strcmp(loaded[i].source, restored.messages[i].source) == 0;
+        delivered += loaded[i].role == PICO_ROLE_USER && strstr(loaded[i].source, "delivered instruction") != NULL;
+        cancelled += loaded[i].role == PICO_ROLE_NOTICE && strstr(loaded[i].source, "cancelled instruction") != NULL;
+        interrupted += loaded[i].role == PICO_ROLE_NOTICE && strstr(loaded[i].source, "interrupted instruction") != NULL;
+        if (strstr(loaded[i].source, "partial assistant")) partial_index = i;
+        if (strstr(loaded[i].source, "cancelled instruction")) cancelled_index = i;
+    }
+    ok &= delivered == 1 && cancelled == 1 && interrupted == 1 && partial_index < cancelled_index;
+    PicoMessages_Free(loaded, count); PicoAgent_ClearMessages(&restored);
+    unlink(source.session_path);
+    return ok ? 0 : Fail("steering persistence lost ordering/status, duplicated stopped content, or replayed undelivered input");
+}
+
 static int TestPartsReplay(void)
 {
     PicoHost app;
@@ -1720,7 +1777,7 @@ static int TestCatalog(void)
             return Fail("catalog jsonl write");
         }
         fprintf(f,
-                "{\"type\":\"session\",\"version\":4,\"id\":\"catalogsess\","
+                "{\"type\":\"session\",\"version\":5,\"id\":\"catalogsess\","
                 "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n",
                 ws);
         fclose(f);
@@ -1825,7 +1882,7 @@ static int TestCatalogProjectDelete(void)
     Pico_MkdirP(media_dir);
     /* Unknown files block deletion before anything is touched; Pico atomic-write
      * residue is tolerated and cleaned up, but a ".tmp." infix alone is not enough. */
-    if (!AppendRaw(file, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"deleted\"}") ||
+    if (!AppendRaw(file, "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"deleted\"}") ||
         !AppendRaw(artifact, "artifact") || !AppendRaw(other, "unrelated") ||
         !AppendRaw(residue, "partial") || !AppendRaw(residue_meta, "partial") || !AppendRaw(decoy, "decoy") ||
         PicoCatalog_DeleteProject(&host, ws) == 0 || access(other, F_OK) != 0 ||
@@ -1874,10 +1931,10 @@ static int TestCatalogSessionDelete(void)
         return Fail("session delete paths");
     }
     PicoCatalog_Free(list, n);
-    if (!AppendRaw(parent, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"parentsess\"}") ||
-        !AppendRaw(child, "{\"type\":\"session\",\"version\":4,\"kind\":\"subagent\",\"id\":\"childsess\",\"parent_session_id\":\"parentsess\",\"profile\":\"review\",\"initial_purpose\":\"look\"}") ||
-        !AppendRaw(grandchild, "{\"type\":\"session\",\"version\":4,\"kind\":\"subagent\",\"id\":\"grandsess\",\"parent_session_id\":\"childsess\",\"profile\":\"review\",\"initial_purpose\":\"deeper\"}") ||
-        !AppendRaw(sibling, "{\"type\":\"session\",\"version\":4,\"kind\":\"normal\",\"id\":\"siblingsess\"}") ||
+    if (!AppendRaw(parent, "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"parentsess\"}") ||
+        !AppendRaw(child, "{\"type\":\"session\",\"version\":5,\"kind\":\"subagent\",\"id\":\"childsess\",\"parent_session_id\":\"parentsess\",\"profile\":\"review\",\"initial_purpose\":\"look\"}") ||
+        !AppendRaw(grandchild, "{\"type\":\"session\",\"version\":5,\"kind\":\"subagent\",\"id\":\"grandsess\",\"parent_session_id\":\"childsess\",\"profile\":\"review\",\"initial_purpose\":\"deeper\"}") ||
+        !AppendRaw(sibling, "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"siblingsess\"}") ||
         !AppendRaw(notes, "keep") || !AppendRaw(residue, "partial"))
         return Fail("session delete fixtures");
     Pico_MkdirP(parent_media);
@@ -2194,7 +2251,7 @@ static int TestCatalogListingCache(void)
             return Fail("catalog cache jsonl write");
         }
         fprintf(f,
-                "{\"type\":\"session\",\"version\":4,\"id\":\"cachesess\","
+                "{\"type\":\"session\",\"version\":5,\"id\":\"cachesess\","
                 "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n",
                 ws);
         fclose(f);
@@ -2294,7 +2351,7 @@ static int TestCatalogListingCache(void)
             return Fail("catalog cache subagent rewrite");
         }
         fprintf(f,
-                "{\"type\":\"session\",\"version\":4,\"id\":\"childsess\","
+                "{\"type\":\"session\",\"version\":5,\"id\":\"childsess\","
                 "\"kind\":\"subagent\",\"profile\":\"p\",\"initial_purpose\":\"t\","
                 "\"cwd\":\"%s\"}\n",
                 ws);
@@ -2357,7 +2414,7 @@ static int TestSessionListCompleteness(void)
             return Fail("complete listing file");
         }
         fprintf(f,
-                "{\"type\":\"session\",\"version\":4,\"id\":\"list%03d\","
+                "{\"type\":\"session\",\"version\":5,\"id\":\"list%03d\","
                 "\"kind\":\"%s\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n",
                 i, i == PICO_MAX_CATALOG_SESSIONS + 3 ? "subagent" : "normal", ws);
         fprintf(f,
@@ -2442,7 +2499,7 @@ static int TestCatalogCacheCoversOlderSessions(void)
             return Fail("older cache file");
         }
         fprintf(f,
-                "{\"type\":\"session\",\"version\":4,\"id\":\"old%03d\","
+                "{\"type\":\"session\",\"version\":5,\"id\":\"old%03d\","
                 "\"kind\":\"normal\",\"model\":\"header-model\",\"cwd\":\"%s\"}\n"
                 "{\"type\":\"message\",\"role\":\"user\",\"content\":\"old-%03d\"}\n",
                 i, ws, i);
@@ -2577,7 +2634,7 @@ static int TestCatalogScanFailureKeepsIndexedSession(void)
                                    g_config_dir, found->key))
     { PicoCatalog_Free(list, n); return Fail("failed-stat path"); }
     PicoCatalog_Free(list, n);
-    if (!AppendRaw(path, "{\"type\":\"session\",\"version\":4,\"id\":\"stable\",\"kind\":\"normal\"}") ||
+    if (!AppendRaw(path, "{\"type\":\"session\",\"version\":5,\"id\":\"stable\",\"kind\":\"normal\"}") ||
         !AppendRaw(path, "{\"type\":\"message\",\"role\":\"user\",\"content\":\"stable title\"}"))
         return Fail("failed-stat session");
     n = PicoCatalog_Scan(&list);
@@ -2625,7 +2682,7 @@ static int TestCatalogSnapshotDoesNotReconcile(void)
         PICO_SESSION_WRITE_OK) goto done;
     FILE *file = fopen(agent.session_path, "wb");
     if (!file) goto done;
-    fprintf(file, "{\"type\":\"session\",\"version\":4,\"id\":\"%s\","
+    fprintf(file, "{\"type\":\"session\",\"version\":5,\"id\":\"%s\","
                   "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"external title\"}\n",
                   agent.session_id, ws);
     fclose(file);
@@ -2723,7 +2780,7 @@ static int TestCatalogDeleteRejectsSwappedCheckout(void)
                                     g_config_dir, target->key))
     { PicoCatalog_Free(list, n); return Fail("swapped checkout paths"); }
     PicoCatalog_Free(list, n);
-    if (!AppendRaw(file, "{\"type\":\"session\",\"version\":4,\"id\":\"foreign\"}") ||
+    if (!AppendRaw(file, "{\"type\":\"session\",\"version\":5,\"id\":\"foreign\"}") ||
         !PicoPath_Format(moved, sizeof(moved), "%s-moved", first) ||
         rename(first, moved) != 0 || symlink(second, first) != 0)
         return Fail("swapped checkout fixture");
@@ -2814,7 +2871,7 @@ static int TestCatalogSQLiteImport(void)
     fclose(f);
     f = fopen(jsonl, "wb");
     if (!f) goto done;
-    fprintf(f, "{\"type\":\"session\",\"version\":4,\"id\":\"imported\","
+    fprintf(f, "{\"type\":\"session\",\"version\":5,\"id\":\"imported\","
             "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
             "{\"type\":\"message\",\"role\":\"user\",\"content\":\"import title\"}\n", first);
     fclose(f);
@@ -3541,7 +3598,7 @@ int main(void)
 
     size_t file_len = 0;
     char *file = Pico_ReadFile(writer_agent.session_path, &file_len);
-    if (!file || !strstr(file, "\"version\":4") || !strstr(file, "\"kind\":\"normal\"") ||
+    if (!file || !strstr(file, "\"version\":5") || !strstr(file, "\"kind\":\"normal\"") ||
         !strstr(file, "\"type\":\"usage\"") || strstr(file, "\"usage\":{") ||
         !strstr(file, "\"fast\":true,\"service_tier\":\"priority\""))
     {
@@ -3570,7 +3627,7 @@ int main(void)
     PicoSession_LogToolResult(&writer, &child_agent, "child-call-2", "sh", "ok", false, NULL);
     PicoSessionHeader child_header;
     if (!child_agent.session_path[0] || PicoSession_ReadHeader(child_agent.session_path, &child_header) != 0 ||
-        child_header.version != 4 || child_header.kind != PICO_AGENT_SUBAGENT ||
+        child_header.version != 5 || child_header.kind != PICO_AGENT_SUBAGENT ||
         strcmp(child_header.profile, "review") != 0 ||
         strcmp(child_header.initial_purpose, "Review carefully") != 0 ||
         strcmp(child_header.parent_session_id, "parent-session") != 0)
@@ -3770,7 +3827,7 @@ int main(void)
     char bad_kind_path[4096];
     snprintf(bad_kind_path, sizeof(bad_kind_path), "%s/bad-kind.jsonl", temp);
     if (!AppendRaw(bad_kind_path,
-                   "{\"type\":\"session\",\"version\":4,\"id\":\"bad\","
+                   "{\"type\":\"session\",\"version\":5,\"id\":\"bad\","
                    "\"kind\":\"unknown\",\"model\":\"saved-model\"}"))
     {
         return Fail("could not create invalid version 4 header");
@@ -3787,7 +3844,7 @@ int main(void)
     char missing_group_path[4096];
     snprintf(missing_group_path, sizeof(missing_group_path), "%s/missing-group.jsonl", temp);
     if (!AppendRaw(missing_group_path,
-                   "{\"type\":\"session\",\"version\":4,\"id\":\"missing-group\","
+                   "{\"type\":\"session\",\"version\":5,\"id\":\"missing-group\","
                    "\"kind\":\"normal\",\"model\":\"saved-model\"}") ||
         !AppendRaw(missing_group_path,
                    "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"lost\"}") ||
@@ -3800,7 +3857,7 @@ int main(void)
     char typed_group_path[4096];
     snprintf(typed_group_path, sizeof(typed_group_path), "%s/typed-group.jsonl", temp);
     if (!AppendRaw(typed_group_path,
-                   "{\"type\":\"session\",\"version\":4,\"id\":\"typed-group\","
+                   "{\"type\":\"session\",\"version\":5,\"id\":\"typed-group\","
                    "\"kind\":\"normal\",\"model\":\"saved-model\"}") ||
         !AppendRaw(typed_group_path,
                    "{\"type\":\"message\",\"role\":\"assistant\","
@@ -3813,7 +3870,7 @@ int main(void)
     char typed_tool_group_path[4096];
     snprintf(typed_tool_group_path, sizeof(typed_tool_group_path), "%s/typed-tool-group.jsonl", temp);
     if (!AppendRaw(typed_tool_group_path,
-                   "{\"type\":\"session\",\"version\":4,\"id\":\"typed-tool-group\","
+                   "{\"type\":\"session\",\"version\":5,\"id\":\"typed-tool-group\","
                    "\"kind\":\"normal\",\"model\":\"saved-model\"}") ||
         !AppendRaw(typed_tool_group_path,
                    "{\"type\":\"tool_call\",\"message_group\":true,"
@@ -3826,7 +3883,7 @@ int main(void)
     char incomplete_child_path[4096];
     snprintf(incomplete_child_path, sizeof(incomplete_child_path), "%s/incomplete-child.jsonl", temp);
     if (!AppendRaw(incomplete_child_path,
-                   "{\"type\":\"session\",\"version\":4,\"id\":\"bad-child\","
+                   "{\"type\":\"session\",\"version\":5,\"id\":\"bad-child\","
                    "\"kind\":\"subagent\",\"profile\":\"review\","
                    "\"model\":\"saved-model\"}") ||
         PicoSession_ReadHeader(incomplete_child_path, &invalid_header) == 0)
@@ -3857,7 +3914,7 @@ int main(void)
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
     if (PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
-        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
+        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||
         PICO_TEST_RUN(TestConcurrentAppendDuringTitle()) != 0 || PICO_TEST_RUN(TestConcurrentDoneCatalog()) != 0 ||

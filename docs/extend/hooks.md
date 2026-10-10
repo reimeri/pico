@@ -54,24 +54,25 @@ Registered during `host_init`. Only valid for host-global UI hooks:
 
 ### Workspace Notification Hooks (`pico_workspace_add_hook`)
 Registered during `workspace_init`. Valid for agent lifecycle hooks:
-- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the snapshotted submit for that agent. A later selection change cannot retarget it.
-- `PICO_HOOK_ON_SUBMIT` — the target user message was logged and its turn started.
+- `PICO_HOOK_BEFORE_SUBMIT` — intercept/rewrite the snapshotted composer send for that agent; `submit_kind` distinguishes a new turn from steering. A later selection change cannot retarget it.
+- `PICO_HOOK_ON_SUBMIT` — the target user message was logged and its turn started (`PICO_SUBMIT_TURN`); never fired for steering.
+- `PICO_HOOK_ON_STEER` — copied input was accepted into the target queue (`PICO_SUBMIT_STEERING`), not delivered. Composer and explicit API acceptance emit it; replay does not. See [steering](steering.md).
 - `PICO_HOOK_ON_MESSAGE` — a message was added to the target transcript.
 - `PICO_HOOK_ON_COMPACT` — target compaction is starting.
 - `PICO_HOOK_AFTER_COMPACT` — target history was replaced with a briefing.
 - `PICO_HOOK_ON_TURN_END` — target became idle after a completed turn, not cancel/error.
 - `PICO_HOOK_ON_CANCEL` — target turn was cancelled.
 - `PICO_HOOK_ON_ERROR` — target entered `PICO_AGENT_ERROR`.
-- `PICO_HOOK_ON_ASK` — a pending ask snapshot was published for the target. Fires for that agent even when another session is selected. `PicoHookEvent` is still only `{hook, agent_id}`; `pico_tool_pending_ask` remains the selected-session ask.
+- `PICO_HOOK_ON_ASK` — a pending ask snapshot was published for the target. Fires for that agent even when another session is selected. `PicoHookEvent.submit_kind` is only meaningful on submit/steering notifications; `pico_tool_pending_ask` remains the selected-session ask.
 - `PICO_HOOK_ON_ASK_END` — that ask is no longer pending after answer, cancel, or force-cancel/stop. Not fired on `PICO_HOOK_ON_AGENT_DESTROY`.
 - `PICO_HOOK_ON_SESSION_RESET` — target starts a new/resumed/ephemeral session, or a reload re-announces a live session; clear only that ID's session state. After reload, structured tool details are replayed to rebuild it.
 - `PICO_HOOK_ON_AGENT_DESTROY` — target is about to become invalid; remove its ID-keyed extension state.
 
 ## BEFORE_SUBMIT
 
-Composer send snapshots the selected agent ID, then `PicoHost_Submit` clears cancel, agent input, and agent parts and runs the hook for that ID. Call `pico_host_request_submit_cancel(host)` to swallow the send. Call `pico_host_set_agent_input(host, text)` with a malloc'd replacement sent to the model; the composer text remains the display text and Pico takes ownership. The builtin file-mention hook expands `@path` references from this replacement when present, preserving earlier command rewrites such as `/skill`. Whitespace-only composer text is skipped unless pasted image attachments are present.
+Composer send snapshots the selected agent ID and chooses `PICO_SUBMIT_TURN` while idle or `PICO_SUBMIT_STEERING` for an eligible busy main agent, then `PicoHost_Submit` clears cancel, agent input, and agent parts and runs the hook for that ID. Call `pico_host_request_submit_cancel(host)` to swallow the send. Call `pico_host_set_agent_input(host, text)` with a malloc'd replacement sent to the model; the composer text remains the display text and Pico takes ownership. The builtin file-mention hook expands `@path` references from this replacement when present, preserving earlier command rewrites such as `/skill`. Whitespace-only composer text is skipped unless pasted image attachments are present.
 
-For structured input, call `pico_host_set_agent_parts(host, parts_json)` with a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When parts are set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. After the hook, Pico validates those parts, then appends any pasted composer images (or builds `[text, image…]` when hooks left parts unset). Invalid hook parts reject the submission without discarding the composer draft. Pasted images also block submission, preserving the draft, when the active model does not support vision. Chat display may include markdown images for those files; agent input and the text part stay as typed/hook text. Pico frees the replacement input and parts after submit or cancellation. Each setter frees any previous value.
+For structured input, call `pico_host_set_agent_parts(host, parts_json)` with a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When parts are set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. After the hook, Pico validates those parts, then appends any pasted composer images (or builds `[text, image…]` when hooks left parts unset). Invalid hook parts reject the submission without discarding the composer draft. Pasted images also block submission, preserving the draft, when the applicable model does not support vision (the pinned running model for steering, selected next-turn model for idle submit). Chat display may include markdown images for those files; agent input and the text part stay as typed/hook text. Pico frees the replacement input and parts after submit or cancellation. Each setter frees any previous value.
 
 ## ON_COMPACT
 

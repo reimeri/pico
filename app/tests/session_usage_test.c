@@ -3782,6 +3782,14 @@ int main(void)
         return Fail("/resume listing included a subagent session, or exact child ids stopped resolving");
     }
 
+    PicoCatalogReferenceMatch *references=NULL;
+    int reference_count=PicoCatalog_SearchReferences(writer_ws.project_path[0] ? writer_ws.project_path : writer_ws.path,
+        "",NULL,NULL,&references,10);
+    bool main_reference=reference_count==1 && !strcmp(references[0].ref.id,writer_agent.session_id) &&
+        !strcmp(references[0].ref.path,writer_agent.session_path);
+    free(references);
+    if (!main_reference) return Fail("session reference discovery must omit persisted subagent conversations");
+
     PicoHost compacted;
     PicoWorkspace compacted_ws;
     PicoAgent compacted_agent;

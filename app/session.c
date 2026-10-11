@@ -4495,6 +4495,111 @@ static int CatalogDbList(sqlite3 *db, const char *workspace, const char *search,
     return count;
 }
 
+/* Snapshot reads grow with indexed metadata, independently of the popup's
+ * display cap. Positive maxima retain bounded searches for other callers. */
+static void *CatalogMatchReserve(void *rows, int count, int *capacity, int maximum, size_t size)
+{
+    if (count < *capacity) return rows;
+    int next = *capacity ? (*capacity > INT_MAX/2 ? INT_MAX : *capacity*2) : 16;
+    if (maximum > 0 && next > maximum) next = maximum;
+    if (next <= count || (size_t)next > SIZE_MAX/size) return NULL;
+    void *grown = realloc(rows,(size_t)next*size);
+    if (grown) *capacity = next;
+    return grown;
+}
+
+int PicoCatalog_SearchProjects(const char *query, bool exact, PicoCatalogProjectMatch **out, int maximum)
+{
+    if (out) *out = NULL;
+    if (!out || maximum < 0) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    sqlite3_stmt *stmt = NULL;
+    /* A project can exist without an explicit projects preference row. */
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "SELECT DISTINCT w.project_path,coalesce(p.name,'') FROM workspaces w"
+        " LEFT JOIN projects p ON p.path=w.project_path ORDER BY w.project_path");
+    PicoCatalogProjectMatch *rows = NULL;
+    int n = 0, capacity = 0, rc = SQLITE_DONE;
+    while (ok && (rc = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        PicoCatalogProjectMatch row = {0};
+        snprintf(row.path, sizeof(row.path), "%s", CatalogDbText(stmt, 0));
+        snprintf(row.name, sizeof(row.name), "%s", CatalogDbText(stmt, 1));
+        if (!row.name[0]) PathBasename(row.path, row.name, sizeof(row.name));
+        /* Match literal bytes, case-insensitively, as existing session search
+         * does. Names are not filesystem identities and need not be unique. */
+        bool match = !query || !query[0];
+        for (const char *a = row.name; !match && *a; a++)
+        {
+            const char *b = a, *q = query;
+            while (*b && *q && tolower((unsigned char)*b) == tolower((unsigned char)*q)) { b++; q++; }
+            match = !*q && (!exact || (a == row.name && !*b));
+        }
+        if (match)
+        {
+            PicoCatalogProjectMatch *next = CatalogMatchReserve(rows,n,&capacity,maximum,sizeof(*rows));
+            if (!next) { ok=false; break; }
+            rows=next;
+            rows[n++] = row;
+        }
+        if (maximum > 0 && n == maximum) break;
+    }
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) ok = false;
+    sqlite3_finalize(stmt); sqlite3_close(db);
+    if (!ok) { free(rows); return -1; }
+    *out = rows;
+    return n;
+}
+
+int PicoCatalog_SearchReferences(const char *project_path, const char *query,
+    const char *exclude_checkout, const char *exclude_id,
+    PicoCatalogReferenceMatch **out, int maximum)
+{
+    if (out) *out = NULL;
+    if (!out || !project_path || !project_path[0] || maximum < 0) return 0;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return -1;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "SELECT s.id,s.title,s.workspace_path,s.file_path,w.checkout_name,w.worktree"
+        " FROM sessions s JOIN workspaces w ON w.path=s.workspace_path"
+        " WHERE s.project_path=? AND s.kind=0"
+        " AND NOT (s.workspace_path=? AND s.id=?)"
+        " AND (?='' OR instr(lower(s.title),lower(?))>0 OR instr(lower(s.id),lower(?))>0)"
+        " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC LIMIT ?");
+    PicoCatalogReferenceMatch *rows = NULL;
+    int n = 0, capacity = 0, rc = SQLITE_DONE;
+    if (ok)
+    {
+        sqlite3_bind_text(stmt, 1, project_path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, exclude_checkout ? exclude_checkout : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, exclude_id ? exclude_id : "", -1, SQLITE_TRANSIENT);
+        for (int i = 4; i <= 6; i++) sqlite3_bind_text(stmt, i, query ? query : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 7, maximum > 0 ? maximum : -1);
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+        {
+            PicoCatalogReferenceMatch *next = CatalogMatchReserve(rows,n,&capacity,maximum,sizeof(*rows));
+            if (!next) { ok=false; break; }
+            rows=next;
+            PicoCatalogReferenceMatch *row = &rows[n++];
+            memset(row,0,sizeof(*row));
+            snprintf(row->ref.id, sizeof(row->ref.id), "%s", CatalogDbText(stmt, 0));
+            snprintf(row->ref.title, sizeof(row->ref.title), "%s", CatalogDbText(stmt, 1));
+            if (!row->ref.title[0]) snprintf(row->ref.title, sizeof(row->ref.title), "Untitled session");
+            snprintf(row->ref.checkout, sizeof(row->ref.checkout), "%s", CatalogDbText(stmt, 2));
+            snprintf(row->ref.path, sizeof(row->ref.path), "%s", CatalogDbText(stmt, 3));
+            snprintf(row->checkout_name, sizeof(row->checkout_name), "%s", CatalogDbText(stmt, 4));
+            row->worktree = sqlite3_column_int(stmt, 5) != 0;
+        }
+        if (rc != SQLITE_DONE) ok = false;
+    }
+    sqlite3_finalize(stmt); sqlite3_close(db);
+    if (!ok) { free(rows); return -1; }
+    *out = rows;
+    return n;
+}
+
 static void CatalogDbFillWorkspace(sqlite3_stmt *stmt, PicoCatalogWorkspace *ws)
 {
     memset(ws, 0, sizeof(*ws));

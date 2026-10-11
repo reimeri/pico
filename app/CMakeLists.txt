@@ -183,6 +183,7 @@ add_executable(pico
     chat_find.c
     chat_sel.c
     text_range.c
+    session_ref.c
     text_field.c
     text_field_ui.c
     spell_engine.c
@@ -209,6 +210,7 @@ add_executable(pico
     builtins/subagent.c
     builtins/complete.c
     builtins/commands.c
+    builtins/sessions.c
     builtins/files.c
     builtins/skills.c
     builtins/skill_load.c
@@ -382,7 +384,8 @@ if(BUILD_TESTING)
 
     add_executable(pico_markdown_tests
         tests/markdown_test.c
-        markdown.c)
+        markdown.c
+        session_ref.c)
     target_include_directories(pico_markdown_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     pico_warnings_are_errors(pico_markdown_tests)
     target_link_libraries(pico_markdown_tests PRIVATE md4c)
@@ -392,6 +395,7 @@ if(BUILD_TESTING)
         tests/md_scroll_layout_test.c
         tests/clay_impl.c
         markdown.c
+        session_ref.c
         md_view.c
         highlight.c
         richtext.c
@@ -689,6 +693,7 @@ if(BUILD_TESTING)
         chat_find.c
         chat_sel.c
         text_range.c
+        session_ref.c
         text_field.c
         text_field_ui.c
         markdown.c)
@@ -738,6 +743,7 @@ if(BUILD_TESTING)
         chat_find.c
         chat_sel.c
         text_range.c
+        session_ref.c
         text_field.c
         text_field_ui.c
         markdown.c)
@@ -947,6 +953,7 @@ if(BUILD_TESTING)
         builtins/notify.c
         builtins/shell.c
         builtins/commands.c
+        builtins/sessions.c
         builtins/complete.c
         builtins/files.c
         builtins/skills.c
@@ -968,6 +975,7 @@ if(BUILD_TESTING)
         highlight.c
         richtext.c
         text_range.c
+        session_ref.c
         text_field.c
         text_field_ui.c
         wrapped_text.c

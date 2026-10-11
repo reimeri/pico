@@ -9,6 +9,7 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 ## Features
 
 - Markdown chat UI, composer, and footer
+- `@` file and `#` session tags
 - Find in the current conversation with Ctrl+F
 - Diff viewer
 - Native model support (api key or `/login {provider}`)

@@ -1,6 +1,7 @@
 #include "test_wait.h"
 #include "pico/host.h"
 #include "composer_internal.h"
+#include "session_ref.h"
 #include "host_internal.h"
 #include "json.h"
 
@@ -201,6 +202,30 @@ int TestClipboardPaste(void)
     PicoComposer_BeginClipboardPaste(host);
     ClipboardDrain(host);
     if (strcmp(host->composer.text, s_fallback) != 0) goto done;
+
+    phase = "portable references survive copy/paste even when their metadata is a large paste";
+    PicoSessionRef reference={.title="Copied conversation",.id="copied-id"};
+    reference.checkout[0]=reference.path[0]='/';
+    memset(reference.checkout+1,' ',2000); reference.checkout[2001]='\0';
+    memset(reference.path+1,' ',2000); reference.path[2001]='\0';
+    char *portable=PicoSessionRef_Serialize(&reference);
+    if (!portable) goto done;
+    PicoComposer_SetText(host,portable);
+    host->composer.sel_anchor=0;
+    PicoComposer_Copy(host);
+    bool copy_preserved=s_recorded_clipboard && !strcmp(s_recorded_clipboard,portable);
+    PicoComposer_SetText(host,"");
+    const char *normal_fallback=s_fallback;
+    s_fallback=portable;
+    PicoComposer_BeginClipboardPaste(host);
+    ClipboardDrain(host);
+    s_fallback=normal_fallback;
+    PicoSessionRef restored;
+    bool restored_reference=PicoSessionRef_Next(host->composer.text,host->composer.length,0,&restored) &&
+        !strcmp(restored.id,reference.id) && !strcmp(restored.path,reference.path);
+    free(portable);
+    if (!copy_preserved || !restored_reference) goto done;
+    PicoComposer_SetText(host,s_fallback);
 
     phase = "presentation switch discards a fetched result awaiting adoption";
     if (!ClipboardWrite(wl, helper) || chmod(wl, 0700) != 0) goto done;

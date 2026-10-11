@@ -12,6 +12,8 @@
 // collector.
 
 #include "markdown.h"
+#include "session_ref.h"
+#include <limits.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1239,6 +1241,138 @@ static char *RewritePreserveBlanks(const char *src, size_t len, size_t *out_len)
     return out;
 }
 
+/* Portable references are display atoms, not Markdown syntax. Mask them before
+ * md4c so `code`, !images and other surrounding syntax cannot reveal the URI or
+ * change their identity. Restore dedicated chunks after parsing, preserving the
+ * surrounding text style. All restored strings live in the document arena. */
+typedef struct MdReference {
+    char *label;
+    int length;
+    char *url;
+} MdReference;
+
+typedef struct MdReferences {
+    char prefix[64];
+    char *text;
+    MdReference *items;
+    int count;
+} MdReferences;
+
+static bool MaskReferences(MdDocument *doc, const char *src, size_t length, MdReferences *map)
+{
+    PicoSessionRef ref;
+    if (length>INT_MAX || !PicoSessionRef_Next(src,(int)length,0,&ref)) return true;
+    unsigned int nonce=0;
+    /* A literal marker already in the source must remain literal, not become
+     * a reference. Choose a prefix absent from this exact source. */
+    for (;;)
+    {
+        snprintf(map->prefix,sizeof(map->prefix),"PICOREFTOKEN%uX",nonce++);
+        bool present=false;
+        size_t n=strlen(map->prefix);
+        for (size_t i=0; i+n<=length; i++)
+            if (!memcmp(src+i,map->prefix,n)) { present=true; break; }
+        if (!present) break;
+    }
+    if (length>(SIZE_MAX-64)/2) return false;
+    map->text=malloc(length*2+64);
+    if (!map->text) return false;
+    char *out=map->text;
+    int at=0;
+    do
+    {
+        MdReference *next=realloc(map->items,(size_t)(map->count+1)*sizeof(*next));
+        if (!next) return false;
+        map->items=next;
+        MdReference *item=&map->items[map->count];
+        char label[290]; snprintf(label,sizeof(label),"#%s",ref.title);
+        item->length=(int)strlen(label);
+        item->label=MdArena_DupCstr(&doc->arena,label);
+        /* Parse has already validated the complete encoded URI. */
+        int url_end=ref.end-1, url_start=url_end;
+        while (url_start>ref.start && src[url_start-1]!='(') url_start--;
+        item->url=MdArena_Dup(&doc->arena,src+url_start,(size_t)(url_end-url_start));
+        if (!item->label || !item->url) return false;
+        memcpy(out,src+at,(size_t)(ref.start-at)); out+=ref.start-at;
+        out+=sprintf(out,"%s%dZ",map->prefix,map->count++);
+        at=ref.end;
+    } while (PicoSessionRef_Next(src,(int)length,at,&ref));
+    memcpy(out,src+at,length-(size_t)at); out+=length-(size_t)at; *out='\0';
+    return true;
+}
+
+static bool RestoreChunkReferences(MdArena *arena, MdChunk **chunks, int *count,
+                                   const MdReferences *map)
+{
+    MdChunk *result=NULL;
+    int used=0;
+    for (int i=0; i<*count; i++)
+    {
+        MdChunk original=(*chunks)[i];
+        const char *at=original.text;
+        for (;;)
+        {
+            const char *marker=strstr(at,map->prefix);
+            int index=-1, bytes=0;
+            if (marker && sscanf(marker+strlen(map->prefix),"%dZ%n",&index,&bytes)==1 && bytes>0 &&
+                index>=0 && index<map->count)
+            {
+                int prefix=(int)(marker-at);
+                MdChunk *next=realloc(result,(size_t)(used+(prefix>0 ? 2 : 1))*sizeof(*next));
+                if (!next) { free(result); return false; }
+                result=next;
+                if (prefix>0)
+                {
+                    result[used]=original;
+                    result[used].text=MdArena_Dup(arena,at,(size_t)prefix);
+                    result[used++].length=prefix;
+                }
+                MdReference *ref=&map->items[index];
+                result[used++]=(MdChunk){.text=ref->label,.length=ref->length,.link_url=ref->url};
+                at=marker+strlen(map->prefix)+bytes;
+            }
+            else
+            {
+                if (*at)
+                {
+                    MdChunk *next=realloc(result,(size_t)(used+1)*sizeof(*next));
+                    if (!next) { free(result); return false; }
+                    result=next;
+                    result[used]=original;
+                    result[used].text=MdArena_DupCstr(arena,at);
+                    result[used++].length=(int)strlen(at);
+                }
+                break;
+            }
+        }
+    }
+    free(*chunks); *chunks=result; *count=used;
+    return true;
+}
+
+static bool RestoreReferences(MdDocument *doc, const MdReferences *map)
+{
+    if (!map->count) return true;
+    for (int i=0; i<doc->block_count; i++)
+    {
+        MdBlock *block=&doc->blocks[i];
+        if (block->raw_text && strstr(block->raw_text,map->prefix))
+        {
+            block->chunks=malloc(sizeof(*block->chunks));
+            if (!block->chunks) return false;
+            block->chunks[0]=(MdChunk){.text=block->raw_text,.length=(int)strlen(block->raw_text)};
+            block->chunk_count=1;
+        }
+        if (!RestoreChunkReferences(&doc->arena,&block->chunks,&block->chunk_count,map)) return false;
+        for (int j=0; j<block->table.row_count*block->table.col_count; j++)
+        {
+            MdTableCell *cell=&block->table.cells[j];
+            if (!RestoreChunkReferences(&doc->arena,&cell->chunks,&cell->chunk_count,map)) return false;
+        }
+    }
+    return true;
+}
+
 MdDocument MdDocument_Parse(const char *src, size_t length)
 {
     return MdDocument_ParseEx(src, length, MD_PARSE_DEFAULT);
@@ -1288,8 +1422,12 @@ MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
         }
     }
 
-    int parse_result = md_parse(parse_src, (MD_SIZE)parse_len, &parser, &builder);
+    MdReferences references={0};
+    bool references_ok=MaskReferences(&doc,parse_src,parse_len,&references);
+    if (references.text && references_ok) { parse_src=references.text; parse_len=strlen(parse_src); }
+    int parse_result = references_ok ? md_parse(parse_src, (MD_SIZE)parse_len, &parser, &builder) : -1;
     free(rewritten);
+    free(references.text);
 
     // Clean up anything left dangling (e.g. when a callback aborted parsing).
     for (int i = 0; i < builder.collector_depth; i++)
@@ -1307,6 +1445,7 @@ MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
         }
         free(builder.blocks);
         FreeBuilderTable(&builder);
+        free(references.items);
         doc.load_error = MdArena_DupCstr(&doc.arena, "Markdown parsing failed.");
         return doc;
     }
@@ -1315,6 +1454,9 @@ MdDocument MdDocument_ParseEx(const char *src, size_t length, int flags)
 
     doc.blocks = builder.blocks;
     doc.block_count = builder.block_count;
+    if (!RestoreReferences(&doc,&references))
+        doc.load_error=MdArena_DupCstr(&doc.arena,"Could not restore session reference display.");
+    free(references.items);
     return doc;
 }
 

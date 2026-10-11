@@ -19,7 +19,9 @@ Parts replace the one-text-part model item, so include the complete model-facing
 text in the parts array. Supported parts and local-file ownership follow
 [hooks](hooks.md#before_submit). Parts-only input derives a display from its text
 and media paths. Composer steering also supports existing pasted attachments
-and `@file` preprocessing. The explicit API does not run composer hooks or read
+and `@file` / `#` session-reference preprocessing. Session references capture
+only the title and absolute JSONL path at acceptance, not a transcript snapshot;
+later delivery does not re-resolve them. The explicit API does not run composer hooks or read
 composer state, matching `pico_agent_submit`.
 
 Results:

@@ -12,6 +12,9 @@
 #include "workspace_internal.h"
 #include "settings.h"
 #include "session.h"
+#include "session_ref.h"
+#include "complete_internal.h"
+#include "composer_internal.h"
 #include "json.h"
 #include "path.h"
 #include "scrollbar.h"
@@ -34,6 +37,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <math.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +50,7 @@ int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoComple
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static bool g_find_input_test;
+static bool g_session_chip_measure;
 static int g_find_key;
 static bool g_find_ctrl;
 static bool g_find_shift;
@@ -2339,6 +2344,8 @@ done:
 
 static int RunExpandedToolFoldCase(bool with_sidebar);
 
+static int RunSessionReferenceShellCase(bool with_sidebar);
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -2366,6 +2373,7 @@ static int TestBottomFollowShellGeometryStable(void)
         return 1;
     if (RunNoticeTranscriptCase(false, false) != 0 || RunNoticeTranscriptCase(true, false) != 0 ||
         RunNoticeTranscriptCase(false, true) != 0 || RunNoticeTranscriptCase(true, true) != 0) return 1;
+    if (RunSessionReferenceShellCase(false) || RunSessionReferenceShellCase(true)) return 1;
     return RunWorkspaceLessShellCase();
 }
 
@@ -15295,6 +15303,468 @@ static bool WorktreeTestAdd(const char *repo, const char *path)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+static int AwaitSessionCompletion(PicoHost *host, const PicoCompleter *completer,
+                                  const char *prefix, PicoCompleteItem *items)
+{
+    int count=0;
+    PICO_TEST_WAIT(!count)
+    {
+        pico_host_pump(host);
+        count=completer->host_query(host,prefix,items,PICO_MAX_COMPLETE_ITEMS,completer->state);
+    }
+    return count;
+}
+
+static int TestSessionReferenceCompletionScopes(void)
+{
+    char repo[]="/tmp/pico-ref-project-XXXXXX", linked[]="/tmp/pico-ref-linked-XXXXXX";
+    char other[]="/tmp/pico-ref-other-XXXXXX", cfg[]="/tmp/pico-ref-cfg-XXXXXX";
+    PicoHost *host=NULL;
+    int rc=1;
+    if (!mkdtemp(repo) || !mkdtemp(linked) || !mkdtemp(other) || !mkdtemp(cfg)) goto done;
+    rmdir(linked);
+    setenv("XDG_CONFIG_HOME",cfg,1);
+    if (!WorktreeTestGit(repo,"init","-q",NULL,NULL) ||
+        !WorktreeTestGit(repo,"config","user.email","pico@example.test",NULL) ||
+        !WorktreeTestGit(repo,"config","user.name","Pico Test",NULL) ||
+        !WorktreeTestGit(repo,"commit","--allow-empty","-qm","initial") || !WorktreeTestAdd(repo,linked) ||
+        pico_host_init(&host,NULL,true)!=PICO_OK) goto done;
+    WaitPluginLoad(host);
+    const char *paths[]={repo,linked,other};
+    const char *titles[]={"SessionTag closed conversation","SessionTag worktree conversation","SessionTag bug:parser conversation"};
+    PicoWorkspaceId workspaces[3];
+    PicoAgentId writers[3];
+    PicoAgentCreateOptions options={.kind=PICO_AGENT_MAIN,.session_start=PICO_SESSION_NEW};
+    for (int i=0; i<3; i++)
+    {
+        if (pico_workspace_open(host,paths[i],&workspaces[i])!=PICO_OK ||
+            pico_main_agent_create(host,workspaces[i],&options,&writers[i])!=PICO_OK) goto done;
+        PicoAgent *agent=PicoHost_FindAgent(host,writers[i]);
+        if (PicoSession_LogUser(host,agent,titles[i],titles[i],NULL)!=PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(host,agent)) goto done;
+    }
+    if (pico_agent_close(host,writers[0])!=PICO_OK || PicoCatalog_SetProjectName(other,"Other Project")!=0) goto done;
+    options.select=true;
+    PicoAgentId current;
+    if (pico_main_agent_create(host,workspaces[0],&options,&current)!=PICO_OK) goto done;
+    PicoAgent *agent=PicoHost_FindAgent(host,current);
+    if (PicoSession_LogUser(host,agent,"SessionTag current conversation","SessionTag current conversation",NULL)!=PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host,agent)) goto done;
+    const PicoCompleter *completer=NULL;
+    for (int i=0; i<host->completer_count; i++) if (host->completers[i].trigger=='#') completer=&host->completers[i];
+    if (!completer) goto done;
+    PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
+    PicoComposer_SetText(host,"#SessionTag");
+#ifdef PICO_TEST_IO
+    char db[4096]; snprintf(db,sizeof(db),"%s/pico/sessions/.catalog.sqlite3",cfg);
+    PicoTestIo_Hold(db);
+#endif
+    PicoComplete_Refresh(host);
+#ifdef PICO_TEST_IO
+    if (PicoTestIo_OnOwner()) { Fail("session autocomplete must not read the catalog on the UI thread"); goto done; }
+    PicoTestIo_WaitEntered();
+    /* Change the query while its first search is blocked. */
+    PicoComposer_SetText(host,"#Other");
+    PicoComplete_Refresh(host);
+    PicoTestIo_Release();
+    int n=AwaitSessionCompletion(host,completer,"Other",items);
+    if (n!=1 || strcmp(items[0].label,"Other Project:"))
+    { Fail("stale session completion must not replace a newer project query"); goto done; }
+#endif
+    PicoComposer_SetText(host,"#SessionTag");
+    PicoComplete_Refresh(host);
+    int local_count=AwaitSessionCompletion(host,completer,"SessionTag",items);
+    bool closed=false, worktree=false, unrelated=false;
+    for (int i=0; i<local_count; i++)
+    {
+        closed |= !strcmp(items[i].label,titles[0]);
+        worktree |= !strcmp(items[i].label,titles[1]);
+        unrelated |= !strcmp(items[i].label,titles[2]) || !strcmp(items[i].label,"SessionTag current conversation");
+    }
+    if (!closed || !worktree || unrelated)
+    { Fail("default reference search must include closed/main worktree sessions but exclude other projects and itself"); goto done; }
+#ifdef PICO_TEST_IO
+    /* Catalog I/O is unavailable while editing an already loaded token.
+     * Matching suggestions must remain visible and selectable without
+     * depending on another worker search. */
+    PicoTestIo_Hold(db);
+    PicoComposer_ReplaceRange(host,host->composer.length-3,host->composer.length,"");
+    PicoComplete_Refresh(host);
+    const char *letters[]={"T","a"};
+    for (int letter=0; letter<2; letter++)
+    {
+        PicoComposer_ReplaceRange(host,host->composer.length,host->composer.length,letters[letter]);
+        PicoComplete_Refresh(host);
+        int visible=completer->host_query(host,host->composer.text+1,items,PICO_MAX_COMPLETE_ITEMS,completer->state);
+        if (!PicoComplete_IsOpen() || visible!=local_count || PicoTestIo_OnOwner())
+        { Fail("session autocomplete must stay open with matching suggestions while a refined search is pending"); goto done; }
+    }
+    PicoComposer_ReplaceRange(host,host->composer.length,host->composer.length,":");
+    PicoComplete_Refresh(host);
+    if (PicoComplete_IsOpen())
+    { Fail("a new project qualifier must clear cached rows even within the same token"); goto done; }
+    PicoComposer_ReplaceRange(host,1,host->composer.length,"closed");
+    PicoComplete_Refresh(host);
+    int filtered=completer->host_query(host,"closed",items,PICO_MAX_COMPLETE_ITEMS,completer->state);
+    if (!PicoComplete_IsOpen() || filtered!=1 || strcmp(items[0].label,titles[0]))
+    { Fail("pending session completion must immediately filter cached rows to the current query"); goto done; }
+    if (!completer->host_accept(host,&items[0],completer->state)) goto done;
+    PicoSessionRef pending_reference;
+    if (!PicoSessionRef_Parse(host->composer.text,host->composer.length,0,&pending_reference) ||
+        strcmp(pending_reference.checkout,repo))
+    { Fail("a filtered cached completion must retain its selected identity during background refresh"); goto done; }
+    /* A new token may not inherit those cached session rows. */
+    PicoComposer_SetText(host,"#Other");
+    PicoComplete_Refresh(host);
+    if (PicoComplete_IsOpen())
+    { Fail("completion rows from another token must not remain visible during a new search"); goto done; }
+    PicoTestIo_Release();
+#endif
+    PicoComposer_SetText(host,"#Other"); PicoComplete_Refresh(host);
+    int count=AwaitSessionCompletion(host,completer,"Other",items);
+    if (count!=1 || !completer->host_accept(host,&items[0],completer->state)) goto done;
+    PicoComplete_Refresh(host);
+    if (strcmp(host->composer.text,"#Other Project:"))
+    { Fail("project completion must retain a readable qualifier including spaces"); goto done; }
+    PicoComposer_ReplaceRange(host,host->composer.length,host->composer.length,"bug:parser");
+    PicoComplete_Refresh(host);
+    count=AwaitSessionCompletion(host,completer,"Other Project:bug:parser",items);
+    if (count!=1 || strcmp(items[0].label,titles[2]) || !completer->host_accept(host,&items[0],completer->state))
+    { Fail("explicit project qualifier must search the selected canonical project"); goto done; }
+    PicoSessionRef reference;
+    if (!PicoSessionRef_Parse(host->composer.text,host->composer.length,0,&reference) || strcmp(reference.checkout,other)) goto done;
+    /* A qualifier may not swallow the next line's file token. */
+    PicoComposer_SetText(host,"#Other"); PicoComplete_Refresh(host);
+    count=AwaitSessionCompletion(host,completer,"Other",items);
+    if (!completer->host_accept(host,&items[0],completer->state)) goto done;
+    PicoComplete_Refresh(host);
+    PicoComposer_ReplaceRange(host,host->composer.length,host->composer.length,"\n@input");
+    int start=0,end=0;
+    if (!PicoComplete_TokenRange(host,&start,&end) || strcmp(host->composer.text+start,"@input"))
+    { Fail("a selected project qualifier must not suppress subsequent file completion"); goto done; }
+    /* Even when an exact name is duplicated, choosing a project row pins the
+     * canonical scope rather than silently selecting a same-named sibling. */
+    if (PicoCatalog_SetProjectName(repo,"Shared")!=0 || PicoCatalog_SetProjectName(other,"Shared")!=0) goto done;
+    PicoComposer_SetText(host,"#Shared:"); PicoComplete_Refresh(host);
+    count=AwaitSessionCompletion(host,completer,"Shared:",items);
+    if (count!=2 || strcmp(items[0].label,"Shared:") || strcmp(items[1].label,"Shared:") ||
+        !strcmp(items[0].detail,items[1].detail))
+    { Fail("ambiguous project names must offer explicit disambiguated project choices"); goto done; }
+    int other_row=strstr(items[0].detail,other) ? 0 : 1;
+    if (!completer->host_accept(host,&items[other_row],completer->state)) goto done;
+    PicoComplete_Refresh(host);
+    count=AwaitSessionCompletion(host,completer,"Shared:",items);
+    if (count!=1 || strcmp(items[0].label,titles[2]) || !completer->host_accept(host,&items[0],completer->state) ||
+        !PicoSessionRef_Parse(host->composer.text,host->composer.length,0,&reference) || strcmp(reference.checkout,other))
+    { Fail("selected duplicate project name must retain the chosen canonical identity"); goto done; }
+    rc=0;
+done:
+#ifdef PICO_TEST_IO
+    PicoTestIo_Release();
+#endif
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(other); RmRf(linked); RmRf(repo);
+    if (rc && !g_failed) Fail("session reference completion scope fixture");
+    return rc;
+}
+
+static int TestSessionCompletionFiltersFullTokenSnapshot(void)
+{
+    char dir[]="/tmp/pico-ref-snapshot-XXXXXX", cfg[]="/tmp/pico-ref-snapshot-cfg-XXXXXX";
+    PicoHost *host=NULL;
+    int rc=1;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME",cfg,1);
+    PicoWorkspaceId workspace;
+    PicoAgentId current;
+    PicoAgentCreateOptions options={.kind=PICO_AGENT_MAIN,.session_start=PICO_SESSION_NEW};
+    if (pico_host_init(&host,NULL,true)!=PICO_OK || pico_workspace_open(host,dir,&workspace)!=PICO_OK) goto done;
+    WaitPluginLoad(host);
+    char older_id[40]={0};
+    /* One older target plus enough newer conversations to fill the popup.
+     * The displayed result cap must not truncate the searchable metadata. */
+    for (int i=0; i<=PICO_MAX_COMPLETE_ITEMS; i++)
+    {
+        PicoAgentId id;
+        if (pico_main_agent_create(host,workspace,&options,&id)!=PICO_OK) goto done;
+        PicoAgent *agent=PicoHost_FindAgent(host,id);
+        char title[80];
+        snprintf(title,sizeof(title),i ? "Snapshot common %d" : "Snapshot rare target",i);
+        if (PicoSession_LogUser(host,agent,title,title,NULL)!=PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(host,agent)) goto done;
+        if (!i) snprintf(older_id,sizeof(older_id),"%s",agent->session_id);
+        if (pico_agent_close(host,id)!=PICO_OK) goto done;
+    }
+    options.select=true;
+    if (pico_main_agent_create(host,workspace,&options,&current)!=PICO_OK) goto done;
+    const PicoCompleter *completer=NULL;
+    for (int i=0; i<host->completer_count; i++)
+        if (host->completers[i].trigger=='#') completer=&host->completers[i];
+    if (!completer) goto done;
+    PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
+    PicoComposer_SetText(host,"#Snapshot");
+    PicoComplete_Refresh(host);
+    AwaitSessionCompletion(host,completer,"Snapshot",items);
+#ifdef PICO_TEST_IO
+    char db[4096]; snprintf(db,sizeof(db),"%s/pico/sessions/.catalog.sqlite3",cfg);
+    PicoTestIo_Hold(db);
+#endif
+    PicoComposer_ReplaceRange(host,1,host->composer.length,"rare");
+    PicoComplete_Refresh(host);
+    int count=completer->host_query(host,"rare",items,PICO_MAX_COMPLETE_ITEMS,completer->state);
+    if (!PicoComplete_IsOpen() || count!=1 || strcmp(items[0].label,"Snapshot rare target"))
+    { Fail("typing a query for a session beyond the popup cap must use the full token snapshot without disappearing"); goto done; }
+#ifdef PICO_TEST_IO
+    if (PicoTestIo_OnOwner()) { Fail("filtering a ready session snapshot must not read the catalog on the UI thread"); goto done; }
+    PicoTestIo_Release();
+#endif
+    /* Let any pending narrow search finish: it must not replace the broad
+     * token snapshot, otherwise backspacing hides its other matches again. */
+    PICO_TEST_WAIT(host->tasks) { pico_host_pump(host); }
+#ifdef PICO_TEST_IO
+    PicoTestIo_Hold(db);
+#endif
+    PicoComposer_ReplaceRange(host,1,host->composer.length,"common");
+    PicoComplete_Refresh(host);
+    count=completer->host_query(host,"common",items,PICO_MAX_COMPLETE_ITEMS,completer->state);
+    if (!PicoComplete_IsOpen() || count<1 || !strstr(items[0].label,"Snapshot common"))
+    { Fail("editing a previously narrowed query must not lose the rest of the token snapshot"); goto done; }
+    PicoComposer_ReplaceRange(host,1,host->composer.length,"rare");
+    PicoComplete_Refresh(host);
+    count=completer->host_query(host,"rare",items,PICO_MAX_COMPLETE_ITEMS,completer->state);
+    if (count!=1 || !completer->host_accept(host,&items[0],completer->state)) goto done;
+    PicoSessionRef selected;
+    if (!PicoSessionRef_Parse(host->composer.text,host->composer.length,0,&selected) || strcmp(selected.id,older_id))
+    { Fail("an older matching session from the full snapshot must retain its selected identity"); goto done; }
+    rc=0;
+done:
+#ifdef PICO_TEST_IO
+    PicoTestIo_Release();
+#endif
+    if (host) pico_host_free(host);
+    unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
+    if (rc && !g_failed) Fail("full session completion snapshot fixture");
+    return rc;
+}
+
+static int TestSessionReferenceSteeringPersistence(void)
+{
+    char dir[]="/tmp/pico-ref-steering-XXXXXX", cfg[]="/tmp/pico-ref-steering-cfg-XXXXXX";
+    PicoHost *host=NULL;
+    char *portable=NULL;
+    int rc=1;
+    MatrixProviderState provider;
+    bool provider_initialized=false;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME",cfg,1);
+    PicoWorkspaceId ws;
+    PicoAgentId id;
+    PicoAgentCreateOptions options={.kind=PICO_AGENT_MAIN,.session_start=PICO_SESSION_NEW,.select=true};
+    if (pico_host_init(&host,NULL,true)!=PICO_OK || pico_workspace_open(host,dir,&ws)!=PICO_OK ||
+        pico_main_agent_create(host,ws,&options,&id)!=PICO_OK) goto done;
+    PicoAgent *agent=PicoHost_FindAgent(host,id);
+    MatrixStateInit(&provider,MATRIX_PROVIDER_COMPLETE);
+    provider_initialized=true;
+    provider.clarification_fixture=true; /* capture provider inputs */
+    bool provider_ready=ConfigureMatrixWorkspace(host,agent->workspace,&provider,false);
+    if (!provider_ready || !PicoSettings_SetModel(agent,"matrix-model"))
+    { goto done; }
+    PicoSessionRef ref={.title="Prior conversation",.id="prior-id",.checkout="/tmp/prior",
+        .path="/tmp/missing session.jsonl"};
+    portable=PicoSessionRef_Serialize(&ref);
+    if (!portable) goto done;
+    PicoComposer_SetText(host,portable);
+    PicoHost_Submit(host);
+    if (!PumpUntilIdle(host,agent)) goto done;
+    pthread_mutex_lock(&provider.mu);
+    bool sent_path=provider.inputs_seen[0] && strstr(provider.inputs_seen[0],ref.path) &&
+        !strstr(provider.inputs_seen[0],"pico-session:");
+    pthread_mutex_unlock(&provider.mu);
+    if (!sent_path || agent->message_count<1 || strcmp(agent->messages[0].source,portable))
+    { Fail("normal composer submit must send the provider a path while retaining the visible reference"); goto done; }
+    agent->state=PICO_AGENT_LLM_WAIT;
+    PicoComposer_SetText(host,portable);
+    PicoHost_Submit(host);
+    if (!agent->steering_head || strcmp(agent->steering_head->display,portable) ||
+        !strstr(agent->steering_head->text,ref.path) || strstr(agent->steering_head->text,"pico-session:") ||
+        host->composer.length!=0 || !DrainSessionForAssertion(host,agent))
+    { Fail("composer steering must capture path projection and preserve the portable visible reference"); goto done; }
+    /* Delivery records use the already accepted payload; replay must not
+     * re-resolve titles or read the referenced path. */
+    PicoSteeringMessage *input=agent->steering_head;
+    if (PicoSession_LogSteeringDelivered(host,agent,input->id,input->text,input->display,input->parts_json)!=PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(host,agent)) goto done;
+    PicoMessage *messages=NULL;
+    int count=0;
+    if (PicoSession_LoadTranscript(agent->workspace,agent->session_id,&messages,&count)!=0) goto done;
+    bool restored=false;
+    for (int i=0; i<count; i++) if (messages[i].role==PICO_ROLE_USER && messages[i].source && !strcmp(messages[i].source,portable)) restored=true;
+    PicoMessages_Free(messages,count);
+    if (!restored) { Fail("session replay must preserve visible reference identity separately from model text"); goto done; }
+    rc=0;
+done:
+    if (host) pico_host_free(host);
+    if (provider_initialized) MatrixStateDestroy(&provider);
+    free(portable);
+    unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
+    if (rc && !g_failed) Fail("reference steering/persistence fixture");
+    return rc;
+}
+
+static int RunSessionReferenceShellCase(bool with_sidebar)
+{
+#ifndef PICO_CLAY_FRAME_FAULT_TESTS
+    (void)with_sidebar;
+    return 0;
+#else
+    const Clay_Dimensions viewport={750,600};
+    char dir[]="/tmp/pico-chip-layout-XXXXXX", cfg[]="/tmp/pico-chip-layout-cfg-XXXXXX";
+    PicoHost *host=NULL;
+    Clay_Context *previous=Clay_GetCurrentContext();
+    uint32_t arena_size=Clay_MinMemorySize();
+    void *memory=malloc(arena_size);
+    int rc=1;
+    char *portable=NULL, *draft=NULL;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME",cfg,1);
+    if (pico_host_init(&host,NULL,true)!=PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace;
+    PicoAgentId id;
+    PicoAgentCreateOptions options={.kind=PICO_AGENT_MAIN,.session_start=PICO_SESSION_NONE,.select=true};
+    if (pico_workspace_open(host,dir,&workspace)!=PICO_OK ||
+        pico_main_agent_create(host,workspace,&options,&id)!=PICO_OK) goto done;
+    PicoAgent *agent=PicoHost_FindAgent(host,id);
+    host->preferences.chat_width=0;
+    host->view_count[PICO_SLOT_SIDEBAR]=0;
+    if (with_sidebar) ShellTestAddView(host,PICO_SLOT_SIDEBAR,ShellTestSidebar,NULL);
+    PicoSessionRef ref={.title="Review ~~old~~ & [new]",.id="reference-id",
+        .checkout="/tmp/source project",.path="/tmp/missing reference.jsonl"};
+    portable=PicoSessionRef_Serialize(&ref);
+    if (!portable) goto done;
+    draft=malloc(strlen(portable)+256);
+    if (!draft) goto done;
+    sprintf(draft,"Compare %s with this approach and keep the remaining text on another line.",portable);
+    for (int i=0; i<40; i++) PicoAgent_AddMessage(host,agent,PICO_ROLE_ASSISTANT,"history before referenced session");
+    PicoAgent_AddMessage(host,agent,PICO_ROLE_USER,portable);
+    int reference_message=agent->message_count-1;
+    PicoComposer_SetText(host,draft);
+    g_session_chip_measure=true;
+    Pico_MeasureCacheReset();
+    Clay_Arena arena=Clay_CreateArenaWithCapacityAndMemory(arena_size,memory);
+    if (!Clay_Initialize(arena,viewport,(Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8,NULL);
+    RichText_SetMeasureFunction(Pico_MeasureTextUtf8,NULL);
+    host->chat_follow_bottom=true;
+    const char *panes[]={"Root","Body","RightColumn","MainColumn","ChatScroll","ComposerAlign","Composer","Footer","Sidebar"};
+    Clay_BoundingBox expected[9]={0};
+    for (int frame=0; frame<120; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_SetPointerState((Clay_Vector2){0},false);
+        Clay_UpdateScrollContainers(false,(Clay_Vector2){0},0);
+        (void)PicoHost_LayoutShell(host,viewport.height,1.0f/60.0f);
+        Clay_ScrollContainerData scroll=Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height<=scroll.scrollContainerDimensions.height)
+        { Fail("chip layout must exercise overflowing bottom-follow chat"); goto done; }
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,scroll.contentDimensions.height,&scroll.scrollPosition->y);
+        Clay_RenderCommandArray commands=PicoHost_LayoutShell(host,viewport.height,0);
+        for (int i=0; i<(with_sidebar ? 9 : 8); i++)
+        {
+            Clay_ElementData pane=Clay_GetElementData(Clay_GetElementId((Clay_String){.chars=panes[i],.length=(int32_t)strlen(panes[i])}));
+            if (!pane.found || (frame>20 && !ShellBoxStable(expected[i],pane.boundingBox)))
+            { Fail("session chips changed stable bottom-follow shell bounds"); goto done; }
+            expected[i]=pane.boundingBox;
+        }
+        for (int i=0; i<commands.length; i++)
+        {
+            Clay_RenderCommand *command=&commands.internalArray[i];
+            if (command->commandType!=CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+            Clay_StringSlice text=command->renderData.text.stringContents;
+            char *visible=malloc((size_t)text.length+1);
+            if (!visible) goto done;
+            memcpy(visible,text.chars,(size_t)text.length); visible[text.length]='\0';
+            bool leaked=strstr(visible,"pico-session:") || strstr(visible,ref.path);
+            free(visible);
+            if (leaked) { Fail("session chips leaked hidden reference metadata into visible text"); goto done; }
+        }
+        if (frame==119 && !FindCardText(&commands,"#Review ~~old~~ & [new]"))
+        { Fail("reference chip titles must preserve literal Markdown punctuation"); goto done; }
+    }
+    /* The visible user bubble remains copyable as the complete portable tag. */
+    host->chat_sel.msg=reference_message;
+    host->chat_sel.anchor=0; host->chat_sel.cursor=INT_MAX;
+    PicoChatSel_Copy(host);
+    const char *copied=GetClipboardText();
+    PicoSessionRef restored;
+    if (!copied || !PicoSessionRef_Next(copied,(int)strlen(copied),0,&restored) ||
+        strcmp(restored.title,ref.title) || strcmp(restored.path,ref.path))
+    { Fail("copying a rendered reference must restore the complete title and path"); goto done; }
+    /* Markdown syntax around a reference cannot reinterpret its payload as
+     * code text or an image destination. Display copy still restores a chip. */
+    const char *contexts[]={"`%s`","!%s","```\n%s\n```"};
+    for (int context=0; context<3; context++)
+    {
+        sprintf(draft,contexts[context],portable);
+        PicoHost_ClearMessages(host,id);
+        PicoAgent_AddMessage(host,agent,PICO_ROLE_USER,draft);
+        Clay_RenderCommandArray commands=PicoHost_LayoutShell(host,viewport.height,0);
+        if (!FindCardText(&commands,"#Review ~~old~~ & [new]"))
+        { Fail("Markdown contexts must not hide a reference chip or reinterpret it as an image"); goto done; }
+        host->chat_sel.msg=0; host->chat_sel.anchor=0; host->chat_sel.cursor=INT_MAX;
+        PicoChatSel_Copy(host);
+        copied=GetClipboardText();
+        if (!copied || !PicoSessionRef_Next(copied,(int)strlen(copied),0,&restored) || strcmp(restored.title,ref.title))
+        { Fail("references inside Markdown contexts must retain portable copy identity"); goto done; }
+    }
+    PicoComposer_SetText(host,portable);
+    PicoChatSel_Clear(host);
+    g_find_input_test=true;
+    (void)PicoHost_LayoutShell(host,viewport.height,0);
+    Clay_ElementData chip=Clay_GetElementData(CLAY_IDI("SessionChip",0));
+    if (!chip.found) goto done;
+    g_find_pointer=(Vector2){chip.boundingBox.x+chip.boundingBox.width*0.75f,
+        chip.boundingBox.y+chip.boundingBox.height*0.5f};
+    g_find_press=g_find_down=true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x,g_find_pointer.y},true);
+    PicoClickSeq_Reset(&host->composer.click_seq);
+    PicoComposer_HandlePointer(host);
+    PicoComposer_HandlePointer(host);
+    if (host->composer.sel_anchor!=0 || host->composer.cursor!=host->composer.length)
+    { Fail("double-clicking the right half of a chip must select the complete reference"); goto done; }
+    g_find_press=g_find_down=false;
+    PicoComposer_SetText(host,portable);
+    g_find_key=KEY_LEFT;
+    PicoComposer_HandleInput(host);
+    if (host->composer.cursor!=0) { Fail("left arrow must skip a complete session chip"); goto done; }
+    g_find_key=KEY_RIGHT;
+    PicoComposer_HandleInput(host);
+    if (host->composer.cursor!=host->composer.length) { Fail("right arrow must skip a complete session chip"); goto done; }
+    g_find_key=KEY_BACKSPACE;
+    PicoComposer_HandleInput(host);
+    if (host->composer.length!=0) { Fail("backspace must delete a complete session chip"); goto done; }
+    PicoComposer_SetText(host,portable);
+    host->composer.cursor=host->composer.sel_anchor=0;
+    g_find_key=KEY_DELETE;
+    PicoComposer_HandleInput(host);
+    if (host->composer.length!=0) { Fail("delete must remove a complete session chip"); goto done; }
+    rc=0;
+done:
+    g_find_input_test=g_session_chip_measure=false;
+    g_find_press=g_find_down=false;
+    g_find_key=0;
+    Pico_MeasureCacheReset();
+    if (host) pico_host_free(host);
+    Clay_SetCurrentContext(previous);
+    free(memory); free(portable); free(draft);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (rc && !g_failed) Fail("session chip layout/editing fixture");
+    return rc;
+#endif
+}
+
 static int TestWorktreeSuggestNameUsesProjectFolder(void)
 {
     char name[129];
@@ -15493,6 +15963,7 @@ Vector2 __real_MeasureTextEx(Font font, const char *text, float fontSize, float 
 Vector2 __wrap_MeasureTextEx(Font font, const char *text, float fontSize, float spacing)
 {
     g_think_measure_calls++;
+    if (g_session_chip_measure) return (Vector2){strlen(text)*fontSize*0.6f,fontSize};
     return __real_MeasureTextEx(font, text, fontSize, spacing);
 }
 #endif
@@ -15940,6 +16411,9 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestAvailableSoftwarePrompt()) != 0) return 1;
     if (PICO_TEST_RUN(TestClipboardPaste()) != 0) return 1;
     if (PICO_TEST_RUN(TestCopiedMessageSourceMetadata()) != 0) return 1;
+    if (PICO_TEST_RUN(TestSessionReferenceCompletionScopes()) != 0) return 1;
+    if (PICO_TEST_RUN(TestSessionCompletionFiltersFullTokenSnapshot()) != 0) return 1;
+    if (PICO_TEST_RUN(TestSessionReferenceSteeringPersistence()) != 0) return 1;
     if (PICO_TEST_RUN(TestWorktreeSuggestNameUsesProjectFolder()) != 0) return 1;
     if (PICO_TEST_RUN(TestWorktreeDiscoveryCreationAndGrouping()) != 0) return 1;
     if (PICO_TEST_RUN(TestQuitDefersTeardownUntilFrameReturns()) != 0)

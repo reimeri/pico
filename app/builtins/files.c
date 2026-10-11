@@ -4,6 +4,7 @@
 #include "pico/plugin.h"
 #include "canonical.h"
 #include "complete_internal.h"
+#include "session_ref.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -520,8 +521,14 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
     }
     char *paths[32];
     int path_n = 0;
+    int text_len = (int)strlen(text);
+    PicoSessionRef ref;
+    bool has_refs = PicoSessionRef_Next(text,text_len,0,&ref);
     for (int i = 0; text[i] && path_n < 32; i++)
     {
+        /* Search the original input, never generated titles/paths or hidden
+         * reference payloads. Referencing a session must not attach its log. */
+        if (PicoSessionRef_Parse(text,text_len,i,&ref)) { i=ref.end-1; continue; }
         if (text[i] != '@' || (i > 0 && !isspace((unsigned char)text[i - 1]) && text[i - 1] != '\n'))
         {
             continue;
@@ -564,13 +571,17 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
         paths[path_n++] = JsonDup(resolved);
         i = j - 1;
     }
-    if (path_n == 0)
+    if (path_n == 0 && !has_refs) return NULL;
+    char *projected = has_refs ? PicoSessionRef_Project(text) : NULL;
+    if (has_refs && !projected)
     {
+        for (int i=0; i<path_n; i++) free(paths[i]);
         return NULL;
     }
     JsonBuf b;
     JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, text);
+    JsonBuf_Puts(&b, projected ? projected : text);
+    free(projected);
     PicoLlmPart media[32];
     memset(media, 0, sizeof(media));
     int media_n = 0;

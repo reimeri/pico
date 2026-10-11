@@ -698,6 +698,20 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
         case MDB_CODE:
         case MDB_HTML:
         {
+            /* Code/HTML containing session references has a projected chunk
+             * view, so hidden payloads never become raw code or image text. */
+            if (block->chunk_count>0)
+            {
+                RichTextStyle style=BaseStyle;
+                style.font_regular=FONT_MONO;
+                CLAY_AUTO_ID({.layout={.layoutDirection=CLAY_TOP_TO_BOTTOM,.padding={14,14,12,12},
+                    .sizing={.width=CLAY_SIZING_GROW(0)}},.backgroundColor=COLOR_CODE_BG,
+                    .cornerRadius=CLAY_CORNER_RADIUS(6)})
+                {
+                    RichText_RenderParagraph(block,&doc->arena,MarkdownContentWidth(available_width,28),&style,emit);
+                }
+                break;
+            }
             Clay_ElementId scroll_id = HorizontalScrollId(id_base, index);
             Clay_ElementData previous_scroll = Clay_GetElementData(scroll_id);
             CodeLineIndex(doc, block);

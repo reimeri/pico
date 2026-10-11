@@ -92,7 +92,8 @@ typedef struct MdBlock {
     char *list_marker;   // "•" or "1." etc. (list items)
     bool list_item_task; // GFM task list item (- [ ] / - [x])
     bool list_item_done; // checkbox state
-    MdChunk *chunks;     // paragraphs, headings, list items, quotes
+    MdChunk *chunks;     // paragraphs, headings, list items, quotes;
+                        // raw blocks also use chunks when containing reference atoms
     int chunk_count;
     char *raw_text;      // code blocks, html blocks
     char *lang;          // MDB_CODE only: fence info-string language, NULL if none

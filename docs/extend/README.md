@@ -28,7 +28,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `tools` — LLM-callable tools, parallel execution policies, and structured replayable details
 - `commands` — slash commands (`/foo`)
 - `notices` — severity-labeled application feedback, transcript persistence, context exclusion
-- `completers` — composer `#` / `@` style completion
+- `completers` — composer completion, `@` files, and `#` session-reference chips
 - `providers` — LLM backends, Fast-mode capabilities and service tiers
 - `auth` — `/login` `/logout` and credentials
 - `contracts` — threads, ownership, limits, reload

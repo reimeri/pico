@@ -1,5 +1,6 @@
 #include "canonical.h"
 #include "composer_internal.h"
+#include "session_ref.h"
 #include "json.h"
 #include "host_internal.h"
 
@@ -291,6 +292,78 @@ static void TestOwnedAttachmentLifetime(void)
     free(temp);
 }
 
+static PicoSessionRef ExampleReference(void)
+{
+    return (PicoSessionRef){.title="Auth cleanup — [retry] ~~old~~ & *new*",
+        .id="auth-session",.checkout="/tmp/project/worktree",.path="/tmp/missing session @data.jsonl"};
+}
+
+static void TestReferencePortableTextAndEditing(PicoHost *host)
+{
+    PicoSessionRef original = ExampleReference(), parsed;
+    char *portable = PicoSessionRef_Serialize(&original);
+    Check(portable && PicoSessionRef_Parse(portable,(int)strlen(portable),0,&parsed) &&
+        !strcmp(parsed.title,original.title) && !strcmp(parsed.id,original.id) &&
+        !strcmp(parsed.checkout,original.checkout) && !strcmp(parsed.path,original.path),
+        "portable reference restores title and exact identity, including punctuation and spaces");
+    if (!portable) return;
+    PicoComposer_SetText(host,portable);
+    /* A caller replacing a selection inside the visible chip must remove the
+     * entire reference, never leave a hidden path fragment in the composer. */
+    PicoComposer_ReplaceRange(host,3,4,"replacement");
+    Check(!strcmp(host->composer.text,"replacement"),"partial replacement removes the entire session chip");
+    PicoComposer_SetText(host,portable);
+    PicoComposer_ReplaceRange(host,0,0,"before ");
+    Check(PicoSessionRef_Next(host->composer.text,host->composer.length,0,&parsed) && parsed.start==7 &&
+          !strcmp(parsed.path,original.path),"editing before a chip preserves its reference identity");
+    PicoComposer_SetText(host,"abc");
+    PicoComposer_ReplaceRange(host,-1,0,"x");
+    PicoComposer_ReplaceRange(host,100,200,"y");
+    Check(!strcmp(host->composer.text,"xabcy") && host->composer.cursor==host->composer.length,
+          "negative and past-end replacement ranges clamp safely");
+    PicoComposer_SetText(host,"");
+    free(portable);
+}
+
+static void TestReferenceProjectionAndFileMentions(void)
+{
+    PicoSessionRef original=ExampleReference();
+    char *portable=PicoSessionRef_Serialize(&original);
+    char *expanded=pico_files_expand_mentions("/tmp",portable,false,NULL);
+    Check(expanded && strstr(expanded,original.path) && !strstr(expanded,"pico-session:") &&
+        !strstr(expanded,"<file"),"an unavailable session passes its absolute path without reading or attaching it");
+    free(expanded); free(portable);
+
+    char *temp=MakeTempDir();
+    if (!temp) { Check(false,"reference/file mention fixture"); return; }
+    char path[4096]; snprintf(path,sizeof(path),"%s/input.txt",temp);
+    Check(WriteBytes(path,"file body",9),"reference/file fixture exists");
+    snprintf(original.title,sizeof(original.title),"Review @input.txt");
+    portable=PicoSessionRef_Serialize(&original);
+    size_t cap=strlen(portable)+32;
+    char *text=malloc(cap); snprintf(text,cap,"Compare %s @input.txt",portable);
+    expanded=pico_files_expand_mentions(temp,text,false,NULL);
+    Check(expanded && strstr(expanded,original.path) && strstr(expanded,"file body") &&
+        !strstr(strstr(expanded,"<file")+1,"<file"),"session references and file mentions project once without scanning chip metadata");
+    free(expanded); free(text); free(portable);
+    unlink(path); rmdir(temp); free(temp);
+}
+
+static void TestReferenceControlEscaping(void)
+{
+    PicoSessionRef ref=ExampleReference();
+    memset(ref.title,'\t',sizeof(ref.title)-1); ref.title[sizeof(ref.title)-1]='\0';
+    char *portable=PicoSessionRef_Serialize(&ref);
+    char *projected=PicoSessionRef_Project(portable);
+    Check(projected && strstr(projected,"\\u0009") && !strchr(projected,'\t'),
+        "portable reference control bytes are safely quoted in model input");
+    free(portable); free(projected);
+    projected=PicoSessionRef_Project("#heading [#broken](pico-session:1:x:%00:%2Ftmp)");
+    Check(projected && !strcmp(projected,"#heading [#broken](pico-session:1:x:%00:%2Ftmp)"),
+        "ordinary hashtags and malformed reference text remain literal text");
+    free(projected);
+}
+
 int main(void)
 {
     PicoExt comp_ext = pico_ext_composer();
@@ -304,6 +377,10 @@ int main(void)
     TestWhitespaceSubmitReady();
     TestMalformedPartsAreRejected();
     TestOwnedAttachmentLifetime();
+    TestReferencePortableTextAndEditing(&app);
+    TestReferenceProjectionAndFileMentions();
+    TestReferenceControlEscaping();
+    free(app.composer.text);
     PicoComposer_DiscardAttachments();
 
     comp_ext.host_shutdown(&app, g_composer_state);

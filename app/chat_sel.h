@@ -21,6 +21,10 @@ void PicoChatSel_SetMessage(int msg);
 void PicoChatSel_Break(void);
 void PicoChatSel_Glue(const char *s);
 void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config);
+/* Visible link fragments retain a complete portable session reference on copy.
+ * label identifies the original complete link, including offscreen fragments. */
+void PicoChatSel_Reference(Clay_String text, Clay_String label, const char *url,
+                         const Clay_TextElementConfig *config);
 /* Append offscreen text to the same selection/search buffer without Clay hits. */
 void PicoChatSel_AppendOnly(Clay_String text);
 int PicoChatSel_CurrentOffset(void);

@@ -31,6 +31,9 @@ typedef struct PicoSpellView {
     Font font;
     float font_px;
     int cursor; /* byte offset; -1 if the field has no caret */
+    bool session_references;
+    /* Optional visual projection, used by inline composer references. */
+    float (*measure_slice)(Font font, const char *text, int start, int length, float font_px);
 } PicoSpellView;
 
 /* Stable, unique address identifying the composer text field. */

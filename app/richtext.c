@@ -3,6 +3,7 @@
 
 #include "richtext.h"
 #include "chat_sel.h"
+#include "session_ref.h"
 #include "pico/theme.h"
 #include "theme_internal.h"
 
@@ -20,6 +21,11 @@
 
 static RichTextMeasureFunction s_measure;
 static void *s_measure_user_data;
+static bool SessionLink(const char *url)
+{
+    return url && !strncmp(url,"pico-session:1:",15);
+}
+
 static int s_link_serial; // reset each layout pass by RichText_BeginLayout
 
 void RichText_SetMeasureFunction(RichTextMeasureFunction measure, void *userData)
@@ -55,6 +61,8 @@ typedef struct RtWord {
     bool italic;
     bool code;
     bool strike;
+    const char *reference_label;
+    int reference_length;
     char *link_url; // arena owned, stable for the document lifetime
     bool hard_break; // length is 0; forces a line break
     bool space_before; // the source had whitespace before this word
@@ -67,6 +75,8 @@ typedef struct RtRun {
     bool italic;
     bool code;
     bool strike;
+    const char *reference_label;
+    int reference_length;
     char *link_url;
     bool space_before; // emit a space before this run (source had whitespace)
 } RtRun;
@@ -182,6 +192,8 @@ static void SplitChunksIntoWords(MdChunk *chunks, int chunk_count, bool force_bo
                     word.code = chunk->code;
                     word.strike = chunk->strike;
                     word.link_url = chunk->link_url;
+                    if (SessionLink(chunk->link_url))
+                    { word.reference_label=chunk->text; word.reference_length=chunk->length; }
                     word.space_before = pending_space;
                     pending_space = false;
                     PushWord(words, word);
@@ -319,6 +331,8 @@ typedef struct ScratchRun {
     bool italic;
     bool code;
     bool strike;
+    const char *reference_label;
+    int reference_length;
     char *link_url;
     bool space_before;
 } ScratchRun;
@@ -356,7 +370,7 @@ static float WordAdvance(const RichTextStyle *style, float default_space, const 
                          bool has_content, const RtWord *word)
 {
     float gap = GapBeforeWord(style, default_space, last_run, has_content, word);
-    float chrome = (word->code && !ContinuesRun(last_run, word)) ? InlineCodeChromeX() : 0.0f;
+    float chrome = ((word->code || SessionLink(word->link_url)) && !ContinuesRun(last_run, word)) ? InlineCodeChromeX() : 0.0f;
     return gap + word->width + chrome;
 }
 
@@ -581,7 +595,7 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
         {
             Clay_TextElementConfig config =
                 TextConfigFor(style, word->bold, word->italic, word->code, word->link_url != NULL);
-            float chrome = word->code ? InlineCodeChromeX() : 0.0f;
+            float chrome = (word->code || SessionLink(word->link_url)) ? InlineCodeChromeX() : 0.0f;
             float budget = available_width - chrome;
             int prefix = LongestPrefixBytes(word->text, word->length, &config, budget);
             if (prefix > 0 && prefix < word->length)
@@ -621,6 +635,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.code = place.code;
             new_run.strike = place.strike;
             new_run.link_url = place.link_url;
+            new_run.reference_label = place.reference_label;
+            new_run.reference_length = place.reference_length;
             new_run.space_before = place.space_before;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], &place, false);
@@ -647,6 +663,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             new_run.code = place.code;
             new_run.strike = place.strike;
             new_run.link_url = place.link_url;
+            new_run.reference_label = place.reference_label;
+            new_run.reference_length = place.reference_length;
             new_run.space_before = place.space_before;
             current_line.runs[current_line.run_count++] = new_run;
             ScratchRunAppendWord(&current_line.runs[current_line.run_count - 1], &place, false);
@@ -691,6 +709,8 @@ static RtCache *BuildWrapCache(MdBlock *block, MdArena *arena, float available_w
             dst->code = src->code;
             dst->strike = src->strike;
             dst->link_url = src->link_url;
+            dst->reference_label = src->reference_label;
+            dst->reference_length = src->reference_length;
             dst->space_before = src->space_before;
         }
     }
@@ -741,6 +761,17 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
             {
                 PicoChatSel_Text(text, config);
             }
+        }
+    }
+    else if (SessionLink(run->link_url) && run->reference_label)
+    {
+        uint16_t pad = InlineCodePadX();
+        config.textColor = style->link_color;
+        CLAY_AUTO_ID({.layout={.padding={pad,pad,0,0}},.backgroundColor=style->code_bg_color,
+                      .cornerRadius=CLAY_CORNER_RADIUS(4)})
+        {
+            PicoChatSel_Reference(text,(Clay_String){.chars=run->reference_label,.length=run->reference_length},
+                                 run->link_url,&config);
         }
     }
     else if (run->link_url)
@@ -837,8 +868,11 @@ static void EmitLineRange(RtCache *cache, const RichTextStyle *style,
             for (int r = 0; r < line->run_count; r++)
             {
                 if (r > 0 && line->runs[r].space_before) PicoChatSel_Glue(" ");
-                PicoChatSel_AppendOnly((Clay_String){.chars = line->runs[r].text,
-                                       .length = (int32_t)strlen(line->runs[r].text)});
+                RtRun *run = &line->runs[r];
+                Clay_String text = {.chars=run->text,.length=(int32_t)strlen(run->text)};
+                if (SessionLink(run->link_url) && run->reference_label)
+                    PicoChatSel_Reference(text,(Clay_String){.chars=run->reference_label,.length=run->reference_length},run->link_url,NULL);
+                else PicoChatSel_AppendOnly(text);
             }
             continue;
         }
@@ -1005,8 +1039,8 @@ void RichText_MeasureUnwrapped(MdChunk *chunks, int chunk_count, const RichTextS
             last = NULL;
             continue;
         }
-        float chrome = word->code && !(last && SameStyle(*last, *word)) ? InlineCodeChromeX() : 0.0f;
-        float word_min = word->width + (word->code ? InlineCodeChromeX() : 0.0f);
+        float chrome = (word->code || SessionLink(word->link_url)) && !(last && SameStyle(*last, *word)) ? InlineCodeChromeX() : 0.0f;
+        float word_min = word->width + ((word->code || SessionLink(word->link_url)) ? InlineCodeChromeX() : 0.0f);
         if (word_min > min)
         {
             min = word_min;

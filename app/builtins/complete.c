@@ -3,6 +3,7 @@
 
 #include "clay/clay.h"
 #include "complete_internal.h"
+#include "session_ref.h"
 #include "pico/theme.h"
 #include "wrapped_text.h"
 
@@ -23,6 +24,10 @@ typedef struct CompleteState {
     char active_trigger;
     uint64_t token_id;
     int count;
+    int scope_start;
+    char scope_prefix[512];
+    PicoWorkspaceId scope_workspace;
+    PicoAgentId scope_agent;
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
     char display_label[PICO_MAX_COMPLETE_ITEMS][PICO_COMPLETE_LABEL_MAX + 8];
 } CompleteState;
@@ -53,6 +58,8 @@ bool PicoComplete_IsOpen(void)
 
 void PicoComplete_BeforeEdit(int from, int to)
 {
+    if (g_complete.scope_prefix[0] && from < g_complete.scope_start + (int)strlen(g_complete.scope_prefix))
+        g_complete.scope_prefix[0] = '\0';
     if (g_complete.token_active && from <= g_complete.active_token_start &&
         to > g_complete.active_token_start)
     {
@@ -93,11 +100,6 @@ static void Dismiss(PicoHost *app)
 static bool IsSpaceByte(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
-static bool IsPathByte(unsigned char c)
-{
-    return c > 32 && c != '@';
 }
 
 static const PicoCompleter *FindCompleter(const PicoHost *app, char trigger, bool bol)
@@ -176,23 +178,59 @@ static bool ScanToken(const PicoHost *app, int *start, int *end, const PicoCompl
             }
         }
     }
-    int i = cur;
-    while (i > 0 && IsPathByte((unsigned char)s[i - 1]))
+    /* References are completed objects, never query text. Their metadata may
+     * contain triggers; keep the scanner outside their atomic spans. */
+    PicoSessionRef ref;
+    int from = 0;
+    while (PicoSessionRef_Next(s, c->length, from, &ref))
     {
-        i--;
+        if (cur > ref.start && cur <= ref.end) return false;
+        from = ref.end;
     }
-    if (i > 0 && s[i - 1] == '@' && (i == 1 || IsSpaceByte(s[i - 2])))
+    if (g_complete.scope_prefix[0])
     {
-        const PicoCompleter *comp = FindCompleter(app, '@', false);
-        if (comp)
+        int a = g_complete.scope_start;
+        int n = (int)strlen(g_complete.scope_prefix);
+        if ((PicoHost_SelectedWorkspaceConst(app) ? PicoHost_SelectedWorkspaceConst(app)->id : 0) == g_complete.scope_workspace &&
+            (PicoHost_SelectedAgentConst(app) ? PicoHost_SelectedAgentConst(app)->id : 0) == g_complete.scope_agent && a >= 0 && a+n <= cur &&
+            !strncmp(s+a,g_complete.scope_prefix,(size_t)n))
         {
-            *start = i - 1;
+            bool query_token = true;
+            for (int j=a+n; j<cur; j++)
+                if (IsSpaceByte(s[j])) { query_token=false; break; }
+            const PicoCompleter *comp = FindCompleter(app,'#',false);
+            if (comp && query_token) { *start=a; *end=cur; *out=comp; return true; }
+        }
+        g_complete.scope_prefix[0] = '\0';
+    }
+    int i = cur;
+    while (i > 0 && !IsSpaceByte(s[i-1])) i--;
+    if (i < cur)
+    {
+        const PicoCompleter *comp = FindCompleter(app, s[i], i == 0);
+        if (comp && (!comp->bol_only || i == 0))
+        {
+            *start = i;
             *end = cur;
             *out = comp;
             return true;
         }
     }
     return false;
+}
+
+void PicoComplete_SetScope(const PicoHost *host, int start, const char *prefix)
+{
+    g_complete.scope_start = start;
+    snprintf(g_complete.scope_prefix,sizeof(g_complete.scope_prefix),"%s",prefix);
+    g_complete.scope_workspace = (PicoHost_SelectedWorkspaceConst(host) ? PicoHost_SelectedWorkspaceConst(host)->id : 0);
+    g_complete.scope_agent = (PicoHost_SelectedAgentConst(host) ? PicoHost_SelectedAgentConst(host)->id : 0);
+}
+
+bool PicoComplete_TokenRange(const PicoHost *host, int *start, int *end)
+{
+    const PicoCompleter *comp = NULL;
+    return ScanToken(host, start, end, &comp);
 }
 
 static int Fold(int c)

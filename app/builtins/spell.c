@@ -4,6 +4,7 @@
 #include "host_internal.h"
 #include "spell_engine.h"
 #include "spell_internal.h"
+#include "session_ref.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -372,9 +373,26 @@ static bool CacheMatches(const SpellFieldCache *cache, const void *key, const ch
            (length == 0 || (cache->text && memcmp(cache->text, text, (size_t)length) == 0));
 }
 
-static void RecheckField(SpellState *s, const void *key, const char *text, int length)
+static void RecheckField(SpellState *s, const void *key, const char *text, int length, bool references)
 {
-    pico_spell_check_text(&s->backend, text, length, &s->cache.ranges);
+    char *masked = NULL;
+    if (references && length > 0)
+    {
+        PicoSessionRef ref;
+        if (PicoSessionRef_Next(text,length,0,&ref))
+        {
+            masked = malloc((size_t)length+1);
+            if (masked)
+            {
+                memcpy(masked,text,(size_t)length); masked[length]='\0';
+                int from=0;
+                while (PicoSessionRef_Next(text,length,from,&ref))
+                { memset(masked+ref.start,' ',(size_t)(ref.end-ref.start)); from=ref.end; }
+            }
+        }
+    }
+    pico_spell_check_text(&s->backend, masked ? masked : text, length, &s->cache.ranges);
+    free(masked);
     if (length <= 0)
     {
         free(s->cache.text);
@@ -418,7 +436,7 @@ void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSp
     bool text_changed = !CacheMatches(&s->cache, field_key, text, length);
     if (text_changed)
     {
-        RecheckField(s, field_key, text, length);
+        RecheckField(s, field_key, text, length, view->session_references);
     }
     /* Filter at draw time. The cached ranges still include the in-progress
      * word so leaving it can show the underline without another check. */
@@ -427,6 +445,7 @@ void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSp
     {
         return;
     }
+    float (*measure)(Font,const char *,int,int,float) = view->measure_slice ? view->measure_slice : MeasureSlice;
     Color miss = {(unsigned char)COLOR_SPELL_MISS.r, (unsigned char)COLOR_SPELL_MISS.g,
                   (unsigned char)COLOR_SPELL_MISS.b, (unsigned char)COLOR_SPELL_MISS.a};
     for (int i = 0; i < view->line_count; i++)
@@ -453,9 +472,9 @@ void PicoSpell_DrawSquiggles(PicoHost *host, const void *field_key, const PicoSp
             {
                 continue;
             }
-            float x0 = view->origin_x + MeasureSlice(view->font, view->text, line_start, a - line_start,
+            float x0 = view->origin_x + measure(view->font, view->text, line_start, a - line_start,
                                                      view->font_px);
-            float x1 = view->origin_x + MeasureSlice(view->font, view->text, line_start, b - line_start,
+            float x1 = view->origin_x + measure(view->font, view->text, line_start, b - line_start,
                                                      view->font_px);
             DrawSquiggle(x0, x1, y, miss);
         }

@@ -4,6 +4,7 @@
 
 #include "pico/app.h"
 #include "text_range.h"
+#include "session_ref.h"
 
 #include "raylib.h"
 
@@ -12,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct SelReference {
+    int start;
+    int end;
+    const char *key;
+    char *portable;
+} SelReference;
+
 typedef struct SelBuf {
     char *text;
     int len;
@@ -19,6 +27,9 @@ typedef struct SelBuf {
     int first_hit;
     int end_hit;
     uint64_t frame_stamp;
+    SelReference *refs;
+    int ref_count;
+    int ref_capacity;
 } SelBuf;
 
 typedef struct WrapLine {
@@ -285,7 +296,12 @@ static int OffsetOnLine(const float *advances, const char *s, int start, int len
 
 void PicoChatSel_Free(void)
 {
-    for (int i = 0; i < s_msg_cap; i++) free(s_msgs[i].text);
+    for (int i = 0; i < s_msg_cap; i++)
+    {
+        free(s_msgs[i].text);
+        for (int j=0; j<s_msgs[i].ref_count; j++) free(s_msgs[i].refs[j].portable);
+        free(s_msgs[i].refs);
+    }
     for (int i = 0; i < s_hit_cap; i++)
     {
         free(s_hits[i].lines);
@@ -358,6 +374,8 @@ void PicoChatSel_SetMessage(int msg)
         if (b->frame_stamp != s_frame_stamp)
         {
             b->frame_stamp = s_frame_stamp;
+            for (int j=0; j<b->ref_count; j++) free(b->refs[j].portable);
+            b->ref_count = 0;
             b->len = 0;
             if (b->text) b->text[0] = '\0';
         }
@@ -455,6 +473,43 @@ void PicoChatSel_Text(Clay_String text, Clay_TextElementConfig config)
     }
 }
 
+void PicoChatSel_Reference(Clay_String text, Clay_String label, const char *url,
+                         const Clay_TextElementConfig *config)
+{
+    SelBuf *b = CurBuf();
+    PicoSessionRef ref;
+    if (b && PicoSessionRef_FromLink(label.chars,label.length,url,&ref))
+    {
+        SelReference *last = b->ref_count ? &b->refs[b->ref_count-1] : NULL;
+        if (last && last->key == label.chars)
+            last->end = b->len+text.length;
+        else
+        {
+            char *portable = PicoSessionRef_Serialize(&ref);
+            if (portable && b->ref_count == b->ref_capacity)
+            {
+                int cap = b->ref_capacity ? b->ref_capacity*2 : 4;
+                SelReference *next = realloc(b->refs,(size_t)cap*sizeof(*next));
+                if (next) { b->refs=next; b->ref_capacity=cap; }
+                else { free(portable); portable=NULL; }
+            }
+            if (portable) b->refs[b->ref_count++] = (SelReference){b->len,b->len+text.length,label.chars,portable};
+        }
+    }
+    if (config) PicoChatSel_Text(text,*config);
+    else PicoChatSel_AppendOnly(text);
+}
+
+static int SnapReference(const SelBuf *b, int pos, bool forward)
+{
+    for (int i=0; i<b->ref_count; i++)
+    {
+        if (pos <= b->refs[i].start) break;
+        if (pos < b->refs[i].end) return forward ? b->refs[i].end : b->refs[i].start;
+    }
+    return pos;
+}
+
 bool PicoChatSel_HasSelection(const PicoHost *app)
 {
     return app && app->chat_sel.msg >= 0 && app->chat_sel.anchor != app->chat_sel.cursor;
@@ -504,14 +559,26 @@ void PicoChatSel_Copy(PicoHost *app)
     {
         return;
     }
-    int n = to - from;
-    char *copy = (char *)malloc((size_t)n + 1);
-    if (!copy)
+    SelBuf *buffer = &s_msgs[msg];
+    from = SnapReference(buffer,from,false);
+    to = SnapReference(buffer,to,true);
+    size_t capacity = (size_t)(to-from)+1;
+    for (int i=0; i<buffer->ref_count; i++)
+        if (buffer->refs[i].start >= from && buffer->refs[i].end <= to)
+            capacity += strlen(buffer->refs[i].portable);
+    char *copy = malloc(capacity);
+    if (!copy) return;
+    char *p = copy;
+    int at=from;
+    for (int i=0; i<buffer->ref_count; i++)
     {
-        return;
+        SelReference *ref = &buffer->refs[i];
+        if (ref->start < from || ref->end > to) continue;
+        memcpy(p,buffer->text+at,(size_t)(ref->start-at)); p += ref->start-at;
+        size_t n = strlen(ref->portable); memcpy(p,ref->portable,n); p+=n;
+        at=ref->end;
     }
-    memcpy(copy, s_msgs[msg].text + from, (size_t)n);
-    copy[n] = '\0';
+    memcpy(p,buffer->text+at,(size_t)(to-at)); p+=to-at; *p='\0';
     SetClipboardText(copy);
     free(copy);
 }
@@ -595,6 +662,8 @@ void PicoChatSel_SelectUnitAt(PicoHost *app, int msg, int pos, int granularity)
     int from = pos;
     int to = pos;
     UnitRange(text, len, pos, granularity, &from, &to);
+    from = SnapReference(&s_msgs[msg],from,false);
+    to = SnapReference(&s_msgs[msg],to,true);
     app->chat_sel.unit_from = from;
     app->chat_sel.unit_to = to;
     app->chat_sel.anchor = from;
@@ -672,6 +741,13 @@ static bool PrepareHit(SelHit *hit, Clay_BoundingBox box)
 
 static int HitOffset(SelHit *hit, Clay_BoundingBox box, float x, float y)
 {
+    SelBuf *buffer = &s_msgs[hit->msg];
+    for (int i=0; i<buffer->ref_count; i++)
+    {
+        SelReference *ref = &buffer->refs[i];
+        if (hit->start >= ref->start && hit->start < ref->end)
+            return x < box.x+box.width*0.5f ? ref->start : ref->end;
+    }
     if (!PrepareHit(hit, box)) return hit->start;
     int li = hit->line_height_px > 1 ? (int)((y - box.y) / hit->line_height_px) : 0;
     if (li < 0) return hit->start;

@@ -6,6 +6,7 @@
 #include "render_scale.h"
 #include "complete_internal.h"
 #include "composer_internal.h"
+#include "session_ref.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -99,22 +100,63 @@ static int LineEnd(const char *s, int length, int pos)
     return pos;
 }
 
+#define SESSION_CHIP_PAD_X 6
+static __thread float s_chip_max_width = 100000.0f;
+
+static void ChipLabel(Font font, float font_size, const PicoSessionRef *ref, char label[304])
+{
+    snprintf(label,304,"#%s",ref->title);
+    float limit = s_chip_max_width - SESSION_CHIP_PAD_X*2;
+    if (MeasureTextEx(font,label,font_size,0).x <= limit) return;
+    int n = (int)strlen(label);
+    while (n > 1)
+    {
+        n = PicoText_Utf8Prev(label,n);
+        memcpy(label+n,"…",4);
+        if (MeasureTextEx(font,label,font_size,0).x <= limit) return;
+        label[n] = '\0';
+    }
+    snprintf(label,304,"#");
+}
+
+static int ComposerNextUnit(const char *text, int length, int at)
+{
+    PicoSessionRef ref;
+    return PicoSessionRef_Parse(text,length,at,&ref) ? ref.end : PicoText_Utf8Next(text,length,at);
+}
+
 static float MeasureSlice(Font font, const char *s, int start, int length, float font_size)
 {
-    if (length <= 0)
+    if (length <= 0) return 0;
+    int end = start+length;
+    float width = 0;
+    while (start < end)
     {
-        return 0;
+        PicoSessionRef ref;
+        if (PicoSessionRef_Parse(s,end,start,&ref))
+        {
+            char label[304]; ChipLabel(font,font_size,&ref,label);
+            width += MeasureTextEx(font,label,font_size,0).x + SESSION_CHIP_PAD_X*2;
+            start = ref.end;
+        }
+        else
+        {
+            int next = start+1;
+            while (next < end && s[next] != '[') next++;
+            char saved = ((char *)s)[next];
+            ((char *)s)[next] = '\0';
+            width += MeasureTextEx(font,s+start,font_size,0).x;
+            ((char *)s)[next] = saved;
+            start = next;
+        }
     }
-    char saved = ((char *)s)[start + length];
-    ((char *)s)[start + length] = '\0';
-    Vector2 size = MeasureTextEx(font, s + start, font_size, 0);
-    ((char *)s)[start + length] = saved;
-    return size.x;
+    return width;
 }
 
 static int WrapComposer(const PicoComposer *c, Font font, float max_width, CompLine *lines, int max_lines,
                         float *line_height)
 {
+    s_chip_max_width = max_width;
     Vector2 sample = MeasureTextEx(font, "Hg", ComposerPx(), 0);
     *line_height = sample.y > 1 ? sample.y : ComposerPx();
     if (!c->text || c->length == 0)
@@ -144,7 +186,7 @@ static int WrapComposer(const PicoComposer *c, Font font, float max_width, CompL
         int wrapped = 0;
         while (i < c->length && c->text[i] != '\n')
         {
-            int next = PicoText_Utf8Next(c->text, c->length, i);
+            int next = ComposerNextUnit(c->text, c->length, i);
             float ch_w = MeasureSlice(font, c->text, i, next - i, ComposerPx());
             if (width + ch_w > max_width && i > line_start)
             {
@@ -250,6 +292,8 @@ typedef struct ComposerState {
     int seen_length;
     float goal_x;
     ComposerWrapCache wrap_cache;
+    char *chip_labels;
+    int chip_labels_capacity;
     double caret_blink_at;
     PicoHost *app;
     ComposerAttach attach[COMPOSER_MAX_ATTACH];
@@ -273,6 +317,7 @@ static ComposerState *ActiveComposerState(void)
 static int WrapComposerCached(ComposerState *s, const PicoComposer *c, Font font, float max_width,
                               CompLine *lines, int max_lines, float *line_height)
 {
+    s_chip_max_width = max_width;
     if (s && s->wrap_cache.valid && c &&
         s->wrap_cache.text_revision == c->revision &&
         s->wrap_cache.text_length == c->length &&
@@ -1254,7 +1299,7 @@ static int OffsetAtXOnLine(Font font, const PicoComposer *c, CompLine line, floa
     int end = line.start + line.length;
     while (pos < end)
     {
-        int next = PicoText_Utf8Next(c->text, c->length, pos);
+        int next = ComposerNextUnit(c->text, c->length, pos);
         float ch_w = MeasureSlice(font, c->text, pos, next - pos, ComposerPx());
         if (width + ch_w * 0.5f >= target_x)
         {
@@ -1315,7 +1360,7 @@ static void MoveVertical(PicoHost *app, int dir, bool extend)
     }
 }
 
-static int OffsetAtPoint(PicoHost *app, float x, float y)
+static int OffsetAtPoint(PicoHost *app, float x, float y, bool select_unit)
 {
     PicoComposer *c = &app->composer;
     ComposerView v = GetComposerView(app);
@@ -1349,8 +1394,11 @@ static int OffsetAtPoint(PicoHost *app, float x, float y)
     int end = line.start + line.length;
     while (pos < end)
     {
-        int next = PicoText_Utf8Next(c->text, c->length, pos);
+        int next = ComposerNextUnit(c->text, c->length, pos);
         float ch_w = MeasureSlice(ComposerFont(), c->text, pos, next - pos, ComposerPx());
+        PicoSessionRef ref;
+        if (select_unit && local_x < width+ch_w && PicoSessionRef_Parse(c->text,c->length,pos,&ref))
+            return ref.start;
         if (width + ch_w * 0.5f >= local_x)
         {
             return pos;
@@ -1480,10 +1528,9 @@ static void ComposerDeleteRange(PicoComposer *c, int from, int to)
     {
         to = c->length;
     }
-    if (to <= from)
-    {
-        return;
-    }
+    if (to <= from) return;
+    from = PicoSessionRef_Snap(c->text,c->length,from,false);
+    to = PicoSessionRef_Snap(c->text,c->length,to,true);
     PicoComplete_BeforeEdit(from, to);
     memmove(c->text + from, c->text + to, (size_t)(c->length - to));
     c->length -= (to - from);
@@ -1511,7 +1558,14 @@ void PicoComposer_ReplaceRange(PicoHost *app, int from, int to, const char *text
         from = to;
         to = tmp;
     }
+    if (from < 0) from=0;
+    if (from > c->length) from=c->length;
+    if (to < 0) to=0;
+    if (to > c->length) to=c->length;
+    from = PicoSessionRef_Snap(c->text,c->length,from,false);
+    to = PicoSessionRef_Snap(c->text,c->length,to,true);
     ComposerDeleteRange(c, from, to);
+    c->cursor = c->sel_anchor = from;
     if (text && text[0])
     {
         ComposerInsert(c, text, (int)strlen(text));
@@ -1550,6 +1604,9 @@ static void ComposerInsert(PicoComposer *c, const char *bytes, int nbytes)
         return;
     }
     DeleteSelection(c);
+    c->cursor = PicoSessionRef_Snap(c->text,c->length,c->cursor,true);
+    c->sel_anchor = c->cursor;
+    PicoComplete_BeforeEdit(c->cursor,c->cursor);
     memmove(c->text + c->cursor + nbytes, c->text + c->cursor, (size_t)(c->length - c->cursor));
     memcpy(c->text + c->cursor, bytes, (size_t)nbytes);
     c->length += nbytes;
@@ -1576,6 +1633,7 @@ static void MoveCursor(PicoComposer *c, int pos, bool extend)
     {
         pos = c->length;
     }
+    pos = PicoSessionRef_Snap(c->text,c->length,pos,pos >= c->cursor);
     c->cursor = pos;
     if (!extend)
     {
@@ -1598,8 +1656,8 @@ void PicoComposer_Copy(PicoHost *app)
     {
         return;
     }
-    int from = SelFrom(c);
-    int to = SelTo(c);
+    int from = PicoSessionRef_Snap(c->text,c->length,SelFrom(c),false);
+    int to = PicoSessionRef_Snap(c->text,c->length,SelTo(c),true);
     int n = to - from;
     char *copy = (char *)malloc((size_t)n + 1);
     if (!copy)
@@ -1638,7 +1696,8 @@ static void PasteClipboardText(PicoComposer *c, const char *clip)
         return;
     }
     int len = (int)strlen(clip);
-    if (len >= PASTE_TEMP_THRESHOLD)
+    PicoSessionRef ref;
+    if (len >= PASTE_TEMP_THRESHOLD && !PicoSessionRef_Next(clip,len,0,&ref))
     {
         char tmpl[] = "/tmp/pico-paste-XXXXXX";
         int fd = mkstemp(tmpl);
@@ -1835,6 +1894,14 @@ void PicoComposer_HandleInput(PicoHost *app)
 static void ComposerUnitRange(const PicoComposer *c, int pos, int granularity, int *from, int *to)
 {
     const char *text = c->text ? c->text : "";
+    PicoSessionRef ref;
+    int scan = 0;
+    while (PicoSessionRef_Next(text,c->length,scan,&ref))
+    {
+        if (pos >= ref.start && pos < ref.end && granularity < 3)
+        { *from = ref.start; *to = ref.end; return; }
+        scan = ref.end;
+    }
     if (granularity >= 3)
     {
         PicoText_ParaRange(text, c->length, pos, from, to);
@@ -1843,6 +1910,8 @@ static void ComposerUnitRange(const PicoComposer *c, int pos, int granularity, i
     {
         PicoText_WordRange(text, c->length, pos, from, to);
     }
+    *from = PicoSessionRef_Snap(text,c->length,*from,false);
+    *to = PicoSessionRef_Snap(text,c->length,*to,true);
 }
 
 static void ComposerSelectUnit(PicoComposer *c, int pos, int granularity)
@@ -1970,8 +2039,8 @@ void PicoComposer_HandlePointer(PicoHost *app)
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over)
     {
-        int pos = OffsetAtPoint(app, mouse.x, mouse.y);
         int count = PicoClickSeq_Press(&c->click_seq, GetTime(), mouse.x, mouse.y);
+        int pos = OffsetAtPoint(app, mouse.x, mouse.y, count>1);
         ComposerSelectUnit(c, pos, count);
         c->mouse_selecting = true;
         PicoChatSel_Clear(app);
@@ -1982,7 +2051,7 @@ void PicoComposer_HandlePointer(PicoHost *app)
     }
     else if (c->mouse_selecting)
     {
-        ComposerExtendUnit(c, OffsetAtPoint(app, mouse.x, mouse.y));
+        ComposerExtendUnit(c, OffsetAtPoint(app, mouse.x, mouse.y, c->granularity>1));
     }
 }
 
@@ -2131,6 +2200,16 @@ void PicoComposer_Render(PicoHost *app, void *state)
         line_height = ComposerPx();
     }
 
+    ComposerState *render_state = ActiveComposerState();
+    bool labels_ready = true;
+    if (c->length+1 > render_state->chip_labels_capacity)
+    {
+        char *next = realloc(render_state->chip_labels,(size_t)c->length+1);
+        if (next) { render_state->chip_labels=next; render_state->chip_labels_capacity=c->length+1; }
+        else labels_ready = false;
+    }
+    int label_used = 0;
+
     float content_h = (float)line_count * line_height;
     float box_h = content_h + (float)COMPOSER_PAD_Y * 2;
     if (box_h < (float)COMPOSER_MIN_HEIGHT)
@@ -2196,12 +2275,39 @@ void PicoComposer_Render(PicoHost *app, void *state)
                             {
                                 if (lines[i].length > 0)
                                 {
-                                    Clay_String text = {.length = (int32_t)lines[i].length,
-                                                        .chars = c->text + lines[i].start};
-                                    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                      .fontSize = COMPOSER_FONT_SIZE,
-                                                                      .textColor = COLOR_TEXT,
-                                                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                    int pos = lines[i].start, end = pos+lines[i].length;
+                                    while (pos < end)
+                                    {
+                                        PicoSessionRef ref;
+                                        if (labels_ready && PicoSessionRef_Parse(c->text,end,pos,&ref))
+                                        {
+                                            char label[304]; ChipLabel(ComposerFont(),ComposerPx(),&ref,label);
+                                            int n = (int)strlen(label);
+                                            memcpy(render_state->chip_labels+label_used,label,(size_t)n+1);
+                                            Clay_String text = {.length=n,.chars=render_state->chip_labels+label_used};
+                                            label_used += n+1;
+                                            float chip_width = MeasureTextEx(ComposerFont(),label,ComposerPx(),0).x+SESSION_CHIP_PAD_X*2;
+                                            CLAY(CLAY_IDI("SessionChip",pos),
+                                                 {.layout={.padding={SESSION_CHIP_PAD_X,SESSION_CHIP_PAD_X,0,0},
+                                                     .childAlignment={.y=CLAY_ALIGN_Y_CENTER},
+                                                     .sizing={.width=CLAY_SIZING_FIXED(chip_width),.height=CLAY_SIZING_FIXED(line_height)}},
+                                                  .backgroundColor=COLOR_CODE_BG,.cornerRadius=CLAY_CORNER_RADIUS(4)})
+                                            {
+                                                CLAY_TEXT(text,CLAY_TEXT_CONFIG({.fontId=FONT_REGULAR,.fontSize=COMPOSER_FONT_SIZE,
+                                                    .textColor=COLOR_LINK,.wrapMode=CLAY_TEXT_WRAP_NONE}));
+                                            }
+                                            pos = ref.end;
+                                        }
+                                        else
+                                        {
+                                            int next = pos+1;
+                                            while (next < end && c->text[next] != '[') next++;
+                                            Clay_String text = {.length=next-pos,.chars=c->text+pos};
+                                            CLAY_TEXT(text,CLAY_TEXT_CONFIG({.fontId=FONT_REGULAR,.fontSize=COMPOSER_FONT_SIZE,
+                                                .textColor=COLOR_TEXT,.wrapMode=CLAY_TEXT_WRAP_NONE}));
+                                            pos = next;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2340,6 +2446,8 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
             .font = ComposerFont(),
             .font_px = ComposerPx(),
             .cursor = c->cursor,
+            .session_references = true,
+            .measure_slice = MeasureSlice,
         };
         PicoSpell_DrawSquiggles(app, PICO_SPELL_FIELD_COMPOSER, &view);
     }
@@ -2518,6 +2626,7 @@ static void ComposerShutdown(PicoHost *app, void *state)
     }
     ResetPreview();
     PicoComposer_DiscardAttachments();
+    free(s->chip_labels);
     free(s);
     s_active_composer_state = NULL;
 }

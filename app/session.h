@@ -2,6 +2,7 @@
 #define PICO_SESSION_H
 
 #include "agent_internal.h"
+#include "session_ref.h"
 
 #include <stdint.h>
 #include <stdatomic.h>
@@ -75,6 +76,26 @@ typedef struct PicoCatalogPage {
     char path[4096];
     int shown;
 } PicoCatalogPage;
+
+typedef struct PicoCatalogProjectMatch {
+    char path[4096];
+    char name[PICO_CATALOG_NAME_MAX];
+} PicoCatalogProjectMatch;
+
+typedef struct PicoCatalogReferenceMatch {
+    PicoSessionRef ref;
+    char checkout_name[256];
+    bool worktree;
+} PicoCatalogReferenceMatch;
+
+/* Worker-side indexed metadata reads. Positive maximum bounds a search;
+ * zero returns the complete matching snapshot, growing storage as needed.
+ * No transcript reads or checkout filesystem requirements; caller frees *out.
+ * Catalog refresh is independent. */
+int PicoCatalog_SearchProjects(const char *query, bool exact, PicoCatalogProjectMatch **out, int maximum);
+int PicoCatalog_SearchReferences(const char *project_path, const char *query,
+    const char *exclude_checkout, const char *exclude_id,
+    PicoCatalogReferenceMatch **out, int maximum);
 
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
 /* JSONL remains authoritative for session contents. One SQLite catalog under the

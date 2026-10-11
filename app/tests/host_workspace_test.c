@@ -302,6 +302,8 @@ static void Fail(const char *msg)
     g_failed = 1;
 }
 
+static int g_shell_test_inbox_rows;
+
 static void ShellTestSidebar(PicoHost *host, void *state)
 {
     (void)host;
@@ -323,6 +325,25 @@ static void ShellTestSidebar(PicoHost *host, void *state)
             CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
                                                 .height = CLAY_SIZING_FIXED(1800)}}})
             {
+            }
+        }
+        /* Docked inbox: content-sized rows as direct children below the
+         * scroll, above the fixed tail, mirroring the production sidebar.
+         * Growing it must trade space with the scroll, not the panes. */
+        if (g_shell_test_inbox_rows > 0)
+        {
+            CLAY(CLAY_ID("ShellTestSidebarInboxHeader"),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                        .height = CLAY_SIZING_FIXED(25)}}})
+            {
+            }
+            for (int row = 0; row < g_shell_test_inbox_rows; row++)
+            {
+                CLAY(CLAY_IDI("ShellTestSidebarInboxRow", row),
+                     {.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                            .height = CLAY_SIZING_FIXED(24)}}})
+                {
+                }
             }
         }
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(1),
@@ -1190,6 +1211,13 @@ static int RunShellStabilityCase(bool with_sidebar)
         {
             state.composer_height = 56.003f;
         }
+        /* The docked inbox appears, grows, shrinks, disappears, and finally
+         * overflows the pane; the structural bounds must not move. */
+        if (frame < 50) g_shell_test_inbox_rows = 0;
+        else if (frame < 150) g_shell_test_inbox_rows = 3;
+        else if (frame < 250) g_shell_test_inbox_rows = 12;
+        else if (frame < 350) g_shell_test_inbox_rows = 0;
+        else g_shell_test_inbox_rows = 60;
         if (frame == 60 || frame == 220) PicoChatFind_Open(&host);
         if (frame == 160 || frame == 320) PicoChatFind_Close(&host);
         if (frame == frames / 2)
@@ -1301,6 +1329,7 @@ static int RunShellStabilityCase(bool with_sidebar)
         }
     }
 
+    g_shell_test_inbox_rows = 0;
     PicoChatFind_Reset(&host);
     Pico_FreeClay();
     Clay_SetCurrentContext(previous);
@@ -13344,9 +13373,11 @@ static int TestSidebarInbox(void)
     PicoWorkspaceId workspace_id = 0;
     PicoAgentId selected_id = 0;
     PicoAgentId other_id = 0;
+    PicoAgentId grow_id = 0;
     PicoAgentCreateOptions opt;
     PicoAgent *selected;
     PicoAgent *other;
+    PicoAgent *grow;
     Clay_Arena arena;
     Clay_RenderCommandArray commands;
     Clay_BoundingBox green = {0};
@@ -13388,7 +13419,9 @@ static int TestSidebarInbox(void)
     }
     opt.select = false;
     if (pico_main_agent_create(host, workspace_id, &opt, &other_id) != PICO_OK ||
-        !(other = PicoHost_FindAgent(host, other_id)))
+        !(other = PicoHost_FindAgent(host, other_id)) ||
+        pico_main_agent_create(host, workspace_id, &opt, &grow_id) != PICO_OK ||
+        !(grow = PicoHost_FindAgent(host, grow_id)))
     {
         Fail("inbox other agent");
         goto done_host;
@@ -13419,6 +13452,42 @@ static int TestSidebarInbox(void)
     other->state = PICO_AGENT_IDLE;
     other->inbox_pending = true;
     other->unseen_complete = false;
+    /* The docked section grows with its row count and the scroll yields. */
+    grow->state = PICO_AGENT_IDLE;
+    PicoSession_SetInboxPending(host, grow, true);
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    {
+        Clay_ElementData first_row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
+        Clay_ElementData second_row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 1));
+        Clay_ElementData settings_two = Clay_GetElementData(CLAY_ID("SidebarSettingsRow"));
+        Clay_ScrollContainerData scroll_two = Clay_GetScrollContainerData(CLAY_ID("SidebarScroll"));
+        if (!first_row.found || !second_row.found || !settings_two.found || !scroll_two.found ||
+            second_row.boundingBox.y < first_row.boundingBox.y + first_row.boundingBox.height)
+        {
+            Fail("a second inbox row must stack below the first");
+            goto done;
+        }
+        PicoSession_SetInboxPending(host, grow, false);
+        Clay_SetLayoutDimensions(viewport);
+        commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        {
+            Clay_ElementData settings_one = Clay_GetElementData(CLAY_ID("SidebarSettingsRow"));
+            Clay_ScrollContainerData scroll_one = Clay_GetScrollContainerData(CLAY_ID("SidebarScroll"));
+            /* The GROW scroll pins the settings row, so the exchange is
+             * observable in the scroll height and the missing row. */
+            if (Clay_GetElementData(CLAY_IDI("SidebarInbox", 1)).found ||
+                !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+                !settings_one.found || !scroll_one.found ||
+                settings_one.boundingBox.y != settings_two.boundingBox.y ||
+                scroll_one.scrollContainerDimensions.height <=
+                    scroll_two.scrollContainerDimensions.height)
+            {
+                Fail("the inbox must shrink and return scroll space when a row is acknowledged");
+                goto done;
+            }
+        }
+    }
     Clay_SetLayoutDimensions(viewport);
     commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
     if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
@@ -13427,6 +13496,34 @@ static int TestSidebarInbox(void)
     {
         Fail("idle review session must appear in the inbox");
         goto done;
+    }
+    /* The pointer cursor marks the checkmark only, like the Projects "+". */
+    {
+        Clay_ElementData header = Clay_GetElementData(CLAY_ID("SidebarInboxHeader"));
+        Clay_ElementData done = Clay_GetElementData(CLAY_ID("SidebarInboxDone"));
+        g_find_input_test = true;
+        g_find_key = -1;
+        g_find_button = MOUSE_BUTTON_LEFT;
+        g_find_press = false;
+        g_find_pointer = (Vector2){header.boundingBox.x + 8.0f,
+                                   header.boundingBox.y + header.boundingBox.height * 0.5f};
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        host->hovered_clickable = false;
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(host));
+        bool title_pointer = host->hovered_clickable;
+        g_find_pointer = (Vector2){done.boundingBox.x + done.boundingBox.width * 0.5f,
+                                   done.boundingBox.y + done.boundingBox.height * 0.5f};
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        host->hovered_clickable = false;
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(host));
+        bool done_pointer = host->hovered_clickable;
+        if (!header.found || !done.found || title_pointer || !done_pointer)
+        {
+            Fail("the inbox pointer cursor must come from the checkmark, not the header title");
+            goto done;
+        }
     }
     /* A non-empty inbox must not swallow clicks on project-list session rows. */
     if (!ClickSidebarId(host, CLAY_IDI("SidebarSess", 1)) ||

@@ -1646,7 +1646,8 @@ static void RenderLiveExtras(PicoHost *host, SidebarState *s, const PicoCatalogW
     }
 }
 
-typedef struct InboxVisit {
+typedef struct InboxVisit
+{
     const char *path;
     const char *title;
     const char *session_id;
@@ -1871,7 +1872,7 @@ static void RenderInbox(PicoHost *host, SidebarState *s)
 static bool PointerOverInbox(PicoHost *host, SidebarState *s)
 {
     int n, i;
-    if (Clay_PointerOver(CLAY_ID("SidebarInboxDone")) || Clay_PointerOver(CLAY_ID("SidebarInboxHeader")))
+    if (Clay_PointerOver(CLAY_ID("SidebarInboxDone")))
         return true;
     n = VisitInbox(host, s, NULL, NULL);
     for (i = 0; i < n; i++)
@@ -1936,7 +1937,6 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                          .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = true, .childOffset = Clay_GetScrollOffset()}})
         {
-            RenderInbox(host, s);
             for (int section = 0; section < 2; section++)
             {
                 if (section == 1)
@@ -2004,6 +2004,8 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                 }
             }
         }
+
+        RenderInbox(host, s);
 
         if (s->is_dragging && s->drag_source_index >= 0 && s->drag_source_index < s->workspace_count)
         {

@@ -13309,6 +13309,375 @@ done_host:
     return rc;
 }
 
+static bool SidebarCommandsContain(Clay_RenderCommandArray *commands, const char *label);
+
+/* Sidebar clicks are handled by PICO_HOOK_AFTER_LAYOUT, which only runs inside
+ * a real host frame. Drive a full frame with the press latched, like production. */
+static bool ClickSidebarId(PicoHost *host, Clay_ElementId id)
+{
+    Clay_ElementData el = Clay_GetElementData(id);
+    if (!host || !el.found)
+        return false;
+    g_find_input_test = true;
+    g_find_key = -1;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    g_find_pointer = (Vector2){el.boundingBox.x + el.boundingBox.width * 0.5f,
+                               el.boundingBox.y + el.boundingBox.height * 0.5f};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_press = true;
+    PicoHost_Frame(host);
+    g_find_press = false;
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+    return host->frame_presented;
+}
+
+/* Inbox rows mirror project-list status. The checkmark clears only the small gray dot. */
+static int TestSidebarInbox(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-inbox-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-inbox-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId selected_id = 0;
+    PicoAgentId other_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *selected;
+    PicoAgent *other;
+    Clay_Arena arena;
+    Clay_RenderCommandArray commands;
+    Clay_BoundingBox green = {0};
+    Clay_BoundingBox gray = {0};
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("inbox setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        RmRf(cfg);
+        RmRf(dir);
+        Fail("inbox host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    if (PicoCatalog_Ensure(dir) != 0 || !WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1) ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("inbox workspace setup");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &selected_id) != PICO_OK ||
+        !(selected = PicoHost_FindAgent(host, selected_id)))
+    {
+        Fail("inbox selected agent");
+        goto done_host;
+    }
+    opt.select = false;
+    if (pico_main_agent_create(host, workspace_id, &opt, &other_id) != PICO_OK ||
+        !(other = PicoHost_FindAgent(host, other_id)))
+    {
+        Fail("inbox other agent");
+        goto done_host;
+    }
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("inbox Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    /* PicoHost_Frame presents and fires after-render hooks; tests stub drawing. */
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+    host->preferences.chat_width = 0;
+    g_clay_frame_test = true;
+
+    other->state = PICO_AGENT_IDLE;
+    other->inbox_pending = true;
+    other->unseen_complete = false;
+    Clay_SetLayoutDimensions(viewport);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        !SidebarCommandsContain(&commands, "Inbox") ||
+        !Clay_GetElementData(CLAY_ID("SidebarInboxDone")).found)
+    {
+        Fail("idle review session must appear in the inbox");
+        goto done;
+    }
+    /* A non-empty inbox must not swallow clicks on project-list session rows. */
+    if (!ClickSidebarId(host, CLAY_IDI("SidebarSess", 1)) ||
+        pico_agent_active(host) != other_id)
+    {
+        Fail("a project-list session row must stay clickable while the inbox lists rows");
+        goto done;
+    }
+
+    other->state = PICO_AGENT_LLM_WAIT;
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        SidebarCommandsContain(&commands, "Inbox"))
+    {
+        Fail("running session must be hidden from the inbox");
+        goto done;
+    }
+
+    other->state = PICO_AGENT_IDLE;
+    other->inbox_pending = false;
+    other->unseen_complete = true;
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        !SidebarSessionDotVisible(&commands, 10000000, &green))
+    {
+        Fail("unseen completion must show a green dot in the inbox");
+        goto done;
+    }
+    if (!ClickSidebarId(host, CLAY_ID("SidebarInboxDone")))
+    {
+        Fail("inbox checkmark missing for a green-dot row");
+        goto done;
+    }
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!other->unseen_complete || other->inbox_pending ||
+        !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found)
+    {
+        Fail("checkmark must leave a green-dot session in the inbox");
+        goto done;
+    }
+
+    if (!ClickSidebarId(host, CLAY_IDI("SidebarInbox", 0)))
+    {
+        Fail("inbox row missing");
+        goto done;
+    }
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (pico_agent_active(host) != other_id || other->unseen_complete || !other->inbox_pending ||
+        !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        !SidebarSessionDotVisible(&commands, 10000000, &gray) ||
+        gray.width >= green.width || gray.height >= green.height)
+    {
+        Fail("opening an inbox session must select it and clear the shared green dot");
+        goto done;
+    }
+    if (!ClickSidebarId(host, CLAY_ID("SidebarInboxDone")))
+    {
+        Fail("inbox checkmark missing for a gray idle row");
+        goto done;
+    }
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (other->inbox_pending || other->state != PICO_AGENT_IDLE ||
+        Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        SidebarCommandsContain(&commands, "Inbox"))
+    {
+        Fail("checkmark must remove the small gray inbox row without changing run state");
+        goto done;
+    }
+
+    other->state = PICO_AGENT_ERROR;
+    other->inbox_pending = true;
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        !ClickSidebarId(host, CLAY_ID("SidebarInboxDone")))
+    {
+        Fail("error session must stay available to the checkmark");
+        goto done;
+    }
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!other->inbox_pending || other->state != PICO_AGENT_ERROR ||
+        !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found)
+    {
+        Fail("checkmark must not clear an error row");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    g_find_input_test = false;
+    g_find_press = false;
+    g_clay_frame_test = false;
+    Clay_SetCurrentContext(previous);
+done_host:
+    if (host)
+        pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    return rc;
+}
+
+/* An open questionnaire shows the session in the inbox; the checkmark skips
+ * that row until the answered turn idles and becomes a review row. */
+static int TestSidebarInboxAsk(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-inbox-ask-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-inbox-ask-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgent *agent = NULL;
+    MatrixProviderState state;
+    PicoToolAsk ask = {0};
+    Clay_Arena arena;
+    int rc = 1;
+
+    MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        MatrixStateDestroy(&state);
+        Fail("inbox ask setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        MatrixStateDestroy(&state);
+        unsetenv("XDG_CONFIG_HOME");
+        RmRf(cfg);
+        RmRf(dir);
+        Fail("inbox ask host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    if (PicoCatalog_Ensure(dir) != 0 || !WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1) ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        !ConfigureMatrixWorkspace(host, PicoHost_FindWorkspace(host, workspace_id), &state, true))
+    {
+        Fail("inbox ask workspace setup");
+        goto done_host;
+    }
+    if (pico_main_agent_create(host, workspace_id, &(PicoAgentCreateOptions){
+            .kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE, .select = true},
+            &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("inbox ask agent");
+        goto done_host;
+    }
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("inbox ask Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    /* PicoHost_Frame presents and fires after-render hooks; tests stub drawing. */
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+    host->preferences.chat_width = 0;
+    g_clay_frame_test = true;
+
+    PicoAgent_StartTurn(host, agent, "ask");
+    PICO_TEST_WAIT(!ask.id)
+    {
+        pico_host_pump(host);
+        pico_tool_pending_ask(host, &ask);
+    }
+    if (!ask.id || agent->inbox_pending)
+    {
+        Fail("a waiting questionnaire must not depend on the inbox flag");
+        goto done;
+    }
+    Clay_SetLayoutDimensions(viewport);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found)
+    {
+        Fail("a waiting questionnaire session must appear in the inbox");
+        goto done;
+    }
+    if (!ClickSidebarId(host, CLAY_ID("SidebarInboxDone")))
+    {
+        Fail("inbox checkmark missing while a questionnaire waits");
+        goto done;
+    }
+    Clay_SetLayoutDimensions(viewport);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found)
+    {
+        Fail("checkmark must keep a waiting row in the inbox");
+        goto done;
+    }
+    if (!pico_tool_answer(host, ask.id, "{\"step\":1}") || !PumpUntilIdle(host, agent))
+    {
+        Fail("answering the questionnaire must finish the turn");
+        goto done;
+    }
+    Clay_SetLayoutDimensions(viewport);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!agent->inbox_pending || !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found)
+    {
+        Fail("a finished questionnaire turn must return to the inbox");
+        goto done;
+    }
+    if (!ClickSidebarId(host, CLAY_ID("SidebarInboxDone")))
+    {
+        Fail("inbox checkmark missing for the idle row");
+        goto done;
+    }
+    Clay_SetLayoutDimensions(viewport);
+    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (agent->inbox_pending || Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found)
+    {
+        Fail("checkmark must remove the idle row after the questionnaire");
+        goto done;
+    }
+    rc = g_failed ? 1 : 0;
+
+done:
+    g_find_input_test = false;
+    g_find_press = false;
+    g_clay_frame_test = false;
+    Clay_SetCurrentContext(previous);
+done_host:
+    if (host)
+        pico_host_free(host);
+    MatrixStateDestroy(&state);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg);
+    RmRf(dir);
+    return rc;
+}
+
 static bool SidebarCommandsContain(Clay_RenderCommandArray *commands, const char *label)
 {
     for (int i = 0; i < commands->length; i++)
@@ -15530,6 +15899,14 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestIdleSidebarSessionDot()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestSidebarInbox()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestSidebarInboxAsk()) != 0)
     {
         return 1;
     }

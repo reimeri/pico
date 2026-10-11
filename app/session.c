@@ -264,6 +264,7 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info, bool header
     info->effort[0] = '\0';
     info->kind = PICO_AGENT_MAIN;
     info->unseen_complete = false;
+    info->inbox_pending = false;
     FILE *f = fopen(path, "rb");
     if (!f)
     {
@@ -372,6 +373,11 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info, bool header
         {
             int tok = JsonObjGet(&doc, 0, "complete");
             info->unseen_complete = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
+        }
+        else if (!header_only && type && strcmp(type, "inbox_pending") == 0)
+        {
+            int tok = JsonObjGet(&doc, 0, "pending");
+            info->inbox_pending = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
         }
         free(type);
         JsonFree(&doc);
@@ -1272,6 +1278,11 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     {
         int tok = JsonObjGet(doc, obj, "complete");
         agent->unseen_complete = JsonEq(doc, tok, "true") || JsonEq(doc, tok, "1");
+    }
+    else if (strcmp(type, "inbox_pending") == 0)
+    {
+        int tok = JsonObjGet(doc, obj, "pending");
+        agent->inbox_pending = JsonEq(doc, tok, "true") || JsonEq(doc, tok, "1");
     }
     free(type);
 }
@@ -2580,6 +2591,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->accepted_submit = false;
     agent->last_steering_id = 0;
     agent->unseen_complete = false;
+    agent->inbox_pending = false;
 }
 
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
@@ -3305,6 +3317,82 @@ void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complet
     (void)PicoSession_LogUnseenComplete(app, agent, complete);
 }
 
+static char *InboxPendingJson(bool pending)
+{
+    char *pre = EventPrefix("inbox_pending");
+    JsonBuf b;
+    char *line;
+    JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, pre);
+    JsonBuf_Puts(&b, ",\"pending\":");
+    JsonBuf_Bool(&b, pending);
+    JsonBuf_Putc(&b, '}');
+    line = JsonBuf_Steal(&b);
+    free(pre);
+    return line;
+}
+
+PicoSessionWriteResult PicoSession_LogInboxPending(PicoHost *app, PicoAgent *agent, bool pending)
+{
+    char *line;
+    PicoSessionWriteResult result;
+    if (agent)
+        agent->inbox_pending = pending;
+    line = InboxPendingJson(pending);
+    result = AppendLine(app, agent, line);
+    free(line);
+    return result;
+}
+
+void PicoSession_SetInboxPending(PicoHost *app, PicoAgent *agent, bool pending)
+{
+    if (!agent || agent->inbox_pending == pending)
+        return;
+    agent->inbox_pending = pending;
+    (void)PicoSession_LogInboxPending(app, agent, pending);
+}
+
+int PicoCatalog_SetInboxPending(const char *checkout_path, const char *session_id, bool pending)
+{
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    char path[4096];
+    char error[256];
+    char *line;
+    bool ok;
+    if (!checkout_path || checkout_path[0] != '/' || !session_id || !session_id[0])
+        return -1;
+    db = CatalogDbOpen();
+    if (!db)
+        return -1;
+    if (!CatalogDbPrepare(db, &stmt, "SELECT file_path FROM sessions WHERE workspace_path=? AND id=?"))
+    {
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_bind_text(stmt, 1, checkout_path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, session_id, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_ROW)
+    {
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s", CatalogDbText(stmt, 0));
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    line = InboxPendingJson(pending);
+    if (!line || !path[0])
+    {
+        free(line);
+        return -1;
+    }
+    ok = WriteLineAtPath(path, line, true, PICO_AGENT_MAIN, PICO_SESSION_DURABLE, session_id,
+                         checkout_path, error, sizeof(error));
+    free(line);
+    return ok ? 0 : -1;
+}
+
 static bool SessionsRoot(char *out, size_t cap)
 {
     char cfg[4096];
@@ -3958,6 +4046,36 @@ static bool CatalogDbMarkInstalled(const char *root)
 
 enum { CATALOG_DB_VERSION = 2 };
 
+static bool CatalogDbEnsureInboxColumn(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool found = false;
+    if (!db || !CatalogDbPrepare(db, &stmt, "PRAGMA table_info(sessions)"))
+        return false;
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (name && strcmp(name, "inbox") == 0)
+            found = true;
+    }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+    if (found)
+        return true;
+    if (CatalogDbExec(db, "ALTER TABLE sessions ADD COLUMN inbox INTEGER NOT NULL DEFAULT 0"))
+        return true;
+    if (!CatalogDbPrepare(db, &stmt, "PRAGMA table_info(sessions)"))
+        return false;
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (name && strcmp(name, "inbox") == 0)
+            found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
 static sqlite3 *CatalogDbOpenUnlocked(void)
 {
     char root[4096], path[4096], marker[4096], version_sql[64];
@@ -3985,6 +4103,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         if (!CatalogDbMarkInstalled(root))
         { fprintf(stderr, "Could not mark Pico catalog installation in %s\n", root); goto fail; }
         CatalogDbRetireLegacy(root);
+        if (!CatalogDbEnsureInboxColumn(db)) goto fail;
         return db;
     }
     if (version != 0) goto incompatible;
@@ -4005,6 +4124,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         if (!CatalogDbMarkInstalled(root))
         { fprintf(stderr, "Could not mark Pico catalog installation in %s\n", root); goto fail; }
         CatalogDbRetireLegacy(root);
+        if (!CatalogDbEnsureInboxColumn(db)) goto fail;
         return db;
     }
     if (version != 0) goto incompatible;
@@ -4024,6 +4144,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         "mtime INTEGER NOT NULL,mtime_nsec INTEGER NOT NULL,ctime INTEGER NOT NULL,"
         "ctime_nsec INTEGER NOT NULL,inode INTEGER NOT NULL,size INTEGER NOT NULL,"
         "unseen INTEGER NOT NULL,seen INTEGER NOT NULL DEFAULT 0,"
+        "inbox INTEGER NOT NULL DEFAULT 0,"
         "PRIMARY KEY(workspace_path,id),"
         "FOREIGN KEY(workspace_path) REFERENCES workspaces(path) ON DELETE CASCADE);"
         "CREATE INDEX sessions_recent ON sessions(workspace_path,mtime DESC,mtime_nsec DESC,id DESC);"
@@ -4106,7 +4227,7 @@ static bool CatalogDbSessionRead(sqlite3 *db, const char *workspace, const char 
     sqlite3_stmt *stmt = NULL;
     bool valid = false;
     if (!CatalogDbPrepare(db, &stmt,
-        "SELECT title,model,effort,kind,mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen"
+        "SELECT title,model,effort,kind,mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen,inbox"
         " FROM sessions WHERE workspace_path=? AND id=?")) return false;
     sqlite3_bind_text(stmt, 1, workspace, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
@@ -4125,6 +4246,7 @@ static bool CatalogDbSessionRead(sqlite3 *db, const char *workspace, const char 
         row->inode = (uint64_t)sqlite3_column_int64(stmt, 8);
         row->size = (uint64_t)sqlite3_column_int64(stmt, 9);
         row->unseen_complete = sqlite3_column_int(stmt, 10) != 0;
+        row->inbox_pending = sqlite3_column_int(stmt, 11) != 0;
         valid = !st || CatalogGenerationMatches(row, st);
     }
     sqlite3_finalize(stmt);
@@ -4137,14 +4259,14 @@ static bool CatalogDbSessionPut(sqlite3 *db, const char *workspace, const char *
     sqlite3_stmt *stmt = NULL;
     bool ok = CatalogDbPrepare(db, &stmt,
         "INSERT INTO sessions(workspace_path,project_path,id,file_path,title,model,effort,kind,"
-        "mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen,seen)"
-        " VALUES(?,(SELECT project_path FROM workspaces WHERE path=?),?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        "mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen,seen,inbox)"
+        " VALUES(?,(SELECT project_path FROM workspaces WHERE path=?),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(workspace_path,id) DO UPDATE SET project_path=excluded.project_path,"
         "file_path=excluded.file_path,"
         "title=excluded.title,model=excluded.model,effort=excluded.effort,"
         "kind=excluded.kind,mtime=excluded.mtime,mtime_nsec=excluded.mtime_nsec,"
         "ctime=excluded.ctime,ctime_nsec=excluded.ctime_nsec,inode=excluded.inode,"
-        "size=excluded.size,unseen=excluded.unseen,seen=excluded.seen");
+        "size=excluded.size,unseen=excluded.unseen,seen=excluded.seen,inbox=excluded.inbox");
     if (ok)
     {
         sqlite3_bind_text(stmt, 1, workspace, -1, SQLITE_TRANSIENT);
@@ -4163,6 +4285,7 @@ static bool CatalogDbSessionPut(sqlite3 *db, const char *workspace, const char *
         sqlite3_bind_int64(stmt, 14, (sqlite3_int64)row->size);
         sqlite3_bind_int(stmt, 15, row->unseen_complete);
         sqlite3_bind_int64(stmt, 16, seen);
+        sqlite3_bind_int(stmt, 17, row->inbox_pending);
         ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
     sqlite3_finalize(stmt);
@@ -4329,6 +4452,7 @@ static void CatalogDbFillInfo(sqlite3_stmt *stmt, PicoSessionInfo *info)
     info->inode = (uint64_t)sqlite3_column_int64(stmt, 10);
     info->size = (uint64_t)sqlite3_column_int64(stmt, 11);
     info->unseen_complete = sqlite3_column_int(stmt, 12) != 0;
+    info->inbox_pending = sqlite3_column_int(stmt, 13) != 0;
 }
 
 static int CatalogDbList(sqlite3 *db, const char *workspace, const char *search,
@@ -4340,7 +4464,7 @@ static int CatalogDbList(sqlite3 *db, const char *workspace, const char *search,
     int cap = 0;
     *out = NULL;
     bool ok = CatalogDbPrepare(db, &stmt,
-        "SELECT file_path,id,title,model,effort,kind,mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen"
+        "SELECT file_path,id,title,model,effort,kind,mtime,mtime_nsec,ctime,ctime_nsec,inode,size,unseen,inbox"
         " FROM sessions WHERE workspace_path=? AND (?=0 OR kind=0)"
         " AND (?='' OR instr(lower(title),lower(?))>0 OR instr(lower(id),lower(?))>0)"
         " ORDER BY mtime DESC,mtime_nsec DESC,file_path DESC LIMIT ?");
@@ -4619,6 +4743,11 @@ static bool CatalogApplyEvent(PicoCatalogSession *row, const char *event_json)
         int tok = JsonObjGet(&doc, 0, "complete");
         row->unseen_complete = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
     }
+    else if (strcmp(type, "inbox_pending") == 0)
+    {
+        int tok = JsonObjGet(&doc, 0, "pending");
+        row->inbox_pending = JsonEq(&doc, tok, "true") || JsonEq(&doc, tok, "1");
+    }
     free(type);
     JsonFree(&doc);
     return ok;
@@ -4673,6 +4802,7 @@ static void CatalogRowFromFile(const char *path, PicoCatalogSession *row)
     snprintf(row->model, sizeof(row->model), "%s", info.model);
     snprintf(row->effort, sizeof(row->effort), "%s", info.effort);
     row->unseen_complete = info.unseen_complete;
+    row->inbox_pending = info.inbox_pending;
     row->kind = info.kind;
 }
 
@@ -4788,6 +4918,7 @@ static bool CatalogScanDir(sqlite3 *db, const char *dir, const char *key, PicoCa
         row.ctime = rows[i].ctime; row.ctime_nsec = rows[i].ctime_nsec;
         row.inode = rows[i].inode; row.size = rows[i].size;
         row.unseen_complete = rows[i].unseen_complete;
+        row.inbox_pending = rows[i].inbox_pending;
         if (!CatalogAppendSession(&ws, &row))
         { if (failed) *failed = true; goto done_db; }
     }
@@ -5197,7 +5328,7 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
     sqlite3_stmt *stmt = NULL;
     if (!CatalogDbPrepare(db, &stmt,
         "SELECT s.id,s.title,s.model,s.effort,s.kind,s.mtime,s.mtime_nsec,s.ctime,s.ctime_nsec,"
-        "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree"
+        "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree,s.inbox"
         " FROM sessions s JOIN workspaces w ON w.path=s.workspace_path"
         " WHERE s.project_path=? AND s.kind=0"
         " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC")) return false;
@@ -5218,6 +5349,7 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
         row.inode = (uint64_t)sqlite3_column_int64(stmt, 9);
         row.size = (uint64_t)sqlite3_column_int64(stmt, 10);
         row.unseen_complete = sqlite3_column_int(stmt, 11) != 0;
+        row.inbox_pending = sqlite3_column_int(stmt, 15) != 0;
         snprintf(row.checkout_path, sizeof(row.checkout_path), "%s", CatalogDbText(stmt, 12));
         snprintf(row.checkout_name, sizeof(row.checkout_name), "%s", CatalogDbText(stmt, 13));
         row.worktree = sqlite3_column_int(stmt, 14) != 0;

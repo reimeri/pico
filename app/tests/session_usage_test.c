@@ -3014,6 +3014,104 @@ static int TestUnseenCompleteRoundTrip(void)
     return 0;
 }
 
+static int TestInboxPendingRoundTrip(void)
+{
+    char wsdir[] = "/tmp/pico-inbox-ws-XXXXXX";
+    PicoHost writer;
+    PicoWorkspace writer_ws;
+    PicoAgent writer_agent;
+    PicoAgent resumed;
+    PicoAgent ephemeral;
+    PicoSessionInfo *listed = NULL;
+    PicoCatalogWorkspace *catalog = NULL;
+    const PicoCatalogWorkspace *found;
+    int listed_n, catalog_n, i;
+    bool listed_pending = false;
+
+    if (!mkdtemp(wsdir))
+        return Fail("inbox pending mkdtemp");
+    memset(&writer, 0, sizeof(writer));
+    memset(&writer_ws, 0, sizeof(writer_ws));
+    memset(&writer_agent, 0, sizeof(writer_agent));
+    memset(&resumed, 0, sizeof(resumed));
+    memset(&ephemeral, 0, sizeof(ephemeral));
+    writer_ws.host = &writer;
+    snprintf(writer_ws.path, sizeof(writer_ws.path), "%s", wsdir);
+    writer.workspaces[0] = &writer_ws;
+    writer.workspace_count = 1;
+    writer_agent.workspace = &writer_ws;
+    writer_agent.persistence = PICO_SESSION_DURABLE;
+    writer_agent.kind = PICO_AGENT_MAIN;
+    ephemeral.persistence = PICO_SESSION_EPHEMERAL;
+    if (PicoSession_LogInboxPending(&writer, &ephemeral, true) != PICO_SESSION_WRITE_SKIPPED)
+        return Fail("ephemeral inbox pending was not skipped");
+    if (PicoSession_LogUser(&writer, &writer_agent, "task", "task", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUnseenComplete(&writer, &writer_agent, true) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogInboxPending(&writer, &writer_agent, true) != PICO_SESSION_WRITE_OK)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("inbox pending jsonl write");
+    }
+    listed_n = PicoSession_List(&writer_ws, &listed, true);
+    for (i = 0; i < listed_n; i++)
+    {
+        if (strcmp(listed[i].id, writer_agent.session_id) == 0)
+        {
+            listed_pending = listed[i].inbox_pending && listed[i].unseen_complete;
+            break;
+        }
+    }
+    free(listed);
+    catalog_n = PicoCatalog_ScanGrouped(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, wsdir);
+    if (!listed_pending || !found || found->session_count < 1 ||
+        !found->sessions[0].inbox_pending || !found->sessions[0].unseen_complete)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        unlink(writer_agent.session_path);
+        return Fail("catalog did not surface inbox pending separately from the green dot");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    resumed.workspace = &writer_ws;
+    resumed.kind = PICO_AGENT_MAIN;
+    if (PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        !resumed.inbox_pending)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("replay must restore inbox pending");
+    }
+    PicoSession_Reset(&writer, &resumed);
+    if (resumed.inbox_pending)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("reset must clear inbox pending");
+    }
+    if (PicoCatalog_SetInboxPending(wsdir, writer_agent.session_id, false) != 0)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("catalog inbox acknowledgement write");
+    }
+    catalog = NULL;
+    catalog_n = PicoCatalog_ScanGrouped(&catalog);
+    found = FindCatalogPath(catalog, catalog_n, wsdir);
+    memset(&resumed, 0, sizeof(resumed));
+    resumed.workspace = &writer_ws;
+    resumed.kind = PICO_AGENT_MAIN;
+    if (!found || found->session_count < 1 || found->sessions[0].inbox_pending ||
+        !found->sessions[0].unseen_complete ||
+        PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        resumed.inbox_pending || !resumed.unseen_complete)
+    {
+        PicoCatalog_Free(catalog, catalog_n);
+        unlink(writer_agent.session_path);
+        return Fail("inbox acknowledgement must not clear the green dot");
+    }
+    PicoCatalog_Free(catalog, catalog_n);
+    unlink(writer_agent.session_path);
+    rmdir(wsdir);
+    return 0;
+}
+
 static int TestCatalogOmitsMissingPath(void)
 {
     char ws[] = "/tmp/pico-catalog-gone-XXXXXX";
@@ -3924,6 +4022,7 @@ int main(void)
         PICO_TEST_RUN(TestCatalogListingCache()) != 0 || PICO_TEST_RUN(TestSessionListCompleteness()) != 0 ||
         PICO_TEST_RUN(TestCatalogCacheCoversOlderSessions()) != 0 ||
         PICO_TEST_RUN(TestUnseenCompleteRoundTrip()) != 0 ||
+        PICO_TEST_RUN(TestInboxPendingRoundTrip()) != 0 ||
         PICO_TEST_RUN(TestCatalogOmitsMissingPath()) != 0 || PICO_TEST_RUN(TestModelResumeReplay()) != 0 ||
         PICO_TEST_RUN(TestQueuedModelChangeOrdersUserWrite()) != 0 || PICO_TEST_RUN(TestQueuedModelChangeFailureThenDrain()) != 0 ||
         PICO_TEST_RUN(TestQueuedModelChangeCreatesHeaderPerAgent()) != 0 ||

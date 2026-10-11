@@ -2580,6 +2580,8 @@ static void GoIdle(PicoHost *app, PicoAgent *agent)
 static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
 {
     GoIdle(app, agent);
+    if (PicoAgent_IsUserMain(agent))
+        PicoSession_SetInboxPending(app, agent, true);
     if (pico_agent_active(app) != agent->id)
     {
         PicoSession_SetUnseenComplete(app, agent, true);
@@ -2779,6 +2781,8 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
     free(agent->error);
     agent->error = Dup(msg ? msg : "agent error");
     agent->state = PICO_AGENT_ERROR;
+    if (PicoAgent_IsUserMain(agent))
+        PicoSession_SetInboxPending(app, agent, true);
     PicoAgent_InvalidateSteering(app, agent, "agent error");
     if (rt->stream_msg >= 0 && MessageEmpty(agent, rt->stream_msg))
     {

@@ -26,6 +26,7 @@ typedef struct PicoSessionInfo {
     uint64_t inode;
     uint64_t size;
     bool unseen_complete;
+    bool inbox_pending;
 } PicoSessionInfo;
 
 #define PICO_CATALOG_NAME_MAX 128
@@ -49,6 +50,7 @@ typedef struct PicoCatalogSession {
     uint64_t inode;
     uint64_t size;
     bool unseen_complete;
+    bool inbox_pending;
     PicoAgentKind kind;
 } PicoCatalogSession;
 
@@ -219,6 +221,10 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
 PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent,
                                                      bool complete);
 void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete);
+PicoSessionWriteResult PicoSession_LogInboxPending(PicoHost *app, PicoAgent *agent, bool pending);
+void PicoSession_SetInboxPending(PicoHost *app, PicoAgent *agent, bool pending);
+/* Appends the inbox event for a closed session. Does not change agent run state. */
+int PicoCatalog_SetInboxPending(const char *checkout_path, const char *session_id, bool pending);
 typedef enum PicoCatalogPersistStatus {
     PICO_CATALOG_PERSIST_FAILED = -1,
     PICO_CATALOG_PERSIST_PENDING = 0,

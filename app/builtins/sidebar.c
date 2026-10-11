@@ -458,7 +458,8 @@ static bool SidebarCatalogEqual(const SidebarState *s, const SidebarScanWorker *
                 strcmp(x->checkout_path, y->checkout_path) ||
                 strcmp(x->checkout_name, y->checkout_name) || x->worktree != y->worktree ||
                 x->missing_checkout != y->missing_checkout ||
-                x->unseen_complete != y->unseen_complete || x->kind != y->kind)
+                x->unseen_complete != y->unseen_complete || x->inbox_pending != y->inbox_pending ||
+                x->kind != y->kind)
                 return false;
         }
     }
@@ -1029,6 +1030,44 @@ typedef enum SidebarDotKind
     SIDEBAR_DOT_ERROR,
 } SidebarDotKind;
 
+static bool AgentOrDescendantAskOpen(PicoHost *host, PicoAgentId id)
+{
+    const PicoAgent *agent;
+    int n, i;
+    if (!host || !id)
+        return false;
+    agent = PicoHost_FindAgentConst(host, id);
+    if (agent && PicoAgent_AskUiOpen(agent))
+        return true;
+    n = pico_agent_count(host);
+    for (i = 0; i < n; i++)
+    {
+        PicoAgentInfo info;
+        PicoAgentId cur;
+        int depth;
+        if (!pico_agent_info(host, i, &info) || info.id == id)
+            continue;
+        cur = info.parent_id;
+        for (depth = 0; cur && depth < 8; depth++)
+        {
+            if (cur == id)
+            {
+                const PicoAgent *child = PicoHost_FindAgentConst(host, info.id);
+                if (child && PicoAgent_AskUiOpen(child))
+                    return true;
+                break;
+            }
+            {
+                const PicoAgent *node = PicoHost_FindAgentConst(host, cur);
+                if (!node)
+                    break;
+                cur = node->parent_id;
+            }
+        }
+    }
+    return false;
+}
+
 static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const char *session_id,
                                      PicoAgentId live_id, bool catalog_unseen)
 {
@@ -1046,6 +1085,8 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     {
         return catalog_unseen ? SIDEBAR_DOT_DONE : SIDEBAR_DOT_IDLE;
     }
+    if (agent->state != PICO_AGENT_ERROR && AgentOrDescendantAskOpen(host, agent->id))
+        return SIDEBAR_DOT_WAITING_USER;
     switch (agent->state)
     {
     case PICO_AGENT_ERROR:
@@ -1382,7 +1423,7 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
 static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_path,
                              const char *title, const char *session_id, PicoAgentId live_id,
                              int row_id, bool catalog_unseen, bool worktree,
-                             bool missing_checkout)
+                             bool missing_checkout, bool inbox_row)
 {
     bool selected = SessionIsSelected(host, ws_path, session_id, live_id);
     PicoAgentId row_live_id = live_id ? live_id : LiveMainAgent(host, ws_path, session_id);
@@ -1391,12 +1432,14 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
     bool loading = PicoSession_LoadTarget(host, &target_ws, &target_id) &&
                    ws_path && session_id && session_id[0] &&
                    strcmp(ws_path, target_ws) == 0 && strcmp(session_id, target_id) == 0;
-    Clay_ElementId id = CLAY_IDI("SidebarSess", row_id);
+    /* Keep load tracking on the project-list id. Inbox rows use a separate element. */
+    int dot_id = inbox_row ? row_id + 10000000 : row_id;
+    Clay_ElementId id = inbox_row ? CLAY_IDI("SidebarInbox", row_id) : CLAY_IDI("SidebarSess", row_id);
     bool hovered = Clay_PointerOver(id);
     Clay_String display = SidebarDisplayTitle(
         s, title && title[0] ? title : "Untitled",
         SidebarLabelWidth(s->row_width, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0.0f));
-    if (loading)
+    if (loading && !inbox_row)
     {
         host->session_load_row_rendered = host->session_load_row_id != row_id ||
                                           host->session_load_row_was_visible;
@@ -1412,7 +1455,7 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
               .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
         RenderSessionDot(s, SessionDotKind(host, ws_path, session_id, row_live_id, catalog_unseen),
-                         row_id, worktree, loading, !row_live_id);
+                         dot_id, worktree, loading, !row_live_id);
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             CLAY_TEXT(display,
@@ -1504,7 +1547,7 @@ static void RenderPinnedSelected(PicoHost *host, SidebarState *s, const PicoCata
         return;
     }
     RenderSessionRow(host, s, pin.checkout_path, pin.title, pin.session_id, pin.live_id,
-                     pin.row_id, pin.unseen_complete, pin.worktree, pin.missing_checkout);
+                     pin.row_id, pin.unseen_complete, pin.worktree, pin.missing_checkout, false);
 }
 
 static bool OpenPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
@@ -1598,9 +1641,245 @@ static void RenderLiveExtras(PicoHost *host, SidebarState *s, const PicoCatalogW
         }
         RenderSessionRow(host, s, agent_ws, info.session_id[0] ? "Untitled" : "New session",
                          info.session_id, info.id, SessionRowId(ws_index, extra), false,
-                         agent && agent->workspace && agent->workspace->worktree, false);
+                         agent && agent->workspace && agent->workspace->worktree, false, false);
         extra++;
     }
+}
+
+typedef struct InboxVisit {
+    const char *path;
+    const char *title;
+    const char *session_id;
+    PicoAgentId live_id;
+    int ws_index;
+    int slot;
+    bool unseen;
+    bool worktree;
+    bool missing;
+} InboxVisit;
+
+typedef int (*InboxVisitFn)(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx);
+
+static bool InboxPendingValue(PicoHost *host, const char *ws_path, const char *session_id,
+                              bool catalog_inbox, PicoAgentId live_id)
+{
+    PicoAgent *agent;
+    if (!live_id)
+        live_id = LiveMainAgent(host, ws_path, session_id);
+    agent = live_id ? PicoHost_FindAgent(host, live_id) : NULL;
+    if (agent)
+        return agent->inbox_pending;
+    return catalog_inbox;
+}
+
+static bool InboxVisible(PicoHost *host, const char *ws_path, const char *session_id,
+                         bool catalog_unseen, bool catalog_inbox, PicoAgentId live_id)
+{
+    SidebarDotKind dot = SessionDotKind(host, ws_path, session_id, live_id, catalog_unseen);
+    if (dot == SIDEBAR_DOT_RUNNING)
+        return false;
+    if (dot == SIDEBAR_DOT_DONE || dot == SIDEBAR_DOT_WAITING_USER || dot == SIDEBAR_DOT_ERROR)
+        return true;
+    return dot == SIDEBAR_DOT_IDLE &&
+           InboxPendingValue(host, ws_path, session_id, catalog_inbox, live_id);
+}
+
+static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ctx)
+{
+    int index = 0;
+    int i, j;
+    if (!host || !s)
+        return 0;
+    for (i = 0; i < s->workspace_count; i++)
+    {
+        const PicoCatalogWorkspace *ws = &s->workspaces[i];
+        int extras = CountLiveExtras(host, ws);
+        for (j = 0; j < extras; j++)
+        {
+            PicoAgentId id = LiveExtraAt(host, ws, j);
+            PicoAgent *agent = PicoHost_FindAgent(host, id);
+            PicoAgentInfo info;
+            const char *path;
+            InboxVisit row;
+            if (!agent || !pico_agent_find(host, id, &info))
+                continue;
+            path = PicoAgent_WorkspacePath(agent);
+            if (!InboxVisible(host, path, info.session_id, agent->unseen_complete, agent->inbox_pending, id))
+                continue;
+            if (fn)
+            {
+                memset(&row, 0, sizeof(row));
+                row.path = path;
+                row.title = info.session_id[0] ? "Untitled" : "New session";
+                row.session_id = info.session_id;
+                row.live_id = id;
+                row.ws_index = i;
+                row.slot = j;
+                row.unseen = agent->unseen_complete;
+                row.worktree = agent->workspace && agent->workspace->worktree;
+                if (fn(host, s, &row, index, ctx))
+                    return index + 1;
+            }
+            index++;
+        }
+        for (j = 0; j < ws->session_count; j++)
+        {
+            const PicoCatalogSession *session = &ws->sessions[j];
+            PicoAgentId live = LiveMainAgent(host, session->checkout_path, session->id);
+            InboxVisit row;
+            if (!InboxVisible(host, session->checkout_path, session->id, session->unseen_complete,
+                              session->inbox_pending, live))
+                continue;
+            if (fn)
+            {
+                memset(&row, 0, sizeof(row));
+                row.path = session->checkout_path;
+                row.title = session->title[0] ? session->title : "Untitled";
+                row.session_id = session->id;
+                row.live_id = live;
+                row.ws_index = i;
+                row.slot = extras + j;
+                row.unseen = session->unseen_complete;
+                row.worktree = session->worktree;
+                row.missing = session->missing_checkout;
+                if (fn(host, s, &row, index, ctx))
+                    return index + 1;
+            }
+            index++;
+        }
+    }
+    return index;
+}
+
+static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
+{
+    (void)ctx;
+    RenderSessionRow(host, s, row->path, row->title, row->session_id, row->live_id, index, row->unseen,
+                     row->worktree, row->missing, true);
+    return 0;
+}
+
+static int NoteInboxIdle(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
+{
+    (void)s;
+    (void)index;
+    if (SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen) == SIDEBAR_DOT_IDLE)
+        *(bool *)ctx = true;
+    return 0;
+}
+
+static void AcknowledgeInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row)
+{
+    if (row->live_id)
+    {
+        PicoAgent *agent = PicoHost_FindAgent(host, row->live_id);
+        if (agent)
+            PicoSession_SetInboxPending(host, agent, false);
+    }
+    else if (PicoCatalog_SetInboxPending(row->path, row->session_id, false) != 0)
+    {
+        PicoOverlay_Notify(host, "Could not update the inbox.");
+        return;
+    }
+    s->dirty = true;
+    pico_host_request_redraw(host);
+}
+
+static int AckInboxIdle(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
+{
+    (void)index;
+    (void)ctx;
+    if (SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen) == SIDEBAR_DOT_IDLE)
+        AcknowledgeInboxRow(host, s, row);
+    return 0;
+}
+
+static void RevealInboxSession(PicoHost *host, SidebarState *s, const InboxVisit *row)
+{
+    const PicoCatalogWorkspace *ws;
+    int total, shown, needed;
+    if (!s || row->ws_index < 0 || row->ws_index >= s->workspace_count)
+        return;
+    ws = &s->workspaces[row->ws_index];
+    if (ws->stashed)
+        s->stash_expanded = true;
+    ExpandWorkspace(s, row->ws_index);
+    total = CountLiveExtras(host, ws) + ws->session_count +
+            (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
+    needed = row->slot + 1;
+    shown = ShownForIndex(s, row->ws_index, total);
+    if (shown < needed && row->ws_index < s->ui_count)
+    {
+        s->ui[row->ws_index].shown = ClampShown(needed, total);
+        host->ui_relayout_requested = true;
+    }
+}
+
+static int ClickInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
+{
+    if (!Clay_PointerOver(CLAY_IDI("SidebarInbox", index)))
+        return 0;
+    if (row->live_id)
+        SelectAgent(host, row->live_id);
+    else
+        OpenCatalogSession(host, s, row->path, row->session_id);
+    RevealInboxSession(host, s, row);
+    /* VisitInbox returns the row count, not whether a click was consumed. */
+    if (ctx)
+        *(bool *)ctx = true;
+    return 1;
+}
+
+static void RenderInboxHeader(SidebarState *s, bool can_ack)
+{
+    const char *mark = "\xE2\x9C\x93";
+    bool hover = can_ack && Clay_PointerOver(CLAY_ID("SidebarInboxDone"));
+    float mark_width = 8.0f + SidebarTextWidth(mark, (int)strlen(mark));
+    Clay_String header = SidebarDisplayTitle(
+        s, "Inbox", s->row_width - 2.0f * SIDEBAR_ROW_PAD_X - SIDEBAR_ROW_GAP - mark_width);
+    CLAY(CLAY_ID("SidebarInboxHeader"),
+         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                     .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
+                     .childGap = SIDEBAR_ROW_GAP,
+                     .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY_TEXT(header, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                .fontSize = PICO_FONT_UI,
+                                                .textColor = COLOR_MUTED,
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
+        CLAY(CLAY_ID("SidebarInboxDone"), {.layout = {.padding = {4, 4, 0, 0}}})
+        {
+            RenderGlyph(mark, hover ? COLOR_TEXT : COLOR_MUTED);
+        }
+    }
+}
+
+static void RenderInbox(PicoHost *host, SidebarState *s)
+{
+    bool can_ack = false;
+    if (VisitInbox(host, s, NULL, NULL) <= 0)
+        return;
+    VisitInbox(host, s, NoteInboxIdle, &can_ack);
+    RenderInboxHeader(s, can_ack);
+    VisitInbox(host, s, RenderInboxRow, NULL);
+}
+
+static bool PointerOverInbox(PicoHost *host, SidebarState *s)
+{
+    int n, i;
+    if (Clay_PointerOver(CLAY_ID("SidebarInboxDone")) || Clay_PointerOver(CLAY_ID("SidebarInboxHeader")))
+        return true;
+    n = VisitInbox(host, s, NULL, NULL);
+    for (i = 0; i < n; i++)
+    {
+        if (Clay_PointerOver(CLAY_IDI("SidebarInbox", i)))
+            return true;
+    }
+    return false;
 }
 
 static void PicoSidebar_Render(PicoHost *host, void *state)
@@ -1657,6 +1936,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                          .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = true, .childOffset = Clay_GetScrollOffset()}})
         {
+            RenderInbox(host, s);
             for (int section = 0; section < 2; section++)
             {
                 if (section == 1)
@@ -1710,7 +1990,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                             RenderSessionRow(host, s, ws->sessions[j].checkout_path, ws->sessions[j].title,
                                              ws->sessions[j].id, 0, SessionRowId(i, extras + j),
                                              ws->sessions[j].unseen_complete, ws->sessions[j].worktree,
-                                             ws->sessions[j].missing_checkout);
+                                             ws->sessions[j].missing_checkout, false);
                         }
                         RenderMoreLessRow(i, shown, total);
                     }
@@ -2137,7 +2417,8 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
     int extras;
     int total;
     int shown;
-    if (Clay_PointerOver(CLAY_ID("SidebarStashedHeader")) ||
+    if (PointerOverInbox(host, s) ||
+        Clay_PointerOver(CLAY_ID("SidebarStashedHeader")) ||
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))) ||
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings"))))
     {
@@ -2612,6 +2893,17 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return;
+    }
+    if (Clay_PointerOver(CLAY_ID("SidebarInboxDone")))
+    {
+        VisitInbox(host, s, AckInboxIdle, NULL);
+        return;
+    }
+    {
+        bool inbox_row_clicked = false;
+        VisitInbox(host, s, ClickInboxRow, &inbox_row_clicked);
+        if (inbox_row_clicked)
+            return;
     }
     if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))))
     {

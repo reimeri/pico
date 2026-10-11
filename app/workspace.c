@@ -78,6 +78,16 @@ const PicoAgent *PicoWorkspace_FindAgentConst(const PicoWorkspace *workspace, Pi
     return index >= 0 ? workspace->agents[index] : NULL;
 }
 
+static void ClearUnseenKeepInbox(PicoHost *host, PicoAgent *agent)
+{
+    if (!agent)
+        return;
+    /* Opening a green-dot session clears the shared dot but keeps the inbox row. */
+    if (agent->unseen_complete && PicoAgent_IsUserMain(agent))
+        PicoSession_SetInboxPending(host, agent, true);
+    PicoSession_SetUnseenComplete(host, agent, false);
+}
+
 static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
 {
     PicoAgent *agent;
@@ -92,7 +102,7 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     agent = PicoHost_FindAgent(host, id);
     if (agent)
     {
-        PicoSession_SetUnseenComplete(host, agent, false);
+        ClearUnseenKeepInbox(host, agent);
         agent->last_activity = PicoClock_Monotonic();
         if (agent->workspace)
         {
@@ -758,7 +768,7 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
     {
         return false;
     }
-    PicoSession_SetUnseenComplete(app, agent, false);
+    ClearUnseenKeepInbox(app, agent);
     if (app->selected_agent_id == id)
     {
         return true;

@@ -63,6 +63,7 @@ struct PicoAgent {
 
     PicoAgentState state;
     bool unseen_complete;
+    bool inbox_pending; /* inbox review flag; not a run state */
     PicoAgentRt *runtime;
     char *error;
     char activity[256];

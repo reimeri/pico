@@ -1608,6 +1608,25 @@ void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complet
     }
 }
 
+PicoSessionWriteResult PicoSession_LogInboxPending(PicoHost *app, PicoAgent *agent, bool pending)
+{
+    (void)app;
+    if (agent)
+    {
+        agent->inbox_pending = pending;
+    }
+    return PICO_SESSION_WRITE_OK;
+}
+
+void PicoSession_SetInboxPending(PicoHost *app, PicoAgent *agent, bool pending)
+{
+    (void)app;
+    if (agent)
+    {
+        agent->inbox_pending = pending;
+    }
+}
+
 void PicoSessionPersist_Init(PicoHost *host)
 {
     (void)host;
@@ -4920,6 +4939,42 @@ static int TestCanonicalContinuationState(void)
     return signature_ok ? 0 : Fail(name, "signature-only assistant state was not sent on the follow-up");
 }
 
+/* An idle turn and an error both mark the main session for inbox review, and
+ * only the inbox acknowledgement clears that mark. */
+static int TestTurnEndMarksInboxPending(TestMode mode)
+{
+    const char *name = mode == TEST_PROVIDER_TEXT_FAIL ? "error inbox pending" : "turn end inbox pending";
+    ResetTest(mode, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    if (!WaitForIdle(&app))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "provider did not finish");
+    }
+    bool entered = agent->inbox_pending && !agent->unseen_complete;
+    bool errored = mode == TEST_PROVIDER_TEXT_FAIL && agent->state == PICO_AGENT_ERROR;
+    if (mode != TEST_PROVIDER_TEXT_FAIL)
+    {
+        PicoAgent_StartTurn(&app, agent, "second turn");
+        if (!WaitForIdle(&app))
+        {
+            PicoHost_Shutdown(&app);
+            return Fail(name, "second turn did not finish");
+        }
+    }
+    PicoAgent_DismissError(agent);
+    PicoSession_SetInboxPending(&app, agent, false);
+    bool cleared = !agent->inbox_pending && agent->state != PICO_AGENT_ERROR;
+    PicoHost_Shutdown(&app);
+    if (!entered) return Fail(name, "a finished turn must wait for inbox acknowledgement");
+    if (mode == TEST_PROVIDER_TEXT_FAIL && !errored)
+        return Fail(name, "a failed turn must keep the error state");
+    return cleared ? 0 : Fail(name, "inbox acknowledgement must not change the run state");
+}
+
 static int TestFailedStreamPersistence(TestMode mode)
 {
     const char *name = "failed stream persistence";
@@ -5829,6 +5884,8 @@ int main(void)
     failed |= PICO_TEST_RUN(TestNonVisionMediaRejected());
     failed |= PICO_TEST_RUN(TestFailedStreamPersistence(TEST_PROVIDER_THINK_FAIL));
     failed |= PICO_TEST_RUN(TestFailedStreamPersistence(TEST_PROVIDER_TEXT_FAIL));
+    failed |= PICO_TEST_RUN(TestTurnEndMarksInboxPending(TEST_PROVIDER_TPS));
+    failed |= PICO_TEST_RUN(TestTurnEndMarksInboxPending(TEST_PROVIDER_TEXT_FAIL));
     failed |= PICO_TEST_RUN(TestProviderStatus());
     failed |= PICO_TEST_RUN(TestCancelledThinkingPersistence());
     failed |= PICO_TEST_RUN(TestStreamingTextActivity());

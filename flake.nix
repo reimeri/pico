@@ -29,9 +29,11 @@
       # withSpellcheck: keep Pico dlopen-only, but extend the wrapper's search
       # paths so the runtime probe finds enchant and the given dictionaries.
       # spellDictionaries: hunspellDicts.* packages to put on DICPATH.
+      # doCheck: compile and run tests only for explicit flake checks by default.
       picoFor =
         pkgs:
         {
+          doCheck ? false,
           withSpellcheck ? false,
           spellDictionaries ? [ pkgs.hunspellDicts.en_US ],
         }:
@@ -86,12 +88,12 @@
           cmakeFlags = [
             "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=${raylib}"
             "-DCMAKE_BUILD_TYPE=Release"
-            "-DBUILD_TESTING=ON"
+            "-DBUILD_TESTING=${if doCheck then "ON" else "OFF"}"
           ];
 
           nativeCheckInputs = [ pkgs.git ];
 
-          doCheck = true;
+          inherit doCheck;
           checkPhase = ''
             runHook preCheck
             ctest --output-on-failure
@@ -143,8 +145,8 @@
       });
 
       checks = forEachSystem (pkgs: {
-        pico = picoFor pkgs { };
-        default = picoFor pkgs { };
+        pico = picoFor pkgs { doCheck = true; };
+        default = picoFor pkgs { doCheck = true; };
       });
 
       # Function form for custom dictionary sets, e.g.:

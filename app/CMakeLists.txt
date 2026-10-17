@@ -290,6 +290,15 @@ if(BUILD_TESTING)
             "LINKER:--wrap=glfwInit,--wrap=glfwDefaultWindowHints,--wrap=glfwWindowHint,--wrap=glfwSetJoystickCallback,--wrap=glfwCreateWindow,--wrap=glfwTerminate")
         pico_warnings_are_errors(pico_raylib_startup_tests)
         add_test(NAME pico_raylib_startup_tests COMMAND pico_raylib_startup_tests)
+        # Exercise the actual Raylib/GLFW input boundary; no display/GPU means
+        # skip this integration test rather than replace the backend with mocks.
+        add_executable(pico_raylib_scroll_tests tests/raylib_scroll_test.c)
+        target_include_directories(pico_raylib_scroll_tests PRIVATE
+            ${raylib_SOURCE_DIR}/src/external/glfw/include)
+        target_link_libraries(pico_raylib_scroll_tests PRIVATE raylib)
+        pico_warnings_are_errors(pico_raylib_scroll_tests)
+        add_test(NAME pico_raylib_scroll_tests COMMAND pico_raylib_scroll_tests)
+        set_tests_properties(pico_raylib_scroll_tests PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME pico_startup_no_display
             COMMAND ${CMAKE_COMMAND} -DPICO=$<TARGET_FILE:pico>
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_no_display.cmake)

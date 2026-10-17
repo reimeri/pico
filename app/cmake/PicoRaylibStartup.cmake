@@ -1,6 +1,7 @@
 # Raylib 5.5 queries the monitor before checking glfwCreateWindow's result,
 # and InitWindow ignores InitPlatform's failure. Patch build-local copies so
 # failed display/context creation returns without invoking GLFW or GL on NULL.
+# Also preserve all wheel motion delivered between input snapshots.
 # Keep the fetched source immutable (in particular for Nix store sources).
 function(pico_patch_raylib_startup)
     set(_src "${raylib_SOURCE_DIR}/src")
@@ -33,6 +34,18 @@ function(pico_patch_raylib_startup)
         }
 
         // After the window was created, determine the monitor that the window manager assigned.]=] _desktop "${_desktop}")
+
+    # Raylib 5.5 replaces the wheel delta on every GLFW callback. High-resolution
+    # wheels (e.g. Logitech on Wayland) send several fractional events per frame,
+    # so keeping only the last event makes scrolling slow and frame-rate dependent.
+    # PollInputEvents already clears this accumulator before polling new events.
+    set(_old "    CORE.Input.Mouse.currentWheelMove = (Vector2){ (float)xoffset, (float)yoffset };")
+    string(FIND "${_desktop}" "${_old}" _match)
+    if(_match EQUAL -1)
+        message(FATAL_ERROR "Pico failed to patch raylib wheel event accumulation")
+    endif()
+    string(REPLACE "${_old}" [=[    CORE.Input.Mouse.currentWheelMove.x += (float)xoffset;
+    CORE.Input.Mouse.currentWheelMove.y += (float)yoffset;]=] _desktop "${_desktop}")
 
     # Preserve the backend's Windows-only relative include after relocation.
     string(REPLACE "\"../external/win32_clipboard.h\""

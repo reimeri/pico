@@ -118,6 +118,7 @@ int PicoCatalog_ReadGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *
 /* Missing token files report a valid empty token. Read failures return false. */
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);
+/* Worker-side presentation write; publishes atomic, non-durable invalidation. */
 int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
 /* Project identity is the canonical main checkout path, not a session checkout. */
 int PicoCatalog_SetProjectName(const char *project_path, const char *name);

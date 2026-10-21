@@ -3538,7 +3538,7 @@ static void CatalogLockRelease(int fd)
     pthread_mutex_unlock(&g_catalog_mutex);
 }
 
-static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
+static bool CatalogAtomicWrite(const char *path, const char *data, size_t len, bool durable)
 {
     char dir[4096];
     char tmp[4096];
@@ -3570,7 +3570,7 @@ static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
     }
     (void)fchmod(fd, 0600);
     ok = PicoIO_WriteAll(fd, data, len);
-    if (ok && fsync(fd) != 0)
+    if (ok && durable && fsync(fd) != 0)
     {
         ok = false;
     }
@@ -3583,6 +3583,8 @@ static bool CatalogAtomicWrite(const char *path, const char *data, size_t len)
         unlink(tmp);
         return false;
     }
+    if (!durable)
+        return true;
     dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dfd < 0)
     {
@@ -3634,7 +3636,7 @@ bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX])
     return true;
 }
 
-static void CatalogMarkChanged(void)
+static void CatalogPublishChange(bool durable)
 {
     char root[4096];
     char path[4096];
@@ -3648,8 +3650,13 @@ static void CatalogMarkChanged(void)
     Pico_RandomHex(token, sizeof(token));
     if (token[0])
     {
-        (void)CatalogAtomicWrite(path, token, strlen(token));
+        (void)CatalogAtomicWrite(path, token, strlen(token), durable);
     }
+}
+
+static void CatalogMarkChanged(void)
+{
+    CatalogPublishChange(true);
 }
 
 /* Project-level presentation survives even when only linked worktrees have catalogs. */
@@ -4041,7 +4048,7 @@ static bool CatalogDbMarkInstalled(const char *root)
 {
     char marker[4096];
     if (!PicoPath_Format(marker, sizeof(marker), "%s/.catalog-installed", root)) return false;
-    return access(marker, F_OK) == 0 || CatalogAtomicWrite(marker, "1\n", 2);
+    return access(marker, F_OK) == 0 || CatalogAtomicWrite(marker, "1\n", 2, true);
 }
 
 enum { CATALOG_DB_VERSION = 2 };
@@ -4754,6 +4761,9 @@ int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed)
     sqlite3 *db;
     sqlite3_stmt *stmt = NULL;
     bool ok;
+#ifdef PICO_SESSION_TEST_HOOKS
+    if (PicoSession_TestHook("catalog_collapsed_before_write")) return -1;
+#endif
     if (!workspace_path || !(db = CatalogDbOpen())) return -1;
     sqlite3_busy_timeout(db, 30);
     ok = CatalogDbPrepare(db, &stmt, "UPDATE workspaces SET collapsed=? WHERE path=?");
@@ -4766,7 +4776,9 @@ int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed)
     sqlite3_finalize(stmt);
     bool changed = sqlite3_changes(db) != 0;
     sqlite3_close(db);
-    if (ok && changed) CatalogMarkChanged();
+    /* Presentation invalidation need not survive a crash. Keep atomic publication
+     * for concurrent readers, but do not sync its file or parent directory. */
+    if (ok && changed) CatalogPublishChange(false);
     return ok && changed ? 0 : -1;
 }
 

@@ -218,6 +218,9 @@ static atomic_int g_catalog_snapshot_done_calls;
 static int g_catalog_ready_fd = -1;
 static int g_catalog_continue_fd = -1;
 static bool g_sidebar_poll_due;
+static int g_collapse_ready_fd = -1;
+static int g_collapse_continue_fd = -1;
+static bool g_collapse_fail_once;
 static int g_replay_ready_fd = -1;
 static int g_replay_continue_fd = -1;
 static int g_replay_adopted;
@@ -266,6 +269,15 @@ bool PicoSession_TestHook(const char *stage)
         int resume = g_replay_continue_fd;
         g_replay_ready_fd = g_replay_continue_fd = -1;
         return !TransferTestByte(ready, true) || !TransferTestByte(resume, false);
+    }
+    if (stage && strcmp(stage, "catalog_collapsed_before_write") == 0 &&
+        g_collapse_ready_fd >= 0 && g_collapse_continue_fd >= 0)
+    {
+        int ready = g_collapse_ready_fd, resume = g_collapse_continue_fd;
+        bool fail = g_collapse_fail_once;
+        g_collapse_ready_fd = g_collapse_continue_fd = -1;
+        g_collapse_fail_once = false;
+        return !TransferTestByte(ready, true) || !TransferTestByte(resume, false) || fail;
     }
     if (stage && strcmp(stage, "catalog_scan") == 0)
     {
@@ -15096,6 +15108,201 @@ done:
     return good ? 0 : 1;
 }
 
+typedef enum SidebarCollapseScenario
+{
+    SIDEBAR_COLLAPSE_TOGGLE,
+    SIDEBAR_COLLAPSE_SAVE_FAILURE,
+    SIDEBAR_COLLAPSE_RELOAD,
+    SIDEBAR_COLLAPSE_PLUS,
+    SIDEBAR_COLLAPSE_INBOX,
+} SidebarCollapseScenario;
+
+/* A slow or failed preference save must not gate folder expansion, and a
+ * refresh of unrelated catalog data must not undo the local presentation. */
+static int TestSidebarCollapseSaveDoesNotBlock(SidebarCollapseScenario scenario)
+{
+    bool fail_save = scenario == SIDEBAR_COLLAPSE_SAVE_FAILURE;
+    bool reload = scenario == SIDEBAR_COLLAPSE_RELOAD;
+    bool shortcut = scenario == SIDEBAR_COLLAPSE_PLUS || scenario == SIDEBAR_COLLAPSE_INBOX;
+    char dir[] = "/tmp/pico-sidebar-collapse-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-sidebar-collapse-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool released = false, good = false;
+    const char *phase = "setup";
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
+    WaitPluginLoad(host);
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+    host->preferences.chat_width = 0;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    if (PicoCatalog_Ensure(dir) != 0 ||
+        PicoCatalog_SetProjectName(dir, "Workspace") != 0 ||
+        pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        PicoCatalog_SetCollapsed(dir, true) != 0) goto done;
+    for (int i = 0; i < 2; i++)
+    {
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_NONE, .select = i == 0};
+        if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK)
+            goto done;
+    }
+    if (scenario == SIDEBAR_COLLAPSE_INBOX)
+        PicoHost_FindAgent(host, agent_id)->inbox_pending = true;
+    if (!WaitHostTasks(host)) goto done;
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    PicoHost_Frame(host);
+    if (scenario == SIDEBAR_COLLAPSE_PLUS)
+    {
+        /* The plus button appears only while its workspace row is hovered. */
+        Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarWs", 0));
+        if (!row.found) goto done;
+        g_find_pointer = (Vector2){row.boundingBox.x + row.boundingBox.width / 2.0f,
+                                   row.boundingBox.y + row.boundingBox.height / 2.0f};
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        pico_host_request_redraw(host);
+        PicoHost_Frame(host);
+    }
+    int collapsed_rows = SidebarVisibleSessionRows();
+    if (!Clay_GetElementData(CLAY_IDI("SidebarWs", 0)).found || collapsed_rows == 0 ||
+        pipe(ready) != 0 || pipe(proceed) != 0) goto done;
+    g_collapse_ready_fd = ready[1];
+    g_collapse_continue_fd = proceed[0];
+    g_collapse_fail_once = fail_save;
+    phase = "expand while persistence is blocked";
+    /* This frame must return before the gate is released. CTest is the hang
+     * watchdog, not a machine-speed threshold for click latency. */
+    Clay_ElementId action_id = scenario == SIDEBAR_COLLAPSE_INBOX
+                                   ? CLAY_IDI("SidebarInbox", 0) : CLAY_IDI("SidebarPlus", 0);
+    bool clicked = shortcut ? SidebarFrameClick(host, Clay_GetElementData(action_id))
+                            : SidebarFrameClickWorkspace(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0)));
+    if (!clicked || SidebarVisibleSessionRows() <= collapsed_rows ||
+        !TransferTestByte(ready[0], false)) goto done;
+    int expanded_rows = SidebarVisibleSessionRows();
+    if (shortcut)
+    {
+        phase = "repeated shortcut must leave the workspace expanded";
+        if (!SidebarFrameClick(host, Clay_GetElementData(action_id)) ||
+            SidebarVisibleSessionRows() != expanded_rows) goto done;
+    }
+
+    phase = "refresh while persistence is blocked";
+    if (PicoCatalog_SetProjectName(dir, "Refreshed workspace") != 0) goto done;
+    g_sidebar_poll_due = true;
+    bool refreshed = false;
+    PICO_TEST_WAIT(!refreshed)
+    {
+        pico_host_pump(host);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+        refreshed = SidebarCommandsContain(&commands, "Refreshed workspace");
+    }
+    if (SidebarVisibleSessionRows() != expanded_rows) goto done;
+
+    if (!fail_save && !shortcut)
+    {
+        if (reload)
+        {
+            phase = "reload during pending save";
+            if (!WaitHostReload(host)) goto done;
+            /* The replacement sidebar has fresh hooks and loads the still-old
+             * stored preference. Neither reload nor its input waits on saves. */
+            for (int i = 0; i < host->hook_count; )
+            {
+                if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+                {
+                    memmove(&host->hooks[i], &host->hooks[i + 1],
+                            (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+                    host->hook_count--;
+                }
+                else i++;
+            }
+            bool loaded = false;
+            PICO_TEST_WAIT(!loaded)
+            {
+                pico_host_pump(host);
+                (void)PicoHost_LayoutShell(host, 800, 0);
+                loaded = Clay_GetElementData(CLAY_IDI("SidebarWs", 0)).found;
+            }
+            if (!SidebarFrameClickWorkspace(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0))))
+                goto done;
+        }
+        phase = "rapid toggles during pending save";
+        /* End opposite to the first blocked save; dropping the later save
+         * must not accidentally satisfy the database assertion. */
+        if (!SidebarFrameClickWorkspace(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0))) ||
+            !SidebarFrameClickWorkspace(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0))) ||
+            !SidebarFrameClickWorkspace(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0))))
+            goto done;
+    }
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    phase = "completed save";
+    if (!WaitHostTasks(host)) goto done;
+
+    /* Read the actual stored preference, not the sidebar's optimistic copy. */
+    PicoCatalogWorkspace *catalog = NULL;
+    int n = PicoCatalog_ReadGroupedPaged(&catalog, NULL, NULL, 0);
+    bool stored = n == 1 && catalog[0].collapsed == !shortcut;
+    PicoCatalog_Free(catalog, n);
+    if (!stored) goto done;
+
+    phase = fail_save ? "failed save stays local without retries" : "external preference still refreshes";
+    if (!fail_save && PicoCatalog_SetCollapsed(dir, shortcut) != 0) goto done;
+    if (PicoCatalog_SetProjectName(dir, "Final workspace") != 0) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
+    PicoHost_Frame(host);
+    if (SidebarVisibleSessionRows() != (shortcut ? collapsed_rows : expanded_rows)) goto done;
+    if (fail_save)
+    {
+        n = PicoCatalog_ReadGroupedPaged(&catalog, NULL, NULL, 0);
+        stored = n == 1 && catalog[0].collapsed;
+        PicoCatalog_Free(catalog, n);
+        if (!stored) goto done;
+    }
+    good = true;
+done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    g_find_input_test = g_find_press = g_find_down = g_find_released = false;
+    g_find_key = 0;
+    g_clay_frame_test = false;
+    g_sidebar_poll_due = false;
+    if (host) pico_host_free(host);
+    g_collapse_ready_fd = g_collapse_continue_fd = -1;
+    g_collapse_fail_once = false;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (!good)
+    {
+        fprintf(stderr, "sidebar collapsed save phase: %s (scenario=%d)\n", phase, scenario);
+        Fail("sidebar preference saves must not block or undo local folder toggles");
+    }
+    return good ? 0 : 1;
+}
+
 static int TestIdleFrameOnlyPresentsOnInvalidation(void)
 {
     PicoHost *host = NULL;
@@ -16398,6 +16605,11 @@ int main(int argc, char **argv)
     }
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
+    if (PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_TOGGLE)) != 0 ||
+        PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_SAVE_FAILURE)) != 0 ||
+        PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_RELOAD)) != 0 ||
+        PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_PLUS)) != 0 ||
+        PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_INBOX)) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameOnlyPresentsOnInvalidation()) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameRetainsChatScroll()) != 0) return 1;
     if (PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement()) != 0)

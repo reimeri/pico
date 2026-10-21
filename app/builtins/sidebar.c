@@ -19,6 +19,7 @@
 #include "clay/clay.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <utf8proc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,25 @@ typedef struct SidebarScanWorker
     bool reconcile;
 } SidebarScanWorker;
 
+/* Local presentation wins over snapshots started before its save completed.
+ * Failed saves stay local for this sidebar lifetime, without retries. */
+typedef struct SidebarCollapseEdit
+{
+    struct SidebarCollapseEdit *next;
+    char path[4096];
+    bool collapsed;
+    bool pending;
+    uint64_t accept_scan;
+} SidebarCollapseEdit;
+
+typedef struct SidebarCollapseSave
+{
+    atomic_bool cancelled;
+    char path[4096];
+    bool collapsed;
+    bool saved;
+} SidebarCollapseSave;
+
 typedef struct SidebarState
 {
     PicoHost *host;
@@ -83,6 +103,8 @@ typedef struct SidebarState
     bool catalog_change_token_valid;
     uint64_t scan_serial;
     SidebarScanWorker *scan_worker;
+    SidebarCollapseEdit *collapse_edits;
+    SidebarCollapseSave *collapse_save;
     Texture2D folder_collapsed;
     Texture2D folder_expanded;
     Texture2D archive_open;
@@ -481,6 +503,22 @@ static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
             s->dirty = true;
         return;
     }
+    /* A refresh already in flight at click/save time may contain old state. */
+    SidebarCollapseEdit **link = &s->collapse_edits;
+    while (*link)
+    {
+        SidebarCollapseEdit *edit = *link;
+        if (edit->accept_scan && worker->serial >= edit->accept_scan)
+        {
+            *link = edit->next;
+            free(edit);
+            continue;
+        }
+        for (int i = 0; i < worker->workspace_count; i++)
+            if (strcmp(worker->workspaces[i].path, edit->path) == 0)
+                worker->workspaces[i].collapsed = edit->collapsed;
+        link = &edit->next;
+    }
     bool refresh_again = s->dirty;
     if (s->order_unsaved)
         SidebarPreserveWorkspaceOrder(worker->workspaces, worker->workspace_count,
@@ -750,6 +788,8 @@ static void SelectAgent(PicoHost *host, PicoAgentId id)
     (void)pico_agent_select(host, id);
 }
 
+static void ToggleCollapsed(SidebarState *s, int index);
+
 static void ExpandWorkspace(SidebarState *s, int index)
 {
     PicoCatalogWorkspace *ws;
@@ -762,12 +802,7 @@ static void ExpandWorkspace(SidebarState *s, int index)
     {
         return;
     }
-    if (PicoCatalog_SetCollapsed(ws->path, false) != 0)
-    {
-        PicoOverlay_Notify(s->host, "Could not expand the workspace.");
-        return;
-    }
-    ws->collapsed = false;
+    ToggleCollapsed(s, index);
 }
 
 static void NewSessionInWorkspace(PicoHost *host, SidebarState *s, int index)
@@ -857,22 +892,99 @@ static void OpenCatalogSession(PicoHost *host, SidebarState *s, const char *path
     }
 }
 
+/* Core tasks can outlive a sidebar reload. Serialize their writes as well as
+ * cancelling retired saves that have not started, so an old generation cannot
+ * overwrite a newer click. This mutex is never acquired by the UI thread. */
+static pthread_mutex_t g_collapse_save_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void SidebarCollapseCancel(void *arg)
+{
+    atomic_store(&((SidebarCollapseSave *)arg)->cancelled, true);
+}
+
+static void *SidebarCollapseRun(void *arg)
+{
+    SidebarCollapseSave *save = arg;
+    pthread_mutex_lock(&g_collapse_save_mu);
+    if (!atomic_load(&save->cancelled))
+        save->saved = PicoCatalog_SetCollapsed(save->path, save->collapsed) == 0;
+    pthread_mutex_unlock(&g_collapse_save_mu);
+    return NULL;
+}
+
+static void SidebarCollapseCompleted(PicoHost *host, void *arg)
+{
+    SidebarCollapseSave *save = arg;
+    SidebarState *s = PicoPlugins_HostState(host, "sidebar");
+    if (!s || s->collapse_save != save)
+        return;
+    s->collapse_save = NULL;
+    for (SidebarCollapseEdit *edit = s->collapse_edits; edit; edit = edit->next)
+    {
+        if (strcmp(edit->path, save->path) == 0 && !edit->pending && save->saved)
+        {
+            /* Only a snapshot started after this completion can release the
+             * local override. Newer clicks still pending keep theirs. */
+            edit->accept_scan = s->scan_serial + 1;
+            s->dirty = true;
+            break;
+        }
+    }
+}
+
+static void SidebarStartCollapseSave(SidebarState *s)
+{
+    if (s->collapse_save)
+        return;
+    for (SidebarCollapseEdit *edit = s->collapse_edits; edit; edit = edit->next)
+    {
+        if (!edit->pending)
+            continue;
+        edit->pending = false;
+        SidebarCollapseSave *save = calloc(1, sizeof(*save));
+        if (!save)
+            return;
+        snprintf(save->path, sizeof(save->path), "%s", edit->path);
+        save->collapsed = edit->collapsed;
+        /* One save at a time keeps rapid toggles ordered. Never fall back to
+         * synchronous I/O when tasks are unavailable. */
+        if (!SidebarHostCanTask(s->host) ||
+            !PicoHost_StartTaskCompleted(s->host, SidebarCollapseRun, save, SidebarCollapseCancel,
+                                         SidebarCollapseCompleted, free))
+        {
+            free(save);
+            return;
+        }
+        s->collapse_save = save;
+        return;
+    }
+}
+
 static void ToggleCollapsed(SidebarState *s, int index)
 {
-    PicoCatalogWorkspace *ws;
     if (!s || index < 0 || index >= s->workspace_count)
-    {
         return;
-    }
-    ws = &s->workspaces[index];
-    if (PicoCatalog_SetCollapsed(ws->path, !ws->collapsed) != 0)
-    {
-        PicoOverlay_Notify(s->host, "Could not update the workspace.");
-        return;
-    }
+    PicoCatalogWorkspace *ws = &s->workspaces[index];
     ws->collapsed = !ws->collapsed;
     /* Input runs after layout; rebuild before presenting the changed rows. */
     s->host->ui_relayout_requested = true;
+
+    SidebarCollapseEdit *edit = s->collapse_edits;
+    while (edit && strcmp(edit->path, ws->path) != 0)
+        edit = edit->next;
+    if (!edit)
+    {
+        edit = calloc(1, sizeof(*edit));
+        if (!edit)
+            return;
+        snprintf(edit->path, sizeof(edit->path), "%s", ws->path);
+        edit->next = s->collapse_edits;
+        s->collapse_edits = edit;
+    }
+    edit->collapsed = ws->collapsed;
+    edit->pending = true;
+    edit->accept_scan = 0;
+    SidebarStartCollapseSave(s);
 }
 
 static Clay_Color RowFill(bool selected, bool hovered)
@@ -3002,6 +3114,7 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
     {
         return;
     }
+    SidebarStartCollapseSave(s);
     selected = PicoHost_SelectedAgentConst(host);
     for (int i = 0; i < pico_agent_count(host); i++)
     {
@@ -3122,12 +3235,20 @@ static void SidebarShutdown(PicoHost *host, void *state)
         host->ui_drag_active = false;
     }
     UnloadFolderIcons(s);
+    if (s->collapse_save)
+        SidebarCollapseCancel(s->collapse_save);
     if (s->scan_worker)
     {
         s->dirty = true;
         return;
     }
     s->scan_serial++;
+    while (s->collapse_edits)
+    {
+        SidebarCollapseEdit *edit = s->collapse_edits;
+        s->collapse_edits = edit->next;
+        free(edit);
+    }
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);
     for (SidebarLabelChunk *chunk = s->label_chunks; chunk;)

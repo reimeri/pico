@@ -212,6 +212,7 @@ add_executable(pico
     builtins/commands.c
     builtins/sessions.c
     builtins/files.c
+    file_mention.c
     builtins/skills.c
     builtins/skill_load.c
     builtins/openai.c
@@ -418,6 +419,11 @@ if(BUILD_TESTING)
     target_compile_options(pico_md_scroll_layout_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_md_scroll_layout_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_md_scroll_layout_tests PRIVATE pico_chat_search raylib md4c)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_md_scroll_layout_tests PRIVATE PICO_TEST_IMAGES=1)
+        target_link_options(pico_md_scroll_layout_tests PRIVATE
+            -Wl,--wrap=LoadImage,--wrap=LoadTextureFromImage,--wrap=UnloadImage,--wrap=UnloadTexture)
+    endif()
     add_test(NAME pico_md_scroll_layout_tests COMMAND pico_md_scroll_layout_tests)
 
     add_executable(pico_diff_lines_tests
@@ -677,6 +683,7 @@ if(BUILD_TESTING)
         builtins/spell.c
         spell_engine.c
         builtins/files.c
+        file_mention.c
         app.c
         ui.c
         scrollbar.c
@@ -715,6 +722,10 @@ if(BUILD_TESTING)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_files_tests PRIVATE PICO_TEST_FILE_KEYS=1)
+        target_link_options(pico_files_tests PRIVATE -Wl,--wrap=IsKeyPressed)
+    endif()
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 
     add_executable(pico_composer_tests
@@ -727,6 +738,7 @@ if(BUILD_TESTING)
         builtins/spell.c
         spell_engine.c
         builtins/files.c
+        file_mention.c
         app.c
         ui.c
         scrollbar.c
@@ -965,6 +977,7 @@ if(BUILD_TESTING)
         builtins/sessions.c
         builtins/complete.c
         builtins/files.c
+        file_mention.c
         builtins/skills.c
         builtins/skill_load.c
         builtins/openai.c

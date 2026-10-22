@@ -5,6 +5,7 @@
 #include "canonical.h"
 #include "complete_internal.h"
 #include "session_ref.h"
+#include "file_mention.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -165,14 +166,8 @@ static void Walk(FilesList *s, const char *root, const char *rel, int depth, con
             continue;
         }
         char child[FILES_PATH];
-        if (rel[0])
-        {
-            snprintf(child, sizeof(child), "%s/%s", rel, ent->d_name);
-        }
-        else
-        {
-            snprintf(child, sizeof(child), "%s", ent->d_name);
-        }
+        if (!(rel[0] ? PicoPath_Format(child, sizeof(child), "%s/%s", rel, ent->d_name)
+                     : PicoPath_Format(child, sizeof(child), "%s", ent->d_name))) continue;
         char full[4096];
         snprintf(full, sizeof(full), "%s/%s", root, child);
         struct stat st;
@@ -387,6 +382,9 @@ int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoComple
     {
         return 0;
     }
+    char decoded_prefix[512];
+    if (!PicoFileMention_Query(prefix, decoded_prefix, sizeof(decoded_prefix))) return 0;
+    prefix = decoded_prefix;
     uint64_t token_id = PicoComplete_TokenId();
     const char *root = (s->workspace && s->workspace->path[0]) ? s->workspace->path : s->root;
     if (!root[0] && workspace)
@@ -461,9 +459,10 @@ int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoComple
             {
                 continue;
             }
+            if (strlen(path) >= sizeof(out[n].label) ||
+                !PicoFileMention_Encode(path, out[n].insert, sizeof(out[n].insert))) continue;
             snprintf(out[n].label, sizeof(out[n].label), "%s", path);
             out[n].detail[0] = '\0';
-            snprintf(out[n].insert, sizeof(out[n].insert), "@%s", path);
             n++;
         }
     }
@@ -476,11 +475,6 @@ int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoComple
     snprintf(s->cache_prefix, sizeof(s->cache_prefix), "%s", prefix ? prefix : "");
     s->cache_valid = true;
     return n;
-}
-
-static bool IsMentionChar(unsigned char c)
-{
-    return isalnum(c) || c == '_' || c == '-' || c == '.' || c == '/';
 }
 
 static bool AlreadyAdded(char **paths, int n, const char *path)
@@ -498,7 +492,14 @@ static bool AlreadyAdded(char **paths, int n, const char *path)
 static void AppendFileBlock(JsonBuf *b, const char *abs, const char *body)
 {
     JsonBuf_Puts(b, "\n\n<file name=\"");
-    JsonBuf_Puts(b, abs);
+    for (const char *p = abs; *p; p++)
+    {
+        if (*p == '&') JsonBuf_Puts(b, "&amp;");
+        else if (*p == '"') JsonBuf_Puts(b, "&quot;");
+        else if (*p == '<') JsonBuf_Puts(b, "&lt;");
+        else if (*p == '>') JsonBuf_Puts(b, "&gt;");
+        else JsonBuf_Putc(b, *p);
+    }
     JsonBuf_Puts(b, "\">\n");
     JsonBuf_Puts(b, body);
     if (body[0] && body[strlen(body) - 1] != '\n')
@@ -533,23 +534,11 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
         {
             continue;
         }
-        int j = i + 1;
-        while (text[j] && IsMentionChar((unsigned char)text[j]))
-        {
-            j++;
-        }
-        if (j <= i + 1)
-        {
-            continue;
-        }
-        char rel[FILES_PATH];
-        int n = j - (i + 1);
-        if (n >= (int)sizeof(rel))
-        {
-            n = (int)sizeof(rel) - 1;
-        }
-        memcpy(rel, text + i + 1, (size_t)n);
-        rel[n] = '\0';
+        int end;
+        char rel[4096];
+        bool valid = PicoFileMention_Parse(text, text_len, i, &end, rel, sizeof(rel));
+        i = end - 1;
+        if (!valid) continue;
         char joined[4096];
         if (rel[0] == '/')
         {
@@ -568,8 +557,8 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
         {
             continue;
         }
-        paths[path_n++] = JsonDup(resolved);
-        i = j - 1;
+        char *copy = JsonDup(resolved);
+        if (copy) paths[path_n++] = copy;
     }
     if (path_n == 0 && !has_refs) return NULL;
     char *projected = has_refs ? PicoSessionRef_Project(text) : NULL;

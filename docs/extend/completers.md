@@ -49,7 +49,30 @@ Each item:
 - Esc (or a click outside the popup) dismisses completions. Query stays skipped until the composer text changes or the cursor moves to a different token.
 - Max 16 completers (`PICO_MAX_COMPLETERS`). First match for a trigger wins (`bol_only` preferred when the cursor is at bol).
 - Builtins: `/` commands, `@` workspace files, `#` session references. Builtin `/resume` searches and initial `#` metadata snapshots run on core workers and may initially be empty; custom completer query/accept remain synchronous. `@` and `#` retain their discovered snapshot for an active token and filter it synchronously while typing; `/resume` may use a briefly stale cached search list.
-- Non-command triggers are recognized at token boundaries; normal tokens end at whitespace. A selected builtin project qualifier can contain spaces in its name, but its query still ends at whitespace. Existing `/` command completion includes arguments on the first composer line.
+- Non-command triggers are recognized at token boundaries; normal tokens end at whitespace. Quoted `@"..."` file tokens can contain spaces; custom completers still receive their raw prefix after the trigger. A selected builtin project qualifier can contain spaces in its name, but its query still ends at whitespace. Existing `/` command completion includes arguments on the first composer line.
+
+## Builtin file mentions
+
+File completion inserts `@src/file.c` for simple ASCII paths and a quoted mention
+such as `@"design notes.md"` for spaces, punctuation, or Unicode. Quotes and
+backslashes are escaped as `\"` and `\\`; control characters use JSON-style
+escapes such as `\n`. File queries continue inside an unfinished quote, including
+spaces. Accepting a suggestion while editing inside an existing quoted mention
+replaces that whole mention, preserving text before and after it.
+
+Bare mentions accept ASCII letters/digits and `_`, `-`, `.`, `/`; other names
+must be quoted. Both forms start at a whitespace/start-of-text boundary and end
+at whitespace/end-of-text. Completion and submission share the same encoding;
+malformed, incomplete, NUL-containing, or oversized names are not resolved to a
+shorter prefix file. A completion that cannot fit the label/insertion limits is
+omitted rather than truncated. Quoted interiors and session-reference metadata
+are not rescanned for additional mentions.
+
+Submission resolves the exact decoded path against the target workspace and
+uses the existing bounded text/media attachment rules. Quoted mentions are
+plain editable composer text, not atomic chips. Extensions supplying replacement
+composer input through submit hooks must use the same spelling. See
+[contracts](contracts.md#composer-file-mentions).
 
 ## Builtin session references
 

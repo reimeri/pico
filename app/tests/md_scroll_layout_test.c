@@ -508,6 +508,10 @@ static int TestSearchRenderedText(void)
     return result;
 }
 
+#ifdef PICO_TEST_IMAGES
+#include "md_image_cache_test.c"
+#endif
+
 int main(void)
 {
     uint32_t arena_size = Clay_MinMemorySize();
@@ -526,7 +530,11 @@ int main(void)
     Clay_SetMeasureTextFunction(MeasureRichText, NULL);
     RichText_SetMeasureFunction(MeasureRichText, NULL);
 
-    int result = PICO_TEST_RUN(TestWideCodeBlock());
+    int result = 0;
+#ifdef PICO_TEST_IMAGES
+    result = PICO_TEST_RUN(TestImageCache());
+#endif
+    if (result == 0) result = PICO_TEST_RUN(TestWideCodeBlock());
     if (result == 0)
     {
         result = PICO_TEST_RUN(TestWideTable());

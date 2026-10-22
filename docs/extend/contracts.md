@@ -36,6 +36,14 @@ referenced file's contents. Replay restores visible and model forms as persisted
 without re-resolving names. Explicit `pico_agent_submit`/`pico_agent_steer` APIs do
 not run composer preprocessing. Details: [completers](completers.md).
 
+## Composer file mentions
+
+Builtin file completion/submission share `@bare/path` and `@"escaped path"` representations. Simple bare paths contain ASCII letters/digits and `_`, `-`, `.`, `/`; names with spaces, other punctuation, or Unicode are quoted with JSON-style string escapes. Tokens start at whitespace/start-of-text and end at whitespace/end-of-text; quoted completion queries can span spaces, and accepting from inside an existing quote replaces its whole span. Invalid/incomplete/NUL-containing/oversized tokens never resolve a shortened prefix or rescan their interiors as attachments. Unrepresentable completion labels/insertions are omitted rather than truncated. Paths resolve against the explicit target workspace, not process CWD or later UI selection; existing bounded text/media attachment rules still apply. These are ordinary editable text mentions, not session-reference chips. See [completers](completers.md#builtin-file-mentions).
+
+## Markdown image resources
+
+`MdView_BeginFrame()` invalidates the prior layout's image borrows, just as a new Clay layout invalidates its command storage. Image nodes/textures remain stable through the current layout's render consumption; keep neither pointer beyond that lifetime. Unused retained cache entries are evictable, but the current/previous working sets may exceed the idle retention budget. File changes trigger refresh/redraw; failed refresh keeps a usable old texture and is retryable. `MdView_ClearImages()` is main/render-thread-only with a live graphics context and no pending command references. The graphics owner clears before context teardown; extensions must not restart or clear the shared image lifetime from view callbacks. See [views](views.md#markdown-image-lifetime).
+
 ## Fast-mode provider contract
 
 `PicoModel.supports_fast` is explicit catalog capability, not a default-on setting. The optional `PicoProvider.supports_fast(host, model, state)` callback runs on the main thread with borrowed arguments, must be prompt/read-only/nonblocking, and must not do network I/O or credential refresh. NULL is unsupported. Its workspace-instance state may concurrently be used by worker `stream` calls; apply the same synchronization and registration-generation lifetime rules as other provider callbacks. The worker independently validates its actual authentication route.

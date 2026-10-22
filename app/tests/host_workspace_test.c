@@ -2383,6 +2383,92 @@ static int RunExpandedToolFoldCase(bool with_sidebar);
 
 static int RunSessionReferenceShellCase(bool with_sidebar);
 
+static void RmRf(const char *path);
+
+static int RunNonTextDiffFooterCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-diff-footer-XXXXXX", cfg[] = "/tmp/pico-diff-footer-cfg-XXXXXX";
+    char path[4096], command[8192];
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { free(memory); return 1; }
+    snprintf(path, sizeof(path), "%s/photo.png", dir);
+    FILE *file = fopen(path, "wb");
+    if (!file) goto done;
+    if (fwrite("old\0img", 1, 7, file) != 7) { fclose(file); goto done; }
+    fclose(file);
+    snprintf(command, sizeof(command), "git -C '%s' init -q", dir);
+    if (system(command) != 0) goto done;
+    snprintf(command, sizeof(command), "git -C '%s' add -A", dir);
+    if (system(command) != 0) goto done;
+    snprintf(command, sizeof(command), "git -C '%s' -c user.name=Test -c user.email=test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm initial", dir);
+    if (system(command) != 0) goto done;
+    file = fopen(path, "wb");
+    if (!file) goto done;
+    if (fwrite("new\0img", 1, 7, file) != 7) { fclose(file); goto done; }
+    fclose(file);
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true, .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    for (int i = 0; i < 40; i++) PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "diff footer history");
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory), viewport,
+                         (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    PicoExt diff = pico_ext_diff();
+    host->chat_follow_bottom = true;
+    PICO_TEST_WAIT_LOOP("binary-only diff reaches footer")
+    {
+        diff.workspace_on_frame(workspace, PicoPlugins_WorkspaceState(workspace, "diff"), 0);
+        Clay_SetLayoutDimensions(viewport);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        if (Clay_GetElementData(CLAY_ID("FooterDiff")).found)
+        {
+            if (!FindCardText(&commands, "1 file")) goto done;
+            break;
+        }
+    }
+    ChatStabilitySnapshot expected = {0};
+    for (int frame = 0; frame < 100; frame++)
+    {
+        LayoutChatStabilityFrame(host, viewport);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        PicoChat_HarvestVirtualHeights(host);
+        ChatStabilitySnapshot current;
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &current) || !FindCardText(&commands, "1 file")) goto done;
+        if (frame == 30) expected = current;
+        if (frame > 30 && !ChatStabilitySnapshotStable(&expected, &current, with_sidebar)) goto done;
+    }
+    rc = 0;
+done:
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
+    if (rc) Fail("binary-only diff must show a file count without changing bottom-follow shell geometry");
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false) != 0)
@@ -2410,6 +2496,7 @@ static int TestBottomFollowShellGeometryStable(void)
         return 1;
     if (RunNoticeTranscriptCase(false, false) != 0 || RunNoticeTranscriptCase(true, false) != 0 ||
         RunNoticeTranscriptCase(false, true) != 0 || RunNoticeTranscriptCase(true, true) != 0) return 1;
+    if (RunNonTextDiffFooterCase(false) || RunNonTextDiffFooterCase(true)) return 1;
     if (RunSessionReferenceShellCase(false) || RunSessionReferenceShellCase(true)) return 1;
     return RunWorkspaceLessShellCase();
 }

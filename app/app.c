@@ -4473,6 +4473,7 @@ void PicoHost_Frame(PicoHost *app)
      * scroll state persist across pumps, so next pump's hit queries keep
      * using the last computed bounds. Extension on_frame callbacks and all
      * pre-layout pumping above still run at the normal cadence. */
+    if (MdView_ImagesChanged()) pico_host_request_redraw(app);
     if (!app->redraw_requested && !app->ui_relayout_requested)
         return;
 

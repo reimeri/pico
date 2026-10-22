@@ -8,6 +8,7 @@
 #include "theme_internal.h"
 
 #include "pico/app.h"
+#include "pico/md_view.h"
 #include "agent_internal.h"
 #include "docs_path.h"
 #include "richtext.h"
@@ -240,6 +241,7 @@ int main(int argc, char **argv)
     PicoHostShutdownResult shutdown = pico_host_free(app);
 
     Pico_FreeClay();
+    MdView_ClearImages();
     Pico_UnloadFonts(fonts);
     Clay_Raylib_Close();
     if (shutdown == PICO_HOST_SHUTDOWN_RETAINED)

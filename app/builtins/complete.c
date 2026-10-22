@@ -4,6 +4,7 @@
 #include "clay/clay.h"
 #include "complete_internal.h"
 #include "session_ref.h"
+#include "file_mention.h"
 #include "pico/theme.h"
 #include "wrapped_text.h"
 
@@ -202,6 +203,24 @@ static bool ScanToken(const PicoHost *app, int *start, int *end, const PicoCompl
             if (comp && query_token) { *start=a; *end=cur; *out=comp; return true; }
         }
         g_complete.scope_prefix[0] = '\0';
+    }
+    /* Quoted file queries may span spaces and contain other trigger bytes.
+     * An accepted quote is still editable, but never scan its interior as a
+     * separate @/# token. Session-reference metadata remains excluded above. */
+    for (int a = 0; a + 1 < cur; a++)
+    {
+        if (PicoSessionRef_Parse(s, c->length, a, &ref)) { a = ref.end - 1; continue; }
+        if (s[a] != '@' || s[a + 1] != '"' || (a && !IsSpaceByte(s[a - 1]))) continue;
+        bool closed;
+        int quote_end = PicoFileMention_QuotedEnd(s, c->length, a, &closed);
+        if (cur <= quote_end)
+        {
+            const PicoCompleter *comp = FindCompleter(app, '@', a == 0);
+            if (!comp || (comp->bol_only && a != 0)) return false;
+            *start = a; *end = cur; *out = comp;
+            return true;
+        }
+        a = quote_end - 1;
     }
     int i = cur;
     while (i > 0 && !IsSpaceByte(s[i-1])) i--;
@@ -406,6 +425,12 @@ static void Accept(PicoHost *app)
         }
     }
     const char *ins = item->insert[0] ? item->insert : item->label;
+    if (comp && comp->trigger == '@' && start + 1 < app->composer.length &&
+        app->composer.text[start + 1] == '"')
+    {
+        bool closed;
+        end = PicoFileMention_QuotedEnd(app->composer.text, app->composer.length, start, &closed);
+    }
     PicoComposer_ReplaceRange(app, start, end, ins);
     PicoComplete_Refresh(app);
 }

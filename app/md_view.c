@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "pico/md_view.h"
 
 #include "pico/theme.h"
@@ -14,6 +15,8 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #define CHAT_IMAGE_MAX_WIDTH 360.0f
 #define CHAT_IMAGE_MAX_HEIGHT 240.0f
@@ -205,14 +208,72 @@ bool MdView_ScrollHoveredHorizontal(float delta_x)
     return false;
 }
 
-typedef struct {
-    char path[8192];
+typedef struct CachedImage {
+    struct CachedImage *previous, *next;
+    char *path;
     Texture2D texture;
-    bool loaded;
+    struct stat stamp;
+    bool have_stamp;
+    bool checked_stamp;
+    bool retry_pending;
+    double retry_after;
+    bool used_in_layout;
+    bool used_in_previous_layout;
 } CachedImage;
 
-static CachedImage image_cache[64];
-static int image_cache_count = 0;
+/* Retain recent images across layouts, but never recycle an entry referenced
+ * by pending Clay commands. A layout with more images may temporarily exceed
+ * this idle-cache budget; excess entries are pruned by the next layout. */
+#define IMAGE_CACHE_RETAIN 64
+static CachedImage *image_cache_head, *image_cache_tail;
+static int image_cache_count;
+
+static void ImageUnlink(CachedImage *image)
+{
+    if (image->previous) image->previous->next = image->next;
+    else image_cache_head = image->next;
+    if (image->next) image->next->previous = image->previous;
+    else image_cache_tail = image->previous;
+}
+
+static void ImageTouch(CachedImage *image)
+{
+    if (image == image_cache_head) return;
+    if (image->previous || image->next || image == image_cache_tail) ImageUnlink(image);
+    image->previous = NULL;
+    image->next = image_cache_head;
+    if (image_cache_head) image_cache_head->previous = image;
+    else image_cache_tail = image;
+    image_cache_head = image;
+}
+
+static void ImageRemove(CachedImage *image)
+{
+    ImageUnlink(image);
+    if (image->texture.id) UnloadTexture(image->texture);
+    free(image->path);
+    free(image);
+    image_cache_count--;
+}
+
+static void ImagesBeginLayout(void)
+{
+    /* Keep previous-layout membership separately from current command pins.
+     * A new image early in a large layout must not evict every image that will
+     * be reused later in the same pass. */
+    for (CachedImage *image = image_cache_head; image; image = image->next)
+    {
+        image->used_in_previous_layout = image->used_in_layout;
+        image->used_in_layout = false;
+    }
+    CachedImage *candidate = image_cache_tail;
+    while (image_cache_count > IMAGE_CACHE_RETAIN && candidate)
+    {
+        CachedImage *previous = candidate->previous;
+        if (!candidate->used_in_previous_layout) ImageRemove(candidate);
+        candidate = previous;
+    }
+}
 
 void MdView_SetImageBaseDir(const char *dir)
 {
@@ -276,57 +337,111 @@ static const char *ResolveImagePath(const char *src)
     return resolved;
 }
 
+static bool SameImageFile(const struct stat *a, const struct stat *b)
+{
+#if defined(__APPLE__)
+    bool times_equal = a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+                       a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+                       a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+                       a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
+    bool times_equal = a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+                       a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+    return times_equal && a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_size == b->st_size;
+}
+
 static CachedImage *GetCachedImage(const char *path)
 {
-    for (int i = 0; i < image_cache_count; i++)
+    CachedImage *entry = image_cache_head;
+    while (entry && strcmp(entry->path, path)) entry = entry->next;
+    if (entry && entry->used_in_layout) return entry;
+    if (!entry)
     {
-        if (strcmp(image_cache[i].path, path) == 0)
+        /* Find an unpinned least-recently-used victim. Pinned textures and
+         * their addresses remain stable even when this layout exceeds budget. */
+        if (image_cache_count >= IMAGE_CACHE_RETAIN)
         {
-            return &image_cache[i];
+            CachedImage *victim = image_cache_tail;
+            while (victim && image_cache_count >= IMAGE_CACHE_RETAIN)
+            {
+                CachedImage *previous = victim->previous;
+                if (!victim->used_in_layout && !victim->used_in_previous_layout) ImageRemove(victim);
+                victim = previous;
+            }
         }
+        entry = calloc(1, sizeof(*entry));
+        if (!entry) return NULL;
+        entry->path = strdup(path);
+        if (!entry->path) { free(entry); return NULL; }
+        image_cache_count++;
     }
-    if (image_cache_count >= 64)
-    {
-        return NULL;
-    }
-    CachedImage *entry = &image_cache[image_cache_count++];
-    snprintf(entry->path, sizeof(entry->path), "%s", path);
-    memset(&entry->texture, 0, sizeof(entry->texture));
-    entry->loaded = false;
+    ImageTouch(entry);
+    entry->used_in_layout = true;
+    struct stat stamp;
+    bool have_stamp = stat(path, &stamp) == 0;
+    bool changed = !entry->checked_stamp || have_stamp != entry->have_stamp ||
+                   (have_stamp && !SameImageFile(&entry->stamp, &stamp));
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double seconds = (double)now.tv_sec + now.tv_nsec / 1e9;
+    if (!changed && (!entry->retry_pending || seconds < entry->retry_after)) return entry;
     Image img = LoadImage(path);
+    Texture2D replacement = {0};
     if (img.data && img.width > 0 && img.height > 0)
     {
-        int w = img.width;
-        int h = img.height;
+        int w, h;
         ChatImageFit(img.width, img.height, CHAT_IMAGE_MAX_WIDTH, CHAT_IMAGE_MAX_HEIGHT, &w, &h);
-        if (w != img.width || h != img.height)
-        {
-            ImageResize(&img, w, h);
-        }
-        entry->texture = LoadTextureFromImage(img);
-        entry->loaded = entry->texture.id != 0;
+        if (w != img.width || h != img.height) ImageResize(&img, w, h);
+        replacement = LoadTextureFromImage(img);
     }
-    if (img.data)
+    if (img.data) UnloadImage(img);
+    if (replacement.id)
     {
-        UnloadImage(img);
+        /* The old texture has not been used in this layout, and prior commands
+         * expired at BeginFrame. Failed replacements leave it usable. */
+        if (entry->texture.id) UnloadTexture(entry->texture);
+        entry->texture = replacement;
+        entry->retry_pending = false;
     }
+    else
+    {
+        entry->retry_pending = true;
+        entry->retry_after = seconds + 1.0;
+    }
+    entry->checked_stamp = true;
+    entry->have_stamp = have_stamp;
+    if (have_stamp) entry->stamp = stamp;
     return entry;
+}
+
+bool MdView_ImagesChanged(void)
+{
+    static double next_check;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double seconds = (double)now.tv_sec + now.tv_nsec / 1e9;
+    if (seconds < next_check) return false;
+    next_check = seconds + 0.5;
+    for (CachedImage *entry = image_cache_head; entry; entry = entry->next)
+    {
+        if (!entry->used_in_layout) continue;
+        struct stat stamp;
+        bool exists = stat(entry->path, &stamp) == 0;
+        if (exists != entry->have_stamp || (exists && !SameImageFile(&entry->stamp, &stamp)) ||
+            (exists && entry->retry_pending && seconds >= entry->retry_after)) return true;
+    }
+    return false;
 }
 
 void MdView_ClearImages(void)
 {
-    for (int i = 0; i < image_cache_count; i++)
-    {
-        if (image_cache[i].loaded)
-        {
-            UnloadTexture(image_cache[i].texture);
-        }
-    }
-    image_cache_count = 0;
+    while (image_cache_tail) ImageRemove(image_cache_tail);
 }
 
 void MdView_BeginFrame(void)
 {
+    ImagesBeginLayout();
     RichText_BeginLayout();
     hovered_link = NULL;
     horizontal_scroll_count = 0;
@@ -908,8 +1023,9 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
         {
             const char *path = ResolveImagePath(block->image_path);
             bool remote = strncmp(block->image_path, "http", 4) == 0;
-            CachedImage *image = (!remote && FileExists(path)) ? GetCachedImage(path) : NULL;
-            if (image && image->loaded && image->texture.width > 0 && image->texture.height > 0)
+            bool exists = !remote && FileExists(path);
+            CachedImage *image = !remote ? GetCachedImage(path) : NULL;
+            if (exists && image && image->texture.id && image->texture.width > 0 && image->texture.height > 0)
             {
                 float max_w = available_width < CHAT_IMAGE_MAX_WIDTH ? available_width : CHAT_IMAGE_MAX_WIDTH;
                 int width = 0;
@@ -942,7 +1058,8 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                     }
                     else
                     {
-                        snprintf(message, sizeof(message), "[image not found] %s", block->image_alt);
+                        snprintf(message, sizeof(message), "%s %s",
+                                 exists ? "[image unavailable]" : "[image not found]", block->image_alt);
                     }
                     Clay_String message_string = {.length = (int32_t)strlen(message), .chars = message};
                     PicoChatSel_Text(message_string, (Clay_TextElementConfig){.fontId = FONT_ITALIC,

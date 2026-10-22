@@ -292,8 +292,9 @@ static char *ShellQuote(const char *path)
 }
 
 /* Runs `git -C <ws> <args>`; returns malloc'd NUL-terminated stdout or NULL. */
-static char *GitRun(const char *ws, const char *args, bool *truncated)
+static char *GitRun(const char *ws, const char *args, bool *truncated, size_t *size)
 {
+    if (size) *size = 0;
     char *quoted = ShellQuote(ws);
     if (!quoted)
     {
@@ -364,12 +365,13 @@ static char *GitRun(const char *ws, const char *args, bool *truncated)
         buf = next;
     }
     buf[len] = '\0';
+    if (size) *size = len;
     return buf;
 }
 
 static bool IsRepo(const char *ws)
 {
-    char *out = GitRun(ws, "rev-parse --is-inside-work-tree", NULL);
+    char *out = GitRun(ws, "rev-parse --is-inside-work-tree", NULL, NULL);
     if (!out)
     {
         return false;
@@ -385,7 +387,7 @@ static bool IsRepo(const char *ws)
 /* Ref to diff against: HEAD when it exists, else the empty tree. */
 static void DiffBase(const char *ws, char *out, size_t cap)
 {
-    char *head = GitRun(ws, "rev-parse --verify HEAD", NULL);
+    char *head = GitRun(ws, "rev-parse --verify HEAD", NULL, NULL);
     if (head)
     {
         free(head);
@@ -415,71 +417,115 @@ static void ParseNumstatLine(const char *line, int *adds, int *dels)
     *dels += (int)d;
 }
 
-/* Parse `git diff -U3` output. File labels and rows borrow from `patch`. */
-static void ParseUnified(DiffModel *m, char *patch)
+static const char *RawField(const char **cursor, const char *end)
+{
+    const char *field = *cursor;
+    const char *zero = memchr(field, '\0', (size_t)(end - field));
+    if (!zero) return NULL;
+    *cursor = zero + 1;
+    return field;
+}
+
+static void MetadataNote(DiffModel *m, DiffFile *file, const char *prefix, const char *path)
+{
+    size_t size = strlen(prefix) + strlen(path) + 1;
+    char *text = malloc(size);
+    if (!text) { m->partial = true; return; }
+    snprintf(text, size, "%s%s", prefix, path);
+    if (!ModelStash(m, text)) { free(text); m->partial = true; return; }
+    FilePushRow(file, ROW_NOTE, text, (int)strlen(text));
+}
+
+/* --raw -z --patch emits exact NUL-delimited paths first, followed by one NUL
+ * and the patch in the same file order. Never infer paths from quoted patch
+ * headers: binary, rename, mode-only, and empty-file changes lack ---/+++. */
+static const char *ParseTrackedMetadata(DiffModel *m, const char *data, size_t size)
+{
+    const char *p = data, *end = data + size;
+    while (p < end && *p == ':')
+    {
+        const char *header = RawField(&p, end);
+        if (!header) { m->partial = true; return end; }
+        unsigned old_mode, new_mode;
+        char status;
+        if (sscanf(header, ":%o %o %*s %*s %c", &old_mode, &new_mode, &status) != 3)
+        { m->partial = true; return end; }
+        const char *old_path = RawField(&p, end);
+        const char *path = old_path;
+        if (path && (status == 'R' || status == 'C')) path = RawField(&p, end);
+        if (!path || !path[0]) { m->partial = true; return end; }
+        DiffFile *file = ModelAddFile(m);
+        if (!file) { m->partial = true; return end; }
+        file->change_type = status;
+        file->label = path;
+        file->label_len = (int)strlen(path);
+        FilePushRow(file, ROW_HEADER, path, file->label_len);
+        if (status == 'R') MetadataNote(m, file, "Renamed from ", old_path);
+        else if (status == 'C') MetadataNote(m, file, "Copied from ", old_path);
+        else if (status == 'A') FilePushRow(file, ROW_NOTE, "Added file", 10);
+        else if (status == 'D') FilePushRow(file, ROW_NOTE, "Deleted file", 12);
+        else if (status == 'T') FilePushRow(file, ROW_NOTE, "File type changed", 17);
+        else if (status == 'U') FilePushRow(file, ROW_NOTE, "Unmerged file", 13);
+        if (old_mode && new_mode && old_mode != new_mode)
+        {
+            char modes[64];
+            snprintf(modes, sizeof(modes), "%06o -> %06o", old_mode, new_mode);
+            MetadataNote(m, file, "Mode changed: ", modes);
+        }
+    }
+    if (p < end && *p == '\0') p++;
+    return p;
+}
+
+static void ParseUnified(DiffModel *m, const char *patch)
 {
     DiffFile *cur = NULL;
+    int file_index = 0;
+    bool in_hunk = false, deleted_type_half = false;
+    const char *previous_header = NULL;
+    int previous_header_len = 0;
     const char *line = patch;
     while (*line)
     {
         const char *nl = strchr(line, '\n');
         int len = nl ? (int)(nl - line) : (int)strlen(line);
-
         if (strncmp(line, "diff --git ", 11) == 0)
         {
-            cur = ModelAddFile(m);
+            /* A type change can emit deletion and addition sections with the
+             * same header. Both belong to one raw record, not the next file. */
+            bool same_type_change = cur && cur->change_type == 'T' && deleted_type_half &&
+                previous_header_len == len && !memcmp(previous_header, line, (size_t)len);
+            if (!same_type_change) cur = file_index < m->file_count ? &m->files[file_index++] : NULL;
+            previous_header = line; previous_header_len = len;
+            in_hunk = false; deleted_type_half = false;
+            if (!cur) m->partial = true;
         }
-        else if (cur && strncmp(line, "+++ b/", 6) == 0)
+        else if (cur && !in_hunk && strncmp(line, "deleted file mode ", 18) == 0)
+            deleted_type_half = cur->change_type == 'T';
+        else if (cur && !in_hunk && strncmp(line, "Binary files ", 13) == 0)
+            FilePushRow(cur, ROW_NOTE, "Binary file changed", 19);
+        else if (cur && len >= 2 && line[0] == '@' && line[1] == '@')
         {
-            cur->label = line + 6;
-            cur->label_len = len - 6;
+            in_hunk = true;
+            FilePushRow(cur, ROW_HUNK, line, len);
         }
-        else if (cur && strncmp(line, "+++ /dev/null", 13) == 0)
+        else if (cur && in_hunk)
         {
-            /* Deleted file: label comes from the preceding "--- a/" line. */
-        }
-        else if (cur && !cur->label && strncmp(line, "--- a/", 6) == 0)
-        {
-            cur->label = line + 6;
-            cur->label_len = len - 6;
-        }
-        else if (cur && cur->label)
-        {
-            if (len >= 2 && line[0] == '@' && line[1] == '@')
-            {
-                FilePushRow(cur, ROW_HUNK, line, len);
-            }
-            else if (line[0] == '+')
-            {
-                FilePushRow(cur, ROW_ADD, line + 1, len - 1);
-            }
-            else if (line[0] == '-')
-            {
-                FilePushRow(cur, ROW_DEL, line + 1, len - 1);
-            }
-            else if (line[0] == ' ')
-            {
-                FilePushRow(cur, ROW_CTX, line + 1, len - 1);
-            }
-            else if (line[0] == '\\')
-            {
-                FilePushRow(cur, ROW_HUNK, line, len);
-            }
+            if (line[0] == '+') FilePushRow(cur, ROW_ADD, line + 1, len - 1);
+            else if (line[0] == '-') FilePushRow(cur, ROW_DEL, line + 1, len - 1);
+            else if (line[0] == ' ') FilePushRow(cur, ROW_CTX, line + 1, len - 1);
+            else if (line[0] == '\\') FilePushRow(cur, ROW_HUNK, line, len);
         }
         line += len + (nl ? 1 : 0);
     }
-
-    /* Emit a header row per labeled file, before its first content row. */
     for (int i = 0; i < m->file_count; i++)
     {
-        DiffFile *f = &m->files[i];
-        if (!f->label || f->row_count == 0)
+        DiffFile *file = &m->files[i];
+        if (file->row_count == 1)
         {
-            continue;
+            const char *note = m->partial ? "Diff unavailable (partial capture)" : "Changed file (no text hunks)";
+            FilePushRow(file, ROW_NOTE, note, (int)strlen(note));
         }
-        FilePushRow(f, ROW_HEADER, f->label, f->label_len);
-        memmove(f->rows + 1, f->rows, (size_t)(f->row_count - 1) * sizeof(*f->rows));
-        f->rows[0] = (DiffRow){.kind = ROW_HEADER, .text = f->label, .len = f->label_len};
     }
 }
 
@@ -606,7 +652,7 @@ static void AddUntracked(DiffModel *m, const char *ws, const char *path, int pat
 static void AddUntrackedFiles(DiffModel *m, const char *ws)
 {
     bool truncated = false;
-    char *out = GitRun(ws, "ls-files --others --exclude-standard -z", &truncated);
+    char *out = GitRun(ws, "ls-files --others --exclude-standard -z", &truncated, NULL);
     m->partial |= truncated;
     if (!out)
     {
@@ -642,11 +688,11 @@ DiffModel *PicoDiffModel_Capture(const char *ws)
 
     char base[64];
     DiffBase(ws, base, sizeof(base));
-    char args[128];
+    char args[256];
 
-    snprintf(args, sizeof(args), "diff --no-color --numstat %s", base);
+    snprintf(args, sizeof(args), "diff --no-color --no-ext-diff --no-textconv -M --numstat %s", base);
     bool truncated = false;
-    char *numstat = GitRun(ws, args, &truncated);
+    char *numstat = GitRun(ws, args, &truncated, NULL);
     m->partial |= truncated;
     if (numstat)
     {
@@ -667,21 +713,23 @@ DiffModel *PicoDiffModel_Capture(const char *ws)
         free(numstat);
     }
 
-    snprintf(args, sizeof(args), "diff --no-color -U3 %s", base);
+    snprintf(args, sizeof(args), "diff --no-color --no-ext-diff --no-textconv -M --raw -z --patch --submodule=short -U3 %s", base);
     truncated = false;
-    m->patch = GitRun(ws, args, &truncated);
+    size_t patch_size = 0;
+    m->patch = GitRun(ws, args, &truncated, &patch_size);
     m->partial |= truncated;
     if (m->patch)
     {
-        /* A cut-off hunk may not be syntactically complete. Parse only whole
-         * lines; the model still advertises that it is partial. */
+        const char *patch = ParseTrackedMetadata(m, m->patch, patch_size);
         if (truncated)
         {
-            char *last = strrchr(m->patch, '\n');
+            /* Metadata was parsed with explicit byte bounds. Only retain
+             * complete patch lines after its NUL-delimited prefix. */
+            char *last = strrchr((char *)patch, '\n');
             if (last) last[1] = '\0';
-            else m->patch[0] = '\0';
+            else *((char *)patch) = '\0';
         }
-        ParseUnified(m, m->patch);
+        ParseUnified(m, patch);
     }
 
     AddUntrackedFiles(m, ws);

@@ -1,5 +1,6 @@
 #include "test_wait.h"
 #include "canonical.h"
+#include "complete_internal.h"
 #include "json.h"
 #include "sanitizer_detect.h"
 #include "pico/app.h"
@@ -23,6 +24,11 @@ char *pico_files_expand_mentions(const char *workspace, const char *text, bool v
 int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state);
 PicoExt pico_ext_files(void);
 PicoExt pico_ext_composer(void);
+
+#ifdef PICO_TEST_FILE_KEYS
+static bool g_file_tab;
+bool __wrap_IsKeyPressed(int key) { return g_file_tab && key == KEY_TAB; }
+#endif
 
 static void *g_files_state = NULL;
 static void *g_composer_state = NULL;
@@ -244,6 +250,72 @@ static void TestCompleteRebuildsAtTokenStart(void)
     unlink(old_path);
     unlink(new_path);
     rmdir(temp);
+}
+
+static void TestQuotedFileRoundTrip(void)
+{
+    char root[] = "/tmp/pico-quoted-files-XXXXXX";
+    const char *names[] = {"design notes.md", "draft(1).md", "café.md", "quote\"slash\\.md", "line\nbreak.md"};
+    if (!mkdtemp(root)) { Check(false, "quoted file fixture"); return; }
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/design", root);
+    Check(WriteFile(path, "WRONG_PREFIX_CONTENT"), "prefix collision fixture");
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        Check(WriteFile(path, "SELECTED_FILE_CONTENT"), "quoted filename fixture");
+    }
+    PicoHost *host = calloc(1, sizeof(*host));
+    PicoWorkspace *workspace = calloc(1, sizeof(*workspace));
+    workspace->host = host; workspace->id = 1; workspace->state = PICO_WORKSPACE_OPEN;
+    snprintf(workspace->path, sizeof(workspace->path), "%s", root);
+    host->workspaces[0] = workspace; host->workspace_count = 1;
+    PicoExt ext = pico_ext_files();
+    ext.workspace_init(workspace, &g_files_state);
+    host->completers[0] = (PicoCompleter){.trigger = '@', .workspace = workspace, .workspace_query = pico_files_complete};
+    host->completer_count = 1;
+    char composer[1024];
+    SetComposer(host, composer, sizeof(composer), "@");
+    PicoComplete_Refresh(host);
+    PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
+    int count = pico_files_complete(workspace, "", items, PICO_MAX_COMPLETE_ITEMS, NULL);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        const char *insert = NULL;
+        for (int j = 0; j < count; j++) if (!strcmp(items[j].label, names[i])) insert = items[j].insert;
+        char *expanded = insert ? pico_files_expand_mentions(root, insert, false, NULL) : NULL;
+        Check(expanded && strstr(expanded, "SELECTED_FILE_CONTENT") && !strstr(expanded, "WRONG_PREFIX_CONTENT"),
+              "selected space, punctuation, UTF-8, escaped quote/backslash, and newline paths attach exactly their file");
+        free(expanded);
+    }
+    SetComposer(host, composer, sizeof(composer), "read @\"design no");
+    int start = -1, end = -1;
+    Check(PicoComplete_TokenRange(host, &start, &end) && start == 5 && end == host->composer.cursor &&
+          QueryHas(workspace, "\"design no", "design notes.md"), "quoted completion queries continue across spaces");
+#ifdef PICO_TEST_FILE_KEYS
+    SetComposer(host, composer, sizeof(composer), "read @\"design obsolete.md\" after");
+    host->composer.cursor = (int)strlen("read @\"design ");
+    PicoComplete_Refresh(host);
+    g_file_tab = true;
+    bool accepted = PicoComplete_HandleKeys(host);
+    g_file_tab = false;
+    if (!accepted || strcmp(host->composer.text, "read @\"design notes.md\" after"))
+        fprintf(stderr, "quoted acceptance: accepted=%d text=%s\n", accepted, host->composer.text);
+    Check(accepted && !strcmp(host->composer.text, "read @\"design notes.md\" after"),
+          "accepting inside a quoted mention replaces its whole old span and preserves surrounding text");
+#endif
+    const char *invalid[] = {"@design(notes).md", "@\"design\\u0000 notes.md\"", "@\"unfinished @design", "@\"design\"suffix"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+    {
+        char *expanded = pico_files_expand_mentions(root, invalid[i], false, NULL);
+        Check(!expanded, "malformed mentions never attach a prefix file or rescan quoted interiors");
+        free(expanded);
+    }
+    ext.workspace_shutdown(workspace, g_files_state); g_files_state = NULL;
+    PicoComplete_Close(); free(workspace); free(host);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    { snprintf(path, sizeof(path), "%s/%s", root, names[i]); unlink(path); }
+    snprintf(path, sizeof(path), "%s/design", root); unlink(path); rmdir(root);
 }
 
 static void TestBoundedMentions(void)
@@ -513,6 +585,7 @@ static void TestCompleteLongPathKeepsFilename(void)
 
 int main(void)
 {
+    TestQuotedFileRoundTrip();
     TestBoundedMentions();
     TestMentionImagePart();
     TestCompleteRebuildsAtTokenStart();

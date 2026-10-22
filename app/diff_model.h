@@ -16,7 +16,7 @@ typedef enum DiffRowKind {
     ROW_CTX,
     ROW_ADD,
     ROW_DEL,
-    ROW_NOTE,       /* untracked file we could not render (empty/binary/oversized) */
+    ROW_NOTE,       /* metadata change or non-text/omitted content summary */
 } DiffRowKind;
 
 typedef struct DiffRow {
@@ -33,6 +33,7 @@ typedef struct DiffRow {
 struct PicoHlSpan;
 
 typedef struct DiffFile {
+    char change_type; /* raw Git status; type changes may have two patch sections */
     const char *label; /* borrowed from the owning model buffer */
     int label_len;
     DiffRow *rows;     /* malloc'd */
@@ -67,7 +68,7 @@ typedef struct DiffModel {
     DiffStash *stash; /* malloc'd buffers for untracked file labels/rows */
 } DiffModel;
 
-/* Runs git (numstat + diff + ls-files) and parses the result. NULL on
+/* Runs git (numstat + raw/patch diff + ls-files) and parses the result. NULL on
  * allocation failure. Highlight spans are NOT built here; call
  * PicoDiffModel_HighlightAll only for models that will be published, so
  * unchanged re-captures stay cheap (see PicoDiffModel_Signature). */

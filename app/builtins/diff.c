@@ -56,6 +56,7 @@ typedef struct DiffState
     bool overflow;
     char chip_adds[32];
     char chip_dels[32];
+    char chip_files[32];
     float row_min_width; /* keeps horizontal scroll extent stable while virtualized */
 } DiffState;
 
@@ -297,7 +298,7 @@ static Clay_String Slice(const char *str, int len)
 static bool HasChanges(const DiffState *s)
 {
     return s && s->model && s->model->is_repo &&
-           (s->model->adds > 0 || s->model->dels > 0 || s->model->untracked > 0);
+           (s->model->file_count > 0 || s->model->untracked > 0);
 }
 
 void PicoDiff_RenderChip(PicoHost *app)
@@ -310,6 +311,9 @@ void PicoDiff_RenderChip(PicoHost *app)
     }
     snprintf(s->chip_adds, sizeof(s->chip_adds), "+%d", s->model->adds);
     snprintf(s->chip_dels, sizeof(s->chip_dels), "-%d", s->model->dels);
+    snprintf(s->chip_files, sizeof(s->chip_files), "%d %s", s->model->file_count,
+             s->model->file_count == 1 ? "file" : "files");
+    bool counts_only = s->model->adds == 0 && s->model->dels == 0;
     bool hovered = Clay_PointerOver(CLAY_ID("FooterDiff"));
 
     CLAY_TEXT(CLAY_STRING("  ·  "), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -321,16 +325,25 @@ void PicoDiff_RenderChip(PicoHost *app)
                      .childGap = 6,
                      .sizing = {.width = CLAY_SIZING_FIT(0), .height = CLAY_SIZING_FIT(0)}}})
     {
-        CLAY_TEXT(CStr(s->chip_adds), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = PICO_FONT_CAPTION,
-                                                        .textColor = hovered ? COLOR_DIFF_ADD_TEXT
-                                                                             : COLOR_DIFF_ADD,
-                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        CLAY_TEXT(CStr(s->chip_dels), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                        .fontSize = PICO_FONT_CAPTION,
-                                                        .textColor = hovered ? COLOR_DIFF_DEL_TEXT
-                                                                             : COLOR_DIFF_DEL,
-                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        if (counts_only)
+        {
+            CLAY_TEXT(CStr(s->chip_files), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                         .fontSize = PICO_FONT_CAPTION, .textColor = hovered ? COLOR_TEXT : COLOR_MUTED,
+                         .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
+        else
+        {
+            CLAY_TEXT(CStr(s->chip_adds), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                            .fontSize = PICO_FONT_CAPTION,
+                                                            .textColor = hovered ? COLOR_DIFF_ADD_TEXT
+                                                                                 : COLOR_DIFF_ADD,
+                                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            CLAY_TEXT(CStr(s->chip_dels), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                            .fontSize = PICO_FONT_CAPTION,
+                                                            .textColor = hovered ? COLOR_DIFF_DEL_TEXT
+                                                                                 : COLOR_DIFF_DEL,
+                                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
     }
 }
 

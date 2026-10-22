@@ -3863,7 +3863,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         clean = false;
     if (!PicoHost_DetachBrowsers(host))
         clean = false;
-    if (!PicoCatalog_DrainOrderPersistBefore(host, &deadline))
+    if (!PicoCatalog_DrainPersistBefore(host, &deadline))
     {
         clean = false;
     }

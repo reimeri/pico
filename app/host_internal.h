@@ -87,9 +87,12 @@ typedef struct PicoHostStaging {
 typedef enum PicoPersistJobKind {
     PICO_PERSIST_JOB_SESSION = 0,
     PICO_PERSIST_JOB_CATALOG_ORDER,
+    PICO_PERSIST_JOB_INBOX_ACK,
 } PicoPersistJobKind;
 
 #define PICO_PERSIST_QUEUE_CAPACITY (PICO_MAX_TOTAL_AGENTS + 1)
+
+struct PicoInboxAckBatch;
 
 typedef struct PicoSessionPersistJob {
     PicoPersistJobKind job_kind;
@@ -106,6 +109,7 @@ typedef struct PicoSessionPersistJob {
     struct PicoSessionPersistJob *next; /* Same-session work after a title barrier. */
     char *catalog_order_json;
     uint64_t catalog_order_generation;
+    struct PicoInboxAckBatch *inbox_ack; /* host-owned until a snapshot covers the results */
 } PicoSessionPersistJob;
 
 typedef struct PicoSessionPersistFailure {
@@ -223,6 +227,9 @@ struct PicoHost {
     size_t persist_pending_bytes;
     PicoAgentId persist_flight_agent_id;
     bool persist_flight_catalog_order;
+    bool persist_flight_inbox;
+    struct PicoInboxAckBatch *inbox_acks;
+    uint64_t inbox_epoch;
     uint64_t persist_catalog_next_generation;
     uint64_t persist_catalog_completed_generation;
     uint64_t persist_catalog_failed_generation;

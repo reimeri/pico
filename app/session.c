@@ -67,6 +67,8 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent,
 static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent,
                                                 const char *title);
 static bool DrainPersistUiBound(PicoHost *app, PicoAgent *agent);
+static void InboxAckReplay(PicoHost *host, PicoAgent *agent);
+static void InboxAckSupersede(PicoHost *host, const PicoAgent *agent);
 #ifdef PICO_SESSION_TEST_HOOKS
 extern bool PicoSession_TestHook(const char *stage);
 #endif
@@ -1746,6 +1748,7 @@ static void ReplayAppendInterrupted(PicoHost *app, PicoAgent *agent,
 void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
                                const PicoSessionReplay *replay, bool append_interrupted)
 {
+    InboxAckReplay(app, agent);
     agent->last_steering_id = replay->last_steering_id;
     if (append_interrupted) ReplayAppendInterrupted(app, agent, replay);
     agent->accepted_submit = true;
@@ -3337,7 +3340,11 @@ PicoSessionWriteResult PicoSession_LogInboxPending(PicoHost *app, PicoAgent *age
     char *line;
     PicoSessionWriteResult result;
     if (agent)
+    {
         agent->inbox_pending = pending;
+        agent->inbox_revision++;
+        InboxAckSupersede(app, agent);
+    }
     line = InboxPendingJson(pending);
     result = AppendLine(app, agent, line);
     free(line);
@@ -3362,6 +3369,9 @@ int PicoCatalog_SetInboxPending(const char *checkout_path, const char *session_i
     bool ok;
     if (!checkout_path || checkout_path[0] != '/' || !session_id || !session_id[0])
         return -1;
+#ifdef PICO_SESSION_TEST_HOOKS
+    if (PicoSession_TestHook("inbox_ack_before_write")) return -1;
+#endif
     db = CatalogDbOpen();
     if (!db)
         return -1;
@@ -5291,9 +5301,9 @@ static int CatalogDeleteProjectLocked(PicoHost *host, const char *project)
     {
         bool busy;
         pthread_mutex_lock(&host->persist_mu);
-        busy = host->persist_flight_agent_id != 0;
+        busy = host->persist_flight_agent_id != 0 || host->persist_flight_inbox;
         for (int i = 0; i < host->persist_pending_count; i++)
-            if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_SESSION) busy = true;
+            if (host->persist_pending[i].job_kind != PICO_PERSIST_JOB_CATALOG_ORDER) busy = true;
         pthread_mutex_unlock(&host->persist_mu);
         if (busy) return -1;
     }
@@ -5633,6 +5643,138 @@ int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out)
 }
 
 
+typedef struct PicoInboxAck {
+    PicoCatalogInboxTarget target;
+    atomic_int status;
+    bool reported;
+    bool superseded;
+    PicoAgentId replay_agent;
+    uint64_t replay_revision;
+} PicoInboxAck;
+
+typedef struct PicoInboxAckBatch {
+    struct PicoInboxAckBatch *next;
+    uint64_t completed_epoch;
+    atomic_bool finished;
+    int count;
+    PicoInboxAck items[];
+} PicoInboxAckBatch;
+
+bool PicoCatalog_InboxAcknowledged(const PicoHost *host, const char *path, const char *id)
+{
+    for (const PicoInboxAckBatch *batch = host ? host->inbox_acks : NULL; batch; batch = batch->next)
+        for (int i = 0; i < batch->count; i++)
+        {
+            const PicoInboxAck *ack = &batch->items[i];
+            if (!strcmp(ack->target.checkout_path, path) && !strcmp(ack->target.session_id, id) &&
+                !ack->superseded && atomic_load(&ack->status) != PICO_CATALOG_PERSIST_FAILED)
+                return true;
+        }
+    return false;
+}
+
+uint64_t PicoCatalog_InboxEpoch(const PicoHost *host)
+{
+    return host ? host->inbox_epoch : 0;
+}
+
+static bool InboxAckSnapshotCovers(const PicoInboxAck *ack,
+                                   const PicoCatalogWorkspace *workspaces, int count)
+{
+    if (ack->superseded || atomic_load(&ack->status) == PICO_CATALOG_PERSIST_FAILED) return true;
+    for (int w = 0; w < count; w++)
+        for (int i = 0; i < workspaces[w].session_count; i++)
+        {
+            const PicoCatalogSession *row = &workspaces[w].sessions[i];
+            if (!strcmp(row->checkout_path, ack->target.checkout_path) &&
+                !strcmp(row->id, ack->target.session_id)) return !row->inbox_pending;
+        }
+    return false;
+}
+
+void PicoCatalog_InboxSnapshotApplied(PicoHost *host, uint64_t epoch,
+                                      const PicoCatalogWorkspace *workspaces, int count)
+{
+    /* A replay worker may have read the old pending flag. Keep its override
+     * until publication/cancellation, even if the catalog is already current. */
+    if (!host || host->session_load) return;
+    PicoInboxAckBatch **link = &host->inbox_acks;
+    while (*link)
+    {
+        PicoInboxAckBatch *batch = *link;
+        bool covered = batch->completed_epoch && batch->completed_epoch <= epoch;
+        for (int i = 0; covered && i < batch->count; i++)
+            covered = InboxAckSnapshotCovers(&batch->items[i], workspaces, count);
+        if (covered)
+        {
+            *link = batch->next;
+            free(batch);
+        }
+        else link = &batch->next;
+    }
+}
+
+static void InboxAckSupersede(PicoHost *host, const PicoAgent *agent)
+{
+    const char *path = PicoAgent_WorkspacePath(agent);
+    for (PicoInboxAckBatch *batch = host ? host->inbox_acks : NULL; batch; batch = batch->next)
+        for (int i = 0; i < batch->count; i++)
+        {
+            PicoInboxAck *ack = &batch->items[i];
+            if (!strcmp(ack->target.checkout_path, path) &&
+                !strcmp(ack->target.session_id, agent->session_id)) ack->superseded = true;
+        }
+}
+
+static void InboxAckReplay(PicoHost *host, PicoAgent *agent)
+{
+    const char *path = PicoAgent_WorkspacePath(agent);
+    for (PicoInboxAckBatch *batch = host ? host->inbox_acks : NULL; batch; batch = batch->next)
+        for (int i = 0; i < batch->count; i++)
+        {
+            PicoInboxAck *ack = &batch->items[i];
+            if (ack->superseded || atomic_load(&ack->status) == PICO_CATALOG_PERSIST_FAILED ||
+                strcmp(ack->target.checkout_path, path) ||
+                strcmp(ack->target.session_id, agent->session_id)) continue;
+            agent->inbox_pending = false;
+            ack->replay_agent = agent->id;
+            ack->replay_revision = ++agent->inbox_revision;
+            return;
+        }
+}
+
+bool PicoCatalog_EnqueueInboxAcknowledgements(PicoHost *host,
+    const PicoCatalogInboxTarget *targets, int count)
+{
+    if (!host || !host->persist_ready || host->terminal_shutdown || !targets || count <= 0 ||
+        (size_t)count > (SIZE_MAX - sizeof(PicoInboxAckBatch)) / sizeof(PicoInboxAck))
+        return false;
+    PicoInboxAckBatch *batch = calloc(1, sizeof(*batch) + (size_t)count * sizeof(batch->items[0]));
+    if (!batch) return false;
+    atomic_init(&batch->finished, false);
+    batch->count = count;
+    for (int i = 0; i < count; i++)
+    {
+        batch->items[i].target = targets[i];
+        atomic_init(&batch->items[i].status, PICO_CATALOG_PERSIST_PENDING);
+    }
+    PicoSessionPersistJob job = {.job_kind = PICO_PERSIST_JOB_INBOX_ACK, .inbox_ack = batch};
+    pthread_mutex_lock(&host->persist_mu);
+    bool accepted = !host->persist_stop && host->persist_pending &&
+                    host->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY;
+    if (accepted)
+    {
+        host->persist_pending[host->persist_pending_count++] = job;
+        pthread_cond_signal(&host->persist_cv);
+    }
+    pthread_mutex_unlock(&host->persist_mu);
+    if (!accepted) { free(batch); return false; }
+    batch->next = host->inbox_acks;
+    host->inbox_acks = batch;
+    pico_host_request_redraw(host);
+    return true;
+}
+
 static void PersistJobClear(PicoSessionPersistJob *job)
 {
     PicoSessionPersistJob *chain;
@@ -5967,6 +6109,10 @@ static void *PersistThreadMain(void *arg)
         {
             host->persist_flight_catalog_order = true;
         }
+        else if (job.job_kind == PICO_PERSIST_JOB_INBOX_ACK)
+        {
+            host->persist_flight_inbox = true;
+        }
         else
         {
             host->persist_flight_agent_id = job.agent_id;
@@ -5977,6 +6123,20 @@ static void *PersistThreadMain(void *arg)
         if (job.job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
         {
             failed = !CatalogWriteOrderJson(job.catalog_order_json, error, sizeof(error));
+        }
+        else if (job.job_kind == PICO_PERSIST_JOB_INBOX_ACK)
+        {
+            PicoInboxAckBatch *batch = job.inbox_ack;
+            for (int i = 0; i < batch->count; i++)
+            {
+                PicoInboxAck *ack = &batch->items[i];
+                bool ok = PicoCatalog_SetInboxPending(ack->target.checkout_path,
+                                                      ack->target.session_id, false) == 0;
+                atomic_store(&ack->status, ok ? PICO_CATALOG_PERSIST_SUCCEEDED
+                                             : PICO_CATALOG_PERSIST_FAILED);
+                pico_host_wakeup(NULL);
+            }
+            atomic_store(&batch->finished, true);
         }
         else
         {
@@ -6025,6 +6185,10 @@ static void *PersistThreadMain(void *arg)
             }
             host->persist_flight_catalog_order = false;
         }
+        else if (job.job_kind == PICO_PERSIST_JOB_INBOX_ACK)
+        {
+            host->persist_flight_inbox = false;
+        }
         else
         {
             if (failed)
@@ -6070,6 +6234,9 @@ void PicoSessionPersist_Init(PicoHost *host)
     host->persist_pending_bytes = 0;
     host->persist_flight_agent_id = 0;
     host->persist_flight_catalog_order = false;
+    host->persist_flight_inbox = false;
+    host->inbox_acks = NULL;
+    host->inbox_epoch = 0;
     host->persist_catalog_next_generation = 0;
     host->persist_catalog_completed_generation = 0;
     host->persist_catalog_failed_generation = 0;
@@ -6109,10 +6276,18 @@ void PicoSessionPersist_Shutdown(PicoHost *host)
             PersistJobClear(&host->persist_pending[i]);
         }
         host->persist_pending_count = 0;
+        while (host->inbox_acks)
+        {
+            PicoInboxAckBatch *batch = host->inbox_acks;
+            host->inbox_acks = batch->next;
+            free(batch);
+        }
         free(host->persist_pending);
         host->persist_pending = NULL;
         host->persist_flight_agent_id = 0;
         host->persist_flight_catalog_order = false;
+        host->persist_flight_inbox = false;
+        host->inbox_epoch = 0;
         host->persist_catalog_next_generation = 0;
         host->persist_catalog_completed_generation = 0;
         host->persist_catalog_failed_generation = 0;
@@ -6144,6 +6319,35 @@ void PicoSessionPersist_Pump(PicoHost *host)
     }
     pthread_mutex_unlock(&host->persist_mu);
     PersistApplyFailures(host, local, n);
+    bool inbox_failed = false;
+    for (PicoInboxAckBatch *batch = host->inbox_acks; batch; batch = batch->next)
+    {
+        bool reported_all = true;
+        for (int i = 0; i < batch->count; i++)
+        {
+            PicoInboxAck *ack = &batch->items[i];
+            int status = atomic_load(&ack->status);
+            if (status == PICO_CATALOG_PERSIST_PENDING) { reported_all = false; continue; }
+            if (ack->reported) continue;
+            ack->reported = true;
+            if (status == PICO_CATALOG_PERSIST_FAILED)
+            {
+                PicoAgent *agent = PersistFindAgent(host, ack->replay_agent);
+                if (agent && !strcmp(agent->session_id, ack->target.session_id) &&
+                    agent->inbox_revision == ack->replay_revision)
+                {
+                    agent->inbox_pending = true;
+                    agent->inbox_revision++;
+                }
+                inbox_failed = true;
+            }
+            pico_host_request_redraw(host);
+        }
+        if (!batch->completed_epoch && reported_all && atomic_load(&batch->finished))
+            batch->completed_epoch = ++host->inbox_epoch;
+    }
+    if (inbox_failed)
+        pico_status_warn(host, "Could not acknowledge some inbox sessions. Failed rows were restored; try again.");
     if (catalog_error[0])
     {
         char line[320];
@@ -6152,20 +6356,21 @@ void PicoSessionPersist_Pump(PicoHost *host)
     }
 }
 
-static bool PersistHasCatalogOrderLocked(const PicoHost *host)
+static bool PersistHasCatalogWorkLocked(const PicoHost *host)
 {
     int i;
     if (!host || !host->persist_pending)
     {
         return false;
     }
-    if (host->persist_flight_catalog_order)
+    if (host->persist_flight_catalog_order || host->persist_flight_inbox)
     {
         return true;
     }
     for (i = 0; i < host->persist_pending_count; i++)
     {
-        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
+        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_CATALOG_ORDER ||
+            host->persist_pending[i].job_kind == PICO_PERSIST_JOB_INBOX_ACK)
         {
             return true;
         }
@@ -6173,7 +6378,7 @@ static bool PersistHasCatalogOrderLocked(const PicoHost *host)
     return false;
 }
 
-bool PicoCatalog_DrainOrderPersistBefore(PicoHost *host, const struct timespec *deadline)
+bool PicoCatalog_DrainPersistBefore(PicoHost *host, const struct timespec *deadline)
 {
     bool drained;
     if (!host || !host->persist_ready)
@@ -6181,17 +6386,17 @@ bool PicoCatalog_DrainOrderPersistBefore(PicoHost *host, const struct timespec *
         return true;
     }
     pthread_mutex_lock(&host->persist_mu);
-    while (PersistHasCatalogOrderLocked(host))
+    while (PersistHasCatalogWorkLocked(host))
     {
         int wait_result = deadline
             ? pthread_cond_timedwait(&host->persist_cv, &host->persist_mu, deadline)
             : pthread_cond_wait(&host->persist_cv, &host->persist_mu);
-        if (wait_result != 0 && PersistHasCatalogOrderLocked(host))
+        if (wait_result != 0 && PersistHasCatalogWorkLocked(host))
         {
             break;
         }
     }
-    drained = !PersistHasCatalogOrderLocked(host);
+    drained = !PersistHasCatalogWorkLocked(host);
     pthread_mutex_unlock(&host->persist_mu);
     return drained;
 }
@@ -7178,6 +7383,11 @@ static bool PersistBlocksSessionDelete(PicoHost *host, const PicoAgentId *agents
             if (job->agent_id == agents[i]) busy = true;
     }
     pthread_mutex_unlock(&host->persist_mu);
+    for (const PicoInboxAckBatch *batch = host->inbox_acks; batch; batch = batch->next)
+        for (int k = 0; k < batch->count; k++)
+            if (atomic_load(&batch->items[k].status) == PICO_CATALOG_PERSIST_PENDING &&
+                CatalogDeleteIdSelected(refs, ref_n, batch->items[k].target.session_id))
+                busy = true;
     return busy;
 }
 

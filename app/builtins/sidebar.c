@@ -54,6 +54,7 @@ typedef struct SidebarScanWorker
 {
     atomic_bool cancelled;
     uint64_t serial;
+    uint64_t inbox_epoch;
     char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
     char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
     bool token_before_valid;
@@ -102,6 +103,7 @@ typedef struct SidebarState
     char catalog_change_token[PICO_CATALOG_CHANGE_TOKEN_MAX];
     bool catalog_change_token_valid;
     uint64_t scan_serial;
+    uint64_t inbox_epoch;
     SidebarScanWorker *scan_worker;
     SidebarCollapseEdit *collapse_edits;
     SidebarCollapseSave *collapse_save;
@@ -541,6 +543,7 @@ static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
         s->last_scan = GetTime();
     }
     s->dirty = s->dirty || refresh_again;
+    PicoCatalog_InboxSnapshotApplied(s->host, worker->inbox_epoch, s->workspaces, s->workspace_count);
 }
 
 static void SidebarScanCompleted(PicoHost *host, void *arg)
@@ -556,7 +559,8 @@ static void SidebarScanCompleted(PicoHost *host, void *arg)
 
 static void SidebarRefreshSync(SidebarState *s, bool reconcile)
 {
-    SidebarScanWorker worker = {.reconcile = reconcile, .pages = s->ui, .page_count = s->ui_count};
+    SidebarScanWorker worker = {.reconcile = reconcile, .pages = s->ui, .page_count = s->ui_count,
+                                .inbox_epoch = PicoCatalog_InboxEpoch(s->host)};
     SidebarScanRun(&worker);
     SidebarFinishRefresh(s, &worker);
     PicoCatalog_Free(worker.workspaces, worker.workspace_count);
@@ -598,6 +602,7 @@ static void SidebarStartRefresh(SidebarState *s, bool reconcile)
         return;
     }
     worker->serial = s->scan_serial;
+    worker->inbox_epoch = PicoCatalog_InboxEpoch(s->host);
     worker->reconcile = reconcile;
     worker->page_count = s->ui_count;
     if (worker->page_count)
@@ -1782,7 +1787,7 @@ static bool InboxPendingValue(PicoHost *host, const char *ws_path, const char *s
     agent = live_id ? PicoHost_FindAgent(host, live_id) : NULL;
     if (agent)
         return agent->inbox_pending;
-    return catalog_inbox;
+    return catalog_inbox && !PicoCatalog_InboxAcknowledged(host, ws_path, session_id);
 }
 
 static bool InboxVisible(PicoHost *host, const char *ws_path, const char *session_id,
@@ -1881,30 +1886,54 @@ static int NoteInboxIdle(PicoHost *host, SidebarState *s, const InboxVisit *row,
     return 0;
 }
 
-static void AcknowledgeInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row)
+typedef struct SidebarInboxAckTargets
 {
-    if (row->live_id)
-    {
-        PicoAgent *agent = PicoHost_FindAgent(host, row->live_id);
-        if (agent)
-            PicoSession_SetInboxPending(host, agent, false);
-    }
-    else if (PicoCatalog_SetInboxPending(row->path, row->session_id, false) != 0)
-    {
-        PicoOverlay_Notify(host, "Could not update the inbox.");
-        return;
-    }
-    s->dirty = true;
-    pico_host_request_redraw(host);
-}
+    PicoCatalogInboxTarget *items;
+    int count;
+    int capacity;
+    bool failed;
+} SidebarInboxAckTargets;
 
 static int AckInboxIdle(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
 {
     (void)index;
-    (void)ctx;
-    if (SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen) == SIDEBAR_DOT_IDLE)
-        AcknowledgeInboxRow(host, s, row);
+    if (SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen) != SIDEBAR_DOT_IDLE)
+        return 0;
+    if (row->live_id)
+    {
+        PicoAgent *agent = PicoHost_FindAgent(host, row->live_id);
+        if (agent) PicoSession_SetInboxPending(host, agent, false);
+        s->dirty = true;
+    }
+    else
+    {
+        SidebarInboxAckTargets *targets = ctx;
+        if (targets->count == targets->capacity)
+        {
+            int capacity = targets->capacity ? targets->capacity * 2 : 8;
+            PicoCatalogInboxTarget *items = realloc(targets->items, (size_t)capacity * sizeof(*items));
+            if (!items) { targets->failed = true; return 0; }
+            targets->items = items;
+            targets->capacity = capacity;
+        }
+        PicoCatalogInboxTarget *target = &targets->items[targets->count++];
+        snprintf(target->checkout_path, sizeof(target->checkout_path), "%s", row->path);
+        snprintf(target->session_id, sizeof(target->session_id), "%s", row->session_id);
+    }
     return 0;
+}
+
+static void AcknowledgeInbox(PicoHost *host, SidebarState *s)
+{
+    SidebarInboxAckTargets targets = {0};
+    VisitInbox(host, s, AckInboxIdle, &targets);
+    if (targets.count && !PicoCatalog_EnqueueInboxAcknowledgements(host, targets.items, targets.count))
+        targets.failed = true;
+    free(targets.items);
+    if (targets.failed)
+        PicoOverlay_Notify(host, "Could not queue some inbox acknowledgements. Those rows remain in the inbox.");
+    /* The checkmark runs after layout; show accepted acknowledgements now. */
+    host->ui_relayout_requested = true;
 }
 
 static void RevealInboxSession(PicoHost *host, SidebarState *s, const InboxVisit *row)
@@ -3010,7 +3039,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     }
     if (Clay_PointerOver(CLAY_ID("SidebarInboxDone")))
     {
-        VisitInbox(host, s, AckInboxIdle, NULL);
+        AcknowledgeInbox(host, s);
         return;
     }
     {
@@ -3115,6 +3144,12 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         return;
     }
     SidebarStartCollapseSave(s);
+    uint64_t inbox_epoch = PicoCatalog_InboxEpoch(host);
+    if (s->inbox_epoch != inbox_epoch)
+    {
+        s->inbox_epoch = inbox_epoch;
+        s->dirty = true;
+    }
     selected = PicoHost_SelectedAgentConst(host);
     for (int i = 0; i < pico_agent_count(host); i++)
     {

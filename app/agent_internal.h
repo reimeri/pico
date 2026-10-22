@@ -64,6 +64,7 @@ struct PicoAgent {
     PicoAgentState state;
     bool unseen_complete;
     bool inbox_pending; /* inbox review flag; not a run state */
+    uint64_t inbox_revision; /* protects newer live state from a failed offline ack */
     PicoAgentRt *runtime;
     char *error;
     char activity[256];

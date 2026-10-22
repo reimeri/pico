@@ -71,6 +71,10 @@ void pico_host_wakeup(PicoHost *host)
 {
     (void)host;
 }
+void pico_host_request_redraw(PicoHost *host)
+{
+    (void)host;
+}
 
 bool PicoSession_TestHook(const char *stage)
 {
@@ -2063,7 +2067,7 @@ static int TestCatalogWorkspaceReorder(void)
     snprintf(order[0].path, sizeof(order[0].path), "%s", ws_b);
     snprintf(order[1].path, sizeof(order[1].path), "%s", ws_a);
     generation = PicoCatalog_EnqueueOrder(&writer, order, 2);
-    if (!generation || !PicoCatalog_DrainOrderPersistBefore(&writer, NULL) ||
+    if (!generation || !PicoCatalog_DrainPersistBefore(&writer, NULL) ||
         PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_SUCCEEDED)
     {
         failure = "initial background workspace order persistence";
@@ -2121,7 +2125,7 @@ static int TestCatalogWorkspaceReorder(void)
     list = NULL;
     n = 0;
     if (idx_b < 0 || idx_a < 0 || idx_b >= idx_a || !TransferByte(continue_pipe[1], true) ||
-        !PicoCatalog_DrainOrderPersistBefore(&writer, NULL) ||
+        !PicoCatalog_DrainPersistBefore(&writer, NULL) ||
         PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_SUCCEEDED)
     {
         failure = "blocked background reorder should preserve then atomically replace durable order";
@@ -2150,7 +2154,7 @@ static int TestCatalogWorkspaceReorder(void)
     snprintf(order[0].path, sizeof(order[0].path), "%s", ws_b);
     snprintf(order[1].path, sizeof(order[1].path), "%s", ws_a);
     generation = PicoCatalog_EnqueueOrder(&writer, order, 2);
-    if (!generation || !PicoCatalog_DrainOrderPersistBefore(&writer, NULL) ||
+    if (!generation || !PicoCatalog_DrainPersistBefore(&writer, NULL) ||
         PicoCatalog_OrderPersistStatus(&writer, generation) != PICO_CATALOG_PERSIST_FAILED)
     {
         failure = "failed workspace order write should report failure";

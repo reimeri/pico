@@ -221,6 +221,9 @@ static bool g_sidebar_poll_due;
 static int g_collapse_ready_fd = -1;
 static int g_collapse_continue_fd = -1;
 static bool g_collapse_fail_once;
+static int g_inbox_ack_ready_fd = -1;
+static int g_inbox_ack_continue_fd = -1;
+static bool g_inbox_ack_fail_once;
 static int g_replay_ready_fd = -1;
 static int g_replay_continue_fd = -1;
 static int g_replay_adopted;
@@ -277,6 +280,15 @@ bool PicoSession_TestHook(const char *stage)
         bool fail = g_collapse_fail_once;
         g_collapse_ready_fd = g_collapse_continue_fd = -1;
         g_collapse_fail_once = false;
+        return !TransferTestByte(ready, true) || !TransferTestByte(resume, false) || fail;
+    }
+    if (stage && strcmp(stage, "inbox_ack_before_write") == 0 &&
+        g_inbox_ack_ready_fd >= 0 && g_inbox_ack_continue_fd >= 0)
+    {
+        int ready = g_inbox_ack_ready_fd, resume = g_inbox_ack_continue_fd;
+        bool fail = g_inbox_ack_fail_once;
+        g_inbox_ack_ready_fd = g_inbox_ack_continue_fd = -1;
+        g_inbox_ack_fail_once = false;
         return !TransferTestByte(ready, true) || !TransferTestByte(resume, false) || fail;
     }
     if (stage && strcmp(stage, "catalog_scan") == 0)
@@ -12819,7 +12831,7 @@ static int TestSelectClearsUnseenComplete(void)
 static bool ShutdownAfterSessionPersist(PicoHost *host, PicoAgent *agent)
 {
     bool session_drained = DrainSessionForAssertion(host, agent);
-    bool catalog_drained = PicoCatalog_DrainOrderPersistBefore(host, NULL);
+    bool catalog_drained = PicoCatalog_DrainPersistBefore(host, NULL);
     PicoHostShutdownResult shutdown = pico_host_free(host);
     if (!session_drained || !catalog_drained)
     {
@@ -15303,6 +15315,209 @@ done:
     return good ? 0 : 1;
 }
 
+typedef enum InboxAckScenario
+{
+    INBOX_ACK_SUCCESS,
+    INBOX_ACK_PARTIAL_FAILURE,
+    INBOX_ACK_NEWER_EVENT,
+} InboxAckScenario;
+
+/* Offline acknowledgements must be as responsive as live ones, even when a
+ * durable write is stalled. Use two idle rows and an unseen row to distinguish
+ * per-row success/failure from the rows the checkmark must never acknowledge. */
+static int TestSidebarOfflineInboxAcknowledgements(InboxAckScenario scenario)
+{
+    char dir[] = "/tmp/pico-inbox-ack-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-inbox-ack-cfg-XXXXXX";
+    char ids[3][40], first_id[40] = {0};
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId id = 0, reopened_id = 0;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool released = false, good = false;
+    const char *phase = "setup";
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
+    WaitPluginLoad(host);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        PicoCatalog_Ensure(dir) != 0 || PicoCatalog_SetProjectName(dir, "Workspace") != 0) goto done;
+    for (int i = 0; i < 3; i++)
+    {
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_NEW, .select = true};
+        if (pico_main_agent_create(host, workspace_id, &options, &id) != PICO_OK) goto done;
+        PicoAgent *agent = PicoHost_FindAgent(host, id);
+        char title[32];
+        snprintf(title, sizeof(title), "Acknowledgement row %d", i);
+        if (PicoSession_LogUser(host, agent, title, title, NULL) != PICO_SESSION_WRITE_OK ||
+            PicoSession_LogInboxPending(host, agent, true) != PICO_SESSION_WRITE_OK ||
+            (i == 2 && PicoSession_LogUnseenComplete(host, agent, true) != PICO_SESSION_WRITE_OK) ||
+            !DrainSessionForAssertion(host, agent)) goto done;
+        snprintf(ids[i], sizeof(ids[i]), "%s", agent->session_id);
+        if (pico_agent_close(host, id) != PICO_OK) goto done;
+    }
+    PicoAgentCreateOptions draft = {.kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_main_agent_create(host, workspace_id, &draft, &id) != PICO_OK ||
+        !WaitHostTasks(host)) goto done;
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+    host->preferences.chat_width = 0;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    if (PicoCatalog_SetProjectName(dir, "Inbox workspace") != 0) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
+    PicoHost_Frame(host);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 2)).found ||
+        pipe(ready) != 0 || pipe(proceed) != 0) goto done;
+    /* Identify the first idle row in the actual display order, not by timestamps. */
+    PicoCatalogWorkspace *catalog = NULL;
+    int n = PicoCatalog_ReadGroupedPaged(&catalog, NULL, NULL, 0);
+    for (int w = 0; w < n && !first_id[0]; w++)
+        for (int i = 0; i < catalog[w].session_count; i++)
+            if (!catalog[w].sessions[i].unseen_complete)
+            {
+                snprintf(first_id, sizeof(first_id), "%s", catalog[w].sessions[i].id);
+                break;
+            }
+    PicoCatalog_Free(catalog, n);
+    if (!first_id[0]) goto done;
+    g_inbox_ack_ready_fd = ready[1];
+    g_inbox_ack_continue_fd = proceed[0];
+    g_inbox_ack_fail_once = scenario == INBOX_ACK_PARTIAL_FAILURE;
+    phase = "bulk acknowledgement while persistence is blocked";
+    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SidebarInboxDone"))) ||
+        !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        Clay_GetElementData(CLAY_IDI("SidebarInbox", 1)).found ||
+        !TransferTestByte(ready[0], false)) goto done;
+    phase = "pending acknowledgement respects the shared drain deadline";
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    if (PicoCatalog_DrainPersistBefore(host, &deadline)) goto done;
+    phase = "pending acknowledgement blocks deletion";
+    if (PicoCatalog_DeleteSession(host, dir, first_id) != PICO_BUSY) goto done;
+
+    phase = "unrelated snapshot while persistence is blocked";
+    if (PicoCatalog_SetProjectName(dir, "Refreshed workspace") != 0) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(host, g_catalog_snapshot_done_calls + 1)) goto done;
+    PicoHost_Frame(host);
+    if (Clay_GetElementData(CLAY_IDI("SidebarInbox", 1)).found) goto done;
+
+    if (scenario == INBOX_ACK_SUCCESS)
+    {
+        phase = "reload retains pending acknowledgements";
+        if (!WaitHostReload(host)) goto done;
+        for (int i = 0; i < host->hook_count; )
+        {
+            if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+            {
+                memmove(&host->hooks[i], &host->hooks[i + 1],
+                        (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+                host->hook_count--;
+            }
+            else i++;
+        }
+        if (!WaitHostTasks(host)) goto done;
+        PicoHost_Frame(host);
+        if (Clay_GetElementData(CLAY_IDI("SidebarInbox", 1)).found) goto done;
+    }
+    else
+    {
+        phase = "reopen while acknowledgement is pending";
+        if (PicoSession_LoadAsync(host, workspace_id, 0, first_id,
+                                  false, false, false, false) != PICO_OK) goto done;
+        PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+        PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
+        for (int i = 0; i < workspace->count; i++)
+            if (!strcmp(workspace->agents[i]->session_id, first_id)) reopened_id = workspace->agents[i]->id;
+        PicoAgent *agent = PicoHost_FindAgent(host, reopened_id);
+        if (!agent || agent->inbox_pending) goto done;
+        if (scenario == INBOX_ACK_NEWER_EVENT)
+            PicoSession_SetInboxPending(host, agent, true);
+    }
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    phase = "completed writes";
+    if (!PicoCatalog_DrainPersistBefore(host, NULL)) goto done;
+    if (reopened_id && !DrainSessionForAssertion(host, PicoHost_FindAgent(host, reopened_id))) goto done;
+    /* No pump/snapshot between the newer event and this replay: a retained
+     * successful acknowledgement must never override a subsequent turn. */
+    if (scenario == INBOX_ACK_NEWER_EVENT)
+    {
+        if (pico_agent_close(host, reopened_id) != PICO_OK) goto done;
+        PicoAgentCreateOptions resume = {.kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_RESUME, .session_id = first_id, .select = true};
+        if (pico_main_agent_create(host, workspace_id, &resume, &reopened_id) != PICO_OK ||
+            !PicoHost_FindAgent(host, reopened_id)->inbox_pending) goto done;
+    }
+    if (!WaitHostTasks(host)) goto done;
+    PicoHost_Frame(host);
+    bool first_pending = scenario != INBOX_ACK_SUCCESS;
+    if (Clay_GetElementData(CLAY_IDI("SidebarInbox", 1)).found != first_pending ||
+        Clay_GetElementData(CLAY_IDI("SidebarInbox", 2)).found) goto done;
+    if (scenario == INBOX_ACK_PARTIAL_FAILURE &&
+        (!host->status_warn || !strstr(host->status_warn, "acknowledge") ||
+         !PicoHost_FindAgent(host, reopened_id)->inbox_pending)) goto done;
+
+    phase = "durable per-row results";
+    catalog = NULL;
+    n = PicoCatalog_ReadGroupedPaged(&catalog, NULL, NULL, 0);
+    bool stored = n == 1 && catalog[0].session_count == 3;
+    for (int w = 0; w < n; w++)
+        for (int i = 0; i < catalog[w].session_count; i++)
+        {
+            PicoCatalogSession *row = &catalog[w].sessions[i];
+            bool expected = !strcmp(row->id, ids[2]) || (!strcmp(row->id, first_id) && first_pending);
+            stored = stored && row->inbox_pending == expected;
+        }
+    PicoCatalog_Free(catalog, n);
+    if (!stored) goto done;
+    good = true;
+done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    g_find_input_test = g_find_press = g_find_down = g_find_released = false;
+    g_find_key = 0;
+    g_clay_frame_test = false;
+    g_sidebar_poll_due = false;
+    if (host)
+    {
+        (void)PicoCatalog_DrainPersistBefore(host, NULL);
+        pico_host_free(host);
+    }
+    g_inbox_ack_ready_fd = g_inbox_ack_continue_fd = -1;
+    g_inbox_ack_fail_once = false;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (!good)
+    {
+        fprintf(stderr, "offline inbox acknowledgement phase: %s (scenario=%d)\n", phase, scenario);
+        Fail("offline inbox acknowledgements must remain responsive, ordered and recoverable");
+    }
+    return good ? 0 : 1;
+}
+
 static int TestIdleFrameOnlyPresentsOnInvalidation(void)
 {
     PicoHost *host = NULL;
@@ -16610,6 +16825,9 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_RELOAD)) != 0 ||
         PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_PLUS)) != 0 ||
         PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_INBOX)) != 0) return 1;
+    if (PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_SUCCESS)) != 0 ||
+        PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) != 0 ||
+        PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_NEWER_EVENT)) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameOnlyPresentsOnInvalidation()) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameRetainsChatScroll()) != 0) return 1;
     if (PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement()) != 0)

@@ -253,6 +253,22 @@ typedef enum PicoCatalogPersistStatus {
     PICO_CATALOG_PERSIST_SUCCEEDED = 1,
 } PicoCatalogPersistStatus;
 
+typedef struct PicoCatalogInboxTarget {
+    char checkout_path[4096];
+    char session_id[40];
+} PicoCatalogInboxTarget;
+
+/* Main-thread-only bookkeeping and batch acceptance. File I/O runs in FIFO order on the persist
+ * worker. Failed rows lose their optimistic override and warn, without retry. */
+bool PicoCatalog_EnqueueInboxAcknowledgements(PicoHost *host,
+    const PicoCatalogInboxTarget *targets, int count);
+bool PicoCatalog_InboxAcknowledged(const PicoHost *host, const char *checkout_path,
+                                   const char *session_id);
+/* A successful catalog snapshot started at this epoch can retire older results. */
+uint64_t PicoCatalog_InboxEpoch(const PicoHost *host);
+void PicoCatalog_InboxSnapshotApplied(PicoHost *host, uint64_t epoch,
+                                      const PicoCatalogWorkspace *workspaces, int count);
+
 void PicoSessionPersist_Init(PicoHost *host);
 void PicoSessionPersist_Shutdown(PicoHost *host);
 void PicoSessionPersist_Pump(PicoHost *host);
@@ -263,7 +279,7 @@ uint64_t PicoCatalog_EnqueueOrder(PicoHost *host,
 PicoCatalogPersistStatus PicoCatalog_OrderPersistStatus(PicoHost *host,
                                                         uint64_t generation);
 /* Uses the host shutdown deadline; false leaves the execution host retained. */
-bool PicoCatalog_DrainOrderPersistBefore(PicoHost *host,
+bool PicoCatalog_DrainPersistBefore(PicoHost *host,
                                          const struct timespec *deadline);
 void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent);
 void PicoSession_DrainPersist(PicoHost *app, PicoAgent *agent);

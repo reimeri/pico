@@ -4346,6 +4346,9 @@ void PicoHost_Frame(PicoHost *app)
     bool had_modal = pico_ui_modal_claimed(app);
     PicoPlugins_Poll(app);
     PicoChatFind_HandleInput(app);
+    /* Builtin frame callbacks update scrollbar drags. Preserve that ownership
+     * until Clay's scroll update so it cannot also drag the content. */
+    PicoScrollbar_BeginFrame();
     pico_host_pump(app);
     /* Commands run in frame callbacks. Leave graphics alive for main cleanup. */
     if (PicoHost_ShouldExit(app))
@@ -4357,7 +4360,6 @@ void PicoHost_Frame(PicoHost *app)
         SkipClayPresent((Clay_RenderCommandArray){0});
         return;
     }
-    PicoScrollbar_BeginFrame();
 
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
@@ -4433,7 +4435,7 @@ void PicoHost_Frame(PicoHost *app)
         CLAY_STRING("SubagentChatScroll"), CLAY_STRING("TodoListScroll"),
         CLAY_STRING("SettingsModalScroll"), CLAY_STRING("SettingsDefaultMenuScroll"),
         CLAY_STRING("AskModalScroll"), CLAY_STRING("AskUserTextScroll"),
-        CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),
+        CLAY_STRING("ClarificationFocus"), CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),
         CLAY_STRING("ExtModalScroll"), CLAY_STRING("PromptModalScroll"),
         CLAY_STRING("BackgroundListScroll"), CLAY_STRING("BackgroundLogScroll"),
         CLAY_STRING("DiffScroll"), CLAY_STRING("MdHorizontalScroll")};

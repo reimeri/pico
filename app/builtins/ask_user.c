@@ -116,6 +116,7 @@ typedef struct AskHostState
 {
     AskUiState *requests;
     AskUiState *active;
+    PicoScrollbar clarification_scrollbar;
 } AskHostState;
 
 static __thread AskUiState *s_active_ask_state = NULL;
@@ -1542,7 +1543,14 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
     if (!host)
         return;
     SyncPendingAsk(app, host);
-    if (PicoClarification_View(app) || !s_active_ask_state || !g_ui.show || g_ui.answered ||
+    if (PicoClarification_View(app))
+    {
+        if (!PicoUi_ModalOpen(app))
+            PicoScrollbar_UpdateDragOverlay(&host->clarification_scrollbar, CLAY_STRING("ClarificationFocus"),
+                                            CLAY_STRING("ClarificationFocusHandle"));
+        return;
+    }
+    if (!s_active_ask_state || !g_ui.show || g_ui.answered ||
         g_ui.current < 0 || g_ui.current >= g_ui.question_count)
         return;
     if (PicoUi_ModalOpen(app))
@@ -2381,9 +2389,15 @@ static void ClarificationControls(PicoHost *app, void *state)
     if (maximum > 0 && width > maximum)
         width = maximum;
     float h = Pico_FontPx(PICO_FONT_UI) + 12;
-    float label_h = Pico_FontPx(PICO_FONT_CAPTION) + 8;
-    float focus_h = 2 * Pico_FontPx(PICO_FONT_BODY) + 8;
-    float total_h = h + label_h + focus_h + 16;
+    float text_width = fmaxf(1, width - SCROLLBAR_GAP - SCROLLBAR_WIDTH);
+    float content_h = LabelHeight(helper->clarification->question, PICO_FONT_BODY, text_width);
+    float line_h = LabelHeight("", PICO_FONT_BODY, text_width);
+    float focus_h = fminf(content_h, 5 * line_h);
+    float total_h = h + focus_h + 8;
+    /* Rewrapping can shrink the content before Clay's next scroll update. */
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ClarificationFocus"));
+    if (scroll.found && scroll.scrollPosition)
+        scroll.scrollPosition->y = fmaxf(focus_h - content_h, fminf(0, scroll.scrollPosition->y));
     CLAY(CLAY_ID("ClarificationAlign"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER},
@@ -2398,12 +2412,17 @@ static void ClarificationControls(PicoHost *app, void *state)
                 RenderButton(CLAY_STRING("ClarificationBack"), "Back to answers", true, false);
             }
             CLAY(CLAY_ID("ClarificationFocus"),
-                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(focus_h)}},
-                  .clip = {.horizontal = true, .vertical = true}})
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(focus_h)}},
+                  .clip = {.horizontal = true, .vertical = true, .childOffset = Clay_GetScrollOffset()}})
             {
-                CLAY_TEXT(CStr(helper->clarification->question),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_BODY, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+                /* A horizontally clipped Clay text node does not wrap to the
+                 * viewport. Use the same bounded lines for sizing and rendering. */
+                RenderAskLabel(helper->clarification->question, FONT_REGULAR, PICO_FONT_BODY, COLOR_TEXT, text_width);
             }
+            if (content_h > focus_h)
+                PicoScrollbar_RenderOverlay(CLAY_STRING("ClarificationFocus"), CLAY_STRING("ClarificationFocusTrack"),
+                                            CLAY_STRING("ClarificationFocusHandle"));
         }
     }
 }

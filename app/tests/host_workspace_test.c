@@ -52,7 +52,7 @@ int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoComple
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static bool g_find_input_test;
-static bool g_session_chip_measure;
+static bool g_fixed_width_text_measure;
 static int g_find_key;
 static bool g_find_ctrl;
 static bool g_find_shift;
@@ -9871,7 +9871,10 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
     state.clarification_fixture = true;
     state.ask_request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
-        "{\"id\":\"target\",\"question\":\"Which target?\",\"kind\":\"select\","
+        "{\"id\":\"target\",\"question\":\"Which deployment target should receive these changes, "
+        "and how should the selected environment handle failures?\\n"
+        "https://deploy.example.test/environments/production/services/clarification/regions/primary/releases/latest/configuration?target=production"
+        "\",\"kind\":\"select\","
         "\"options\":[\"one\",\"two\",\"three\",\"four\",\"five\",\"six\",\"seven\",\"eight\"]}]}";
     int result = 1;
     if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
@@ -9906,12 +9909,12 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     strcpy(host->composer.text, "unsent draft");
     host->composer.length = host->composer.cursor = (int)strlen(host->composer.text);
     int message_count = agent->message_count;
-    const Clay_Dimensions viewport = {1100, 800};
+    Clay_Dimensions viewport = {1100, 800};
     if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
                          viewport, (Clay_ErrorHandler){0})) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
-    g_find_input_test = true;
+    g_find_input_test = g_fixed_width_text_measure = true;
     PicoExt ext = pico_ext_ask_user();
     void *ui = PicoPlugins_HostState(host, "ask-user");
     const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
@@ -9925,13 +9928,15 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     {
         for (int frame = 0; frame < 100; frame++)
         {
+            bool resized = phase == 3 && (frame == 40 || frame == 80);
+            if (resized) viewport.width = frame == 40 ? 500 : 1100;
             Clay_SetLayoutDimensions(viewport);
             Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0);
-            PicoHost_LayoutShell(host, viewport.height, 0);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
             Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
             if (!chat.found || !chat.scrollPosition) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
             if (PicoScrollbar_PinToBottom(chat.scrollContainerDimensions.height, chat.contentDimensions.height,
-                                         &chat.scrollPosition->y)) PicoHost_LayoutShell(host, viewport.height, 0);
+                                         &chat.scrollPosition->y)) commands = PicoHost_LayoutShell(host, viewport.height, 0);
             if (fabsf(chat.scrollPosition->y + chat.contentDimensions.height - chat.scrollContainerDimensions.height) > .01f)
                 { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
             for (int pane = 0; pane < (with_sidebar ? 12 : 11); pane++)
@@ -9940,7 +9945,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
                     .chars = phase == 3 ? clarification_panes[pane] : panes[pane],
                     .length = (int32_t)strlen(phase == 3 ? clarification_panes[pane] : panes[pane])}));
                 if (!box.found) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
-                if (frame == 0) expected[pane] = box.boundingBox;
+                if (frame == 0 || resized) expected[pane] = box.boundingBox;
                 else if (!ShellBoxStable(expected[pane], box.boundingBox)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
             }
             if (phase == 3)
@@ -9951,6 +9956,43 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
                     !ShellVerticallyContains(expected[8], expected[9]) ||
                     !ShellVerticallyContains(expected[3], expected[6]))
                 { Fail("clarification controls and composer must remain bounded inside the shell"); goto done; }
+                Clay_BoundingBox focus = expected[9];
+                Clay_ScrollContainerData question_scroll = Clay_GetScrollContainerData(CLAY_ID("ClarificationFocus"));
+                bool narrow = frame >= 40 && frame < 80;
+                if (!question_scroll.found || !question_scroll.scrollPosition ||
+                    question_scroll.contentDimensions.width > focus.width + .01f ||
+                    (question_scroll.contentDimensions.height > focus.height + .01f) != narrow ||
+                    Clay_GetElementData(CLAY_ID("ClarificationFocusHandle")).found != narrow)
+                { Fail("clarification question must wrap to its width and scroll only when it overflows"); goto done; }
+                int visible_lines = 0;
+                bool tail_visible = false;
+                const char *question = PicoClarification_View(host)->clarification->question;
+                size_t length = strlen(question);
+                for (int i = 0; i < commands.length; i++)
+                {
+                    Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, i);
+                    if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+                    Clay_StringSlice text = cmd->renderData.text.stringContents;
+                    if (!ShellBoxStable(CardTextClip(&commands, cmd), focus)) continue;
+                    if (cmd->boundingBox.x < focus.x - .01f ||
+                        cmd->boundingBox.x + cmd->boundingBox.width > focus.x + focus.width + .01f)
+                    { Fail("wrapped clarification lines must stay inside the question clip, including long URLs"); goto done; }
+                    if (ShellVerticallyContains(focus, cmd->boundingBox))
+                    {
+                        visible_lines++;
+                        tail_visible |= text.length > 0 && (size_t)text.length <= length &&
+                                        !memcmp(text.chars, question + length - text.length, (size_t)text.length);
+                    }
+                }
+                if (visible_lines < 2 || visible_lines > 5 || (!narrow && !tail_visible) || (frame == 60 && !tail_visible))
+                { Fail("clarification question must show up to five wrapped lines and make its final line reachable"); goto done; }
+                if (frame == 50)
+                {
+                    Clay_SetPointerState((Clay_Vector2){focus.x + focus.width / 2, focus.y + focus.height / 2}, false);
+                    Clay_UpdateScrollContainers(false, (Clay_Vector2){0, -10000}, 0);
+                    if (question_scroll.scrollPosition->y >= 0)
+                    { Fail("wheel over clarification question must scroll the wrapped text"); goto done; }
+                }
                 ext.host_on_frame(host, ui, 0);
                 continue;
             }
@@ -10009,6 +10051,41 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         }
         else if (phase == 3)
         {
+            if (!with_sidebar)
+            {
+                /* Exercise the real frame ordering: dragging the thumb must
+                 * not also start a Clay content drag when the pointer moves
+                 * sideways into the question while still held. */
+                host->preferences.chat_width = 20;
+                int hook_count = host->hook_count;
+                host->hook_count = 0; /* No GL overlays in the headless frame. */
+                g_clay_frame_test = true;
+                PicoHost_Frame(host);
+                PicoHost_Frame(host);
+                Clay_BoundingBox handle = Clay_GetElementData(CLAY_ID("ClarificationFocusHandle")).boundingBox;
+                g_find_pointer = (Vector2){handle.x + handle.width / 2, handle.y + handle.height / 2};
+                Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+                g_find_press = g_find_down = true;
+                PicoHost_Frame(host);
+                g_find_press = false;
+                float previous_y = 0;
+                for (int step = 0; step < 3; step++)
+                {
+                    g_find_pointer.x = handle.x - 20;
+                    g_find_pointer.y += 10;
+                    PicoHost_Frame(host);
+                    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ClarificationFocus"));
+                    if (!scroll.found || !scroll.scrollPosition || scroll.scrollPosition->y >= previous_y)
+                    { Fail("dragging the clarification thumb down must scroll forward without a competing content drag"); goto done; }
+                    previous_y = scroll.scrollPosition->y;
+                }
+                g_find_down = false;
+                PicoHost_Frame(host);
+                host->preferences.chat_width = 0;
+                PicoHost_Frame(host);
+                g_clay_frame_test = false;
+                host->hook_count = hook_count;
+            }
             Clay_BoundingBox back = Clay_GetElementData(CLAY_ID("ClarificationBack")).boundingBox;
             g_find_pointer = (Vector2){back.x + back.width / 2, back.y + back.height / 2};
             g_find_press = true;
@@ -10095,7 +10172,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         Clay_GetElementData(CLAY_ID("AskUserHeader")).found || strcmp(host->composer.text, "unsent draft")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     result = 0;
 done:
-    g_find_input_test = g_find_press = false;
+    g_find_input_test = g_find_press = g_find_down = g_clay_frame_test = g_fixed_width_text_measure = false;
     g_find_key = g_find_character = 0;
     if (host) pico_host_free(host);
     MatrixStateDestroy(&state);
@@ -16674,7 +16751,7 @@ static int RunSessionReferenceShellCase(bool with_sidebar)
     PicoAgent_AddMessage(host,agent,PICO_ROLE_USER,portable);
     int reference_message=agent->message_count-1;
     PicoComposer_SetText(host,draft);
-    g_session_chip_measure=true;
+    g_fixed_width_text_measure=true;
     Pico_MeasureCacheReset();
     Clay_Arena arena=Clay_CreateArenaWithCapacityAndMemory(arena_size,memory);
     if (!Clay_Initialize(arena,viewport,(Clay_ErrorHandler){0})) goto done;
@@ -16775,7 +16852,7 @@ static int RunSessionReferenceShellCase(bool with_sidebar)
     if (host->composer.length!=0) { Fail("delete must remove a complete session chip"); goto done; }
     rc=0;
 done:
-    g_find_input_test=g_session_chip_measure=false;
+    g_find_input_test=g_fixed_width_text_measure=false;
     g_find_press=g_find_down=false;
     g_find_key=0;
     Pico_MeasureCacheReset();
@@ -16987,7 +17064,7 @@ Vector2 __real_MeasureTextEx(Font font, const char *text, float fontSize, float 
 Vector2 __wrap_MeasureTextEx(Font font, const char *text, float fontSize, float spacing)
 {
     g_think_measure_calls++;
-    if (g_session_chip_measure) return (Vector2){strlen(text)*fontSize*0.6f,fontSize};
+    if (g_fixed_width_text_measure) return (Vector2){strlen(text)*fontSize*0.6f,fontSize};
     return __real_MeasureTextEx(font, text, fontSize, spacing);
 }
 #endif

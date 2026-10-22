@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "pico_build_info.h"
 #include "scrollbar.h"
 #include "host_internal.h"
 #include "overlay.h"
@@ -1721,7 +1722,7 @@ static void SettingsRender(PicoHost *app, void *state)
                                                             .y = CLAY_ALIGN_Y_CENTER},
                                          .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                 {
-                    CLAY_TEXT(CLAY_STRING("v" PICO_VERSION),
+                    CLAY_TEXT(CLAY_STRING("v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX),
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                 .fontSize = PICO_FONT_CAPTION,
                                                 .textColor = COLOR_MUTED,

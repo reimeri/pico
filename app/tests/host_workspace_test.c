@@ -12,6 +12,7 @@
 #include "sanitizer_detect.h"
 #include "workspace_internal.h"
 #include "settings.h"
+#include "pico_build_info.h"
 #include "session.h"
 #include "session_ref.h"
 #include "complete_internal.h"
@@ -5888,7 +5889,7 @@ static int TestHostPluginIsolation(void)
     return 0;
 }
 
-static int TestSettingsModalWheelOverField(void)
+static int TestSettingsModal(bool wheel_over_field)
 {
     const Clay_Dimensions viewport = {1100, 800};
     char cfg[] = "/tmp/pico-cfg-settings-wheel-XXXXXX";
@@ -5970,7 +5971,17 @@ static int TestSettingsModalWheelOverField(void)
 
     Clay_SetLayoutDimensions(viewport);
     Clay_SetPointerState((Clay_Vector2){0, 0}, false);
-    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    if (!wheel_over_field)
+    {
+        if (!FindCardText(&commands, "v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX))
+        {
+            Fail("settings modal must display the version and available build revision");
+            goto done;
+        }
+        rc = 0;
+        goto done;
+    }
 
     field = Clay_GetElementData(CLAY_ID("SettingsContextLimit"));
     scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
@@ -6014,6 +6025,16 @@ done:
     unsetenv("XDG_CONFIG_HOME");
     RmRf(cfg);
     return rc;
+}
+
+static int TestSettingsModalBuildVersion(void)
+{
+    return TestSettingsModal(false);
+}
+
+static int TestSettingsModalWheelOverField(void)
+{
+    return TestSettingsModal(true);
 }
 
 static int FindHostExtensionIndex(PicoHost *host, const char *name)
@@ -17960,6 +17981,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestHostPluginIsolation()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestSettingsModalBuildVersion()) != 0)
     {
         return 1;
     }

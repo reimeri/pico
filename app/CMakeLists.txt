@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.27)
 project(pico VERSION 0.4.2 LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 
+include(cmake/PicoBuildInfo.cmake)
+
 include(FetchContent)
 include(GNUInstallDirs)
 set(FETCHCONTENT_QUIET FALSE)
@@ -230,6 +232,7 @@ add_executable(pico
     builtins/diff.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
 
+add_dependencies(pico pico_build_info)
 set_target_properties(pico PROPERTIES ENABLE_EXPORTS ON INSTALL_RPATH_USE_LINK_PATH TRUE)
 pico_warnings_are_errors(pico)
 
@@ -238,6 +241,7 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
 
+target_include_directories(pico PRIVATE "${_pico_build_info_dir}")
 target_include_directories(pico PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -283,6 +287,13 @@ endif()
 set(DART_TESTING_TIMEOUT 1500 CACHE STRING "Overall test executable hang watchdog (seconds)")
 include(CTest)
 if(BUILD_TESTING)
+    add_test(NAME pico_build_info_tests
+        COMMAND "${CMAKE_COMMAND}"
+            "-DPICO_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/build-info-test"
+            "-DPICO_CMAKE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/cmake"
+            "-DPICO_CC=${CMAKE_C_COMPILER}"
+            "-DPICO_GENERATOR=${CMAKE_GENERATOR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_info_test.cmake")
     if(UNIX AND NOT APPLE)
         add_executable(pico_raylib_startup_tests tests/raylib_startup_test.c)
         target_include_directories(pico_raylib_startup_tests PRIVATE
@@ -1011,7 +1022,9 @@ if(BUILD_TESTING)
         http.c
         http_capture.c
         third_party/tinyfiledialogs/tinyfiledialogs.c)
+    add_dependencies(pico_host_workspace_tests pico_build_info)
     target_include_directories(pico_host_workspace_tests PRIVATE
+        "${_pico_build_info_dir}"
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/..

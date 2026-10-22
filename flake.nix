@@ -88,6 +88,7 @@
           cmakeFlags = [
             "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=${raylib}"
             "-DCMAKE_BUILD_TYPE=Release"
+            "-DPICO_BUILD_REVISION=${self.rev or self.dirtyRev or ""}"
             "-DBUILD_TESTING=${if doCheck then "ON" else "OFF"}"
           ];
 

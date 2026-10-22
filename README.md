@@ -101,6 +101,8 @@ cmake -S app --preset debug && cmake --build app/build/debug && ./app/build/debu
 
 The first configure fetches Raylib unless `FETCHCONTENT_SOURCE_DIR_RAYLIB` is set. Nix: `nix develop` (or [direnv](https://direnv.net/)). After a NixOS graphics-driver upgrade, EGL failures can mean a glibc mismatch (`LD_DEBUG=libs ./app/build/debug/pico`); `nix flake update nixpkgs`, then recreate `app/build/debug` inside a new `nix develop` shell before rebuilding.
 
+Settings shows the version and a seven-character source commit hash (`-dirty` for tracked changes). Local builds refresh this metadata on each build; flakes supply their source revision. Source archives without revision metadata show only the version; packagers can set `-DPICO_BUILD_REVISION=<commit-hash>[-dirty]` when configuring CMake.
+
 Install includes the desktop entry and `app/resources/logo.png`. Debug builds keep the newest 100 SSE capture pairs under `$XDG_CONFIG_HOME/pico/debug/sse/` (sensitive: prompts, reasoning, tools); release builds do not. Dev builds keep `pico` next to `resources/`, `docs/`, `examples/`, `builtins/`, and `sdk/`; installed layouts use `bin/pico` and `share/pico/{...}`. Discovery is relative to the executable (`PICO_DATA_DIR` overrides). Extensions compile with `${PICO_CC:-cc}` against packaged `sdk/include`.
 
 F5 and `/reload` reload host extensions and the selected workspace. Extension API: [`docs/extend/`](docs/extend/README.md).

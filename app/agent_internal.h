@@ -74,6 +74,7 @@ struct PicoAgent {
     char session_path[4096];
     PicoSessionPersistence persistence;
     bool accepted_submit;
+    bool has_llm_response; /* successful non-compaction response, restored from session usage */
     uint64_t session_input_tokens;
     uint64_t session_cached_tokens;
     int tokens_used;

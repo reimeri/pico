@@ -10,6 +10,14 @@ static bool ExtPinned(const char *name)
     return name && name[0] && strcmp(name, "extensions") == 0;
 }
 
+static bool HostExtensionExplicitlyEnabled(const PicoHost *host, const char *name)
+{
+    if (!host || !name || !name[0]) return false;
+    for (int i = 0; i < host->preferences.enabled_host_extension_count; i++)
+        if (strcmp(host->preferences.enabled_host_extensions[i], name) == 0) return true;
+    return false;
+}
+
 bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name)
 {
     if (!host || !name || !name[0] || ExtPinned(name))
@@ -20,10 +28,10 @@ bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name)
     {
         if (strcmp(host->preferences.disabled_host_extensions[i], name) == 0)
         {
-            return true;
+            return true; /* explicit disable takes precedence over opt-in */
         }
     }
-    return false;
+    return !PicoSettings_HostExtensionEnabledByDefault(name) && !HostExtensionExplicitlyEnabled(host, name);
 }
 
 static bool HostSlotMatchesModule(const PicoPluginSlot *slot,

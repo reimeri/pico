@@ -71,6 +71,7 @@ bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoMo
 bool PicoSettings_FastAvailable(const PicoAgent *agent);
 bool PicoSettings_SetFast(PicoAgent *agent, bool enabled);
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
+bool PicoSettings_HostExtensionEnabledByDefault(const char *name);
 bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
 /* Main-thread-only memory mutation and worker-only durable patch, respectively. */
 bool PicoSettings_ExtensionMemory(PicoHost *host, PicoWorkspace *workspace, const char *name, bool disabled);

@@ -26,4 +26,16 @@ failure preserves partial output and adds a separate Error notice.
 `PicoHost_AddMessage` remains for user/assistant transcript content and does not
 persist that content or add provider history by itself. It does not accept the
 notice role: use `PicoHost_AddNotice` to supply severity and persistence together.
+
+The opt-in host builtin `cache_miss` demonstrates response-boundary feedback: it
+adds an informational notice to the responding main agent's chat for each later
+normal response with at least 10,000 uncached input tokens, regardless of cache-hit
+percentage. The threshold is fixed, not configurable. It skips the first
+successful normal response in each session, compaction, subagents, builtin
+clarification helpers, and unknown usage. Enable it in `/extensions` or with F2.
+It is off by default; user-global
+`enabled_host_extensions` opts it in and `disabled_host_extensions` takes
+precedence. See [host preferences](host.md#preferences) and
+[LLM response notifications](hooks.md#llm-response-notification).
+
 See [contracts](contracts.md) for thread and ownership rules.

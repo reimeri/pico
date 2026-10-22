@@ -1972,7 +1972,7 @@ static int TestFastSelectionPersistence(void)
     phase = "Fast persistence queueing seed message";
     if (PicoSession_LogUser(host, writer, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK) goto done;
     phase = "Fast persistence queueing usage";
-    if (PicoSession_LogUsage(host, writer, 10, 0, true, "default") != PICO_SESSION_WRITE_OK) goto done;
+    if (PicoSession_LogUsage(host, writer, 10, 0, true, "default", false) != PICO_SESSION_WRITE_OK) goto done;
     phase = "Fast persistence draining initial settings and usage";
     if (!DrainSessionForAssertion(host, writer)) goto done;
     phase = "Fast persistence resumed agent creation";
@@ -6014,6 +6014,180 @@ done:
     unsetenv("XDG_CONFIG_HOME");
     RmRf(cfg);
     return rc;
+}
+
+static int FindHostExtensionIndex(PicoHost *host, const char *name)
+{
+    for (int i = 0; i < PicoPlugins_Count(host); i++)
+    {
+        PicoExtInfo info;
+        if (PicoPlugins_Get(host, i, &info) && info.scope == PICO_EXTENSION_HOST &&
+            info.name && strcmp(info.name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static int CountAgentNotices(PicoHost *host, PicoAgentId id)
+{
+    int count = 0;
+    for (int i = 0; i < pico_agent_message_count(host, id); i++)
+    {
+        const PicoMessage *message = pico_agent_message(host, id, i);
+        if (message && message->role == PICO_ROLE_NOTICE) count++;
+    }
+    return count;
+}
+
+static void DispatchCacheMiss(PicoHost *host, PicoAgentId id, int input_tokens, int cached_tokens,
+                              bool first, bool compact)
+{
+    PicoLlmResponse response = {
+        .input_tokens = input_tokens,
+        .cached_tokens = cached_tokens,
+        .compact = compact,
+        .first_response = first,
+    };
+    PicoHost_RunLlmResponseHooks(host, id, &response);
+}
+
+static int TestCacheMissBuiltinOptIn(void)
+{
+    char cfg[] = "/tmp/pico-cache-miss-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-cache-miss-cache-XXXXXX";
+    char dir_a[] = "/tmp/pico-cache-miss-a-XXXXXX";
+    char dir_b[] = "/tmp/pico-cache-miss-b-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws_a = 0, ws_b = 0;
+    PicoAgentId agent_a = 0, agent_b = 0, child_id = 0;
+    bool good = false;
+    if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(dir_a) || !mkdtemp(dir_b))
+    {
+        Fail("cache-miss opt-in fixture directories");
+        goto done;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    setenv("XDG_CACHE_HOME", cache, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host) goto done;
+    WaitPluginLoad(host);
+    int index = FindHostExtensionIndex(host, "cache_miss");
+    PicoExtInfo info;
+    if (index < 0 || !PicoPlugins_Get(host, index, &info) || info.enabled ||
+        !PicoHost_ExtensionDisabled(host, "cache_miss"))
+    {
+        Fail("cache_miss must be listed as a host extension and default off");
+        goto done;
+    }
+    if (pico_workspace_open(host, dir_a, &ws_a) != PICO_OK ||
+        pico_workspace_open(host, dir_b, &ws_b) != PICO_OK)
+    {
+        Fail("cache-miss workspaces open");
+        goto done;
+    }
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    if (pico_main_agent_create(host, ws_a, &options, &agent_a) != PICO_OK ||
+        pico_main_agent_create(host, ws_b, &options, &agent_b) != PICO_OK ||
+        PicoWorkspace_CreateAgent(PicoHost_FindWorkspace(host, ws_a),
+            &(PicoAgentCreateOptions){.kind = PICO_AGENT_SUBAGENT, .parent_id = agent_a,
+                                      .session_start = PICO_SESSION_NONE}, &child_id) != PICO_OK)
+    {
+        Fail("cache-miss agents create");
+        goto done;
+    }
+
+    /* Disabled builtin must not add notes. */
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, false);
+    if (CountAgentNotices(host, agent_a) != 0)
+    {
+        Fail("disabled cache_miss must not add a notice");
+        goto done;
+    }
+    index = FindHostExtensionIndex(host, "cache_miss");
+    if (!PicoPlugins_SetEnabled(host, index, true) || !PicoCatalog_DrainPersistBefore(host, NULL))
+    {
+        Fail("cache_miss opt-in preference save");
+        goto done;
+    }
+    if (!WaitHostReload(host)) goto done;
+    if (!PicoPlugins_Get(host, index, &info) || !info.enabled || PicoHost_ExtensionDisabled(host, "cache_miss"))
+    {
+        Fail("cache_miss opt-in must activate the host extension");
+        goto done;
+    }
+    DispatchCacheMiss(host, agent_a, 10999, 1000, false, false);
+    DispatchCacheMiss(host, child_id, 11000, 1000, false, false);
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, false);
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, false);
+    DispatchCacheMiss(host, agent_b, 11000, 1000, false, false);
+    if (CountAgentNotices(host, agent_a) != 2 || CountAgentNotices(host, agent_b) != 1 ||
+        CountAgentNotices(host, child_id) != 0)
+    {
+        Fail("enabled host cache_miss must affect agents in every workspace");
+        goto done;
+    }
+
+    if (pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        host = NULL;
+        Fail("cache-miss host shutdown");
+        goto done;
+    }
+    host = NULL;
+    /* Saved host opt-in is read on a fresh host and remains global. */
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host) goto done;
+    WaitPluginLoad(host);
+    index = FindHostExtensionIndex(host, "cache_miss");
+    if (index < 0 || !PicoPlugins_Get(host, index, &info) || !info.enabled)
+    {
+        Fail("cache_miss opt-in must survive host preference reload");
+        goto done;
+    }
+    if (pico_workspace_open(host, dir_a, &ws_a) != PICO_OK ||
+        pico_workspace_open(host, dir_b, &ws_b) != PICO_OK ||
+        pico_main_agent_create(host, ws_a, &options, &agent_a) != PICO_OK ||
+        pico_main_agent_create(host, ws_b, &options, &agent_b) != PICO_OK)
+    {
+        Fail("reloaded cache-miss workspaces and agents");
+        goto done;
+    }
+    DispatchCacheMiss(host, agent_a, 11000, 1000, true, false);
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, true);
+    if (CountAgentNotices(host, agent_a) != 0)
+    {
+        Fail("first and compaction responses must not produce cache-miss notes");
+        goto done;
+    }
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, false);
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, false);
+    if (CountAgentNotices(host, agent_a) != 2)
+    {
+        Fail("each qualifying normal response must produce a cache-miss note");
+        goto done;
+    }
+    index = FindHostExtensionIndex(host, "cache_miss");
+    if (!PicoPlugins_SetEnabled(host, index, false) || !PicoCatalog_DrainPersistBefore(host, NULL))
+    {
+        Fail("cache_miss disable preference save");
+        goto done;
+    }
+    if (!WaitHostReload(host)) goto done;
+    int before = CountAgentNotices(host, agent_a);
+    DispatchCacheMiss(host, agent_a, 11000, 1000, false, false);
+    if ((PicoPlugins_Get(host, index, &info) && info.enabled) || CountAgentNotices(host, agent_a) != before)
+    {
+        Fail("disabled cache_miss must stop subsequent notices");
+        goto done;
+    }
+    good = true;
+done:
+    if (host && pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN)
+    {
+        Fail("cache-miss test host must shut down cleanly");
+        good = false;
+    }
+    unsetenv("XDG_CONFIG_HOME");
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(cfg); RmRf(cache); RmRf(dir_a); RmRf(dir_b);
+    return good ? 0 : 1;
 }
 
 static int TestHostSettingsPersistence(void)
@@ -15972,7 +16146,9 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     PicoHost *host = f.host;
     PicoWorkspace *workspace = PicoHost_FindWorkspace(host, f.workspace);
     int extension_index = -1;
-    const char *extension = action == PREF_HOST_EXTENSION ? "footer" : "sh";
+    const char *extension = action == PREF_HOST_EXTENSION ? "cache_miss" : "sh";
+    bool want_enabled = action == PREF_HOST_EXTENSION;
+    bool initial_disabled = false;
     if (action == PREF_SETTINGS)
     {
         PicoSettingsUi_Open(host);
@@ -15994,6 +16170,8 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
             { extension_index = i; break; }
         }
         if (extension_index < 0) goto done;
+        initial_disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
+                                                        : PicoWorkspace_ExtensionDisabled(workspace, extension);
     }
     g_preference_ready_fd = ready[1];
     g_preference_continue_fd = proceed[0];
@@ -16011,7 +16189,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
         if (!SidebarFrameClick(host, Clay_GetElementData(action == PREF_RENAME
                                        ? CLAY_ID("SidebarEditSave") : CLAY_ID("SidebarEditStash")))) goto done;
     }
-    else if (!PicoPlugins_SetEnabled(host, extension_index, false)) goto done;
+    else if (!PicoPlugins_SetEnabled(host, extension_index, want_enabled)) goto done;
     if (!TransferTestByte(ready[0], false)) goto done;
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
@@ -16044,9 +16222,13 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     {
         bool disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
                                                       : PicoWorkspace_ExtensionDisabled(workspace, extension);
-        if (!disabled) goto done;
+        if (disabled != !want_enabled) goto done;
         pico_host_pump(host); /* Activation/reload cannot wait for this disk write. */
-        if (action == PREF_HOST_EXTENSION && PicoPlugins_HostState(host, extension)) goto done;
+        if (action == PREF_HOST_EXTENSION)
+        {
+            PicoExtInfo current;
+            if (!PicoPlugins_Get(host, extension_index, &current) || current.enabled != want_enabled) goto done;
+        }
         if (action == PREF_WORKSPACE_EXTENSION)
             for (int i = 0; i < workspace->tool_count; i++)
                 if (!strcmp(workspace->tools[i].name, "sh")) goto done;
@@ -16078,7 +16260,13 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     {
         bool disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
                                                       : PicoWorkspace_ExtensionDisabled(workspace, extension);
-        if (disabled != !fail) goto done;
+        bool expected_disabled = fail ? initial_disabled : !want_enabled;
+        if (disabled != expected_disabled) goto done;
+        if (action == PREF_HOST_EXTENSION)
+        {
+            PicoExtInfo current;
+            if (!PicoPlugins_Get(host, extension_index, &current) || current.enabled != !expected_disabled) goto done;
+        }
     }
     if (fail && action != PREF_SETTINGS && !host->status_warn) goto done;
     good = true;
@@ -17541,6 +17729,7 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestOpenAiLogin()) || PICO_TEST_RUN(TestOpenAiBrowserLauncher()) || PICO_TEST_RUN(TestOpenAiBlockedShutdown());
     if (PICO_TEST_RUN(TestOpenAiLogin()) || PICO_TEST_RUN(TestOpenAiBrowserLauncher()) || PICO_TEST_RUN(TestOpenAiBlockedShutdown())) return 1;
 #endif
+    if (PICO_TEST_RUN(TestCacheMissBuiltinOptIn()) != 0) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--clay-recovery") == 0)
     {

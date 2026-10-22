@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 20 adds rejected-token-aware OAuth refresh coordination and includes queued, durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 21 adds successful LLM-response notifications and host-extension opt-in preferences; it includes rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 
@@ -22,7 +22,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits and capacity eviction
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
-- `hooks` — submit, layout, compact, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
+- `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
 - `steering` — user input queued for an active turn, delivery, persistence, and hooks
 - `tools` — LLM-callable tools, parallel execution policies, and structured replayable details

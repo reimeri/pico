@@ -441,6 +441,7 @@ void PicoHostExtensions_ShutdownModule(PicoHost *host, PicoModuleGeneration *mod
 void PicoHostExtensions_OnFrame(PicoHost *host, float dt);
 void *PicoHostExtensions_State(const PicoHost *host, const char *name);
 bool PicoHostExtensions_Reload(PicoHost *host);
+void PicoHost_RunLlmResponseHooks(PicoHost *host, PicoAgentId agent_id, const PicoLlmResponse *response);
 bool PicoHost_ExtensionDisabled(const PicoHost *host, const char *name);
 
 /* Main-thread-only builtin task ownership. On success the host owns state until

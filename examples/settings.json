@@ -75,8 +75,15 @@
   // "spell_lang": "en_US",
 
   // Host extension names disabled globally; `/extensions` or F2 updates this.
+  // Explicit disable takes precedence over enabled_host_extensions.
   // Ignored in workspace .pico/settings.json.
   // "disabled_host_extensions": ["footer"],
+
+  // Opt in to host built-ins that default to off (currently `cache_miss`).
+  // cache_miss notes later normal main-agent responses with >=10,000 uncached input tokens.
+  // An explicit disabled_host_extensions entry takes precedence. `/extensions` or F2 updates this.
+  // Ignored in workspace .pico/settings.json.
+  // "enabled_host_extensions": ["cache_miss"],
 
   // Workspace extension names to disable; `/extensions` or F2 updates this.
   // The builtin "extensions" manager and "settings" editor cannot be disabled.

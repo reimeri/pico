@@ -306,6 +306,71 @@ static int TestDisabledExtensionsFromUserSettings(void)
     return failed ? Fail("user disabled_host_extensions did not populate the disabled set") : 0;
 }
 
+static int WriteFile(const char *path, const char *contents);
+
+static int TestHostExtensionOptInSettings(void)
+{
+    char temp[] = "/tmp/pico-host-optin-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create opt-in settings directory");
+    char dir[sizeof(temp) + 8], path[sizeof(temp) + 32];
+    snprintf(dir, sizeof(dir), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(dir);
+    if (WriteFile(path, "{\n  \"model\": \"keep\",\n  \"disabled_host_extensions\": [\"footer\", \"cache_miss\"],\n  \"enabled_host_extensions\": [\"cache_miss\"]\n}\n"))
+    {
+        rmdir(dir); rmdir(temp);
+        return Fail("could not write opt-in fixture");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    pthread_mutex_init(&host.settings_mu, NULL);
+    PicoHost_SetPath(&host, temp);
+    PicoHostPreferences_Load(&host);
+    bool precedence = host.preferences.disabled_host_extension_count == 2 &&
+                     host.preferences.enabled_host_extension_count == 1 &&
+                     !PicoSettings_HostExtensionEnabledByDefault("cache_miss");
+    /* Enabling removes an explicit disable and persists an opt-in; unrelated
+       settings and extension names remain untouched. */
+    bool changed = PicoHost_SetExtensionDisabled(&host, "cache_miss", false);
+    bool memory = host.preferences.disabled_host_extension_count == 1 &&
+                  host.preferences.enabled_host_extension_count == 1;
+    size_t len = 0;
+    char *saved = Pico_ReadFile(path, &len);
+    bool persisted = saved && strstr(saved, "keep") && strstr(saved, "footer") &&
+                     strstr(saved, "enabled_host_extensions") && strstr(saved, "cache_miss");
+    free(saved);
+    PicoHost restored;
+    memset(&restored, 0, sizeof(restored));
+    pthread_mutex_init(&restored.settings_mu, NULL);
+    PicoHost_SetPath(&restored, temp);
+    PicoHostPreferences_Load(&restored);
+    bool reload = restored.preferences.disabled_host_extension_count == 1 &&
+                  restored.preferences.enabled_host_extension_count == 1;
+    bool disabled = PicoHost_SetExtensionDisabled(&restored, "cache_miss", true);
+    PicoHost disabled_reload;
+    memset(&disabled_reload, 0, sizeof(disabled_reload));
+    PicoHost_SetPath(&disabled_reload, temp);
+    PicoHostPreferences_Load(&disabled_reload);
+    bool disable_persisted = disabled && disabled_reload.preferences.disabled_host_extension_count == 2 &&
+                             disabled_reload.preferences.enabled_host_extension_count == 0;
+    bool reenabled = PicoHost_SetExtensionDisabled(&restored, "cache_miss", false);
+
+    /* Failed read/modify/write restores the in-memory opt-in. */
+    bool replaced = WriteFile(path, "{ invalid json") == 0;
+    bool failed_save = replaced && !PicoHost_SetExtensionDisabled(&restored, "cache_miss", true);
+    bool rolled_back = restored.preferences.disabled_host_extension_count == 1 &&
+                       restored.preferences.enabled_host_extension_count == 1;
+    pthread_mutex_destroy(&host.settings_mu);
+    pthread_mutex_destroy(&restored.settings_mu);
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(path); rmdir(dir); rmdir(temp);
+    if (!precedence || !changed || !memory || !persisted || !reload || !disable_persisted ||
+        !reenabled || !failed_save || !rolled_back)
+        return Fail("host built-in opt-in load, precedence, persistence, or rollback failed");
+    return 0;
+}
+
 static int WriteFile(const char *path, const char *contents)
 {
     FILE *f = fopen(path, "w");
@@ -316,6 +381,86 @@ static int WriteFile(const char *path, const char *contents)
     fputs(contents, f);
     fclose(f);
     return 0;
+}
+
+static bool SettingsArrayContains(const JsonDoc *doc, const char *key, const char *name)
+{
+    int array = JsonObjGet(doc, 0, key);
+    for (int i = 0; i < JsonArrayLen(doc, array); i++)
+        if (JsonEq(doc, JsonArrayAt(doc, array, i), name)) return true;
+    return false;
+}
+
+static int TestExtensionWriterPreservesPreferences(void)
+{
+    char temp[] = "/tmp/pico-async-ext-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create async extension settings directory");
+    char dir[sizeof(temp) + 8], path[sizeof(temp) + 32];
+    snprintf(dir, sizeof(dir), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/pico/settings.json", temp);
+    Pico_MkdirP(dir);
+    const char *fixture = "{\n  // keep this comment\n  \"model\": \"keep\",\n  \"disabled_host_extensions\": [\"other_disabled\"],\n  \"enabled_host_extensions\": [\"cache_miss\", \"other_opt_in\"]\n}\n";
+    if (WriteFile(path, fixture))
+    {
+        rmdir(dir); rmdir(temp);
+        return Fail("could not write async extension fixture");
+    }
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    bool wrote = PicoSettings_WriteExtension(NULL, "cache_miss", true);
+    size_t len = 0;
+    char *saved = Pico_ReadFile(path, &len);
+    bool preserved = wrote && saved && strstr(saved, "// keep this comment");
+    if (preserved)
+    {
+        JsonStripComments(saved, len);
+        JsonDoc doc;
+        preserved = JsonParse(&doc, saved, len) == 0;
+        if (preserved)
+        {
+            preserved = JsonEq(&doc, JsonObjGet(&doc, 0, "model"), "keep") &&
+                        SettingsArrayContains(&doc, "disabled_host_extensions", "other_disabled") &&
+                        SettingsArrayContains(&doc, "disabled_host_extensions", "cache_miss") &&
+                        SettingsArrayContains(&doc, "enabled_host_extensions", "other_opt_in") &&
+                        !SettingsArrayContains(&doc, "enabled_host_extensions", "cache_miss");
+            JsonFree(&doc);
+        }
+    }
+    free(saved);
+
+#ifdef PICO_TEST_SETTINGS_IO
+    size_t before_len = 0;
+    char *before = Pico_ReadFile(path, &before_len);
+    fail_file_sync = true;
+    bool failed = !PicoSettings_WriteExtension(NULL, "cache_miss", false);
+    fail_file_sync = false;
+    size_t after_len = 0;
+    char *after = Pico_ReadFile(path, &after_len);
+    bool unchanged = failed && before && after && before_len == after_len &&
+                     memcmp(before, after, before_len) == 0;
+    free(before);
+    free(after);
+#else
+    bool unchanged = true;
+#endif
+    unsetenv("XDG_CONFIG_HOME");
+    unlink(path); rmdir(dir); rmdir(temp);
+    return preserved && unchanged ? 0 : Fail("async extension writer did not atomically preserve both preference lists");
+}
+
+static int TestExtensionMemoryCapacityFailureIsAtomic(void)
+{
+    PicoHost host;
+    memset(&host, 0, sizeof(host));
+    snprintf(host.preferences.disabled_host_extensions[0], PICO_DISABLED_EXT_NAME, "%s", "cache_miss");
+    host.preferences.disabled_host_extension_count = 1;
+    for (int i = 0; i < PICO_MAX_DISABLED_EXTENSIONS; i++)
+        snprintf(host.preferences.enabled_host_extensions[i], PICO_DISABLED_EXT_NAME, "enabled_%d", i);
+    host.preferences.enabled_host_extension_count = PICO_MAX_DISABLED_EXTENSIONS;
+    PicoHostPreferences before = host.preferences;
+    bool changed = PicoSettings_ExtensionMemory(&host, NULL, "cache_miss", false);
+    bool unchanged = !changed &&
+                     memcmp(&before, &host.preferences, sizeof(before)) == 0;
+    return unchanged ? 0 : Fail("failed opt-in capacity check partially changed disabled preferences");
 }
 
 static int TestConcurrentHostSettingsWritePreservesUpdate(void)
@@ -1632,6 +1777,21 @@ int main(void)
         return rc;
     }
     rc = PICO_TEST_RUN(TestDisabledExtensionsFromUserSettings());
+    if (rc)
+    {
+        return rc;
+    }
+    rc = PICO_TEST_RUN(TestHostExtensionOptInSettings());
+    if (rc)
+    {
+        return rc;
+    }
+    rc = PICO_TEST_RUN(TestExtensionWriterPreservesPreferences());
+    if (rc)
+    {
+        return rc;
+    }
+    rc = PICO_TEST_RUN(TestExtensionMemoryCapacityFailureIsAtomic());
     if (rc)
     {
         return rc;

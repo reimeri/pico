@@ -1,6 +1,6 @@
 # Anatomy
 
-Every user extension is one `.c` file that exports `pico_ext`. ABI 20 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
+Every user extension is one `.c` file that exports `pico_ext`. ABI 21 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
 
 ```c
 #include "pico/plugin.h"
@@ -31,7 +31,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 20). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 21). ABI 21 adds `PICO_HOOK_ON_LLM_RESPONSE` notifications in host and workspace scope; see [hooks](hooks.md#llm-response-notification). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.
@@ -66,6 +66,7 @@ Registration functions are valid only during the matching init callback. Host in
 | Before/after tool hooks | no | yes |
 | LLM/context/tool-row hooks | no | yes |
 | Agent lifecycle/message/submit hooks | no | yes |
+| Successful LLM-response notification hook | yes | yes |
 | Host after-layout/after-render hooks | yes | no |
 | Workspace `on_frame` | no | descriptor callback |
 | Host `on_frame` | descriptor callback | no |
@@ -88,7 +89,7 @@ A dual-scope user-global source has independent active-generation slots: one hos
 
 `/extensions` (or F2) lists one record per active slot. `PICO_EXTENSION_HOST` uses workspace ID zero; `PICO_EXTENSION_WORKSPACE` uses an explicit workspace ID. Each copied record includes source, name, scope, workspace ID, enabled, desired module-generation ID, active module-generation ID, and the latest scoped error. A dual-scope source is not collapsed into one enabled/active row.
 
-Click a row to toggle it off or on. Disabled extensions stay in the registry (compiled/`dlopen` for user sources) but skip `init` / `on_frame`. The builtin `extensions` manager and `settings` editor cannot be turned off. Host toggles persist as `disabled_host_extensions` in user-global `~/.config/pico/settings.json`. Workspace toggles persist as `disabled_extensions` in `<workspace>/.pico/settings.json`. They apply through the same reload path as F5. Disabling one scope/instance does not disable another.
+Click a row to toggle it off or on. Disabled extensions stay in the registry (compiled/`dlopen` for user sources) but skip `init` / `on_frame`. The builtin `extensions` manager and `settings` editor cannot be turned off. Host toggles persist in user-global `~/.config/pico/settings.json`: `disabled_host_extensions` disables, while `enabled_host_extensions` opts in built-ins that default off (currently `cache_miss`). An explicit disable takes precedence over opt-in. Workspace toggles persist as `disabled_extensions` in `<workspace>/.pico/settings.json`; workspace files do not control host built-ins. They apply through the same reload path as F5. Disabling one scope/instance does not disable another.
 
 ## Directories
 

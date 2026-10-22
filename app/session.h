@@ -231,7 +231,7 @@ PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent,
                                              const char *parts_json);
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens,
-                                            bool fast, const char *service_tier);
+                                            bool fast, const char *service_tier, bool compact);
 PicoSessionWriteResult PicoSession_LogAssistant(PicoHost *app, PicoAgent *agent,
                                                 int message_group, const char *content,
                                                 const char *thinking,

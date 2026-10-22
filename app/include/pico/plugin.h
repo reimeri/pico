@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 20 /* Rejected-token-aware OAuth refresh coordination */
+#define PICO_EXT_ABI 21 /* Successful LLM response notifications and host opt-in preferences */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);
@@ -51,5 +51,6 @@ PicoExt pico_ext_extensions(void);
 PicoExt pico_ext_settings(void);
 PicoExt pico_ext_prompt(void);
 PicoExt pico_ext_diff(void);
+PicoExt pico_ext_cache_miss(void);
 
 #endif

@@ -2,7 +2,7 @@
 
 Four families:
 
-- **Notifications** — `pico_host_add_hook` (host scope) and `pico_workspace_add_hook` (workspace scope). Main thread, with a `PicoHookEvent` target.
+- **Notifications** — `pico_host_add_hook` (host scope) and `pico_workspace_add_hook` (workspace scope). Main thread, with a `PicoHookEvent` target; includes successful LLM-response notifications in both scopes.
 - **Tool interceptors** — `pico_add_tool_before_hook` and `pico_add_tool_after_hook` (workspace scope).
 - **LLM/request context** — `pico_add_llm_hook` and `pico_add_context_hook` (workspace scope), with a target agent ID.
 - **Tool-row clicks** — `pico_add_tool_row_hook` (workspace scope). Main thread, when a chat tool row is activated.
@@ -15,7 +15,7 @@ pico_add_tool_after_hook(workspace, MyAfterTool);
 pico_add_llm_hook(workspace, MyBeforeLlm);
 ```
 
-Callbacks run in registration order. Each family has its corresponding `PICO_MAX_*_HOOKS` limit.
+Callbacks run in registration order within each scope. Each family has its corresponding `PICO_MAX_*_HOOKS` limit.
 
 Builtin questionnaire clarification uses an internal ephemeral helper with a
 clean, dedicated prompt. It skips ordinary submit, LLM instruction/tool-filter,
@@ -48,9 +48,10 @@ static void MyWorkspaceHook(PicoWorkspace *workspace, const PicoHookEvent *event
 All notifications run on the main thread. Host UI notifications may run while no workspace or agent is selected; in that state `event->agent_id` is zero and callbacks must avoid agent-targeted work.
 
 ### Host Notification Hooks (`pico_host_add_hook`)
-Registered during `host_init`. Only valid for host-global UI hooks:
+Registered during `host_init`. Host UI hooks are global; successful-response notifications target the responding agent:
 - `PICO_HOOK_AFTER_LAYOUT` — after Clay layout, before render. Host-global UI work; `event->agent_id` is the UI-selected agent, or zero. Runs only on pumps that perform layout: an unchanged idle pump skips layout and this hook, so use `on_frame` for per-pump cadence.
 - `PICO_HOOK_AFTER_RENDER` — after `Clay_Raylib_Render`. Host-global UI work; `event->agent_id` is the UI-selected agent, or zero.
+- `PICO_HOOK_ON_LLM_RESPONSE` — after an accepted successful provider response has been ingested and its usage recorded, before Pico continues with tools or finishes the turn. Runs once per response, including tool follow-ups and compaction; failed or cancelled requests do not notify. The target is the responding agent, not necessarily the selected agent.
 
 ### Workspace Notification Hooks (`pico_workspace_add_hook`)
 Registered during `workspace_init`. Valid for agent lifecycle hooks:
@@ -58,6 +59,7 @@ Registered during `workspace_init`. Valid for agent lifecycle hooks:
 - `PICO_HOOK_ON_SUBMIT` — the target user message was logged and its turn started (`PICO_SUBMIT_TURN`); never fired for steering.
 - `PICO_HOOK_ON_STEER` — copied input was accepted into the target queue (`PICO_SUBMIT_STEERING`), not delivered. Composer and explicit API acceptance emit it; replay does not. See [steering](steering.md).
 - `PICO_HOOK_ON_MESSAGE` — a message was added to the target transcript.
+- `PICO_HOOK_ON_LLM_RESPONSE` — the target agent received an accepted successful provider response. The response details and lifecycle are documented in [LLM response notification](hooks.md#llm-response-notification).
 - `PICO_HOOK_ON_COMPACT` — target compaction is starting.
 - `PICO_HOOK_AFTER_COMPACT` — target history was replaced with a briefing.
 - `PICO_HOOK_ON_TURN_END` — target became idle after a completed turn, not cancel/error.
@@ -73,6 +75,47 @@ Registered during `workspace_init`. Valid for agent lifecycle hooks:
 Composer send snapshots the selected agent ID and chooses `PICO_SUBMIT_TURN` while idle or `PICO_SUBMIT_STEERING` for an eligible busy main agent, then `PicoHost_Submit` clears cancel, agent input, and agent parts and runs the hook for that ID. Call `pico_host_request_submit_cancel(host)` to swallow the send. Call `pico_host_set_agent_input(host, text)` with a malloc'd replacement sent to the model; the composer text remains the display text and Pico takes ownership. The builtin mention hook expands `@path` / `@"escaped path"` references and projects portable `#` session chips from this replacement when present, preserving earlier command rewrites such as `/skill`. Session chips contribute a title and absolute JSONL path, never file contents. Expansion discovers file mentions in the original text, excluding chip metadata, then substitutes session references without rescanning the generated text. See [completers](completers.md#builtin-session-references). Whitespace-only composer text is skipped unless pasted image attachments are present.
 
 For structured input, call `pico_host_set_agent_parts(host, parts_json)` with a malloc'd JSON array of canonical parts in model-facing order. Supported user parts are `text` (`text`), `image`, and `audio` (`path`, optional `mime` / `url`). Keep bytes and base64 out of this JSON; provider converters read local `path` values when sending the request. When parts are set, include the complete text part as well as attachments because it replaces the normal one-text-part user item. After the hook, Pico validates those parts, then appends any pasted composer images (or builds `[text, image…]` when hooks left parts unset). Invalid hook parts reject the submission without discarding the composer draft. Pasted images also block submission, preserving the draft, when the applicable model does not support vision (the pinned running model for steering, selected next-turn model for idle submit). Chat display may include markdown images for those files; agent input and the text part stay as typed/hook text. Pico frees the replacement input and parts after submit or cancellation. Each setter frees any previous value.
+
+## LLM response notification
+
+Register `PICO_HOOK_ON_LLM_RESPONSE` with `pico_host_add_hook` during `host_init`,
+with `pico_workspace_add_hook` during `workspace_init`, or both. Host callbacks run
+first, then callbacks for the responding agent's workspace; each scope preserves
+registration order. The callback runs on the main thread. `event->llm_response`
+is non-NULL only for this hook and points to a borrowed `PicoLlmResponse` valid
+only during the callback:
+
+- `input_tokens` is the provider-reported input count, or zero when unavailable.
+- `cached_tokens` is normalized to `[0, input_tokens]`.
+- `compact` identifies a compaction response.
+- `first_response` is true only for the first accepted successful **normal**
+  (non-compaction) response in that session.
+
+The first-response state survives durable session replay, including responses
+without usage metrics. Compaction does not consume it; resetting to a new session
+clears it, while changing models does not. Replay and extension reload do not
+synthesize response notifications. Use `event->agent_id` for any agent-targeted
+work; the responding agent may not be selected. `PicoHost_AddNotice` is safe at
+this main-thread boundary. See [notices](notices.md).
+
+```c
+static void OnResponse(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    const PicoLlmResponse *r = event->llm_response;
+    if (!r || r->compact || r->first_response || r->input_tokens == 0) return;
+    int uncached = r->input_tokens - r->cached_tokens;
+    if (uncached >= 10000)
+        PicoHost_AddNotice(host, event->agent_id, PICO_NOTICE_INFO,
+                           "A large prompt-cache miss occurred.");
+}
+
+/* host_init */
+pico_host_add_hook(host, PICO_HOOK_ON_LLM_RESPONSE, OnResponse);
+```
+
+This sample applies a policy; the core hook reports provider usage and does not
+impose a threshold. The builtin `cache_miss` uses this hook and is opt-in.
 
 ## ON_COMPACT
 

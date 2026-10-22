@@ -201,6 +201,7 @@ add_executable(pico
     builtins/sidebar.c
     builtins/overlay.c
     builtins/notify.c
+    builtins/cache_miss.c
     builtins/ask_user.c
     builtins/todo.c
     builtins/todo_model.c
@@ -620,6 +621,7 @@ if(BUILD_TESTING)
         host_extensions.c
         workspace_extensions.c
         subagent_config.c
+        builtins/cache_miss.c
         builtins/ask_user.c
         builtins/subagent.c
         builtins/todo.c
@@ -972,6 +974,7 @@ if(BUILD_TESTING)
         builtins/sidebar.c
         builtins/overlay.c
         builtins/notify.c
+        builtins/cache_miss.c
         builtins/shell.c
         builtins/commands.c
         builtins/sessions.c

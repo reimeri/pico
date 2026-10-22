@@ -1442,7 +1442,7 @@ PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
 
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens,
-                                            bool fast, const char *service_tier)
+                                            bool fast, const char *service_tier, bool compact)
 {
     (void)app;
     (void)agent;
@@ -1450,6 +1450,7 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
     (void)cached_tokens;
     (void)fast;
     (void)service_tier;
+    (void)compact;
     g_test.usage_log_count++;
     return PICO_SESSION_WRITE_OK;
 }
@@ -4127,6 +4128,145 @@ static int TestSessionUsageAccumulation(void)
     return ok ? 0 : Fail(name, "latest or cumulative usage did not include every successful request");
 }
 
+static int CountCacheMissNotices(PicoHost *host, PicoAgentId id)
+{
+    int count = 0;
+    for (int i = 0; i < pico_agent_message_count(host, id); i++)
+    {
+        const PicoMessage *message = pico_agent_message(host, id, i);
+        if (message->role == PICO_ROLE_NOTICE && strstr(message->source, "Large cache miss")) count++;
+    }
+    return count;
+}
+
+static int TestCacheMissProviderResponses(void)
+{
+    const char *name = "cache miss notes use successful provider responses";
+    ResetTest(TEST_SINGLE, 0);
+    g_test.provider_tokens = 25000;
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    InitExt(&app, agent->workspace, pico_ext_cache_miss(), NULL, NULL);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent_StartTurn(&app, agent, "cold request");
+    if (!WaitForIdle(&app) || CountCacheMissNotices(&app, agent->id))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "cold first response must not produce a cache miss note");
+    }
+    /* Two responses in one turn, both with a high cache hit ratio: the rule
+       is the absolute uncached count, not a percentage or per-turn limit. */
+    g_test.provider_tokens = 30000;
+    g_test.provider_cached_tokens = 20000;
+    g_test.provider_tool_limit = 2;
+    PicoAgent_StartTurn(&app, agent, "warm tool turn");
+    if (!WaitForIdle(&app) || CountCacheMissNotices(&app, agent->id) != 2 ||
+        g_test.notice_log_count != 2)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "each qualifying tool-followup response must produce a note");
+    }
+    g_test.provider_tokens = 0;
+    g_test.provider_cached_tokens = -1;
+    PicoAgent_StartTurn(&app, agent, "usage unavailable");
+    if (!WaitForIdle(&app) || CountCacheMissNotices(&app, agent->id) != 2 ||
+        strstr(g_test.last_input ? g_test.last_input : "", "Large cache miss"))
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "missing usage must be silent and notes must stay out of model context");
+    }
+    PicoHost_Shutdown(&app);
+    return 0;
+}
+
+static PicoLlmResponse g_last_response;
+static int g_host_responses, g_workspace_responses;
+static void ObserveHostResponse(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)host; (void)state;
+    if (event->llm_response)
+    {
+        g_host_responses++;
+        g_last_response = *event->llm_response;
+    }
+}
+static void ObserveWorkspaceResponse(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)workspace; (void)state;
+    if (event->llm_response) g_workspace_responses++;
+}
+
+static void ObserveResponses(PicoHost *host)
+{
+    g_host_responses = g_workspace_responses = 0;
+    PicoHost_BeginRegistration(host, PICO_REG_HOST, NULL);
+    pico_host_add_hook(host, PICO_HOOK_ON_LLM_RESPONSE, ObserveHostResponse);
+    PicoHost_PublishRegistration(host, NULL);
+    PicoWorkspace *workspace = PicoHost_PrimaryWorkspace(host);
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_workspace_add_hook(workspace, PICO_HOOK_ON_LLM_RESPONSE, ObserveWorkspaceResponse);
+    PicoHost_PublishRegistration(host, NULL);
+}
+
+static void CancelOnResponse(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    (void)pico_agent_cancel(host, event->agent_id);
+}
+
+static int TestCancelFromResponseHook(void)
+{
+    const char *name = "response hook cancellation settles pending tool calls";
+    ResetTest(TEST_BLOCK_WITH_ASSISTANT, 1);
+    PicoHost app;
+    InitApp(&app);
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    AddLifeHooks(&app);
+    PicoHost_BeginRegistration(&app, PICO_REG_HOST, NULL);
+    pico_host_add_hook(&app, PICO_HOOK_ON_LLM_RESPONSE, CancelOnResponse);
+    PicoHost_PublishRegistration(&app, NULL);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "cancel before executing tools");
+    bool ok = WaitForIdle(&app) && g_test.tool_invocations == 0 && g_test.life_cancel == 1 &&
+              g_test.life_turn_end == 0 && !strcmp(g_test.session_item_order, "AT");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "cancellation must settle without running tools or duplicating the assistant record");
+}
+
+static int TestLlmResponseNotifications(void)
+{
+    const char *name = "response notifications normalize usage and track successful requests";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    ObserveResponses(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "first without usage");
+    if (!WaitForIdle(&app) || g_host_responses != 1 || g_workspace_responses != 1 ||
+        !g_last_response.first_response || g_last_response.compact ||
+        g_last_response.input_tokens || g_last_response.cached_tokens)
+    {
+        PicoHost_Shutdown(&app);
+        return Fail(name, "a successful response without usage must still consume the first response");
+    }
+    g_test.provider_tokens = 10;
+    g_test.provider_cached_tokens = 100;
+    PicoAgent_StartTurn(&app, agent, "cached count overreported");
+    bool ok = WaitForIdle(&app) && g_host_responses == 2 && g_workspace_responses == 2 &&
+              !g_last_response.first_response && g_last_response.input_tokens == 10 &&
+              g_last_response.cached_tokens == 10;
+    if (ok)
+    {
+        g_test.provider_fail = true;
+        PicoAgent_StartTurn(&app, agent, "failed response");
+        ok = WaitForIdle(&app) && g_host_responses == 2 && g_workspace_responses == 2;
+    }
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "response notifications must normalize usage and exclude failures");
+}
+
 static int TestFastTurnSnapshot(void)
 {
     const char *name = "Fast applies to the next whole turn";
@@ -5831,6 +5971,9 @@ int main(void)
     failed |= PICO_TEST_RUN(TestAskReplaceNotification());
     failed |= PICO_TEST_RUN(TestCancelledProviderUsage());
     failed |= PICO_TEST_RUN(TestSessionUsageAccumulation());
+    failed |= PICO_TEST_RUN(TestCacheMissProviderResponses());
+    failed |= PICO_TEST_RUN(TestLlmResponseNotifications());
+    failed |= PICO_TEST_RUN(TestCancelFromResponseHook());
     failed |= PICO_TEST_RUN(TestFastTurnSnapshot());
     failed |= PICO_TEST_RUN(TestUsageNormalizationAndSaturation());
     failed |= PICO_TEST_RUN(TestAfterCompact());

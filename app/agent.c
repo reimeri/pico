@@ -221,6 +221,7 @@ struct PicoAgentRt {
     int stream_msg;
     bool stream_notices_pending;
     bool llm_started; /* current stream was dispatched, not merely prepared */
+    bool stream_saved; /* completed normal response is canonical and persisted */
     bool stream_dirty;
     double stream_reparse_at; /* main thread only: last debounced reparse */
     double action_t0;
@@ -2594,7 +2595,8 @@ static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
 void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index)
 {
     PicoAgentRt *rt = agent->runtime;
-    if (rt && agent->state == PICO_AGENT_LLM_WAIT && !rt->compacting && rt->stream_msg >= 0)
+    if (rt && agent->state == PICO_AGENT_LLM_WAIT && !rt->compacting &&
+        !rt->stream_saved && rt->stream_msg >= 0)
     {
         rt->stream_notices_pending = true;
         return;
@@ -2656,7 +2658,7 @@ static void ApplyCancel(PicoHost *app, PicoAgent *agent)
     }
     /* The completed assistant/tool-call result is already canonical and persisted
      * once tool execution begins. Only provider cancellation has partial output. */
-    if (agent->state == PICO_AGENT_LLM_WAIT)
+    if (agent->state == PICO_AGENT_LLM_WAIT && !rt->stream_saved)
     {
         SavePartialAssistant(app, agent);
     }
@@ -2902,6 +2904,7 @@ static void StartLlm(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
     rt->llm_started = false;
+    rt->stream_saved = false;
     agent->state = PICO_AGENT_LLM_WAIT;
     int last = agent->message_count - 1;
     if (last >= 0 && agent->messages[last].role == PICO_ROLE_ASSISTANT && MessageSourceEmpty(agent, last))
@@ -3433,6 +3436,22 @@ static bool IngestResult(PicoHost *app, PicoAgent *agent, const char *payload)
     return true;
 }
 
+static void NotifyLlmResponse(PicoHost *host, PicoAgent *agent, const PicoAgentEv *ev, bool compact)
+{
+    PicoLlmResponse response = {
+        .compact = compact,
+        .first_response = !compact && !agent->has_llm_response,
+    };
+    if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &response.cached_tokens))
+        response.input_tokens = ev->tokens;
+    if (!compact) agent->has_llm_response = true;
+    /* Record even responses without usage so reopening cannot make a warm
+       session cold again. Compaction never consumes the first normal response. */
+    PicoSession_LogUsage(host, agent, response.input_tokens, response.cached_tokens,
+                         agent->runtime->turn_fast, agent->last_service_tier, compact);
+    PicoHost_RunLlmResponseHooks(host, agent->id, &response);
+}
+
 static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -3448,12 +3467,9 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     if (rt->compacting)
     {
         SweepProvisionalRows(agent, rt);
-        int normalized_cached = 0;
-        if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
-        {
-            PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached,
-                                 rt->turn_fast, agent->last_service_tier);
-        }
+        NotifyLlmResponse(app, agent, ev, true);
+        if (agent->runtime != rt) return;
+        if (PicoAgent_CancelRequested(agent)) { ApplyCancel(app, agent); return; }
         if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
             rt->compact_no_tools = true;
@@ -3487,12 +3503,10 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
         return;
     }
     SweepProvisionalRows(agent, rt);
-    int normalized_cached = 0;
-    if (PicoUsage_Apply(agent, ev->tokens, ev->cached, &normalized_cached))
-    {
-        PicoSession_LogUsage(app, agent, ev->tokens, normalized_cached,
-                             rt->turn_fast, agent->last_service_tier);
-    }
+    rt->stream_saved = true;
+    NotifyLlmResponse(app, agent, ev, false);
+    if (agent->runtime != rt) return;
+    if (PicoAgent_CancelRequested(agent)) { ApplyCancel(app, agent); return; }
     if (rt->pending_count > 0)
     {
         rt->running_tools = 0;

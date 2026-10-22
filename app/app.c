@@ -825,9 +825,10 @@ void pico_host_add_hook(PicoHost *host, PicoHook hook, PicoHostHookFn fn)
         pico_status_warn(host, "pico_host_add_hook: missing hook function");
         return;
     }
-    if (hook != PICO_HOOK_AFTER_LAYOUT && hook != PICO_HOOK_AFTER_RENDER)
+    if (hook != PICO_HOOK_AFTER_LAYOUT && hook != PICO_HOOK_AFTER_RENDER &&
+        hook != PICO_HOOK_ON_LLM_RESPONSE)
     {
-        pico_status_warn(host, "pico_host_add_hook only accepts PICO_HOOK_AFTER_LAYOUT and PICO_HOOK_AFTER_RENDER");
+        pico_status_warn(host, "pico_host_add_hook only accepts AFTER_LAYOUT, AFTER_RENDER, and ON_LLM_RESPONSE");
         return;
     }
     if (host->hook_count + host->staging.host_hook_count >= PICO_MAX_HOOKS)
@@ -1525,9 +1526,10 @@ void pico_clear_registrations(PicoHost *app)
     }
 }
 
-static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSubmitKind submit_kind)
+static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSubmitKind submit_kind,
+                     const PicoLlmResponse *response)
 {
-    PicoHookEvent event;
+    PicoHookEvent event = {0};
     if (!host)
     {
         return;
@@ -1535,6 +1537,7 @@ static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSu
     event.hook = hook;
     event.submit_kind = submit_kind;
     event.agent_id = agent_id;
+    event.llm_response = response;
     if (hook == PICO_HOOK_AFTER_LAYOUT || hook == PICO_HOOK_AFTER_RENDER)
     {
         for (int i = 0; i < host->hook_count; i++)
@@ -1568,12 +1571,13 @@ static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSu
         PicoRegistrationGeneration *agent_registration = agent ? PicoAgent_Registration(agent) : NULL;
         if (ws && (agent_registration || ws->active_registration))
         {
-            const PicoRegistrationGeneration *registration = agent_registration
-                                                                 ? agent_registration
-                                                                 : ws->active_registration;
+            PicoRegistrationGeneration *registration = agent_registration
+                                                           ? agent_registration
+                                                           : ws->active_registration;
             /* A hook may open workspaces or create agents at a cap; the
              * dispatching agent and its workspace must survive that. */
             int hold = PicoHost_EvictHoldPush(host, ws, agent_id);
+            PicoWorkspace_RegistrationRetain(registration);
             for (int i = 0; i < registration->hook_count; i++)
             {
                 if (registration->hooks[i].hook == hook && registration->hooks[i].workspace_fn)
@@ -1581,6 +1585,7 @@ static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSu
                     registration->hooks[i].workspace_fn(ws, &event, registration->hooks[i].state);
                 }
             }
+            PicoWorkspace_RegistrationRelease(registration);
             PicoHost_EvictHoldPop(host, hold);
         }
     }
@@ -1588,7 +1593,26 @@ static void RunHooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id, PicoSu
 
 void pico_run_hooks(PicoHost *host, PicoHook hook, PicoAgentId agent_id)
 {
-    RunHooks(host, hook, agent_id, hook == PICO_HOOK_ON_STEER ? PICO_SUBMIT_STEERING : PICO_SUBMIT_TURN);
+    RunHooks(host, hook, agent_id, hook == PICO_HOOK_ON_STEER ? PICO_SUBMIT_STEERING : PICO_SUBMIT_TURN, NULL);
+}
+
+void PicoHost_RunLlmResponseHooks(PicoHost *host, PicoAgentId agent_id, const PicoLlmResponse *response)
+{
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    if (!agent || !response) return;
+    int hold = PicoHost_EvictHoldPush(host, agent->workspace, agent_id);
+    PicoHookEvent event = {
+        .hook = PICO_HOOK_ON_LLM_RESPONSE,
+        .agent_id = agent_id,
+        .llm_response = response,
+    };
+    for (int i = 0; i < host->hook_count; i++)
+    {
+        if (host->hooks[i].hook == event.hook && host->hooks[i].host_fn)
+            host->hooks[i].host_fn(host, &event, host->hooks[i].state);
+    }
+    RunHooks(host, event.hook, agent_id, PICO_SUBMIT_TURN, response);
+    PicoHost_EvictHoldPop(host, hold);
 }
 
 static char LayoutLetter(int key)
@@ -2296,7 +2320,7 @@ void PicoHost_Submit(PicoHost *app)
     free(app->agent_parts);
     app->agent_parts = NULL;
     app->submit_cancel = false;
-    RunHooks(app, PICO_HOOK_BEFORE_SUBMIT, id, steering ? PICO_SUBMIT_STEERING : PICO_SUBMIT_TURN);
+    RunHooks(app, PICO_HOOK_BEFORE_SUBMIT, id, steering ? PICO_SUBMIT_STEERING : PICO_SUBMIT_TURN, NULL);
     if (app->submit_cancel)
     {
         free(app->agent_input);

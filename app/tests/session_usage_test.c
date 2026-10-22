@@ -69,6 +69,64 @@ static int g_lock_attempt_fd = -1;
 static int g_scan_session_calls;
 static int g_delete_attempt_fd = -1;
 
+static int Fail(const char *message);
+static int g_llm_response_hook_count;
+static void CountLlmResponse(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)host;
+    (void)state;
+    if (event->hook == PICO_HOOK_ON_LLM_RESPONSE) g_llm_response_hook_count++;
+}
+
+static int TestLlmResponseSessionState(void)
+{
+    PicoHost host = {0};
+    PicoWorkspace workspace = {0};
+    PicoAgent writer = {0}, replayed = {0};
+    char config[] = "/tmp/pico-llm-response-state-XXXXXX";
+    if (!mkdtemp(config)) return Fail("LLM response state config directory");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    workspace.host = &host;
+    snprintf(workspace.path, sizeof(workspace.path), "/workspace");
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    writer.workspace = replayed.workspace = &workspace;
+    writer.persistence = replayed.persistence = PICO_SESSION_DURABLE;
+    snprintf(writer.model, sizeof(writer.model), "test-model");
+    snprintf(replayed.model, sizeof(replayed.model), "test-model");
+    host.hooks[host.hook_count++] = (PicoHookEntry){
+        .hook = PICO_HOOK_ON_LLM_RESPONSE, .host_fn = CountLlmResponse,
+    };
+    g_llm_response_hook_count = 0;
+
+    /* A normal successful response with no provider usage still warms the session. */
+    if (PicoSession_LogUsage(&host, &writer, 0, 0, false, "", false) != PICO_SESSION_WRITE_OK ||
+        PicoSession_Replay(&host, &replayed, writer.session_path, false) != 0 || !replayed.has_llm_response)
+        return Fail("zero-usage normal response must persist warm-session state across reopen");
+    bool replay_was_silent = g_llm_response_hook_count == 0 && replayed.message_count == 0;
+    PicoSession_Reset(&host, &replayed);
+    if (replayed.has_llm_response)
+        return Fail("session reset must restore first-response eligibility");
+
+    PicoAgent compact_writer = {0}, compact_replayed = {0};
+    compact_writer.workspace = compact_replayed.workspace = &workspace;
+    compact_writer.persistence = compact_replayed.persistence = PICO_SESSION_DURABLE;
+    snprintf(compact_writer.model, sizeof(compact_writer.model), "test-model");
+    snprintf(compact_replayed.model, sizeof(compact_replayed.model), "test-model");
+    if (PicoSession_LogUsage(&host, &compact_writer, 12000, 0, false, "", true) != PICO_SESSION_WRITE_OK ||
+        PicoSession_Replay(&host, &compact_replayed, compact_writer.session_path, false) != 0 ||
+        compact_replayed.has_llm_response)
+        return Fail("compaction-only session must remain first-response cold after reopen");
+
+    /* Replaying usage is data restoration, not a fresh provider response. */
+    replay_was_silent = replay_was_silent && compact_replayed.message_count == 0 &&
+                        g_llm_response_hook_count == 0;
+    unlink(writer.session_path);
+    unlink(compact_writer.session_path);
+    rmdir(config);
+    return replay_was_silent ? 0 : Fail("session replay must not emit response hooks or synthetic notices");
+}
+
 static const PicoCatalogWorkspace *FindCatalogPath(PicoCatalogWorkspace *list, int n,
                                                     const char *path);
 
@@ -3893,8 +3951,8 @@ int main(void)
     writer_agent.persistence = PICO_SESSION_DURABLE;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "saved-model");
     snprintf(writer_ws.settings.default_model, sizeof(writer_ws.settings.default_model), "default-model");
-    PicoSession_LogUsage(&writer, &writer_agent, 100, 20, false, "default");
-    PicoSession_LogUsage(&writer, &writer_agent, 200, 150, true, "priority");
+    PicoSession_LogUsage(&writer, &writer_agent, 100, 20, false, "default", false);
+    PicoSession_LogUsage(&writer, &writer_agent, 200, 150, true, "priority", false);
     PicoSession_LogAssistant(&writer, &writer_agent, 0, "assistant response", NULL, NULL, NULL, NULL, 0);
     PicoSession_LogCompaction(&writer, &writer_agent, "brief", 200);
     PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
@@ -4230,7 +4288,8 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
+    if (PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
+        PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||

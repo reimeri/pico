@@ -75,6 +75,7 @@ typedef enum PicoHook {
     PICO_HOOK_ON_MESSAGE,
     PICO_HOOK_ON_COMPACT, /* pico_agent_set_compact_summary can replace the default briefing */
     PICO_HOOK_AFTER_COMPACT,
+    PICO_HOOK_ON_LLM_RESPONSE, /* successful response; event->llm_response is callback-scoped */
     PICO_HOOK_ON_TURN_END, /* idle after a finished turn (not cancel/error) */
     PICO_HOOK_ON_CANCEL,
     PICO_HOOK_ON_ERROR,
@@ -182,10 +183,18 @@ typedef enum PicoSubmitKind {
     PICO_SUBMIT_STEERING,
 } PicoSubmitKind;
 
+typedef struct PicoLlmResponse {
+    int input_tokens; /* zero when usage is unavailable */
+    int cached_tokens; /* normalized to [0, input_tokens] */
+    bool compact; /* response to a compaction request */
+    bool first_response; /* first successful non-compaction response in this session */
+} PicoLlmResponse;
+
 typedef struct PicoHookEvent {
     PicoHook hook;
     PicoSubmitKind submit_kind; /* BEFORE_SUBMIT / ON_SUBMIT / ON_STEER only */
     PicoAgentId agent_id; /* zero only for host-global hooks without an agent target */
+    const PicoLlmResponse *llm_response; /* ON_LLM_RESPONSE only; borrowed during callback */
 } PicoHookEvent;
 
 typedef void (*PicoHostHookFn)(PicoHost *host, const PicoHookEvent *event, void *state);
@@ -497,6 +506,8 @@ typedef struct PicoHostPreferences {
     char spell_lang[32];
     char disabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
     int disabled_host_extension_count;
+    char enabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
+    int enabled_host_extension_count;
 } PicoHostPreferences;
 
 typedef struct PicoWorkspaceSettings {

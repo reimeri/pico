@@ -1080,6 +1080,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         int input_tokens = JsonObjInt(doc, obj, "input_tokens", 0);
         int cached_tokens = JsonObjInt(doc, obj, "cached_tokens", 0);
         PicoUsage_Apply(agent, input_tokens, cached_tokens, NULL);
+        if (!JsonEq(doc, JsonObjGet(doc, obj, "compact"), "true")) agent->has_llm_response = true;
         char *tier = JsonObjStr(doc, obj, "service_tier");
         snprintf(agent->last_service_tier, sizeof(agent->last_service_tier), "%s", tier ? tier : "");
         free(tier);
@@ -2780,6 +2781,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     PicoAgent_RotateCacheKey(agent);
     agent->tokens_used = 0;
     agent->tokens_cached = 0;
+    agent->has_llm_response = false;
     agent->session_input_tokens = 0;
     agent->session_cached_tokens = 0;
     agent->fast = false;
@@ -2953,12 +2955,8 @@ PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent,
 
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
                                             int input_tokens, int cached_tokens,
-                                            bool fast, const char *service_tier)
+                                            bool fast, const char *service_tier, bool compact)
 {
-    if (input_tokens <= 0)
-    {
-        return PICO_SESSION_WRITE_SKIPPED;
-    }
     char *pre = EventPrefix("usage");
     JsonBuf b;
     JsonBuf_Init(&b);
@@ -2971,6 +2969,8 @@ PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
     JsonBuf_Bool(&b, fast);
     JsonBuf_Puts(&b, ",\"service_tier\":");
     JsonBuf_String(&b, service_tier ? service_tier : "");
+    JsonBuf_Puts(&b, ",\"compact\":");
+    JsonBuf_Bool(&b, compact);
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     PicoSessionWriteResult result = AppendLine(app, agent, line);

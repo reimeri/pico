@@ -131,48 +131,6 @@ static bool IsSessionJsonl(const char *name)
     return len >= 7 && name[0] != '.' && strcmp(name + len - 6, ".jsonl") == 0;
 }
 
-static int FindLatest(const char *dir, char *out, size_t cap)
-{
-    DIR *d = opendir(dir);
-    if (!d)
-    {
-        return -1;
-    }
-    char best[256];
-    best[0] = '\0';
-    time_t best_mtime = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)))
-    {
-        const char *n = ent->d_name;
-        if (!IsSessionJsonl(n))
-        {
-            continue;
-        }
-        char path[4096];
-        if (!PicoPath_Format(path, sizeof(path), "%s/%s", dir, n))
-        {
-            continue;
-        }
-        struct stat st;
-        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-        {
-            continue;
-        }
-        if (!best[0] || st.st_mtime > best_mtime)
-        {
-            snprintf(best, sizeof(best), "%s", n);
-            best_mtime = st.st_mtime;
-        }
-    }
-    closedir(d);
-    if (!best[0])
-    {
-        return -1;
-    }
-    return PicoPath_Format(out, cap, "%s/%s", dir, best) ? 0 : -1;
-}
-
 static void IdFromName(const char *name, char *out, size_t cap)
 {
     out[0] = '\0';
@@ -1478,11 +1436,18 @@ static bool PrepareSteeringReplay(PicoSessionReplay *replay)
     return valid;
 }
 
+typedef enum ReplayFailure {
+    REPLAY_CORRUPT,
+    REPLAY_CHILD,
+    REPLAY_UNAVAILABLE,
+} ReplayFailure;
+
 /* Reading and strict validation are worker-safe. All ReplayLine calls remain
  * on the main thread, including historical extension tool apply callbacks. */
 static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
                                       const atomic_bool *cancelled,
-                                      bool prepare_messages, bool recover_tail)
+                                      bool prepare_messages, bool recover_tail,
+                                      ReplayFailure *failure)
 {
     JsonDoc *docs = NULL;
     char **lines = NULL;
@@ -1511,12 +1476,29 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
         {
             continue;
         }
+        if (n == 0 && kind == PICO_AGENT_MAIN)
+        {
+            /* Identify children under the same lock and with the same blank-
+             * line rules as replay; do not scan their potentially large body. */
+            JsonDoc header = {0};
+            errno = 0;
+            if (JsonParse(&header, buf, len) == 0)
+            {
+                bool child = JsonEq(&header, JsonObjGet(&header, 0, "type"), "session") &&
+                             JsonEq(&header, JsonObjGet(&header, 0, "kind"), "subagent");
+                JsonFree(&header);
+                if (child) { *failure = REPLAY_CHILD; free(buf); goto invalid; }
+            }
+            else if (errno == ENOMEM)
+            { *failure = REPLAY_UNAVAILABLE; free(buf); goto invalid; }
+        }
         if (n >= cap)
         {
             cap = cap == 0 ? 32 : cap * 2;
             char **next = (char **)realloc(lines, (size_t)cap * sizeof(char *));
             if (!next)
             {
+                *failure = REPLAY_UNAVAILABLE;
                 read_failed = true;
                 break;
             }
@@ -1525,14 +1507,16 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
         char *copy = JsonDup(buf);
         if (!copy)
         {
+            *failure = REPLAY_UNAVAILABLE;
             read_failed = true;
             break;
         }
         if (!terminated) unterminated_record = n;
         lines[n++] = copy;
     }
-    if (ferror(f) || !feof(f))
+    if (ferror(f) || (!read_failed && !feof(f)))
     {
+        *failure = REPLAY_UNAVAILABLE;
         read_failed = true;
     }
     free(buf);
@@ -1542,7 +1526,7 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     }
 
     docs = (JsonDoc *)calloc((size_t)n, sizeof(JsonDoc));
-    if (!docs) goto invalid;
+    if (!docs) { *failure = REPLAY_UNAVAILABLE; goto invalid; }
     int last_compact = -1;
     int last_tool_call = -1;
     int last_tool_result = -1;
@@ -1552,12 +1536,13 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     bool recovered_tail = false;
     for (int i = 0; i < n; i++)
     {
-        if (cancelled && atomic_load(cancelled)) goto invalid;
+        if (cancelled && atomic_load(cancelled)) { *failure = REPLAY_UNAVAILABLE; goto invalid; }
         JsonDoc *doc = &docs[i];
         errno = 0;
         if (JsonParse(doc, lines[i], strlen(lines[i])) != 0)
         {
             /* An allocation failure is not evidence of corrupt disk data. */
+            if (errno == ENOMEM) *failure = REPLAY_UNAVAILABLE;
             if (errno == ENOMEM || !recover_tail || i == 0 || i != unterminated_record || i != n - 1)
                 goto invalid;
             free(lines[i]);
@@ -1620,12 +1605,12 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
             tool_results++;
         }
         free(type);
-
+        if (errno == ENOMEM) goto invalid;
     }
     if (!valid_header) goto invalid;
 
     PicoSessionReplay *replay = (PicoSessionReplay *)calloc(1, sizeof(*replay));
-    if (!replay) goto invalid;
+    if (!replay) { *failure = REPLAY_UNAVAILABLE; goto invalid; }
     replay->lines = lines;
     replay->docs = docs;
     replay->count = n;
@@ -1637,8 +1622,10 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     replay->last_tool_result = last_tool_result;
     replay->tool_calls = tool_calls;
     replay->tool_results = tool_results;
+    errno = 0;
     if (!PrepareSteeringReplay(replay))
     {
+        if (errno == ENOMEM) *failure = REPLAY_UNAVAILABLE;
         PicoSession_ReplayFree(replay);
         return NULL;
     }
@@ -1646,7 +1633,7 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     if (prepare_messages)
     {
         replay->prepared = calloc((size_t)replay->count, sizeof(*replay->prepared));
-        if (!replay->prepared) { PicoSession_ReplayFree(replay); return NULL; }
+        if (!replay->prepared) { *failure = REPLAY_UNAVAILABLE; PicoSession_ReplayFree(replay); return NULL; }
         int group = -1;
         int prepared_docs = 0;
         /* Keep worker preparation from multiplying one arena per JSONL
@@ -1729,6 +1716,9 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     }
     return replay;
 invalid:
+    /* Field extraction allocates too. Missing decoded header/record fields
+     * after an allocation failure must never masquerade as corrupt history. */
+    if (errno == ENOMEM) *failure = REPLAY_UNAVAILABLE;
     for (int i = 0; i < n; i++)
     {
         if (docs) JsonFree(&docs[i]);
@@ -1744,15 +1734,20 @@ invalid:
 static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind kind,
                                               const atomic_bool *cancelled,
                                               bool prepare_messages, bool recover_tail,
-                                              bool *repaired)
+                                              bool *repaired, ReplayFailure *failure)
 {
+    ReplayFailure ignored;
+    if (!failure) failure = &ignored;
+    *failure = REPLAY_CORRUPT;
     if (repaired) *repaired = false;
     int lock = recover_tail ? SessionLockAcquireBefore(path, NULL, 0, cancelled) : -1;
-    if (recover_tail && lock < 0) return NULL;
+    if (recover_tail && lock < 0) { *failure = REPLAY_UNAVAILABLE; return NULL; }
     FILE *f = fopen(path, "rb");
-    PicoSessionReplay *replay = f ? ReplayRead(f, kind, cancelled, prepare_messages, recover_tail) : NULL;
+    if (!f) *failure = REPLAY_UNAVAILABLE;
+    PicoSessionReplay *replay = f ? ReplayRead(f, kind, cancelled, prepare_messages, recover_tail, failure) : NULL;
     if (replay && cancelled && atomic_load(cancelled))
     {
+        *failure = REPLAY_UNAVAILABLE;
         PicoSession_ReplayFree(replay);
         replay = NULL;
     }
@@ -1777,6 +1772,7 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
         if (fd >= 0 && close(fd) != 0) ok = false;
         if (!ok)
         {
+            *failure = REPLAY_UNAVAILABLE;
             PicoSession_ReplayFree(replay);
             replay = NULL;
         }
@@ -1799,7 +1795,7 @@ static void ReplayWarnRecovered(PicoHost *host, bool repaired, bool ready)
 PicoSessionReplay *PicoSession_ReplayPrepare(PicoHost *host, const char *path, PicoAgentKind kind)
 {
     bool repaired = false;
-    PicoSessionReplay *replay = ReplayPrepareBefore(path, kind, NULL, false, true, &repaired);
+    PicoSessionReplay *replay = ReplayPrepareBefore(path, kind, NULL, false, true, &repaired, NULL);
     ReplayWarnRecovered(host, repaired, replay != NULL);
     return replay;
 }
@@ -1982,6 +1978,114 @@ void PicoSession_ReplayToolDetails(PicoHost *app, PicoAgent *agent)
     fclose(f);
 }
 
+typedef struct LatestSessionCandidate {
+    char name[256];
+    struct timespec modified;
+} LatestSessionCandidate;
+
+static int CompareLatestSessions(const void *left, const void *right)
+{
+    const LatestSessionCandidate *a = left, *b = right;
+    if (a->modified.tv_sec != b->modified.tv_sec)
+        return a->modified.tv_sec > b->modified.tv_sec ? -1 : 1;
+    if (a->modified.tv_nsec != b->modified.tv_nsec)
+        return a->modified.tv_nsec > b->modified.tv_nsec ? -1 : 1;
+    /* Session filenames include creation time and identity. Never depend on
+     * filesystem enumeration order when modification timestamps tie. */
+    return strcmp(b->name, a->name);
+}
+
+/* Shared by synchronous resume and the UI read worker. Read only headers for
+ * ineligible children; fully validate main candidates newest-first and transfer
+ * the chosen replay rather than rereading it after selection. */
+static PicoSessionReplay *ReplayLatestMain(const char *dir, const atomic_bool *cancelled,
+                                           bool prepare_messages, char *path, size_t path_cap,
+                                           bool *no_session, bool *skipped, bool *repaired)
+{
+    *no_session = true;
+    *skipped = false;
+    *repaired = false;
+    path[0] = '\0';
+    DIR *d = opendir(dir);
+    if (!d)
+    {
+        *no_session = errno == ENOENT;
+        return NULL;
+    }
+    LatestSessionCandidate *candidates = NULL;
+    size_t count = 0, capacity = 0;
+    bool failed = false;
+    for (;;)
+    {
+        if (cancelled && atomic_load(cancelled)) { failed = true; break; }
+        errno = 0;
+        struct dirent *ent = readdir(d);
+        if (!ent) { failed = errno != 0; break; }
+        if (!IsSessionJsonl(ent->d_name)) continue;
+        char candidate_path[4096];
+        struct stat st;
+        if (!PicoPath_Format(candidate_path, sizeof(candidate_path), "%s/%s", dir, ent->d_name))
+        { failed = true; break; }
+        if (stat(candidate_path, &st) != 0)
+        {
+            if (errno == ENOENT) continue;
+            failed = true; break;
+        }
+        if (!S_ISREG(st.st_mode)) continue;
+        if (count == capacity)
+        {
+            size_t next = capacity ? capacity * 2 : 32;
+            LatestSessionCandidate *grown = realloc(candidates, next * sizeof(*grown));
+            if (!grown) { failed = true; break; }
+            candidates = grown;
+            capacity = next;
+        }
+        LatestSessionCandidate *candidate = &candidates[count++];
+        snprintf(candidate->name, sizeof(candidate->name), "%s", ent->d_name);
+#if defined(__APPLE__)
+        candidate->modified = st.st_mtimespec;
+#else
+        candidate->modified = st.st_mtim;
+#endif
+    }
+    closedir(d);
+    PicoSessionReplay *replay = NULL;
+    if (failed) { *no_session = false; goto done; }
+    if (count > 1) qsort(candidates, count, sizeof(*candidates), CompareLatestSessions);
+    for (size_t i = 0; i < count; i++)
+    {
+        if (cancelled && atomic_load(cancelled)) break;
+        char candidate_path[4096], canonical[4096];
+        if (!PicoPath_Format(candidate_path, sizeof(candidate_path), "%s/%s", dir, candidates[i].name))
+        { *no_session = false; break; }
+        if (!realpath(candidate_path, canonical)) { *no_session = false; break; }
+        ReplayFailure failure;
+        replay = ReplayPrepareBefore(canonical, PICO_AGENT_MAIN, cancelled,
+                                      prepare_messages, true, repaired, &failure);
+        if (!replay && failure == REPLAY_CHILD) continue;
+        *no_session = false;
+        if (replay)
+        {
+            if (!PicoPath_Format(path, path_cap, "%s", canonical))
+            { PicoSession_ReplayFree(replay); replay = NULL; }
+            break;
+        }
+        /* Corruption may fall back; unavailable storage, cancellation, OOM,
+         * and failed repairs must not silently select an unrelated older chat. */
+        if (failure == REPLAY_UNAVAILABLE) break;
+        *skipped = true;
+    }
+done:
+    free(candidates);
+    return replay;
+}
+
+static void WarnLatestFallback(PicoHost *host)
+{
+    pico_status_warn(host, "Skipped newer session files that could not be resumed; "
+                           "opened the newest recoverable main conversation.");
+}
+
 void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, const char *session_file)
 {
     if (!app || !agent)
@@ -2010,18 +2114,23 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
     }
     if (start == PICO_SESSION_RESUME || (ws && ws->settings.resume_last))
     {
-        char dir[4096];
-        char latest[4096];
-        if (SessionDir(SessionWorkspace(app, agent), dir, sizeof(dir)) &&
-            FindLatest(dir, latest, sizeof(latest)) == 0)
+        char dir[4096], path[4096];
+        bool no_session = false, skipped = false, repaired = false;
+        PicoSessionReplay *replay = SessionDir(SessionWorkspace(app, agent), dir, sizeof(dir))
+            ? ReplayLatestMain(dir, NULL, false, path, sizeof(path), &no_session, &skipped, &repaired)
+            : NULL;
+        ReplayWarnRecovered(app, repaired, replay != NULL);
+        if (replay && (!ws || PicoWorkspace_ReserveSession(ws, agent->id, path)))
         {
-            char canonical[4096];
-            if (realpath(latest, canonical) &&
-                (!ws || PicoWorkspace_ReserveSession(ws, agent->id, canonical)))
-            {
-                (void)PicoSession_Replay(app, agent, canonical, true);
-            }
+            PicoSession_ReplayPrepared(app, agent, path, replay, true);
+            if (skipped) WarnLatestFallback(app);
         }
+        else if (!no_session)
+        {
+            agent->persistence = PICO_SESSION_FAILED;
+            pico_status_warn(app, "Could not resume a saved main conversation.");
+        }
+        PicoSession_ReplayFree(replay);
     }
 }
 
@@ -2442,7 +2551,7 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
     }
     PicoSessionHeader info;
     if (PicoSession_ReadHeader(path, &info) != 0) return -1;
-    PicoSessionReplay *replay = ReplayPrepareBefore(path, info.kind, NULL, false, false, NULL);
+    PicoSessionReplay *replay = ReplayPrepareBefore(path, info.kind, NULL, false, false, NULL, NULL);
     if (!replay) return -1;
     PicoMessage *messages = NULL;
     int count = 0;
@@ -7030,6 +7139,7 @@ typedef struct PicoSessionLoadWorker {
     bool allow_prefix;
     bool no_session;
     bool repaired_tail;
+    bool skipped_latest;
     char path[4096];
     PicoSessionReplay *replay;
 } PicoSessionLoadWorker;
@@ -7040,6 +7150,7 @@ typedef struct PicoSessionLoad {
     PicoAgentId replace_id;
     PicoAgentId selected_at_start;
     bool startup;
+    bool skipped_latest;
     bool cancelled;
     bool processing;
     PicoSessionLoadWorker *worker;
@@ -7083,11 +7194,13 @@ static void *SessionLoadRead(void *arg)
         snprintf(lookup->path, sizeof(lookup->path), "%s", worker->workspace_path);
         if (worker->latest)
         {
-            char dir[4096], latest[4096];
-            if (!SessionDir(lookup, dir, sizeof(dir)) ||
-                FindLatest(dir, latest, sizeof(latest)) != 0)
-                worker->no_session = true;
-            else if (!realpath(latest, worker->path)) worker->path[0] = '\0';
+            char dir[4096];
+            if (SessionDir(lookup, dir, sizeof(dir)))
+                worker->replay = ReplayLatestMain(dir, &worker->cancelled, true,
+                    worker->path, sizeof(worker->path), &worker->no_session,
+                    &worker->skipped_latest, &worker->repaired_tail);
+            free(lookup);
+            goto prepared;
         }
         else if (PicoSession_Resolve(lookup, worker->requested,
                                      worker->allow_prefix, worker->path,
@@ -7097,7 +7210,8 @@ static void *SessionLoadRead(void *arg)
     }
     if (worker->path[0] && !atomic_load(&worker->cancelled))
         worker->replay = ReplayPrepareBefore(worker->path, PICO_AGENT_MAIN,
-                                              &worker->cancelled, true, true, &worker->repaired_tail);
+                                              &worker->cancelled, true, true, &worker->repaired_tail, NULL);
+prepared:
 #ifdef PICO_SESSION_TEST_HOOKS
     (void)PicoSession_TestHook("async_replay_after_read");
 #endif
@@ -7179,6 +7293,7 @@ static void SessionLoadCompleted(PicoHost *host, void *arg)
         PicoSession_LoadCancel(host);
         return;
     }
+    load->skipped_latest = worker->skipped_latest;
     load->replay = worker->replay;
     worker->replay = NULL;
 #ifdef PICO_SESSION_TEST_HOOKS
@@ -7349,6 +7464,7 @@ void PicoSession_LoadPump(PicoHost *host)
                                            load->selected_at_start == host->selected_agent_id))
         goto failed;
     load->candidate = NULL;
+    if (load->skipped_latest) WarnLatestFallback(host);
     /* Session hooks may close the just-published agent or supersede this load. */
     PicoAgent *live = PicoHost_FindAgent(host, published_id);
     if (live) ReplayAppendInterrupted(host, live, load->replay);

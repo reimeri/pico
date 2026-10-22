@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <poll.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,22 @@ static char g_status_warning[512];
 static int g_reserve_calls;
 static char g_replayed_history[16384];
 static char g_last_think[2048];
+
+#ifdef PICO_TEST_JSON_ALLOC
+static bool g_fail_replay_header;
+char *__real_JsonObjStr(const JsonDoc *doc, int obj, const char *key);
+char *__wrap_JsonObjStr(const JsonDoc *doc, int obj, const char *key)
+{
+    if (g_fail_replay_header && !strcmp(key, "id") &&
+        JsonEq(doc, JsonObjGet(doc, obj, "type"), "session"))
+    {
+        g_fail_replay_header = false;
+        errno = ENOMEM;
+        return NULL;
+    }
+    return __real_JsonObjStr(doc, obj, key);
+}
+#endif
 
 static void TrackHistory(const char *text)
 {
@@ -3662,6 +3679,103 @@ static int TestModelResumeReplay(void)
     return 0;
 }
 
+static int TestResumeLatestMain(void)
+{
+    PicoHost host = {0};
+    PicoWorkspace workspace = {.host = &host};
+    snprintf(workspace.path, sizeof(workspace.path), "/latest-main-selection");
+    host.workspaces[0] = &workspace; host.workspace_count = 1;
+    PicoAgent first = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+    PicoAgent second = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+    if (PicoSession_LogUser(&host, &first, "first main", "first main", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(&host, &second, "second main", "second main", NULL) != PICO_SESSION_WRITE_OK)
+        return Fail("latest main fixtures");
+    /* Explicit replay accepts leading empty lines; latest must use the same
+     * recoverability rules rather than a different first-physical-line parser. */
+    char *first_contents = Pico_ReadFile(first.session_path, NULL);
+    FILE *leading = fopen(first.session_path, "wb");
+    if (!first_contents || !leading) return Fail("leading blank fixture");
+    fputc('\n', leading); fputs(first_contents, leading); fclose(leading); free(first_contents);
+    char child[4096], corrupt[4096];
+    snprintf(child, sizeof(child), "%s", first.session_path);
+    char *slash = strrchr(child, '/');
+    if (!slash) return Fail("latest session directory");
+    snprintf(slash + 1, sizeof(child) - (size_t)(slash + 1 - child), "child.jsonl");
+    snprintf(corrupt, sizeof(corrupt), "%s", child);
+    slash = strrchr(corrupt, '/');
+    snprintf(slash + 1, sizeof(corrupt) - (size_t)(slash + 1 - corrupt), "corrupt.jsonl");
+    if (!AppendRaw(child, "{\"type\":\"session\",\"version\":5,\"kind\":\"subagent\",\"id\":\"child\","
+                          "\"profile\":\"review\",\"initial_purpose\":\"review\"}"))
+        return Fail("latest child fixture");
+    struct timespec earlier[2] = {{.tv_sec = 1700000000, .tv_nsec = 100}, {.tv_sec = 1700000000, .tv_nsec = 100}};
+    struct timespec later[2] = {{.tv_sec = 1700000000, .tv_nsec = 900}, {.tv_sec = 1700000000, .tv_nsec = 900}};
+    struct timespec newest[2] = {{.tv_sec = 1700000010}, {.tv_sec = 1700000010}};
+    if (utimensat(AT_FDCWD, first.session_path, later, 0) || utimensat(AT_FDCWD, second.session_path, earlier, 0) ||
+        utimensat(AT_FDCWD, child, newest, 0)) return Fail("latest fixture timestamps");
+    PicoAgent restored = {.workspace = &workspace};
+    g_status_warning[0] = '\0'; g_replayed_history[0] = '\0';
+    PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+    bool ok = !strcmp(restored.session_path, first.session_path) && strstr(g_replayed_history, "first main") &&
+              !g_status_warning[0];
+    if (!ok) return Fail("latest resume must ignore children and use subsecond modification order");
+#ifdef PICO_TEST_JSON_ALLOC
+    restored = (PicoAgent){.workspace = &workspace};
+    g_fail_replay_header = true;
+    PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+    if (g_fail_replay_header || restored.session_path[0] || restored.persistence != PICO_SESSION_FAILED ||
+        strstr(g_status_warning, "Skipped newer")) return Fail("header allocation failure must not select older history");
+#endif
+    const char *bad_header = "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"corrupt\"}";
+    if (!AppendRaw(corrupt, bad_header) || !AppendRaw(corrupt, "{broken") ||
+        utimensat(AT_FDCWD, corrupt, newest, 0)) return Fail("latest corrupt fixture");
+    char *before = Pico_ReadFile(corrupt, NULL);
+    restored = (PicoAgent){.workspace = &workspace};
+    g_status_warning[0] = '\0';
+    PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+    char *after = Pico_ReadFile(corrupt, NULL);
+    ok = !strcmp(restored.session_path, first.session_path) && strstr(g_status_warning, "Skipped newer") &&
+         before && after && !strcmp(before, after);
+    free(before); free(after);
+    if (!ok) return Fail("latest resume must warn on corruption fallback without modifying skipped files");
+    if (utimensat(AT_FDCWD, second.session_path, later, 0)) return Fail("latest tie timestamp");
+    restored = (PicoAgent){.workspace = &workspace};
+    PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+    const char *tie_winner = strcmp(first.session_path, second.session_path) > 0 ? first.session_path : second.session_path;
+    if (strcmp(restored.session_path, tie_winner)) return Fail("latest timestamp ties must have deterministic filename order");
+    /* A recoverable newest record whose repair cannot be saved is an I/O
+     * failure, not permission to silently restore older conversation state. */
+    const char *repair_stages[] = {"replay_before_repair", "replay_after_repair"};
+    const char *repair_tails[] = {"{\"type\":", "{\"type\":\"message\",\"role\":\"user\",\"content\":\"intact tail\"}"};
+    for (int i = 0; i < 2; i++)
+    {
+        FILE *f = fopen(corrupt, "wb");
+        if (!f) return Fail("latest repair failure fixture");
+        fprintf(f, "%s\n%s", bad_header, repair_tails[i]); fclose(f);
+        if (utimensat(AT_FDCWD, corrupt, newest, 0)) return Fail("repair timestamp");
+        restored = (PicoAgent){.workspace = &workspace};
+        g_status_warning[0] = '\0';
+        g_session_fail_stage = repair_stages[i];
+        PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+        g_session_fail_stage = NULL;
+        if (restored.session_path[0] || restored.persistence != PICO_SESSION_FAILED ||
+            strstr(g_status_warning, "Skipped newer")) return Fail("latest must not fall back after a failed repair");
+    }
+    /* Leave an actually corrupt candidate for the all-invalid directory case. */
+    if (!AppendRaw(corrupt, "{broken")) return Fail("corrupt-only fixture");
+    unlink(first.session_path); unlink(second.session_path);
+    restored = (PicoAgent){.workspace = &workspace};
+    PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+    if (restored.session_path[0] || restored.persistence != PICO_SESSION_FAILED)
+        return Fail("unrecoverable main sessions must not look like an empty session directory");
+    unlink(corrupt);
+    restored = (PicoAgent){.workspace = &workspace};
+    g_status_warning[0] = '\0';
+    PicoSession_Start(&host, &restored, PICO_SESSION_RESUME, NULL);
+    ok = !restored.session_path[0] && restored.persistence == PICO_SESSION_DURABLE && !g_status_warning[0];
+    unlink(child);
+    return ok ? 0 : Fail("child-only history must not be treated as a failed main-session resume");
+}
+
 static int TestSessionTailRecovery(void)
 {
     PicoHost host = {0};
@@ -4116,7 +4230,7 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
+    if (PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||

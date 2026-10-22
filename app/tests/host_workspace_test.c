@@ -12321,6 +12321,74 @@ done:
     return rc;
 }
 
+static int TestLatestResumeWaitsForHeader(void)
+{
+    char dir[] = "/tmp/pico-latest-lock-XXXXXX", cfg[] = "/tmp/pico-latest-lock-cfg-XXXXXX";
+    char path[4096] = {0}, lock_path[4102];
+    char *contents = NULL;
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentId seed_id = 0, current_id = 0;
+    int lock = -1, rc = 1, ready[2] = {-1, -1}, release[2] = {-1, -1};
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || pico_workspace_open(host, dir, &ws) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+    for (int i = 0; i < 2; i++)
+    {
+        if (pico_main_agent_create(host, ws, &options, &seed_id) != PICO_OK) goto done;
+        PicoAgent *seed = PicoHost_FindAgent(host, seed_id);
+        const char *text = i ? "newest committed history" : "older fallback";
+        if (PicoSession_LogUser(host, seed, text, text, NULL) != PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(host, seed)) goto done;
+        snprintf(path, sizeof(path), "%s", seed->session_path);
+        if (pico_agent_close(host, seed_id) != PICO_OK) goto done;
+    }
+    contents = Pico_ReadFile(path, NULL);
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
+    lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+#if defined(__linux__)
+    struct flock held = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    if (!contents || lock < 0 || fcntl(lock, F_OFD_SETLK, &held) != 0) goto done;
+#else
+    if (!contents || lock < 0 || flock(lock, LOCK_EX) != 0) goto done;
+#endif
+    FILE *f = fopen(path, "wb");
+    if (!f) goto done;
+    fputs("{\"type\":", f); fclose(f);
+    options.session_start = PICO_SESSION_NONE;
+    options.select = true;
+    if (pico_main_agent_create(host, ws, &options, &current_id) != PICO_OK ||
+        pipe(ready) || pipe(release)) goto done;
+    g_replay_gate_stage = "replay_lock_wait";
+    g_replay_ready_fd = ready[1]; g_replay_continue_fd = release[0];
+    if (PicoSession_LoadAsync(host, ws, current_id, NULL, false, true, false, false) != PICO_OK ||
+        !TransferTestByte(ready[0], false)) goto done;
+    f = fopen(path, "wb");
+    if (!f) goto done;
+    fputs(contents, f); fclose(f);
+    close(lock); lock = -1;
+    if (!TransferTestByte(release[1], true)) goto done;
+    PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+    PicoAgent *loaded = PicoHost_SelectedAgent(host);
+    if (!loaded || strcmp(loaded->session_path, path) || loaded->message_count != 1 ||
+        strcmp(loaded->messages[0].source, "newest committed history") ||
+        (host->status_warn && strstr(host->status_warn, "Skipped newer"))) goto done;
+    rc = 0;
+done:
+    if (lock >= 0) close(lock);
+    if (release[1] >= 0) (void)TransferTestByte(release[1], true);
+    if (host) pico_host_free(host);
+    g_replay_ready_fd = g_replay_continue_fd = -1;
+    g_replay_gate_stage = "async_replay_before_read";
+    for (int i = 0; i < 2; i++) { if (ready[i] >= 0) close(ready[i]); if (release[i] >= 0) close(release[i]); }
+    free(contents);
+    unsetenv("XDG_CONFIG_HOME"); rmdir(cfg); rmdir(dir);
+    if (rc) Fail("latest resume must wait for a locked header instead of falling back to stale history");
+    return rc;
+}
+
 static int TestAsyncSessionReplay(void)
 
 {
@@ -12471,8 +12539,27 @@ static int TestAsyncSessionReplay(void)
 
     /* Startup must return while reading is gated, and must reject submits into
      * the empty initial agent until the replay is ready for atomic publication. */
+    char newer_child[4096], newer_bad[4096];
+    snprintf(newer_child, sizeof(newer_child), "%s", path);
+    char *slash = strrchr(newer_child, '/');
+    if (!slash) goto done;
+    snprintf(slash + 1, sizeof(newer_child) - (size_t)(slash + 1 - newer_child), "newer-child.jsonl");
+    snprintf(newer_bad, sizeof(newer_bad), "%s", path);
+    slash = strrchr(newer_bad, '/');
+    snprintf(slash + 1, sizeof(newer_bad) - (size_t)(slash + 1 - newer_bad), "newer-bad.jsonl");
+    FILE *newer = fopen(newer_child, "wb");
+    if (!newer) goto done;
+    fputs("{\"type\":\"session\",\"version\":5,\"kind\":\"subagent\",\"id\":\"child\","
+          "\"profile\":\"review\",\"initial_purpose\":\"review\"}\n", newer);
+    fclose(newer);
+    newer = fopen(newer_bad, "wb");
+    if (!newer) goto done;
+    fputs("{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"bad\"}\n{broken\n", newer);
+    fclose(newer);
+    struct timespec future[2] = {{.tv_sec = time(NULL) + 60}, {.tv_sec = time(NULL) + 60}};
+    if (utimensat(AT_FDCWD, newer_child, future, 0) || utimensat(AT_FDCWD, newer_bad, future, 0)) goto done;
     if (pico_host_init(&startup, NULL, true) != PICO_OK) goto done;
-    PicoHost_Start(startup, NULL, dir, true, PICO_SESSION_RESUME, path);
+    PicoHost_Start(startup, NULL, dir, true, PICO_SESSION_RESUME, NULL);
     PicoAgentId initial = pico_agent_active(startup);
     if (!PicoSession_LoadPending(startup) || !initial ||
         pico_agent_submit(startup, initial, "premature", NULL) != PICO_BUSY)
@@ -12486,7 +12573,8 @@ static int TestAsyncSessionReplay(void)
     }
     PicoAgent *started = PicoHost_SelectedAgent(startup);
     if (PicoSession_LoadPending(startup) || !started || started->id == initial ||
-        started->message_count != 81)
+        started->message_count != 81 || strcmp(started->session_path, path) ||
+        !startup->status_warn || !strstr(startup->status_warn, "Skipped newer"))
     {
         Fail("startup must publish the complete resumed session");
         goto done;
@@ -17278,6 +17366,13 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
     if (argc == 2 && strcmp(argv[1], "--fast-persistence") == 0) return PICO_TEST_RUN(TestFastSelectionPersistence());
 #ifdef PICO_OPENAI_LOGIN_TESTS
+    if (argc == 2 && strcmp(argv[1], "--openai-refresh") == 0)
+        return PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(1, false)) ||
+               PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(2, false)) ||
+               PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(1, true));
+    if (PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(1, false)) ||
+        PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(2, false)) ||
+        PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(1, true))) return 1;
     if (argc == 2 && strcmp(argv[1], "--openai-login") == 0)
         return PICO_TEST_RUN(TestOpenAiLogin()) || PICO_TEST_RUN(TestOpenAiBrowserLauncher()) || PICO_TEST_RUN(TestOpenAiBlockedShutdown());
     if (PICO_TEST_RUN(TestOpenAiLogin()) || PICO_TEST_RUN(TestOpenAiBrowserLauncher()) || PICO_TEST_RUN(TestOpenAiBlockedShutdown())) return 1;
@@ -17701,6 +17796,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestLoadTargetSurvivesPreviousLoadCancellation()) != 0) return 1;
     if (PICO_TEST_RUN(TestSteeringAsyncReplayIdentity()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncRecoveryCancellation()) != 0) return 1;
+    if (PICO_TEST_RUN(TestLatestResumeWaitsForHeader()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncSessionReplay()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncReplayLargeMessage()) != 0) return 1;
     if (PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) != 0) return 1;

@@ -100,6 +100,8 @@ If a non-compaction request fails or is cancelled after streaming output, Pico p
 
 `PICO_LLM_DELTA_THINKING` appends raw thinking. `PICO_LLM_DELTA_THINKING_SUMMARY` replaces the current reasoning-summary snapshot (OpenAI-style short titles). A zero-length `THINKING_SUMMARY` starts a new step in that streak; Pico coalesces consecutive summaries until a tool call. The thinking widget title is the latest summary; expanding it shows every step. Durable sessions preserve the ordered steps. After a tool, the next summary starts a new line.
 
+Builtin Chat Completions providers (Hyper and xAI) treat `finish_reason: "length"` as a failed, token-truncated response, not a completed answer. Partial streamed text/thinking remain visible and durable through the normal failed-turn path, but **none** of that response's tool calls execute, including calls whose arguments finished earlier. Content-filter termination likewise fails. Before projecting any tool calls, the complete batch must have IDs/names and nonempty, valid JSON-object arguments; missing arguments are never substituted with `{}`. These failures do not trigger automatic continuation or retry.
+
 ## Result
 
 Fill `PicoLlmResult` with malloc'd strings and ordered items. Pico calls `pico_llm_result_free`. Return `PICO_LLM_OK`, `PICO_LLM_FAIL` (set `out->error`), or `PICO_LLM_CANCEL`. Helpers such as `pico_llm_result_add_text`, `pico_llm_result_add_refusal`, and `pico_llm_result_add_tool_call` append items so simple providers do not hand-build arrays.

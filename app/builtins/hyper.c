@@ -392,26 +392,10 @@ static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel 
         return false;
     }
 
-    if (!force)
-    {
-        int res = pico_auth_begin_refresh_ctx(ctx, "hyper", tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
-        if (res == PICO_AUTH_REFRESH_ALREADY_VALID)
-        {
-            return true;
-        }
-        if (res != PICO_AUTH_REFRESH_OWNER)
-        {
-            return false;
-        }
-    }
-    else
-    {
-        int res = pico_auth_begin_refresh_ctx(ctx, "hyper", tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
-        if (res == PICO_AUTH_REFRESH_FAILED)
-        {
-            return false;
-        }
-    }
+    int res = pico_auth_begin_refresh_ctx(ctx, "hyper", force ? auth->access_token : NULL,
+                                           tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
+    if (res == PICO_AUTH_REFRESH_ALREADY_VALID) return true;
+    if (res != PICO_AUTH_REFRESH_OWNER) return false;
 
     int rc = ExchangeRefreshToken(NULL, ctx, auth, auth->refresh_token, auth->account_id, tc);
     pico_auth_end_refresh_ctx(ctx, "hyper");

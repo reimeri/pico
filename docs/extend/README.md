@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 19 adds queued, durable steering and submission-kind hooks alongside typed transcript-only notices and includes Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 20 adds rejected-token-aware OAuth refresh coordination and includes queued, durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 

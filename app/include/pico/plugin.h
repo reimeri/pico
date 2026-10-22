@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 19 /* Queued, durable steering and submission kinds */
+#define PICO_EXT_ABI 20 /* Rejected-token-aware OAuth refresh coordination */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);

@@ -40,8 +40,13 @@ enum {
     PICO_AUTH_REFRESH_OWNER = 2,
 };
 
-/* Coordinates worker OAuth token refresh without mutable static variables. */
+/* Coordinates worker OAuth refresh. NULL rejected_access_token is proactive;
+ * otherwise force an exchange only if the store still has that rejected token.
+ * A waiter adopts a usable replacement without exchanging it again. The token
+ * may alias auth_out->access_token; auth_out is replaced with a fresh snapshot.
+ * Only OWNER may exchange credentials and must call end on every exit path. */
 int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
+                                const char *rejected_access_token,
                                 PicoLlmCancelFn cancel, void *user,
                                 PicoAuthEntry *auth_out);
 void pico_auth_end_refresh_ctx(PicoAgentContext *ctx, const char *provider);

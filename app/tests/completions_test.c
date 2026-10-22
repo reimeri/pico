@@ -669,8 +669,68 @@ static void TestServiceTier(void)
     pico_completions_ctx_free(&ctx);
 }
 
+/* Exercise the actual transport-to-result path without a live provider. */
+static const char *post_chunks[8];
+int pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
+{
+    *http = 200;
+    *error = NULL;
+    for (int i = 0; post_chunks[i]; i++)
+        if (!req->on_json(req->user, NULL, post_chunks[i], strlen(post_chunks[i]))) break;
+    return PICO_HTTP_OK;
+}
+
+static void CapturePartialText(void *user, const PicoLlmDelta *delta)
+{
+    if (delta->kind == PICO_LLM_DELTA_TEXT)
+        JsonBuf_Append(user, delta->text, delta->len);
+}
+
+static void TestTruncatedCompletion(void)
+{
+    const char *first = "{\"choices\":[{\"delta\":{\"content\":\"partial answer\",\"tool_calls\":["
+                        "{\"index\":0,\"id\":\"complete\",\"function\":{\"name\":\"sh\",\"arguments\":\"{}\"}}]}}]}";
+    const char *last = "{\"choices\":[{\"finish_reason\":\"length\",\"delta\":{\"tool_calls\":["
+                       "{\"index\":1,\"id\":\"unfinished\",\"function\":{\"name\":\"sh\",\"arguments\":\"{\"}}]}}]}";
+    post_chunks[0] = first; post_chunks[1] = last; post_chunks[2] = "[DONE]"; post_chunks[3] = NULL;
+    JsonBuf text; JsonBuf_Init(&text);
+    PicoCompletionsCtx ctx;
+    int rc = pico_completions_post("https://provider.invalid", "{}", "test", NULL, 0,
+                                   NULL, CapturePartialText, &text, &ctx);
+    PicoLlmResult out = {0};
+    pico_completions_fill_result(&ctx, &out);
+    Check(rc == PICO_LLM_FAIL && out.error && strstr(out.error, "token limit") &&
+          out.item_count == 0 && text.data && strcmp(text.data, "partial answer") == 0,
+          "truncation reports an error, retains streamed text, and exports no calls, including completed ones");
+    pico_llm_result_free(&out); pico_completions_ctx_free(&ctx); JsonBuf_Free(&text);
+}
+
+static void TestInvalidCompletedArguments(void)
+{
+    const char *arguments[] = {"{\"command\":\"unfinished", "", "[]", "{}{}"};
+    for (size_t i = 0; i < sizeof(arguments) / sizeof(arguments[0]); i++)
+    {
+        JsonBuf chunk; JsonBuf_Init(&chunk);
+        JsonBuf_Puts(&chunk, "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":["
+                            "{\"index\":0,\"id\":\"call\",\"function\":{\"name\":\"sh\",\"arguments\":");
+        JsonBuf_String(&chunk, arguments[i]);
+        JsonBuf_Puts(&chunk, "}}]}}]}");
+        post_chunks[0] = chunk.data; post_chunks[1] = NULL;
+        PicoCompletionsCtx ctx;
+        int rc = pico_completions_post("https://provider.invalid", "{}", "test", NULL, 0,
+                                       NULL, NULL, NULL, &ctx);
+        PicoLlmResult out = {0};
+        pico_completions_fill_result(&ctx, &out);
+        Check(rc == PICO_LLM_FAIL && out.error && out.item_count == 0,
+              "unfinished, absent, non-object, or multiple JSON arguments never become executable calls");
+        pico_llm_result_free(&out); pico_completions_ctx_free(&ctx); JsonBuf_Free(&chunk);
+    }
+}
+
 int main(void)
 {
+    TestTruncatedCompletion();
+    TestInvalidCompletedArguments();
     TestUrls();
     TestServiceTier();
     TestRequestConversion();

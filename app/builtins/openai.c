@@ -437,14 +437,15 @@ static bool OauthDue(const PicoAuthEntry *auth)
     return auth->expires_at > 0 && time(NULL) + 60 >= auth->expires_at;
 }
 
-static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel *tc)
+static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel *tc, bool force)
 {
     if (!ctx || !auth)
     {
         return false;
     }
 
-    int res = pico_auth_begin_refresh_ctx(ctx, "openai", tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
+    int res = pico_auth_begin_refresh_ctx(ctx, "openai", force ? auth->access_token : NULL,
+                                           tc ? tc->fn : NULL, tc ? tc->user : NULL, auth);
     if (res == PICO_AUTH_REFRESH_ALREADY_VALID)
     {
         return true;
@@ -1067,7 +1068,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     {
         if (OauthDue(&auth) || !auth.access_token || !auth.access_token[0])
         {
-            if (!RefreshOauth(agent_ctx, &auth, &tc))
+            if (!RefreshOauth(agent_ctx, &auth, &tc, false))
             {
                 pico_auth_entry_free(&auth);
                 if (TurnCancelled(&tc))
@@ -1112,7 +1113,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
         pico_responses_ctx_free(&ctx);
-        if (!RefreshOauth(agent_ctx, &auth, &tc))
+        if (!RefreshOauth(agent_ctx, &auth, &tc, true))
         {
             free(body);
             pico_auth_entry_free(&auth);
@@ -1127,7 +1128,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         rc = PostOnce(url, bearer, auth.account_id, true, body, turn->cache_key, &ctx, cancel, on_delta,
                       user);
     }
-    if (rc == PICO_LLM_FAIL && ctx.error && strstr(ctx.error, "easoning"))
+    if (rc == PICO_LLM_FAIL && ctx.http != 401 && ctx.error && strstr(ctx.error, "easoning"))
     {
         char *stripped = pico_responses_body_without_reasoning(body);
         if (stripped)

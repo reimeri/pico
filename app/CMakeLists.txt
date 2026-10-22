@@ -662,8 +662,8 @@ if(BUILD_TESTING)
     target_link_libraries(pico_session_usage_tests PRIVATE SQLite::SQLite3 Threads::Threads)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_session_usage_tests PRIVATE tests/test_lock.c)
-        target_compile_definitions(pico_session_usage_tests PRIVATE PICO_TEST_LOCK=1)
-        target_link_options(pico_session_usage_tests PRIVATE -Wl,--wrap=fcntl)
+        target_compile_definitions(pico_session_usage_tests PRIVATE PICO_TEST_LOCK=1 PICO_TEST_JSON_ALLOC=1)
+        target_link_options(pico_session_usage_tests PRIVATE -Wl,--wrap=fcntl,--wrap=JsonObjStr)
     endif()
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
 
@@ -1021,7 +1021,7 @@ if(BUILD_TESTING)
         target_link_options(pico_host_workspace_tests PRIVATE
             -Wl,--wrap=RAND_bytes -Wl,--wrap=PicoHost_OpenBrowser
             -Wl,--wrap=pico_openai_listen -Wl,--wrap=pico_openai_await_callback
-            -Wl,--wrap=pico_http_post)
+            -Wl,--wrap=pico_http_post -Wl,--wrap=pico_http_post_sse)
         target_link_options(pico_host_workspace_tests PRIVATE
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing

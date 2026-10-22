@@ -1182,6 +1182,12 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
                 }
             }
         }
+        char *finish = JsonObjStr(&doc, choice, "finish_reason");
+        if (finish && strcmp(finish, "length") == 0)
+            SetError(c, "Response truncated at the token limit. Partial text was retained; no tools were executed.");
+        else if (finish && strcmp(finish, "content_filter") == 0)
+            SetError(c, "Response stopped by the provider's content filter; no tools were executed.");
+        free(finish);
     }
     JsonFree(&doc);
     return !c->failed;
@@ -1223,12 +1229,37 @@ static void SetResultProjectionError(PicoLlmResult *out)
     out->error = JsonDup("out of memory");
 }
 
+/* Streaming deltas are provisional. Validate the complete batch before any
+ * call is projected, including when a provider ends without a useful reason. */
+static void ValidateCompletedCalls(PicoCompletionsCtx *c)
+{
+    if (c->failed || c->error) return;
+    for (int i = 0; i < c->call_count; i++)
+    {
+        PicoCompletionsCall *call = &c->calls[i];
+        JsonDoc doc = {0};
+        bool valid = call->id && call->id[0] && call->name && call->name[0] &&
+                     call->arguments.len > 0 &&
+                     JsonValidUtf8(call->arguments.data, call->arguments.len) &&
+                     JsonValidSyntax(call->arguments.data, call->arguments.len) &&
+                     JsonParse(&doc, call->arguments.data, call->arguments.len) == 0 &&
+                     JsonIsObject(&doc, 0);
+        JsonFree(&doc);
+        if (!valid)
+        {
+            SetError(c, "Provider returned an incomplete or invalid tool call; no tools were executed.");
+            return;
+        }
+    }
+}
+
 void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out)
 {
     if (!c || !out)
     {
         return;
     }
+    ValidateCompletedCalls(c);
     out->input_tokens = c->input_tokens;
     out->cached_tokens = c->cached_tokens;
     snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
@@ -1291,7 +1322,7 @@ void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out)
             continue;
         }
         PicoCompletionsCall *call = &c->calls[entry->call_index];
-        const char *args = call->arguments.len ? call->arguments.data : "{}";
+        const char *args = call->arguments.data;
         int before = out->item_count;
         bool added = pico_llm_result_add_tool_call(out, call->id, call->name, args, NULL);
         PicoLlmItem *projected = added && out->item_count == before + 1 ? &out->items[before] : NULL;
@@ -1413,6 +1444,7 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
         snprintf(buf, sizeof(buf), "HTTP %ld from %s", http, url ? url : "");
         SetError(ctx, buf);
     }
+    ValidateCompletedCalls(ctx);
     if (ctx->failed || ctx->error)
     {
         return PICO_LLM_FAIL;

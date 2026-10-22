@@ -695,6 +695,7 @@ static bool OauthDue(const PicoAuthEntry *auth)
 }
 
 int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
+                                const char *rejected_access_token,
                                 PicoLlmCancelFn cancel, void *user,
                                 PicoAuthEntry *auth_out)
 {
@@ -737,6 +738,10 @@ int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
         (void)pthread_cond_timedwait(&e->refresh_cv, &store->mu, &until);
     }
 
+    /* Compare before replacing auth_out: callers may pass its access_token.
+     * Waiting above lets a concurrent successful owner replace this token. */
+    bool rejected_current = rejected_access_token && e->access_token &&
+                            strcmp(rejected_access_token, e->access_token) == 0;
     PicoAuthEntry latest;
     memset(&latest, 0, sizeof(latest));
     snprintf(latest.provider, sizeof(latest.provider), "%s", e->provider);
@@ -755,7 +760,7 @@ int pico_auth_begin_refresh_ctx(PicoAgentContext *ctx, const char *provider,
         pthread_mutex_unlock(&store->mu);
         return PICO_AUTH_REFRESH_FAILED;
     }
-    if (auth_out->access_token && auth_out->access_token[0] && !OauthDue(auth_out))
+    if (!rejected_current && auth_out->access_token && auth_out->access_token[0] && !OauthDue(auth_out))
     {
         pthread_mutex_unlock(&store->mu);
         return PICO_AUTH_REFRESH_ALREADY_VALID;

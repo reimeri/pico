@@ -79,7 +79,9 @@ extensions to leave their own threads running across frames. See
 - `pico_auth_set_env_key(host, name, key)` — process-only key; not written. NULL clears.
 - `pico_auth_set_oauth(host, ...)` — main-thread access/refresh/account/expiry.
 - `pico_auth_set_oauth_ctx(ctx, ...)` — synchronized worker variant for provider token refresh.
-- `pico_auth_begin_refresh_ctx(ctx, name, &out_entry)` / `pico_auth_end_refresh_ctx(ctx, name)` — coordinate single-flight token refresh across concurrent worker threads; callers refresh only when `begin` returns true, or recheck `out_entry` when false.
+- `pico_auth_begin_refresh_ctx(ctx, name, rejected_access_token, cancel, user, &entry)` — coordinate single-flight OAuth refresh across workers. Pass `NULL` for proactive expiry-based refresh, or the access token rejected by the server to refresh it even before local expiry. The rejected-token pointer may alias `entry.access_token`; `entry` must be zero-initialized or own a previous copied snapshot. The function replaces it with the latest owned snapshot.
+- `PICO_AUTH_REFRESH_OWNER` grants the exchange slot. Only that caller may exchange credentials, publish them with `pico_auth_set_oauth_ctx`, and call `pico_auth_end_refresh_ctx(ctx, name)` on every success/failure path.
+- `PICO_AUTH_REFRESH_ALREADY_VALID` means use the returned usable token without another exchange or `end` call. After a rejection, this occurs when a concurrent owner has already replaced that rejected token. `PICO_AUTH_REFRESH_FAILED` means stop; cancellation or an abandoned refresh owner must not race rotating credentials.
 - `pico_auth_set_active(host, name, PICO_AUTH_API_KEY or PICO_AUTH_OAUTH)` — which credential to use.
 - `pico_auth_clear_oauth(host, name)` — drop stored tokens.
 
@@ -89,7 +91,7 @@ extensions to leave their own threads running across frames. See
 
 - `.provider`, `.help`, `.verbs` must outlive the extension.
 - `login` runs on the main thread from builtin `/login` (submit is already cancelled) and receives the snapshotted `PicoAgentId` from that submit. Route user-visible notes to that ID; do not call `pico_agent_active`. Asynchronous login text must keep the same ID, so a later selection change cannot append results to another agent. `logout` is `void (*)(PicoHost *, PicoAgentId, void *)` and uses the same snapshotted ID; `/logout` already cancels submit.
-- Auth storage is process-global and mutex-protected. Worker callbacks for different agents may overlap safely when using context variants. Builtin OpenAI, Hyper, and xAI OAuth refresh are each single-flight; waiters recheck the latest token, and a replacement fails promptly instead of racing an abandoned rotating-token exchange.
+- Auth storage is process-global and mutex-protected. Worker callbacks for different agents may overlap safely when using context variants. Builtin OpenAI, Hyper, and xAI OAuth refresh are each single-flight, including server-forced refresh after a 401. Each request retries once with the refreshed or concurrently replaced access token; a second 401 remains an error. Waiters recheck the latest token, and a replacement fails promptly instead of racing an abandoned rotating-token exchange.
 - If shutdown detaches a callback, Pico retains the auth store and skips auth destruction so callback-scoped access cannot observe freed credentials. Pico then rejects reinitialization and must exit.
 - Max 16 auth providers (`PICO_MAX_AUTH`).
 - Builtin OpenAI, Hyper, and xAI: [`../../builtins/openai.c`](../../builtins/openai.c) (uses [`openai_auth.c`](../../builtins/openai_auth.c)), [`../../builtins/hyper.c`](../../builtins/hyper.c) (`HYPER_API_KEY`, `/login hyper`), [`../../builtins/xai.c`](../../builtins/xai.c) (`XAI_API_KEY`, `/login xai`).

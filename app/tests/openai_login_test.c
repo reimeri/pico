@@ -12,6 +12,8 @@ static pthread_mutex_t oauth_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t oauth_cv = PTHREAD_COND_INITIALIZER;
 static struct {
     bool active, random_failure, hold_token;
+    bool stream_test, reject_replacement, unexpected_bearer;
+    int stream_calls, rejected_calls, replacement_calls, expected_rejected;
     int callbacks, launches, binds, tokens, device_requests;
     unsigned short port;
     char state[128];
@@ -109,6 +111,45 @@ int __wrap_pico_http_post(const PicoHttpReq *req, long *http, char **body, char 
         *body = strdup(oauth_test.token_response);
     }
     pthread_mutex_unlock(&oauth_mu);
+    return PICO_HTTP_OK;
+}
+
+int __real_pico_http_post_sse(const PicoHttpPost *req, long *http, char **error);
+int __wrap_pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
+{
+    pthread_mutex_lock(&oauth_mu);
+    if (!oauth_test.stream_test)
+    {
+        pthread_mutex_unlock(&oauth_mu);
+        return __real_pico_http_post_sse(req, http, error);
+    }
+    bool rejected = false, replacement = false;
+    for (int i = 0; i < req->header_count; i++)
+    {
+        if (!strcmp(req->headers[i], "Authorization: Bearer rejected-access")) rejected = true;
+        if (!strcmp(req->headers[i], "Authorization: Bearer synthetic-access")) replacement = true;
+    }
+    oauth_test.stream_calls++;
+    if (!rejected && !replacement) oauth_test.unexpected_bearer = true;
+    if (replacement) oauth_test.replacement_calls++;
+    if (rejected)
+    {
+        oauth_test.rejected_calls++;
+        pthread_cond_broadcast(&oauth_cv);
+        /* Every concurrent request must receive its 401 for the same token,
+         * even if one refresh finishes before the other caller acquires it. */
+        while (oauth_test.rejected_calls < oauth_test.expected_rejected)
+            pthread_cond_wait(&oauth_cv, &oauth_mu);
+    }
+    bool unauthorized = rejected || !replacement || oauth_test.reject_replacement;
+    pthread_mutex_unlock(&oauth_mu);
+    *http = unauthorized ? 401 : 200;
+    *error = NULL;
+    const char *json = unauthorized ?
+        "{\"detail\":\"reasoning access token rejected\"}" :
+        "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\","
+        "\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"refreshed answer\"}]}]}}";
+    (void)req->on_json(req->user, NULL, json, strlen(json));
     return PICO_HTTP_OK;
 }
 
@@ -335,6 +376,75 @@ static int TestOpenAiLogin(void)
     else unsetenv("PICO_API_KEY");
     RmRf(config); RmRf(workspace);
     return g_failed ? 1 : 0;
+}
+
+static int TestOpenAiRejectedTokenRefresh(int participants, bool reject_replacement)
+{
+    char config[] = "/tmp/pico-refresh-config-XXXXXX";
+    char directory[] = "/tmp/pico-refresh-workspace-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId ids[2] = {0};
+    bool ok = false;
+    if (!mkdtemp(config) || !mkdtemp(directory)) return 1;
+    char *old_config = getenv("XDG_CONFIG_HOME") ? strdup(getenv("XDG_CONFIG_HOME")) : NULL;
+    setenv("XDG_CONFIG_HOME", config, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, directory, &workspace_id) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
+    PicoModel *model = realloc(workspace->models, sizeof(*model));
+    if (!model) goto done;
+    workspace->models = model; workspace->model_count = 1;
+    memset(model, 0, sizeof(*model));
+    snprintf(model->id, sizeof(model->id), "refresh-model");
+    snprintf(model->name, sizeof(model->name), "refresh model");
+    snprintf(model->provider, sizeof(model->provider), "openai");
+    snprintf(workspace->settings.default_model, sizeof(workspace->settings.default_model), "%s", model->id);
+    if (!pico_auth_set_oauth(host, "openai", "rejected-access", "original-refresh", NULL, time(NULL) + 3600) ||
+        !pico_auth_set_active(host, "openai", PICO_AUTH_OAUTH)) goto done;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE,
+                                      .model = "refresh-model"};
+    for (int i = 0; i < participants; i++)
+        if (pico_main_agent_create(host, workspace_id, &options, &ids[i]) != PICO_OK) goto done;
+    pthread_mutex_lock(&oauth_mu);
+    oauth_test.active = oauth_test.stream_test = true;
+    oauth_test.reject_replacement = reject_replacement;
+    oauth_test.expected_rejected = participants;
+    oauth_test.token_response = oauth_good_token;
+    pthread_mutex_unlock(&oauth_mu);
+    for (int i = 0; i < participants; i++)
+        if (pico_agent_submit(host, ids[i], "test forced refresh", NULL) != PICO_OK) goto done;
+    for (int i = 0; i < participants; i++)
+        if (!PumpUntilIdle(host, PicoHost_FindAgent(host, ids[i]))) goto done;
+    pthread_mutex_lock(&oauth_mu);
+    ok = oauth_test.tokens == 1 && oauth_test.stream_calls == participants * 2 &&
+         oauth_test.rejected_calls == participants && oauth_test.replacement_calls == participants &&
+         !oauth_test.unexpected_bearer && oauth_test.form &&
+         strstr(oauth_test.form, "grant_type=refresh_token") && strstr(oauth_test.form, "original-refresh");
+    pthread_mutex_unlock(&oauth_mu);
+    for (int i = 0; i < participants; i++)
+    {
+        PicoAgent *agent = PicoHost_FindAgent(host, ids[i]);
+        ok = ok && agent && (reject_replacement ? agent->state == PICO_AGENT_ERROR :
+                            agent->state == PICO_AGENT_IDLE && OauthMessage(host, ids[i], "refreshed answer"));
+    }
+    ok = ok && OauthCredentials(host, true);
+done:
+    pthread_mutex_lock(&oauth_mu);
+    oauth_test.expected_rejected = 0;
+    pthread_cond_broadcast(&oauth_cv);
+    pthread_mutex_unlock(&oauth_mu);
+    if (host) pico_host_free(host);
+    pthread_mutex_lock(&oauth_mu);
+    free(oauth_test.url); free(oauth_test.form);
+    memset(&oauth_test, 0, sizeof(oauth_test));
+    pthread_mutex_unlock(&oauth_mu);
+    if (old_config) { setenv("XDG_CONFIG_HOME", old_config, 1); free(old_config); }
+    else unsetenv("XDG_CONFIG_HOME");
+    RmRf(config); RmRf(directory);
+    if (!ok) Fail("401 recovery must exchange once, share rotated credentials, and retry each request only once");
+    return ok ? 0 : 1;
 }
 
 static int TestOpenAiBlockedShutdownChild(void)

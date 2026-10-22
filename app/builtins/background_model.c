@@ -344,10 +344,8 @@ static void ReapJob(PicoBgJob *job, int status)
         job->term_signal = WTERMSIG(status);
         job->exit_code = 0;
     }
-    if (job->status != PICO_BG_KILLED)
-    {
-        job->status = PICO_BG_EXITED;
-    }
+    if (job->status == PICO_BG_KILLED) job->term_signal = SIGKILL;
+    else job->status = PICO_BG_EXITED;
 }
 
 static char *DupError(const char *message)
@@ -377,7 +375,7 @@ static char *FormatJobJson(const PicoBgJob *job, bool include_command)
     if (job->status != PICO_BG_RUNNING)
     {
         int sig = job->term_signal;
-        if (sig <= 0 && job->status == PICO_BG_KILLED && !job->reaped)
+        if (sig <= 0 && job->status == PICO_BG_KILLED)
         {
             sig = SIGKILL; /* kill always sends SIGKILL; reap has not landed yet */
         }
@@ -422,9 +420,10 @@ void PicoBgTable_Destroy(PicoBgTable *table)
     for (i = 0; i < table->job_count; i++)
     {
         PicoBgJob *job = &table->jobs[i];
-        if (!job->reaped && job->pid > 0)
+        if (!job->reaped && job->pgid > 0)
         {
-            KillProcessGroup(job->pgid > 0 ? job->pgid : job->pid);
+            KillProcessGroup(job->pgid);
+            job->status = PICO_BG_KILLED;
         }
     }
     pthread_mutex_unlock(&table->mu);
@@ -437,7 +436,7 @@ void PicoBgTable_Destroy(PicoBgTable *table)
             int j;
             for (j = 0; j < table->job_count; j++)
             {
-                if (table->jobs[j].status == PICO_BG_RUNNING)
+                if (!table->jobs[j].reaped)
                 {
                     running++;
                 }
@@ -490,6 +489,99 @@ void PicoBgTable_Pump(PicoBgTable *table)
     }
     pthread_mutex_unlock(&table->mu);
 }
+
+#if defined(__linux__)
+static pid_t supervisor_parent;
+static sigset_t supervisor_original_mask;
+static struct sigaction supervisor_original_term;
+
+static void SupervisorSignal(int signal)
+{
+    (void)signal;
+    /* PDEATHSIG follows the creating thread on Linux. A finished tool worker
+     * must not kill a job while the host process is still its parent. */
+    if (getppid() != supervisor_parent)
+    {
+        kill(-getpgrp(), SIGKILL);
+        _exit(127);
+    }
+}
+
+/* Group-directed signals belong to the command. Block them in the supervisor
+ * except SIGTERM for parent death; SIGKILL still terminates the whole group. */
+static void ConfigureSupervisor(pid_t parent)
+{
+    supervisor_parent = parent;
+    sigset_t blocked;
+    sigfillset(&blocked);
+    if (sigprocmask(SIG_SETMASK, &blocked, &supervisor_original_mask) != 0) _exit(127);
+    struct sigaction action = {.sa_handler = SupervisorSignal};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, &supervisor_original_term) != 0 ||
+        prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) _exit(127);
+    SupervisorSignal(0); /* Host may have died before PDEATHSIG was installed. */
+}
+
+/* This child alone is a subreaper, never the multithreaded Pico host. It pins
+ * the job's process group until its command and orphaned group descendants
+ * finish, reaping them without stealing any other tool's children. */
+static void SuperviseJob(void)
+{
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) _exit(127);
+    pid_t command = fork();
+    if (command < 0) _exit(127);
+    if (command == 0)
+    {
+        /* Parent-death delivery is blocked across fork. Restore the command's
+         * inherited policy before unblocking, without running our handler. */
+        sigaction(SIGTERM, &supervisor_original_term, NULL);
+        sigprocmask(SIG_SETMASK, &supervisor_original_mask, NULL);
+        return;
+    }
+    sigset_t parent_death;
+    sigemptyset(&parent_death);
+    sigaddset(&parent_death, SIGTERM);
+    sigprocmask(SIG_UNBLOCK, &parent_death, NULL);
+
+    /* Unlike the command, the supervisor never execs. Do not retain inherited
+     * capture pipes, sockets, session locks, or other host descriptors. */
+    if (close_range(0, ~0U, 0) != 0)
+    {
+        kill(-getpgrp(), SIGKILL);
+        _exit(127);
+    }
+    int command_status = 0;
+    bool have_status = false;
+    for (;;)
+    {
+        int status;
+        pid_t child = waitpid(-getpgrp(), &status, 0);
+        if (child > 0)
+        {
+            if (child == command) { command_status = status; have_status = true; }
+            continue;
+        }
+        if (errno == EINTR) continue;
+        if (errno != ECHILD) _exit(127);
+        break;
+    }
+    if (!have_status) _exit(127);
+    if (WIFSIGNALED(command_status))
+    {
+        int sig = WTERMSIG(command_status);
+        struct sigaction action = {.sa_handler = SIG_DFL};
+        sigemptyset(&action.sa_mask);
+        sigaction(sig, &action, NULL);
+        sigset_t unblocked;
+        sigemptyset(&unblocked);
+        sigaddset(&unblocked, sig);
+        sigprocmask(SIG_UNBLOCK, &unblocked, NULL);
+        kill(getpid(), sig);
+        _exit(128 + sig);
+    }
+    _exit(WEXITSTATUS(command_status));
+}
+#endif
 
 char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *workspace,
                         const char *description, const char *command, char **error)
@@ -611,6 +703,9 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         return NULL;
     }
 
+#if defined(__linux__)
+    pid_t parent = getpid();
+#endif
     pid = fork();
     if (pid < 0)
     {
@@ -628,11 +723,7 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
     {
         setpgid(0, 0);
 #if defined(__linux__)
-        prctl(PR_SET_PDEATHSIG, SIGKILL);
-        if (getppid() == 1)
-        {
-            _exit(127);
-        }
+        ConfigureSupervisor(parent);
 #endif
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0)
@@ -652,6 +743,9 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         {
             _exit(127);
         }
+#if defined(__linux__)
+        SuperviseJob();
+#endif
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);
     }
@@ -705,8 +799,6 @@ char *PicoBgTable_Kill(PicoBgTable *table, PicoAgentId agent_id, const char *id,
 {
     PicoBgJob *job;
     char *result;
-    pid_t pgid = 0;
-    pid_t pid = 0;
     if (error)
     {
         *error = NULL;
@@ -733,15 +825,11 @@ char *PicoBgTable_Kill(PicoBgTable *table, PicoAgentId agent_id, const char *id,
     if (job->status == PICO_BG_RUNNING && job->pid > 0)
     {
         job->status = PICO_BG_KILLED;
-        pgid = job->pgid > 0 ? job->pgid : job->pid;
-        pid = job->pid;
+        KillProcessGroup(job->pgid);
+        job->term_signal = SIGKILL;
     }
     result = FormatJobJson(job, true);
     pthread_mutex_unlock(&table->mu);
-    if (pid > 0)
-    {
-        KillProcessGroup(pgid);
-    }
     if (!result && error)
     {
         *error = DupError("kill_background: out of memory");
@@ -860,7 +948,7 @@ void PicoBgTable_ResetAgent(PicoBgTable *table, PicoAgentId agent_id)
     for (i = 0; i < table->job_count; i++)
     {
         PicoBgJob *job = &table->jobs[i];
-        if (job->agent_id == agent_id && !job->reaped && job->pid > 0)
+        if (job->agent_id == agent_id && !job->reaped && job->pgid > 0)
         {
             KillProcessGroup(job->pgid > 0 ? job->pgid : job->pid);
             job->status = PICO_BG_KILLED;

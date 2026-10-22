@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "test_wait.h"
 #ifdef PICO_TEST_CLOCK
 #include "test_clock.h"
@@ -43,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -230,6 +232,7 @@ static bool g_preference_fail;
 static int g_replay_ready_fd = -1;
 static int g_replay_continue_fd = -1;
 static int g_replay_adopted;
+static const char *g_replay_gate_stage = "async_replay_before_read";
 
 static bool WaitCatalogWorkDone(PicoHost *host, const atomic_int *completed, int target_done)
 {
@@ -268,7 +271,7 @@ bool PicoSession_TestHook(const char *stage)
     {
         g_replay_adopted++;
     }
-    if (stage && strcmp(stage, "async_replay_before_read") == 0 &&
+    if (stage && strcmp(stage, g_replay_gate_stage) == 0 &&
         g_replay_ready_fd >= 0 && g_replay_continue_fd >= 0)
     {
         int ready = g_replay_ready_fd;
@@ -11771,7 +11774,11 @@ static int HoldSessionLockChild(const char *session_path, int ready_fd, int cont
     memset(&lock, 0, sizeof(lock));
     lock.l_type = F_WRLCK;
     lock.l_whence = SEEK_SET;
+#if defined(__linux__)
     while (fcntl(fd, F_SETLKW, &lock) != 0)
+#else
+    while (flock(fd, LOCK_EX) != 0)
+#endif
     {
         if (errno == EINTR)
         {
@@ -12243,6 +12250,77 @@ done:
     return rc;
 }
 
+static int TestAsyncRecoveryCancellation(void)
+{
+    char dir[] = "/tmp/pico-recover-async-XXXXXX";
+    char cfg[] = "/tmp/pico-recover-cfg-XXXXXX";
+    char path[4096], lock_path[4102];
+    PicoHost *host = NULL;
+    PicoWorkspaceId ws = 0;
+    PicoAgentId original = 0;
+    int rc = 1, lock = -1;
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    snprintf(path, sizeof(path), "%s/recover.jsonl", dir);
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
+    if (pico_host_init(&host, NULL, true) != PICO_OK ||
+        pico_workspace_open(host, dir, &ws) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_main_agent_create(host, ws, &options, &original) != PICO_OK) goto done;
+    for (int mode = 0; mode < 2; mode++)
+    {
+        const char *prefix = "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"recover\"}\n"
+                             "{\"type\":\"message\",\"role\":\"user\",\"content\":\"kept\"}\n";
+        FILE *f = fopen(path, "wb");
+        if (!f) goto done;
+        fputs(prefix, f); fputs("{\"type\":\"message\",\"content\":\"torn", f);
+        if (fclose(f) != 0 || pipe(ready) != 0 || pipe(release) != 0) goto done;
+        if (mode == 0)
+        {
+            /* A distinct descriptor in this same process models a persist
+             * worker. Cancellation must finish without waiting for its lock. */
+            lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+#if defined(__linux__)
+            struct flock held = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+            if (lock < 0 || fcntl(lock, F_OFD_SETLK, &held) != 0) goto done;
+#else
+            if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0) goto done;
+#endif
+        }
+        g_replay_gate_stage = mode == 0 ? "replay_lock_wait" : "async_replay_after_read";
+        g_replay_ready_fd = ready[1]; g_replay_continue_fd = release[0];
+        if (PicoSession_LoadAsync(host, ws, original, path, false, false, true, false) != PICO_OK ||
+            !TransferTestByte(ready[0], false)) goto done;
+        PicoSession_LoadCancel(host);
+        if (!TransferTestByte(release[1], true)) goto done;
+        PICO_TEST_WAIT(host->tasks) pico_host_pump(host);
+        char *saved = Pico_ReadFile(path, NULL);
+        bool warned = host->status_warn && strstr(host->status_warn, "incomplete final record");
+        bool ok = saved && pico_agent_active(host) == original && !PicoSession_LoadPending(host) &&
+                  (mode == 0 ? strstr(saved, "torn") != NULL && !warned
+                             : strcmp(saved, prefix) == 0 && warned);
+        free(saved);
+        if (!ok) goto done;
+        if (lock >= 0) { close(lock); lock = -1; }
+        close(ready[0]); close(ready[1]); close(release[0]); close(release[1]);
+        ready[0] = ready[1] = release[0] = release[1] = -1;
+    }
+    rc = 0;
+done:
+    if (release[1] >= 0) (void)TransferTestByte(release[1], true);
+    if (lock >= 0) close(lock);
+    if (host) pico_host_free(host);
+    g_replay_ready_fd = g_replay_continue_fd = -1;
+    g_replay_gate_stage = "async_replay_before_read";
+    for (int i = 0; i < 2; i++) { if (ready[i] >= 0) close(ready[i]); if (release[i] >= 0) close(release[i]); }
+    unlink(path); unlink(lock_path);
+    unsetenv("XDG_CONFIG_HOME"); rmdir(cfg); rmdir(dir);
+    if (rc) Fail("cancelled recovery must stop at a held lock and still report any completed repair");
+    return rc;
+}
+
 static int TestAsyncSessionReplay(void)
 
 {
@@ -12276,6 +12354,7 @@ static int TestAsyncSessionReplay(void)
     if (!f) goto done;
     for (int i = 0; i < 80; i++)
         fputs("{\"type\":\"message\",\"role\":\"user\",\"content\":\"*replayed*\"}\n", f);
+    fputs("{\"type\":\"message\",\"content\":\"torn", f);
     if (fclose(f) != 0 || pico_agent_close(host, seed_id) != PICO_OK) goto done;
     options.session_start = PICO_SESSION_NONE;
     if (pico_main_agent_create(host, ws_id, &options, &current_id) != PICO_OK) goto done;
@@ -12316,7 +12395,8 @@ static int TestAsyncSessionReplay(void)
     PicoAgent *loaded = PicoHost_SelectedAgent(host);
     if (PicoSession_LoadPending(host) || !loaded || loaded->id == current_id ||
         loaded->message_count != 81 || PicoHost_FindAgent(host, current_id) ||
-        !loaded->messages[loaded->message_count - 1].doc.block_count)
+        !loaded->messages[loaded->message_count - 1].doc.block_count ||
+        !host->status_warn || !strstr(host->status_warn, "incomplete final record"))
     {
         Fail("/resume must publish the fully parsed transcript atomically");
         goto done;
@@ -17620,6 +17700,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestCapacityCreateProtectsPendingReplacement()) != 0) return 1;
     if (PICO_TEST_RUN(TestLoadTargetSurvivesPreviousLoadCancellation()) != 0) return 1;
     if (PICO_TEST_RUN(TestSteeringAsyncReplayIdentity()) != 0) return 1;
+    if (PICO_TEST_RUN(TestAsyncRecoveryCancellation()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncSessionReplay()) != 0) return 1;
     if (PICO_TEST_RUN(TestAsyncReplayLargeMessage()) != 0) return 1;
     if (PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) != 0) return 1;

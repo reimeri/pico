@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "test_lock.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -14,13 +15,14 @@ int __wrap_fcntl(int fd, int command, ...)
         return __real_fcntl(fd, command);
     va_list args;
     va_start(args, command);
-    if (command == F_SETLK || command == F_SETLKW || command == F_GETLK)
+    if (command == F_SETLK || command == F_SETLKW || command == F_GETLK ||
+        command == F_OFD_SETLK || command == F_OFD_SETLKW || command == F_OFD_GETLK)
     {
         struct flock *lock = va_arg(args, struct flock *);
         va_end(args);
-        if (command == F_SETLKW && notify_fd >= 0)
+        if ((command == F_SETLKW || command == F_OFD_SETLKW) && notify_fd >= 0)
         {
-            int result = __real_fcntl(fd, F_SETLK, lock);
+            int result = __real_fcntl(fd, command == F_OFD_SETLKW ? F_OFD_SETLK : F_SETLK, lock);
             if (result == 0 || (errno != EAGAIN && errno != EACCES)) return result;
             char ready = 'x';
             ssize_t sent;

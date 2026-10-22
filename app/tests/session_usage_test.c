@@ -3662,6 +3662,99 @@ static int TestModelResumeReplay(void)
     return 0;
 }
 
+static int TestSessionTailRecovery(void)
+{
+    PicoHost host = {0};
+    PicoWorkspace workspace = {0};
+    workspace.host = &host;
+    snprintf(workspace.path, sizeof(workspace.path), "/workspace");
+    host.workspaces[0] = &workspace;
+    host.workspace_count = 1;
+    const struct {
+        const char *tail;
+        bool recover;
+        bool valid;
+    } cases[] = {
+        {"{\"type\":\"message\",\"content\":\"torn", true, true},
+        {"{\"type\":\"message\",\"content\":\"torn\n", false, false},
+        {"{broken\n{\"type\":", false, false},
+        {"{broken\n\r", false, false},
+        {"{\"type\":\"message\",\"role\":\"user\",\"content\":\"last intact\"}", false, true},
+        /* A syntactically valid but invalid record is not a torn write. */
+        {"{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"missing group\"}", false, false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        PicoAgent writer = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+        PicoAgent restored = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+        if (PicoSession_LogUser(&host, &writer, "intact history", "intact history", NULL) != PICO_SESSION_WRITE_OK)
+            return Fail("tail fixture write failed");
+        FILE *f = fopen(writer.session_path, "ab");
+        if (!f) return Fail("tail fixture open failed");
+        fputs(cases[i].tail, f);
+        fclose(f);
+        size_t before_len = 0;
+        char *before = Pico_ReadFile(writer.session_path, &before_len);
+        g_status_warning[0] = '\0';
+        if (cases[i].recover)
+        {
+            PicoMessage *messages = NULL;
+            int count = 0;
+            (void)PicoSession_LoadTranscript(&workspace, writer.session_id, &messages, &count);
+            PicoMessages_Free(messages, count);
+            size_t inspected_len = 0;
+            char *inspected = Pico_ReadFile(writer.session_path, &inspected_len);
+            bool unchanged = inspected && before && inspected_len == before_len &&
+                             memcmp(inspected, before, before_len) == 0 && !g_status_warning[0];
+            free(inspected);
+            if (!unchanged) return Fail("transcript inspection repaired a session");
+            g_session_fail_stage = "replay_before_repair";
+            PicoSessionReplay *failed = PicoSession_ReplayPrepare(&host, writer.session_path, PICO_AGENT_MAIN);
+            g_session_fail_stage = NULL;
+            if (failed) { PicoSession_ReplayFree(failed); return Fail("failed repair was accepted"); }
+            g_session_fail_stage = "replay_after_repair";
+            failed = PicoSession_ReplayPrepare(&host, writer.session_path, PICO_AGENT_MAIN);
+            g_session_fail_stage = NULL;
+            char *repaired = Pico_ReadFile(writer.session_path, NULL);
+            bool reported = !failed && repaired && !strstr(repaired, "torn") &&
+                            strstr(g_status_warning, "could not finish saving the recovery");
+            PicoSession_ReplayFree(failed);
+            free(repaired);
+            if (!reported) return Fail("post-truncation failure hid the repair or claimed success");
+            f = fopen(writer.session_path, "ab");
+            if (!f) return Fail("tail retry fixture");
+            fputs(cases[i].tail, f);
+            fclose(f);
+            g_status_warning[0] = '\0';
+        }
+        g_replayed_history[0] = '\0';
+        int rc = PicoSession_Replay(&host, &restored, writer.session_path, false);
+        size_t after_len = 0;
+        char *after = Pico_ReadFile(writer.session_path, &after_len);
+        bool ok = before && after && (rc == 0) == cases[i].valid;
+        if (cases[i].valid)
+        {
+            ok = ok && strstr(g_replayed_history, "intact history") &&
+                 ((g_status_warning[0] != '\0') == cases[i].recover);
+            if (!cases[i].recover) ok = ok && strstr(g_replayed_history, "last intact");
+            ok = ok && PicoSession_LogUser(&host, &restored, "continued", "continued", NULL) == PICO_SESSION_WRITE_OK;
+            PicoSessionReplay *continued = PicoSession_ReplayPrepare(&host, writer.session_path, PICO_AGENT_MAIN);
+            ok = ok && continued != NULL;
+            PicoSession_ReplayFree(continued);
+            char *saved = Pico_ReadFile(writer.session_path, NULL);
+            ok = ok && saved && strstr(saved, "continued") && !strstr(saved, "torn");
+            free(saved);
+        }
+        else
+            ok = ok && before_len == after_len && memcmp(before, after, before_len) == 0 && !g_status_warning[0];
+        free(before);
+        free(after);
+        unlink(writer.session_path);
+        if (!ok) return Fail("tail recovery lost history, accepted corruption, or failed continuation");
+    }
+    return 0;
+}
+
 int main(void)
 {
     PicoTest_Case("session usage: initial persistence, replay and failure cases");
@@ -4023,7 +4116,7 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
+    if (PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||

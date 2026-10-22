@@ -30,6 +30,8 @@ static PicoToolFn g_shell_run;
 static const char *g_shell_params_json;
 static void *g_shell_state;
 static int g_interrupt_count;
+static bool g_overlap_spawn;
+static pid_t g_overlap_pid;
 #ifdef PICO_TEST_EINTR
 static bool interrupt_read, interrupt_wait;
 ssize_t __real_read(int fd, void *buffer, size_t size);
@@ -84,7 +86,16 @@ const char *pico_agent_context_workspace(const PicoAgentContext *ctx)
 void pico_tool_set_child(PicoAgentContext *ctx, pid_t pid)
 {
     (void)ctx;
-    (void)pid;
+    if (pid > 0 && g_overlap_spawn)
+    {
+        g_overlap_spawn = false;
+        g_overlap_pid = fork();
+        if (g_overlap_pid == 0)
+        {
+            execl("/bin/sh", "sh", "-c", "exec sleep 30", (char *)NULL);
+            _exit(127);
+        }
+    }
 }
 
 static int Fail(const char *message)
@@ -455,6 +466,24 @@ static bool TestTimeoutClosedPipes(void)
     return ok;
 }
 
+/* Launch another process while sh's capture pipe is open. The short command
+ * must finish independently, not wait for an unrelated inherited writer. */
+static bool TestConcurrentLaunch(void)
+{
+    g_overlap_spawn = true;
+    g_overlap_pid = -1;
+    PicoToolResult result = RunCommandTimeout("overlapping launch", "printf done", 1);
+    bool ok = g_overlap_pid > 0 && kill(g_overlap_pid, 0) == 0 &&
+              !result.is_error && result.output && strcmp(result.output, "done") == 0;
+    if (g_overlap_pid > 0)
+    {
+        kill(g_overlap_pid, SIGKILL);
+        while (waitpid(g_overlap_pid, NULL, 0) < 0 && errno == EINTR) {}
+    }
+    free(result.output);
+    return ok;
+}
+
 int main(void)
 {
     char temp[] = "/tmp/pico-shell-output-test-XXXXXX";
@@ -521,6 +550,10 @@ int main(void)
     else if (!PICO_TEST_RUN(TestTimeoutPluralSeconds()))
     {
         failure = "plural seconds timeout annotation incorrect";
+    }
+    else if (!PICO_TEST_RUN(TestConcurrentLaunch()))
+    {
+        failure = "completed command waited for an unrelated process";
     }
     else if (!PICO_TEST_RUN(TestTimeoutClosedPipes()))
     {

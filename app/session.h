@@ -194,10 +194,14 @@ void PicoSession_CopyDisplayTitle(const PicoAgent *agent, char *out, size_t cap)
  * empty until PicoMessages_PrepareDocs. Caller frees with PicoMessages_Free. */
 int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
                                PicoMessage **out, int *out_count);
-/* Worker-safe preparation owns its file data and parsed tokens; replay, hooks,
- * and tool apply run only from ReplayBatch on the main thread. */
+/* Resume preparation owns its file data and parsed tokens. Under
+ * the session writer lock it repairs a malformed unterminated final record,
+ * or adds the missing delimiter to a valid one. Inspection uses a read-only
+ * path instead. This entry point reports recovery on the main thread; the
+ * asynchronous loader uses worker-only preparation and delivers warnings in
+ * its completion callback. Replay, hooks, and tool apply are main-thread-only. */
 typedef struct PicoSessionReplay PicoSessionReplay;
-PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind);
+PicoSessionReplay *PicoSession_ReplayPrepare(PicoHost *host, const char *path, PicoAgentKind kind);
 void PicoSession_ReplayFree(PicoSessionReplay *replay);
 bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay *replay,
                              int max_records);

@@ -1,4 +1,4 @@
-#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "session.h"
@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -477,7 +478,8 @@ static bool SessionTestFail(const char *stage)
 }
 #endif
 
-static int SessionLockAcquire(const char *session_path, char *error, size_t error_cap)
+static int SessionLockAcquireBefore(const char *session_path, char *error, size_t error_cap,
+                                    const atomic_bool *cancelled)
 {
     char lock_path[4102];
     if (!session_path ||
@@ -498,41 +500,58 @@ static int SessionLockAcquire(const char *session_path, char *error, size_t erro
         }
         return -1;
     }
-    struct flock lock;
-    memset(&lock, 0, sizeof(lock));
-    lock.l_type = F_WRLCK;
-    lock.l_whence = SEEK_SET;
     if (SessionTestFail("lock_before_wait"))
     {
         int failure = errno ? errno : EIO;
         close(fd);
         if (error && error_cap > 0)
-        {
             snprintf(error, error_cap, "%s", strerror(failure));
-        }
         return -1;
     }
-    while (fcntl(fd, F_SETLKW, &lock) != 0)
+    /* The lock must belong to this open description, not the whole process:
+     * a recovery worker and a writer in the same host must exclude each other. */
+#if defined(__linux__)
+    struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    while (fcntl(fd, cancelled ? F_OFD_SETLK : F_OFD_SETLKW, &lock) != 0)
+#else
+    while (flock(fd, LOCK_EX | (cancelled ? LOCK_NB : 0)) != 0)
+#endif
     {
-        if (errno == EINTR)
+        if (cancelled && atomic_load(cancelled)) errno = ECANCELED;
+        else if (errno == EINTR) continue;
+        else if (cancelled && (errno == EAGAIN || errno == EACCES || errno == EWOULDBLOCK))
         {
+            (void)SessionTestFail("replay_lock_wait");
+            struct timespec pause = {.tv_nsec = 10000000L};
+            nanosleep(&pause, NULL);
             continue;
         }
         int failure = errno ? errno : EIO;
         close(fd);
         if (error && error_cap > 0)
-        {
             snprintf(error, error_cap, "%s", strerror(failure));
-        }
         return -1;
     }
     return fd;
+}
+
+static int SessionLockAcquire(const char *path, char *error, size_t cap)
+{
+    return SessionLockAcquireBefore(path, error, cap, NULL);
 }
 
 static void SessionLockRelease(int fd)
 {
     if (fd >= 0)
     {
+        /* Release explicitly: a concurrently forked child can briefly retain
+         * this open description before exec closes its CLOEXEC descriptor. */
+#if defined(__linux__)
+        struct flock lock = {.l_type = F_UNLCK, .l_whence = SEEK_SET};
+        (void)fcntl(fd, F_OFD_SETLK, &lock);
+#else
+        (void)flock(fd, LOCK_UN);
+#endif
         close(fd);
     }
 }
@@ -1304,6 +1323,9 @@ typedef struct PicoSessionReplay {
     int active_group;
     ReplayPreparedMessage *prepared;
     uint64_t last_steering_id;
+    bool recovered_tail;
+    bool missing_newline;
+    off_t tail_offset;
 } PicoSessionReplay;
 
 static void ReplayReleaseRecord(PicoSessionReplay *replay, int i)
@@ -1458,17 +1480,10 @@ static bool PrepareSteeringReplay(PicoSessionReplay *replay)
 
 /* Reading and strict validation are worker-safe. All ReplayLine calls remain
  * on the main thread, including historical extension tool apply callbacks. */
-static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind kind,
-                                              const atomic_bool *cancelled,
-                                              bool prepare_messages)
+static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
+                                      const atomic_bool *cancelled,
+                                      bool prepare_messages, bool recover_tail)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-    {
-        return NULL;
-    }
-
-
     JsonDoc *docs = NULL;
     char **lines = NULL;
     int n = 0;
@@ -1476,9 +1491,18 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
     char *buf = NULL;
     size_t buf_cap = 0;
     bool read_failed = false;
-    while ((!cancelled || !atomic_load(cancelled)) && getline(&buf, &buf_cap, f) != -1)
+    bool terminated = true;
+    off_t offset = 0, tail_offset = 0;
+    int unterminated_record = -1;
+    ssize_t got;
+    while ((!cancelled || !atomic_load(cancelled)) && (got = getline(&buf, &buf_cap, f)) != -1)
     {
-        size_t len = strlen(buf);
+        tail_offset = offset;
+        unterminated_record = -1;
+        offset += got;
+        terminated = got > 0 && buf[got - 1] == '\n';
+        size_t len = (size_t)got;
+        if (memchr(buf, '\0', len)) { read_failed = true; break; }
         while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
         {
             buf[--len] = '\0';
@@ -1504,14 +1528,14 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
             read_failed = true;
             break;
         }
+        if (!terminated) unterminated_record = n;
         lines[n++] = copy;
     }
-    if (ferror(f))
+    if (ferror(f) || !feof(f))
     {
         read_failed = true;
     }
     free(buf);
-    fclose(f);
     if (read_failed || n == 0 || (cancelled && atomic_load(cancelled)))
     {
         goto invalid;
@@ -1525,14 +1549,24 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
     int tool_calls = 0;
     int tool_results = 0;
     bool valid_header = false;
+    bool recovered_tail = false;
     for (int i = 0; i < n; i++)
     {
         if (cancelled && atomic_load(cancelled)) goto invalid;
         JsonDoc *doc = &docs[i];
-        if (JsonParse(doc, lines[i], strlen(lines[i])) != 0 || !JsonIsObject(doc, 0))
+        errno = 0;
+        if (JsonParse(doc, lines[i], strlen(lines[i])) != 0)
         {
-            goto invalid;
+            /* An allocation failure is not evidence of corrupt disk data. */
+            if (errno == ENOMEM || !recover_tail || i == 0 || i != unterminated_record || i != n - 1)
+                goto invalid;
+            free(lines[i]);
+            lines[i] = NULL;
+            n--;
+            recovered_tail = true;
+            break;
         }
+        if (!JsonIsObject(doc, 0)) goto invalid;
         char *type = JsonObjStr(doc, 0, "type");
         if (i == 0)
         {
@@ -1595,6 +1629,9 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
     replay->lines = lines;
     replay->docs = docs;
     replay->count = n;
+    replay->recovered_tail = recovered_tail;
+    replay->missing_newline = !terminated && !recovered_tail;
+    replay->tail_offset = tail_offset;
     replay->last_compact = last_compact;
     replay->last_tool_call = last_tool_call;
     replay->last_tool_result = last_tool_result;
@@ -1702,9 +1739,69 @@ invalid:
     return NULL;
 }
 
-PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind)
+/* Inspection stays read-only. Actual resume validates the complete prefix and
+ * repairs only the last unterminated record, while holding the writer lock. */
+static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind kind,
+                                              const atomic_bool *cancelled,
+                                              bool prepare_messages, bool recover_tail,
+                                              bool *repaired)
 {
-    return ReplayPrepareBefore(path, kind, NULL, false);
+    if (repaired) *repaired = false;
+    int lock = recover_tail ? SessionLockAcquireBefore(path, NULL, 0, cancelled) : -1;
+    if (recover_tail && lock < 0) return NULL;
+    FILE *f = fopen(path, "rb");
+    PicoSessionReplay *replay = f ? ReplayRead(f, kind, cancelled, prepare_messages, recover_tail) : NULL;
+    if (replay && cancelled && atomic_load(cancelled))
+    {
+        PicoSession_ReplayFree(replay);
+        replay = NULL;
+    }
+    if (replay && recover_tail && (replay->recovered_tail || replay->missing_newline))
+    {
+        int fd = open(path, O_WRONLY | O_CLOEXEC);
+        struct stat read_stat, write_stat;
+        bool ok = fd >= 0 && fstat(fileno(f), &read_stat) == 0 && fstat(fd, &write_stat) == 0 &&
+                  read_stat.st_dev == write_stat.st_dev && read_stat.st_ino == write_stat.st_ino &&
+                  read_stat.st_size == write_stat.st_size;
+        if (ok && SessionTestFail("replay_before_repair")) ok = false;
+        if (cancelled && atomic_load(cancelled)) ok = false;
+        if (ok && replay->recovered_tail)
+        {
+            ok = ftruncate(fd, replay->tail_offset) == 0;
+            if (ok && repaired) *repaired = true;
+        }
+        else if (ok)
+            /* A valid record without its delimiter must survive continuation. */
+            ok = lseek(fd, 0, SEEK_END) >= 0 && PicoIO_WriteAll(fd, "\n", 1);
+        if (ok) ok = !SessionTestFail("replay_after_repair") && fsync(fd) == 0;
+        if (fd >= 0 && close(fd) != 0) ok = false;
+        if (!ok)
+        {
+            PicoSession_ReplayFree(replay);
+            replay = NULL;
+        }
+    }
+    if (f) fclose(f);
+    SessionLockRelease(lock);
+    if (replay && recover_tail && (replay->recovered_tail || replay->missing_newline))
+        CatalogMarkChanged();
+    return replay;
+}
+
+static void ReplayWarnRecovered(PicoHost *host, bool repaired, bool ready)
+{
+    if (host && repaired)
+        pico_status_warn(host, ready ?
+            "Recovered session history after an interrupted write; discarded the incomplete final record." :
+            "Removed an incomplete final session record, but could not finish saving the recovery. Try opening it again.");
+}
+
+PicoSessionReplay *PicoSession_ReplayPrepare(PicoHost *host, const char *path, PicoAgentKind kind)
+{
+    bool repaired = false;
+    PicoSessionReplay *replay = ReplayPrepareBefore(path, kind, NULL, false, true, &repaired);
+    ReplayWarnRecovered(host, repaired, replay != NULL);
+    return replay;
 }
 
 /* Returns true when complete. Call on the main thread only. */
@@ -1770,7 +1867,7 @@ void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *pat
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
                        bool append_interrupted)
 {
-    PicoSessionReplay *replay = PicoSession_ReplayPrepare(path, agent->kind);
+    PicoSessionReplay *replay = PicoSession_ReplayPrepare(app, path, agent->kind);
     if (!replay)
     {
         agent->session_path[0] = '\0';
@@ -2345,7 +2442,7 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
     }
     PicoSessionHeader info;
     if (PicoSession_ReadHeader(path, &info) != 0) return -1;
-    PicoSessionReplay *replay = PicoSession_ReplayPrepare(path, info.kind);
+    PicoSessionReplay *replay = ReplayPrepareBefore(path, info.kind, NULL, false, false, NULL);
     if (!replay) return -1;
     PicoMessage *messages = NULL;
     int count = 0;
@@ -3482,9 +3579,8 @@ static bool CatalogDirForPath(const char *workspace_path, char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/%s", root, key);
 }
 
-/* Held while a JSONL is written or a project is removed. File locks coordinate
- * independent Pico processes; the mutex supplies the missing thread-level
- * serialization (POSIX record locks are process-scoped). */
+/* Held while a JSONL is written or a project is removed. The mutex orders
+ * local operations; the file lock also coordinates independent Pico processes. */
 static pthread_mutex_t g_catalog_deletion_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int CatalogDeletionGuardAcquire(char *error, size_t error_cap)
@@ -6933,6 +7029,7 @@ typedef struct PicoSessionLoadWorker {
     bool explicit_in_workspace;
     bool allow_prefix;
     bool no_session;
+    bool repaired_tail;
     char path[4096];
     PicoSessionReplay *replay;
 } PicoSessionLoadWorker;
@@ -7000,7 +7097,10 @@ static void *SessionLoadRead(void *arg)
     }
     if (worker->path[0] && !atomic_load(&worker->cancelled))
         worker->replay = ReplayPrepareBefore(worker->path, PICO_AGENT_MAIN,
-                                              &worker->cancelled, true);
+                                              &worker->cancelled, true, true, &worker->repaired_tail);
+#ifdef PICO_SESSION_TEST_HOOKS
+    (void)PicoSession_TestHook("async_replay_after_read");
+#endif
     return NULL;
 }
 
@@ -7062,6 +7162,9 @@ void PicoSession_LoadCancelWorkspace(PicoHost *host, PicoWorkspaceId id)
 static void SessionLoadCompleted(PicoHost *host, void *arg)
 {
     PicoSessionLoadWorker *worker = arg;
+    /* Repair is a disk change even if selection/cancellation superseded this
+     * load. Deliver its warning independently of candidate publication. */
+    ReplayWarnRecovered(host, worker->repaired_tail, worker->replay != NULL);
     PicoSessionLoad *load = host->session_load;
     if (!load || load->serial != worker->serial || load->cancelled) return;
     load->worker = NULL;

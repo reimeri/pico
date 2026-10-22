@@ -605,7 +605,7 @@ static PicoResult CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOpt
             goto discard;
         }
         agent->persistence = PICO_SESSION_DURABLE;
-        replay = PicoSession_ReplayPrepare(path, agent->kind);
+        replay = PicoSession_ReplayPrepare(app, path, agent->kind);
         if (!replay)
         {
             result = PICO_SESSION_INVALID;

@@ -44,6 +44,12 @@ static int EchoInit(PicoWorkspace *workspace, void **state_out)
 
 Full file: [`../../examples/echo_tool.c`](../../examples/echo_tool.c). Builtin reference: [`../../builtins/shell.c`](../../builtins/shell.c) (`sh`). Background processes: [`../../builtins/background.c`](../../builtins/background.c) (`run_background`, `kill_background`, `list_background`, `log_background`). Those jobs outlive the tool call, are local to one agent, and keep only the latest 64 KiB of output (oldest lines dropped). They do not use `pico_tool_set_child` or `details_json`. Asking the user: [`../../examples/ask_tool.c`](../../examples/ask_tool.c) (`pico_tool_ask` + builtin confirm overlay). Wrapping tools: [`../../examples/permit_tool.c`](../../examples/permit_tool.c) (a before-tool hook).
 
+### Background job lifetime
+
+On Linux, a background job stays `running` until its command and descendants in the original process group finish, even when the launching shell exits or output pipes close first. A private per-job supervisor owns and reaps orphaned group descendants; Pico itself is not made a process-wide subreaper. Natural completion reports the launching command's exit code or signal, not an aggregate descendant result.
+
+`kill_background`, session reset, agent destruction, workspace free, and host shutdown signal the entire owned group, including descendants remaining after launcher exit. Explicit kill reports `killed` with its signal. Linux parent-death handling also kills the group when the host disappears; merely finishing the tool's worker thread does not stop the job. A process that deliberately leaves the group with `setsid`/`setpgid` is outside this ownership boundary. Jobs retain their existing reload lifetime and bounded output capture; no extension-owned thread or callback is added. See [contracts](contracts.md#threads).
+
 ## Execution policy and parallel calls
 
 The final argument to `pico_add_tool` is a required `PicoToolExecution`:

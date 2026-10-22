@@ -1823,8 +1823,9 @@ bool PicoSession_LoadReplacesAgent(const PicoHost *host, PicoAgentId id)
 bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
 { (void)host; (void)id; return false; }
 
-PicoSessionReplay *PicoSession_ReplayPrepare(const char *path, PicoAgentKind kind)
+PicoSessionReplay *PicoSession_ReplayPrepare(PicoHost *host, const char *path, PicoAgentKind kind)
 {
+    (void)host;
     (void)kind;
     return g_fake_session.enabled && g_fake_session.resolve_ok && path &&
            strcmp(path, g_fake_session.path) == 0 ? (PicoSessionReplay *)&g_fake_session : NULL;

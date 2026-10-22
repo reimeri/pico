@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/plugin.h"
@@ -6,6 +7,7 @@
 #include "sh_timeout.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
 #include <signal.h>
@@ -278,6 +280,24 @@ static char *ExtractArgs(const char *args_json, int *timeout_seconds)
     return cmd;
 }
 
+/* Concurrent agents may fork while this pipe is open. Only the command's
+ * stdout/stderr duplicates may survive exec, never another child's copies. */
+static int OpenCapturePipe(int pipefd[2])
+{
+#if defined(__linux__)
+    return pipe2(pipefd, O_CLOEXEC);
+#else
+    if (pipe(pipefd) != 0) return -1;
+    if (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) == 0 &&
+        fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == 0) return 0;
+    int failure = errno;
+    close(pipefd[0]);
+    close(pipefd[1]);
+    errno = failure;
+    return -1;
+#endif
+}
+
 static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *out, void *state)
 {
     (void)state;
@@ -301,7 +321,7 @@ static void ShRun(PicoAgentContext *ctx, const char *args_json, PicoToolResult *
     const char *workspace = pico_agent_context_workspace(ctx);
 
     int pipefd[2];
-    if (pipe(pipefd) != 0)
+    if (OpenCapturePipe(pipefd) != 0)
     {
         if (out)
         {

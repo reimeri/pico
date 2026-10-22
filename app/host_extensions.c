@@ -308,7 +308,7 @@ static void ShutdownHostSlots(PicoHost *host, PicoPluginSlot *slots, int count)
 
 bool PicoHostExtensions_Reload(PicoHost *host)
 {
-    if (!host)
+    if (!host || host->settings_reload_blocked)
     {
         return false;
     }

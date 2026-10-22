@@ -3680,6 +3680,9 @@ static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
 
 static int CatalogProjectUpdate(const char *project, const char *name, int stash)
 {
+#ifdef PICO_SESSION_TEST_HOOKS
+    if (PicoSession_TestHook("project_before_save")) return -1;
+#endif
     char canonical[4096];
     sqlite3 *db;
     sqlite3_stmt *stmt = NULL;
@@ -5301,7 +5304,7 @@ static int CatalogDeleteProjectLocked(PicoHost *host, const char *project)
     {
         bool busy;
         pthread_mutex_lock(&host->persist_mu);
-        busy = host->persist_flight_agent_id != 0 || host->persist_flight_inbox;
+        busy = host->persist_flight_agent_id != 0 || host->persist_flight_inbox || host->persist_flight_ui;
         for (int i = 0; i < host->persist_pending_count; i++)
             if (host->persist_pending[i].job_kind != PICO_PERSIST_JOB_CATALOG_ORDER) busy = true;
         pthread_mutex_unlock(&host->persist_mu);
@@ -6081,6 +6084,50 @@ static bool PersistHasFailureLocked(const PicoHost *host, PicoAgentId id, const 
     return false;
 }
 
+bool PicoHost_EnqueueUiPersist(PicoHost *host, void *state, void (*run)(void *),
+                              void (*complete)(PicoHost *, void *), void (*destroy)(void *))
+{
+    if (!host || !host->persist_ready || host->terminal_shutdown) return false;
+    PicoUiPersist *work = calloc(1, sizeof(*work));
+    if (!work) return false;
+    *work = (PicoUiPersist){.state = state, .run = run, .complete = complete, .destroy = destroy};
+    pthread_mutex_lock(&host->persist_mu);
+    bool accepted = !host->persist_stop && host->persist_pending_count < PICO_PERSIST_QUEUE_CAPACITY;
+    if (accepted)
+    {
+        host->persist_pending[host->persist_pending_count++] =
+            (PicoSessionPersistJob){.job_kind = PICO_PERSIST_JOB_UI, .ui_persist = work};
+        if (host->ui_persist_tail) host->ui_persist_tail->next = work;
+        else host->ui_persist_head = work;
+        host->ui_persist_tail = work;
+        pthread_cond_signal(&host->persist_cv);
+    }
+    pthread_mutex_unlock(&host->persist_mu);
+    if (!accepted) free(work);
+    return accepted;
+}
+
+static void PumpUiPersist(PicoHost *host)
+{
+    for (;;)
+    {
+        pthread_mutex_lock(&host->persist_mu);
+        PicoUiPersist *work = host->ui_persist_head;
+        if (work && work->finished)
+        {
+            host->ui_persist_head = work->next;
+            if (!host->ui_persist_head) host->ui_persist_tail = NULL;
+        }
+        else work = NULL;
+        pthread_mutex_unlock(&host->persist_mu);
+        if (!work) break;
+        if (work->complete) work->complete(host, work->state);
+        work->destroy(work->state);
+        free(work);
+        pico_host_request_redraw(host);
+    }
+}
+
 static void *PersistThreadMain(void *arg)
 {
     PicoHost *host = (PicoHost *)arg;
@@ -6113,6 +6160,8 @@ static void *PersistThreadMain(void *arg)
         {
             host->persist_flight_inbox = true;
         }
+        else if (job.job_kind == PICO_PERSIST_JOB_UI)
+            host->persist_flight_ui = true;
         else
         {
             host->persist_flight_agent_id = job.agent_id;
@@ -6138,6 +6187,8 @@ static void *PersistThreadMain(void *arg)
             }
             atomic_store(&batch->finished, true);
         }
+        else if (job.job_kind == PICO_PERSIST_JOB_UI)
+            job.ui_persist->run(job.ui_persist->state);
         else
         {
             PicoSessionPersistJob *cur = &job;
@@ -6188,6 +6239,11 @@ static void *PersistThreadMain(void *arg)
         else if (job.job_kind == PICO_PERSIST_JOB_INBOX_ACK)
         {
             host->persist_flight_inbox = false;
+        }
+        else if (job.job_kind == PICO_PERSIST_JOB_UI)
+        {
+            job.ui_persist->finished = true;
+            host->persist_flight_ui = false;
         }
         else
         {
@@ -6271,6 +6327,20 @@ void PicoSessionPersist_Shutdown(PicoHost *host)
     if (host->persist_ready)
     {
         pthread_join(host->persist_thread, NULL);
+        while (host->ui_persist_head)
+        {
+            PicoUiPersist *work = host->ui_persist_head;
+            host->ui_persist_head = work->next;
+            work->destroy(work->state);
+            free(work);
+        }
+        host->ui_persist_tail = NULL;
+        while (host->project_preferences)
+        {
+            PicoProjectPreference *pref = host->project_preferences;
+            host->project_preferences = pref->next;
+            free(pref);
+        }
         for (i = 0; i < host->persist_pending_count; i++)
         {
             PersistJobClear(&host->persist_pending[i]);
@@ -6319,6 +6389,7 @@ void PicoSessionPersist_Pump(PicoHost *host)
     }
     pthread_mutex_unlock(&host->persist_mu);
     PersistApplyFailures(host, local, n);
+    PumpUiPersist(host);
     bool inbox_failed = false;
     for (PicoInboxAckBatch *batch = host->inbox_acks; batch; batch = batch->next)
     {
@@ -6363,14 +6434,15 @@ static bool PersistHasCatalogWorkLocked(const PicoHost *host)
     {
         return false;
     }
-    if (host->persist_flight_catalog_order || host->persist_flight_inbox)
+    if (host->persist_flight_catalog_order || host->persist_flight_inbox || host->persist_flight_ui)
     {
         return true;
     }
     for (i = 0; i < host->persist_pending_count; i++)
     {
         if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_CATALOG_ORDER ||
-            host->persist_pending[i].job_kind == PICO_PERSIST_JOB_INBOX_ACK)
+            host->persist_pending[i].job_kind == PICO_PERSIST_JOB_INBOX_ACK ||
+            host->persist_pending[i].job_kind == PICO_PERSIST_JOB_UI)
         {
             return true;
         }

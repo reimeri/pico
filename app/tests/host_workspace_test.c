@@ -224,6 +224,9 @@ static bool g_collapse_fail_once;
 static int g_inbox_ack_ready_fd = -1;
 static int g_inbox_ack_continue_fd = -1;
 static bool g_inbox_ack_fail_once;
+static const char *g_preference_stage;
+static int g_preference_ready_fd = -1, g_preference_continue_fd = -1;
+static bool g_preference_fail;
 static int g_replay_ready_fd = -1;
 static int g_replay_continue_fd = -1;
 static int g_replay_adopted;
@@ -289,6 +292,13 @@ bool PicoSession_TestHook(const char *stage)
         bool fail = g_inbox_ack_fail_once;
         g_inbox_ack_ready_fd = g_inbox_ack_continue_fd = -1;
         g_inbox_ack_fail_once = false;
+        return !TransferTestByte(ready, true) || !TransferTestByte(resume, false) || fail;
+    }
+    if (stage && g_preference_stage && !strcmp(stage, g_preference_stage))
+    {
+        int ready = g_preference_ready_fd, resume = g_preference_continue_fd;
+        bool fail = g_preference_fail;
+        g_preference_stage = NULL;
         return !TransferTestByte(ready, true) || !TransferTestByte(resume, false) || fail;
     }
     if (stage && strcmp(stage, "catalog_scan") == 0)
@@ -5995,6 +6005,12 @@ static int TestHostSettingsPersistence(void)
         return 1;
     }
 
+    if (!PicoCatalog_DrainPersistBefore(host, NULL))
+    {
+        Fail("accepted host preference must finish persistence");
+        pico_host_free(host);
+        return 1;
+    }
     char settings_content[8192];
     ReadFileStr(settings_path, settings_content, sizeof(settings_content));
     struct stat settings_stat;
@@ -15518,6 +15534,337 @@ done:
     return good ? 0 : 1;
 }
 
+typedef struct InteractionFixture
+{
+    char dir[64], cfg[64];
+    PicoHost *host;
+    PicoWorkspaceId workspace;
+    PicoAgentId agent;
+    Clay_Context *previous;
+} InteractionFixture;
+
+static void InteractionOmitDrawHooks(PicoHost *host)
+{
+    for (int i = 0; i < host->hook_count; )
+    {
+        if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
+        {
+            memmove(&host->hooks[i], &host->hooks[i + 1],
+                    (size_t)(host->hook_count - i - 1) * sizeof(host->hooks[0]));
+            host->hook_count--;
+        }
+        else i++;
+    }
+}
+
+static bool InteractionFixtureInit(InteractionFixture *f)
+{
+    f->previous = Clay_GetCurrentContext();
+    snprintf(f->dir, sizeof(f->dir), "/tmp/pico-interaction-ws-XXXXXX");
+    snprintf(f->cfg, sizeof(f->cfg), "/tmp/pico-interaction-cfg-XXXXXX");
+    if (!mkdtemp(f->dir) || !mkdtemp(f->cfg)) return false;
+    setenv("XDG_CONFIG_HOME", f->cfg, 1);
+    char directory[4096], path[4096];
+    snprintf(directory, sizeof(directory), "%s/pico", f->cfg);
+    Pico_MkdirP(directory);
+    if (!PicoPath_Format(path, sizeof(path), "%s/settings.json", directory)) return false;
+    if (WriteFile(path, "{\"model\":\"test\",\"resume_last\":false,\"chat_width\":0,\"spell\":false}\n") != 0 ||
+        pico_host_init(&f->host, NULL, true) != PICO_OK ||
+        !Pico_InitClay((Clay_Dimensions){1100, 800})) return false;
+    WaitPluginLoad(f->host);
+    if (pico_workspace_open(f->host, f->dir, &f->workspace) != PICO_OK ||
+        PicoCatalog_Ensure(f->dir) != 0 || PicoCatalog_SetProjectName(f->dir, "Original") != 0) return false;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE, .select = true};
+    if (pico_main_agent_create(f->host, f->workspace, &options, &f->agent) != PICO_OK ||
+        !WaitHostTasks(f->host)) return false;
+    InteractionOmitDrawHooks(f->host);
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    PicoHost_Frame(f->host);
+    return true;
+}
+
+static void InteractionFixtureFree(InteractionFixture *f)
+{
+    g_find_input_test = g_find_press = g_find_down = g_find_released = g_find_ctrl = false;
+    g_find_key = g_find_character = 0;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    g_clay_frame_test = g_sidebar_poll_due = false;
+    if (f->host)
+    {
+        (void)PicoCatalog_DrainPersistBefore(f->host, NULL);
+        (void)WaitHostTasks(f->host);
+        if (pico_host_free(f->host) != PICO_HOST_SHUTDOWN_CLEAN)
+            Fail("interaction fixture must finish its workers before teardown");
+    }
+    Pico_FreeClay();
+    Clay_SetCurrentContext(f->previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(f->dir); RmRf(f->cfg);
+}
+
+static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char *text)
+{
+    if (!SidebarFrameClick(host, Clay_GetElementData(id))) return false;
+    g_find_ctrl = true; g_find_key = KEY_A;
+    PicoHost_Frame(host);
+    g_find_ctrl = false; g_find_key = -1;
+    for (const char *p = text; *p; p++)
+    {
+        g_find_character = *p;
+        pico_host_request_redraw(host);
+        PicoHost_Frame(host);
+    }
+    return true;
+}
+
+typedef enum PreferenceAction
+{
+    PREF_SETTINGS,
+    PREF_RENAME,
+    PREF_STASH,
+    PREF_HOST_EXTENSION,
+    PREF_WORKSPACE_EXTENSION,
+} PreferenceAction;
+
+static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
+{
+    InteractionFixture f = {0};
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool released = false, good = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f) || pipe(ready) || pipe(proceed)) goto done;
+    PicoHost *host = f.host;
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, f.workspace);
+    int extension_index = -1;
+    const char *extension = action == PREF_HOST_EXTENSION ? "footer" : "sh";
+    if (action == PREF_SETTINGS)
+    {
+        PicoSettingsUi_Open(host);
+        PicoHost_Frame(host);
+        if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsResumeLast")))) goto done;
+    }
+    else if (action == PREF_RENAME || action == PREF_STASH)
+    {
+        if (!SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0)), MOUSE_BUTTON_RIGHT)) goto done;
+        if (action == PREF_RENAME && !InteractionReplaceText(host, CLAY_ID("SidebarEditName"), "Renamed")) goto done;
+    }
+    else
+    {
+        for (int i = 0; i < PicoPlugins_Count(host); i++)
+        {
+            PicoExtInfo info;
+            if (PicoPlugins_Get(host, i, &info) && !strcmp(info.name, extension) &&
+                (action == PREF_HOST_EXTENSION ? info.scope == PICO_EXTENSION_HOST : info.workspace_id == f.workspace))
+            { extension_index = i; break; }
+        }
+        if (extension_index < 0) goto done;
+    }
+    g_preference_ready_fd = ready[1];
+    g_preference_continue_fd = proceed[0];
+    g_preference_fail = fail;
+    g_preference_stage = action == PREF_SETTINGS ? "settings_before_save"
+                         : action == PREF_RENAME || action == PREF_STASH ? "project_before_save"
+                         : "extension_before_save";
+    phase = "input returns while save is blocked";
+    if (action == PREF_SETTINGS)
+    {
+        if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsApply")))) goto done;
+    }
+    else if (action == PREF_RENAME || action == PREF_STASH)
+    {
+        if (!SidebarFrameClick(host, Clay_GetElementData(action == PREF_RENAME
+                                       ? CLAY_ID("SidebarEditSave") : CLAY_ID("SidebarEditStash")))) goto done;
+    }
+    else if (!PicoPlugins_SetEnabled(host, extension_index, false)) goto done;
+    if (!TransferTestByte(ready[0], false)) goto done;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    if (PicoCatalog_DrainPersistBefore(host, &deadline)) goto done;
+    phase = "pending UI state";
+    if (action == PREF_SETTINGS)
+    {
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+        if (!PicoSettingsUi_IsOpen(host) || !SidebarCommandsContain(&commands, "Saving…") ||
+            workspace->settings.resume_last) goto done;
+        /* Editing/cancel must not replace the snapshot already being saved. */
+        if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsResumeLast")))) goto done;
+        g_find_key = KEY_ESCAPE; PicoHost_Frame(host); g_find_key = -1;
+        if (!PicoSettingsUi_IsOpen(host)) goto done;
+        PicoHost_RequestHostReload(host);
+        pico_host_pump(host);
+        if (!PicoSettingsUi_IsOpen(host)) goto done;
+    }
+    else if (action == PREF_RENAME)
+    {
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+        if (!SidebarCommandsContain(&commands, "Renamed")) goto done;
+    }
+    else if (action == PREF_STASH)
+    {
+        if (Clay_GetElementData(CLAY_IDI("SidebarWs", 0)).found ||
+            !Clay_GetElementData(CLAY_ID("SidebarStashedHeader")).found) goto done;
+    }
+    else
+    {
+        bool disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
+                                                      : PicoWorkspace_ExtensionDisabled(workspace, extension);
+        if (!disabled) goto done;
+        pico_host_pump(host); /* Activation/reload cannot wait for this disk write. */
+        if (action == PREF_HOST_EXTENSION && PicoPlugins_HostState(host, extension)) goto done;
+        if (action == PREF_WORKSPACE_EXTENSION)
+            for (int i = 0; i < workspace->tool_count; i++)
+                if (!strcmp(workspace->tools[i].name, "sh")) goto done;
+        InteractionOmitDrawHooks(host);
+    }
+    phase = "completion";
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    if (!PicoCatalog_DrainPersistBefore(host, NULL)) goto done;
+    pico_host_pump(host);
+    InteractionOmitDrawHooks(host);
+    if (action == PREF_SETTINGS)
+    {
+        if (PicoSettingsUi_IsOpen(host) != fail || workspace->settings.resume_last != !fail) goto done;
+        if (fail)
+        {
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+            if (SidebarCommandsContain(&commands, "Saving…") || !SidebarCommandsContain(&commands, "Could not save settings.")) goto done;
+        }
+    }
+    else if (action == PREF_RENAME || action == PREF_STASH)
+    {
+        PicoHost_Frame(host);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+        if (action == PREF_RENAME && !SidebarCommandsContain(&commands, fail ? "Original" : "Renamed")) goto done;
+        if (action == PREF_STASH && Clay_GetElementData(CLAY_IDI("SidebarWs", 0)).found != fail) goto done;
+    }
+    else
+    {
+        bool disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
+                                                      : PicoWorkspace_ExtensionDisabled(workspace, extension);
+        if (disabled != !fail) goto done;
+    }
+    if (fail && action != PREF_SETTINGS && !host->status_warn) goto done;
+    good = true;
+done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    InteractionFixtureFree(&f);
+    g_preference_stage = NULL;
+    g_preference_ready_fd = g_preference_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
+    if (!good)
+    {
+        fprintf(stderr, "preference save phase: %s (action=%d failure=%d)\n", phase, action, fail);
+        Fail("preference actions must be responsive and apply the agreed save/failure behavior");
+    }
+    return good ? 0 : 1;
+}
+
+/* A workspace is already canonicalized when opened. Replacing that directory
+ * with a symlink must not change the footer's workspace identity on redraw. */
+static int TestFooterUsesWorkspaceIdentity(void)
+{
+    InteractionFixture f = {0};
+    char moved[128], target[] = "/tmp/pico-footer-target-XXXXXX";
+    bool renamed = false, linked = false, good = false;
+    if (!InteractionFixtureInit(&f) || !mkdtemp(target)) goto done;
+    if (!PicoPath_Format(moved, sizeof(moved), "%s-moved", f.dir) || rename(f.dir, moved)) goto done;
+    renamed = true;
+    if (symlink(target, f.dir)) goto done;
+    linked = true;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    good = SidebarCommandsContain(&commands, f.dir) && !SidebarCommandsContain(&commands, target);
+done:
+    if (linked) unlink(f.dir);
+    if (renamed) rename(moved, f.dir);
+    InteractionFixtureFree(&f);
+    RmRf(target);
+    if (!good) Fail("footer redraw must retain the opened workspace identity without filesystem resolution");
+    return good ? 0 : 1;
+}
+
+/* Distinct live extras are not catalog rows; their cached IDs must remain
+ * owned and correctly associated with each inbox and context-menu action. */
+static int TestSidebarCachedLiveRowIdentity(void)
+{
+    InteractionFixture f = {0};
+    PicoAgentId ids[2] = {0};
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    ids[0] = f.agent;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    if (pico_main_agent_create(f.host, f.workspace, &options, &ids[1]) != PICO_OK) goto done;
+    for (int i = 0; i < 2; i++)
+    {
+        PicoAgent *agent = PicoHost_FindAgent(f.host, ids[i]);
+        snprintf(agent->session_id, sizeof(agent->session_id), "uncataloged-%d", i);
+        agent->inbox_pending = true;
+    }
+    pico_host_request_redraw(f.host);
+    PicoHost_Frame(f.host);
+    for (int i = 0; i < 2; i++)
+    {
+        if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInbox", i))) ||
+            pico_agent_active(f.host) != ids[i]) goto done;
+        if (!SidebarFrameClickButton(f.host, Clay_GetElementData(CLAY_IDI("SidebarSess", i)), MOUSE_BUTTON_RIGHT) ||
+            !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSessionCopy")))) goto done;
+        char expected[40];
+        snprintf(expected, sizeof(expected), "uncataloged-%d", i);
+        if (!GetClipboardText() || strcmp(GetClipboardText(), expected)) goto done;
+    }
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("cached sidebar rows must preserve distinct live session identities across layout and input");
+    return good ? 0 : 1;
+}
+
+static int TestWorkspaceExtensionPreferenceKeepsEffectiveList(bool local_file)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    char path[4096];
+    if (!PicoPath_Format(path, sizeof(path), "%s/pico/settings.json", f.cfg) ||
+        WriteFile(path, "{\"disabled_extensions\":[\"diff\"],\"model\":\"test\"}\n")) goto done;
+    if (local_file)
+    {
+        char directory[4096], local_path[4096];
+        if (!PicoPath_Format(directory, sizeof(directory), "%s/.pico", f.dir) ||
+            !PicoPath_Format(local_path, sizeof(local_path), "%s/settings.json", directory)) goto done;
+        Pico_MkdirP(directory);
+        if (WriteFile(local_path, "{\"model\":\"test\"}\n")) goto done;
+    }
+    PicoWorkspace *ws = PicoHost_FindWorkspace(f.host, f.workspace);
+    if (!PicoWorkspaceSettings_Load(ws) || PicoWorkspace_ExtensionDisabled(ws, "diff") != !local_file) goto done;
+    int index = -1;
+    for (int i = 0; i < PicoPlugins_Count(f.host); i++)
+    {
+        PicoExtInfo info;
+        if (PicoPlugins_Get(f.host, i, &info) && info.workspace_id == f.workspace && !strcmp(info.name, "sh"))
+        { index = i; break; }
+    }
+    if (index < 0 || !PicoPlugins_SetEnabled(f.host, index, false) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    /* Reloading from disk, not inspecting optimistic memory, protects the
+     * inherited list when the first local settings override is created. */
+    if (!PicoWorkspaceSettings_Load(ws) || PicoWorkspace_ExtensionDisabled(ws, "diff") != !local_file ||
+        !PicoWorkspace_ExtensionDisabled(ws, "sh")) goto done;
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("workspace extension preference writes must preserve the effective disabled list");
+    return good ? 0 : 1;
+}
+
 static int TestIdleFrameOnlyPresentsOnInvalidation(void)
 {
     PicoHost *host = NULL;
@@ -16443,6 +16790,48 @@ static Clay_RenderCommandArray CachedThinkFrame(PicoHost *host, const Clay_Dimen
  * on every frame, so a long thinking block pegged one core and froze the UI.
  * The durable contract: unchanged content costs no per-frame parsing or font
  * measurement, and a streaming append only measures the appended words. */
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static int TestMountedTraceRowsRemainInteractive(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
+    for (int i = 0; i < 120; i++)
+    {
+        char call_id[40];
+        snprintf(call_id, sizeof(call_id), "history-tool-%d", i);
+        PicoAgent_AddMessage(f.host, agent, PICO_ROLE_ASSISTANT, "");
+        PicoAgent_AddToolCallWithId(f.host, agent, call_id, "read", "{}");
+        PicoAgent_SetLastToolOutput(agent, "visible-tool-output", false);
+        agent->messages[i].trace[0].tool_done_t0 = 0;
+    }
+    int target = agent->message_count - 1;
+    agent->messages[target].trace_group_expanded = true;
+    PicoAgent_TranscriptChanged(agent, target);
+    f.host->chat_follow_bottom = true;
+    for (int i = 0; i < 16; i++)
+    {
+        pico_host_request_redraw(f.host);
+        PicoHost_Frame(f.host);
+    }
+    Clay_ElementData row = Clay_GetElementData(MainTraceRowId(target, 0, "ToolRow"));
+    if (!row.found || Clay_GetElementData(CLAY_IDI("MsgMain", 0)).found ||
+        !SidebarFrameClick(f.host, row)) goto done;
+    g_find_released = true;
+    PicoHost_Frame(f.host);
+    g_find_released = false;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!agent->messages[target].trace[0].expanded || agent->messages[0].trace[0].expanded ||
+        !SidebarCommandsContain(&commands, "visible-tool-output")) goto done;
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("mounted trace rows must activate the correct tool in a virtualized long conversation");
+    return good ? 0 : 1;
+}
+#endif
+
 static int TestExpandedThinkRenderingIsCached(void)
 {
     const Clay_Dimensions viewport = {1100, 800};
@@ -16818,6 +17207,14 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
+    for (int action = PREF_SETTINGS; action <= PREF_WORKSPACE_EXTENSION; action++)
+        if (PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, false)) ||
+            PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, true))) return 1;
+    if (PICO_TEST_RUN(TestFooterUsesWorkspaceIdentity()) ||
+        PICO_TEST_RUN(TestSidebarCachedLiveRowIdentity()) ||
+        PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(false)) ||
+        PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(true))) return 1;
+    if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_TOGGLE)) != 0 ||

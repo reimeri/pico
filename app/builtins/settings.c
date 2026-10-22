@@ -3,11 +3,13 @@
 #include "host_internal.h"
 #include "overlay.h"
 #include "settings.h"
+#include "theme_internal.h"
 
 #include "clay/clay.h"
 #include "docs_path.h"
 #include "text_field_ui.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,9 +29,23 @@ enum {
     FOCUS_CUSTOM_EFFORT,
 };
 
+typedef struct SettingsSave {
+    PicoUserSettingsDraft draft;
+    PicoHostPreferences preferences;
+    struct {
+        PicoWorkspaceId id;
+        char path[4096];
+        PicoResolvedSettings resolved;
+    } workspaces[PICO_MAX_WORKSPACES];
+    int count;
+    bool saved, prepared;
+    char error[PICO_SETTINGS_ERROR_MAX];
+} SettingsSave;
+
 typedef struct SettingsState {
     PicoHost *host;
     bool open;
+    SettingsSave *save;
     bool overflow;
     PicoScrollbar scrollbar;
     PicoScrollbar model_dropdown_scrollbar;
@@ -223,6 +239,7 @@ static bool Unclaim(void)
         return false;
     }
     g_open = false;
+    g_host->settings_reload_blocked = false;
     DiscardDraft(s_active_settings_state);
     return true;
 }
@@ -239,7 +256,7 @@ void PicoSettingsUi_Close(PicoHost *host)
     {
         return;
     }
-    (void)Unclaim();
+    if (!s_active_settings_state->save) (void)Unclaim();
 }
 
 void PicoSettingsUi_Open(PicoHost *host)
@@ -382,29 +399,94 @@ static bool ParseFieldsIntoDraft(SettingsState *s)
     return true;
 }
 
+static void SettingsSaveDestroy(void *arg)
+{
+    SettingsSave *save = arg;
+    PicoSettings_FreeUserDraft(&save->draft);
+    for (int i = 0; i < save->count; i++) free(save->workspaces[i].resolved.models);
+    free(save);
+}
+
+static void SettingsSaveRun(void *arg)
+{
+    SettingsSave *save = arg;
+    save->saved = PicoSettings_SaveUserDraft(NULL, &save->draft, save->error, sizeof(save->error));
+    if (!save->saved) return;
+    PicoSettings_ReadPreferences(&save->preferences);
+    save->prepared = true;
+    for (int i = 0; i < save->count; i++)
+        if (!PicoSettings_ReadResolved(save->workspaces[i].path, &save->workspaces[i].resolved))
+            save->prepared = false;
+}
+
+static void SettingsSaveCompleted(PicoHost *host, void *arg)
+{
+    SettingsSave *save = arg;
+    SettingsState *s = PicoPlugins_HostState(host, "settings");
+    bool current = s && s->save == save;
+    if (current) s->save = NULL;
+    if (!save->saved || !save->prepared)
+    {
+        const char *error = save->error[0] ? save->error : "Settings saved, but could not prepare the updated configuration.";
+        if (current) snprintf(s->error, sizeof(s->error), "%s", error);
+        else PicoOverlay_Notify(host, error);
+        return;
+    }
+    host->preferences.font_scale = save->preferences.font_scale;
+    host->preferences.chat_width = save->preferences.chat_width;
+    host->preferences.spell = save->preferences.spell;
+    snprintf(host->preferences.spell_lang, sizeof(host->preferences.spell_lang), "%s", save->preferences.spell_lang);
+    Pico_SetFontScale((float)host->preferences.font_scale);
+    for (int i = 0; i < save->count; i++)
+    {
+        PicoWorkspace *ws = PicoHost_FindWorkspace(host, save->workspaces[i].id);
+        if (ws && !strcmp(ws->path, save->workspaces[i].path))
+            PicoSettings_PublishResolved(ws, &save->workspaces[i].resolved);
+    }
+    PicoOverlay_Notify(host, "Settings saved.");
+    if (current) PicoSettingsUi_Close(host);
+}
+
 static bool ApplyDraft(SettingsState *s)
 {
-    const char *err;
-    if (!ParseFieldsIntoDraft(s))
+    if (s->save || !ParseFieldsIntoDraft(s)) return false;
+    const char *err = PicoSettings_ValidateUserDraft(&s->draft);
+    if (err) { snprintf(s->error, sizeof(s->error), "%s", err); return false; }
+    SettingsSave *save = calloc(1, sizeof(*save));
+    if (!save) return false;
+    save->draft = s->draft;
+    save->draft.models = NULL;
+    save->draft.source_model_ids = NULL;
+    if (s->draft.model_count)
     {
+        save->draft.models = malloc((size_t)s->draft.model_count * sizeof(*save->draft.models));
+        save->draft.source_model_ids = malloc((size_t)s->draft.model_count * sizeof(*save->draft.source_model_ids));
+        if (!save->draft.models || !save->draft.source_model_ids) { SettingsSaveDestroy(save); return false; }
+        memcpy(save->draft.models, s->draft.models, (size_t)s->draft.model_count * sizeof(*save->draft.models));
+        if (s->draft.source_model_ids)
+            memcpy(save->draft.source_model_ids, s->draft.source_model_ids,
+                   (size_t)s->draft.model_count * sizeof(*save->draft.source_model_ids));
+        else memset(save->draft.source_model_ids, 0, (size_t)s->draft.model_count * sizeof(*save->draft.source_model_ids));
+    }
+    for (int i = 0; i < s->host->workspace_count; i++)
+    {
+        PicoWorkspace *ws = s->host->workspaces[i];
+        if (!ws) continue;
+        save->workspaces[save->count].id = ws->id;
+        snprintf(save->workspaces[save->count++].path, sizeof(save->workspaces[0].path), "%s", ws->path);
+    }
+    if (!PicoHost_EnqueueUiPersist(s->host, save, SettingsSaveRun, SettingsSaveCompleted, SettingsSaveDestroy))
+    {
+        SettingsSaveDestroy(save);
+        snprintf(s->error, sizeof(s->error), "Could not queue settings save.");
         return false;
     }
-    err = PicoSettings_ValidateUserDraft(&s->draft);
-    if (err)
-    {
-        snprintf(s->error, sizeof(s->error), "%s", err);
-        return false;
-    }
-    if (!PicoSettings_SaveUserDraft(s->host, &s->draft, s->error, sizeof(s->error)))
-    {
-        return false;
-    }
-    if (!PicoSettings_ApplyUserDraft(s->host))
-    {
-        snprintf(s->error, sizeof(s->error), "%s", "Settings saved, but could not reload them in memory.");
-        return false;
-    }
-    PicoOverlay_Notify(s->host, "Settings saved.");
+    s->save = save;
+    s->host->settings_reload_blocked = true;
+    s->error[0] = '\0';
+    CancelModelDrag(s);
+    ClearFocus(s);
+    s->host->ui_relayout_requested = true;
     return true;
 }
 
@@ -930,6 +1012,7 @@ static void RenderField(SettingsState *s, Clay_ElementId id, const char *value, 
 
 static void RenderButton(Clay_ElementId id, const char *label, bool enabled, bool primary)
 {
+    bool saving = s_active_settings_state && s_active_settings_state->save && id.id == CLAY_ID("SettingsApply").id;
     bool hover = enabled && Clay_PointerOver(id);
     Clay_Color bg = primary ? (Clay_Color){74, 104, 180, 255} : COLOR_FOOTER_BG;
     Clay_Color text = enabled ? COLOR_TEXT : COLOR_MUTED;
@@ -940,6 +1023,12 @@ static void RenderButton(Clay_ElementId id, const char *label, bool enabled, boo
     else if (hover)
     {
         bg = primary ? (Clay_Color){92, 126, 210, 255} : COLOR_CODE_BG;
+    }
+    if (saving)
+    {
+        float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 5.0f);
+        bg = (Clay_Color){54 + 28 * pulse, 74 + 32 * pulse, 126 + 54 * pulse, 255};
+        text = COLOR_TEXT;
     }
     CLAY(id, {.layout = {.padding = {14, 14, 8, 8}}, .backgroundColor = bg, .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
@@ -1627,7 +1716,7 @@ static void SettingsRender(PicoHost *app, void *state)
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
-                RenderButton(CLAY_ID("SettingsCancel"), "Cancel", true, false);
+                RenderButton(CLAY_ID("SettingsCancel"), "Cancel", !s_active_settings_state->save, false);
                 CLAY_AUTO_ID({.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER,
                                                             .y = CLAY_ALIGN_Y_CENTER},
                                          .sizing = {.width = CLAY_SIZING_GROW(0)}}})
@@ -1638,7 +1727,7 @@ static void SettingsRender(PicoHost *app, void *state)
                                                 .textColor = COLOR_MUTED,
                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 }
-                RenderButton(CLAY_ID("SettingsApply"), "Apply", true, true);
+                RenderButton(CLAY_ID("SettingsApply"), s_active_settings_state->save ? "Saving…" : "Apply", !s_active_settings_state->save, true);
             }
         }
     }
@@ -1791,6 +1880,7 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     {
         return;
     }
+    if (s_active_settings_state->save) return;
     g_overflow = PicoScrollbar_Overflows(CLAY_STRING("SettingsModalScroll"));
     if (s_active_settings_state->model_dropdown_ensure_visible)
     {
@@ -1875,10 +1965,7 @@ static bool HandleClicks(SettingsState *s)
     }
     if (OverId(CLAY_STRING("SettingsApply")))
     {
-        if (ApplyDraft(s))
-        {
-            PicoSettingsUi_Close(s->host);
-        }
+        (void)ApplyDraft(s);
         return true;
     }
     if (OverId(CLAY_STRING("SettingsAddModel")))
@@ -2070,6 +2157,12 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
         return;
     }
     s = s_active_settings_state;
+    if (s->save)
+    {
+        while (GetCharPressed() != 0) {}
+        pico_host_request_redraw_after(app, 1.0 / 30.0);
+        return;
+    }
     if (!pico_ui_modal_is_top(app, "settings"))
     {
         CancelModelDrag(s);

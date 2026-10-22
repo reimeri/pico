@@ -88,11 +88,25 @@ typedef enum PicoPersistJobKind {
     PICO_PERSIST_JOB_SESSION = 0,
     PICO_PERSIST_JOB_CATALOG_ORDER,
     PICO_PERSIST_JOB_INBOX_ACK,
+    PICO_PERSIST_JOB_UI,
 } PicoPersistJobKind;
 
 #define PICO_PERSIST_QUEUE_CAPACITY (PICO_MAX_TOTAL_AGENTS + 1)
 
 struct PicoInboxAckBatch;
+
+/* Compiled-in FIFO work. run/destroy own copied data, never borrowed UI state;
+ * complete runs on the main thread and resolves any current state afresh. */
+typedef struct PicoUiPersist {
+    struct PicoUiPersist *next;
+    void *state;
+    void (*run)(void *);
+    void (*complete)(PicoHost *, void *);
+    void (*destroy)(void *);
+    bool finished;
+} PicoUiPersist;
+bool PicoHost_EnqueueUiPersist(PicoHost *host, void *state, void (*run)(void *),
+                              void (*complete)(PicoHost *, void *), void (*destroy)(void *));
 
 typedef struct PicoSessionPersistJob {
     PicoPersistJobKind job_kind;
@@ -109,6 +123,7 @@ typedef struct PicoSessionPersistJob {
     struct PicoSessionPersistJob *next; /* Same-session work after a title barrier. */
     char *catalog_order_json;
     uint64_t catalog_order_generation;
+    PicoUiPersist *ui_persist;
     struct PicoInboxAckBatch *inbox_ack; /* host-owned until a snapshot covers the results */
 } PicoSessionPersistJob;
 
@@ -119,6 +134,9 @@ typedef struct PicoSessionPersistFailure {
 } PicoSessionPersistFailure;
 
 struct PicoWorktreeJob;
+struct PicoExtensionPreference;
+struct PicoProjectPreference;
+
 
 #define PICO_HOST_IDLE_WAIT_CAP 0.1 /* Max idle sleep; bounds latency of undeclared polling work. */
 
@@ -133,6 +151,10 @@ struct PicoHost {
     PicoComposer clarification_parked_composer;
     PicoChatFind find;
     PicoHostPreferences preferences;
+    bool settings_reload_blocked; /* save/failure modal owns its draft until applied or closed */
+    struct PicoExtensionPreference *extension_preferences;
+    struct PicoProjectPreference *project_preferences;
+    uint64_t project_preference_epoch;
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];
@@ -228,6 +250,8 @@ struct PicoHost {
     PicoAgentId persist_flight_agent_id;
     bool persist_flight_catalog_order;
     bool persist_flight_inbox;
+    bool persist_flight_ui;
+    PicoUiPersist *ui_persist_head, *ui_persist_tail;
     struct PicoInboxAckBatch *inbox_acks;
     uint64_t inbox_epoch;
     uint64_t persist_catalog_next_generation;

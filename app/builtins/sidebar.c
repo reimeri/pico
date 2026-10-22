@@ -55,6 +55,7 @@ typedef struct SidebarScanWorker
     atomic_bool cancelled;
     uint64_t serial;
     uint64_t inbox_epoch;
+    uint64_t project_epoch;
     char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
     char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
     bool token_before_valid;
@@ -86,9 +87,36 @@ typedef struct SidebarCollapseSave
     bool saved;
 } SidebarCollapseSave;
 
+typedef struct SidebarLiveAgent
+{
+    PicoAgentId id;
+    char path[4096], session_id[40];
+} SidebarLiveAgent;
+
+typedef struct InboxVisit
+{
+    const char *path;
+    const char *title;
+    char session_id[40];
+    PicoAgentId live_id;
+    int ws_index;
+    int slot;
+    bool unseen;
+    bool worktree;
+    bool missing;
+} InboxVisit;
+
 typedef struct SidebarState
 {
     PicoHost *host;
+    SidebarLiveAgent live[PICO_MAX_TOTAL_AGENTS];
+    int live_count;
+    bool live_snapshot_valid;
+    PicoAgentId extras[PICO_MAX_CATALOG_WORKSPACES][PICO_MAX_TOTAL_AGENTS];
+    int extra_counts[PICO_MAX_CATALOG_WORKSPACES];
+    InboxVisit *inbox_rows;
+    int inbox_count, inbox_capacity;
+    bool inbox_valid;
     PicoCatalogWorkspace *workspaces;
     int workspace_count;
     SidebarWsUi *ui;
@@ -104,6 +132,7 @@ typedef struct SidebarState
     bool catalog_change_token_valid;
     uint64_t scan_serial;
     uint64_t inbox_epoch;
+    uint64_t project_epoch;
     SidebarScanWorker *scan_worker;
     SidebarCollapseEdit *collapse_edits;
     SidebarCollapseSave *collapse_save;
@@ -412,6 +441,8 @@ static void SidebarAdoptCatalog(SidebarState *s, PicoCatalogWorkspace *next, int
             }
         }
     }
+    s->live_snapshot_valid = false;
+    s->inbox_valid = false;
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(prev_ui);
     pico_host_request_redraw(s->host);
@@ -521,6 +552,26 @@ static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
                 worker->workspaces[i].collapsed = edit->collapsed;
         link = &edit->next;
     }
+    PicoProjectPreference **pref_link = &s->host->project_preferences;
+    while (*pref_link)
+    {
+        PicoProjectPreference *pref = *pref_link;
+        bool covered = false;
+        for (int i = 0; i < worker->workspace_count; i++)
+        {
+            PicoCatalogWorkspace *ws = &worker->workspaces[i];
+            if (strcmp(ws->path, pref->path)) continue;
+            covered = !pref->pending && pref->completed_epoch <= worker->project_epoch &&
+                      !strcmp(ws->name, pref->name) && ws->stashed == pref->stashed;
+            if (!covered)
+            {
+                snprintf(ws->name, sizeof(ws->name), "%s", pref->name);
+                ws->stashed = pref->stashed;
+            }
+        }
+        if (covered) { *pref_link = pref->next; free(pref); }
+        else pref_link = &pref->next;
+    }
     bool refresh_again = s->dirty;
     if (s->order_unsaved)
         SidebarPreserveWorkspaceOrder(worker->workspaces, worker->workspace_count,
@@ -560,7 +611,8 @@ static void SidebarScanCompleted(PicoHost *host, void *arg)
 static void SidebarRefreshSync(SidebarState *s, bool reconcile)
 {
     SidebarScanWorker worker = {.reconcile = reconcile, .pages = s->ui, .page_count = s->ui_count,
-                                .inbox_epoch = PicoCatalog_InboxEpoch(s->host)};
+                                .inbox_epoch = PicoCatalog_InboxEpoch(s->host),
+                                .project_epoch = s->host->project_preference_epoch};
     SidebarScanRun(&worker);
     SidebarFinishRefresh(s, &worker);
     PicoCatalog_Free(worker.workspaces, worker.workspace_count);
@@ -603,6 +655,7 @@ static void SidebarStartRefresh(SidebarState *s, bool reconcile)
     }
     worker->serial = s->scan_serial;
     worker->inbox_epoch = PicoCatalog_InboxEpoch(s->host);
+    worker->project_epoch = s->host->project_preference_epoch;
     worker->reconcile = reconcile;
     worker->page_count = s->ui_count;
     if (worker->page_count)
@@ -731,38 +784,27 @@ static PicoWorkspaceId OpenLiveWorkspace(PicoHost *host, const char *path, PicoR
 
 static PicoAgentId LiveMainAgent(PicoHost *host, const char *ws_path, const char *session_id)
 {
-    int n;
-    int i;
-    if (!host || !ws_path || !ws_path[0])
+    if (!host || !ws_path || !ws_path[0]) return 0;
+    SidebarState *s = PicoPlugins_HostState(host, "sidebar");
+    if (s && s->live_snapshot_valid)
     {
+        for (int i = 0; i < s->live_count; i++)
+        {
+            SidebarLiveAgent *live = &s->live[i];
+            if (!strcmp(live->path, ws_path) &&
+                !strcmp(live->session_id, session_id ? session_id : "")) return live->id;
+        }
         return 0;
     }
-    n = pico_agent_count(host);
-    for (i = 0; i < n; i++)
+    for (int w = 0; w < host->workspace_count; w++)
     {
-        PicoAgentInfo info;
-        PicoAgent *agent;
-        const char *agent_ws;
-        if (!pico_agent_info(host, i, &info) || !PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, info.id)))
+        PicoWorkspace *ws = host->workspaces[w];
+        if (!ws || strcmp(ws->path, ws_path)) continue;
+        for (int i = 0; i < ws->count; i++)
         {
-            continue;
-        }
-        agent = PicoHost_FindAgent(host, info.id);
-        agent_ws = PicoAgent_WorkspacePath(agent);
-        if (!agent_ws || strcmp(agent_ws, ws_path) != 0)
-        {
-            continue;
-        }
-        if (session_id && session_id[0])
-        {
-            if (strcmp(info.session_id, session_id) == 0)
-            {
-                return info.id;
-            }
-        }
-        else if (!info.session_id[0])
-        {
-            return info.id;
+            PicoAgent *agent = ws->agents[i];
+            if (PicoAgent_IsUserMain(agent) &&
+                !strcmp(agent->session_id, session_id ? session_id : "")) return agent->id;
         }
     }
     return 0;
@@ -785,6 +827,35 @@ static bool CatalogHasSession(const PicoCatalogWorkspace *ws, const char *checko
         }
     }
     return false;
+}
+
+static void SidebarBuildLiveSnapshot(SidebarState *s)
+{
+    s->live_count = 0;
+    memset(s->extra_counts, 0, sizeof(s->extra_counts));
+    for (int w = 0; w < s->host->workspace_count; w++)
+    {
+        PicoWorkspace *workspace = s->host->workspaces[w];
+        if (!workspace) continue;
+        const char *project = workspace->project_path[0] ? workspace->project_path : workspace->path;
+        int ws_index = -1;
+        for (int j = 0; j < s->workspace_count; j++)
+            if (!strcmp(s->workspaces[j].path, project)) { ws_index = j; break; }
+        for (int i = 0; i < workspace->count && s->live_count < PICO_MAX_TOTAL_AGENTS; i++)
+        {
+            PicoAgent *agent = workspace->agents[i];
+            if (!PicoAgent_IsUserMain(agent)) continue;
+            SidebarLiveAgent *live = &s->live[s->live_count++];
+            live->id = agent->id;
+            snprintf(live->path, sizeof(live->path), "%s", workspace->path);
+            snprintf(live->session_id, sizeof(live->session_id), "%s", agent->session_id);
+            if (ws_index >= 0 && ws_index < PICO_MAX_CATALOG_WORKSPACES &&
+                (!agent->session_id[0] || !CatalogHasSession(&s->workspaces[ws_index], workspace->path, agent->session_id)))
+                s->extras[ws_index][s->extra_counts[ws_index]++] = agent->id;
+        }
+    }
+    s->live_snapshot_valid = true;
+    s->inbox_valid = false;
 }
 
 static void SelectAgent(PicoHost *host, PicoAgentId id)
@@ -1586,8 +1657,8 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
 }
 
 static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorkspace *ws);
-static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index);
-static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws);
+static PicoAgentId LiveExtraAt(SidebarState *s, const PicoCatalogWorkspace *ws, int extra_index);
+static int CountLiveExtras(SidebarState *s, const PicoCatalogWorkspace *ws);
 
 typedef struct SidebarPin
 {
@@ -1602,7 +1673,7 @@ typedef struct SidebarPin
     bool unseen_complete;
 } SidebarPin;
 
-static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorkspace *ws, int ws_index)
+static SidebarPin FindSelectedSidebarRow(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws, int ws_index)
 {
     SidebarPin pin = {0};
     PicoAgentInfo info;
@@ -1612,10 +1683,10 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
     {
         return pin;
     }
-    extras = CountLiveExtras(host, ws);
+    extras = CountLiveExtras(s, ws);
     for (j = 0; j < extras; j++)
     {
-        PicoAgentId extra = LiveExtraAt(host, ws, j);
+        PicoAgentId extra = LiveExtraAt(s, ws, j);
         if (!pico_agent_find(host, extra, &info))
         {
             continue;
@@ -1658,7 +1729,7 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, const PicoCatalogWorksp
 
 static void RenderPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws, int ws_index)
 {
-    SidebarPin pin = FindSelectedSidebarRow(host, ws, ws_index);
+    SidebarPin pin = FindSelectedSidebarRow(host, s, ws, ws_index);
     if (!pin.found)
     {
         return;
@@ -1670,7 +1741,7 @@ static void RenderPinnedSelected(PicoHost *host, SidebarState *s, const PicoCata
 static bool OpenPinnedSelected(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
                                int ws_index)
 {
-    SidebarPin pin = FindSelectedSidebarRow(host, ws, ws_index);
+    SidebarPin pin = FindSelectedSidebarRow(host, s, ws, ws_index);
     if (!pin.found || !Clay_PointerOver(CLAY_IDI("SidebarSess", pin.row_id)))
     {
         return false;
@@ -1730,51 +1801,16 @@ static void RenderMoreLessRow(int ws_index, int shown, int total)
 static void RenderLiveExtras(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
                              int ws_index, int max_extras)
 {
-    int n = pico_agent_count(host);
-    int extra = 0;
-    int i;
-    for (i = 0; i < n; i++)
+    for (int extra = 0; extra < max_extras; extra++)
     {
-        PicoAgentInfo info;
-        PicoAgent *agent;
-        const char *agent_ws;
-        if (!pico_agent_info(host, i, &info) || !PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, info.id)))
-        {
-            continue;
-        }
-        agent = PicoHost_FindAgent(host, info.id);
-        agent_ws = PicoAgent_WorkspacePath(agent);
-        if (!agent_ws || !AgentInCatalogProject(agent, ws))
-        {
-            continue;
-        }
-        if (info.session_id[0] && CatalogHasSession(ws, agent_ws, info.session_id))
-        {
-            continue;
-        }
-        if (extra >= max_extras)
-        {
-            break;
-        }
-        RenderSessionRow(host, s, agent_ws, info.session_id[0] ? "Untitled" : "New session",
-                         info.session_id, info.id, SessionRowId(ws_index, extra), false,
-                         agent && agent->workspace && agent->workspace->worktree, false, false);
-        extra++;
+        PicoAgentId id = LiveExtraAt(s, ws, extra);
+        PicoAgent *agent = PicoHost_FindAgent(host, id);
+        if (!agent) continue;
+        RenderSessionRow(host, s, PicoAgent_WorkspacePath(agent), agent->session_id[0] ? "Untitled" : "New session",
+                         agent->session_id, id, SessionRowId(ws_index, extra), false,
+                         agent->workspace && agent->workspace->worktree, false, false);
     }
 }
-
-typedef struct InboxVisit
-{
-    const char *path;
-    const char *title;
-    const char *session_id;
-    PicoAgentId live_id;
-    int ws_index;
-    int slot;
-    bool unseen;
-    bool worktree;
-    bool missing;
-} InboxVisit;
 
 typedef int (*InboxVisitFn)(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx);
 
@@ -1802,7 +1838,7 @@ static bool InboxVisible(PicoHost *host, const char *ws_path, const char *sessio
            InboxPendingValue(host, ws_path, session_id, catalog_inbox, live_id);
 }
 
-static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ctx)
+static int EnumerateInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ctx)
 {
     int index = 0;
     int i, j;
@@ -1811,10 +1847,10 @@ static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ct
     for (i = 0; i < s->workspace_count; i++)
     {
         const PicoCatalogWorkspace *ws = &s->workspaces[i];
-        int extras = CountLiveExtras(host, ws);
+        int extras = CountLiveExtras(s, ws);
         for (j = 0; j < extras; j++)
         {
-            PicoAgentId id = LiveExtraAt(host, ws, j);
+            PicoAgentId id = LiveExtraAt(s, ws, j);
             PicoAgent *agent = PicoHost_FindAgent(host, id);
             PicoAgentInfo info;
             const char *path;
@@ -1829,7 +1865,7 @@ static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ct
                 memset(&row, 0, sizeof(row));
                 row.path = path;
                 row.title = info.session_id[0] ? "Untitled" : "New session";
-                row.session_id = info.session_id;
+                snprintf(row.session_id, sizeof(row.session_id), "%s", info.session_id);
                 row.live_id = id;
                 row.ws_index = i;
                 row.slot = j;
@@ -1853,7 +1889,7 @@ static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ct
                 memset(&row, 0, sizeof(row));
                 row.path = session->checkout_path;
                 row.title = session->title[0] ? session->title : "Untitled";
-                row.session_id = session->id;
+                snprintf(row.session_id, sizeof(row.session_id), "%s", session->id);
                 row.live_id = live;
                 row.ws_index = i;
                 row.slot = extras + j;
@@ -1867,6 +1903,34 @@ static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ct
         }
     }
     return index;
+}
+
+static int CacheInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
+{
+    (void)host; (void)index; (void)ctx;
+    if (s->inbox_count == s->inbox_capacity)
+    {
+        int capacity = s->inbox_capacity ? s->inbox_capacity * 2 : 16;
+        InboxVisit *rows = realloc(s->inbox_rows, (size_t)capacity * sizeof(*rows));
+        if (!rows) return 1;
+        s->inbox_rows = rows;
+        s->inbox_capacity = capacity;
+    }
+    s->inbox_rows[s->inbox_count++] = *row;
+    return 0;
+}
+
+static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ctx)
+{
+    if (!s->inbox_valid)
+    {
+        s->inbox_count = 0;
+        EnumerateInbox(host, s, CacheInboxRow, NULL);
+        s->inbox_valid = true;
+    }
+    for (int i = 0; fn && i < s->inbox_count; i++)
+        if (fn(host, s, &s->inbox_rows[i], i, ctx)) return i + 1;
+    return s->inbox_count;
 }
 
 static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
@@ -1946,7 +2010,7 @@ static void RevealInboxSession(PicoHost *host, SidebarState *s, const InboxVisit
     if (ws->stashed)
         s->stash_expanded = true;
     ExpandWorkspace(s, row->ws_index);
-    total = CountLiveExtras(host, ws) + ws->session_count +
+    total = CountLiveExtras(s, ws) + ws->session_count +
             (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
     needed = row->slot + 1;
     shown = ShownForIndex(s, row->ws_index, total);
@@ -2037,6 +2101,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     {
         return;
     }
+    SidebarBuildLiveSnapshot(s);
     EnsureFolderIcons(s);
     s->row_width = PicoHost_SidebarContentWidth();
     s->label_chunk = NULL;
@@ -2122,7 +2187,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                     }
                     else
                     {
-                        extras = CountLiveExtras(host, ws);
+                        extras = CountLiveExtras(s, ws);
                         total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
                         shown = ShownForIndex(s, i, total);
                         RenderLiveExtras(host, s, ws, i, shown < extras ? shown : extras);
@@ -2346,6 +2411,89 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
     }
 }
 
+typedef struct SidebarProjectSave {
+    char path[4096], name[PICO_CATALOG_NAME_MAX];
+    bool rename, stashed, saved;
+} SidebarProjectSave;
+
+static void SidebarProjectSaveRun(void *arg)
+{
+    SidebarProjectSave *save = arg;
+    save->saved = (save->rename ? PicoCatalog_SetProjectName(save->path, save->name)
+                               : PicoCatalog_SetProjectStashed(save->path, save->stashed)) == 0;
+}
+
+static void SidebarProjectSaveCompleted(PicoHost *host, void *arg)
+{
+    SidebarProjectSave *save = arg;
+    PicoProjectPreference *pref = host->project_preferences;
+    while (pref && strcmp(pref->path, save->path)) pref = pref->next;
+    if (!pref) return;
+    if (save->saved)
+    {
+        if (save->rename) snprintf(pref->confirmed_name, sizeof(pref->confirmed_name), "%s", save->name);
+        else pref->confirmed_stashed = save->stashed;
+    }
+    pref->pending--;
+    if (!pref->pending)
+    {
+        snprintf(pref->name, sizeof(pref->name), "%s", pref->confirmed_name);
+        pref->stashed = pref->confirmed_stashed;
+        pref->completed_epoch = ++host->project_preference_epoch;
+    }
+    SidebarState *s = PicoPlugins_HostState(host, "sidebar");
+    if (s)
+    {
+        for (int i = 0; i < s->workspace_count; i++)
+            if (!strcmp(s->workspaces[i].path, pref->path))
+            {
+                snprintf(s->workspaces[i].name, sizeof(s->workspaces[i].name), "%s", pref->name);
+                s->workspaces[i].stashed = pref->stashed;
+            }
+        s->dirty = true;
+    }
+    if (!save->saved) pico_status_warn(host, "Could not save the project preference. Unsaved changes were restored.");
+}
+
+static bool SidebarSaveProject(SidebarState *s, int index, bool rename)
+{
+    PicoCatalogWorkspace *ws = &s->workspaces[index];
+    if (rename)
+    {
+        size_t n = strlen(s->edit_name);
+        if (!n || n >= PICO_CATALOG_NAME_MAX) return false;
+        for (size_t i = 0; i < n; i++) if ((unsigned char)s->edit_name[i] < 32) return false;
+    }
+    PicoProjectPreference *pref = s->host->project_preferences;
+    while (pref && strcmp(pref->path, ws->path)) pref = pref->next;
+    if (!pref)
+    {
+        pref = calloc(1, sizeof(*pref));
+        if (!pref) return false;
+        snprintf(pref->path, sizeof(pref->path), "%s", ws->path);
+        snprintf(pref->name, sizeof(pref->name), "%s", ws->name);
+        snprintf(pref->confirmed_name, sizeof(pref->confirmed_name), "%s", ws->name);
+        pref->stashed = pref->confirmed_stashed = ws->stashed;
+        pref->next = s->host->project_preferences;
+        s->host->project_preferences = pref;
+    }
+    SidebarProjectSave *save = calloc(1, sizeof(*save));
+    if (!save) return false;
+    snprintf(save->path, sizeof(save->path), "%s", ws->path);
+    snprintf(save->name, sizeof(save->name), "%s", s->edit_name);
+    save->rename = rename;
+    save->stashed = !ws->stashed;
+    if (!PicoHost_EnqueueUiPersist(s->host, save, SidebarProjectSaveRun, SidebarProjectSaveCompleted, free))
+    { free(save); return false; }
+    pref->pending++;
+    if (rename) snprintf(pref->name, sizeof(pref->name), "%s", save->name);
+    else pref->stashed = save->stashed;
+    snprintf(ws->name, sizeof(ws->name), "%s", pref->name);
+    ws->stashed = pref->stashed;
+    s->host->ui_relayout_requested = true;
+    return true;
+}
+
 static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
 {
     int i = EditWorkspaceIndex(s);
@@ -2394,7 +2542,7 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
         return; /* the field consumed the press */
     if (Clay_PointerOver(CLAY_ID("SidebarEditSave")) && !s->delete_confirm)
     {
-        if (PicoCatalog_SetProjectName(s->edit_path, s->edit_name) != 0)
+        if (!SidebarSaveProject(s, i, true))
             PicoOverlay_Notify(host, "Enter a name to rename the project.");
         else
         {
@@ -2404,7 +2552,7 @@ static void WorkspaceEditInput(PicoHost *host, SidebarState *s)
     }
     else if (Clay_PointerOver(CLAY_ID("SidebarEditStash")) && !s->delete_confirm)
     {
-        if (PicoCatalog_SetProjectStashed(s->edit_path, !s->workspaces[i].stashed) != 0)
+        if (!SidebarSaveProject(s, i, false))
             PicoOverlay_Notify(host, "Could not update the project.");
         else
         {
@@ -2510,47 +2658,18 @@ static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorks
     return strcmp(project, ws->path) == 0;
 }
 
-static PicoAgentId LiveExtraAt(PicoHost *host, const PicoCatalogWorkspace *ws, int extra_index)
+static int CountLiveExtras(SidebarState *s, const PicoCatalogWorkspace *ws)
 {
-    int n = pico_agent_count(host);
-    int extra = 0;
-    int i;
-    for (i = 0; i < n; i++)
-    {
-        PicoAgentInfo info;
-        PicoAgent *agent;
-        const char *agent_ws;
-        if (!pico_agent_info(host, i, &info) || !PicoAgent_IsUserMain(PicoHost_FindAgentConst(host, info.id)))
-        {
-            continue;
-        }
-        agent = PicoHost_FindAgent(host, info.id);
-        agent_ws = PicoAgent_WorkspacePath(agent);
-        if (!agent_ws || !AgentInCatalogProject(agent, ws))
-        {
-            continue;
-        }
-        if (info.session_id[0] && CatalogHasSession(ws, agent_ws, info.session_id))
-        {
-            continue;
-        }
-        if (extra == extra_index)
-        {
-            return info.id;
-        }
-        extra++;
-    }
-    return 0;
+    int index = (int)(ws - s->workspaces);
+    return index >= 0 && index < s->workspace_count && index < PICO_MAX_CATALOG_WORKSPACES
+               ? s->extra_counts[index] : 0;
 }
 
-static int CountLiveExtras(PicoHost *host, const PicoCatalogWorkspace *ws)
+static PicoAgentId LiveExtraAt(SidebarState *s, const PicoCatalogWorkspace *ws, int extra_index)
 {
-    int extra = 0;
-    while (LiveExtraAt(host, ws, extra))
-    {
-        extra++;
-    }
-    return extra;
+    int index = (int)(ws - s->workspaces);
+    return extra_index >= 0 && extra_index < CountLiveExtras(s, ws)
+               ? s->extras[index][extra_index] : 0;
 }
 
 static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
@@ -2577,14 +2696,14 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
         }
         if (ws->collapsed)
         {
-            SidebarPin pin = FindSelectedSidebarRow(host, ws, i);
+            SidebarPin pin = FindSelectedSidebarRow(host, s, ws, i);
             if (pin.found && Clay_PointerOver(CLAY_IDI("SidebarSess", pin.row_id)))
             {
                 return true;
             }
             continue;
         }
-        extras = CountLiveExtras(host, ws);
+        extras = CountLiveExtras(s, ws);
         total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)) || Clay_PointerOver(CLAY_IDI("SidebarLess", i)))
@@ -2650,7 +2769,7 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
         const PicoCatalogWorkspace *ws = &s->workspaces[i];
         if (ws->collapsed)
         {
-            SidebarPin pin = FindSelectedSidebarRow(host, ws, i);
+            SidebarPin pin = FindSelectedSidebarRow(host, s, ws, i);
             char live_id[40] = {0};
             const char *path = pin.checkout_path;
             const char *sid = pin.session_id;
@@ -2680,12 +2799,12 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
                 continue;
             return FillSessionHit(out, path, sid, pin.row_id);
         }
-        extras = CountLiveExtras(host, ws);
+        extras = CountLiveExtras(s, ws);
         total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         for (j = 0; j < extras && j < shown; j++)
         {
-            PicoAgentId extra = LiveExtraAt(host, ws, j);
+            PicoAgentId extra = LiveExtraAt(s, ws, j);
             PicoAgent *agent = PicoHost_FindAgent(host, extra);
             const char *path = agent ? PicoAgent_WorkspacePath(agent) : NULL;
             const char *sid = agent ? agent->session_id : "";
@@ -3100,7 +3219,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
             }
             continue;
         }
-        extras = CountLiveExtras(host, ws);
+        extras = CountLiveExtras(s, ws);
         total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)))
@@ -3116,7 +3235,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         }
         for (j = 0; j < extras && j < shown; j++)
         {
-            PicoAgentId extra = LiveExtraAt(host, ws, j);
+            PicoAgentId extra = LiveExtraAt(s, ws, j);
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, j))))
             {
                 SelectAgent(host, extra);
@@ -3144,6 +3263,11 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         return;
     }
     SidebarStartCollapseSave(s);
+    if (s->project_epoch != host->project_preference_epoch)
+    {
+        s->project_epoch = host->project_preference_epoch;
+        s->dirty = true;
+    }
     uint64_t inbox_epoch = PicoCatalog_InboxEpoch(host);
     if (s->inbox_epoch != inbox_epoch)
     {
@@ -3286,6 +3410,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
     }
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);
+    free(s->inbox_rows);
     for (SidebarLabelChunk *chunk = s->label_chunks; chunk;)
     {
         SidebarLabelChunk *next = chunk->next;

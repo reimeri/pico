@@ -3346,6 +3346,26 @@ static bool HitTraceGroup(const TranscriptView *view, int message_index)
     return Clay_PointerOver(TraceGroupRowId(view, message_index));
 }
 
+/* Use the same sorted mount plan that emitted the queried Clay elements.
+ * When allocation prevented virtualization, RenderTranscript emitted all rows. */
+static bool TranscriptHasMountPlan(const TranscriptView *view)
+{
+    return view->virtual_cache && view->virtual_cache->configured &&
+           view->virtual_cache->count == view->message_count;
+}
+
+static int TranscriptMountedCount(const TranscriptView *view)
+{
+    return TranscriptHasMountPlan(view) ? PicoTranscriptVirtual_MountedCount(view->virtual_cache)
+                                        : view->message_count;
+}
+
+static int TranscriptMountedIndex(const TranscriptView *view, int position)
+{
+    return TranscriptHasMountPlan(view) ? PicoTranscriptVirtual_MountedIndex(view->virtual_cache, position)
+                                        : position;
+}
+
 static void InspectHandlePointer(PicoHost *app)
 {
     if (!InspectIsTopModal(app))
@@ -3366,6 +3386,7 @@ static void InspectHandlePointer(PicoHost *app)
         .app = app,
         .messages = found ? inspect.messages : NULL,
         .message_count = found ? inspect.message_count : 0,
+        .virtual_cache = &g_inspect_virtual,
         .id_ns = g_inspect_n,
         .selectable = false,
     };
@@ -3375,8 +3396,9 @@ static void InspectHandlePointer(PicoHost *app)
     int tool_idx = -1;
     if (over_scroll && found)
     {
-        for (int i = 0; i < view.message_count; i++)
+        for (int j = 0; j < TranscriptMountedCount(&view); j++)
         {
+            int i = TranscriptMountedIndex(&view, j);
             if (HitTraceGroup(&view, i))
             {
                 group_msg = i;
@@ -3537,8 +3559,9 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
         int group_msg = -1;
         int tool_msg = -1;
         int tool_idx = -1;
-        for (int i = 0; i < PicoHost_TranscriptAgent(app)->message_count; i++)
+        for (int j = 0; j < TranscriptMountedCount(&main); j++)
         {
+            int i = TranscriptMountedIndex(&main, j);
             PicoMessage *msg = &PicoHost_TranscriptAgent(app)->messages[i];
             if (HitTraceGroup(&main, i))
             {
@@ -3771,8 +3794,9 @@ static void DrawTraceChevrons(const TranscriptView *view, Clay_BoundingBox clip)
     const char *glyph = "\xE2\x80\xBA";
     float glyph_px = Pico_FontPx(PICO_FONT_UI);
     Vector2 size = MeasureTextEx(font, glyph, glyph_px, 0.0f);
-    for (int i = 0; i < view->message_count; i++)
+    for (int j = 0; j < TranscriptMountedCount(view); j++)
     {
+        int i = TranscriptMountedIndex(view, j);
         PicoMessage *msg = (PicoMessage *)&view->messages[i];
         if (MessageHasFinishedTrace(view, msg, i))
         {
@@ -3861,8 +3885,9 @@ static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox cli
         return;
     }
     Pico_Scissor((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
-    for (int i = 0; i < view->message_count; i++)
+    for (int j = 0; j < TranscriptMountedCount(view); j++)
     {
+        int i = TranscriptMountedIndex(view, j);
         PicoMessage *msg = (PicoMessage *)&view->messages[i];
         for (int t = 0; t < msg->trace_count; t++)
         {
@@ -3933,6 +3958,7 @@ static void PicoChat_DrawChevrons(PicoHost *app)
                     .state = inspect.state,
                     .activity = inspect.activity,
                     .owner = owner,
+                    .virtual_cache = &g_inspect_virtual,
                     .id_ns = g_inspect_n,
                     .selectable = false,
                 };
@@ -3976,6 +4002,7 @@ static void PicoChat_DrawLiveTimers(PicoHost *app)
                     .state = inspect.state,
                     .activity = inspect.activity,
                     .owner = owner,
+                    .virtual_cache = &g_inspect_virtual,
                     .id_ns = g_inspect_n,
                     .selectable = false,
                 };

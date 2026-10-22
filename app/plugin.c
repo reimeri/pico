@@ -5,6 +5,7 @@
 #include "workspace_internal.h"
 #include "path.h"
 #include "session.h"
+#include "overlay.h"
 #include "settings.h"
 #include "host_internal.h"
 
@@ -1327,6 +1328,12 @@ static bool ReloadHostWithPolicy(PicoHost *app, bool retry_compile_failures)
         return false;
     }
 
+    if (app->settings_reload_blocked)
+    {
+        app->plugin_reload_pending = true;
+        app->plugin_reload_retry = retry_compile_failures;
+        return false;
+    }
     app->plugin_compile_pending = false;
     app->plugin_reload_retry = retry_compile_failures;
     if (!ValidateUserSources(app, retry_compile_failures))
@@ -1433,8 +1440,11 @@ void PicoPlugins_CancelCompiles(PicoHost *app)
     }
 }
 
+static void FreeExtensionPreferences(PicoHost *host);
+
 void PicoPlugins_Shutdown(PicoHost *app)
 {
+    FreeExtensionPreferences(app);
     PicoPlugins_CancelCompiles(app);
     if (!app || app->terminal_shutdown || PicoHost_ProcessRetired())
     {
@@ -2152,48 +2162,102 @@ bool PicoPlugins_Get(const PicoHost *host, int index, PicoExtInfo *out)
     return true;
 }
 
+typedef struct PicoExtensionPreference {
+    struct PicoExtensionPreference *next;
+    PicoWorkspaceId workspace_id;
+    char name[PICO_DISABLED_EXT_NAME];
+    bool confirmed_disabled;
+    int pending;
+} PicoExtensionPreference;
+
+typedef struct ExtensionSave {
+    PicoWorkspaceId workspace_id;
+    char workspace_path[4096];
+    char name[PICO_DISABLED_EXT_NAME];
+    bool disabled, saved;
+} ExtensionSave;
+
+static void ExtensionSaveRun(void *arg)
+{
+    ExtensionSave *save = arg;
+    save->saved = PicoSettings_WriteExtension(save->workspace_path, save->name, save->disabled);
+}
+
+static void ExtensionReload(PicoHost *host, PicoWorkspace *ws)
+{
+    if (ws) (void)pico_workspace_request_reload(host, ws->id);
+    else PicoHost_RequestHostReload(host);
+}
+
+static void ExtensionSaveCompleted(PicoHost *host, void *arg)
+{
+    ExtensionSave *save = arg;
+    PicoExtensionPreference *pref = host->extension_preferences;
+    while (pref && (pref->workspace_id != save->workspace_id || strcmp(pref->name, save->name))) pref = pref->next;
+    if (!pref) return;
+    if (save->saved) pref->confirmed_disabled = save->disabled;
+    pref->pending--;
+    PicoWorkspace *ws = save->workspace_id ? PicoHost_FindWorkspace(host, save->workspace_id) : NULL;
+    if (!save->saved)
+    {
+        if (!pref->pending && (!save->workspace_id || (ws && !strcmp(ws->path, save->workspace_path))))
+        {
+            (void)PicoSettings_ExtensionMemory(host, ws, save->name, pref->confirmed_disabled);
+            ExtensionReload(host, ws);
+        }
+        pico_status_warn(host, "Could not save the extension preference. Unsaved changes were restored.");
+    }
+}
+
 bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
 {
     PicoExtInfo info;
-    if (!app || !PicoPlugins_Get(app, index, &info))
+    if (!app || !PicoPlugins_Get(app, index, &info) || !info.name || !info.name[0] ||
+        !strcmp(info.name, "extensions") || !strcmp(info.name, "settings")) return false;
+    if (info.enabled == enabled) return true;
+    PicoWorkspace *ws = info.scope == PICO_EXTENSION_HOST ? NULL : PicoHost_FindWorkspace(app, info.workspace_id);
+    if (info.scope != PICO_EXTENSION_HOST && !ws) return false;
+    PicoWorkspaceId ws_id = ws ? ws->id : 0;
+    PicoExtensionPreference *pref = app->extension_preferences;
+    while (pref && (pref->workspace_id != ws_id || strcmp(pref->name, info.name))) pref = pref->next;
+    if (!pref)
     {
+        pref = calloc(1, sizeof(*pref));
+        if (!pref) return false;
+        pref->workspace_id = ws_id;
+        snprintf(pref->name, sizeof(pref->name), "%s", info.name);
+        pref->next = app->extension_preferences;
+        app->extension_preferences = pref;
+    }
+    if (!pref->pending) pref->confirmed_disabled = !info.enabled;
+    ExtensionSave *save = calloc(1, sizeof(*save));
+    if (!save) return false;
+    save->workspace_id = ws_id;
+    if (ws) snprintf(save->workspace_path, sizeof(save->workspace_path), "%s", ws->path);
+    snprintf(save->name, sizeof(save->name), "%s", info.name);
+    save->disabled = !enabled;
+    if (!PicoSettings_ExtensionMemory(app, ws, info.name, !enabled)) { free(save); return false; }
+    if (!PicoHost_EnqueueUiPersist(app, save, ExtensionSaveRun, ExtensionSaveCompleted, free))
+    {
+        (void)PicoSettings_ExtensionMemory(app, ws, info.name, !info.enabled);
+        free(save);
+        PicoOverlay_Notify(app, "Could not queue the extension preference.");
         return false;
     }
-    if (!info.name || !info.name[0] || strcmp(info.name, "extensions") == 0 ||
-        strcmp(info.name, "settings") == 0)
+    pref->pending++;
+    ExtensionReload(app, ws);
+    pico_host_request_redraw(app);
+    return true;
+}
+
+static void FreeExtensionPreferences(PicoHost *host)
+{
+    while (host && host->extension_preferences)
     {
-        return false;
+        PicoExtensionPreference *pref = host->extension_preferences;
+        host->extension_preferences = pref->next;
+        free(pref);
     }
-    if (info.enabled == enabled)
-    {
-        return true;
-    }
-    bool ok = true;
-    if (info.scope == PICO_EXTENSION_HOST)
-    {
-        ok = PicoHost_SetExtensionDisabled(app, info.name, !enabled);
-        if (ok)
-        {
-            PicoHost_RequestHostReload(app);
-        }
-    }
-    else
-    {
-        PicoWorkspace *ws = PicoHost_FindWorkspace(app, info.workspace_id);
-        if (!ws && app->workspace_count > 0)
-        {
-            ws = app->workspaces[0];
-        }
-        if (ws)
-        {
-            ok = PicoWorkspace_SetExtensionDisabled(ws, info.name, !enabled);
-            if (ok)
-            {
-                (void)PicoWorkspace_Reload(ws);
-            }
-        }
-    }
-    return ok;
 }
 
 void *PicoPlugins_HostState(const PicoHost *host, const char *name)

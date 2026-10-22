@@ -25,6 +25,15 @@ void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);
 void PicoHostPreferences_Load(PicoHost *host);
+void PicoSettings_ReadPreferences(PicoHostPreferences *preferences);
+typedef struct PicoResolvedSettings {
+    PicoWorkspaceSettings settings;
+    PicoModel *models;
+    int model_count;
+} PicoResolvedSettings;
+bool PicoSettings_ReadResolved(const char *workspace_path, PicoResolvedSettings *out);
+void PicoSettings_PublishResolved(PicoWorkspace *workspace, PicoResolvedSettings *resolved);
+
 bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace);
 float Pico_ClampChatWidth(float available, float text_max);
 float Pico_ChatTextMaxPx(const PicoHost *app);
@@ -63,6 +72,10 @@ bool PicoSettings_FastAvailable(const PicoAgent *agent);
 bool PicoSettings_SetFast(PicoAgent *agent, bool enabled);
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
 bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
+/* Main-thread-only memory mutation and worker-only durable patch, respectively. */
+bool PicoSettings_ExtensionMemory(PicoHost *host, PicoWorkspace *workspace, const char *name, bool disabled);
+bool PicoSettings_WriteExtension(const char *workspace_path, const char *name, bool disabled);
+
 
 #define PICO_SETTINGS_MODEL_MAX 64
 #define PICO_SETTINGS_ERROR_MAX 4608

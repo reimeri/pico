@@ -864,13 +864,12 @@ static bool WorkspaceSettingsPath(const PicoWorkspace *workspace, char *out, siz
     return true;
 }
 
-void PicoHostPreferences_Load(PicoHost *host)
+void PicoSettings_ReadPreferences(PicoHostPreferences *p)
 {
-    if (!host)
+    if (!p)
     {
         return;
     }
-    PicoHostPreferences *p = &host->preferences;
     memset(p, 0, sizeof(*p));
     p->font_scale = 1.0;
     p->chat_width = PICO_CHAT_WIDTH_DEFAULT;
@@ -921,7 +920,13 @@ void PicoHostPreferences_Load(PicoHost *host)
         }
     }
 
-    Pico_SetFontScale((float)p->font_scale);
+}
+
+void PicoHostPreferences_Load(PicoHost *host)
+{
+    if (!host) return;
+    PicoSettings_ReadPreferences(&host->preferences);
+    Pico_SetFontScale((float)host->preferences.font_scale);
 }
 
 static bool EnsureDefaultCatalog(const PicoWorkspaceSettings *settings, PicoModel **catalog, int *count)
@@ -1073,6 +1078,42 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
     workspace->models = catalog;
     workspace->model_count = catalog_n;
     return true;
+}
+
+bool PicoSettings_ReadResolved(const char *workspace_path, PicoResolvedSettings *out)
+{
+    PicoWorkspace *copy = calloc(1, sizeof(*copy));
+    if (!copy) return false;
+    snprintf(copy->path, sizeof(copy->path), "%s", workspace_path);
+    bool ok = PicoWorkspaceSettings_Load(copy);
+    if (ok)
+        *out = (PicoResolvedSettings){copy->settings, copy->models, copy->model_count};
+    else free(copy->models);
+    free(copy);
+    return ok;
+}
+
+void PicoSettings_PublishResolved(PicoWorkspace *workspace, PicoResolvedSettings *resolved)
+{
+    for (int j = 0; j < workspace->count; j++)
+    {
+        PicoAgent *agent = workspace->agents[j];
+        if (agent && PicoAgent_IsBusy(agent) && !agent->has_running_model)
+        {
+            const PicoModel *model = PicoSettings_ActiveModelConst(agent);
+            if (model) { agent->running_model = *model; agent->has_running_model = true; }
+        }
+    }
+    /* Disabled lists may have changed optimistically while this copy loaded. */
+    resolved->settings.disabled_extension_count = workspace->settings.disabled_extension_count;
+    memcpy(resolved->settings.disabled_extensions, workspace->settings.disabled_extensions,
+           sizeof(resolved->settings.disabled_extensions));
+    free(workspace->models);
+    workspace->settings = resolved->settings;
+    workspace->models = resolved->models;
+    workspace->model_count = resolved->model_count;
+    resolved->models = NULL;
+    for (int j = 0; j < workspace->count; j++) PicoSettings_ReconcileIdleAgent(workspace->agents[j]);
 }
 
 PicoModel *PicoSettings_FindModel(PicoWorkspace *workspace, const char *id)
@@ -1801,6 +1842,103 @@ bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *na
     return ok;
 }
 
+bool PicoSettings_ExtensionMemory(PicoHost *host, PicoWorkspace *workspace, const char *name, bool disabled)
+{
+    if (!host || !name || !name[0] || ReservedExtensionName(name)) return false;
+    char (*names)[PICO_DISABLED_EXT_NAME] = workspace ? workspace->settings.disabled_extensions
+                                                    : host->preferences.disabled_host_extensions;
+    int *count = workspace ? &workspace->settings.disabled_extension_count
+                           : &host->preferences.disabled_host_extension_count;
+    int found = -1;
+    for (int i = 0; i < *count; i++) if (!strcmp(names[i], name)) { found = i; break; }
+    if (disabled && found < 0)
+    {
+        if (*count >= PICO_MAX_DISABLED_EXTENSIONS) return false;
+        snprintf(names[(*count)++], PICO_DISABLED_EXT_NAME, "%s", name);
+    }
+    else if (!disabled && found >= 0)
+    {
+        memmove(names + found, names + found + 1, (size_t)(*count - found - 1) * sizeof(*names));
+        names[--*count][0] = '\0';
+    }
+    return true;
+}
+
+bool PicoSettings_WriteExtension(const char *workspace_path, const char *name, bool disabled)
+{
+#ifdef PICO_SESSION_TEST_HOOKS
+    extern bool PicoSession_TestHook(const char *);
+    if (PicoSession_TestHook("extension_before_save")) return false;
+#endif
+    char path[4096], dir[4096];
+    bool local = workspace_path && workspace_path[0];
+    if (local)
+    {
+        if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico", workspace_path) ||
+            !PicoPath_Format(path, sizeof(path), "%s/settings.json", dir)) return false;
+    }
+    else if (!Pico_ConfigDir(dir, sizeof(dir)) || !UserSettingsPath(path, sizeof(path))) return false;
+    if (!MkdirP(dir)) return false;
+    int lock = SettingsLockAcquire(path);
+    if (lock < 0) return false;
+    const char *key = local ? "disabled_extensions" : "disabled_host_extensions";
+    size_t len = 0;
+    char *src = NULL, *clean = NULL;
+    bool ok = ReadUserSettings(path, &src, &len, NULL, 0);
+    JsonDoc doc = {0};
+    bool parsed = false;
+    if (ok && src)
+    {
+        ok = PrepareSettingsJson(src, len, path, &clean, NULL, 0);
+        if (ok) parsed = JsonParse(&doc, clean, strlen(clean)) == 0;
+        ok = ok && parsed;
+    }
+    JsonBuf b;
+    JsonBuf_Init(&b);
+    JsonBuf_Putc(&b, '[');
+    int count = 0;
+    int array = parsed ? JsonObjGet(&doc, 0, key) : -1;
+    JsonDoc inherited = {0};
+    char *user_src = NULL, *user_clean = NULL;
+    bool inherited_parsed = false;
+    const JsonDoc *list_doc = &doc;
+    if (ok && local && !src)
+    {
+        char user_path[4096];
+        size_t user_len = 0;
+        ok = UserSettingsPath(user_path, sizeof(user_path)) &&
+             ReadUserSettings(user_path, &user_src, &user_len, NULL, 0);
+        if (ok && user_src)
+        {
+            ok = PrepareSettingsJson(user_src, user_len, user_path, &user_clean, NULL, 0);
+            if (ok) inherited_parsed = JsonParse(&inherited, user_clean, strlen(user_clean)) == 0;
+            ok = ok && inherited_parsed;
+            list_doc = &inherited;
+            array = inherited_parsed ? JsonObjGet(&inherited, 0, key) : -1;
+        }
+    }
+    for (int i = 0; ok && i < JsonArrayLen(list_doc, array); i++)
+    {
+        char *entry = JsonStrDup(list_doc, JsonArrayAt(list_doc, array, i));
+        if (entry && strcmp(entry, name))
+        {
+            if (count++) JsonBuf_Putc(&b, ',');
+            JsonBuf_String(&b, entry);
+        }
+        free(entry);
+    }
+    if (disabled) { if (count++) JsonBuf_Putc(&b, ','); JsonBuf_String(&b, name); }
+    JsonBuf_Putc(&b, ']');
+    char *json = JsonBuf_Steal(&b);
+    if (ok) ok = json && PatchRootJsonUnlocked(path, key, json);
+    free(json); free(src); free(clean);
+    free(user_src); free(user_clean);
+    if (inherited_parsed) JsonFree(&inherited);
+    if (parsed) JsonFree(&doc);
+    SettingsLockRelease(lock);
+    return ok;
+}
+
 static void WriteModelValue(JsonBuf *b, const PicoModel *m)
 {
     /* The caller places the opening brace at a 4-space indent inside the
@@ -2519,6 +2657,11 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
     bool ok = false;
     if (error && error_cap)
         error[0] = '\0';
+#ifdef PICO_SESSION_TEST_HOOKS
+    extern bool PicoSession_TestHook(const char *);
+    if (PicoSession_TestHook("settings_before_save"))
+        return SettingsError(error, error_cap, "Could not save settings.");
+#endif
     const char *err = PicoSettings_ValidateUserDraft(draft);
     if (err)
         return SettingsError(error, error_cap, "%s", err);

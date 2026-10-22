@@ -72,6 +72,16 @@ typedef struct PicoCatalogWorkspace {
     bool has_more_sessions;
 } PicoCatalogWorkspace;
 
+/* Host-owned optimistic project presentation and its last durable baseline. */
+typedef struct PicoProjectPreference {
+    struct PicoProjectPreference *next;
+    char path[4096];
+    char confirmed_name[PICO_CATALOG_NAME_MAX], name[PICO_CATALOG_NAME_MAX];
+    bool confirmed_stashed, stashed;
+    int pending;
+    uint64_t completed_epoch;
+} PicoProjectPreference;
+
 typedef struct PicoCatalogPage {
     char path[4096];
     int shown;

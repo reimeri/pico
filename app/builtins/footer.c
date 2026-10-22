@@ -98,7 +98,8 @@ static void StartWorktreeCreation(PicoHost *app);
 
 bool PicoFooter_MenuOpen(void)
 {
-    return g_menu != FOOTER_MENU_NONE || g_esc_block || g_want_folder || g_worktree_open;
+    FooterState *s = ActiveFooterState();
+    return s && (s->menu != FOOTER_MENU_NONE || s->esc_block || s->want_folder || s->worktree_open);
 }
 
 static bool UnclaimMenu(void)
@@ -179,12 +180,7 @@ static Clay_Color StatusDotColor(FooterStatusKind kind)
 
 static void FormatCwd(const char *workspace, char *out, size_t cap)
 {
-    char real[4096];
-    const char *src = workspace && workspace[0] ? workspace : ".";
-    if (!realpath(src, real))
-    {
-        snprintf(real, sizeof(real), "%s", src);
-    }
+    const char *real = workspace && workspace[0] ? workspace : ".";
 
     const char *home = getenv("HOME");
     if (home && home[0])

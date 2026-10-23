@@ -12,6 +12,8 @@ void PicoBrowser_CloseAgent(PicoHost *host, PicoAgentId id);
 void PicoBrowser_BeginLayout(PicoHost *host);
 void PicoBrowser_Layout(PicoHost *host);
 float PicoBrowser_ShellWidth(const PicoHost *host);
+bool PicoBrowser_ResizeHovered(const PicoHost *host);
+bool PicoBrowser_BlocksPointer(const PicoHost *host);
 void PicoBrowser_Input(PicoHost *host);
 void PicoBrowser_AfterLayout(PicoHost *host);
 void PicoBrowser_AfterRender(PicoHost *host);

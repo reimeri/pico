@@ -1079,7 +1079,7 @@ if(BUILD_TESTING)
             -Wl,--wrap=pico_openai_listen -Wl,--wrap=pico_openai_await_callback
             -Wl,--wrap=pico_http_post -Wl,--wrap=pico_http_post_sse)
         target_link_options(pico_host_workspace_tests PRIVATE
-            -Wl,--wrap=IsWindowReady -Wl,--wrap=GetApplicationDirectory -Wl,--wrap=PbGpuInit
+            -Wl,--wrap=IsWindowReady -Wl,--wrap=IsWindowFocused -Wl,--wrap=GetApplicationDirectory -Wl,--wrap=PbGpuInit
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
             -Wl,--wrap=SetMouseCursor -Wl,--wrap=IsKeyDown -Wl,--wrap=IsKeyPressed

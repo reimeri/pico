@@ -51,6 +51,12 @@ reload icons, a control-mode slider, a viewport dropdown, a shutdown icon to clo
 the page, and a bright web icon to collapse the pane. The footer stays below
 the chat/browser content row at its full shell width.
 
+- Drag the expanded pane's left edge to resize it; the edge shows a horizontal
+  resize cursor. The pane is at least 300 logical pixels wide when space allows
+  and at most half the right column (excluding the sidebar). Each session keeps
+  its chosen width when collapsed and reopened or switched away from, until
+  Pico exits. Narrower windows temporarily clamp the width to the available half.
+  Toolbar controls wrap onto additional rows when the pane is narrow.
 - Collapse hides the pane without discarding the page.
 - Close destroys that session's live page, not its cookies or local storage.
 - Switching sessions selects that session's dock and browser; it does not

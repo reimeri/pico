@@ -365,6 +365,17 @@ side, and retains the existing takeover/input-release behavior. Manual open
 starts in User mode; agent open starts in Agent mode. Selector animation is
 presentation-only and must not resize the toolbar or bottom-follow shell.
 
+The expanded dock's left edge is a core-owned resize handle with a horizontal
+resize cursor. Its width is main-session-local presentation state, retained
+through collapse/reopen and selection changes but never persisted. Expanded
+width is bounded to 300 logical pixels minimum and half the right column maximum;
+the maximum wins when space is narrower. Passive window/sidebar changes clamp
+presentation without overwriting the preferred width. Toolbar controls wrap into
+fixed-height rows when needed. A resize gesture owns pointer input through
+physical release; Escape, focus loss, minimization, a modal, selection change, or
+page/session close stops resizing without handing the held gesture to chat or
+Clay drag-scrolling. Resizing the dock never starts Chromium.
+
 The core browser service is lazy and per-main-session; subagents and clarification
 helpers cannot use any browser tool, including diagnostics, inspection,
 evaluation, or viewport control. Tools

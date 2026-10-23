@@ -361,6 +361,7 @@ static inline void PicoHost_SetPath(PicoHost *host, const char *path)
 int PicoHost_ResolveWorkspaceDir(const char *workspace, const char *arg, char *out, size_t cap);
 bool PicoHost_ProcessRetired(void);
 /* Current-frame shell allocation; independent of previous layout bounds. */
+float PicoHost_RightColumnWidth(const PicoHost *host);
 float PicoHost_MainColumnWidth(const PicoHost *host);
 /* Available width of the shell-owned sidebar view during the current layout. */
 float PicoHost_SidebarContentWidth(void);

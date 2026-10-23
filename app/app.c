@@ -3981,13 +3981,19 @@ float PicoHost_SidebarContentWidth(void)
     return SHELL_SIDEBAR_WIDTH - 2.0f * SHELL_SIDEBAR_PADDING;
 }
 
-float PicoHost_MainColumnWidth(const PicoHost *host)
+float PicoHost_RightColumnWidth(const PicoHost *host)
 {
     float width = Clay_GetLayoutDimensions().width - 2.0f * SHELL_ROOT_PADDING;
     if (host && host->view_count[PICO_SLOT_SIDEBAR] > 0)
     {
         width -= SHELL_SIDEBAR_WIDTH + SHELL_BODY_GAP;
     }
+    return width > 0.0f ? width : 0.0f;
+}
+
+float PicoHost_MainColumnWidth(const PicoHost *host)
+{
+    float width = PicoHost_RightColumnWidth(host);
     float browser = PicoBrowser_ShellWidth(host);
     if (browser > 0) width -= browser + SHELL_BODY_GAP;
     return width > 0.0f ? width : 0.0f;
@@ -4049,9 +4055,11 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                     RunSlot(app, PICO_SLOT_SIDEBAR);
                 }
             }
+            /* Bound width before laying out children: oversized content must
+             * not enlarge the allocation used by the browser's 50% cap. */
             CLAY(CLAY_ID("RightColumn"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)},
+                             .sizing = {.width = CLAY_SIZING_FIXED(PicoHost_RightColumnWidth(app)), .height = CLAY_SIZING_PERCENT(1)},
                              .childGap = 6}})
             {
                 /* Content row grows only inside the exactly bounded RightColumn.
@@ -4063,7 +4071,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                 {
                     CLAY(CLAY_ID("MainColumn"),
                          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)},
+                                     .sizing = {.width = CLAY_SIZING_FIXED(PicoHost_MainColumnWidth(app)), .height = CLAY_SIZING_PERCENT(1)},
                                      .childGap = 12}})
                     {
                         RunSlot(app, PICO_SLOT_MAIN);
@@ -4450,7 +4458,7 @@ void PicoHost_Frame(PicoHost *app)
         UpdateChatScrollbarDrag(app);
     }
     bool bar_drag = PicoScrollbar_AnyDragging();
-    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !bar_drag);
+    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !bar_drag && !PicoBrowser_BlocksPointer(app));
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
     PicoChat_HandleToolRelease(app);
 
@@ -4499,7 +4507,7 @@ void PicoHost_Frame(PicoHost *app)
         previous_scroll[i] = (data.found && data.scrollPosition) ? *data.scrollPosition : (Clay_Vector2){0};
     }
     Clay_UpdateScrollContainers(
-        !bar_drag && !over_settings_content &&
+        !bar_drag && !PicoBrowser_BlocksPointer(app) && !over_settings_content &&
             (modal_open || (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
         (pane_wheel || sidebar_wheel || over_settings_content) ? (Clay_Vector2){0, 0} : wheel, frame_dt);
     for (size_t i = 0; i < sizeof(scroll_ids) / sizeof(scroll_ids[0]); i++)
@@ -4555,7 +4563,11 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
 
-    if (app->hovered_drag)
+    if (PicoBrowser_ResizeHovered(app))
+    {
+        SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
+    }
+    else if (app->hovered_drag)
     {
         SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
     }

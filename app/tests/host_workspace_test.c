@@ -123,6 +123,10 @@ Vector2 __wrap_GetMouseWheelMoveV(void)
 }
 
 static bool g_clay_frame_test;
+static bool g_browser_resize_frame;
+static int g_mouse_cursor;
+bool __real_IsWindowFocused(void);
+bool __wrap_IsWindowFocused(void) { return g_browser_resize_frame || __real_IsWindowFocused(); }
 /* Do not let an unrelated persistence worker consume the UI allocation fault. */
 static __thread bool g_fail_frame_allocation;
 static int g_clay_failed_allocations;
@@ -148,7 +152,7 @@ int __wrap_GetScreenWidth(void) { return g_clay_frame_test ? 1100 : __real_GetSc
 int __real_GetScreenHeight(void);
 int __wrap_GetScreenHeight(void) { return g_clay_frame_test ? 800 : __real_GetScreenHeight(); }
 void __real_SetMouseCursor(int cursor);
-void __wrap_SetMouseCursor(int cursor) { if (!g_clay_frame_test) __real_SetMouseCursor(cursor); }
+void __wrap_SetMouseCursor(int cursor) { g_mouse_cursor = cursor; if (!g_clay_frame_test) __real_SetMouseCursor(cursor); }
 void __real_BeginDrawing(void);
 void __wrap_BeginDrawing(void) { if (!g_clay_frame_test) __real_BeginDrawing(); }
 void __real_ClearBackground(Color color);
@@ -4795,6 +4799,214 @@ done:
     return good;
 }
 
+static bool BrowserTestResize(PicoHost *host, float requested_width)
+{
+    Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    g_find_input_test = g_find_press = g_find_down = true;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+    PicoBrowser_Input(host);
+    g_find_press = false;
+    if (!host->ui_drag_active) return false;
+    /* Capture must survive leaving both the edge and the panel vertically. */
+    g_find_pointer.x += pane.width - requested_width;
+    g_find_pointer.y = pane.y + pane.height + 50;
+    PicoBrowser_Input(host);
+    if (!PicoBrowser_ResizeHovered(host) || !PicoBrowser_BlocksKeyboard(host)) return false;
+    g_find_down = false; g_find_released = true;
+    PicoBrowser_Input(host);
+    g_find_input_test = g_find_released = false;
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    return !host->ui_drag_active && !PicoBrowser_ResizeHovered(host);
+}
+static bool BrowserToolbarContained(void)
+{
+    Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    const char *controls[] = {"BrowserBack", "BrowserForward", "BrowserReload", "BrowserControl",
+                              "BrowserViewport", "BrowserClose", "BrowserCollapse"};
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); ++i) {
+        Clay_ElementData control = Clay_GetElementData(Clay_GetElementId((Clay_String){.chars=controls[i], .length=(int)strlen(controls[i])}));
+        if (!control.found || !ShellVerticallyContains(pane, control.boundingBox) ||
+            control.boundingBox.x < pane.x || control.boundingBox.x + control.boundingBox.width > pane.x + pane.width + 0.01f) return false;
+    }
+    return true;
+}
+static bool BrowserResizeFrameBehavior(PicoHost *host)
+{
+    bool good = false;
+    int hooks = host->hook_count;
+    int chat_width = host->preferences.chat_width;
+    host->hook_count = 0; /* No GPU drawing hooks in the headless frame. */
+    host->preferences.chat_width = 20;
+    g_clay_frame_test = g_browser_resize_frame = g_find_input_test = true;
+    Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+    pico_host_request_redraw(host); PicoHost_Frame(host);
+    if (g_mouse_cursor != MOUSE_CURSOR_RESIZE_EW) goto done;
+    g_find_press = g_find_down = true; PicoHost_Frame(host); g_find_press = false;
+    g_find_pointer.x += 30; g_find_pointer.y = -10;
+    PicoHost_Frame(host);
+    pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    if (g_mouse_cursor != MOUSE_CURSOR_RESIZE_EW ||
+        Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED ||
+        Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) goto done;
+    /* Escape must stop resizing without handing the still-held gesture to
+     * Clay or cancelling an agent; ownership lasts until physical release. */
+    g_find_key = KEY_ESCAPE; PicoHost_Frame(host); g_find_key = 0;
+    g_find_pointer.x -= 100; PicoHost_Frame(host);
+    if (host->ui_drag_active || !PicoBrowser_BlocksPointer(host) ||
+        g_mouse_cursor == MOUSE_CURSOR_RESIZE_EW ||
+        !ShellBoxStable(pane, Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox) ||
+        Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED ||
+        Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) goto done;
+    g_find_down = false; g_find_released = true; PicoHost_Frame(host); g_find_released = false;
+    PicoHost_Frame(host);
+    if (PicoBrowser_BlocksPointer(host) || PicoBrowser_BlocksKeyboard(host)) goto done;
+    /* A plain release also ends capture and keeps the final dragged width. */
+    g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+    g_find_press = g_find_down = true; PicoHost_Frame(host); g_find_press = false;
+    g_find_pointer.x -= 20; PicoHost_Frame(host);
+    g_find_down = false; g_find_released = true; PicoHost_Frame(host); g_find_released = false;
+    if (host->ui_drag_active ||
+        fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - pane.width - 20) > 0.01f) goto done;
+    Clay_BoundingBox right = Clay_GetElementData(CLAY_ID("RightColumn")).boundingBox;
+    pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    if (pane.width > right.width / 2 + 0.01f || fabsf(pane.x + pane.width - right.x - right.width) > 0.01f) goto done;
+    good = true;
+done:
+    host->hook_count = hooks;
+    host->preferences.chat_width = chat_width;
+    g_clay_frame_test = g_browser_resize_frame = g_find_input_test = false;
+    g_find_press = g_find_down = g_find_released = false; g_find_key = 0;
+    return good;
+}
+static bool BrowserResizeCancelBehavior(PicoHost *host)
+{
+    for (int cause = 0; cause < 3; ++cause) {
+        Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+        g_find_input_test = g_find_press = g_find_down = true;
+        g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+        PicoBrowser_Input(host); g_find_press = false;
+        if (!host->ui_drag_active) return false;
+        if (cause == 0 && !pico_ui_modal_push(host, "browser-resize-test")) return false;
+        if (cause == 1) host->window_minimized = true;
+        if (cause == 2) PicoBrowser_CloseAgent(host, host->selected_agent_id);
+        PicoBrowser_Input(host);
+        bool cancelled = !host->ui_drag_active && !PicoBrowser_ResizeHovered(host);
+        if (cause == 0) pico_ui_modal_pop(host, "browser-resize-test");
+        if (cause == 1) host->window_minimized = false;
+        /* Dismissing the blocker while still held cannot resume the gesture. */
+        g_find_pointer.x -= 100; PicoBrowser_Input(host);
+        g_find_down = false; g_find_released = true; PicoBrowser_Input(host);
+        g_find_input_test = g_find_released = false;
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        if (!cancelled || !ShellBoxStable(pane, Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox)) return false;
+    }
+    return true;
+}
+static bool BrowserResizeGeometryStable(PicoHost *host, bool with_sidebar)
+{
+    ChatStabilitySnapshot expected, current;
+    /* Settle wrapping/virtualization once after the intentional width change. */
+    for (int frame = 0; frame < 8; ++frame) LayoutChatStabilityFrame(host, (Clay_Dimensions){1100,800});
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &expected)) return false;
+    Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    Clay_BoundingBox row = Clay_GetElementData(CLAY_ID("ChatBrowserRow")).boundingBox;
+    Clay_BoundingBox handle = Clay_GetElementData(CLAY_ID("BrowserResizeHandle")).boundingBox;
+    for (int frame = 0; frame < 60; ++frame) {
+        LayoutChatStabilityFrame(host, (Clay_Dimensions){1100,800});
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) return false;
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &current) ||
+            !ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+            !ShellBoxStable(pane, Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox) ||
+            !ShellBoxStable(row, Clay_GetElementData(CLAY_ID("ChatBrowserRow")).boundingBox) ||
+            !ShellBoxStable(handle, Clay_GetElementData(CLAY_ID("BrowserResizeHandle")).boundingBox)) return false;
+    }
+    return true;
+}
+static bool BrowserResizeBehavior(PicoHost *host, bool with_sidebar)
+{
+    PicoAgent *agent = PicoHost_SelectedAgent(host);
+    Clay_BoundingBox right = Clay_GetElementData(CLAY_ID("RightColumn")).boundingBox;
+    Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    Clay_BoundingBox main = Clay_GetElementData(CLAY_ID("MainColumn")).boundingBox;
+    Clay_ElementData handle = Clay_GetElementData(CLAY_ID("BrowserResizeHandle"));
+    if (!handle.found || fabsf(handle.boundingBox.height - pane.height) > 0.01f) return false;
+    g_find_input_test = true;
+    g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+    if (!PicoBrowser_ResizeHovered(host)) return false;
+    g_find_pointer.x += 20;
+    if (PicoBrowser_ResizeHovered(host)) return false;
+    g_find_input_test = false;
+    /* Drag far beyond both limits: chat gets the remainder and the right edge
+     * stays anchored. The cap is RightColumn-relative even with a sidebar. */
+    if (!BrowserTestResize(host, right.width * 2)) return false;
+    Clay_BoundingBox maximum = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    if (fabsf(maximum.width - right.width / 2) > 0.01f ||
+        fabsf(maximum.x + maximum.width - pane.x - pane.width) > 0.01f ||
+        fabsf(Clay_GetElementData(CLAY_ID("MainColumn")).boundingBox.width - main.width + maximum.width - pane.width) > 0.01f ||
+        !BrowserResizeGeometryStable(host, with_sidebar)) return false;
+    if (!BrowserTestResize(host, 1) ||
+        fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - 300) > 0.01f ||
+        !BrowserToolbarContained() || !BrowserResizeGeometryStable(host, with_sidebar)) return false;
+    float preferred = (300 + maximum.width) / 2;
+    if (!BrowserTestResize(host, preferred) ||
+        fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
+    BrowserTestClick(host, "BrowserCollapse");
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (Clay_GetElementData(CLAY_ID("BrowserResizeHandle")).found) return false;
+    BrowserTestClick(host, "BrowserExpand");
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
+    /* Other sessions have their own preferred widths, and switching mid-drag
+     * must not apply the old gesture to the new session. */
+    PicoAgentId other;
+    PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .session_start=PICO_SESSION_NONE};
+    if (pico_main_agent_create(host, agent->workspace->id, &options, &other) != PICO_OK) return false;
+    g_find_input_test = g_find_press = g_find_down = true;
+    pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+    PicoBrowser_Input(host); g_find_press = false;
+    if (!pico_agent_select(host, other)) return false;
+    PicoBrowser_Input(host);
+    if (host->ui_drag_active) return false;
+    g_find_input_test = g_find_down = false;
+    PicoHost_FindAgent(host, other)->browser_expanded = true;
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (!BrowserTestResize(host, 300) || !pico_agent_select(host, agent->id)) return false;
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
+    /* Temporary window constraints must not overwrite the remembered width. */
+    const float narrow_widths[] = {600, 380};
+    for (size_t i = 0; i < sizeof(narrow_widths) / sizeof(narrow_widths[0]); ++i) {
+        Clay_SetLayoutDimensions((Clay_Dimensions){narrow_widths[i],800});
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        right = Clay_GetElementData(CLAY_ID("RightColumn")).boundingBox;
+        pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+        if (pane.width >= 300 || fabsf(pane.width - right.width / 2) > 0.01f ||
+            fabsf(pane.x + pane.width - right.x - right.width) > 0.01f || !BrowserToolbarContained()) return false;
+    }
+    Clay_SetLayoutDimensions((Clay_Dimensions){1100,800});
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f ||
+        !BrowserResizeGeometryStable(host, with_sidebar)) return false;
+    /* Focus loss ends a held gesture; an unrelated later click cannot resize. */
+    g_find_input_test = g_find_press = g_find_down = true;
+    pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
+    PicoBrowser_Input(host); g_find_press = false;
+    host->window_focused = false; PicoBrowser_Input(host);
+    if (host->ui_drag_active || PicoBrowser_ResizeHovered(host)) return false;
+    host->window_focused = true;
+    g_find_pointer.x -= 100; PicoBrowser_Input(host);
+    g_find_input_test = g_find_down = false;
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    return fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) <= 0.01f &&
+        BrowserResizeFrameBehavior(host) && BrowserResizeCancelBehavior(host);
+}
 static void BrowserTestPreset(PicoHost *host, int option)
 {
     BrowserTestClick(host, "BrowserViewport");
@@ -4931,6 +5143,7 @@ static int RunBrowserViewportCase(bool with_sidebar)
     /* Closing the popup must not permanently capture composer keyboard input. */
     BrowserTestKey(host, 0);
     if (PicoBrowser_BlocksKeyboard(host)) goto done;
+    if (!BrowserResizeBehavior(host, with_sidebar)) { Fail("browser edge resizing must enforce limits, retain per-session widths, and preserve bottom-follow geometry"); goto done; }
     rc = 0;
 done:
     g_find_input_test = g_find_press = g_find_down = g_find_released = g_find_ctrl = false;

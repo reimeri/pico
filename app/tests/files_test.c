@@ -583,8 +583,23 @@ static void TestCompleteLongPathKeepsFilename(void)
     free(memory);
 }
 
+static int TestToolImagePath(void)
+{
+    const char *path = "/tmp/tool images (x)&/<test>/screenshot.png";
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=(char *)path, .mime="image/png"};
+    char *parts = pico_canonical_parts_json(&image, 1);
+    char *markdown = pico_canonical_tool_images_markdown(parts);
+    MdDocument document = MdDocument_Parse(markdown, strlen(markdown));
+    bool ok = document.block_count == 1 && document.blocks[0].image_path &&
+              !strcmp(document.blocks[0].image_path, path);
+    MdDocument_Free(&document); free(markdown); free(parts);
+    if (!ok) fprintf(stderr, "tool images must render from paths containing spaces and Markdown syntax\n");
+    return ok ? 0 : 1;
+}
+
 int main(void)
 {
+    if (TestToolImagePath()) return 1;
     TestQuotedFileRoundTrip();
     TestBoundedMentions();
     TestMentionImagePart();

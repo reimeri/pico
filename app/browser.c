@@ -18,6 +18,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sys/random.h>
+#include <limits.h>
+#include <ctype.h>
 
 extern char **environ;
 typedef struct BrowserSession {
@@ -45,6 +48,14 @@ typedef struct BrowserRequest {
     bool done, cancelled, error;
     int refs;
     char url[PB_URL_CAP], result[512];
+    uint64_t id, token, navigation, viewport;
+    uint32_t kind;
+    bool dispatched, cancel_sent;
+    struct timespec started;
+    PbCommand *steps;
+    int step_count, width, height;
+    PbObservation observation;
+    unsigned char *png;
 } BrowserRequest;
 typedef struct PicoBrowserService {
     PicoHost *host;
@@ -52,7 +63,7 @@ typedef struct PicoBrowserService {
     pthread_cond_t cv;
     BrowserSession *sessions, *retired;
     BrowserRequest *requests;
-    uint64_t next_token;
+    uint64_t next_token, next_request;
     int command_fd, event_fd;
     pid_t pid;
     pthread_t receiver;
@@ -84,6 +95,9 @@ void PicoBrowser_Init(PicoHost *host)
     PicoBrowserService *s = calloc(1, sizeof(*s));
     if (!s) return;
     s->host = host; s->command_fd = s->event_fd = -1;
+    if (getrandom(&s->next_token, sizeof(s->next_token), 0) != sizeof(s->next_token)) {
+        free(s); return; /* Never reuse observation identities across processes. */
+    }
     pthread_mutex_init(&s->mu, NULL); pthread_cond_init(&s->cv, NULL);
     host->browser = s;
 }
@@ -106,11 +120,32 @@ static void *Receive(void *arg)
         bool frame = event.type == PB_FRAME;
         if (frame ? (!event.width || !event.height || event.width > PB_MAX_DIMENSION ||
                      event.height > PB_MAX_DIMENSION || event.length != event.width * event.height * 4)
-                  : event.length >= PB_URL_CAP) break;
+                  : event.type == PB_OBSERVATION ?
+                    (event.length < sizeof(PbObservation) || event.length > sizeof(PbObservation) + PB_MAX_PNG ||
+                     !event.width || !event.height || event.width > PB_MAX_DIMENSION || event.height > PB_MAX_DIMENSION)
+                    : event.length >= PB_URL_CAP) break;
         unsigned char *data = malloc((size_t)event.length + 1);
         if (!data || !ReadAll(s->event_fd, data, event.length)) { free(data); break; }
         data[event.length] = 0;
         pthread_mutex_lock(&s->mu);
+        if (event.type == PB_OBSERVATION) {
+            PbObservation info; memcpy(&info, data, sizeof(info));
+            bool valid = info.png_size == event.length - sizeof(info) &&
+                         memchr(info.url, 0, sizeof(info.url)) && memchr(info.error, 0, sizeof(info.error));
+            if (valid) for (BrowserRequest *r = s->requests; r; r = r->next) {
+                if (r->id != info.request || r->token != event.token || !r->dispatched || r->done) continue;
+                r->observation = info; r->width = event.width; r->height = event.height;
+                r->error = info.error[0] || !info.png_size;
+                if (info.png_size && !r->cancelled) {
+                    memmove(data, data + sizeof(info), info.png_size); r->png = data; data = NULL;
+                }
+                snprintf(r->result, sizeof(r->result), "%s", info.error);
+                r->done = true; pthread_cond_broadcast(&s->cv); break;
+            }
+            pthread_mutex_unlock(&s->mu); free(data); pico_host_wakeup(s->host);
+            if (!valid) break;
+            continue;
+        }
         BrowserSession *b = s->sessions;
         while (b && b->token != event.token) b = b->next;
         if (!event.token && event.type == PB_ERROR)
@@ -261,6 +296,9 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
         PicoTextField_Bind(&b->field, b->address, sizeof(b->address));
         pthread_mutex_lock(&s->mu); b->next = s->sessions; s->sessions = b; pthread_mutex_unlock(&s->mu);
     }
+    pthread_mutex_lock(&s->mu);
+    if (!b->opened) b->token = ++s->next_token;
+    pthread_mutex_unlock(&s->mu);
     PbCommand command = {.type = PB_OPEN, .token = b->token};
     snprintf(command.text, sizeof(command.text), "%s", url);
     snprintf(command.profile, sizeof(command.profile), "%s", agent->session_id);
@@ -269,10 +307,30 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
         b->opened = true; b->visible = false; b->width = b->height = 0;
         b->error[0] = 0;
     }
+    Send(s, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control});
     if (user) agent->browser_expanded = true;
     PicoTextField_SetText(&b->field, url);
     pico_host_request_redraw(host);
     return true;
+}
+void PicoBrowser_CancelAgent(PicoHost *host, PicoAgentId id, uint64_t generation)
+{
+    PicoBrowserService *s = host ? host->browser : NULL;
+    if (!s) return;
+    pthread_mutex_lock(&s->mu);
+    for (BrowserRequest *r = s->requests; r; r = r->next) {
+        if (r->agent_id != id || r->generation != generation || r->done) continue;
+        r->cancelled = true;
+        if (!r->dispatched) {
+            r->done = r->error = true; snprintf(r->result, sizeof(r->result), "Browser operation cancelled before dispatch.");
+        } else if (!r->cancel_sent) {
+            r->cancel_sent = true;
+            pthread_mutex_unlock(&s->mu);
+            Send(s, (PbCommand){.type=PB_CANCEL, .token=r->token, .request=r->id});
+            pthread_mutex_lock(&s->mu);
+        }
+    }
+    pthread_cond_broadcast(&s->cv); pthread_mutex_unlock(&s->mu);
 }
 void PicoBrowser_CloseAgent(PicoHost *host, PicoAgentId id)
 {
@@ -283,6 +341,14 @@ void PicoBrowser_CloseAgent(PicoHost *host, PicoAgentId id)
     while (*link && (*link)->agent_id != id) link = &(*link)->next;
     BrowserSession *b = *link;
     if (b) *link = b->next;
+    /* Runtime unload must not wait on a UI pump to release tool workers. The
+     * page is being destroyed; no replacement can use its token. Delivery of
+     * an already-dispatched prefix cannot be asserted during close. */
+    for (BrowserRequest *r = s->requests; r; r = r->next) if (r->agent_id == id && !r->done) {
+        r->done = r->error = r->cancelled = true; r->observation.uncertain = r->dispatched;
+        snprintf(r->result, sizeof(r->result), "Browser closed; in-flight input delivery may be uncertain.");
+    }
+    pthread_cond_broadcast(&s->cv);
     pthread_mutex_unlock(&s->mu);
     if (!b) return;
     Send(s, (PbCommand){.type = PB_CLOSE, .token = b->token});
@@ -301,56 +367,321 @@ void PicoBrowser_BeginLayout(PicoHost *host)
         PicoTextField_Unbind(&b->field); free(b);
     }
 }
-static void ReleaseRequest(BrowserRequest *r) { if (!--r->refs) free(r); }
+/* All request fields are protected by service->mu. Requests have a queue and a
+ * worker reference; cancellation never frees storage used by the receiver. */
+static void ReleaseRequest(BrowserRequest *r)
+{
+    if (!--r->refs) { free(r->steps); free(r->png); free(r); }
+}
+static bool Number(const JsonDoc *doc, int object, const char *name, int min, int max, int *out)
+{
+    int token = JsonObjGet(doc, object, name);
+    char *raw = JsonRawDup(doc, token), *end = NULL;
+    if (!raw) return false;
+    errno = 0; long value = strtol(raw, &end, 10);
+    bool ok = !errno && end != raw && !*end && value >= min && value <= max;
+    if (ok) *out = (int)value;
+    free(raw); return ok;
+}
+static char *String(const JsonDoc *doc, int object, const char *name)
+{
+    int token = JsonObjGet(doc, object, name), start = JsonTokStart(doc, token);
+    if (start < 1 || doc->src[start-1] != '"') return NULL;
+    return JsonStrDup(doc, token);
+}
+static int ModifiersJson(const JsonDoc *doc, int object)
+{
+    int array = JsonObjGet(doc, object, "modifiers");
+    if (array < 0) return 0;
+    if (!JsonIsArray(doc, array) || JsonArrayLen(doc, array) > 3) return -1;
+    int flags = 0;
+    for (int i = 0; i < JsonArrayLen(doc, array); ++i) {
+        int item = JsonArrayAt(doc, array, i), flag = 0;
+        if (JsonEq(doc, item, "Shift")) flag = 2;
+        else if (JsonEq(doc, item, "Control")) flag = 4;
+        else if (JsonEq(doc, item, "Alt")) flag = 8;
+        else return -1;
+        if (flags & flag) return -1;
+        flags |= flag;
+    }
+    return flags;
+}
+static int ButtonJson(const JsonDoc *doc, int object)
+{
+    int button = JsonObjGet(doc, object, "button");
+    if (button < 0 || JsonEq(doc, button, "left")) return 0;
+    if (JsonEq(doc, button, "middle")) return 1;
+    if (JsonEq(doc, button, "right")) return 2;
+    return -1;
+}
+static bool AddStep(BrowserRequest *r, PbCommand step)
+{
+    if (r->step_count >= PB_MAX_STEPS) return false;
+    r->steps[r->step_count++] = step; return true;
+}
+static bool Point(const JsonDoc *doc, int object, BrowserRequest *r, PbCommand *step)
+{
+    return Number(doc, object, "x", 0, r->width - 1, &step->x) &&
+           Number(doc, object, "y", 0, r->height - 1, &step->y);
+}
+static bool ObservationIdentity(BrowserRequest *r, const char *id)
+{
+    if (!id || strlen(id) > 100) return false;
+    unsigned long long values[5]; const char *cursor = id;
+    const char delimiters[] = {':', ':', ':', 'x', 0};
+    for (int i = 0; i < 5; ++i) {
+        if (!(i < 3 ? isxdigit((unsigned char)*cursor) : isdigit((unsigned char)*cursor))) return false;
+        char *end = NULL; errno = 0;
+        values[i] = strtoull(cursor, &end, i < 3 ? 16 : 10);
+        if (errno || end == cursor || *end != delimiters[i] || !values[i]) return false;
+        cursor = end + (i < 4);
+    }
+    if (values[3] > PB_MAX_DIMENSION || values[4] > PB_MAX_DIMENSION) return false;
+    r->token = values[0]; r->navigation = values[1]; r->viewport = values[2];
+    r->width = (int)values[3]; r->height = (int)values[4]; return true;
+}
+static bool ParseActions(BrowserRequest *r, const char *args)
+{
+    JsonDoc doc;
+    if (!args || strlen(args) > 65536 || !JsonValidSyntax(args, strlen(args)) || JsonParse(&doc, args, strlen(args))) return false;
+    char *id = String(&doc, 0, "observation_id");
+    bool ok = ObservationIdentity(r, id);
+    free(id);
+    int array = JsonObjGet(&doc, 0, "actions");
+    int count = JsonArrayLen(&doc, array);
+    ok = ok && JsonIsArray(&doc, array) && count > 0 && count <= PB_MAX_ACTIONS;
+    r->steps = calloc(PB_MAX_STEPS, sizeof(*r->steps)); ok = ok && r->steps;
+    for (int i = 0; ok && i < count; ++i) {
+        int action = JsonArrayAt(&doc, array, i), type = JsonObjGet(&doc, action, "type");
+        PbCommand step = {.modifiers = ModifiersJson(&doc, action)};
+        if (!JsonIsObject(&doc, action) || step.modifiers < 0) { ok = false; break; }
+        if (JsonEq(&doc, type, "move") || JsonEq(&doc, type, "click") || JsonEq(&doc, type, "scroll")) {
+            ok = Point(&doc, action, r, &step); if (!ok) break;
+            step.type = PB_MOUSE; step.a = -1;
+            if (JsonEq(&doc, type, "click")) {
+                step.a = ButtonJson(&doc, action); int clicks = 1;
+                if (step.a < 0 || (JsonObjGet(&doc, action, "count") >= 0 && !Number(&doc, action, "count", 1, 2, &clicks))) { ok = false; break; }
+                for (int c = 1; ok && c <= clicks; ++c) {
+                    step.text[0] = c; step.b = 0; ok = AddStep(r, step);
+                    step.b = 1; ok = ok && AddStep(r, step);
+                }
+            } else if (JsonEq(&doc, type, "scroll")) {
+                step.type = PB_WHEEL;
+                ok = Number(&doc, action, "delta_x", -10000, 10000, &step.a) &&
+                     Number(&doc, action, "delta_y", -10000, 10000, &step.b) && AddStep(r, step);
+            } else ok = AddStep(r, step);
+        } else if (JsonEq(&doc, type, "text")) {
+            char *text = String(&doc, action, "text");
+            ok = text && text[0] && strlen(text) <= 16384 && JsonValidUtf8(text, strlen(text)) && !step.modifiers;
+            step.type = PB_TEXT;
+            for (size_t offset = 0; ok && text[offset]; ) {
+                size_t len = strlen(text + offset); if (len >= sizeof(step.text)) len = sizeof(step.text) - 1;
+                while (len && ((unsigned char)text[offset + len] & 0xc0) == 0x80) --len;
+                if (!len) { ok = false; break; }
+                memcpy(step.text, text + offset, len); step.text[len] = 0;
+                ok = AddStep(r, step); offset += len;
+            }
+            free(text);
+        } else if (JsonEq(&doc, type, "key")) {
+            char *key = String(&doc, action, "key");
+            static const struct { const char *name; int code; } keys[] = {
+                {"Enter",13},{"Tab",9},{"Escape",27},{"Backspace",8},{"Delete",46},
+                {"ArrowLeft",37},{"ArrowUp",38},{"ArrowRight",39},{"ArrowDown",40},
+                {"Home",36},{"End",35},{"PageUp",33},{"PageDown",34},{"Space",32}
+            };
+            step.type = PB_KEY;
+            for (size_t k = 0; key && k < sizeof(keys)/sizeof(keys[0]); ++k)
+                if (!strcmp(key, keys[k].name)) step.a = keys[k].code;
+            if (key && strlen(key) == 1 && key[0] >= 'A' && key[0] <= 'Z' && (step.modifiers & (4|8))) step.a = key[0];
+            if (key && strlen(key) == 1 && key[0] >= '0' && key[0] <= '9' && (step.modifiers & (4|8))) step.a = key[0];
+            // Clipboard and browser/OS shortcut capabilities are deliberately not exposed.
+            if (!step.a || ((step.modifiers & 4) && (step.a == 'C' || step.a == 'X' || step.a == 'V' || step.a == 45)) ||
+                ((step.modifiers & 2) && (step.a == 45 || step.a == 46))) ok = false;
+            if (ok) {
+                snprintf(step.text, sizeof(step.text), "%s", step.a == 32 ? " " : key);
+                if (strlen(key) == 1) snprintf(step.profile, sizeof(step.profile), "%s%s", step.a >= 'A' ? "Key" : "Digit", key);
+                else snprintf(step.profile, sizeof(step.profile), "%s", key);
+                ok = AddStep(r, step); step.b = 1; ok = ok && AddStep(r, step);
+            }
+            free(key);
+        } else if (JsonEq(&doc, type, "drag")) {
+            int points = JsonObjGet(&doc, action, "points"), n = JsonArrayLen(&doc, points);
+            int button = ButtonJson(&doc, action);
+            ok = JsonIsArray(&doc, points) && n >= 2 && n <= 32 && button >= 0;
+            step.type = PB_MOUSE;
+            for (int j = 0; ok && j < n; ++j) {
+                ok = Point(&doc, JsonArrayAt(&doc, points, j), r, &step);
+                step.a = j ? -1 : button; step.b = 0;
+                ok = ok && AddStep(r, step);
+            }
+            step.a = button; step.b = 1; ok = ok && AddStep(r, step);
+        } else ok = false;
+        if (ok) r->steps[r->step_count - 1].end_action = 1;
+    }
+    JsonFree(&doc); return ok;
+}
+static BrowserRequest *Request(PicoAgentContext *ctx, uint32_t kind)
+{
+    BrowserRequest *r = calloc(1, sizeof(*r));
+    if (r) { r->refs = 1; r->agent_id = pico_agent_context_id(ctx);
+        r->generation = pico_agent_context_generation(ctx); r->kind = kind; }
+    return r;
+}
+static void Submit(PicoBrowserService *s, PicoAgentContext *ctx, BrowserRequest *r)
+{
+    pthread_mutex_lock(&s->mu);
+    if (pico_agent_context_cancelled(ctx)) {
+        r->done = r->error = r->cancelled = true;
+        snprintf(r->result, sizeof(r->result), "Browser operation cancelled before submission."); return;
+    }
+    ++r->refs; r->id = ++s->next_request; clock_gettime(CLOCK_MONOTONIC, &r->started);
+    BrowserRequest **tail = &s->requests; while (*tail) tail = &(*tail)->next; *tail = r;
+    pico_host_wakeup(s->host);
+    while (!r->done) {
+        if (pico_agent_context_cancelled(ctx) && !r->cancelled) {
+            r->cancelled = true; pico_host_wakeup(s->host);
+        }
+        struct timespec until; clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 50000000;
+        if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&s->cv, &s->mu, &until);
+    }
+    /* Caller reads under mu, then releases its reference. */
+}
 char *PicoBrowser_ToolOpen(PicoAgentContext *ctx, const char *url, bool *error)
 {
     *error = true;
     PicoWorkspace *ws = PicoAgentContext_Workspace(ctx);
     PicoBrowserService *s = ws && ws->host ? ws->host->browser : NULL;
     if (!s || !ValidUrl(url)) return strdup("browser_open: provide an http:// or https:// URL.");
-    BrowserRequest *r = calloc(1, sizeof(*r));
+    BrowserRequest *r = Request(ctx, PB_OPEN);
     if (!r) return strdup("browser_open: out of memory.");
-    r->refs = 2; r->agent_id = pico_agent_context_id(ctx);
-    r->generation = pico_agent_context_generation(ctx);
     snprintf(r->url, sizeof(r->url), "%s", url);
-    pthread_mutex_lock(&s->mu);
-    BrowserRequest **tail = &s->requests; while (*tail) tail = &(*tail)->next; *tail = r;
-    pico_host_wakeup(s->host);
-    while (!r->done && !pico_agent_context_cancelled(ctx)) {
-        struct timespec until; clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_nsec += 50000000;
-        if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
-        pthread_cond_timedwait(&s->cv, &s->mu, &until);
-    }
-    char *result;
-    if (!r->done) { r->cancelled = true; result = strdup("browser_open cancelled."); }
-    else { *error = r->error; result = strdup(r->result); }
-    ReleaseRequest(r); pthread_mutex_unlock(&s->mu);
-    return result;
+    Submit(s, ctx, r);
+    *error = r->error; char *result = strdup(r->result);
+    ReleaseRequest(r); pthread_mutex_unlock(&s->mu); return result;
 }
+void PicoBrowser_ToolObserve(PicoAgentContext *ctx, const char *args, bool act, PicoToolResult *out)
+{
+    out->is_error = true;
+    if (!pico_agent_context_accepts_tool_images(ctx)) {
+        out->output = strdup("This model/provider does not support image-bearing tool results."); return;
+    }
+    PicoWorkspace *ws = PicoAgentContext_Workspace(ctx);
+    PicoBrowserService *s = ws && ws->host ? ws->host->browser : NULL;
+    BrowserRequest *r = s ? Request(ctx, act ? PB_BEGIN : PB_OBSERVE) : NULL;
+    if (!r) { out->output = strdup("Browser service unavailable."); return; }
+    if (act && !ParseActions(r, args)) {
+        out->output = strdup("Invalid browser_act batch. Use a valid observation_id and bounded move/click/scroll/key/text/drag actions; coordinates must be inside that image. Clipboard shortcuts are unsupported.");
+        ReleaseRequest(r); return;
+    }
+    Submit(s, ctx, r);
+    out->is_error = r->error;
+    if (r->png && !r->cancelled) {
+        JsonBuf result; JsonBuf_Init(&result);
+        char id[128]; snprintf(id, sizeof(id), "%llx:%llx:%llx:%dx%d", (unsigned long long)r->token,
+            (unsigned long long)r->observation.navigation, (unsigned long long)r->observation.viewport, r->width, r->height);
+        JsonBuf_Puts(&result, "{\"observation_id\":"); JsonBuf_String(&result, id);
+        JsonBuf_Puts(&result, ",\"url\":"); JsonBuf_String(&result, r->observation.url);
+        JsonBuf_Puts(&result, ",\"width\":"); JsonBuf_Int(&result, r->width);
+        JsonBuf_Puts(&result, ",\"height\":"); JsonBuf_Int(&result, r->height);
+        JsonBuf_Puts(&result, ",\"completed_actions\":"); JsonBuf_Int(&result, r->observation.completed);
+        JsonBuf_Puts(&result, ",\"delivered_events\":"); JsonBuf_Int(&result, r->observation.delivered_events);
+        JsonBuf_Puts(&result, ",\"partial_action\":"); JsonBuf_Bool(&result, r->observation.partial_action);
+        JsonBuf_Puts(&result, ",\"delivery_uncertain\":"); JsonBuf_Bool(&result, r->observation.uncertain);
+        JsonBuf_Puts(&result, ",\"coordinates\":\"image pixels; top-left origin; x right, y down; 1:1 logical viewport units\"");
+        JsonBuf_Puts(&result, ",\"readiness\":\"load completed and fresh composited paint; not network-idle or application readiness\"");
+        if (r->result[0]) { JsonBuf_Puts(&result, ",\"error\":"); JsonBuf_String(&result, r->result); }
+        JsonBuf_Putc(&result, '}'); out->output = JsonBuf_Steal(&result);
+        out->images = calloc(1, sizeof(*out->images));
+        if (out->images) {
+            out->images[0] = (PicoToolImage){.png=r->png, .size=r->observation.png_size}; r->png = NULL;
+            out->image_count = 1; out->media_namespace = strdup("browser");
+        } else { free(out->output); out->output = strdup("Could not allocate screenshot result."); out->is_error = true; }
+    } else {
+        char text[768]; snprintf(text, sizeof(text), "%s Completed actions: %u; delivered native events: %u; partial action: %s; delivery uncertain: %s. Already delivered input was not undone; do not retry it blindly.",
+                                r->result[0] ? r->result : "No observation was captured.", r->observation.completed, r->observation.delivered_events, r->observation.partial_action ? "yes" : "no", r->observation.uncertain ? "yes" : "no");
+        out->output = strdup(text);
+    }
+    ReleaseRequest(r); pthread_mutex_unlock(&s->mu);
+}
+
 void PicoBrowser_Pump(PicoHost *host)
 {
     PicoBrowserService *s = host ? host->browser : NULL;
     if (!s) return;
     Flush(s);
-    for (;;) {
-        pthread_mutex_lock(&s->mu);
-        BrowserRequest *r = s->requests;
-        if (!r) { pthread_mutex_unlock(&s->mu); break; }
-        s->requests = r->next;
-        bool cancelled = r->cancelled;
-        pthread_mutex_unlock(&s->mu);
-        char result[512] = "browser_open cancelled."; bool error = true;
-        PicoAgent *a = PicoHost_FindAgent(host, r->agent_id);
-        if (!cancelled && a && a->runtime_generation == r->generation) {
-            error = !Open(host, a, r->url, false, result, sizeof(result));
-            if (!error) snprintf(result, sizeof(result), "Browser navigation requested for this main session. Page load is asynchronous. Screenshot and agent input tools are not available yet.");
+    /* Dispatch and cancellation stay on the host thread. Never hold mu while
+     * Send/Open run: Send's failure path also publishes under that mutex. */
+    pthread_mutex_lock(&s->mu);
+    BrowserRequest **link = &s->requests;
+    while (*link) {
+        BrowserRequest *r = *link;
+        PicoAgent *agent = PicoHost_FindAgent(host, r->agent_id);
+        BrowserSession *browser = Session(host, r->agent_id);
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        bool invalid = !agent || agent->runtime_generation != r->generation || !PicoAgent_IsUserMain(agent);
+        bool timeout = now.tv_sec - r->started.tv_sec > 35;
+        if (!r->done && (r->cancelled || invalid || timeout || (s->disconnected && r->kind != PB_OPEN) ||
+                        (r->dispatched && r->kind != PB_OPEN && (!browser || browser->token != r->token)))) {
+            bool unavailable = timeout || s->disconnected;
+            if (r->dispatched && r->kind != PB_OPEN && !unavailable) {
+                if (!r->cancel_sent) {
+                    r->cancel_sent = true;
+                    pthread_mutex_unlock(&s->mu);
+                    Send(s, (PbCommand){.type=PB_CANCEL, .token=r->token, .request=r->id});
+                    pthread_mutex_lock(&s->mu);
+                }
+            } else {
+                r->done = r->error = true;
+                r->observation.uncertain = r->dispatched;
+                if (timeout && r->dispatched && !s->disconnected) {
+                    pthread_mutex_unlock(&s->mu);
+                    Send(s, (PbCommand){.type=PB_CANCEL, .token=r->token, .request=r->id});
+                    PicoBrowser_CloseAgent(host, r->agent_id);
+                    pthread_mutex_lock(&s->mu);
+                }
+                snprintf(r->result, sizeof(r->result), "%s", timeout ? "Browser operation timed out; page closed and input delivery may be uncertain." : "Browser operation cancelled or helper unavailable.");
+            }
         }
-        pthread_mutex_lock(&s->mu);
-        r->done = true; r->error = error; snprintf(r->result, sizeof(r->result), "%s", result);
-        pthread_cond_broadcast(&s->cv); ReleaseRequest(r);
-        pthread_mutex_unlock(&s->mu);
+        bool busy = false;
+        for (BrowserRequest *earlier = s->requests; earlier != r; earlier = earlier->next)
+            if (!earlier->done && earlier->agent_id == r->agent_id) busy = true;
+        if (r->kind == PB_BEGIN && 256 - s->queue_count < (unsigned)r->step_count + 2) busy = true;
+        if (!r->done && !r->dispatched && !busy) {
+            char error[512] = {0}; bool ok = true;
+            if (r->kind != PB_OPEN && (!browser || !browser->opened)) {
+                ok = false; snprintf(error, sizeof(error), "No open browser. Use browser_open first.");
+            } else if (r->kind == PB_BEGIN && (browser->user_control || browser->token != r->token)) {
+                ok = false; snprintf(error, sizeof(error), "%s", browser->user_control ? "Browser is under User control." : "Stale observation: this browser was replaced.");
+            }
+            if (ok) {
+                if (r->kind != PB_OPEN) r->token = browser->token;
+                r->dispatched = true;
+                pthread_mutex_unlock(&s->mu);
+                if (r->kind == PB_OPEN) {
+                    ok = Open(host, agent, r->url, false, error, sizeof(error));
+                    if (ok) snprintf(error, sizeof(error), "Navigation queued. Use browser_observe to wait for a fresh page image.");
+                } else {
+                    ok = Send(s, (PbCommand){.type=r->kind, .token=r->token, .request=r->id,
+                              .navigation=r->navigation, .viewport=r->viewport, .x=r->width, .y=r->height});
+                    for (int i = 0; ok && i < r->step_count; ++i) {
+                        PbCommand step = r->steps[i]; step.token = r->token; step.request = r->id;
+                        ok = Send(s, step);
+                    }
+                    if (ok && r->kind == PB_BEGIN) ok = Send(s, (PbCommand){.type=PB_COMMIT, .token=r->token, .request=r->id});
+                    if (!ok) snprintf(error, sizeof(error), "Browser command transport failed.");
+                }
+                pthread_mutex_lock(&s->mu);
+            }
+            if (!ok || r->kind == PB_OPEN) {
+                r->done = true; r->error = !ok; snprintf(r->result, sizeof(r->result), "%s", error);
+            }
+        }
+        if (r->done) { *link = r->next; pthread_cond_broadcast(&s->cv); ReleaseRequest(r); }
+        else link = &r->next;
     }
+    pthread_mutex_unlock(&s->mu);
     pthread_mutex_lock(&s->mu);
     bool disconnected = s->disconnected;
     pthread_mutex_unlock(&s->mu);
@@ -567,6 +898,7 @@ void PicoBrowser_Input(PicoHost *host)
     if (!b || !a->browser_expanded) return;
     if (click && Over("BrowserControl")) {
         b->user_control = !b->user_control; b->address_focus = false; Focus(host, b, false);
+        Send(host->browser, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control});
         pico_host_request_redraw(host);
     }
     if (!b->user_control) return;

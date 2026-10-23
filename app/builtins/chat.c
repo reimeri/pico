@@ -1743,6 +1743,7 @@ static void RenderToolLine(const TranscriptView *view, PicoTraceLine *line, int 
             if (output || !line->tool_streaming)
             {
                 RenderTitledToolBlock(view, "Output", output, available_width);
+                MdView_RenderDocument(&line->doc, (int)(row_id.id ^ 0x62490000u), available_width);
             }
         }
     }

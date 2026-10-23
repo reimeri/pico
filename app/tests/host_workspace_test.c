@@ -740,7 +740,7 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
         char call_id[32];
         snprintf(call_id, sizeof(call_id), "stabilize-%d", i);
         PicoAgent_AddToolCallWithId(host, agent, call_id, "read", "{}");
-        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false, NULL);
         agent->messages[trace_message].trace[i].tool_done_t0 = 0.0;
     }
     agent->messages[trace_message].trace_group_expanded = true;
@@ -799,7 +799,7 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
     {
         char call_id[32];
         snprintf(call_id, sizeof(call_id), "stabilize-%d", i);
-        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false, NULL);
     }
     agent->messages[trace_message].trace_group_expanded = false;
     for (int i = 0; i < agent->messages[trace_message].trace_count; i++)
@@ -974,7 +974,7 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
         char call_id[32];
         snprintf(call_id, sizeof(call_id), "away-%d", i);
         PicoAgent_AddToolCallWithId(host, agent, call_id, "read", "{}");
-        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false, NULL);
         agent->messages[trace_message].trace[i].tool_done_t0 = 0.0;
     }
     agent->messages[trace_message].trace_group_expanded = true;
@@ -994,7 +994,7 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
     {
         char call_id[32];
         snprintf(call_id, sizeof(call_id), "away-%d", i);
-        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, "ok", false, NULL);
     }
     agent->messages[trace_message].trace_group_expanded = false;
     for (int i = 0; i < agent->messages[trace_message].trace_count; i++)
@@ -3578,7 +3578,7 @@ static int RunExpandedToolFoldCase(bool with_sidebar)
     char output[8192] = {0};
     for (int i = 0; i < 160; i++) strcat(output, "A long expanded tool output line.\n");
     PicoAgent_AddToolCallWithId(host, agent, "fold-output", "read", "{}");
-    PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false);
+    PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false, NULL);
     PicoAgent_AppendThink(host, agent, "next thought", 0);
     agent->messages[tool_message].trace[0].expanded = true;
     agent->messages[tool_message].trace[1].expanded = true;
@@ -3650,7 +3650,7 @@ static int RunExpandedToolFoldCase(bool with_sidebar)
      * later content keeps the old position valid and the viewport nonempty. */
     for (int i = 0; i < 80; i++)
         PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "later content below the output");
-    PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false);
+    PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false, NULL);
     agent->messages[tool_message].trace[0].tool_done_t0 = pico_trace_now();
     host->chat_follow_bottom = true;
     for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
@@ -3790,7 +3790,7 @@ static int TestChatTraceRowsShareHeight(void)
 
     /* The tool completes and the agent starts thinking: the open tool row is
      * replaced by the group header plus a live think row. */
-    PicoAgent_SetToolOutputByCallId(agent, "run-1", "ok", false);
+    PicoAgent_SetToolOutputByCallId(agent, "run-1", "ok", false, NULL);
     agent->messages[1].trace[0].tool_done_t0 = 0.0;
     PicoAgent_AppendThink(host, agent, "reasoning", 0);
     agent->state = PICO_AGENT_LLM_WAIT;
@@ -4521,7 +4521,10 @@ static int TestBrowserMainSessionPolicy(void)
             ws->llm_hooks[h].fn(ws, which ? child.id : main.id, &event, ws->llm_hooks[h].state);
         bool offered = false;
         for (int i = 0; i < event.tool_count; ++i)
-            if (!strcmp(event.tools[i].name, "browser_open") && !exclude[i]) offered = true;
+            if (!strncmp(event.tools[i].name, "browser_", 8)) {
+                if (exclude[i] != (which != 0)) Fail("all browser tools must be main-session-only");
+                if (!exclude[i]) offered = true;
+            }
         if (offered != !which || (!which && (!event.extra_instructions ||
             !strstr(event.extra_instructions, "do not delegate browser tasks"))))
             Fail("browser must be offered only to main sessions with no-delegation guidance");

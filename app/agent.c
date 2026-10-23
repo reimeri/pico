@@ -83,6 +83,8 @@ typedef struct PicoAgentEv {
     char *payload;
     char *tool_args;
     char *tool_details;
+    char *tool_parts;
+    bool media_adopted;
     int call_index; /* tool events only */
     int tokens;
     int cached;
@@ -109,6 +111,7 @@ struct PicoAgentContext {
     char purpose[1025];
     const char *tool_call_id;
     bool safe_mode;
+    bool accepts_tool_images;
     struct PicoAuthStore *auth_store;
 };
 
@@ -248,6 +251,41 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
 static char *BuildUserItem(const char *text, const char *parts_json);
 static void *WorkerMain(void *arg);
 static bool AgentContextActive(const PicoAgentContext *ctx);
+static char *PersistToolImages(PicoAgentContext *ctx, PicoToolResult *result)
+{
+    if (!result->image_count) return NULL;
+    if (!ctx->accepts_tool_images || result->image_count < 0 || result->image_count > 4 ||
+        !result->images || !ctx->session_id[0]) goto invalid;
+    const char *group = result->media_namespace ? result->media_namespace : "tools";
+    if (strcmp(group, "tools") && strcmp(group, "browser")) goto invalid;
+    size_t total = 0;
+    for (int i = 0; i < result->image_count; ++i) {
+        PicoToolImage *image = &result->images[i];
+        if (!image->png || image->size < 24 || image->size > 64 * 1024 * 1024 ||
+            !pico_canonical_valid_png(image->png, image->size) ||
+            (total += image->size) > 64 * 1024 * 1024) goto invalid;
+    }
+    char dir[4096];
+    if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico/media/%s/%s", ctx->workspace, group, ctx->session_id)) goto invalid;
+    PicoLlmPart parts[4] = {0}; bool ok = true;
+    for (int i = 0; i < result->image_count; ++i) {
+        parts[i].kind = PICO_LLM_PART_IMAGE; parts[i].mime = "image/png";
+        parts[i].path = pico_canonical_persist_bytes(dir, "png", result->images[i].png, result->images[i].size);
+        if (!parts[i].path) { ok = false; break; }
+    }
+    char *json = ok ? pico_canonical_parts_json(parts, result->image_count) : NULL;
+    for (int i = 0; i < result->image_count; ++i) {
+        if (!json && parts[i].path) unlink(parts[i].path);
+        free(parts[i].path);
+    }
+    if (json) return json;
+invalid:
+    free(result->output); result->is_error = true;
+    result->output = JsonDup(ctx->accepts_tool_images ? "Tool images are invalid or could not be saved." :
+                         "This model/provider does not support image-bearing tool results.");
+    return NULL;
+}
+
 static void *ToolWorkerMain(void *arg);
 static void JoinToolJob(PicoAgentRt *rt, int index);
 static void KillToolChildren(PicoAgentRt *rt);
@@ -322,8 +360,23 @@ static void ClearPending(PicoAgentRt *rt)
 /* Completing a work item updates the active worker count in the same critical
  * section as its terminal event. The main thread separately tracks completions
  * still to apply, and joins each job before freeing it or starting a new batch. */
+/* Only called with paths produced by this worker, never replayed/tool-supplied paths. */
+static void DiscardToolMedia(char *parts)
+{
+    if (!parts) return;
+    JsonDoc doc;
+    if (!JsonParse(&doc, parts, strlen(parts))) {
+        for (int i = 0; i < JsonArrayLen(&doc, 0); ++i) {
+            char *path = JsonObjStr(&doc, JsonArrayAt(&doc, 0, i), "path");
+            if (path) unlink(path);
+            free(path);
+        }
+        JsonFree(&doc);
+    }
+}
+
 static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, char *tool_args,
-                        char *tool_details, int tokens, int cached, bool finish, bool executed, bool is_error)
+                        char *tool_details, char *tool_parts, int tokens, int cached, bool finish, bool executed, bool is_error)
 {
     pthread_mutex_lock(&rt->mu);
     if (rt->event_count >= rt->event_cap)
@@ -346,6 +399,7 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
             free(payload);
             free(tool_args);
             free(tool_details);
+            DiscardToolMedia(tool_parts); free(tool_parts);
             pico_host_wakeup(NULL);
             return;
         }
@@ -359,6 +413,7 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
     ev->payload = payload;
     ev->tool_args = tool_args;
     ev->tool_details = tool_details;
+    ev->tool_parts = tool_parts; ev->media_adopted = false;
     ev->tokens = tokens;
     ev->cached = cached;
     ev->executed = executed;
@@ -378,7 +433,7 @@ static void PostEventEx(PicoAgentRt *rt, PicoAgentEvType type, char *text, char 
 
 static void PostEvent(PicoAgentRt *rt, PicoAgentEvType type, char *text, char *payload, int tokens, int cached)
 {
-    PostEventEx(rt, type, text, payload, NULL, NULL, tokens, cached, true, false, false);
+    PostEventEx(rt, type, text, payload, NULL, NULL, NULL, tokens, cached, true, false, false);
 }
 
 static bool CancelCb(void *user)
@@ -1381,7 +1436,7 @@ static void *ToolWorkerMain(void *arg)
     else
     {
         PostEventEx(rt, PICO_AEV_TOOL_START, Dup(job->name), Dup(job->args),
-                    NULL, NULL, 0, 0, false, false, false);
+                    NULL, NULL, NULL, 0, 0, false, false, false);
         job->run(&job->context, job->args, &result, job->state);
         executed = true;
         bool valid = false;
@@ -1394,8 +1449,11 @@ static void *ToolWorkerMain(void *arg)
         }
     }
     free(denial);
+    char *parts = WorkerIsCancelled(rt) ? NULL : PersistToolImages(&job->context, &result);
+    for (int i = 0; result.images && i < result.image_count; ++i) free(result.images[i].png);
+    free(result.images); free(result.media_namespace);
     PostEventEx(rt, PICO_AEV_TOOL_DONE, result.output ? result.output : Dup(""), Dup(job->call_id),
-                Dup(job->args), result.details_json, 0, 0, true, executed, result.is_error);
+                Dup(job->args), result.details_json, parts, 0, 0, true, executed, result.is_error);
     t_agent_context = NULL;
     t_worker_context = PICO_WORKER_NONE;
     t_worker_rt = NULL;
@@ -1579,11 +1637,12 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         return false;
     }
 
-    if (!m->vision)
+    rt->context.accepts_tool_images = m->vision && p->tool_images;
+    if (!m->vision || !p->tool_images)
     {
         for (int i = 0; i < input_count; i++)
         {
-            if (pico_canonical_json_has_media(input[i]))
+            if (pico_canonical_json_has_media(input[i]) && (!m->vision || pico_canonical_is_tool_result(input[i])))
             {
                 for (int j = 0; j < input_count; j++)
                 {
@@ -1592,7 +1651,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
                 free(input);
                 free(instructions);
                 free(tools);
-                SetErrorState(app, agent, "model does not accept images");
+                SetErrorState(app, agent, !m->vision ? "model does not accept images" : "provider does not support image-bearing tool results");
                 return false;
             }
         }
@@ -2063,6 +2122,7 @@ void PicoTraceLine_Release(PicoTraceLine *line)
     free(line->tool_args);
     free(line->tool_args_json);
     free(line->tool_output);
+    free(line->tool_parts_json);
     if (line->think_parts)
     {
         for (int i = 0; i < line->think_part_count; i++)
@@ -2369,9 +2429,9 @@ static char *FormatToolLine(const char *name, const char *args_json)
 }
 
 static void PushFunctionOutput(PicoAgentRt *rt, const char *call_id, const char *name, const char *output,
-                               bool is_error)
+                               bool is_error, const char *parts_json)
 {
-    PushInput(rt, pico_canonical_tool_result_json(call_id, name, output, is_error));
+    PushInput(rt, pico_canonical_tool_result_json(call_id, name, output, is_error, parts_json));
 }
 
 static void AbortRemainingCalls(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt)
@@ -2379,11 +2439,11 @@ static void AbortRemainingCalls(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt
     for (int i = 0; i < rt->pending_count; i++)
     {
         if (rt->pending[i].completed) continue;
-        PushFunctionOutput(rt, rt->pending[i].call_id, rt->pending[i].name, "(interrupted)", true);
+        PushFunctionOutput(rt, rt->pending[i].call_id, rt->pending[i].name, "(interrupted)", true, NULL);
         PicoSession_LogToolResult(app, agent, rt->pending[i].call_id, rt->pending[i].name,
-                                  "(interrupted)", true, NULL);
+                                  "(interrupted)", true, NULL, NULL);
         PicoAgent_SetToolOutputByCallId(agent, rt->pending[i].call_id,
-                                        "(interrupted)", true);
+                                        "(interrupted)", true, NULL);
     }
     ClearPending(rt);
 }
@@ -2869,9 +2929,9 @@ static void StartNextTool(PicoHost *app, PicoAgent *agent)
             JsonBuf_Puts(&b, call->name);
             char *error = JsonBuf_Steal(&b);
             if (!error) error = Dup("unoffered tool");
-            PushFunctionOutput(rt, call->call_id, call->name, error, true);
-            PicoSession_LogToolResult(app, agent, call->call_id, call->name, error, true, NULL);
-            PicoAgent_SetToolOutputByCallId(agent, call->call_id, error, true);
+            PushFunctionOutput(rt, call->call_id, call->name, error, true, NULL);
+            PicoSession_LogToolResult(app, agent, call->call_id, call->name, error, true, NULL, NULL);
+            PicoAgent_SetToolOutputByCallId(agent, call->call_id, error, true, NULL);
             free(error);
             call->completed = true;
             continue;
@@ -2882,9 +2942,9 @@ static void StartNextTool(PicoHost *app, PicoAgent *agent)
         {
             /* A dispatch failure is a call failure, not a reason to abandon siblings. */
             const char *error = "Failed to start tool";
-            PushFunctionOutput(rt, call->call_id, call->name, error, true);
-            PicoSession_LogToolResult(app, agent, call->call_id, call->name, error, true, NULL);
-            PicoAgent_SetToolOutputByCallId(agent, call->call_id, error, true);
+            PushFunctionOutput(rt, call->call_id, call->name, error, true, NULL);
+            PicoSession_LogToolResult(app, agent, call->call_id, call->name, error, true, NULL, NULL);
+            PicoAgent_SetToolOutputByCallId(agent, call->call_id, error, true, NULL);
             call->completed = true;
             continue;
         }
@@ -3620,8 +3680,10 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
     cancel = WorkerIsCancelled(rt);
     is_error = is_error || cancel;
     const char *use = output ? output : raw;
-    PushFunctionOutput(rt, call_id, name, use, is_error);
-    PicoSession_LogToolResult(app, agent, call_id, name, use, is_error, details);
+    const char *parts = !cancel ? ev->tool_parts : NULL;
+    PushFunctionOutput(rt, call_id, name, use, is_error, parts);
+    PicoSession_LogToolResult(app, agent, call_id, name, use, is_error, details, parts);
+    ev->media_adopted = parts != NULL;
     if (rt->stream_msg >= 0)
     {
         if (!TraceHasToolCall(agent, rt->stream_msg, call_id))
@@ -3630,7 +3692,7 @@ static void OnToolDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev, bool fa
                          name[0] ? name : "tool",
                          call && call->arguments ? call->arguments : "{}");
         }
-        PicoAgent_SetToolOutputByCallId(agent, call_id, use, is_error);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, use, is_error, parts);
     }
     call->completed = true;
     call->progress = PICO_TOOL_CALL_IDLE;
@@ -3912,6 +3974,8 @@ static void FreeRt(PicoAgentRt *rt)
         free(rt->events[i].payload);
         free(rt->events[i].tool_args);
         free(rt->events[i].tool_details);
+        if (!rt->events[i].media_adopted) DiscardToolMedia(rt->events[i].tool_parts);
+        free(rt->events[i].tool_parts);
     }
     free(rt->events);
     for (int i = 0; i < rt->input_count; i++)
@@ -4227,6 +4291,12 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
     }
     PicoAgent_InvalidateSteering(agent->workspace ? agent->workspace->host : NULL, agent, "agent closed");
     PicoAgentRt *rt = agent->runtime;
+    /* Destruction may run after sibling slots have been cleared. Mark this
+     * context cancelled without re-entering workspace/clarification callbacks. */
+    if (rt) {
+        pthread_mutex_lock(&rt->mu); rt->cancel = true; pthread_cond_broadcast(&rt->cv); pthread_mutex_unlock(&rt->mu);
+    }
+    PicoBrowser_CloseAgent(agent->workspace ? agent->workspace->host : NULL, agent->id);
     if (rt)
     {
         bool done = StopRt(rt, deadline);
@@ -4244,7 +4314,6 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
         FreeRt(rt);
         agent->runtime = NULL;
     }
-    PicoBrowser_CloseAgent(agent->workspace ? agent->workspace->host : NULL, agent->id);
     PicoAgent_ClearMessages(agent);
     free(agent->messages);
     free(agent->error);
@@ -4346,6 +4415,7 @@ void PicoAgent_Cancel(PicoAgent *agent)
     rt->cancel = true;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
+    PicoBrowser_CancelAgent(agent->workspace ? agent->workspace->host : NULL, agent->id, agent->runtime_generation);
     PicoAgent_InvalidateSteering(agent->workspace->host, agent, "turn cancelled");
     PicoWorkspace_CancelDelegations(agent->workspace, agent->id,
                                     agent->runtime_generation);
@@ -4979,6 +5049,8 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
         free(ev->payload);
         free(ev->tool_args);
         free(ev->tool_details);
+        if (!ev->media_adopted) DiscardToolMedia(ev->tool_parts);
+        free(ev->tool_parts);
     }
     free(events);
 }
@@ -5062,9 +5134,9 @@ void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, co
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
-                                         const char *output, bool is_error)
+                                         const char *output, bool is_error, const char *parts_json)
 {
-    if (agent && agent->runtime) PushFunctionOutput(agent->runtime, call_id, name, output, is_error);
+    if (agent && agent->runtime) PushFunctionOutput(agent->runtime, call_id, name, output, is_error, parts_json);
 }
 
 void PicoAgent_AppendThink(PicoHost *app, PicoAgent *agent, const char *text, int think_ms)
@@ -5324,4 +5396,9 @@ void PicoAgent_CopyInfo(const PicoAgent *agent, PicoAgentInfo *out)
     out->cancelling = PicoAgent_CancelRequested(agent);
     out->pending_steering = agent->steering_count;
     out->resumable = agent->persistence == PICO_SESSION_DURABLE && agent->session_id[0];
+}
+
+bool pico_agent_context_accepts_tool_images(const PicoAgentContext *ctx)
+{
+    return ctx && ctx->accepts_tool_images;
 }

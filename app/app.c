@@ -1947,7 +1947,7 @@ void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
 }
 
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
-                                     const char *output, bool is_error)
+                                     const char *output, bool is_error, const char *parts_json)
 {
     if (!agent || !call_id || !call_id[0])
     {
@@ -1965,6 +1965,11 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                 free(line->tool_output);
                 line->tool_output = JsonDup(output ? output : "");
                 line->tool_error = is_error;
+                free(line->tool_parts_json); line->tool_parts_json = parts_json ? JsonDup(parts_json) : NULL;
+                char *images = pico_canonical_tool_images_markdown(parts_json);
+                MdDocument_Free(&line->doc);
+                line->doc = MdDocument_ParseEx(images ? images : "", images ? strlen(images) : 0, MD_PARSE_DEFAULT);
+                free(images);
                 pico_trace_line_stamp_tool_done(line);
                 message->revision++;
                 PicoAgent_TranscriptChanged(agent, i);
@@ -3714,6 +3719,12 @@ void PicoMessages_PrepareDocs(PicoMessage *messages, int count)
         for (int t = 0; t < msg->trace_count; t++)
         {
             PicoTraceLine *line = &msg->trace[t];
+            if (line->is_tool && line->tool_parts_json) {
+                char *images = pico_canonical_tool_images_markdown(line->tool_parts_json);
+                MdDocument_Free(&line->doc);
+                line->doc = MdDocument_ParseEx(images ? images : "", images ? strlen(images) : 0, MD_PARSE_DEFAULT);
+                free(images);
+            }
             if (line->doc.block_count == 0 && line->text && line->text[0] && line->think_steps >= 1)
             {
                 MdDocument_Free(&line->doc);
@@ -3789,6 +3800,7 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
                 to->tool_args = from->tool_args ? JsonDup(from->tool_args) : NULL;
                 to->tool_args_json = from->tool_args_json ? JsonDup(from->tool_args_json) : NULL;
                 to->tool_output = from->tool_output ? JsonDup(from->tool_output) : NULL;
+                to->tool_parts_json = from->tool_parts_json ? JsonDup(from->tool_parts_json) : NULL;
                 if (from->think_part_count > 0 && from->think_parts)
                 {
                     to->think_parts =

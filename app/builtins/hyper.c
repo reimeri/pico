@@ -1060,7 +1060,7 @@ static void HyperHostShutdown(PicoHost *app, void *state)
 static int HyperWorkspaceInit(PicoWorkspace *workspace, void **state_out)
 {
     (void)state_out;
-    pico_add_provider(workspace, &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true});
+    pico_add_provider(workspace, &(PicoProvider){.name = "hyper", .stream = HyperStream, .map_context = true, .tool_images = true});
     return 0;
 }
 

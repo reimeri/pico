@@ -136,7 +136,7 @@ Mailbox identity does not gain a call ID: same-agent/name posts still share a st
 
 - Pico owns Clay context/arena lifecycle. Extensions must not initialize or replace the context or change its capacity limits. Clay-owned pointers are valid only for the current layout; retain IDs or copied values instead. See [Clay layout lifetime](views.md#clay-layout-lifetime).
 - `PicoExt.name`, `PicoExt.description`, and `name` / `description` / `help` / `params_json` / provider/auth string fields: must outlive the extension. Use string literals. `PicoExt.description` is optional.
-- `PicoToolResult.output` / `details_json`: malloc if set; Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
+- `PicoToolResult.output` / `details_json`, `images` and every image byte buffer, and optional `media_namespace`: malloc if set; ownership transfers to core on callback return and Pico frees. Zero-initialize the result and set `is_error` for tool-defined failures.
 - `pico_tool_ask` answer: malloc on `PICO_ASK_OK`; the caller frees it. Always `NULL` on cancel/fail.
 - `pico_tool_pending_ask` `request_json`: the oldest live ask owned by the open session (the selected agent or a transitive delegated child); valid until the next pump. Do not retain it across frames.
 - `pico_agent_ui_latest` `status` / `text`: borrowed published mailbox storage keyed by `(agent_id, runtime_generation, name)`, invalidated by the next pump, `pico_agent_ui_clear` of that agent and name, force-cancel or generation retirement, or workspace close. Pico copies posted bytes; do not retain worker pointers. `pico_ui_latest` / `pico_ui_clear` are the same lookup for the UI-selected agent.
@@ -331,19 +331,58 @@ delivered user records, and stopped records plus transcript-only notices. An
 acceptance-only crash restores as not delivered, never model input. See
 [steering](steering.md) for full eligibility, lifecycle, and ownership contracts.
 
+## Image-bearing tool results
+
+ABI 22 adds encoded PNG tool results and `PicoProvider.tool_images` opt-in.
+`pico_agent_context_accepts_tool_images` reports the immutable turn snapshot:
+vision model AND capable retained provider. Unsupported results fail explicitly.
+Core validates/decodes PNGs and persists them on the worker; up to four images,
+64 MiB encoded total, and 4096 × 4096 per image. Core owns all transferred
+allocations and cleans unadopted/cancelled-generation assets. Accepted files live
+at `<workspace>/.pico/media/{tools|browser}/<session-id>/`; only those two namespace
+values are accepted, default `tools`. Parent-directory symlinks are refused.
+
+Canonical/session `tool_result.parts` contains image paths/MIME, never bytes.
+Interrupted replay repairs every unanswered tool-call ID independently, preserving
+completed image results even when siblings finished in reverse order.
+Replay does not capture or act. Compaction drops summarized images from active
+context but retains transcript/assets; saved-history deletion removes owned
+files. Missing/invalid required assets fail provider requests. Expanded tool
+rows and copied transcripts retain image references; `tool_parts_json` is
+borrowed core storage with ordinary trace invalidation rules. After-tool text
+replacement does not modify image ownership. Builtin adapters project real
+images as labeled untrusted observation messages after sibling tool replies,
+without adding canonical human input. See [tools](tools.md#image-bearing-results)
+and [providers](providers.md#image-bearing-tool-results).
+
 ## Embedded browser ownership
 
 The core browser service is lazy and per-main-session; subagents and clarification
-helpers cannot use `browser_open`. The tool targets its calling session, is
-sequential within that agent, and returns after navigation is queued, not after
-load completes. User control refuses agent navigation. Worker requests carry
-copied agent/generation identity and are validated on the main thread.
+helpers cannot use `browser_open`, `browser_observe`, or `browser_act`. Tools
+validate calling identity/runtime generation, never target UI selection, and
+serialize per session independently. Open returns at queued navigation;
+observe requires an open browser, waits for load plus composited capture, and
+works hidden or under User control. Act requires Agent control and a matching
+browser/navigation/viewport identity; older observations within that identity
+remain usable. Ordinary DOM/input changes are not detected as staleness.
+
+Batches are validated before dispatch and use acknowledged CEF-native DevTools
+input to the same embedded page, never OS input. Takeover/cancellation stops the
+remaining events, reconciles an outstanding acknowledgment, and releases held
+input; partial/uncertain delivery is reported without rollback or retry. Runtime
+unload/close invalidates work and can report uncertainty for already dispatched
+input. An unacknowledged input/release failure can close the page. Collapse and
+selection alone do not cancel; actual resize/navigation invalidates coordinates.
+Compositor synchronization precedes fresh OSR view/popup capture, not a sleep or
+network-idle heuristic. Application readiness still requires visual verification.
 
 The runtime is not extension-owned and survives extension reload. Live pages end
 on explicit close or session-runtime unload; cookie/local-storage profiles
 persist by durable session ID. Replay/resume alone never recreates a page.
-Hidden pages keep executing but produce fewer paints and do not retain Pico
-textures. CEF callbacks never touch Clay or Raylib; core's graphics thread owns
-textures and retains retired render data through the current layout lifetime.
-The helper's local IPC is private, not a public extension API. See
-[browser](browser.md) for the singleton-root constraint, supported UI, and tests.
+Hidden pages keep executing at reduced paint cadence and do not retain Pico
+display textures; on-demand captures temporarily retain CPU surfaces. CEF/tool
+workers never touch Clay or Raylib; the graphics thread owns display textures
+and retains retired render data through the current layout lifetime. The IPC and
+DevTools channel are private, with no remote listener. Sandbox protection stays
+enabled. See [browser](browser.md) for schemas, readiness, limits, singleton-root
+ownership, storage, and tests.

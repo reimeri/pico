@@ -4,6 +4,9 @@
 #include "include/base/cef_callback.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_image.h"
+#include "include/cef_devtools_message_observer.h"
+#include "include/cef_parser.h"
 #include "include/cef_command_line.h"
 #include "include/wrapper/cef_closure_task.h"
 #include <algorithm>
@@ -29,7 +32,7 @@ std::map<uint64_t, CefRefPtr<Page>> pages;
 
 bool Send(uint64_t token, uint32_t type, const void* bytes = nullptr,
           size_t size = 0, int width = 0, int height = 0) {
-    if (type != PB_FRAME) size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
+    if (type != PB_FRAME && type != PB_OBSERVATION) size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
     PbEvent event{token, type, static_cast<uint32_t>(size),
                   static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     const void* chunks[] = {&event, bytes};
@@ -52,7 +55,7 @@ void Error(uint64_t token, const std::string& text) {
 class Page : public CefClient, public CefLifeSpanHandler, public CefRenderHandler,
              public CefDisplayHandler, public CefLoadHandler,
              public CefContextMenuHandler, public CefDialogHandler,
-             public CefJSDialogHandler {
+             public CefJSDialogHandler, public CefRequestHandler, public CefDevToolsMessageObserver {
 public:
     explicit Page(uint64_t id) : token(id) {}
     uint64_t token;
@@ -65,6 +68,236 @@ public:
     CefRect popup_rect;
     int popup_width = 0, popup_height = 0;
     bool popup_shown = false;
+    bool agent_control = false, capture_ready = false, priming_capture = false, capturing = false, fresh_view = false, fresh_popup = false;
+    uint64_t navigation = 1, viewport = 1, observed_navigation = 0, observed_viewport = 0;
+    uint64_t request = 0, action_navigation = 0, action_viewport = 0;
+    std::string url, action_error;
+    bool interrupted = false, releasing = false, uncertain = false;
+    unsigned delivered_events = 0, events_in_action = 0;
+    int capture_message = 0;
+    uint64_t capture_navigation = 0, capture_viewport = 0;
+    std::vector<PbCommand> steps;
+    size_t step_index = 0;
+    unsigned completed = 0, held_buttons = 0;
+    std::map<int, bool> held_keys;
+    int mouse_x = 0, mouse_y = 0, next_message = 1, input_message = 0;
+    CefRefPtr<CefRegistration> devtools;
+    CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+
+    void ReleaseInput() {
+        if (browser) {
+            auto host = browser->GetHost();
+            CefMouseEvent mouse; mouse.x = mouse_x; mouse.y = mouse_y;
+            for (int i = 0; i < 3; ++i)
+                if (held_buttons & (1u << i)) host->SendMouseClickEvent(mouse, static_cast<cef_mouse_button_type_t>(i), true, 1);
+            for (const auto& [key, held] : held_keys) if (held) {
+                CefKeyEvent event; event.type = KEYEVENT_KEYUP; event.windows_key_code = key;
+                host->SendKeyEvent(event);
+            }
+        }
+        held_buttons = 0; held_keys.clear();
+    }
+    void Finish(const std::string& error, const std::vector<unsigned char>& png = {}) {
+        if (!request) return;
+        PbObservation info{};
+        info.request = request; info.navigation = navigation; info.viewport = viewport;
+        info.completed = completed; info.delivered_events = delivered_events;
+        info.partial_action = events_in_action != 0; info.uncertain = uncertain; info.png_size = static_cast<uint32_t>(png.size());
+        snprintf(info.url, sizeof(info.url), "%s", url.c_str());
+        snprintf(info.error, sizeof(info.error), "%s", error.c_str());
+        std::vector<unsigned char> packet(sizeof(info) + png.size());
+        memcpy(packet.data(), &info, sizeof(info));
+        if (!png.empty()) memcpy(packet.data() + sizeof(info), png.data(), png.size());
+        ReleaseInput();
+        Send(token, PB_OBSERVATION, packet.data(), packet.size(), width, height);
+        request = 0; input_message = capture_message = 0; priming_capture = capturing = capture_ready = false; steps.clear();
+        if (!visible) { pixels.clear(); popup.clear(); }
+    }
+    void Interrupt(const std::string& error) {
+        if (!request) return;
+        action_error = error; interrupted = true; priming_capture = capturing = capture_ready = false;
+        capture_message = 0;
+        if (!input_message) Cleanup();
+    }
+    void Cleanup() {
+        steps.clear(); step_index = 0; releasing = true;
+        for (int i = 0; i < 3; ++i) if (held_buttons & (1u << i)) {
+            PbCommand step{}; step.type = PB_MOUSE; step.a = i; step.b = 1;
+            step.x = mouse_x; step.y = mouse_y; steps.push_back(step);
+        }
+        for (const auto& [key, held] : held_keys) if (held) {
+            PbCommand step{}; step.type = PB_KEY; step.a = key; step.b = 1; steps.push_back(step);
+        }
+        Step();
+    }
+    void Capture() {
+        if (!request || !browser || !capture_ready || browser->IsLoading() || capture_message) return;
+        capturing = false; fresh_view = false; fresh_popup = !popup_shown;
+        priming_capture = true;
+        browser->GetHost()->Invalidate(PET_VIEW);
+    }
+    void CaptureFence() {
+        if (!request || !capture_ready || !priming_capture || browser->IsLoading()) return;
+        priming_capture = false;
+        capture_navigation = navigation; capture_viewport = viewport;
+        /* A compositor snapshot is a render fence, not the returned image.
+         * Only afterwards invalidate the OSR surfaces (including popups).
+         * This prevents an already queued pre-action paint satisfying capture. */
+        auto params = CefDictionaryValue::Create(); params->SetString("format", "png");
+        params->SetBool("fromSurface", true);
+        capture_message = next_message++;
+        if (!browser->GetHost()->ExecuteDevToolsMethod(capture_message, "Page.captureScreenshot", params))
+            Finish("Could not synchronize the browser compositor.");
+    }
+    void Captured() {
+        if (!request || !capturing || !fresh_view || !fresh_popup || browser->IsLoading()) return;
+        auto bitmap = Composite();
+        if (bitmap.empty()) return;
+        auto image = CefImage::CreateImage();
+        if (!image->AddBitmap(1, width, height, CEF_COLOR_TYPE_BGRA_8888, CEF_ALPHA_TYPE_OPAQUE,
+                              bitmap.data(), bitmap.size())) { Finish("Could not encode observation."); return; }
+        int w = 0, h = 0;
+        auto data = image->GetAsPNG(1, false, w, h);
+        if (!data || data->GetSize() > PB_MAX_PNG) { Finish("Observation image exceeds the size limit."); return; }
+        std::vector<unsigned char> png(data->GetSize()); data->GetData(png.data(), png.size(), 0);
+        observed_navigation = navigation; observed_viewport = viewport;
+        Finish(action_error, png);
+    }
+    void Begin(const PbCommand& command, bool actions) {
+        if (request) { // Host serializes by session; reject a protocol violation explicitly.
+            PbObservation info{}; info.request = command.request;
+            snprintf(info.error, sizeof(info.error), "Browser is busy.");
+            Send(token, PB_OBSERVATION, &info, sizeof(info), width, height); return;
+        }
+        request = command.request; capture_ready = !actions; interrupted = releasing = uncertain = false;
+        delivered_events = events_in_action = 0; completed = 0; step_index = 0; steps.clear(); action_error.clear();
+        action_navigation = command.navigation; action_viewport = command.viewport;
+        if (actions && (!agent_control || navigation != command.navigation || viewport != command.viewport ||
+                        observed_navigation != navigation || observed_viewport != viewport || command.x != width || command.y != height)) {
+            Finish(!agent_control ? "Browser is under User control." : "Stale observation: observe again before acting."); return;
+        }
+        CefPostDelayedTask(TID_UI, base::BindOnce([](uint64_t token, uint64_t id) {
+            auto found = pages.find(token);
+            if (found == pages.end()) return;
+            auto self = found->second;
+            if (self->request == id) {
+                bool unacknowledged = self->input_message != 0;
+                bool input_active = unacknowledged || self->held_buttons || self->events_in_action;
+                for (const auto& [key, held] : self->held_keys) input_active = input_active || held;
+                self->uncertain = unacknowledged;
+                self->Finish(input_active ? "Input operation timed out. Browser closed to prevent late input; check delivery uncertainty." :
+                                             "Browser observation timed out; no application readiness is implied.");
+                if (input_active && self->browser) self->browser->GetHost()->CloseBrowser(true);
+            }
+        }, token, request), 30000);
+        if (!actions) Capture();
+    }
+    void Changed() {
+        fresh_view = fresh_popup = capturing = false;
+    }
+    bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
+                         CefRefPtr<CefRequest>, bool, bool) override {
+        if (frame->IsMain()) { ++navigation; Changed(); }
+        return false;
+    }
+    void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool loading, bool, bool) override {
+        if (loading) { fresh_view = fresh_popup = false; }
+        else if (request && capture_ready && !input_message) Capture();
+    }
+    void Step() {
+        if (!request || input_message || !browser) return;
+        if (interrupted && !releasing) { Cleanup(); return; }
+        if (releasing && step_index >= steps.size()) { Finish(action_error); return; }
+        if (!releasing && !agent_control) { Interrupt("Browser control was taken by the user."); return; }
+        if (!releasing && (step_index >= steps.size() || !action_error.empty() ||
+            navigation != action_navigation || viewport != action_viewport)) {
+            if (step_index < steps.size() && action_error.empty()) action_error = "Stale observation: remaining actions were stopped.";
+            bool held = held_buttons != 0;
+            for (const auto& [key, down] : held_keys) held = held || down;
+            if (held) { interrupted = true; Cleanup(); return; }
+            capture_ready = true; Capture(); return;
+        }
+        const auto& command = steps[step_index];
+        auto params = CefDictionaryValue::Create();
+        int modifiers = ((command.modifiers & EVENTFLAG_ALT_DOWN) ? 1 : 0) |
+                        ((command.modifiers & EVENTFLAG_CONTROL_DOWN) ? 2 : 0) |
+                        ((command.modifiers & EVENTFLAG_COMMAND_DOWN) ? 4 : 0) |
+                        ((command.modifiers & EVENTFLAG_SHIFT_DOWN) ? 8 : 0);
+        params->SetInt("modifiers", modifiers);
+        std::string method;
+        if (command.type == PB_MOUSE || command.type == PB_WHEEL) {
+            mouse_x = command.x; mouse_y = command.y;
+            params->SetInt("x", mouse_x); params->SetInt("y", mouse_y);
+            if (command.type == PB_WHEEL) {
+                params->SetString("type", "mouseWheel");
+                params->SetInt("deltaX", command.a); params->SetInt("deltaY", command.b);
+            } else {
+                params->SetString("type", command.a < 0 ? "mouseMoved" : command.b ? "mouseReleased" : "mousePressed");
+                if (command.a >= 0) {
+                    params->SetString("button", command.a == 0 ? "left" : command.a == 1 ? "middle" : "right");
+                    params->SetInt("clickCount", command.text[0] ? command.text[0] : 1);
+                    if (!command.b) held_buttons |= 1u << command.a;
+                } else if (held_buttons) params->SetString("button", held_buttons & 1 ? "left" : held_buttons & 2 ? "middle" : "right");
+            }
+            unsigned sent_buttons = held_buttons;
+            if (command.type == PB_MOUSE && command.a >= 0 && command.b) sent_buttons &= ~(1u << command.a);
+            int buttons = ((sent_buttons & 1) ? 1 : 0) | ((sent_buttons & 2) ? 4 : 0) | ((sent_buttons & 4) ? 2 : 0);
+            params->SetInt("buttons", buttons); method = "Input.dispatchMouseEvent";
+        } else if (command.type == PB_KEY) {
+            params->SetString("type", command.b ? "keyUp" : "keyDown");
+            params->SetInt("windowsVirtualKeyCode", command.a);
+            params->SetString("key", command.text);
+            params->SetString("code", command.profile);
+            if (!command.b && !(command.modifiers & (EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN))) {
+                if (command.a == 13) params->SetString("text", "\r");
+                if (command.a == 32) params->SetString("text", " ");
+            }
+            if (!command.b) held_keys[command.a] = true;
+            method = "Input.dispatchKeyEvent";
+        } else if (command.type == PB_TEXT) {
+            params->SetString("text", command.text); method = "Input.insertText";
+        } else { Finish("Invalid native input command."); return; }
+        browser->GetHost()->SetFocus(true);
+        input_message = next_message++;
+        if (!browser->GetHost()->ExecuteDevToolsMethod(input_message, method, params)) {
+            input_message = 0;
+            if (releasing) { uncertain = true; Finish("Input release dispatch failed; browser closed."); CloseUnresponsive(); }
+            else Interrupt("Native browser input dispatch failed.");
+        }
+    }
+    void CloseUnresponsive() { if (browser) browser->GetHost()->CloseBrowser(true); }
+    void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int id, bool success, const void* result, size_t result_size) override {
+        if (!request) return;
+        if (id == capture_message) {
+            capture_message = 0;
+            if (!success) { Finish("Browser compositor synchronization failed: " + std::string(static_cast<const char*>(result), result_size)); return; }
+            if (navigation != capture_navigation || viewport != capture_viewport || browser->IsLoading()) { Capture(); return; }
+            pixels.clear(); capturing = true; fresh_view = false; fresh_popup = !popup_shown;
+            if (popup_shown) { popup.clear(); browser->GetHost()->Invalidate(PET_POPUP); }
+            browser->GetHost()->Invalidate(PET_VIEW); return;
+        }
+        if (id != input_message) return;
+        input_message = 0;
+        if (!success) {
+            uncertain = true;
+            if (releasing) { Finish("Input release failed; delivery uncertain. Browser closed."); CloseUnresponsive(); }
+            else Interrupt("Native browser input failed; delivery uncertain, do not retry blindly.");
+            return;
+        }
+        const auto& acknowledged = steps[step_index];
+        if (acknowledged.type == PB_MOUSE && acknowledged.a >= 0 && acknowledged.b) held_buttons &= ~(1u << acknowledged.a);
+        if (acknowledged.type == PB_KEY && acknowledged.b) held_keys[acknowledged.a] = false;
+        if (!releasing) {
+            ++delivered_events; ++events_in_action;
+            if (steps[step_index].end_action) { ++completed; events_in_action = 0; }
+        }
+        ++step_index;
+        CefRefPtr<Page> self(this);
+        CefPostTask(TID_UI, base::BindOnce(&Page::Step, self));
+    }
+    void OnDevToolsAgentDetached(CefRefPtr<CefBrowser>) override {
+        if (request) { uncertain = input_message != 0; Finish("Browser renderer disconnected; any in-flight input delivery is uncertain."); }
+    }
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
     CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
@@ -77,12 +310,14 @@ public:
     }
     void OnAfterCreated(CefRefPtr<CefBrowser> value) override {
         browser = value;
+        devtools = browser->GetHost()->AddDevToolsMessageObserver(this);
         Send(token, PB_READY);
         if (stopping || close_requested) { browser->GetHost()->CloseBrowser(true); return; }
         auto commands = std::move(pending);
         for (const auto& command : commands) Command(command);
     }
     void OnBeforeClose(CefRefPtr<CefBrowser>) override {
+        uncertain = input_message != 0; Finish("Browser closed; in-flight input may be uncertain."); devtools = nullptr;
         browser = nullptr;
         Send(token, PB_CLOSED);
         pages.erase(token);
@@ -116,14 +351,24 @@ public:
     }
     void OnAddressChange(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                          const CefString& url) override {
-        if (frame->IsMain()) { auto s = url.ToString(); Send(token, PB_URL, s.data(), s.size()); }
+        if (frame->IsMain()) {
+            this->url = url.ToString(); ++navigation; Changed();
+            Send(token, PB_URL, this->url.data(), this->url.size());
+            if (request && capture_ready) {
+                CefRefPtr<Page> self(this); CefPostTask(TID_UI, base::BindOnce(&Page::Capture, self));
+            }
+        }
     }
     void OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
         ErrorCode code, const CefString& text, const CefString&) override {
-        if (frame->IsMain() && code != ERR_ABORTED) Error(token, text.ToString());
+        if (frame->IsMain() && code != ERR_ABORTED) {
+            Error(token, text.ToString());
+            if (request && !steps.empty()) Interrupt(text.ToString());
+            else Finish(text.ToString());
+        }
     }
-    void Publish() {
-        if (!visible || pixels.empty()) return;
+    std::vector<unsigned char> Composite() {
+        if (pixels.empty()) return {};
         auto result = pixels;
         if (popup_shown && !popup.empty()) {
             for (int y = 0; y < popup_height; ++y)
@@ -134,25 +379,33 @@ public:
                                &popup[(y * popup_width + x) * 4], 4);
                 }
         }
+        return result;
+    }
+    void Publish() {
+        if (!visible || pixels.empty()) return;
+        auto result = Composite();
         Send(token, PB_FRAME, result.data(), result.size(), width, height);
     }
     void OnPopupShow(CefRefPtr<CefBrowser>, bool show) override {
-        popup_shown = show; if (!show) popup.clear(); Publish();
+        popup_shown = show; if (!show) { popup.clear(); fresh_popup = true; } else fresh_popup = false; Publish(); Captured();
     }
     void OnPopupSize(CefRefPtr<CefBrowser>, const CefRect& rect) override { popup_rect = rect; }
     void OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList&,
                  const void* buffer, int w, int h) override {
-        if (!visible || w < 1 || h < 1 || w > PB_MAX_DIMENSION || h > PB_MAX_DIMENSION) return;
+        if ((!visible && !request) || w < 1 || h < 1 || w > PB_MAX_DIMENSION || h > PB_MAX_DIMENSION) return;
         auto start = static_cast<const unsigned char*>(buffer);
         if (type == PET_VIEW) {
             // A resize may still have an older paint in flight.
             if (w != width || h != height) return;
             pixels.assign(start, start + static_cast<size_t>(w) * h * 4);
+            if (capturing) fresh_view = true;
         } else {
             popup.assign(start, start + static_cast<size_t>(w) * h * 4);
             popup_width = w; popup_height = h;
+            if (capturing) fresh_popup = true;
         }
-        Publish();
+        if (type == PET_VIEW && priming_capture) CaptureFence();
+        Publish(); Captured();
     }
 private:
     IMPLEMENT_REFCOUNTING(Page);
@@ -202,25 +455,53 @@ void Command(PbCommand cmd) {
     }
     auto browser = page->browser;
     auto host = browser->GetHost();
+    if (cmd.request && (cmd.type == PB_MOUSE || cmd.type == PB_WHEEL || cmd.type == PB_KEY || cmd.type == PB_TEXT)) {
+        if (page->request == cmd.request) {
+            if (page->steps.size() >= PB_MAX_STEPS) page->Finish("Action batch exceeds native input limit.");
+            else page->steps.push_back(cmd);
+        }
+        return;
+    }
     switch (cmd.type) {
-    case PB_OPEN: browser->GetMainFrame()->LoadURL(cmd.text); break;
+    case PB_OBSERVE: page->Begin(cmd, false); break;
+    case PB_BEGIN: page->Begin(cmd, true); break;
+    case PB_COMMIT:
+        if (page->request == cmd.request) {
+            bool valid = !page->steps.empty();
+            for (const auto& step : page->steps)
+                if ((step.type == PB_MOUSE || step.type == PB_WHEEL) &&
+                    (step.x < 0 || step.y < 0 || step.x >= page->width || step.y >= page->height)) valid = false;
+            if (valid) page->Step(); else page->Finish("Invalid input coordinates.");
+        }
+        break;
+    case PB_CANCEL:
+        if (page->request == cmd.request) page->Interrupt("Browser operation cancelled; completed input was not undone.");
+        break;
+    case PB_CONTROL:
+        page->agent_control = cmd.a;
+        if (!cmd.a) { if (!page->steps.empty()) page->Interrupt("Browser control was taken by the user."); if (!page->request) { page->ReleaseInput(); host->SetFocus(false); } }
+        break;
+    case PB_OPEN: ++page->navigation; page->Changed(); browser->GetMainFrame()->LoadURL(cmd.text); break;
     case PB_CLOSE: host->CloseBrowser(true); break;
     case PB_BACK: browser->GoBack(); break;
     case PB_FORWARD: browser->GoForward(); break;
     case PB_RELOAD: browser->Reload(); break;
     case PB_RESIZE:
+        ++page->viewport; page->Changed();
         page->width = std::clamp<int>(cmd.x, 1, PB_MAX_DIMENSION);
         page->height = std::clamp<int>(cmd.y, 1, PB_MAX_DIMENSION);
         page->pixels.clear(); page->popup.clear();
-        host->WasResized(); break;
+        host->WasResized();
+        if (page->request && page->capture_ready && !page->input_message) page->Capture();
+        break;
     case PB_VISIBLE:
         page->visible = cmd.a;
         // Do not WasHidden(true): background sessions must keep making progress.
         host->SetWindowlessFrameRate(cmd.a ? 30 : 1);
         if (cmd.a) host->Invalidate(PET_VIEW);
-        else { page->pixels.clear(); page->pixels.shrink_to_fit(); page->popup.clear(); }
+        else if (!page->request) { page->pixels.clear(); page->pixels.shrink_to_fit(); page->popup.clear(); }
         break;
-    case PB_FOCUS: host->SetFocus(cmd.a); break;
+    case PB_FOCUS: if (page->steps.empty()) host->SetFocus(cmd.a); break;
     case PB_MOUSE: {
         CefMouseEvent e; e.x = cmd.x; e.y = cmd.y; e.modifiers = cmd.modifiers;
         if (cmd.a < 0) host->SendMouseMoveEvent(e, cmd.b);

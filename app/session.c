@@ -1203,6 +1203,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         char *name = JsonObjStr(doc, obj, "name");
         char *output = JsonObjStr(doc, obj, "output");
         bool is_error = JsonEq(doc, JsonObjGet(doc, obj, "is_error"), "true");
+        char *parts = JsonRawDup(doc, JsonObjGet(doc, obj, "parts"));
         char *details = NULL;
         int details_tok = JsonObjGet(doc, obj, "details");
         if (JsonIsObject(doc, details_tok))
@@ -1210,15 +1211,16 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
             details = JsonRawDup(doc, details_tok);
         }
         ApplyToolDetails(app, agent, name, details, is_error);
-        PicoAgent_SetToolOutputByCallId(agent, call_id, output, is_error);
+        PicoAgent_SetToolOutputByCallId(agent, call_id, output, is_error, parts);
         if (into_input)
         {
-            PicoAgent_PushHistoryFunctionOutput(agent, call_id, name, output, is_error);
+            PicoAgent_PushHistoryFunctionOutput(agent, call_id, name, output, is_error, parts);
         }
         free(call_id);
         free(name);
         free(output);
         free(details);
+        free(parts);
     }
     else if (strcmp(type, "compaction") == 0)
     {
@@ -1269,16 +1271,16 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
 
 /* Only owned file data and JSON tokens live here; workers never hold a host,
  * agent, workspace, or registration pointer. */
+typedef struct ReplayCall { char *id, *name; } ReplayCall;
+
 typedef struct PicoSessionReplay {
     char **lines;
     JsonDoc *docs;
     int count;
     int cursor;
     int last_compact;
-    int last_tool_call;
-    int last_tool_result;
-    int tool_calls;
-    int tool_results;
+    ReplayCall *unanswered;
+    int unanswered_count;
     int active_group;
     ReplayPreparedMessage *prepared;
     uint64_t last_steering_id;
@@ -1311,7 +1313,42 @@ void PicoSession_ReplayFree(PicoSessionReplay *replay)
     free(replay->docs);
     free(replay->lines);
     free(replay->prepared);
+    for (int i = 0; i < replay->unanswered_count; ++i) { free(replay->unanswered[i].id); free(replay->unanswered[i].name); }
+    free(replay->unanswered);
     free(replay);
+}
+
+/* Calls can complete in any order. A crash may leave several unanswered;
+ * positions/counts alone cannot identify them, especially after image results. */
+static bool PrepareUnansweredCalls(PicoSessionReplay *replay)
+{
+    replay->unanswered = calloc((size_t)replay->count, sizeof(*replay->unanswered));
+    if (!replay->unanswered) return false;
+    int start = replay->last_compact >= 0 ? replay->last_compact : 0;
+    for (int i = start; i < replay->count; ++i) {
+        const JsonDoc *doc = &replay->docs[i];
+        bool call = JsonEq(doc, JsonObjGet(doc, 0, "type"), "tool_call");
+        bool result = JsonEq(doc, JsonObjGet(doc, 0, "type"), "tool_result");
+        if (!call && !result) continue;
+        char *id = JsonObjStr(doc, 0, "call_id");
+        if (!id || !id[0]) { free(id); return false; }
+        int matched = -1;
+        for (int j = 0; j < replay->unanswered_count; ++j)
+            if (!strcmp(replay->unanswered[j].id, id)) { matched = j; break; }
+        if (call) {
+            if (matched >= 0) { free(id); return false; }
+            char *name = JsonObjStr(doc, 0, "name");
+            if (!name) { free(id); return false; }
+            replay->unanswered[replay->unanswered_count++] = (ReplayCall){id, name};
+        } else {
+            free(id);
+            if (matched < 0) continue;
+            free(replay->unanswered[matched].id); free(replay->unanswered[matched].name);
+            memmove(replay->unanswered + matched, replay->unanswered + matched + 1,
+                    (size_t)(--replay->unanswered_count - matched) * sizeof(*replay->unanswered));
+        }
+    }
+    return true;
 }
 
 static bool ReadSteeringId(const JsonDoc *doc, uint64_t *out)
@@ -1529,10 +1566,7 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     docs = (JsonDoc *)calloc((size_t)n, sizeof(JsonDoc));
     if (!docs) { *failure = REPLAY_UNAVAILABLE; goto invalid; }
     int last_compact = -1;
-    int last_tool_call = -1;
-    int last_tool_result = -1;
-    int tool_calls = 0;
-    int tool_results = 0;
+
     bool valid_header = false;
     bool recovered_tail = false;
     for (int i = 0; i < n; i++)
@@ -1595,15 +1629,10 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
         {
             last_compact = i;
         }
-        else if (type && strcmp(type, "tool_call") == 0)
-        {
-            last_tool_call = i;
-            tool_calls++;
-        }
         else if (type && strcmp(type, "tool_result") == 0)
         {
-            last_tool_result = i;
-            tool_results++;
+            if (!pico_canonical_tool_images_valid(doc, false)) { free(type); goto invalid; }
+
         }
         free(type);
         if (errno == ENOMEM) goto invalid;
@@ -1619,12 +1648,9 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
     replay->missing_newline = !terminated && !recovered_tail;
     replay->tail_offset = tail_offset;
     replay->last_compact = last_compact;
-    replay->last_tool_call = last_tool_call;
-    replay->last_tool_result = last_tool_result;
-    replay->tool_calls = tool_calls;
-    replay->tool_results = tool_results;
+
     errno = 0;
-    if (!PrepareSteeringReplay(replay))
+    if (!PrepareUnansweredCalls(replay) || !PrepareSteeringReplay(replay))
     {
         if (errno == ENOMEM) *failure = REPLAY_UNAVAILABLE;
         PicoSession_ReplayFree(replay);
@@ -1813,12 +1839,7 @@ bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay 
         bool into_input = replay->last_compact < 0 || i >= replay->last_compact;
         ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group,
                    replay->prepared ? &replay->prepared[i] : NULL);
-        /* The final unmatched call is needed by ReplayFinish to append its
-         * interrupted result; every other record can be released now. */
-        if (i != replay->last_tool_call ||
-            replay->last_tool_call <= replay->last_tool_result ||
-            replay->tool_calls <= replay->tool_results)
-            ReplayReleaseRecord(replay, i);
+        ReplayReleaseRecord(replay, i);
     }
     replay->cursor = end;
     return end == replay->count;
@@ -1827,16 +1848,12 @@ bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay 
 static void ReplayAppendInterrupted(PicoHost *app, PicoAgent *agent,
                                     const PicoSessionReplay *replay)
 {
-    if (replay->last_tool_call <= replay->last_tool_result ||
-        replay->tool_calls <= replay->tool_results) return;
-    const JsonDoc *doc = &replay->docs[replay->last_tool_call];
-    char *call_id = JsonObjStr(doc, 0, "call_id");
-    char *name = JsonObjStr(doc, 0, "name");
-    PicoSession_LogToolResult(app, agent, call_id, name, "(interrupted)", true, NULL);
-    PicoAgent_SetLastToolOutput(agent, "(interrupted)", true);
-    PicoAgent_PushHistoryFunctionOutput(agent, call_id, name, "(interrupted)", true);
-    free(call_id);
-    free(name);
+    for (int i = 0; i < replay->unanswered_count; ++i) {
+        const ReplayCall *call = &replay->unanswered[i];
+        PicoSession_LogToolResult(app, agent, call->id, call->name, "(interrupted)", true, NULL, NULL);
+        PicoAgent_SetToolOutputByCallId(agent, call->id, "(interrupted)", true, NULL);
+        PicoAgent_PushHistoryFunctionOutput(agent, call->id, call->name, "(interrupted)", true, NULL);
+    }
 }
 
 void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
@@ -1877,57 +1894,14 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
 
 void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent)
 {
-    if (!app || !agent || !agent->session_path[0])
-    {
-        return;
+    if (!app || !agent || !agent->session_path[0]) return;
+    if (!DrainPersistUiBound(app, agent)) {
+        pico_status_warn(app, "Session writes are pending; interrupted tool repair was deferred."); return;
     }
-    FILE *f = fopen(agent->session_path, "rb");
-    if (!f)
-    {
-        return;
-    }
-    char *line = NULL;
-    size_t cap = 0;
-    char *last_call = NULL;
-    int calls = 0;
-    int results = 0;
-    while (getline(&line, &cap, f) != -1)
-    {
-        JsonDoc doc;
-        if (JsonParse(&doc, line, strlen(line)) != 0)
-        {
-            continue;
-        }
-        if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_call"))
-        {
-            calls++;
-            free(last_call);
-            last_call = JsonDup(line);
-        }
-        else if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_result"))
-        {
-            results++;
-        }
-        JsonFree(&doc);
-    }
-    free(line);
-    fclose(f);
-    if (calls > results && last_call)
-    {
-        JsonDoc doc;
-        if (JsonParse(&doc, last_call, strlen(last_call)) == 0)
-        {
-            char *call_id = JsonObjStr(&doc, 0, "call_id");
-            char *name = JsonObjStr(&doc, 0, "name");
-            PicoSession_LogToolResult(app, agent, call_id, name, "(interrupted)", true, NULL);
-            PicoAgent_SetLastToolOutput(agent, "(interrupted)", true);
-            PicoAgent_PushHistoryFunctionOutput(agent, call_id, name, "(interrupted)", true);
-            free(call_id);
-            free(name);
-            JsonFree(&doc);
-        }
-    }
-    free(last_call);
+    PicoSessionReplay *replay = PicoSession_ReplayPrepare(app, agent->session_path, agent->kind);
+    if (!replay) return;
+    ReplayAppendInterrupted(app, agent, replay);
+    PicoSession_ReplayFree(replay);
 }
 
 void PicoSession_ReplayToolDetails(PicoHost *app, PicoAgent *agent)
@@ -2506,7 +2480,7 @@ static bool LoadedAddThinkParts(PicoMessage **messages, int *count, int *capacit
 }
 
 static void LoadedSetOutput(PicoMessage *messages, int count, const char *call_id,
-                            const char *output, bool is_error)
+                            const char *output, bool is_error, const char *parts_json)
 {
     if (count <= 0)
     {
@@ -2524,6 +2498,11 @@ static void LoadedSetOutput(PicoMessage *messages, int count, const char *call_i
                 free(line->tool_output);
                 line->tool_output = JsonDup(output ? output : "");
                 line->tool_error = is_error;
+                free(line->tool_parts_json); line->tool_parts_json = parts_json ? JsonDup(parts_json) : NULL;
+                char *images = pico_canonical_tool_images_markdown(parts_json);
+                MdDocument_Free(&line->doc);
+                line->doc = MdDocument_ParseEx(images ? images : "", images ? strlen(images) : 0, MD_PARSE_DEFAULT);
+                free(images);
                 return;
             }
         }
@@ -2630,7 +2609,9 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
             char *call_id = JsonObjStr(&doc, 0, "call_id");
             char *output = JsonObjStr(&doc, 0, "output");
             bool is_error = JsonEq(&doc, JsonObjGet(&doc, 0, "is_error"), "true");
-            LoadedSetOutput(messages, count, call_id, output, is_error);
+            char *parts = JsonRawDup(&doc, JsonObjGet(&doc, 0, "parts"));
+            LoadedSetOutput(messages, count, call_id, output, is_error, parts);
+            free(parts);
             free(call_id);
             free(output);
         }
@@ -3076,7 +3057,7 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoHost *app, PicoAgent *agent,
 PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent,
                                                  const char *call_id, const char *name,
                                                  const char *output, bool is_error,
-                                                 const char *details_json)
+                                                 const char *details_json, const char *parts_json)
 {
     char *pre = EventPrefix("tool_result");
     JsonBuf b;
@@ -3090,6 +3071,7 @@ PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent
     JsonBuf_String(&b, output ? output : "");
     JsonBuf_Puts(&b, ",\"is_error\":");
     JsonBuf_Bool(&b, is_error);
+    if (parts_json) { JsonBuf_Puts(&b, ",\"parts\":"); JsonBuf_Puts(&b, parts_json); }
     if (details_json && details_json[0])
     {
         JsonBuf_Puts(&b, ",\"details\":");
@@ -5453,7 +5435,7 @@ static bool CatalogValidateDataTree(const char *dir)
     return ok;
 }
 
-static bool CatalogRemoveSessionMedia(const char *checkout, const char *id)
+static bool CatalogRemoveSessionMediaAt(const char *checkout, const char *id, const char *group)
 {
     int pico = -1, media = -1, session = -1;
     bool ok = false;
@@ -5472,6 +5454,11 @@ static bool CatalogRemoveSessionMedia(const char *checkout, const char *id)
         ok = media_error == ENOENT;
         goto done;
     }
+    if (group) {
+        int grouped = openat(media, group, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (grouped < 0) { ok = errno == ENOENT; goto done; }
+        close(media); media = grouped;
+    }
     session = openat(media, id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (session < 0)
     {
@@ -5484,6 +5471,13 @@ done:
     if (media >= 0) close(media);
     close(pico);
     return ok;
+}
+
+static bool CatalogRemoveSessionMedia(const char *checkout, const char *id)
+{
+    return CatalogRemoveSessionMediaAt(checkout, id, NULL) &&
+           CatalogRemoveSessionMediaAt(checkout, id, "browser") &&
+           CatalogRemoveSessionMediaAt(checkout, id, "tools");
 }
 
 static int CatalogDeleteProjectLocked(PicoHost *host, const char *project)

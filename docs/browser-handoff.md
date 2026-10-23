@@ -4,14 +4,17 @@
 
 **Implementation baseline:** `731c819` — `First part of integrated browser implementation`.
 
-**Current status:** the first vertical slice is implemented. The user has tested
-it on their native Wayland setup (niri) and confirmed that the embedded browser
-works well after the rendering and link-navigation fixes described below.
+**Current status:** slices 1–3 are now implemented: human browsing,
+model-visible composited observations, and bounded agent input batches. The user
+validated the original human-facing browser on native Wayland/niri; the new
+agent loop is covered by real-helper and loopback-provider integration fixtures,
+not yet by a live-model/native-Wayland manual acceptance run.
 
-**The original goal is not yet complete:** humans can browse inside Pico and an
-agent can open a URL, but the agent cannot yet receive a screenshot or operate
-mouse/keyboard tools. The next milestone should close that observe–act–verify
-loop, not add more browser chrome first.
+The continuation preserves the original requirements below. See
+[the current browser contract](extend/browser.md) for the implemented schemas,
+readiness, cancellation, coordinate identity, and limits. Next work should verify
+real model usage and measured robustness before adding developer inspection or
+more browser chrome.
 
 Read these alongside this handoff:
 
@@ -38,7 +41,7 @@ proposed follow-up work. Suggested tool names below are **not existing APIs**.
 | Persistence | Cookies and local storage persist separately by session. Do not automatically reopen pages or restore the last URL. Implemented. |
 | Reclamation | Keep an initialized page until explicit close or session-runtime unload. No automatic idle eviction/suspension was requested. Implemented. |
 | Hidden pages | Limit rendering costs without stopping application/agent work. Implemented with reduced paint cadence and discarded display textures. |
-| Shared control | Explicit **User / Agent** mode. User takeover blocks new agent actions until control is released. Implemented for navigation; extend the same rule to future actions. |
+| Shared control | Explicit **User / Agent** mode. User takeover blocks new agent actions until control is released. Implemented for navigation/input; read-only observation is allowed in both modes. |
 | New sessions | Before a session ID exists, show a non-blocking reminder to send a message first. Do not start Chromium or show a warning/error overlay. Implemented. |
 
 Do not replace session isolation with a single global browser. Agent commands
@@ -61,8 +64,11 @@ Agent input must be browser-native injection, not OS-wide mouse/keyboard control
   tasks to subagents.”
 
 A successful `browser_open` result means **navigation was queued**, not that the
-page loaded. It neither selects another session nor opens its dock. There is no
-model-visible screenshot, DOM, console, or agent input result yet.
+page loaded. It neither selects another session nor opens its dock.
+`browser_observe({})` supplies a PNG plus URL/viewport/coordinate identity;
+`browser_act({"observation_id":"…","actions":[…]})` executes native input and
+returns a fresh observation. Both require an existing browser and a capable
+vision model/provider. DOM and console inspection are not implemented.
 
 Human-created instances start in User mode; agent-created instances start in
 Agent mode. The toolbar label is the current mode and toggles on click. Disabling
@@ -134,15 +140,16 @@ Paths in this table are relative to the repository root.
 | --- | --- |
 | `app/browser.c`, `app/browser.h` | Host service, lazy process launch, request broker, per-session state, IPC receiver/queue, dock, focus/input, textures, shutdown. Private core API. |
 | `app/browser/helper.cc` | CEF lifecycle and request contexts, OSR painting/popup composition, event/input dispatch, feature configuration, private profile-root lock. |
-| `app/browser/protocol.h` | Private command/event structures. Already has manual mouse/key/text input commands; no observation/DevTools protocol yet. |
+| `app/browser/protocol.h` | Private command/event structures. Private observation/request metadata, bounded native input batches, cancellation and control messages. |
 | `app/browser/CMakeLists.txt` | Isolated C++20/CEF target, wrapper library, runtime assets and install layout. |
-| `app/builtins/browser.c` | `browser_open`, tool filtering, no-delegation guidance. |
+| `app/builtins/browser.c` | `browser_open`, `browser_observe`, `browser_act`, main-session filtering and guidance. |
 | `app/app.c` | Browser pump and shutdown, shell layout, input routing, layout/render boundaries. |
 | `app/main.c` | GLFW key/character interception and host lifetime. Modifier/release state must still reach Raylib appropriately. |
 | `app/agent.c`, `app/agent_internal.h` | Browser cleanup on agent destruction; session-local dock expansion flag. |
 | `app/builtins/composer.c` | Prevent browser input/file drops from leaking into the composer. |
 | `app/host_internal.h`, `app/plugin.c` | Core service ownership and builtin registration. |
 | `app/tests/browser_integration.py` | Real helper/Chromium test without a Pico window. |
+| `app/tests/browser_agent_integration.py` | Real Pico and loopback Responses fixture: model-visible PNG payloads, click/type/scroll, durable media, clipboard refusal. |
 | `app/tests/browser_ui_integration.py` | Real Pico window, address-bar navigation/reload, and screenshot-pixel assertions under Xvfb. |
 | `app/tests/host_workspace_test.c` | Browser eligibility, new-session notification, repeated shell geometry. |
 | `app/tests/install_smoke.cmake` | Checks installed helper and required CEF assets. |
@@ -196,62 +203,46 @@ exhaustion report is this same issue. Temporary diagnostic logging was removed.
 The order below is the recommended continuation, not a commitment to every
 suggested API name or optional browser feature.
 
-### Slice 2 — model-visible observations (next)
+### Slice 2 — model-visible observations
 
-**Status: not implemented; prerequisite for reliable visual automation.**
+**Status: implemented, with live-model verification still pending.**
 
-Pico's `PicoToolResult` currently contains text, optional JSON details, and an
-error flag. Canonical tool results and provider adapters serialize text. Images
-are already supported in user input, but that does not make an image returned
-by a browser tool visible to the model.
-
-Work:
-
-- Design an explicit multimodal tool-result/observation contract. Inspect
-  `app/include/pico/app.h`, `app/canonical.c`, `app/agent.c`, `app/session.c`,
-  `app/builtins/responses.c`, and `app/builtins/completions.c`.
-- Define screenshot asset ownership, persistence, history replay, compaction,
-  cleanup, and provider capability/error behavior. Do not merely put a path or
-  base64 string into text/`details_json` and call that vision support.
-- Add an explicit on-demand observation request to the **same session browser**.
-  It must work when the dock is hidden and no Pico texture is retained.
-- Return page metadata with the image: URL, viewport dimensions, coordinate
-  mapping, and sufficient navigation/viewport identity to detect stale actions.
-- Define what “capture complete” means. A newly queued navigation and a completed
-  page observation are different events; avoid arbitrary sleeps as readiness.
-- Choose whether screenshots reflect CEF's composited OSR surface or a page
-  capture via DevTools; document popup composition and scaling differences.
-
-**Acceptance:** a vision-capable model receives the actual page image, can report
-its visible content, and gets a clear failure for unsupported providers. Capture
-must not require selecting/expanding the session or mix up concurrent sessions.
+- ABI 22 adds `PicoToolImage`, image-bearing `PicoToolResult`, provider
+  `tool_images` capability, and a worker capability accessor. Core validates PNGs
+  and owns persisted assets; canonical results gain image `parts` references.
+- Browser assets live in `.pico/media/browser/<session-id>/`, separate from
+  `.pico/media/composer/`. Generic image tools default to `tools/<session-id>/`.
+  Replay never recaptures. Compaction removes summarized images from active
+  model context but keeps saved history/assets; history deletion cleans images.
+- OpenAI Responses (including Codex), Hyper, and xAI project actual image parts
+  into labeled untrusted observation messages after tool results. Missing media
+  or unsupported model/provider capability fails explicitly.
+- Capture works hidden and under User control, without selecting/expanding a
+  pane. It primes a surface, fences via an internal compositor snapshot, then
+  captures fresh composited OSR view/popup pixels at logical scale 1. Readiness is
+  navigation load plus fresh paint, **not** network-idle or SPA completion.
 
 ### Slice 3 — agent mouse/keyboard action loop
 
-**Status: not implemented as agent tools; helper-side primitives already exist.**
+**Status: implemented, with native/live-model acceptance still pending.**
 
-A possible surface is `browser_observe` plus `browser_act`, or several focused
-input tools. Settle the schema before implementation.
+`browser_act` supports bounded move, click, scroll, named key chords, Unicode text
+insertion, and drag paths; validates the whole batch before dispatch; and returns
+an observation automatically. Coordinates are image pixels. Older observations
+remain valid within the same browser/navigation/viewport identity, even after
+input, but ordinary DOM changes are not detectable as staleness.
 
-Work:
+CEF's private DevTools Input methods deliver native input to the same embedded
+page and acknowledge each event. Takeover/cancellation interrupts remaining
+work, reconciles pending input, and releases held buttons/keys. Results distinguish
+completed actions, delivered events, partial actions, and uncertain delivery;
+nothing is rolled back or automatically retried. Cancellation/runtime retirement
+cannot retarget a replacement session. Capture/input timeouts are bounded;
+unacknowledged input/release failure may close the page.
 
-- Expose clicks/movement, scrolling, key down/up or key chords, text insertion,
-  and drag sequences through the existing browser service.
-- Keep text input separate from physical keys; handle modifiers and balanced
-  press/release pairs deliberately.
-- Extend explicit User/Agent ownership to every action. Taking control blocks
-  new agent actions; define the treatment of an already-started action batch.
-- Serialize mutations within a session while allowing different sessions to
-  progress independently. Do not infer global safety from a per-agent sequential
-  tool registration alone if future APIs allow sharing a target.
-- Define coordinate semantics against observations, resize/navigation staleness,
-  cancellation, action completion, and cleanup of held buttons/keys.
-- Bound action batches and prevent stale/cancelled generations from acting on a
-  resumed or replaced session. Never redirect automation to the selected pane.
-
-**Acceptance:** the agent observes a local app, clicks/types/scrolls, observes the
-result, and verifies it. Two sessions can run that loop independently. Human
-takeover, collapse, selection changes, cancellation, and close are safe.
+No browser is created by observe/act alone, and no new viewport presets, tabs,
+clipboard/file/download tools, page evaluation, or cross-process sharing were
+added. Current initial/hidden viewport behavior is preserved.
 
 ### Slice 4 — developer-oriented inspection and viewport control
 
@@ -297,22 +288,20 @@ edit the app, and verify the result after hot reload in the same browser.
 - Keep Chromium security updates part of release maintenance. Re-evaluate the
   reader-mode policy against the actual pinned CEF source before changing it.
 
-## 7. Decisions the next developer should clarify
+## 7. Settled continuation decisions and future scope
 
-Do not silently turn these proposed details into public contracts:
+The user approved slices 2 and 3 together, all builtin vision adapters,
+composited OSR observations after navigation load/fresh paint, durable
+`.pico/media/browser/<session-id>/` assets, observations in both control modes,
+batched `browser_act` with automatic observations, older observation reuse while
+browser/navigation/viewport identity matches, and interruption on takeover.
+Provider-specific labeled observation-message projection is allowed; canonical
+history must remain tool output, not human input.
 
-1. Observation/tool-result schema and supported provider behavior; how image
-   assets are retained and compacted.
-2. Exact action-tool shape, coordinate units, batch boundaries, readiness rules,
-   and stale-observation handling.
-3. Whether takeover cancels an in-flight batch or only rejects subsequent work.
-4. Desired viewport presets/resize behavior and screenshot/display scaling.
-5. Whether multiple Pico windows/processes must share a browser service.
-6. Scope and permission policies for clipboard, files, downloads, tabs, page
-   evaluation, and other browser capabilities.
-
-The per-main-session ownership, subagent exclusion, lazy startup, persistence,
-and explicit control-mode requirements in section 2 are already settled.
+Viewport presets, cross-process sharing, clipboard/files/downloads/tabs, DOM,
+console, and page evaluation remain deferred. Clarify their scope and permissions
+before implementation. The per-main-session ownership, subagent exclusion, lazy
+startup, persistence, and explicit control-mode requirements remain settled.
 
 ## 8. Build, test, and validation status
 
@@ -351,7 +340,7 @@ nix develop .#browser-tests -c xvfb-run -a -s '-screen 0 1600x1200x24' \
   timeout -k 5s 90s python3 app/tests/browser_ui_integration.py app/build/debug/pico
 ```
 
-Recorded validation before this documentation handoff:
+Historical validation before the original documentation handoff:
 
 - The first slice passed the full 48-test CTest suite in a serial run.
 - After the subsequent fixes, the required host/workspace suite, real helper
@@ -363,6 +352,39 @@ Recorded validation before this documentation handoff:
 - The user subsequently confirmed navigation was fixed and the browser works
   well on their native Wayland setup. This is not exhaustive native-platform,
   performance, IME, or release-artifact certification.
+
+Recorded continuation validation:
+
+- Full 48-test CTest suite passed serially, including the host/workspace geometry
+  suite and install smoke test. The harness's documented zombie-reaping issue
+  required an external test-parent reaper; no test assertions were weakened.
+- Real helper regression passed with hidden PNG captures, native input,
+  stale identities, cancellation/takeover, and concurrent independent requests.
+- Real-window navigation/reload presentation regression passed under Xvfb.
+- Real-Pico loopback-provider agent regression passed, checking actual image
+  payload pixels, click/Unicode text/scroll, and session-owned media persistence.
+- New SDK image example compiles in the ordinary build.
+- Native Wayland **agent** usage and live OpenAI/Codex/Hyper/xAI model acceptance
+  have not been manually tested. Existing human Wayland validation predates
+  these changes.
+
+Continuation validation commands (in addition to the original helper/UI tests):
+
+```sh
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
+  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+  python3 app/tests/browser_agent_integration.py app/build/debug/pico
+```
+
+The core tests now cover image payload mapping, unsupported providers, image
+ownership/transcript copies, malformed/missing media, replay/compaction retention,
+and browser-owned history deletion. Helper coverage includes hidden observations,
+input acknowledgments, stale identity, and interrupted batches. The real Pico
+fixture verifies the open → observe → click/type → observe → scroll loop and the
+actual PNG contents delivered to a loopback Responses endpoint. No real API
+credentials are used. Hyper/xAI wire projection is covered by serializer tests;
+live service/model acceptance, including Codex authentication, remains a manual
+check.
 
 Test-environment notes:
 
@@ -411,7 +433,9 @@ When debugging:
 5. Measure outbound command types/depth before attributing an exit to exhaustion.
    Do not raise limits or disable security features without identifying the cause.
 
-**Recommended next deliverable:** a model-visible screenshot from the calling
-main session, with explicit image ownership and coordinate metadata, followed by
-one safe click/type/observe loop. That is the smallest slice that advances the
-remaining original goal.
+**Recommended next deliverable:** manually verify the implemented observe–act
+loop with a real vision-capable model on native Wayland, including concurrent
+sessions and takeover. Then prioritize measured robustness or developer
+inspection rather than additional chrome. Loopback payload validation proves
+image transport and input behavior, not model comprehension or every backend's
+acceptance.

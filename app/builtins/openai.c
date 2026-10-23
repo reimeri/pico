@@ -1231,7 +1231,7 @@ static int OpenAiWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     (void)state_out;
     pico_add_provider(workspace, &(PicoProvider){.name = "openai",
                                                  .stream = OpenAiStream,
-                                                 .map_context = true,
+                                                 .map_context = true, .tool_images = true,
                                                  .supports_fast = OpenAiSupportsFast});
     return 0;
 }

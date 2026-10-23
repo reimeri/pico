@@ -257,8 +257,9 @@ static bool CompletionsInputMediaValid(const char *json)
     {
         return false;
     }
+    if (!pico_canonical_tool_images_valid(&doc, true)) { JsonFree(&doc); return false; }
     char *type = JsonObjStr(&doc, 0, "type");
-    bool content = type && (strcmp(type, "user") == 0 || strcmp(type, "assistant") == 0);
+    bool content = type && (strcmp(type, "user") == 0 || strcmp(type, "assistant") == 0 || strcmp(type, "tool_result") == 0);
     PicoLlmPart *parts = NULL;
     int n = 0;
     bool valid = !content || pico_canonical_parse_parts(&doc, 0, &parts, &n);
@@ -429,8 +430,15 @@ char *pico_completions_build_request(const PicoLlmTurn *turn, const PicoCompleti
         }
         else if (strcmp(type, "tool_call") == 0)
         {
-            const char *calls[1] = {turn->input_json[i]};
-            FlushAssistant(&b, &wrote, NULL, 0, NULL, NULL, calls, 1, requires_reasoning);
+            const char *calls[64]; int count = 0, j = i;
+            while (j < turn->input_count && count < (int)(sizeof(calls) / sizeof(calls[0]))) {
+                char *next = ItemType(turn->input_json[j]);
+                bool call = next && !strcmp(next, "tool_call"); free(next);
+                if (!call) break;
+                calls[count++] = turn->input_json[j++];
+            }
+            FlushAssistant(&b, &wrote, NULL, 0, NULL, NULL, calls, count, requires_reasoning);
+            i = j - 1;
         }
         else if (strcmp(type, "tool_result") == 0)
         {
@@ -448,6 +456,32 @@ char *pico_completions_build_request(const PicoLlmTurn *turn, const PicoCompleti
             wrote++;
             free(id);
             free(output);
+        }
+        if (strcmp(type, "tool_result") == 0) {
+            char *next = i + 1 < turn->input_count ? ItemType(turn->input_json[i+1]) : NULL;
+            bool end = !next || strcmp(next, "tool_result"); free(next);
+            if (end) {
+                int begin = i;
+                while (begin > 0) {
+                    char *prev = ItemType(turn->input_json[begin-1]);
+                    bool result = prev && !strcmp(prev, "tool_result"); free(prev);
+                    if (!result) break;
+                    --begin;
+                }
+                for (int j = begin; j <= i; ++j) {
+                    char *observation = pico_canonical_tool_observation(turn->input_json[j]);
+                    JsonDoc image;
+                    if (observation && !JsonParse(&image, observation, strlen(observation))) {
+                        PicoLlmPart *parts = NULL; int count = 0;
+                        pico_canonical_parse_parts(&image, 0, &parts, &count);
+                        char *content = CompletionsContentArray(parts, count, false);
+                        JsonBuf_Puts(&b, ",{\"role\":\"user\",\"content\":");
+                        JsonBuf_Puts(&b, content ? content : "[]"); JsonBuf_Putc(&b, '}'); wrote++;
+                        free(content); pico_canonical_free_parts(parts, count); JsonFree(&image);
+                    }
+                    free(observation);
+                }
+            }
         }
         JsonFree(&doc);
         free(type);

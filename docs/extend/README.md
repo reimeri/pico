@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 21 adds successful LLM-response notifications and host-extension opt-in preferences; it includes rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 22 adds image-bearing tool results, explicit provider image capability, and browser observe/act tools; it includes successful LLM-response notifications and host-extension opt-in preferences, rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 
@@ -21,16 +21,16 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `host` — process owner, preferences, host-scoped registrations, pump, shutdown
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits and capacity eviction
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
-- `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, and first-slice limits
+- `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, model-visible observations, and agent input
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
 - `steering` — user input queued for an active turn, delivery, persistence, and hooks
-- `tools` — LLM-callable tools, parallel execution policies, and structured replayable details
+- `tools` — image-bearing results, LLM-callable tools, parallel execution policies, and structured replayable details
 - `commands` — slash commands (`/foo`)
 - `notices` — severity-labeled application feedback, transcript persistence, context exclusion
 - `completers` — composer completion, `@` files, and `#` session-reference chips
-- `providers` — LLM backends, Fast-mode capabilities and service tiers
+- `providers` — LLM backends, tool-image projection, Fast-mode capabilities and service tiers
 - `auth` — `/login` `/logout` and credentials
 - `contracts` — threads, ownership, limits, reload
 
@@ -46,6 +46,7 @@ Copy-templates (paths from this README):
 
 - [`../../examples/hello.c`](../../examples/hello.c) — host sidebar view
 - [`../../examples/empty_banner.c`](../../examples/empty_banner.c) — empty-state banner above the Tools / Context / Skills cards
+- [`../../examples/image_tool.c`](../../examples/image_tool.c) — owned PNG tool result
 - [`../../examples/echo_tool.c`](../../examples/echo_tool.c) — workspace tool + `json.h`
 - [`../../examples/counter_tool.c`](../../examples/counter_tool.c) — stateful per-workspace tool
 - [`../../examples/ask_tool.c`](../../examples/ask_tool.c) — `pico_tool_ask` + builtin confirm overlay

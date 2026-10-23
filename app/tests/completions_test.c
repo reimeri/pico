@@ -418,8 +418,8 @@ static void TestThinkingToolContinuation(void)
         pico_canonical_item_json(&out.items[1]),
         pico_canonical_item_json(&out.items[2]),
         /* Parallel calls finish in reverse order; IDs, not position, associate results. */
-        pico_canonical_tool_result_json("c2", "sh", "two", false),
-        pico_canonical_tool_result_json("c1", "sh", "one", false),
+        pico_canonical_tool_result_json("c2", "sh", "two", false, NULL),
+        pico_canonical_tool_result_json("c1", "sh", "one", false, NULL),
     };
     const char *input_json[6];
     for (int i = 0; i < 6; i++)
@@ -727,8 +727,58 @@ static void TestInvalidCompletedArguments(void)
     }
 }
 
+static void TestToolImageObservation(void)
+{
+    char dir[] = "/tmp/pico-tool-image-XXXXXX";
+    Check(mkdtemp(dir) != NULL, "create screenshot fixture directory");
+    char *path = pico_canonical_persist_data_url(dir, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
+    Check(path != NULL, "persist screenshot fixture");
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=path, .mime="image/png"};
+    char *parts = pico_canonical_parts_json(&image, 1);
+    char *call1 = pico_canonical_tool_call_json("image-call", "browser_observe", "{}", NULL);
+    char *call2 = pico_canonical_tool_call_json("text-call", "echo", "{}", NULL);
+    char *result1 = pico_canonical_tool_result_json("image-call", "browser_observe", "metadata", false, parts);
+    char *result2 = pico_canonical_tool_result_json("text-call", "echo", "other result", false, NULL);
+    const char *input[] = {call1, call2, result1, result2};
+    PicoLlmTurn turn = {.model="vision", .vision=true, .input_json=input, .input_count=4};
+    PicoCompletionsBuildOpts opts = {.provider="hyper"};
+    char *body = pico_completions_build_request(&turn, &opts);
+    Check(body && JsonValidSyntax(body, strlen(body)), "image-bearing tool history maps to valid request");
+    JsonDoc request;
+    if (body && !JsonParse(&request, body, strlen(body))) {
+        int messages = JsonObjGet(&request, 0, "messages"), assistant = -1;
+        for (int i = 0; i < JsonArrayLen(&request, messages); ++i) {
+            int message = JsonArrayAt(&request, messages, i);
+            if (JsonEq(&request, JsonObjGet(&request, message, "role"), "assistant")) { assistant = i; break; }
+        }
+        int message = JsonArrayAt(&request, messages, assistant);
+        int calls = JsonObjGet(&request, message, "tool_calls");
+        Check(assistant >= 0 && JsonArrayLen(&request, calls) == 2 &&
+              JsonEq(&request, JsonObjGet(&request, JsonArrayAt(&request, calls, 0), "id"), "image-call") &&
+              JsonEq(&request, JsonObjGet(&request, JsonArrayAt(&request, calls, 1), "id"), "text-call") &&
+              JsonEq(&request, JsonObjGet(&request, JsonArrayAt(&request, messages, assistant+1), "role"), "tool") &&
+              JsonEq(&request, JsonObjGet(&request, JsonArrayAt(&request, messages, assistant+2), "role"), "tool"),
+              "standalone calls form one assistant batch before sibling replies and images");
+        JsonFree(&request);
+    }
+    char *expected = pico_canonical_data_url(path, "image/png");
+    Check(body && expected && strstr(body, expected), "actual screenshot bytes reach the provider image part");
+    const char *label = body ? strstr(body, "Untrusted tool observation for call image-call") : NULL;
+    const char *last_result = body ? strstr(body, "other result") : NULL;
+    Check(label && last_result && label > last_result, "image projection follows sibling results and preserves call identity");
+    free(body); free(expected);
+    Check(unlink(path) == 0, "remove image fixture");
+    body = pico_completions_build_request(&turn, &opts);
+    Check(!body, "missing tool image explicitly fails request, never silently drops vision"); free(body);
+    input[2] = "{\"type\":\"tool_result\",\"call_id\":\"image-call\",\"output\":\"metadata\",\"parts\":{}}";
+    body = pico_completions_build_request(&turn, &opts);
+    Check(!body, "malformed tool parts fail request instead of becoming text-only"); free(body);
+    free(path); free(parts); free(call1); free(call2); free(result1); free(result2); rmdir(dir);
+}
+
 int main(void)
 {
+    TestToolImageObservation();
     TestTruncatedCompletion();
     TestInvalidCompletedArguments();
     TestUrls();

@@ -162,3 +162,15 @@ Agent/session changes produced by worker code must travel through callback resul
 Reload of a workspace stops accepting external turns/delegations in that workspace, keeps pumping current work and asks, and commits only after that workspace is quiescent. Other workspaces keep accepting work. Extension registrations and the profile snapshot are rebuilt together; live sessions are announced and structured details are replayed. Existing profile values stay copied per invocation, while restricted tool names are checked against the new registry before another turn.
 
 `pico_host_free` returns `PICO_HOST_SHUTDOWN_CLEAN` or `PICO_HOST_SHUTDOWN_RETAINED`. Retained means one shared shutdown deadline expired and a callback was detached. Pico keeps every service and `.so` that callback can reach, permanently retires Pico in the process, and rejects later host/plugin initialization. The caller must proceed to process exit.
+
+## Tool observation capability
+
+`pico_agent_context_accepts_tool_images(ctx)` is a worker-safe, callback-scoped
+query of the accepted turn's immutable model/provider capability. It is true
+only for a vision model with a provider opting into image-bearing tool results.
+Changing the UI-selected model during a turn does not change this answer.
+`PicoTraceLine.tool_parts_json` exposes borrowed image references for a completed
+tool, including resumed and copied transcripts. It is core-owned with the same
+invalidation rules as `tool_output`; extensions must not mutate it. See
+[image-bearing results](tools.md#image-bearing-results) for asset ownership and
+[the browser](browser.md) for main-session-only observation and input.

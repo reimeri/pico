@@ -1,6 +1,6 @@
 # Anatomy
 
-Every user extension is one `.c` file that exports `pico_ext`. ABI 21 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
+Every user extension is one `.c` file that exports `pico_ext`. ABI 22 uses separate host and workspace instances: callbacks take `PicoHost *` or `PicoWorkspace *` plus instance `void *state`. There is no compatibility layer.
 
 ```c
 #include "pico/plugin.h"
@@ -31,7 +31,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 21). ABI 21 adds `PICO_HOOK_ON_LLM_RESPONSE` notifications in host and workspace scope; see [hooks](hooks.md#llm-response-notification). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 22). ABI 22 adds image-bearing tool results and explicit provider image capability; see [tools](tools.md#image-bearing-results) and [providers](providers.md#image-bearing-tool-results). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.

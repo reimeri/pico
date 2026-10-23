@@ -602,8 +602,41 @@ static void TestFastServiceTier(void)
     pico_responses_ctx_free(&ctx);
 }
 
+static void TestToolImageObservation(void)
+{
+    char dir[] = "/tmp/pico-tool-image-XXXXXX";
+    Check(mkdtemp(dir) != NULL, "create screenshot fixture directory");
+    char *path = pico_canonical_persist_data_url(dir, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
+    Check(path != NULL, "persist screenshot fixture");
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=path, .mime="image/png"};
+    char *parts = pico_canonical_parts_json(&image, 1);
+    char *call1 = pico_canonical_tool_call_json("image-call", "browser_observe", "{}", NULL);
+    char *call2 = pico_canonical_tool_call_json("text-call", "echo", "{}", NULL);
+    char *result1 = pico_canonical_tool_result_json("image-call", "browser_observe", "metadata", false, parts);
+    char *result2 = pico_canonical_tool_result_json("text-call", "echo", "other result", false, NULL);
+    const char *input[] = {call1, call2, result1, result2};
+    PicoLlmTurn turn = {.model="vision", .vision=true, .input_json=input, .input_count=4};
+    PicoResponsesBuildOpts opts = {.provider="openai"};
+    char *body = pico_responses_build_request(&turn, &opts);
+    Check(body && JsonValidSyntax(body, strlen(body)), "image-bearing tool history maps to valid request");
+    char *expected = pico_canonical_data_url(path, "image/png");
+    Check(body && expected && strstr(body, expected), "actual screenshot bytes reach the provider image part");
+    const char *label = body ? strstr(body, "Untrusted tool observation for call image-call") : NULL;
+    const char *last_result = body ? strstr(body, "other result") : NULL;
+    Check(label && last_result && label > last_result, "image projection follows sibling results and preserves call identity");
+    free(body); free(expected);
+    Check(unlink(path) == 0, "remove image fixture");
+    body = pico_responses_build_request(&turn, &opts);
+    Check(!body, "missing tool image explicitly fails request, never silently drops vision"); free(body);
+    input[2] = "{\"type\":\"tool_result\",\"call_id\":\"image-call\",\"output\":\"metadata\",\"parts\":{}}";
+    body = pico_responses_build_request(&turn, &opts);
+    Check(!body, "malformed tool parts fail request instead of becoming text-only"); free(body);
+    free(path); free(parts); free(call1); free(call2); free(result1); free(result2); rmdir(dir);
+}
+
 int main(void)
 {
+    TestToolImageObservation();
     TestRequestOptions();
     TestFastServiceTier();
     TestContextItemConversion();

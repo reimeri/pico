@@ -53,5 +53,14 @@ int main(void)
     free(value);
     JsonFree(&doc);
 
+    const char *strings[] = {"\"\\ud83d\\ude42\"", "\"before\\u0000after\"", "\"\\ud83d\""};
+    for (int i = 0; i < 3; ++i) {
+        if (JsonParse(&doc, strings[i], strlen(strings[i]))) return 1;
+        value = JsonStrDup(&doc, 0);
+        if (i == 0 ? (!value || strcmp(value, "\xF0\x9F\x99\x82")) : value != NULL) {
+            fprintf(stderr, "Unicode strings must decode complete scalar values without truncation\n"); failed = 1;
+        }
+        free(value); JsonFree(&doc);
+    }
     return failed;
 }

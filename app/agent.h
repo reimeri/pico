@@ -65,7 +65,7 @@ void PicoAgent_PushHistoryAssistantParts(PicoAgent *agent, const char *text, con
 void PicoAgent_PushHistoryFunctionCall(PicoAgent *agent, const char *call_id, const char *name,
                                        const char *args, const char *item_id);
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
-                                         const char *output, bool is_error);
+                                         const char *output, bool is_error, const char *parts_json);
 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown);
 void PicoAgent_AppendAssistant(PicoHost *app, PicoAgent *agent, const char *text);
@@ -103,7 +103,7 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
 void PicoAgent_SetToolArgsByCallId(PicoAgent *agent, const char *call_id,
                                    const char *args);
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
-                                     const char *output, bool is_error);
+                                     const char *output, bool is_error, const char *parts_json);
 /* Main-thread notification for internal transcript edits (including UI trace toggles). */
 void PicoAgent_TranscriptChanged(PicoAgent *agent, int index);
 void PicoAgent_ClearMessages(PicoAgent *agent);

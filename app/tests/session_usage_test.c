@@ -5,6 +5,7 @@
 #include "test_lock.h"
 #endif
 #include "agent.h"
+#include "canonical.h"
 #include "json.h"
 #include "path.h"
 #include "session.h"
@@ -125,6 +126,73 @@ static int TestLlmResponseSessionState(void)
     unlink(compact_writer.session_path);
     rmdir(config);
     return replay_was_silent ? 0 : Fail("session replay must not emit response hooks or synthetic notices");
+}
+
+static int TestToolImageReplayCompaction(void)
+{
+    PicoHost host = {0}; PicoAgent writer = {0};
+    PicoHost_SetPath(&host, "/workspace"); writer.persistence = PICO_SESSION_DURABLE;
+    char directory[] = "/tmp/pico-replay-image-XXXXXX";
+    if (!mkdtemp(directory)) return Fail("image replay fixture directory");
+    char *image = pico_canonical_persist_data_url(directory,
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
+    if (!image) return Fail("image replay fixture");
+    PicoLlmPart part = {.kind=PICO_LLM_PART_IMAGE, .path=image, .mime="image/png"};
+    char *parts = pico_canonical_parts_json(&part, 1);
+    bool ok = PicoSession_LogToolCall(&host, &writer, 0, "capture", "browser_observe", "{}", NULL) == PICO_SESSION_WRITE_OK &&
+              PicoSession_LogToolResult(&host, &writer, "capture", "browser_observe", "metadata", false, NULL, parts) == PICO_SESSION_WRITE_OK;
+    for (int compacted = 0; compacted < 2; ++compacted) {
+        if (compacted) ok &= PicoSession_LogCompaction(&host, &writer, "image summarized", 0) == PICO_SESSION_WRITE_OK;
+        PicoAgent restored = {.persistence=PICO_SESSION_DURABLE};
+        g_replayed_history[0] = 0;
+        ok &= PicoSession_Replay(&host, &restored, writer.session_path, false) == 0;
+        bool image_in_context = strstr(g_replayed_history, image) != NULL;
+        ok &= image_in_context == !compacted && access(image, R_OK) == 0;
+        bool retained = false;
+        for (int i = 0; i < restored.message_count; ++i) for (int t = 0; t < restored.messages[i].trace_count; ++t) {
+            PicoTraceLine *line = &restored.messages[i].trace[t];
+            if (line->tool_parts_json && strstr(line->tool_parts_json, image)) retained = true;
+            free(line->tool_parts_json); line->tool_parts_json = NULL;
+        }
+        ok &= retained; PicoAgent_ClearMessages(&restored); free(restored.messages);
+    }
+    unlink(writer.session_path); unlink(image); rmdir(directory); free(image); free(parts);
+    return ok ? 0 : Fail("compaction must omit image context while replay retains the saved tool image without capture");
+}
+
+static int TestInterruptedImageBatch(void)
+{
+    for (int finished = -1; finished < 2; ++finished) {
+        PicoHost host = {0}; PicoAgent writer = {.persistence=PICO_SESSION_DURABLE};
+        PicoHost_SetPath(&host, "/workspace");
+        const char *ids[] = {"image-first", "text-second"};
+        const char *image = "[{\"type\":\"image\",\"path\":\"/tmp/saved-browser-image.png\",\"mime\":\"image/png\"}]";
+        PicoSession_LogToolCall(&host, &writer, 0, ids[0], "browser_observe", "{}", NULL);
+        PicoSession_LogToolCall(&host, &writer, 0, ids[1], "echo", "{}", NULL);
+        if (finished >= 0) PicoSession_LogToolResult(&host, &writer, ids[finished], finished ? "echo" : "browser_observe",
+                                                    "completed", false, NULL, finished ? NULL : image);
+        PicoAgent restored = {.persistence=PICO_SESSION_DURABLE};
+        bool ok = PicoSession_Replay(&host, &restored, writer.session_path, true) == 0;
+        /* A second repair must not duplicate a completed or repaired result. */
+        PicoSession_AppendInterrupted(&host, &restored);
+        size_t length = 0; char *jsonl = Pico_ReadFile(writer.session_path, &length);
+        int results[2] = {0}; bool kept_image = finished != 0;
+        if (jsonl) for (char *line = strtok(jsonl, "\n"); line; line = strtok(NULL, "\n")) {
+            JsonDoc doc; if (JsonParse(&doc, line, strlen(line))) { ok = false; continue; }
+            if (JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_result")) {
+                for (int i = 0; i < 2; ++i) if (JsonEq(&doc, JsonObjGet(&doc, 0, "call_id"), ids[i])) {
+                    ++results[i];
+                    ok &= JsonEq(&doc, JsonObjGet(&doc, 0, "output"), i == finished ? "completed" : "(interrupted)");
+                    if (!i && finished == 0) kept_image = JsonIsArray(&doc, JsonObjGet(&doc, 0, "parts"));
+                }
+            }
+            JsonFree(&doc);
+        }
+        ok &= jsonl && results[0] == 1 && results[1] == 1 && kept_image;
+        free(jsonl); unlink(writer.session_path); PicoAgent_ClearMessages(&restored); free(restored.messages);
+        if (!ok) return Fail("interrupted multi-call repair must match every unanswered id and preserve completed images");
+    }
+    return 0;
 }
 
 static const PicoCatalogWorkspace *FindCatalogPath(PicoCatalogWorkspace *list, int n,
@@ -525,13 +593,14 @@ void PicoAgent_AppendThinkSummary(PicoHost *app, PicoAgent *agent, const char *t
 }
 
 void PicoAgent_PushHistoryFunctionOutput(PicoAgent *agent, const char *call_id, const char *name,
-                                         const char *output, bool is_error)
+                                         const char *output, bool is_error, const char *parts_json)
 {
     (void)agent;
     (void)call_id;
     (void)name;
     (void)output;
     (void)is_error;
+    TrackHistory(call_id); TrackHistory(output); TrackHistory(parts_json);
 }
 
 void PicoHost_AddMessage(PicoHost *app, PicoAgentId agent_id, PicoRole role, const char *text)
@@ -732,7 +801,7 @@ void PicoAgent_SetLastToolOutput(PicoAgent *agent, const char *output, bool is_e
 }
 
 void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
-                                     const char *output, bool is_error)
+                                     const char *output, bool is_error, const char *parts_json)
 {
     int i;
 
@@ -752,6 +821,7 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
                 free(line->tool_output);
                 line->tool_output = JsonDup(output ? output : "");
                 line->tool_error = is_error;
+                free(line->tool_parts_json); line->tool_parts_json = parts_json ? JsonDup(parts_json) : NULL;
                 return;
             }
         }
@@ -1569,12 +1639,12 @@ static int TestTranscriptMessageGroups(void)
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "second", NULL, NULL, NULL, NULL, 0);
     PicoSession_LogToolCall(&writer, &writer_agent, 1, "call-1", "sh",
                             "{\"description\":\"run first command\",\"command\":\"true\"}", NULL);
-    PicoSession_LogToolResult(&writer, &writer_agent, "call-1", "sh", "ok-1", false, NULL);
+    PicoSession_LogToolResult(&writer, &writer_agent, "call-1", "sh", "ok-1", false, NULL, NULL);
     PicoSession_LogAssistant(&writer, &writer_agent, 1, "after", "think-after-tool", NULL, NULL, NULL, 0);
     PicoSession_LogAssistant(&writer, &writer_agent, 2, "third", "think-2", NULL, NULL, NULL, 0);
     PicoSession_LogToolCall(&writer, &writer_agent, 3, "call-2", "sh",
                             "{\"description\":\"run second command\",\"command\":\"true\"}", NULL);
-    PicoSession_LogToolResult(&writer, &writer_agent, "call-2", "sh", "ok-2", false, NULL);
+    PicoSession_LogToolResult(&writer, &writer_agent, "call-2", "sh", "ok-2", false, NULL, NULL);
     PicoSession_LogAssistant(&writer, &writer_agent, 3, "fourth", "think-3", NULL, NULL, NULL, 0);
     if (!writer_agent.session_path[0])
     {
@@ -1986,6 +2056,7 @@ static int TestCatalogSessionDelete(void)
     char ws[] = "/tmp/pico-cat-sess-del-XXXXXX";
     char parent[4096], child[4096], grandchild[4096], sibling[4096], notes[4096];
     char residue[4096], parent_media[4096], child_media[4096], composer[4096];
+    char browser_media[4096];
     PicoCatalogWorkspace *list = NULL;
     const PicoCatalogWorkspace *found;
     PicoHost host = {0};
@@ -2016,6 +2087,10 @@ static int TestCatalogSessionDelete(void)
         !AppendRaw(sibling, "{\"type\":\"session\",\"version\":5,\"kind\":\"normal\",\"id\":\"siblingsess\"}") ||
         !AppendRaw(notes, "keep") || !AppendRaw(residue, "partial"))
         return Fail("session delete fixtures");
+    snprintf(browser_media, sizeof(browser_media), "%s/.pico/media/browser/parentsess", ws);
+    Pico_MkdirP(browser_media);
+    char browser_image[4096]; if (!PicoPath_Format(browser_image, sizeof(browser_image), "%s/screenshot.png", browser_media)) return Fail("browser screenshot path");
+    AppendRaw(browser_image, "owned screenshot");
     Pico_MkdirP(parent_media);
     Pico_MkdirP(child_media);
     Pico_MkdirP(composer);
@@ -2057,6 +2132,7 @@ static int TestCatalogSessionDelete(void)
         rmdir(parent_media);
         rmdir(child_media);
     }
+    if (access(browser_image, F_OK) == 0) return Fail("session deletion must clean browser-owned screenshot assets");
     return 0;
 }
 
@@ -3955,9 +4031,9 @@ int main(void)
     PicoSession_LogUsage(&writer, &writer_agent, 200, 150, true, "priority", false);
     PicoSession_LogAssistant(&writer, &writer_agent, 0, "assistant response", NULL, NULL, NULL, NULL, 0);
     PicoSession_LogCompaction(&writer, &writer_agent, "brief", 200);
-    PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}");
-    PicoSession_LogToolResult(&writer, &writer_agent, "state-2", "state_test", "failed", true, "{\"value\":8}");
-    PicoSession_LogToolResult(&writer, &writer_agent, "state-3", "state_test", "bad snapshot", false, "{\"value\":99}");
+    PicoSession_LogToolResult(&writer, &writer_agent, "state-1", "state_test", "saved", false, "{\"value\":7}", NULL);
+    PicoSession_LogToolResult(&writer, &writer_agent, "state-2", "state_test", "failed", true, "{\"value\":8}", NULL);
+    PicoSession_LogToolResult(&writer, &writer_agent, "state-3", "state_test", "bad snapshot", false, "{\"value\":99}", NULL);
     if (!writer_agent.session_path[0])
     {
         return Fail("usage did not create a session file");
@@ -3990,8 +4066,8 @@ int main(void)
     PicoSession_LogToolCall(&writer, &child_agent, 1, "child-call-2", "sh",
                             "{\"command\":\"true\"}", NULL);
     PicoSession_LogToolResult(&writer, &child_agent, "child-call-1", "subagent",
-                              "{\"session_id\":\"nested-child\"}", false, NULL);
-    PicoSession_LogToolResult(&writer, &child_agent, "child-call-2", "sh", "ok", false, NULL);
+                              "{\"session_id\":\"nested-child\"}", false, NULL, NULL);
+    PicoSession_LogToolResult(&writer, &child_agent, "child-call-2", "sh", "ok", false, NULL, NULL);
     PicoSessionHeader child_header;
     if (!child_agent.session_path[0] || PicoSession_ReadHeader(child_agent.session_path, &child_header) != 0 ||
         child_header.version != 5 || child_header.kind != PICO_AGENT_SUBAGENT ||
@@ -4289,7 +4365,7 @@ int main(void)
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
     if (PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
-        PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 ||
+        PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 || PICO_TEST_RUN(TestToolImageReplayCompaction()) != 0 || PICO_TEST_RUN(TestInterruptedImageBatch()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||

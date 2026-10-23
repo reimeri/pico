@@ -956,7 +956,7 @@ static int XaiWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     (void)state_out;
     pico_add_provider(workspace, &(PicoProvider){.name = "xai",
                                                  .stream = XaiStream,
-                                                 .map_context = true,
+                                                 .map_context = true, .tool_images = true,
                                                  .supports_fast = XaiSupportsFast});
     return 0;
 }

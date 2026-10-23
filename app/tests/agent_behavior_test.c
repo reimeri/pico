@@ -5,6 +5,7 @@
 #include "test_clock.h"
 #endif
 #include "agent.h"
+#include "canonical.h"
 #include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
@@ -21,6 +22,7 @@ void PicoComposer_ResetPresentation(PicoHost *host) { (void)host; }
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
 
 #include <pthread.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1551,7 +1553,7 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoHost *app, PicoAgent *agent,
 }
 
 PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent, const char *call_id, const char *name, const char *output,
-                               bool is_error, const char *details_json)
+                               bool is_error, const char *details_json, const char *parts_json)
 {
     (void)app;
     (void)agent;
@@ -4360,6 +4362,128 @@ static int TestAfterCompact(void)
     return ok ? 0 : Fail(name, "compaction did not retain cumulative usage or fire lifecycle hooks");
 }
 
+static void ImageTool(PicoAgentContext *ctx, const char *args, PicoToolResult *out, void *state)
+{
+    (void)ctx; (void)args;
+    char *path = state;
+    size_t size = 0;
+    unsigned char *png = (unsigned char *)Pico_ReadFile(path, &size);
+    out->images = calloc(1, sizeof(*out->images)); out->image_count = 1;
+    out->images[0] = (PicoToolImage){.png=png, .size=size};
+    out->output = JsonDup("image metadata");
+    if (strstr(args, "wait")) {
+        pthread_mutex_lock(&g_test.mu); g_test.block_entered = true; pthread_cond_broadcast(&g_test.cv);
+        while (!g_test.block_release) pthread_cond_wait(&g_test.cv, &g_test.mu);
+        pthread_mutex_unlock(&g_test.mu);
+    }
+}
+static int TestUnadoptedToolImageCleanup(bool force)
+{
+    const char *name = "unadopted tool image cancellation";
+    char dir[] = "/tmp/pico-cancel-image-XXXXXX";
+    if (!mkdtemp(dir)) return Fail(name, "fixture directory");
+    char *path = pico_canonical_persist_data_url(dir,
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
+    if (!path) return Fail(name, "PNG fixture");
+    ResetTest(TEST_SINGLE, 1); PicoHost app; InitApp(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    snprintf(ws->path, sizeof(ws->path), "%s", dir); ws->models[0].vision = true;
+    snprintf(ws->models[0].provider, sizeof(ws->models[0].provider), "image-provider");
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    pico_add_provider(ws, &(PicoProvider){.name="image-provider", .stream=FakeProvider, .map_context=true, .tool_images=true});
+    pico_add_tool(ws, "image_test", "image", "{}", ImageTool, NULL, PICO_TOOL_SEQUENTIAL);
+    PicoHost_PublishRegistration(&app, path);
+    snprintf(TestAgent(&app)->session_id, sizeof(TestAgent(&app)->session_id), "image-session");
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "image_test");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args), "{\"wait\":true}");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    bool ok = WaitForBlock(&app);
+    pthread_mutex_lock(&g_test.mu); g_test.block_release = true; pthread_cond_broadcast(&g_test.cv); pthread_mutex_unlock(&g_test.mu);
+    char media[4096], owned[4096] = {0};
+    snprintf(media, sizeof(media), "%s/.pico/media/tools/image-session", dir);
+    /* Observe persistence without pumping/adopting the queued result. */
+    PICO_TEST_WAIT(!owned[0]) {
+        DIR *directory = opendir(media); struct dirent *entry;
+        while (directory && (entry = readdir(directory))) {
+            if (entry->d_name[0] != '.') { PicoPath_Format(owned, sizeof(owned), "%s/%s", media, entry->d_name); break; }
+        }
+        if (directory) closedir(directory);
+    }
+    if (force) PicoAgent_ForceCancel(&app, TestAgent(&app)); else PicoAgent_Cancel(TestAgent(&app));
+    ok &= WaitForIdle(&app);
+    PICO_TEST_WAIT(ws->retired_count > 0) PicoAgent_ReapRetired(ws);
+    ok &= access(owned, F_OK) != 0;
+    PicoTraceLine *line = LastToolTrace(&app);
+    ok &= line && !line->tool_parts_json;
+    PicoHost_Shutdown(&app);
+    unlink(path); free(path); rmdir(media);
+    snprintf(media, sizeof(media), "%s/.pico/media/tools", dir); rmdir(media);
+    snprintf(media, sizeof(media), "%s/.pico/media", dir); rmdir(media);
+    snprintf(media, sizeof(media), "%s/.pico", dir); rmdir(media); rmdir(dir);
+    return ok ? 0 : Fail(name, "cancelled or retired result retained its screenshot");
+}
+
+static int TestToolImageOwnership(void)
+{
+    const char *name = "image-bearing tool result ownership";
+    char dir[] = "/tmp/pico-image-tool-XXXXXX";
+    if (!mkdtemp(dir)) return Fail(name, "fixture directory");
+    char *path = pico_canonical_persist_data_url(dir,
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
+    if (!path) return Fail(name, "PNG fixture");
+    bool ok = true;
+    for (int supported = 0; supported < 2; ++supported) {
+        ResetTest(TEST_SINGLE, 1); PicoHost app; InitApp(&app);
+        PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+        snprintf(ws->path, sizeof(ws->path), "%s", dir);
+        ws->models[0].vision = true;
+        snprintf(ws->models[0].provider, sizeof(ws->models[0].provider), "image-provider");
+        PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+        pico_add_provider(ws, &(PicoProvider){.name="image-provider", .stream=FakeProvider,
+                                             .map_context=true, .tool_images=supported != 0});
+        pico_add_tool(ws, "image_test", "image", "{}", ImageTool, NULL, PICO_TOOL_SEQUENTIAL);
+        PicoHost_PublishRegistration(&app, path);
+        snprintf(TestAgent(&app)->session_id, sizeof(TestAgent(&app)->session_id), "image-session");
+        snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "image_test");
+        PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+        ok = ok && WaitForIdle(&app);
+        PicoTraceLine *line = LastToolTrace(&app);
+        ok = ok && line && line->tool_error == !supported;
+        if (supported && line) {
+            ok = ok && line->tool_parts_json &&
+                 g_test.last_input && strstr(g_test.last_input, "image/png") &&
+                 strstr(g_test.last_input, "image-session");
+            JsonDoc doc;
+            if (line->tool_parts_json && !JsonParse(&doc, line->tool_parts_json, strlen(line->tool_parts_json))) {
+                char *owned = JsonObjStr(&doc, JsonArrayAt(&doc, 0, 0), "path");
+                ok = ok && owned && strcmp(owned, path) && access(owned, R_OK) == 0;
+                PicoMessage *copy = NULL; int count = 0;
+                PicoAgent *agent = TestAgent(&app);
+                ok = ok && PicoMessages_Copy(agent->messages, agent->message_count, &copy, &count);
+                bool copied_image = false;
+                for (int m = 0; m < count; ++m) for (int t = 0; t < copy[m].trace_count; ++t)
+                    if (copy[m].trace[t].tool_parts_json) copied_image = true;
+                ok = ok && copied_image; PicoMessages_Free(copy, count);
+                if (owned) unlink(owned); free(owned); JsonFree(&doc);
+            } else ok = false;
+        }
+        PicoHost_Shutdown(&app);
+    }
+    unsigned char truncated[24] = "\x89PNG\r\n\x1a\n";
+    ok = ok && !pico_canonical_valid_png(truncated, sizeof(truncated));
+    char link[4096], redirected[4096];
+    snprintf(link, sizeof(link), "%s/link", dir);
+    snprintf(redirected, sizeof(redirected), "%s/link/new", dir);
+    ok = ok && symlink(dir, link) == 0;
+    char *escaped = pico_canonical_persist_bytes(redirected, "png", truncated, sizeof(truncated));
+    ok = ok && !escaped; free(escaped); unlink(link); unlink(path); free(path);
+    char child[4096]; snprintf(child, sizeof(child), "%s/.pico/media/tools/image-session", dir); rmdir(child);
+    snprintf(child, sizeof(child), "%s/.pico/media/tools", dir); rmdir(child);
+    snprintf(child, sizeof(child), "%s/.pico/media", dir); rmdir(child);
+    snprintf(child, sizeof(child), "%s/.pico", dir); rmdir(child); rmdir(dir);
+    return ok ? 0 : Fail(name, "tool image capability, persistence, or transcript ownership failed");
+}
+
 static int TestToolTraceError(void)
 {
     const char *name = "tool trace error flag";
@@ -5977,6 +6101,9 @@ int main(void)
     failed |= PICO_TEST_RUN(TestFastTurnSnapshot());
     failed |= PICO_TEST_RUN(TestUsageNormalizationAndSaturation());
     failed |= PICO_TEST_RUN(TestAfterCompact());
+    failed |= PICO_TEST_RUN(TestToolImageOwnership());
+    failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(false));
+    failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(true));
     failed |= PICO_TEST_RUN(TestToolTraceError());
     failed |= PICO_TEST_RUN(TestQueuedToolCallProgress());
     failed |= PICO_TEST_RUN(TestTodoAgentIsolation());

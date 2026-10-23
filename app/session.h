@@ -246,7 +246,7 @@ PicoSessionWriteResult PicoSession_LogToolCall(PicoHost *app, PicoAgent *agent,
 PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent,
                                                  const char *call_id, const char *name,
                                                  const char *output, bool is_error,
-                                                 const char *details_json);
+                                                 const char *details_json, const char *parts_json);
 PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent,
                                                  const char *summary, int tokens_before);
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,

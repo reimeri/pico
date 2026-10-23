@@ -19,7 +19,7 @@ char *pico_canonical_assistant_json(const PicoLlmPart *parts, int n, const char 
 char *pico_canonical_tool_call_json(const char *call_id, const char *name, const char *arguments,
                                     const char *item_id);
 char *pico_canonical_tool_result_json(const char *call_id, const char *name, const char *output,
-                                      bool is_error);
+                                      bool is_error, const char *parts_json);
 char *pico_canonical_item_json(const PicoLlmItem *item);
 char *pico_canonical_display(const PicoLlmPart *parts, int n);
 char *pico_canonical_compact_text(const PicoLlmPart *parts, int n);
@@ -35,5 +35,13 @@ char *pico_canonical_file_base64(const char *path, size_t *out_len);
 char *pico_canonical_audio_format(const char *path, const char *mime);
 char *pico_canonical_persist_bytes(const char *dir, const char *ext, const void *data, size_t n);
 char *pico_canonical_persist_data_url(const char *dir, const char *data_url);
+
+char *pico_canonical_tool_observation(const char *json);
+char *pico_canonical_tool_images_markdown(const char *parts_json);
+
+bool pico_canonical_valid_png(const void *bytes, size_t size);
+bool pico_canonical_tool_images_valid(const JsonDoc *doc, bool read_files);
+
+bool pico_canonical_is_tool_result(const char *json);
 
 #endif

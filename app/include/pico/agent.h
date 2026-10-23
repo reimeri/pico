@@ -142,6 +142,8 @@ uint64_t pico_agent_context_generation(const PicoAgentContext *ctx);
 uint64_t pico_agent_context_registration_generation(const PicoAgentContext *ctx);
 PicoWorkspaceId pico_agent_context_workspace_id(const PicoAgentContext *ctx);
 const char *pico_agent_context_workspace(const PicoAgentContext *ctx);
+/* Immutable turn capability: vision model AND image-bearing tool-result provider. */
+bool pico_agent_context_accepts_tool_images(const PicoAgentContext *ctx);
 const char *pico_agent_context_session_id(const PicoAgentContext *ctx);
 const char *pico_agent_context_profile(const PicoAgentContext *ctx);
 const char *pico_agent_context_purpose(const PicoAgentContext *ctx);

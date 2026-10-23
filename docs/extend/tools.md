@@ -288,11 +288,47 @@ pico_add_tool(workspace, "stateful", "Update state", kParams, RunStateful, Apply
 
 The apply callback returns `false` to reject details. A live rejection converts the tool result to an error and omits details from persistence. A replay rejection ignores that snapshot and preserves the latest valid state. Pico replays details chronologically on session resume and after extension reload, so details should be complete snapshots and apply should be idempotent. The callback runs on the main thread and may update extension state, but should not call Clay outside a view callback.
 
+## Image-bearing results
+
+ABI 22 adds `PicoToolResult.images` (`PicoToolImage *`), `image_count`, and optional
+`media_namespace`. Each image owns encoded PNG `png` bytes and a `size`; the
+array, every byte buffer, and the optional namespace string must be malloc'd.
+Ownership transfers to core when the callback returns, including errors and
+cancellation. Keep `output` for model-visible text/metadata and `details_json`
+for structured replay state; neither is an image transport.
+
+Call `pico_agent_context_accepts_tool_images(ctx)` before expensive capture. It
+snapshots the turn's vision model **and** the retained provider's `tool_images`
+capability. False means unsupported. Core also rejects image results when false;
+it never silently strips their images. Up to four valid PNGs, 64 MiB of encoded
+bytes total, and 4096 × 4096 pixels per image are accepted. Decoding/persistence
+happens on the core tool worker, not the graphics thread. Do not use Raylib on a
+tool worker to produce an image.
+
+Core writes exclusive private files below
+`<workspace>/.pico/media/tools/<session-id>/`. Optional namespace `"browser"`
+selects `.pico/media/browser/<session-id>/`; only `"tools"` and `"browser"` are
+accepted. Directory symlinks are rejected. A session identity is required.
+Canonical results gain image `parts` with absolute `path` and `mime` references.
+Bytes never enter canonical history or JSONL. Invalid PNGs or persistence failure
+become tool errors. See [`../../examples/image_tool.c`](../../examples/image_tool.c).
+
+Unadopted, cancelled, and retired-generation results release buffers and delete
+their newly written files. Accepted assets survive close/reload/replay and
+compaction; compaction removes old image results from active model context, not
+saved history. Saved-history deletion removes the corresponding owned assets.
+A request that needs a missing/unreadable/corrupt image fails instead of silently
+losing visual context. Replay restores references and never re-executes a tool.
+Expanded tool rows and copied/saved transcripts retain image presentation.
+`PicoTraceLine.tool_parts_json` is a borrowed core-owned reference array with the
+same lifetime as the other trace fields; do not mutate it. Text replacement by
+an after-tool hook does not remove the independently owned images.
+
 ## Contract
 
 - `name`, `description`, `params_json`, and optional group-title strings must outlive the extension — use string literals.
 - `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration also rejects invalid execution policies. It returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay warning names the tool and the reason.
-- Zero-initialize `PicoToolResult`. `output` and optional `details_json` must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
+- Zero-initialize `PicoToolResult`. `output`, optional `details_json`, and all image-result allocations must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).
 - Runs on the **worker thread** with a callback-scoped `PicoAgentContext *`, never `PicoHost *`. Do not retain it, inspect/mutate transcript or session state, call Clay, add views, or mutate UI. Stream overlay text with `pico_ui_post`. Parallel-eligible worker callbacks from the same agent, as well as callbacks from different agents, may overlap. See [agents](agents.md).

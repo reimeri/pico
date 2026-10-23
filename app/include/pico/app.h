@@ -107,6 +107,7 @@ typedef struct PicoTraceLine {
     char *tool_args;      /* formatted for transcript display */
     char *tool_args_json; /* original JSON supplied by the provider */
     char *tool_output;
+    char *tool_parts_json; /* borrowed image references; core-owned, restored on replay */
     bool tool_error;
     bool tool_streaming;      /* provisional until the finished result claims this call */
     size_t tool_stream_bytes; /* argument bytes received so far */
@@ -200,9 +201,19 @@ typedef struct PicoHookEvent {
 typedef void (*PicoHostHookFn)(PicoHost *host, const PicoHookEvent *event, void *state);
 typedef void (*PicoWorkspaceHookFn)(PicoWorkspace *workspace, const PicoHookEvent *event, void *state);
 
+/* Encoded PNG bytes. All allocations transfer to core on callback return.
+ * Up to 4 images / 64 MiB total. Core persists immutable session-owned assets. */
+typedef struct PicoToolImage {
+    unsigned char *png;
+    size_t size;
+} PicoToolImage;
+
 typedef struct PicoToolResult {
     char *output;       /* malloc; Pico frees */
     char *details_json; /* optional malloc'd JSON object; Pico validates and frees */
+    PicoToolImage *images; /* malloc array and nested PNG bytes; Pico frees */
+    int image_count;
+    char *media_namespace; /* optional malloc "tools" (default) or "browser" storage namespace */
     bool is_error;
 } PicoToolResult;
 
@@ -407,7 +418,7 @@ typedef struct PicoUiPost {
  *   {"type":"user","parts":[{"type":"text","text":"..."},{"type":"image","path":"...","mime":"..."}]}
  *   {"type":"assistant","parts":[{"type":"text","text":"..."}],"thinking":"...","thinking_signature":"..."}
  *   {"type":"tool_call","call_id":"...","name":"...","arguments":"...","item_id":"..."}
- *   {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false}
+ *   {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false,"parts":[{"type":"image","path":"...","mime":"image/png"}]}
  *   {"type":"context","parts":[{"type":"text","text":"..."}]}
  * `thinking`, `thinking_signature`, and `item_id` are optional. User/assistant
  * parts may also be `refusal`, `image`, or `audio` (`path`, optional `mime` / `url`).
@@ -478,6 +489,7 @@ typedef struct PicoProvider {
     const char *name;
     PicoProviderStreamFn stream;
     bool map_context; /* stream maps type:context items to a non-user role */
+    bool tool_images; /* explicitly maps tool_result image parts; false fails closed */
     /* Main-thread, nonblocking query. Borrowed arguments; no network or mutation.
      * Called only for models explicitly configured with supports_fast.
      * stream must independently validate the authentication route. NULL means unsupported. */

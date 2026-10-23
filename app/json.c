@@ -791,7 +791,27 @@ char *JsonStrDup(const JsonDoc *doc, int tok)
                     if (ok)
                     {
                         i += 4;
-                        if (cp < 0x80)
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (i + 6 >= n || s[i+1] != '\\' || s[i+2] != 'u') { JsonBuf_Free(&b); return NULL; }
+                            int low = 0;
+                            for (int h = 0; h < 4; ++h) {
+                                int v = HexVal(s[i+3+h]);
+                                if (v < 0) { JsonBuf_Free(&b); return NULL; }
+                                low = (low << 4) | v;
+                            }
+                            if (low < 0xDC00 || low > 0xDFFF) { JsonBuf_Free(&b); return NULL; }
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + low - 0xDC00; i += 6;
+                        } else if (!cp || (cp >= 0xDC00 && cp <= 0xDFFF)) {
+                            /* This API returns C strings: never silently truncate at an escaped NUL. */
+                            JsonBuf_Free(&b); return NULL;
+                        }
+                        if (cp >= 0x10000) {
+                            JsonBuf_Putc(&b, (char)(0xF0 | (cp >> 18)));
+                            JsonBuf_Putc(&b, (char)(0x80 | ((cp >> 12) & 0x3F)));
+                            JsonBuf_Putc(&b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+                            JsonBuf_Putc(&b, (char)(0x80 | (cp & 0x3F)));
+                        }
+                        else if (cp < 0x80)
                         {
                             JsonBuf_Putc(&b, (char)cp);
                         }

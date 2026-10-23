@@ -321,8 +321,9 @@ static bool ResponsesInputMediaValid(const char *json)
     {
         return false;
     }
+    if (!pico_canonical_tool_images_valid(&doc, true)) { JsonFree(&doc); return false; }
     char *type = JsonObjStr(&doc, 0, "type");
-    bool content = type && (strcmp(type, "user") == 0 || strcmp(type, "assistant") == 0);
+    bool content = type && (strcmp(type, "user") == 0 || strcmp(type, "assistant") == 0 || strcmp(type, "tool_result") == 0);
     PicoLlmPart *parts = NULL;
     int n = 0;
     bool valid = !content || pico_canonical_parse_parts(&doc, 0, &parts, &n);
@@ -415,6 +416,29 @@ char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesB
         JsonBuf_Puts(&b, mapped);
         free(mapped);
         wrote++;
+        JsonDoc current, next;
+        bool result = !JsonParse(&current, turn->input_json[i], strlen(turn->input_json[i]));
+        bool next_result = false;
+        if (result) { result = JsonEq(&current, JsonObjGet(&current, 0, "type"), "tool_result"); JsonFree(&current); }
+        if (i + 1 < turn->input_count && !JsonParse(&next, turn->input_json[i+1], strlen(turn->input_json[i+1]))) {
+            next_result = JsonEq(&next, JsonObjGet(&next, 0, "type"), "tool_result"); JsonFree(&next);
+        }
+        if (result && !next_result) {
+            int begin = i;
+            while (begin > 0) {
+                JsonDoc prev;
+                if (JsonParse(&prev, turn->input_json[begin-1], strlen(turn->input_json[begin-1]))) break;
+                bool is_result = JsonEq(&prev, JsonObjGet(&prev, 0, "type"), "tool_result"); JsonFree(&prev);
+                if (!is_result) break;
+                --begin;
+            }
+            for (int j = begin; j <= i; ++j) {
+                char *observation = pico_canonical_tool_observation(turn->input_json[j]);
+                char *image = observation ? MapPicoItem(observation, opts->provider) : NULL;
+                if (image) { JsonBuf_Putc(&b, ','); JsonBuf_Puts(&b, image); wrote++; }
+                free(image); free(observation);
+            }
+        }
     }
     if (turn->compact)
     {

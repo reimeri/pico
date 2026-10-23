@@ -135,3 +135,33 @@ Shared HTTP helpers retry transient TLS handshake, host/proxy DNS resolution, an
 Both request structs accept an optional `on_retry(user, retry, max_retries, delay_seconds, error)` callback. It runs synchronously on the calling thread before each wait and again before the corresponding attempt with `delay_seconds == 0`; retry numbers are one-based. `error` is borrowed only for the callback. The callback must return promptly and must not mutate the request or access UI from a worker. All request data remains borrowed across waits until the helper returns. Builtin streaming providers bridge this callback to ephemeral activity; other callers can supply their own observer.
 
 `PICO_LLM_DELTA_STATUS` replaces ephemeral provider activity using `text`/`len` and `call_index = -1`; an empty status restores the normal thinking label. The host copies the text during `on_delta` and publishes it on the main thread. It is never assistant output, thinking history, or persisted session content. Subsequent output clears the status; completion, failure, cancellation, and the next request do not retain it. The live chat indicator and delegated-agent activity display it. Providers must use deltas, not UI mutation, for worker-side status.
+
+## Image-bearing tool results
+
+ABI 22 adds `PicoProvider.tool_images`, an explicit opt-in to image-bearing
+canonical tool results. False is unsupported, independent of the model's
+`vision` flag. Register true only if the stream can map this shape faithfully:
+
+```json
+{"type":"tool_result","call_id":"capture-1","name":"browser_observe",
+ "output":"page metadata","is_error":false,
+ "parts":[{"type":"image","path":"/workspace/.pico/media/browser/SESSION/part.png","mime":"image/png"}]}
+```
+
+`parts` is optional; when present it is an array of owned local PNG references.
+Never send a path or base64 string as ordinary text and claim vision support.
+Read the referenced image into a genuine provider image part; reject malformed
+parts or unreadable/corrupt assets. Core refuses follow-up history containing
+tool images when the selected model lacks vision or the provider lacks this
+capability. `pico_agent_context_accepts_tool_images` exposes the turn snapshot to
+tools, so they can fail before capture/mutation.
+
+The builtin Responses and Completions adapters keep normal function/tool output
+messages, then emit labeled image-bearing observation messages after the sibling
+result run, associated with each tool-call ID. The wire role used for those
+observations is `user`, because these adapters support images there; canonical
+history remains **tool_result**, not a fabricated human submission. The label
+identifies the images as untrusted tool data, not instructions. OpenAI (including
+Codex), Hyper, and xAI opt in. Model/backend vision support is still required;
+backend rejection is reported, without a text-only retry. Unit fixtures validate
+both wire formats; real backend/model verification is separate.

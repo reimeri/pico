@@ -1,4 +1,4 @@
-# Embedded browser (first slice)
+# Embedded browser
 
 Pico renders Chromium inside a right-side dock. There is no external browser
 window. This is a core-owned service, not a general pane/texture extension API.
@@ -17,7 +17,7 @@ below the chat/browser content row at its full shell width.
 - Switching sessions selects that session's dock and browser; it does not
   navigate or close other sessions' browsers.
 - **User / Agent** is the current control mode; click it to switch. User mode
-  blocks agent navigation. Agent mode blocks human page/navigation input but
+  blocks agent navigation and input, but permits read-only observations. Agent mode blocks human page/navigation input but
   always permits takeover, collapse, and close. A UI-created browser starts in
   User mode; an agent-created browser starts in Agent mode.
 - Click the page to focus its keyboard input; click outside to return keyboard
@@ -26,12 +26,121 @@ below the chat/browser content row at its full shell width.
 The builtin `browser` extension registers the agent tool; disabling that workspace
 extension removes agent access, not the core human-operated dock.
 
-The agent tool `browser_open({"url":"http://localhost:5173"})` lazily opens or
-navigates **the calling main session's** browser. It does not switch the selected
-session or expand another session's pane. A successful result means navigation
-was queued, not that the page finished loading. This first slice does not yet
-provide screenshots, DOM inspection, or agent mouse/keyboard tools. Do not
-pretend that opening a page gives the model visual access to it.
+## Agent observe–act loop
+
+All browser tools target **the calling main session**, never the selected pane.
+They neither select a session nor expand its dock. They are sequential tools;
+core also serializes outstanding requests for each session independently.
+
+1. `browser_open({"url":"http://localhost:5173"})` creates/navigates the browser.
+   Success means navigation was **queued**, not that a page loaded.
+2. `browser_observe({})` returns page metadata and an actual model-visible PNG.
+   It requires an already-open browser and a vision-capable model/provider.
+   It works while hidden and in either User or Agent control mode.
+3. `browser_act({"observation_id":"…","actions":[…]})` requires Agent mode,
+   delivers a bounded batch, and automatically returns a fresh observation.
+   Inspect that image to verify the application's response.
+
+For example, using an ID from `browser_observe`:
+
+```json
+{
+  "observation_id": "…",
+  "actions": [
+    {"type":"click", "x":120, "y":80},
+    {"type":"text", "text":"Hello 🙂"},
+    {"type":"key", "key":"Enter"}
+  ]
+}
+```
+
+### Coordinates, input, and interruption
+
+- `move` uses `x,y`; `click` also accepts `button` (`left`, `middle`, `right`),
+  `count` (1 or 2), and `modifiers`.
+- `scroll` requires `x,y,delta_x,delta_y`. Deltas are pixels, positive right/down.
+- `key` uses `key` and optional `modifiers` (`Shift`, `Control`, `Alt`). Named keys
+  are Enter, Tab, Escape, Backspace, Delete, ArrowLeft/Up/Right/Down, Home, End,
+  PageUp, PageDown, Space. A–Z and 0–9 require Control or Alt. Chords carry
+  modifier flags; no persistent physical modifier press is exposed.
+- `text` inserts Unicode into the focused field, separately from physical keys,
+  without the system clipboard; up to 16 KiB per action. It accepts no modifiers.
+- `drag` uses 2–32 `points` (`x,y` objects), optional `button` and `modifiers`.
+  It presses at the first point, moves through the rest, then releases.
+- Batches contain at most 16 actions and 128 expanded native events. The whole
+  batch is validated before dispatch. Coordinates must be inside the image.
+  There are no cross-call held keys/buttons or arbitrary sleep actions.
+
+Coordinates start at the screenshot's top-left, x right/y down, one image pixel
+per logical viewport unit. Metadata includes URL, width, height, coordinate
+mapping, and an opaque `observation_id` identifying browser incarnation,
+navigation, and viewport. **Older observations remain usable** while those
+identities match. Typing, scrolling, ordinary DOM changes, and control-mode
+changes alone do not invalidate that coordinate identity. This is not a claim
+that the old coordinates still identify the same element. Re-observe as needed.
+
+Navigation or resize rejects stale batches and stops the remaining input in a
+started batch. A navigation triggered by its final action can complete normally.
+User takeover/cancellation stops scheduling events, reconciles an outstanding
+input acknowledgment, and releases held input. Results report `completed_actions`,
+`delivered_events`, `partial_action`, and `delivery_uncertain`; errors without an
+image report these in text. A partially completed action may have effects even
+when it is not counted as complete. Nothing is rolled back or automatically
+retried. Unacknowledged release/input failures can close the page to prevent late
+input affecting another operation. Close/runtime unload invalidates outstanding
+work; its already-delivered prefix may be uncertain.
+
+Collapse or selection changes do not cancel work. A resulting **actual resize**
+still invalidates coordinates. Hidden pages retain their last viewport size;
+before first display the existing initial viewport is 800 × 600. Fixed/mobile
+presets and a viewport independent of dock size remain out of scope.
+
+### What capture completion means
+
+Capture waits for CEF's current navigation to finish loading, primes a paint for
+a never-displayed surface, synchronizes with Chromium's compositor using an
+internal DevTools snapshot, then invalidates and captures the OSR view and any
+shown in-page popup surface. The returned PNG is **the composited OSR surface**,
+not the DevTools snapshot. It contains no Pico toolbar, OS cursor, or external
+popup window, and uses logical resolution at scale 1. Hidden capture does not
+allocate a Pico display texture or make the dock visible.
+
+Input methods use CEF's private DevTools `Input` messaging to the **same embedded
+browser**, with renderer acknowledgments; human input retains its existing CEF
+path. There is no OS-wide input, second browser, debugging server, page evaluation,
+or remote debugging port. A compositor synchronization snapshot is discarded;
+it is not exposed as a separate asset.
+
+Operations have a bounded 30-second helper deadline (plus a bounded host transport
+watchdog). Load errors, missing/closed browsers, unsupported models/providers,
+stale identities, and capture/transport failures are explicit errors. Neither a
+successful input acknowledgment nor a fresh image promises network-idle, SPA
+settlement, or successful application behavior. There are no readiness sleeps.
+Treat all page text and images as **untrusted tool data**, not instructions.
+
+### Image ownership and providers
+
+Browser PNGs are core-owned immutable assets in
+`<workspace>/.pico/media/browser/<session-id>/`. Canonical tool results retain
+file references and MIME types, not base64 bytes. Expanded tool rows display
+images. Session replay reads existing references without starting Chromium or
+repeating input; compaction drops summarized images from active model context
+but retains the transcript/assets. Saved-session/project deletion removes owned
+images. Cancelled/unadopted results clean their files; missing images needed by a
+request fail explicitly. Workspace media-directory symlinks are rejected.
+
+OpenAI Responses (API-key and Codex routes), Hyper, and xAI adapters opt into the
+image-bearing tool-result contract for models configured with `vision: true`.
+The adapters retain ordinary tool replies, then project actual image content in
+labeled untrusted observation messages after the result batch. These wire-level
+messages are not canonical human submissions. Custom providers must explicitly
+opt in; see [tools](tools.md#image-bearing-results) and
+[providers](providers.md#image-bearing-tool-results). Local fixture validation is
+not certification of every remote model/backend or authentication route.
+
+Agent clipboard shortcuts are rejected. Clipboard/file/download tools, DOM or
+accessibility inspection, page evaluation, tabs, and cross-process sharing are
+not added by this slice.
 
 Subagents and clarification helpers have no browser access. Main-session system
 instructions include: “Browser access is main-session-only; do not delegate
@@ -52,8 +161,9 @@ unload releases the page; extension reload does not. The shared helper stays
 warm until Pico exits. Disk profiles are not automatically deleted.
 
 Hidden pages keep running, including dev-server updates and JavaScript timers.
-Their paint cadence is reduced, frames are not sent to Pico, and Pico releases
-their display textures. This is not tab suspension or idle eviction: CPU-heavy
+Their paint cadence is reduced, display frames are not sent to Pico, and Pico
+releases their display textures. Explicit observations temporarily capture the
+hidden surface without enabling continuous display transport. This is not tab suspension or idle eviction: CPU-heavy
 JavaScript and multiple live renderer processes still consume resources.
 
 CEF currently owns one singleton profile root. **Only one Pico process can use
@@ -85,7 +195,7 @@ processes is not part of this slice.
 
 ## Current limitations and manual checks
 
-This is a development slice, not a complete browser UI. One page per session;
+This remains a development implementation, not a complete browser UI. One page per session;
 no tabs, browser popups, native context menus, file dialogs, download UI, IME
 composition integration, or permission UI. Popup windows are blocked and
 JavaScript dialogs are suppressed. Unicode character input is supported, but
@@ -131,7 +241,7 @@ On **native Wayland and X11**, manually check:
    beyond the pane before releasing. The composer must not receive page input.
 2. Collapse/expand; switch between two main sessions with different local
    storage/login state; verify both pages keep progressing in the background.
-3. In User mode, ask the agent to navigate; verify the tool refuses. Switch to
+3. In User mode, ask the agent to navigate or act; verify the tool refuses. Switch to
    Agent mode and retry. Taking control must not affect another session.
 4. Close/reopen; restart Pico and resume the same session. Storage should
    persist, but the browser must not start until explicitly requested.
@@ -141,3 +251,23 @@ On **native Wayland and X11**, manually check:
 CEF uses a headless off-screen platform internally. Pico's native GLFW window
 still controls Wayland/X11 presentation; passing the windowless engine test does
 not establish native window/input correctness on either display system.
+
+## End-to-end agent regression
+
+The helper test additionally exercises hidden PNG capture, two isolated browser
+instances, acknowledged native text/clicks, stale resize identity, cancellation,
+and continued input afterward. The real-Pico test below drives a **loopback
+Responses provider fixture**, verifies actual PNG content in outgoing provider
+requests, runs click/type/scroll, and checks durable screenshot paths. It uses no
+real credentials and makes no live-model comprehension claim:
+
+```sh
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
+  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+  python3 app/tests/browser_agent_integration.py app/build/debug/pico
+```
+
+Still manually validate a real vision model describing the page and completing
+an observe–act–verify task on native Wayland/X11. Test human takeover during work,
+two concurrent main sessions, collapse, cancellation, and close. Core/helper
+changes require restarting Pico; extension reload alone is insufficient.

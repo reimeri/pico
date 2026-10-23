@@ -30,6 +30,11 @@ static inline GLFWwindow *pico_glfwCreateWindow(int width, int height, const cha
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
     }
 #endif
+#if defined(__linux__)
+    /* Browser DMA-BUF imports must use this very OpenGL context. X11 defaults
+     * to GLX; choose EGL there as well as on Wayland, without a GLX fallback. */
+    glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+#endif
     return glfwCreateWindow(width, height, title, monitor, share);
 }
 

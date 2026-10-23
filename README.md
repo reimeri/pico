@@ -79,13 +79,13 @@ Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO
 
 ## Build from source
 
-Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, and Raylib's native deps (OpenGL, X11/Wayland, audio). Ubuntu 26.04:
+Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:
 
 ```bash
 sudo apt update
 sudo apt install build-essential cmake ninja-build meson pkg-config git curl \
   libcurl4-openssl-dev libssl-dev libsqlite3-dev libutf8proc-dev \
-  libgl1-mesa-dev libx11-dev libx11-xcb-dev \
+  libgl1-mesa-dev libegl-dev libx11-dev libx11-xcb-dev \
   libxcb1-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
   libxinerama-dev libxrandr-dev libxrender-dev libxkbcommon-dev \
   libwayland-dev wayland-protocols libffi-dev libexpat1-dev \
@@ -101,6 +101,9 @@ cmake -S app --preset debug && cmake --build app/build/debug && ./app/build/debu
 ```
 
 The first configure fetches Raylib unless `FETCHCONTENT_SOURCE_DIR_RAYLIB` is set. Nix: `nix develop` (or [direnv](https://direnv.net/)). After a NixOS graphics-driver upgrade, EGL failures can mean a glibc mismatch (`LD_DEBUG=libs ./app/build/debug/pico`); `nix flake update nixpkgs`, then recreate `app/build/debug` inside a new `nix develop` shell before rebuilding.
+
+The embedded browser requires hardware EGL DMA-BUF import/export and native GPU
+fences; it has no CPU-rendering fallback. See [browser GPU requirements](docs/extend/browser.md#gpu-rendering-requirements).
 
 Settings shows the version and a seven-character source commit hash (`-dirty` for tracked changes). Local builds refresh this metadata on each build; flakes supply their source revision. Source archives without revision metadata show only the version; packagers can set `-DPICO_BUILD_REVISION=<commit-hash>[-dirty]` when configuring CMake.
 

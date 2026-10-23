@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real Pico -> browser tools -> CEF -> image-bearing provider request.
 Uses a loopback OpenAI Responses fixture, not credentials or a paid/live model.
-Run under nix develop .#browser-tests and isolated xvfb-run, like the UI test.
+Run under nix develop .#browser-tests and isolated hardware-backed X11, like the UI test.
 """
 import base64
 import http.server
@@ -203,7 +203,7 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
 
 def main():
     if os.environ.get('WAYLAND_DISPLAY') or not os.environ.get('DISPLAY'):
-        raise RuntimeError('Use an isolated xvfb-run display, not the user desktop.')
+        raise RuntimeError('Use an isolated hardware-backed X11 display, not the user desktop.')
     binary = str(Path(sys.argv[1]).resolve())
     def interrupted(signum, frame):
         raise RuntimeError(f'agent integration watchdog at provider round {Fixture.round}')
@@ -220,7 +220,7 @@ def main():
             'compact_at':None, 'resume_last':False}))
         environment = {k:v for k,v in os.environ.items() if not k.startswith(('PICO_', 'OPENAI_', 'HYPER_', 'XAI_'))}
         environment.update(XDG_CONFIG_HOME=str(root/'config'), XDG_SESSION_TYPE='x11',
-                           LIBGL_ALWAYS_SOFTWARE='1', OPENAI_API_KEY='loopback-fixture-only')
+                           OPENAI_API_KEY='loopback-fixture-only')
         with (root/'pico.log').open('w') as log:
             process = subprocess.Popen([binary,'--safe'],cwd=root,env=environment,stdout=log,stderr=log)
             Fixture.process = process

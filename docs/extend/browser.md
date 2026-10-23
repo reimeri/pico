@@ -3,6 +3,44 @@
 Pico renders Chromium inside a right-side dock. There is no external browser
 window. This is a core-owned service, not a general pane/texture extension API.
 
+## GPU rendering requirements
+
+Continuous presentation is **GPU-only on Linux**, with no software-pixel fallback.
+Pico uses an EGL OpenGL context on both Wayland and X11. Chromium's helper uses
+native Ozone (Wayland when `WAYLAND_DISPLAY` is set, otherwise X11), but still
+renders windowlessly: it never creates an external browser window. For diagnosis,
+`PICO_BROWSER_OZONE_PLATFORM=wayland` or `x11` selects the helper backend explicitly.
+Both processes need access to a working native display and compatible GPU drivers.
+The helper uses a surfaceless EGL OpenGL context for copies and exports.
+
+Required driver features include EGL DMA-BUF import with modifiers, native
+`sync_file` fences and server-side waits, and (in the helper) EGL Mesa DMA-BUF
+image export. Unsupported formats, devices, contexts, or fences produce explicit
+errors; they never switch to full-frame CPU transport. Software Xvfb/llvmpipe is
+not a substitute for this hardware test. Multi-GPU/offload and other drivers need
+native validation; successful import on one driver does not establish portability.
+The pinned CEF build delivers accelerated buffers on native Wayland/X11 in the
+hardware regression; its headless Ozone backend failed frame allocation.
+
+CEF owns its accelerated buffer only for the callback. The helper imports and
+copies it into owned GPU view/popup textures, completes that borrowed-buffer read
+before returning, and composites into a bounded pool of owned exportable images.
+Only metadata, DMA-BUF descriptors, and an acquire fence cross the private socket.
+Pico imports the image directly in its actual graphics context. It flushes Raylib's
+batched sampling before sending a release fence and serial-matched acknowledgment;
+the helper waits on that fence before reusing a slot. Duplication of a CEF descriptor
+alone would **not** extend the lifetime of its contents. Pool exhaustion coalesces
+to the newest GPU state instead of blocking CEF or accumulating frames. Resize
+never reallocates a leased image. Closed/failed pages release imports and descriptors
+without retaining stale resources across reopen or extension reload.
+
+This eliminates continuous CPU-pixel socket payloads, BGRA conversion, and host
+texture uploads—not Chromium rendering or GPU copies. There are GPU copies for
+borrowed-buffer ownership and popup composition, and the callback-completion wait
+can stall. Screenshots remain separate: a requested observation synchronizes the
+compositor, obtains fresh accelerated view/popup surfaces, then performs readback
+and PNG encoding **on demand**. No speedup or zero-copy claim is implied.
+
 ## Using it
 
 Select a main session and click the right-edge `<` to expand its browser. A new,
@@ -345,7 +383,7 @@ processes is not part of this slice.
 
 A failed page is **stopped**, not still “Starting browser…”. The dock and tool
 errors retain the concrete cause: helper exit status or terminating signal,
-command/event transport or protocol failure, command-queue exhaustion, or
+command/event transport or protocol failure, GPU import/export/fence failure, command-queue exhaustion, or
 Chromium renderer termination (including killed/crashed/OOM/launch failure when
 Chromium supplies that classification). Process status can arrive one pump after
 socket EOF; pending tools wait briefly for that classification rather than
@@ -369,33 +407,33 @@ misreporting a signal as a startup failure.
   Already delivered actions/evaluation effects are not undone and can be uncertain.
 - Runtime initialization and page initialization have independent 30-second
   readiness watchdogs. A runtime timeout stops the shared helper; a page timeout
-  stops that page. Readiness is not application/network-idle readiness.
+  stops that page. A separate 10-second initial accelerated-buffer watchdog
+  stops a page if CEF supplies no accelerated callbacks. Readiness is not application/network-idle readiness.
 
 ### Opt-in resource profiling
 
 Set `PICO_BROWSER_PROFILE=/absolute/path/to/new-metrics.jsonl` before launching
 Pico to write private, cumulative JSONL counters. The file must not already exist
 and is created with mode `0600`; it is never overwritten. Without the variable,
-no profiling file, timing calls around conversion/upload, or periodic profiling
+no profiling file, timing calls around GPU import, or periodic profiling
 wakeups are added. Write/flush errors returned by stdio disable metric output
 with a stderr warning, not a browser failure. Files survive exit until removed by their owner.
 
-Records contain monotonic timestamps, received raw-frame counts/bytes,
-latest-frame replacements, texture-upload counts/bytes, observation PNG bytes,
-BGRA conversion wall time, texture creation/update wall time, and the lifetime
-command-queue high-water mark. Records are emitted approximately once per second
-(and finally on graceful shutdown). Profiling adds a roughly one-Hz host wakeup
-when otherwise idle. It records no URLs, page text, image pixels or session IDs.
-Upload timing measures host API wall time, **not GPU completion**. Counters are
-host-wide across sessions and cumulative across explicit helper restarts; they
-are not a public extension API or a renderer CPU/RAM limit.
+Records contain monotonic timestamps, received GPU-frame counts and metadata
+bytes (`frames`, `frame_bytes`), dropped/coalesced frames (`replaced_frames`),
+imports (`imports`, `import_seconds`), observation PNG bytes (`png_bytes`), and the
+lifetime command-queue high-water mark (`queue_peak`). Metadata byte counts exclude
+ancillary descriptors/fences and are **not pixel bandwidth**. Records are emitted
+approximately once per second and at graceful shutdown. Profiling adds a roughly
+one-Hz host wakeup when otherwise idle, but records no URLs, page text, image pixels
+or session IDs. Import timing measures host API wall time, **not GPU completion**.
+Counters are host-wide, cumulative across explicit helper restarts, and are not a
+public extension API or a renderer CPU/RAM limit.
 
-See [the profiling procedure and measured baseline](../browser-profiling.md) for
-repeatable static/animated/WebGL workloads, visible/hidden/concurrent sessions,
-process-tree CPU/RSS, IPC bandwidth, and actual host upload measurements. Software
-Xvfb results do not establish native GPU/Wayland performance. Dirty-region/GPU
-transport changes, suspension/eviction, helper-idle shutdown, cross-process
-sharing, and packaged-artifact execution remain outside this increment.
+See [profiling](../browser-profiling.md) for repeatable workloads and the historical
+CPU-transport baseline. Those old conversion/upload metrics do not describe this
+GPU path. Suspension/eviction, helper-idle shutdown, and sharing one runtime between
+multiple Pico processes remain out of scope.
 
 ## Implementation contracts
 
@@ -406,7 +444,8 @@ sharing, and packaged-artifact execution remain outside this increment.
 - Private local sockets carry commands and off-screen frames; there is no
   listening DevTools/debug port. Text events and frame dimensions are bounded.
 - The receiver publishes owned pending snapshots under a mutex and wakes Pico.
-  Only the graphics thread uploads/unloads textures or touches Clay.
+  Only the graphics thread imports/destroys display textures, handles release
+  fences, or touches Clay. The receiver owns only metadata and transferred FDs.
 - Browser view callbacks are declarative. Retired texture/text storage survives
   pending Clay commands until the next layout boundary.
 - The content row is bounded by the shell; browser and main panes take its exact
@@ -437,7 +476,7 @@ cmake --build app/build/debug
 ```
 
 For the real, windowless engine test (requires working Chromium sandbox/user
-namespaces):
+namespaces, a native display, and hardware EGL/DMA-BUF support):
 
 ```sh
 python3 app/tests/browser_integration.py \
@@ -456,9 +495,28 @@ display, enters a loopback URL, and checks screenshot pixels before and after
 reload. This catches presentation failures that a helper-only frame test cannot:
 
 ```sh
-nix develop .#browser-tests -c xvfb-run -a -s '-screen 0 1600x1200x24' \
+# Run only on an isolated hardware-backed X11 display; do not automate your desktop.
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY \
   timeout 90s python3 app/tests/browser_ui_integration.py app/build/debug/pico
 ```
+
+A separate hardware test uses Pico's patched Raylib/GLFW context and the real
+helper, without OS-level input injection. It checks actual colors/orientation,
+cross-process fences, retained-frame contents, full-pool resize, and helper death:
+
+```sh
+nix develop -c cmake --build app/build/debug --target pico_browser_gpu_tests
+nix develop -c timeout -k 5s 60s app/build/debug/pico_browser_gpu_tests \
+  "$PWD/app/build/debug/browser/runtime/pico_browser_helper"
+# Repeat on X11/Xwayland:
+nix develop -c env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 \
+  timeout -k 5s 60s app/build/debug/pico_browser_gpu_tests \
+  "$PWD/app/build/debug/browser/runtime/pico_browser_helper"
+```
+
+The hardware test is deliberately not an unconditional CTest test; code 77 means
+no suitable host graphics context, not a passing GPU test. The ordinary CTest suite
+includes descriptor ownership/truncation tests and helper-failure classification.
 
 On **native Wayland and X11**, manually check:
 
@@ -473,9 +531,9 @@ On **native Wayland and X11**, manually check:
 5. Resize and move Pico between monitors. Watch for bounds drift, image scaling,
    popup positioning, and stuck keys/buttons after focus changes.
 
-CEF uses a headless off-screen platform internally. Pico's native GLFW window
-still controls Wayland/X11 presentation; passing the windowless engine test does
-not establish native window/input correctness on either display system.
+CEF uses native Ozone for accelerated windowless rendering. Pico's GLFW window
+still owns presentation; passing buffer-import tests does not establish native
+window/input/IME correctness on either display system.
 
 ## End-to-end agent regression
 
@@ -487,8 +545,8 @@ requests, runs click/type/scroll, and checks durable screenshot paths. It uses n
 real credentials and makes no live-model comprehension claim:
 
 ```sh
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
-  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+# Isolated hardware-backed X11 display required.
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico
 ```
 
@@ -517,8 +575,8 @@ tool registration/dispatch, no lazy creation by inspection, complete large-file
 handoff, file lifetime after exit, and viewport control:
 
 ```sh
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
-  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+# Isolated hardware-backed X11 display required.
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico --developer
 ```
 
@@ -550,7 +608,7 @@ checks actual registered tool errors, effect uncertainty, and refusal to revive
 a stopped browser via another `browser_open`:
 
 ```sh
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
-  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+# Isolated hardware-backed X11 display required.
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico --failure
 ```

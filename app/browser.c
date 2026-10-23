@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "browser.h"
 #include "browser/protocol.h"
+#include "browser/gpu.h"
+#include "rlgl.h"
 #include "host_internal.h"
 #include "agent_internal.h"
 #include "agent.h"
@@ -24,6 +26,7 @@
 #include <math.h>
 
 extern char **environ;
+typedef struct BrowserFrame { PbFrame frame; PbFds fds; } BrowserFrame;
 typedef struct BrowserSession {
     struct BrowserSession *next;
     PicoAgentId agent_id;
@@ -42,8 +45,11 @@ typedef struct BrowserSession {
     PicoTextField field;
     Texture2D texture;
     /* Only the receiver and main thread share these, under service->mu. */
-    unsigned char *pixels;
-    int pixel_width, pixel_height;
+    BrowserFrame inbox[PB_POOL_SIZE];
+    unsigned inbox_count;
+    uint64_t last_frame;
+    PbGpuImage image;
+    PbFrame displayed;
     bool changed, received_ready, received_closed, received_stopped;
     char received_url[PB_URL_CAP], received_error[512];
 } BrowserSession;
@@ -84,10 +90,13 @@ typedef struct PicoBrowserService {
     FILE *profile;
     bool profiling; /* Immutable until receiver shutdown; FILE belongs to main. */
     double profile_last;
-    uint64_t frames, frame_bytes, replaced_frames, uploads, upload_bytes, png_bytes;
-    double convert_seconds, upload_seconds;
+    uint64_t frames, frame_bytes, replaced_frames, imports, png_bytes;
+    double import_seconds;
     unsigned queue_peak;
     PbCommand queue[256];
+    int queue_fence[256];
+    PbGpu gpu;
+    bool gpu_ready;
     unsigned queue_head, queue_count;
     int modifiers;
 } PicoBrowserService;
@@ -111,11 +120,11 @@ static void Profile(PicoBrowserService *s, bool final)
     pthread_mutex_unlock(&s->mu);
     int rc = fprintf(s->profile,
         "{\"monotonic_seconds\":%.6f,\"final\":%s,\"frames\":%llu,\"frame_bytes\":%llu,"
-        "\"replaced_frames\":%llu,\"uploads\":%llu,\"upload_bytes\":%llu,\"png_bytes\":%llu,"
-        "\"convert_seconds\":%.9f,\"upload_seconds\":%.9f,\"queue_peak\":%u}\n",
+        "\"replaced_frames\":%llu,\"imports\":%llu,\"png_bytes\":%llu,"
+        "\"import_seconds\":%.9f,\"queue_peak\":%u}\n",
         now, final ? "true" : "false", (unsigned long long)frames, (unsigned long long)bytes,
-        (unsigned long long)replaced, (unsigned long long)s->uploads, (unsigned long long)s->upload_bytes,
-        (unsigned long long)png, s->convert_seconds, s->upload_seconds, s->queue_peak);
+        (unsigned long long)replaced, (unsigned long long)s->imports,
+        (unsigned long long)png, s->import_seconds, s->queue_peak);
     if (rc < 0 || fflush(s->profile)) {
         fclose(s->profile); s->profile = NULL;
         fprintf(stderr, "Browser profiling stopped: could not write complete metrics.\n");
@@ -155,12 +164,12 @@ void PicoBrowser_Init(PicoHost *host)
     }
 }
 /* A clean EOF is distinct from a truncated record and a socket failure. */
-static bool ReadAll(int fd, void *data, size_t n, bool header, char *error, size_t cap)
+static bool ReadAll(int fd, void *data, size_t n, bool header, char *error, size_t cap, PbFds *fds)
 {
     char *p = data;
     size_t remaining = n;
     while (remaining) {
-        ssize_t got = recv(fd, p, remaining, 0);
+        ssize_t got = PbReceive(fd, p, remaining, fds, 0);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) {
             if (got < 0) snprintf(error, cap, "Browser event transport failed: %s.", strerror(errno));
@@ -183,12 +192,13 @@ static void *Receive(void *arg)
     PicoBrowserService *s = arg;
     PbEvent event;
     char failure[512] = {0};
-    while (ReadAll(s->event_fd, &event, sizeof(event), true, failure, sizeof(failure))) {
+    PbFds fds = {0};
+    while (ReadAll(s->event_fd, &event, sizeof(event), true, failure, sizeof(failure), &fds)) {
         bool frame = event.type == PB_FRAME;
         if (event.type < PB_READY || event.type > PB_RUNTIME_READY ||
             ((event.type == PB_READY || event.type == PB_CLOSED || event.type == PB_RUNTIME_READY) && event.length) ||
             (frame ? (!event.width || !event.height || event.width > PB_MAX_DIMENSION ||
-                     event.height > PB_MAX_DIMENSION || event.length != event.width * event.height * 4)
+                     event.height > PB_MAX_DIMENSION || event.length != sizeof(PbFrame))
                   : event.type == PB_TEXT_RESULT ? event.length != sizeof(PbTextResult)
                   : event.type == PB_OBSERVATION ?
                     (event.length < sizeof(PbObservation) || event.length > sizeof(PbObservation) + PB_MAX_PNG ||
@@ -198,8 +208,14 @@ static void *Receive(void *arg)
         }
         unsigned char *data = malloc((size_t)event.length + 1);
         if (!data) { snprintf(failure, sizeof(failure), "Browser event allocation failed."); break; }
-        if (!ReadAll(s->event_fd, data, event.length, false, failure, sizeof(failure))) { free(data); break; }
+        if (!ReadAll(s->event_fd, data, event.length, false, failure, sizeof(failure), &fds)) { free(data); break; }
         data[event.length] = 0;
+        PbFrame metadata = {0};
+        if (frame) memcpy(&metadata, data, sizeof(metadata));
+        if ((frame && (!PbFrameValid(&metadata, &fds) || metadata.width != event.width || metadata.height != event.height)) ||
+            (!frame && fds.count)) {
+            snprintf(failure, sizeof(failure), "Browser protocol error: invalid GPU frame descriptors."); free(data); break;
+        }
         pthread_mutex_lock(&s->mu);
         if (event.type == PB_TEXT_RESULT) {
             PbTextResult info; memcpy(&info, data, sizeof(info));
@@ -243,9 +259,13 @@ static void *Receive(void *arg)
             snprintf(s->error, sizeof(s->error), "%s", data);
         if (b) {
             if (frame) {
-                if (s->profiling) { ++s->frames; s->frame_bytes += event.length; s->replaced_frames += b->pixels != NULL; }
-                free(b->pixels); b->pixels = data; data = NULL;
-                b->pixel_width = event.width; b->pixel_height = event.height;
+                if (b->inbox_count == PB_POOL_SIZE || metadata.serial <= b->last_frame) {
+                    snprintf(failure, sizeof(failure), "Browser protocol error: GPU lease queue or serial violation.");
+                    pthread_mutex_unlock(&s->mu); free(data); break;
+                }
+                if (s->profiling) { ++s->frames; s->frame_bytes += event.length; }
+                b->last_frame = metadata.serial;
+                b->inbox[b->inbox_count++] = (BrowserFrame){metadata, fds}; fds.count = 0;
             } else if (event.type == PB_READY) b->received_ready = true;
             else if (event.type == PB_CLOSED) b->received_closed = true;
             else if (event.type == PB_URL) snprintf(b->received_url, sizeof(b->received_url), "%s", data);
@@ -257,9 +277,10 @@ static void *Receive(void *arg)
             b->changed = true;
         }
         pthread_mutex_unlock(&s->mu);
-        free(data);
+        free(data); PbFdsClose(&fds);
         pico_host_wakeup(s->host);
     }
+    PbFdsClose(&fds);
     pthread_mutex_lock(&s->mu); s->disconnected = true;
     if (failure[0] && !s->error[0]) snprintf(s->error, sizeof(s->error), "%s", failure);
     pthread_mutex_unlock(&s->mu);
@@ -268,10 +289,28 @@ static void *Receive(void *arg)
 }
 /* Main-thread terminal latch. Once fail-closed, no queued input can escape
  * through a later Flush/Send, even before the receiver notices shutdown. */
+static void ClearQueue(PicoBrowserService *s)
+{
+    while (s->queue_count) {
+        int fd = s->queue_fence[s->queue_head];
+        if (fd >= 0) close(fd);
+        s->queue_head = (s->queue_head + 1) % 256; --s->queue_count;
+    }
+}
+static void ClearInbox(BrowserSession *b)
+{
+    for (unsigned i = 0; i < b->inbox_count; ++i) PbFdsClose(&b->inbox[i].fds);
+    b->inbox_count = 0;
+}
+static void DestroyDisplay(PicoBrowserService *s, BrowserSession *b)
+{
+    if (b->image.texture) { rlDrawRenderBatchActive(); PbGpuDestroy(&s->gpu, &b->image); }
+    b->texture = (Texture2D){0}; b->displayed = (PbFrame){0};
+}
 static void StopTransport(PicoBrowserService *s)
 {
     if (s->transport_failed) return;
-    s->transport_failed = true; s->queue_count = 0;
+    s->transport_failed = true; ClearQueue(s);
     s->failure_at = MonotonicSeconds();
     if (s->command_fd >= 0) shutdown(s->command_fd, SHUT_RDWR);
     if (s->event_fd >= 0) shutdown(s->event_fd, SHUT_RDWR);
@@ -285,7 +324,9 @@ static bool Flush(PicoBrowserService *s)
     if (s->transport_failed || failed) return false;
     while (s->queue_count && s->command_fd >= 0) {
         PbCommand *c = &s->queue[s->queue_head];
-        ssize_t n = send(s->command_fd, c, sizeof(*c), MSG_DONTWAIT | MSG_NOSIGNAL);
+        PbFds fds = {.count = s->queue_fence[s->queue_head] >= 0 ? 1 : 0};
+        fds.fd[0] = s->queue_fence[s->queue_head];
+        ssize_t n = PbSend(s->command_fd, c, sizeof(*c), &fds, MSG_DONTWAIT);
         if (n < 0 && errno == EINTR) continue;
         if (n != sizeof(*c)) {
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
@@ -294,14 +335,16 @@ static bool Flush(PicoBrowserService *s)
             pthread_mutex_unlock(&s->mu);
             StopTransport(s); return false;
         }
+        PbFdsClose(&fds);
         s->queue_head = (s->queue_head + 1) % 256; s->queue_count--;
     }
     return true;
 }
-static bool Send(PicoBrowserService *s, PbCommand command)
+static bool SendFence(PicoBrowserService *s, PbCommand command, int fence)
 {
-    if (!s || s->command_fd < 0 || !Flush(s)) return false;
+    if (!s || s->command_fd < 0 || !Flush(s)) { if (fence >= 0) close(fence); return false; }
     if (s->queue_count == 256) {
+        if (fence >= 0) close(fence);
         /* Fail closed rather than silently lose a key-up or browser close. */
         pthread_mutex_lock(&s->mu);
         snprintf(s->error, sizeof(s->error), "Browser stopped: command queue exhausted.");
@@ -309,9 +352,26 @@ static bool Send(PicoBrowserService *s, PbCommand command)
         StopTransport(s); return false;
     }
     s->queue[(s->queue_head + s->queue_count) % 256] = command;
+    s->queue_fence[(s->queue_head + s->queue_count) % 256] = fence;
     s->queue_count++;
     if (s->profile && s->queue_count > s->queue_peak) s->queue_peak = s->queue_count;
     return Flush(s);
+}
+static bool Send(PicoBrowserService *s, PbCommand command) { return SendFence(s, command, -1); }
+static bool ReleaseFrame(PicoBrowserService *s, BrowserSession *b, const PbFrame *frame, int fence)
+{
+    return SendFence(s, (PbCommand){.type=PB_RELEASE, .token=b->token, .request=frame->serial, .a=(int)frame->slot}, fence);
+}
+static bool ReleaseDisplay(PicoBrowserService *s, BrowserSession *b)
+{
+    if (!b->image.texture) return true;
+    /* Raylib batches texture reads. Flush the batch BEFORE inserting the fence,
+     * not just the GL command stream, then retire this lease exactly once. */
+    rlDrawRenderBatchActive();
+    int fence = PbGpuFence(&s->gpu);
+    bool ok = fence >= 0 && ReleaseFrame(s, b, &b->displayed, fence);
+    DestroyDisplay(s, b);
+    return ok;
 }
 static bool MakeDirs(const char *path)
 {
@@ -336,6 +396,10 @@ static bool Start(PicoBrowserService *s)
     }
     char helper[4096], root[4096], config[4096];
     if (!IsWindowReady()) { snprintf(s->error, sizeof(s->error), "Browser requires Pico's graphics window."); return false; }
+    if (!s->gpu_ready) {
+        if (!PbGpuInit(&s->gpu, false)) { snprintf(s->error, sizeof(s->error), "%s", s->gpu.error); return false; }
+        s->gpu_ready = true;
+    }
     if (!Pico_ConfigDir(config, sizeof(config)) ||
         snprintf(root, sizeof(root), "%s/browser", config) >= sizeof(root) || !MakeDirs(root) ||
         snprintf(helper, sizeof(helper), "%sbrowser/runtime/pico_browser_helper", GetApplicationDirectory()) >= sizeof(helper)) {
@@ -482,7 +546,7 @@ void PicoBrowser_CloseAgent(PicoHost *host, PicoAgentId id)
     pthread_mutex_unlock(&s->mu);
     if (!b) return;
     Send(s, (PbCommand){.type = PB_CLOSE, .token = b->token});
-    free(b->pixels); b->pixels = NULL;
+    ClearInbox(b);
     /* Clay commands borrow text and &texture. Agent close is legal even in an
      * AFTER_LAYOUT hook: retire, never free resources behind pending commands. */
     b->next = s->retired; s->retired = b;
@@ -493,7 +557,7 @@ void PicoBrowser_BeginLayout(PicoHost *host)
     PicoBrowserService *s = host ? host->browser : NULL;
     while (s && s->retired) {
         BrowserSession *b = s->retired; s->retired = b->next;
-        if (b->texture.id) UnloadTexture(b->texture);
+        DestroyDisplay(s, b);
         PicoTextField_Unbind(&b->field); PicoTextField_Unbind(&b->viewport_field); free(b);
     }
 }
@@ -861,7 +925,7 @@ void PicoBrowser_Pump(PicoHost *host)
     if (disconnected && s->thread_started) {
         pthread_join(s->receiver, NULL); s->thread_started = false;
         close(s->command_fd); close(s->event_fd); s->command_fd = s->event_fd = -1;
-        s->queue_count = 0;
+        ClearQueue(s);
         /* A malformed event must not leave a live, inaccessible helper holding
          * profiles. Also terminate any surviving Chromium subprocesses. */
         if (!s->failure_at) s->failure_at = MonotonicSeconds();
@@ -905,8 +969,8 @@ void PicoBrowser_Pump(PicoHost *host)
         b->received_ready = b->received_stopped = b->received_closed = false;
         b->received_error[0] = 0;
         b->mouse_buttons = 0; memset(b->keys, 0, sizeof(b->keys));
-        free(b->pixels); b->pixels = NULL;
-        if (b->texture.id) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
+        ClearInbox(b);
+        DestroyDisplay(s, b);
         if (newly_stopped || strcmp(previous, b->error)) pico_host_request_redraw(host);
     }
     pthread_mutex_unlock(&s->mu);
@@ -1014,33 +1078,55 @@ void PicoBrowser_Pump(PicoHost *host)
         }
         pthread_mutex_lock(&s->mu);
         bool changed = b->changed; b->changed = false;
-        unsigned char *pixels = b->pixels; b->pixels = NULL;
-        int w = b->pixel_width, h = b->pixel_height;
+        BrowserFrame frames[PB_POOL_SIZE]; unsigned count = b->inbox_count;
+        memcpy(frames, b->inbox, count * sizeof(*frames)); b->inbox_count = 0;
         if (b->received_ready) { b->ready = !b->stopped; b->received_ready = false; }
         if (b->received_url[0]) { snprintf(b->url, sizeof(b->url), "%s", b->received_url); b->received_url[0] = 0; }
         if (b->received_error[0]) { if (!b->stopped) snprintf(b->error, sizeof(b->error), "%s", b->received_error); b->received_error[0] = 0; }
         if (changed && !b->address_focus && b->url[0]) PicoTextField_SetText(&b->field, b->url);
         bool closed = b->received_closed;
         pthread_mutex_unlock(&s->mu);
-        if (closed && !b->stopped) { PicoBrowser_CloseAgent(host, b->agent_id); pico_host_request_redraw(host); free(pixels); continue; }
-        if (pixels && visible && !b->stopped && IsWindowReady() && w == b->width && h == b->height) {
-            // CEF BGRA -> Raylib RGBA. Only this thread owns graphics resources.
-            double conversion = s->profile ? MonotonicSeconds() : 0;
-            for (size_t i = 0; i < (size_t)w * h * 4; i += 4) { unsigned char c = pixels[i]; pixels[i] = pixels[i+2]; pixels[i+2] = c; }
-            double upload = s->profile ? MonotonicSeconds() : 0;
-            if (b->texture.id && (b->texture.width != w || b->texture.height != h)) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
-            if (!b->texture.id) b->texture = LoadTextureFromImage((Image){.data = pixels, .width = w, .height = h, .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
-            else UpdateTexture(b->texture, pixels);
-            SetTextureFilter(b->texture, TEXTURE_FILTER_BILINEAR);
-            if (s->profile) {
-                s->convert_seconds += upload - conversion;
-                s->upload_seconds += MonotonicSeconds() - upload;
-                ++s->uploads; s->upload_bytes += (uint64_t)w * h * 4;
+        if (closed && !b->stopped) {
+            for (unsigned i = 0; i < count; ++i) PbFdsClose(&frames[i].fds);
+            PicoBrowser_CloseAgent(host, b->agent_id); pico_host_request_redraw(host); continue;
+        }
+        bool gpu_ok = true;
+        for (unsigned i = 0; i < count; ++i) {
+            BrowserFrame *pending = &frames[i]; PbFrame *frame = &pending->frame;
+            int fence = pending->fds.fd[--pending->fds.count];
+            bool use = gpu_ok && i == count - 1 && visible && !b->stopped && IsWindowReady() &&
+                       frame->width == (unsigned)b->width && frame->height == (unsigned)b->height;
+            if (!use) {
+                /* No GPU sample occurred: forwarding the producer's fence is a
+                 * valid release, without waiting or touching graphics here. */
+                if (!b->stopped) gpu_ok &= ReleaseFrame(s, b, frame, fence);
+                else close(fence);
+                if (s->profile) ++s->replaced_frames;
+            } else {
+                double start = s->profile ? MonotonicSeconds() : 0;
+                gpu_ok = ReleaseDisplay(s, b);
+                if (gpu_ok) gpu_ok = PbGpuWait(&s->gpu, fence);
+                else close(fence);
+                if (gpu_ok) gpu_ok = PbGpuImport(&s->gpu, &b->image, frame, &pending->fds);
+                if (gpu_ok) {
+                    b->displayed = *frame;
+                    b->texture = (Texture2D){.id=b->image.texture, .width=b->image.width, .height=b->image.height,
+                                            .mipmaps=1, .format=PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    if (s->profile) { ++s->imports; s->import_seconds += MonotonicSeconds() - start; }
+                    pico_host_request_redraw(host);
+                }
             }
+            PbFdsClose(&pending->fds);
+        }
+        if (!visible && !ReleaseDisplay(s, b)) gpu_ok = false;
+        if (!gpu_ok && !b->stopped) {
+            Send(s, (PbCommand){.type=PB_CLOSE, .token=b->token});
+            pthread_mutex_lock(&s->mu);
+            b->received_stopped = true;
+            snprintf(b->received_error, sizeof(b->received_error), "Browser GPU presentation failed: %s", s->gpu.error[0] ? s->gpu.error : "buffer release transport failed");
+            pthread_mutex_unlock(&s->mu);
             pico_host_request_redraw(host);
         }
-        if (!visible && b->texture.id) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
-        free(pixels);
         if (b->opened && !b->ready) pico_host_request_redraw_after(host, 0.1f);
         if (changed && visible) pico_host_request_redraw(host);
     }
@@ -1073,6 +1159,7 @@ void PicoBrowser_Shutdown(PicoHost *host, const struct timespec *deadline)
     if (s->command_fd >= 0) close(s->command_fd);
     if (s->event_fd >= 0) close(s->event_fd);
     while (s->requests) { BrowserRequest *r = s->requests; s->requests = r->next; ReleaseRequest(r); }
+    ClearQueue(s); PbGpuShutdown(&s->gpu);
     pthread_mutex_destroy(&s->mu); pthread_cond_destroy(&s->cv);
     free(s); host->browser = NULL;
 }

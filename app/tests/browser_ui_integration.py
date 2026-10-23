@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real Pico/Clay/Raylib browser presentation, driven through the UI.
-Run on an isolated X11 display (not the user's desktop):
-  nix develop .#browser-tests -c xvfb-run -a -s '-screen 0 1600x1200x24' \
+Run on an isolated hardware-backed X11 display (not the user's desktop):
+  nix develop .#browser-tests -c env -u WAYLAND_DISPLAY \
     timeout 90s python3 app/tests/browser_ui_integration.py app/build/debug/pico
 The outer timeout is the overall hang watchdog, not a page-load speed assertion.
 """
@@ -52,7 +52,7 @@ class Page(http.server.BaseHTTPRequestHandler):
 
 def main():
     if os.environ.get('WAYLAND_DISPLAY') or not os.environ.get('DISPLAY'):
-        raise RuntimeError('Run this test under xvfb-run, with WAYLAND_DISPLAY unset.')
+        raise RuntimeError('Use an isolated hardware-backed X11 display, with WAYLAND_DISPLAY unset.')
     binary = str(Path(sys.argv[1]).resolve())
     phase = 'startup'
 
@@ -69,7 +69,7 @@ def main():
         session.write_text(json.dumps({'type': 'session', 'version': 5,
                                       'id': '123456abcdef', 'kind': 'normal', 'cwd': directory}) + '\n')
         environment = dict(os.environ, XDG_CONFIG_HOME=str(root / 'config'),
-                           XDG_SESSION_TYPE='x11', LIBGL_ALWAYS_SOFTWARE='1')
+                           XDG_SESSION_TYPE='x11')
         with (root / 'pico.log').open('w') as log:
             process = subprocess.Popen([binary, '--safe', '--session', str(session)],
                                        cwd=root, env=environment, stdout=log, stderr=log)
@@ -207,6 +207,6 @@ def main():
 
 
 if __name__ == '__main__':
-    # xvfb-run supplies DISPLAY; do not let a desktop Wayland socket leak in.
+    # The isolated X11 display supplies DISPLAY; do not mix in a Wayland socket.
     os.environ.pop('WAYLAND_DISPLAY', None)
     main()

@@ -57,6 +57,13 @@ int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoComple
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static const char *g_browser_application_directory;
 static bool g_browser_fake_window;
+#include "browser/gpu.h"
+bool __real_PbGpuInit(PbGpu *gpu, bool helper);
+bool __wrap_PbGpuInit(PbGpu *gpu, bool helper) {
+    /* Fault fixtures send no frames; graphics availability is already faked.
+     * Test helper/IPC failure classification independently of a real driver. */
+    return g_browser_fake_window || __real_PbGpuInit(gpu, helper);
+}
 bool __real_IsWindowReady(void);
 bool __wrap_IsWindowReady(void) { return g_browser_fake_window || __real_IsWindowReady(); }
 const char *__real_GetApplicationDirectory(void);

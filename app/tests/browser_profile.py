@@ -2,9 +2,9 @@
 """Descriptive Linux browser benchmark; no performance pass/fail thresholds.
 
 Helper matrix (sandbox enabled): nix develop -c python3 app/tests/browser_profile.py HELPER
-Actual host upload path: nix develop .#browser-tests -c env -u WAYLAND_DISPLAY \
-  xvfb-run -a -s '-screen 0 1600x1200x24' python3 app/tests/browser_profile.py HELPER --pico PICO
-WARNING: --pico sends X11 mouse/keyboard input; use an isolated xvfb-run display,
+Actual host import path: nix develop .#browser-tests -c env -u WAYLAND_DISPLAY \
+  python3 app/tests/browser_profile.py HELPER --pico PICO
+WARNING: --pico sends X11 mouse/keyboard input; use an isolated hardware-backed X11 display,
 never your desktop DISPLAY. The script cannot certify arbitrary display isolation.
 Use --output NEW_FILE to retain private JSON results. See docs/browser-profiling.md.
 """
@@ -237,7 +237,7 @@ def helper_trial(args, url, workload, count, visibility):
 def host_trial(args, url, workload, visibility):
     """One actually presented browser; concurrent workloads measured above."""
     if not os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
-        raise RuntimeError('--pico uses isolated X11 UI driving; run under env -u WAYLAND_DISPLAY xvfb-run')
+        raise RuntimeError('--pico uses isolated X11 UI driving; use an isolated hardware-backed X11 display with WAYLAND_DISPLAY unset')
     with tempfile.TemporaryDirectory(prefix='pico-browser-host-profile-') as directory:
         root = Path(directory); metrics = root/'metrics.jsonl'; session = root/'session.jsonl'
         session.write_text(json.dumps({'type':'session','version':5,'id':'abcdef123456','kind':'normal','cwd':directory})+'\n')
@@ -273,12 +273,12 @@ def host_trial(args, url, workload, visibility):
                                 viewport=[args.width,args.height],status='unavailable',pages=pages)
                 # Observe real page pixels for the static fixture, not just IPC.
                 # Animated/WebGL presentation has the same host path; counters
-                # establish uploads, not visual/GPU correctness certification.
-                while not records() or records()[-1]['uploads'] == 0:
+                # establish imports, not visual/GPU correctness certification.
+                while not records() or records()[-1]['imports'] == 0:
                     time.sleep(.05); x('getwindowname',window)
                 if workload != 'static':
-                    before_upload = records()[-1]['uploads']
-                    while records()[-1]['uploads'] <= before_upload:
+                    before_import = records()[-1]['imports']
+                    while records()[-1]['imports'] <= before_import:
                         time.sleep(.05); x('getwindowname',window)
                 if workload == 'static':
                     from PIL import Image
@@ -316,7 +316,7 @@ def host_trial(args, url, workload, visibility):
                 after = records()[-1]
                 result['host_counter_seconds'] = after['monotonic_seconds']-before['monotonic_seconds']
                 result['host_counters'] = {key: after[key]-before[key] for key in
-                    ('frames','frame_bytes','replaced_frames','uploads','upload_bytes','png_bytes','convert_seconds','upload_seconds')}
+                    ('frames','frame_bytes','replaced_frames','imports','png_bytes','import_seconds')}
                 result['queue_peak_lifetime'] = after['queue_peak']
                 result.update(status='measured',path='pico-presented',workload=workload,sessions=1,visibility=visibility,
                               viewport=[args.width,args.height],pages_before=before_pages,pages_after=fresh_reports([name],process,boundary))

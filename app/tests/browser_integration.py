@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Real CEF OSR test (sandbox/user namespaces required, no Pico window).
+"""Real CEF OSR test (hardware EGL/DMA-BUF and native display required, no Pico window).
 Run inside nix develop:
   python3 app/tests/browser_integration.py app/build/debug/browser/runtime/pico_browser_helper
 A CTest/manual outer timeout should guard a hung browser, not page-speed guesses.
 """
+import array
+import os
 import ctypes
 import http.server
 import json
@@ -24,6 +26,11 @@ class Command(ctypes.Structure):
     _fields_ = [("token", ctypes.c_uint64), ("type", ctypes.c_uint32)] + [
         (n, ctypes.c_int32) for n in ("x", "y", "a", "b", "modifiers")
     ] + [("text", ctypes.c_char * 2048), ("profile", ctypes.c_char * 80)] + [(n, ctypes.c_uint64) for n in ("request", "navigation", "viewport")] + [("end_action", ctypes.c_uint32)]
+
+class Frame(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_uint64) for n in ('serial', 'modifier')] + [
+        (n, ctypes.c_uint32) for n in ('slot', 'width', 'height', 'format', 'plane_count')
+    ] + [('stride', ctypes.c_uint32 * 4), ('offset', ctypes.c_uint32 * 4)]
 
 class TextResult(ctypes.Structure):
     _fields_ = [("request", ctypes.c_uint64), ("size", ctypes.c_uint64), ("error", ctypes.c_uint32),
@@ -61,6 +68,7 @@ def png_pixel(png, x, y):
 
 reports = queue.Queue()
 HTML = b'''<!doctype html><style>body{margin:0;background:rgb(12,34,56)}input{position:absolute;top:10px;left:10px;width:300px;height:40px}</style>
+<select style="position:absolute;left:10px;top:200px;width:250px;height:40px;background:rgb(140,80,190)"><option>One</option><option>Two</option><option>Three</option><option>Four</option></select>
 <input id="field" oninput="document.body.style.background='rgb(23,45,67)';fetch('/input?value='+encodeURIComponent(this.value))">
 <a href="/terms" style="position:absolute;left:10px;top:100px;width:200px;height:50px;background:white" onclick="event.preventDefault();navigate()">Terms</a>
 <script>
@@ -104,14 +112,29 @@ class Browser:
         def receive():
             try:
                 while True:
-                    header = events.recv(24, socket.MSG_WAITALL)
+                    header, ancillary, flags, _ = events.recvmsg(24, socket.CMSG_SPACE(5 * 4), socket.MSG_WAITALL | socket.MSG_CMSG_CLOEXEC)
+                    fds = array.array('i')
+                    for level, kind, value in ancillary:
+                        assert level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS
+                        fds.frombytes(value)
+                    assert not flags & socket.MSG_CTRUNC
                     if not header: break
                     assert len(header) == 24
                     token, kind, length, width, height = struct.unpack('=QIIII',header)
                     data = events.recv(length, socket.MSG_WAITALL) if length else b''
                     assert len(data) == length
-                    if kind == 2 and frame_callback:
-                        frame_callback(token, length)
+                    try:
+                        if kind == 2:
+                            frame = Frame.from_buffer_copy(data)
+                            assert len(data) == ctypes.sizeof(Frame) and len(fds) == frame.plane_count + 1
+                            # This client does not sample presentation buffers. Forward
+                            # the acquire fence as release; never acknowledge without it.
+                            release = Command(token=token, type=23, a=frame.slot, request=frame.serial)
+                            self.commands.sendmsg([bytes(release)], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [fds[-1]]))])
+                            if frame_callback: frame_callback(token, length)
+                        else: assert not fds
+                    finally:
+                        for fd in fds: os.close(fd)
                     # Retain only metadata: do not enqueue unbounded video pixels.
                     self.events.put((token, kind, width, height, data if kind in (6, 7) else data[:100] if kind != 2 else b''))
             finally:
@@ -126,12 +149,12 @@ class Browser:
             event = self.events.get()
             if event is None: raise RuntimeError(f'helper exited before event {kind}; inspect stderr/cef.log')
             if event[0] == token and event[1] == kind: return event
-            if event[1] == 4: raise RuntimeError(event[-1].decode(errors='replace'))
+            if event[1] in (4, 8): raise RuntimeError(event[-1].decode(errors='replace'))
     def observation(self, token, request):
         while (token, request) not in self.observations:
             event = self.events.get()
             if event is None: raise RuntimeError('helper exited before observation')
-            if event[1] == 4: raise RuntimeError(event[-1].decode(errors='replace'))
+            if event[1] in (4, 8): raise RuntimeError(event[-1].decode(errors='replace'))
             if event[1] != 6: continue
             info = Observation.from_buffer_copy(event[-1])
             png = event[-1][ctypes.sizeof(Observation):]
@@ -248,6 +271,15 @@ def main():
             assert png_pixel(hidden[1], 400, 400) == (12, 34, 56)
             assert hidden[2] == (640, 480) and other[2] == (800, 600)
             b.send(1,18,a=1)
+            # Native OSR select menus are separate accelerated popup surfaces.
+            # They must appear in on-demand composition and disappear on Escape.
+            menu = b.act(1, hidden, [
+                (6,dict(x=40,y=220,a=0)), (6,dict(x=40,y=220,a=0,b=1,end_action=1))])
+            assert not menu[0].error, menu[0].error
+            assert png_pixel(menu[1],150,270) == (140,80,190), png_pixel(menu[1],150,270)
+            dismissed = b.act(1, menu, [(8,dict(a=27,text="Escape",profile="Escape")), (8,dict(a=27,b=1,text="Escape",profile="Escape",end_action=1))])
+            assert not dismissed[0].error, dismissed[0].error
+            assert png_pixel(dismissed[1],150,270) == (12,34,56), png_pixel(dismissed[1],150,270)
             changed = b.act(1, hidden, [
                 (6,dict(x=40,y=30,a=0,b=0)),
                 (6,dict(x=40,y=30,a=0,b=1,end_action=1)),
@@ -316,6 +348,11 @@ def main():
             assert restored['local'] == ['alpha'] and 'value=alpha' in restored['cookie'][0], restored
             b.send(3,4,a=1); b.send(3,3,x=420,y=280)
             while b.wait(3,2)[2:4] != (420,280): pass
+            # Teardown must not depend on the last CEF reference disappearing
+            # immediately: callbacks/capture work may still retain the page.
+            b.sequence += 1
+            b.send(3,14,request=b.sequence)
+            b.send(3,2)
         finally: b.close()
         # Reopening the helper must not reopen pages; explicit navigation uses
         # the same persisted session profile, without sharing it with session B.
@@ -326,5 +363,5 @@ def main():
             assert persisted['local'] == ['beta'] and 'value=beta' in persisted['cookie'][0], persisted
         finally: b.close()
     server.shutdown()
-    print('PASS: embedded frames, mouse/text, hidden progress, session isolation, resize, singleton rejection, persistent profiles, delayed SPA navigation, hidden PNG observations, acknowledged input, stale identity, and cancellation')
+    print('PASS: embedded frames, mouse/text, hidden progress, session isolation, resize, singleton rejection, persistent profiles, delayed SPA navigation, hidden PNG and popup composition, acknowledged input, stale identity, and cancellation')
 if __name__ == '__main__': main()

@@ -1,7 +1,9 @@
 #include "protocol.h"
+#include "gpu.h"
 #include "inspection.h"
 #include "include/cef_app.h"
 #include "include/base/cef_bind.h"
+#include "include/base/cef_compiler_specific.h"
 #include "include/base/cef_callback.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
@@ -15,6 +17,7 @@
 #include <csignal>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,13 +30,20 @@
 namespace {
 int events_fd = -1;
 bool stopping = false;
+PbGpu gpu{};
+struct ReceivedFence {
+    explicit ReceivedFence(int value) : fd(value) {}
+    int fd;
+    ~ReceivedFence() { if (fd >= 0) close(fd); }
+    int Take() { int result = fd; fd = -1; return result; }
+};
 std::string profile_root;
 class Page;
 void Command(PbCommand command);
 std::map<uint64_t, CefRefPtr<Page>> pages;
 
 bool Send(uint64_t token, uint32_t type, const void* bytes = nullptr,
-          size_t size = 0, int width = 0, int height = 0) {
+          size_t size = 0, int width = 0, int height = 0, const PbFds* fds = nullptr) {
     if (type != PB_FRAME && type != PB_OBSERVATION && type != PB_TEXT_RESULT) size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
     PbEvent event{token, type, static_cast<uint32_t>(size),
                   static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
@@ -42,7 +52,7 @@ bool Send(uint64_t token, uint32_t type, const void* bytes = nullptr,
     for (int i = 0; i < 2; ++i) {
         auto p = static_cast<const char*>(chunks[i]);
         while (sizes[i]) {
-            ssize_t n = send(events_fd, p, sizes[i], MSG_NOSIGNAL);
+            ssize_t n = PbSend(events_fd, p, sizes[i], i == 0 && p == reinterpret_cast<const char*>(&event) ? fds : nullptr, 0);
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) return false;
             p += n; sizes[i] -= n;
@@ -72,7 +82,40 @@ public:
     CefRefPtr<CefBrowser> browser;
     std::vector<PbCommand> pending;
     CefRefPtr<CefRequestContext> context;
-    std::vector<unsigned char> pixels, popup;
+    PbGpuImage view{}, popup{}, composite{};
+    struct Slot { PbGpuImage image{}; uint64_t serial = 0; bool leased = false; } pool[PB_POOL_SIZE];
+    uint64_t next_frame = 0;
+    bool frame_dirty = false, accelerated = false;
+    // CEF may retain Page through delayed callbacks beyond its message loop.
+    // Retire GPU state explicitly on TID_UI, never in a refcount destructor.
+    void RetireGpu() {
+        PbGpuCurrent(&gpu);
+        ClearSurfaces();
+        for (auto& slot : pool) PbGpuDestroy(&gpu, &slot.image);
+    }
+    void ClearSurfaces() {
+        PbGpuDestroy(&gpu, &view); PbGpuDestroy(&gpu, &popup); PbGpuDestroy(&gpu, &composite);
+    }
+    void GpuFailure(const std::string& message) {
+        if (failed || close_requested) return;
+        failed = true;
+        std::string error = "Browser GPU rendering failed: " + message;
+        Send(token, PB_STOPPED, error.data(), error.size());
+        inspector.Fail(error);
+        if (request) { uncertain = input_message != 0; Finish(error); }
+        close_requested = true;
+        if (browser) browser->GetHost()->CloseBrowser(true);
+    }
+    void Release(const PbCommand& cmd, int fence) {
+        if (cmd.a < 0 || cmd.a >= PB_POOL_SIZE || !pool[cmd.a].leased || pool[cmd.a].serial != cmd.request) {
+            close(fence); GpuFailure("Invalid or duplicate GPU buffer release."); return;
+        }
+        if (!PbGpuCurrent(&gpu)) { close(fence); GpuFailure(gpu.error); return; }
+        if (!PbGpuWait(&gpu, fence)) { GpuFailure(gpu.error); return; }
+        pool[cmd.a].leased = false;
+        if (!visible) PbGpuDestroy(&gpu, &pool[cmd.a].image);
+        Publish(false);
+    }
     CefRect popup_rect;
     int popup_width = 0, popup_height = 0;
     bool popup_shown = false;
@@ -129,7 +172,7 @@ public:
         w = std::clamp<int>(w, 1, PB_MAX_DIMENSION); h = std::clamp<int>(h, 1, PB_MAX_DIMENSION);
         if (width == w && height == h) return;
         ++viewport; Changed(); width = w; height = h;
-        pixels.clear(); popup.clear(); browser->GetHost()->WasResized();
+        ClearSurfaces(); frame_dirty = false; browser->GetHost()->WasResized();
         if (request && capture_ready && !input_message) Capture();
     }
     void Viewport(const PbCommand& command) {
@@ -180,7 +223,7 @@ public:
         ReleaseInput();
         Send(token, PB_OBSERVATION, packet.data(), packet.size(), width, height);
         request = 0; input_message = capture_message = 0; priming_capture = capturing = capture_ready = false; steps.clear();
-        if (!visible) { pixels.clear(); popup.clear(); }
+        if (!visible) ClearSurfaces();
     }
     void Interrupt(const std::string& error) {
         if (!request) return;
@@ -220,10 +263,11 @@ public:
     }
     void Captured() {
         if (!request || !capturing || !fresh_view || !fresh_popup || browser->IsLoading()) return;
-        auto bitmap = Composite();
-        if (bitmap.empty()) return;
+        if (!Compose(&composite)) return;
+        std::vector<unsigned char> bitmap(static_cast<size_t>(width) * height * 4);
+        if (!PbGpuRead(&gpu, &composite, bitmap.data())) { GpuFailure(gpu.error); return; }
         auto image = CefImage::CreateImage();
-        if (!image->AddBitmap(1, width, height, CEF_COLOR_TYPE_BGRA_8888, CEF_ALPHA_TYPE_OPAQUE,
+        if (!image->AddBitmap(1, width, height, CEF_COLOR_TYPE_RGBA_8888, CEF_ALPHA_TYPE_OPAQUE,
                               bitmap.data(), bitmap.size())) { Finish("Could not encode observation."); return; }
         int w = 0, h = 0;
         auto data = image->GetAsPNG(1, false, w, h);
@@ -344,8 +388,8 @@ public:
             capture_message = 0;
             if (!success) { Finish("Browser compositor synchronization failed: " + std::string(static_cast<const char*>(result), result_size)); return; }
             if (navigation != capture_navigation || viewport != capture_viewport || browser->IsLoading()) { Capture(); return; }
-            pixels.clear(); capturing = true; fresh_view = false; fresh_popup = !popup_shown;
-            if (popup_shown) { popup.clear(); browser->GetHost()->Invalidate(PET_POPUP); }
+            capturing = true; fresh_view = false; fresh_popup = !popup_shown;
+            if (popup_shown) browser->GetHost()->Invalidate(PET_POPUP);
             browser->GetHost()->Invalidate(PET_VIEW); return;
         }
         if (id != input_message) return;
@@ -415,6 +459,11 @@ public:
     }
     void OnAfterCreated(CefRefPtr<CefBrowser> value) override {
         browser = value;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](uint64_t id) {
+            auto it = pages.find(id);
+            if (it != pages.end() && !it->second->accelerated)
+                it->second->GpuFailure("Chromium produced no accelerated buffers. Check cef.log and the native Wayland/X11 GPU backend.");
+        }, token), 10000);
         devtools = browser->GetHost()->AddDevToolsMessageObserver(this);
         if (stopping || close_requested) { browser->GetHost()->CloseBrowser(true); return; }
         runtime_message = next_message++;
@@ -423,6 +472,8 @@ public:
     void OnBeforeClose(CefRefPtr<CefBrowser>) override {
         inspector.Fail("Browser closed; evaluation effects may be uncertain.");
         uncertain = input_message != 0; Finish("Browser closed; in-flight input may be uncertain."); devtools = nullptr;
+        close_requested = true;
+        RetireGpu();
         browser = nullptr;
         Send(token, PB_CLOSED);
         pages.erase(token);
@@ -472,43 +523,83 @@ public:
             else Finish(text.ToString());
         }
     }
-    std::vector<unsigned char> Composite() {
-        if (pixels.empty()) return {};
-        auto result = pixels;
-        if (popup_shown && !popup.empty()) {
-            for (int y = 0; y < popup_height; ++y)
-                for (int x = 0; x < popup_width; ++x) {
-                    int dx = popup_rect.x + x, dy = popup_rect.y + y;
-                    if (dx >= 0 && dx < width && dy >= 0 && dy < height)
-                        memcpy(&result[(dy * width + dx) * 4],
-                               &popup[(y * popup_width + x) * 4], 4);
-                }
+    bool Compose(PbGpuImage* target) {
+        if (!view.texture || view.width != width || view.height != height) return false;
+        if (!PbGpuCurrent(&gpu) || !PbGpuAllocate(&gpu, target, width, height) ||
+            !PbGpuCopy(&gpu, &view, target, 0, 0, width, height, 0, 0)) { GpuFailure(gpu.error); return false; }
+        if (popup_shown && popup.texture) {
+            int x = std::max(0, popup_rect.x), y = std::max(0, popup_rect.y);
+            int right = std::min(width, popup_rect.x + popup_width), bottom = std::min(height, popup_rect.y + popup_height);
+            if (right > x && bottom > y && !PbGpuCopy(&gpu, &popup, target, x-popup_rect.x, y-popup_rect.y, right-x, bottom-y, x, y)) {
+                GpuFailure(gpu.error); return false;
+            }
         }
-        return result;
+        return true;
     }
-    void Publish() {
-        if (!visible || pixels.empty()) return;
-        auto result = Composite();
-        Send(token, PB_FRAME, result.data(), result.size(), width, height);
+    void Publish(bool changed = true) {
+        frame_dirty |= changed;
+        if (failed || close_requested || !visible || !frame_dirty || !view.texture) return;
+        for (unsigned i = 0; i < PB_POOL_SIZE; ++i) {
+            auto& slot = pool[i];
+            if (slot.leased) continue;
+            if (!Compose(&slot.image)) return;
+            PbFrame frame{}; frame.serial = ++next_frame; frame.slot = i;
+            PbFds fds{};
+            if (!PbGpuExport(&gpu, &slot.image, &frame, &fds)) { GpuFailure(gpu.error); return; }
+            bool sent = Send(token, PB_FRAME, &frame, sizeof(frame), width, height, &fds);
+            PbFdsClose(&fds);
+            if (!sent) { GpuFailure("Frame descriptor transport failed."); return; }
+            slot.leased = true; slot.serial = frame.serial; frame_dirty = false;
+            return;
+        }
+        // All buffers are leased. Keep only the newest GPU view/popup state;
+        // a release publishes it, even if the page stops animating meanwhile.
     }
     void OnPopupShow(CefRefPtr<CefBrowser>, bool show) override {
-        popup_shown = show; if (!show) { popup.clear(); fresh_popup = true; } else fresh_popup = false; Publish(); Captured();
+        popup_shown = show;
+        if (!show) { PbGpuCurrent(&gpu); PbGpuDestroy(&gpu, &popup); fresh_popup = true; }
+        else fresh_popup = false;
+        Publish(); Captured();
     }
     void OnPopupSize(CefRefPtr<CefBrowser>, const CefRect& rect) override { popup_rect = rect; }
-    void OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList&,
-                 const void* buffer, int w, int h) override {
-        if ((!visible && !request) || w < 1 || h < 1 || w > PB_MAX_DIMENSION || h > PB_MAX_DIMENSION) return;
-        auto start = static_cast<const unsigned char*>(buffer);
-        if (type == PET_VIEW) {
-            // A resize may still have an older paint in flight.
-            if (w != width || h != height) return;
-            pixels.assign(start, start + static_cast<size_t>(w) * h * 4);
-            if (capturing) fresh_view = true;
-        } else {
-            popup.assign(start, start + static_cast<size_t>(w) * h * 4);
-            popup_width = w; popup_height = h;
-            if (capturing) fresh_popup = true;
+    void OnPaint(CefRefPtr<CefBrowser>, PaintElementType, const RectList&, const void*, int, int) override {
+        GpuFailure("Chromium delivered software paint instead of an accelerated DMA-BUF; no CPU fallback is available.");
+    }
+    void OnAcceleratedPaint(CefRefPtr<CefBrowser>, PaintElementType type,
+                            const RectList&, const CefAcceleratedPaintInfo& info) override {
+        if (failed || close_requested) return;
+        if (!visible && !request && accelerated) return;
+        const auto& rect = info.extra.visible_rect;
+        int w = rect.width, h = rect.height;
+        if (type == PET_VIEW && (w != width || h != height)) return; // old resize in flight
+        if (rect.x < 0 || rect.y < 0 || w <= 0 || h <= 0 ||
+            rect.x + w > info.extra.coded_size.width || rect.y + h > info.extra.coded_size.height ||
+            info.plane_count < 1 || info.plane_count > PB_MAX_PLANES ||
+            (info.format != CEF_COLOR_TYPE_BGRA_8888 && info.format != CEF_COLOR_TYPE_RGBA_8888)) {
+            GpuFailure("Unsupported accelerated frame layout or color format."); return;
         }
+        PbFrame frame{}; frame.width = info.extra.coded_size.width; frame.height = info.extra.coded_size.height;
+        frame.plane_count = info.plane_count; frame.modifier = info.modifier;
+        // DRM_FORMAT_ARGB8888 / ABGR8888, little-endian BGRA / RGBA bytes.
+        frame.format = info.format == CEF_COLOR_TYPE_BGRA_8888 ? 0x34325241u : 0x34324241u;
+        PbFds borrowed{};
+        for (int i = 0; i < info.plane_count; ++i) {
+            if (info.planes[i].offset > INT_MAX) { GpuFailure("Unsupported DMA-BUF offset."); return; }
+            frame.stride[i] = info.planes[i].stride; frame.offset[i] = info.planes[i].offset;
+            borrowed.fd[borrowed.count++] = info.planes[i].fd;
+        }
+        PbGpuImage imported{};
+        auto* target = type == PET_VIEW ? &view : &popup;
+        bool ok = PbGpuCurrent(&gpu) && PbGpuImport(&gpu, &imported, &frame, &borrowed) &&
+                  PbGpuAllocate(&gpu, target, w, h) && PbGpuCopy(&gpu, &imported, target, rect.x, rect.y, w, h, 0, 0);
+        // A duplicate fd would NOT protect Chromium's pooled contents. Finish
+        // every read of the borrowed allocation before this callback returns.
+        if (imported.texture && !PbGpuComplete(&gpu)) ok = false;
+        PbGpuDestroy(&gpu, &imported); // borrowed descriptor ownership stays in CEF
+        if (!ok) { GpuFailure(gpu.error); return; }
+        accelerated = true;
+        if (type == PET_VIEW) { if (capturing) fresh_view = true; }
+        else { popup_width = w; popup_height = h; if (capturing) fresh_popup = true; }
         if (type == PET_VIEW && priming_capture) CaptureFence();
         Publish(); Captured();
     }
@@ -542,6 +633,7 @@ void Command(PbCommand cmd) {
         page->context = CefRequestContext::CreateContext(context_settings, nullptr);
         CefWindowInfo window;
         window.SetAsWindowless(0);
+        window.shared_texture_enabled = true;
         CefBrowserSettings settings;
         settings.windowless_frame_rate = 1;
         pages[cmd.token] = page;
@@ -610,7 +702,9 @@ void Command(PbCommand cmd) {
         // Do not WasHidden(true): background sessions must keep making progress.
         host->SetWindowlessFrameRate(cmd.a ? 30 : 1);
         if (cmd.a) host->Invalidate(PET_VIEW);
-        else if (!page->request) { page->pixels.clear(); page->pixels.shrink_to_fit(); page->popup.clear(); }
+        else if (!page->request) { page->ClearSurfaces(); }
+        if (!page->visible) for (auto& slot : page->pool)
+            if (!slot.leased) PbGpuDestroy(&gpu, &slot.image);
         break;
     case PB_FOCUS: if (page->steps.empty()) host->SetFocus(cmd.a); break;
     case PB_MOUSE: {
@@ -660,18 +754,19 @@ class App : public CefApp, public CefBrowserProcessHandler {
             if (!disabled.empty()) disabled += ",";
             command->AppendSwitchWithValue("disable-features", disabled + "ImmersiveReadAnything");
         }
-        command->AppendSwitchWithValue("ozone-platform", "headless");
+        // Native Ozone allocates exportable DMA-BUFs. Headless Ozone cannot
+        // allocate accelerated OSR frames on the pinned CEF build. Still OSR:
+        // no browser window is created on either display backend.
+        const char* backend = getenv("PICO_BROWSER_OZONE_PLATFORM");
+        command->AppendSwitchWithValue("ozone-platform", backend ? backend :
+                                      (getenv("WAYLAND_DISPLAY") ? "wayland" : "x11"));
         command->AppendSwitch("disable-background-timer-throttling");
         command->AppendSwitch("disable-renderer-backgrounding");
     }
     IMPLEMENT_REFCOUNTING(App);
 };
 }
-int main(int argc, char** argv) {
-    CefMainArgs args(argc, argv);
-    CefRefPtr<App> app = new App;
-    int subprocess = CefExecuteProcess(args, app, nullptr);
-    if (subprocess >= 0) return subprocess;
+static int RunHelper(int argc, char** argv, const CefMainArgs& args, CefRefPtr<App> app) {
     if (argc != 4) return 2;
     // File-size quotas must produce explicit output/collection errors, not
     // terminate every session's browser helper with SIGXFSZ.
@@ -701,14 +796,21 @@ int main(int argc, char** argv) {
     if (!CefInitialize(args, settings, app, nullptr)) {
         Error(0, "CEF initialization failed; check browser/cef.log and profile ownership."); return 1;
     }
+    if (!PbGpuInit(&gpu, true)) {
+        Error(0, std::string("Browser GPU initialization failed: ") + gpu.error);
+        PbGpuShutdown(&gpu); CefShutdown(); close(owner); return 1;
+    }
     Send(0, PB_RUNTIME_READY);
     std::thread reader([command_fd] {
         PbCommand cmd;
         for (;;) {
-            ssize_t n = recv(command_fd, &cmd, sizeof(cmd), MSG_TRUNC);
+            PbFds fds{};
+            ssize_t n = PbReceive(command_fd, &cmd, sizeof(cmd), &fds, MSG_TRUNC);
             if (n < 0 && errno == EINTR) continue;
-            if (n != sizeof(cmd) || cmd.type < PB_OPEN || cmd.type > PB_VIEWPORT ||
+            if (n != sizeof(cmd) || cmd.type < PB_OPEN || cmd.type > PB_RELEASE ||
+                fds.count != (cmd.type == PB_RELEASE ? 1u : 0u) ||
                 !memchr(cmd.text, 0, sizeof(cmd.text)) || !memchr(cmd.profile, 0, sizeof(cmd.profile))) {
+                PbFdsClose(&fds);
                 if (n) {
                     std::string error = n < 0 ? "Browser command transport failed: " + std::string(strerror(errno)) :
                                                "Browser command protocol error: malformed command.";
@@ -717,7 +819,14 @@ int main(int argc, char** argv) {
                 }
                 break;
             }
-            if (!CefPostTask(TID_UI, base::BindOnce(Command, cmd))) break;
+            if (cmd.type == PB_RELEASE) {
+                auto fence = std::make_unique<ReceivedFence>(fds.fd[0]);
+                if (!CefPostTask(TID_UI, base::BindOnce([](PbCommand command, std::unique_ptr<ReceivedFence> fd) {
+                    auto found = pages.find(command.token);
+                    if (found != pages.end() && !found->second->failed && !found->second->close_requested)
+                        found->second->Release(command, fd->Take());
+                }, cmd, std::move(fence)))) break;
+            } else if (!CefPostTask(TID_UI, base::BindOnce(Command, cmd))) break;
             if (cmd.type == PB_STOP) return;
         }
         CefPostTask(TID_UI, base::BindOnce(Stop));
@@ -725,7 +834,19 @@ int main(int argc, char** argv) {
     CefRunMessageLoop();
     shutdown(command_fd, SHUT_RDWR);
     reader.join();
+    PbGpuShutdown(&gpu);
     CefShutdown();
     close(owner); close(command_fd); close(events_fd);
     return 0;
+}
+
+// Chromium changes its stack canary in forked sandbox children. Only the small
+// frame spanning CefExecuteProcess must omit the old-canary check when those
+// children return. The actual helper and its buffers retain stack protection.
+NO_STACK_PROTECTOR int main(int argc, char** argv) {
+    CefMainArgs args(argc, argv);
+    CefRefPtr<App> app = new App;
+    int subprocess = CefExecuteProcess(args, app, nullptr);
+    if (subprocess >= 0) return subprocess;
+    return RunHelper(argc, argv, args, app);
 }

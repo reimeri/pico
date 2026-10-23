@@ -428,7 +428,15 @@ The runtime is not extension-owned and survives extension reload. Live pages end
 on explicit close or session-runtime unload; cookie/local-storage profiles
 persist by durable session ID. Replay/resume alone never recreates a page.
 Hidden pages keep executing at reduced paint cadence and do not retain Pico
-display textures; on-demand captures temporarily retain CPU surfaces. CEF/tool
+display textures. Continuous presentation is GPU-only: callback-borrowed CEF
+DMA-BUFs are copied and completed inside the callback, never retained by fd
+duplication alone. A bounded helper-owned pool shares descriptors and acquire
+fences; Pico flushes its batched sampling and returns a release fence plus the
+matching slot/serial acknowledgment before reuse. Resize cannot overwrite leased
+storage. Dropped frames return their untouched acquire fence. Native Ozone and
+EGL/DMA-BUF/native-fence driver support are required on Wayland and X11, with
+explicit failures rather than a CPU fallback. Only requested observations read
+back fresh GPU view/popup composition and encode PNGs. CEF/tool
 workers never touch Clay or Raylib; the graphics thread owns display textures
 and retains retired render data through the current layout lifetime. The IPC and
 DevTools channel are private, with no remote listener. Sandbox protection stays

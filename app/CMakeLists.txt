@@ -242,6 +242,10 @@ find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
+pkg_check_modules(PICO_EGL REQUIRED IMPORTED_TARGET egl gl)
+add_library(pico_browser_gpu STATIC browser/gpu.c)
+pico_warnings_are_errors(pico_browser_gpu)
+target_link_libraries(pico_browser_gpu PUBLIC PkgConfig::PICO_EGL)
 add_subdirectory(browser)
 add_dependencies(pico pico_browser_helper)
 
@@ -262,7 +266,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_BROWSER_HELPER=\"${CMAKE_INSTALL_FULL_LIBEXECDIR}/pico/browser/pico_browser_helper\""
     "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
-target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS} pico_browser_gpu)
 target_link_options(pico PRIVATE "-rdynamic")
 
 # GLFW dlopens Wayland/Xcursor instead of linking them. On Nix those .so files are
@@ -292,6 +296,16 @@ endif()
 set(DART_TESTING_TIMEOUT 1500 CACHE STRING "Overall test executable hang watchdog (seconds)")
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(pico_browser_transport_tests tests/browser_transport_test.c)
+    target_include_directories(pico_browser_transport_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    pico_warnings_are_errors(pico_browser_transport_tests)
+    add_test(NAME pico_browser_transport_tests COMMAND pico_browser_transport_tests)
+    # Hardware/native-display integration is explicit, not a software-CI test.
+    add_executable(pico_browser_gpu_tests tests/browser_gpu_test.c)
+    target_include_directories(pico_browser_gpu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(pico_browser_gpu_tests PRIVATE pico_browser_gpu raylib)
+    pico_warnings_are_errors(pico_browser_gpu_tests)
+    add_dependencies(pico_browser_gpu_tests pico_browser_helper)
     add_test(NAME pico_build_info_tests
         COMMAND "${CMAKE_COMMAND}"
             "-DPICO_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/build-info-test"
@@ -660,7 +674,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_agent_behavior_tests)
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads OpenSSL::Crypto)
+    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads OpenSSL::Crypto pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_agent_behavior_tests PRIVATE tests/test_clock.c)
         target_compile_definitions(pico_agent_behavior_tests PRIVATE PICO_TEST_CLOCK=1)
@@ -743,7 +757,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_files_tests)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3)
+    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(pico_files_tests PRIVATE PICO_TEST_FILE_KEYS=1)
         target_link_options(pico_files_tests PRIVATE -Wl,--wrap=IsKeyPressed)
@@ -800,7 +814,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_composer_tests)
     target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3)
+    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
 
     add_executable(pico_spell_tests
@@ -1053,7 +1067,7 @@ if(BUILD_TESTING)
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
-    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS} pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_host_workspace_tests PRIVATE tests/test_clock.c tests/test_io.c)
         target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_TEST_CLOCK=1 PICO_TEST_IO=1)
@@ -1065,7 +1079,7 @@ if(BUILD_TESTING)
             -Wl,--wrap=pico_openai_listen -Wl,--wrap=pico_openai_await_callback
             -Wl,--wrap=pico_http_post -Wl,--wrap=pico_http_post_sse)
         target_link_options(pico_host_workspace_tests PRIVATE
-            -Wl,--wrap=IsWindowReady -Wl,--wrap=GetApplicationDirectory
+            -Wl,--wrap=IsWindowReady -Wl,--wrap=GetApplicationDirectory -Wl,--wrap=PbGpuInit
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
             -Wl,--wrap=SetMouseCursor -Wl,--wrap=IsKeyDown -Wl,--wrap=IsKeyPressed

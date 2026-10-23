@@ -4,6 +4,12 @@ Slice 5 adds a repeatable **descriptive benchmark**, not performance gates or a
 new page suspension/eviction policy. The first increment also hardens failure
 classification and explicit close/reopen recovery; see [browser contracts](extend/browser.md#failures-and-explicit-recovery).
 
+The recorded baseline below is **historical CPU-pixel transport**, not a
+measurement of the GPU-only renderer. Current `frame_bytes` means metadata bytes;
+conversion/upload counters have been removed in favor of import counters. New
+runs require native display/DMA-BUF/fence-capable drivers; software Xvfb is no
+longer a supported browser presentation configuration.
+
 ## Procedure
 
 Use the pinned Nix development tools and build the current core/helper:
@@ -11,17 +17,16 @@ Use the pinned Nix development tools and build the current core/helper:
 ```sh
 nix develop -c cmake --build app/build/debug --target pico pico_host_workspace_tests
 
-# Engine-only matrix: no Pico window or texture uploads.
+# Engine-only matrix: native display/GPU required, no Pico window.
 nix develop -c timeout -k 5s 300s python3 app/tests/browser_profile.py \
   app/build/debug/browser/runtime/pico_browser_helper \
   --seconds 10 --warmup 3 --output /tmp/browser-engine-new.json
 
-# Add real Pico conversion/upload measurements on an isolated software X11 display.
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY LIBGL_ALWAYS_SOFTWARE=1 \
-  xvfb-run -a -s '-screen 0 1600x1200x24' \
+# Add real Pico import measurements on an ISOLATED hardware-backed X11 display.
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY \
   timeout -k 5s 360s python3 app/tests/browser_profile.py \
   app/build/debug/browser/runtime/pico_browser_helper --pico app/build/debug/pico \
-  --seconds 10 --warmup 3 --output /tmp/browser-software-new.json
+  --seconds 10 --warmup 3 --output /tmp/browser-gpu-new.json
 ```
 
 Output paths must be new files. Reports use mode `0600`, contain environment,
@@ -44,12 +49,12 @@ must advance, including when hidden. No FPS threshold is asserted.
 
 Helper trials cover all-visible, all-hidden, and (for three sessions) one-visible
 plus two-hidden. **Helper-visible is not actually presented in Pico**: these
-trials drain the production raw-frame socket without converting/uploading it.
+trials receive GPU-frame metadata and return acquire fences without sampling images.
 Host trials show one real Pico browser, then measure either expanded or collapsed
 presentation. Static host trials verify actual website screenshot pixels;
-animated/WebGL trials require uploads after fixture readiness. Concurrent engine
+animated/WebGL trials require imports after fixture readiness. Concurrent engine
 work is measured separately, not described as three simultaneously visible UI
-panes. The supplied `xvfb-run` command drives an isolated X11 display. **Do not
+panes. Host tests require an isolated hardware-backed X11 display. **Do not
 run `--pico` against your desktop's `DISPLAY`: host trials use X11 mouse/keyboard
 input and change focus.** The script checks for X11, but cannot establish that an
 arbitrary display is isolated. Native Wayland input/IME, HiDPI and GPU acceptance
@@ -67,12 +72,12 @@ remain manual.
   this is neither PSS nor unique physical memory, and excludes graphics-driver
   allocations not charged as process RSS. Mean and peak apply only to the sampled
   measurement window, not startup or lifetime peaks.
-- Helper `frame_bytes` counts raw BGRA payload received, excluding event headers.
-  Divide by `seconds` for IPC payload bandwidth. It is not all internal copies,
-  dirty-region area, or PNG observation cost.
+- Helper `frame_bytes` counts GPU metadata payload received, excluding event
+  headers and ancillary descriptors/fences. It is not pixel bandwidth, GPU copies,
+  DMA-BUF allocation size, or PNG observation cost.
 - Host counters are enabled by `PICO_BROWSER_PROFILE` in the isolated process.
-  They include raw frames, pending-frame replacements, upload bytes and wall time
-  for BGRA conversion and texture creation/update. Upload time is CPU-side API
+  They include GPU frames/metadata, discarded frames, imports, and import wall time.
+  Import time is CPU-side API
   wall time, **not GPU completion**. Counter deltas use their own exact
   `host_counter_seconds` span; process CPU/RSS use the separate `seconds` window.
   The queue high-water value is lifetime-wide, not a delta. Opt-in reporting adds
@@ -87,8 +92,7 @@ remain manual.
   unsandboxed or blocklist-bypassed “passing” run. Record unavailable backends.
 
 Use `--width`, `--height`, `--sessions`, and `--workloads` for targeted repeats.
-For an engine-only native-driver comparison, omit `LIBGL_ALWAYS_SOFTWARE=1` and
-`--pico`; retain the reported WebGL renderer/environment. It is still off-screen
+For an engine-only native-driver comparison, omit `--pico`; retain the reported WebGL renderer/environment. It is still off-screen
 CEF, not native Pico/Wayland presentation.
 
 ## Recorded baseline

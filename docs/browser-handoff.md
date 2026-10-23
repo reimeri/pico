@@ -2,6 +2,13 @@
 
 ## 1. Start here
 
+**Rendering architecture update:** GPU-only DMA-BUF presentation supersedes the
+CPU/headless rendering descriptions in historical slice notes below. See
+[GPU requirements and ownership](extend/browser.md#gpu-rendering-requirements).
+The helper is native-Ozone windowless, the host is EGL on both window backends,
+and screenshots read back only on demand. Use the hardware GPU regression, not
+software Xvfb, to validate presentation.
+
 **Implementation baseline:** `731c819` — `First part of integrated browser implementation`.
 
 **Current status:** slices 1–4 are now implemented: human browsing,
@@ -116,22 +123,22 @@ Pico main/graphics thread
                        ├─ independent browser/request context per session
                        └─ Chromium renderer/GPU/network subprocesses
                                   ↓
-                       framed events + raw BGRA pixels
+                       framed metadata + DMA-BUF planes + acquire fences
                                   ↓
 Pico receiver thread → mutex-protected latest snapshots → host wakeup
                                   ↓
-Pico graphics thread → BGRA/RGBA conversion → texture upload → Clay/Raylib
+Pico graphics thread → EGL image import → Clay/Raylib → release fence + acknowledgment
 ```
 
 - `PicoBrowser_Init` allocates service metadata; it does **not** launch Chromium.
 - The helper and browser instances belong to core, not hot-reloaded extension
   state. Extension reload does not tear them down.
-- The C++ helper uses Chromium's headless off-screen platform. Pico's existing
-  GLFW window owns native Wayland/X11 presentation.
+- The C++ helper uses Chromium's native-Ozone windowless GPU platform. Pico's
+  EGL-backed GLFW window owns native Wayland/X11 presentation.
 - The helper reader posts work onto CEF's UI thread. Browser callbacks serialize
   events back to Pico. The receiver never calls Clay or graphics APIs.
-- Frames replace pending frames rather than accumulating an unbounded video
-  history. The main thread alone creates, updates, or unloads Raylib textures.
+- A bounded pool coalesces updates rather than accumulating unbounded video
+  history. The main thread alone imports/destroys display textures and releases GPU leases.
 - Clay commands borrow browser text/texture storage. Closed browser objects are
   retired until the next layout boundary; do not free them from underneath an
   `AFTER_LAYOUT` callback's pending render commands.
@@ -150,8 +157,8 @@ ID, not its new in-memory agent ID, to retain storage.
 - Hidden pages currently paint at a lower frame rate, but their frames are not
   sent to Pico and their Pico textures are released. JavaScript/network activity
   continues; this is **not** suspension or a CPU/RAM limit.
-- The current path copies raw pixels over IPC and uploads CPU buffers. It does
-  not implement dirty-region transport or GPU-buffer sharing.
+- The current path transports GPU metadata/fds/fences, not pixel bytes. A
+  bounded owned pool and release acknowledgments protect buffer contents.
 - The command queue is bounded. Exhaustion currently stops the helper rather
   than silently dropping lifecycle commands or key/button releases.
 - All sessions share one helper: helper failure stops its pages; a renderer

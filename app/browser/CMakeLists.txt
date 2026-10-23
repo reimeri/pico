@@ -17,7 +17,7 @@ target_include_directories(pico_browser_helper SYSTEM PRIVATE "${CEF_ROOT}")
 target_compile_definitions(pico_browser_helper PRIVATE
     ${CEF_COMPILER_DEFINES})
 target_compile_options(pico_browser_helper PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(pico_browser_helper PRIVATE libcef_dll_wrapper
+target_link_libraries(pico_browser_helper PRIVATE pico_browser_gpu libcef_dll_wrapper
     "${CEF_ROOT}/Release/libcef.so" Threads::Threads ${CMAKE_DL_LIBS})
 # Chromium needs ICU/V8 data beside the executable before CefInitialize.
 file(GLOB _cef_runtime "${CEF_ROOT}/Release/*" "${CEF_ROOT}/Resources/*")

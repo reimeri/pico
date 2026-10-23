@@ -366,8 +366,10 @@ starts in User mode; agent open starts in Agent mode. Selector animation is
 presentation-only and must not resize the toolbar or bottom-follow shell.
 
 The expanded dock's left edge is a core-owned resize handle with a horizontal
-resize cursor. Its width is main-session-local presentation state, retained
-through collapse/reopen and selection changes but never persisted. Expanded
+resize cursor. A proximity spotlight is clipped to that border and remains lit
+while resizing; it is presentation-only and does not enlarge the input target or
+change shell geometry. The dock width is main-session-local presentation state,
+retained through collapse/reopen and selection changes but never persisted. Expanded
 width is bounded to 300 logical pixels minimum and half the right column maximum;
 the maximum wins when space is narrower. Passive window/sidebar changes clamp
 presentation without overwriting the preferred width. Toolbar controls wrap into

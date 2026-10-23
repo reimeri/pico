@@ -1082,7 +1082,8 @@ if(BUILD_TESTING)
             -Wl,--wrap=IsWindowReady -Wl,--wrap=IsWindowFocused -Wl,--wrap=GetApplicationDirectory -Wl,--wrap=PbGpuInit
             -Wl,--wrap=malloc -Wl,--wrap=GetScreenWidth -Wl,--wrap=GetScreenHeight
             -Wl,--wrap=BeginDrawing -Wl,--wrap=ClearBackground -Wl,--wrap=EndDrawing
-            -Wl,--wrap=SetMouseCursor -Wl,--wrap=IsKeyDown -Wl,--wrap=IsKeyPressed
+            -Wl,--wrap=SetMouseCursor -Wl,--wrap=DrawCircleGradient -Wl,--wrap=Pico_Scissor -Wl,--wrap=Pico_ScissorEnd
+            -Wl,--wrap=IsKeyDown -Wl,--wrap=IsKeyPressed
             -Wl,--wrap=GetCharPressed -Wl,--wrap=IsMouseButtonPressed
             -Wl,--wrap=IsMouseButtonDown -Wl,--wrap=IsMouseButtonReleased -Wl,--wrap=GetMousePosition
             -Wl,--wrap=GetMouseWheelMoveV

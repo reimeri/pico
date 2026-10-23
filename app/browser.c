@@ -11,6 +11,7 @@
 #include "docs_path.h"
 #include "overlay.h"
 #include "text_field_ui.h"
+#include "render_scale.h"
 #include "json.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -1538,14 +1539,22 @@ bool PicoBrowser_BlocksPointer(const PicoHost *host)
 {
     return host && host->browser && host->browser->resize_pointer_claimed;
 }
-bool PicoBrowser_ResizeHovered(const PicoHost *host)
+static bool ResizeEdgeAvailable(const PicoHost *host)
 {
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
-    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded || !host->window_focused ||
-        host->window_minimized || PicoUi_ModalOpen(host)) return false;
-    bool dragging = host->browser && host->browser->resize_agent_id == a->id;
-    return dragging || (!host->ui_drag_active && !PicoBrowser_BlocksPointer(host) &&
-                        Over("BrowserResizeHandle") && !Over("BrowserViewportPopup"));
+    return PicoAgent_IsUserMain(a) && a->browser_expanded && host->window_focused &&
+           !host->window_minimized && !PicoUi_ModalOpen(host);
+}
+static bool Resizing(const PicoHost *host)
+{
+    const PicoAgent *a = PicoHost_SelectedAgentConst(host);
+    return a && host->browser && host->browser->resize_agent_id == a->id;
+}
+bool PicoBrowser_ResizeHovered(const PicoHost *host)
+{
+    if (!ResizeEdgeAvailable(host)) return false;
+    return Resizing(host) || (!host->ui_drag_active && !PicoBrowser_BlocksPointer(host) &&
+                             Over("BrowserResizeHandle") && !Over("BrowserViewportPopup"));
 }
 static void EndResize(PicoHost *host)
 {
@@ -1833,8 +1842,34 @@ void PicoBrowser_AfterLayout(PicoHost *host)
         host->ui_relayout_requested = true; pico_host_request_redraw(host);
     }
 }
+static void DrawResizeGlow(PicoHost *host)
+{
+    if (!ResizeEdgeAvailable(host)) return;
+    bool dragging = Resizing(host);
+    if (!dragging && (host->ui_drag_active || PicoBrowser_BlocksPointer(host) || Over("BrowserViewportPopup"))) return;
+    Clay_ElementData pane = Bounds("BrowserPane");
+    if (!pane.found || pane.boundingBox.width <= 0 || pane.boundingBox.height <= 0) return;
+    Clay_BoundingBox bounds = pane.boundingBox;
+    const float proximity = 24, radius = 50;
+    Vector2 mouse = GetMousePosition();
+    float center_y = fminf(bounds.y + bounds.height, fmaxf(bounds.y, mouse.y));
+    float distance = hypotf(mouse.x - bounds.x, mouse.y - center_y);
+    if (!dragging && distance >= proximity) return;
+    float strength = dragging ? 1 : 1 - distance / proximity;
+    strength = strength * strength * (3 - 2 * strength);
+    Color accent = {(unsigned char)COLOR_LINK.r, (unsigned char)COLOR_LINK.g, (unsigned char)COLOR_LINK.b,
+                    (unsigned char)(180 * strength)};
+    /* Project the flashlight onto a narrow border strip. It never paints the
+     * chat/page surface, changes layout, or enlarges the resize hit target. */
+    Pico_Scissor((int)floorf(bounds.x), (int)ceilf(bounds.y),
+                 (int)fminf(2, floorf(bounds.width)), (int)floorf(bounds.height));
+    DrawCircleGradient((int)roundf(bounds.x), (int)roundf(center_y), radius,
+                       accent, (Color){accent.r, accent.g, accent.b, 0});
+    Pico_ScissorEnd();
+}
 void PicoBrowser_AfterRender(PicoHost *host)
 {
+    DrawResizeGlow(host);
     BrowserSession *b = Selected(host);
     if (b && b->address_focus) PicoTextField_Draw(&b->field, CLAY_ID("BrowserAddress"), 8, 5, FONT_REGULAR);
     if (b && b->viewport_custom && b->viewport_focus >= 1 && b->viewport_focus <= 2)

@@ -124,6 +124,40 @@ Vector2 __wrap_GetMouseWheelMoveV(void)
 
 static bool g_clay_frame_test;
 static bool g_browser_resize_frame;
+/* Probe composited opacity at a point, independent of the gradient's radius,
+ * opacity, or number of drawing primitives. Scissoring is part of the result. */
+static bool g_glow_probe, g_glow_clip_active;
+static Vector2 g_glow_point;
+static Rectangle g_glow_clip;
+static float g_glow_alpha;
+void __real_Pico_Scissor(int x, int y, int width, int height);
+void __wrap_Pico_Scissor(int x, int y, int width, int height)
+{
+    g_glow_clip_active = true;
+    g_glow_clip = (Rectangle){x, y, width, height};
+    if (!g_clay_frame_test) __real_Pico_Scissor(x, y, width, height);
+}
+void __real_Pico_ScissorEnd(void);
+void __wrap_Pico_ScissorEnd(void)
+{
+    g_glow_clip_active = false;
+    if (!g_clay_frame_test) __real_Pico_ScissorEnd();
+}
+void __real_DrawCircleGradient(int x, int y, float radius, Color inner, Color outer);
+void __wrap_DrawCircleGradient(int x, int y, float radius, Color inner, Color outer)
+{
+    if (g_glow_probe && (!g_glow_clip_active ||
+        (g_glow_point.x >= g_glow_clip.x && g_glow_point.x < g_glow_clip.x + g_glow_clip.width &&
+         g_glow_point.y >= g_glow_clip.y && g_glow_point.y < g_glow_clip.y + g_glow_clip.height))) {
+        float distance = hypotf(g_glow_point.x - x, g_glow_point.y - y);
+        if (distance < radius) {
+            float t = distance / radius;
+            float alpha = (inner.a * (1 - t) + outer.a * t) / 255;
+            g_glow_alpha += (1 - g_glow_alpha) * alpha;
+        }
+    }
+    if (!g_clay_frame_test) __real_DrawCircleGradient(x, y, radius, inner, outer);
+}
 static int g_mouse_cursor;
 bool __real_IsWindowFocused(void);
 bool __wrap_IsWindowFocused(void) { return g_browser_resize_frame || __real_IsWindowFocused(); }
@@ -4831,6 +4865,63 @@ static bool BrowserToolbarContained(void)
     }
     return true;
 }
+static float BrowserGlowAlpha(PicoHost *host, Vector2 point)
+{
+    bool was_frame = g_clay_frame_test;
+    g_clay_frame_test = g_glow_probe = true;
+    g_glow_clip_active = false;
+    g_glow_point = point; g_glow_alpha = 0;
+    PicoBrowser_AfterRender(host);
+    g_glow_probe = false; g_clay_frame_test = was_frame;
+    return g_glow_alpha;
+}
+static bool BrowserResizeGlowBehavior(PicoHost *host)
+{
+    bool good = false;
+    g_find_input_test = true;
+    Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
+    Vector2 center = {pane.x + 1, pane.y + pane.height / 2};
+    g_find_pointer = (Vector2){pane.x, center.y};
+    float peak = BrowserGlowAlpha(host, center);
+    if (peak <= 0 || BrowserGlowAlpha(host, (Vector2){center.x - 10, center.y}) != 0 ||
+        BrowserGlowAlpha(host, (Vector2){center.x + 10, center.y}) != 0 ||
+        BrowserGlowAlpha(host, (Vector2){center.x, center.y + 200}) != 0) goto done;
+    float shoulder = BrowserGlowAlpha(host, (Vector2){center.x, center.y + 20});
+    if (shoulder <= 0 || shoulder >= peak) goto done;
+    /* Proximity is only a visual affordance, not a larger clickable handle. */
+    g_find_pointer.x += 12;
+    float near = BrowserGlowAlpha(host, center);
+    if (near <= 0 || near >= peak || PicoBrowser_ResizeHovered(host)) goto done;
+    g_find_pointer.x += 200;
+    if (BrowserGlowAlpha(host, center) != 0) goto done;
+    g_find_pointer = (Vector2){pane.x, center.y + 100};
+    if (BrowserGlowAlpha(host, center) != 0 ||
+        BrowserGlowAlpha(host, (Vector2){center.x, g_find_pointer.y}) <= 0) goto done;
+    /* The radial highlight is also clipped at the pane's top and bottom. */
+    g_find_pointer.y = pane.y;
+    if (BrowserGlowAlpha(host, (Vector2){center.x, pane.y - 1}) != 0) goto done;
+    g_find_pointer.y = pane.y + pane.height;
+    if (BrowserGlowAlpha(host, (Vector2){center.x, pane.y + pane.height + 1}) != 0) goto done;
+    g_find_pointer = (Vector2){pane.x, center.y};
+    host->window_focused = false;
+    float unfocused = BrowserGlowAlpha(host, center);
+    host->window_focused = true;
+    if (unfocused != 0) goto done;
+    if (!pico_ui_modal_push(host, "browser-glow-test")) goto done;
+    float modal = BrowserGlowAlpha(host, center);
+    pico_ui_modal_pop(host, "browser-glow-test");
+    if (modal != 0) goto done;
+    PicoAgent *agent = PicoHost_SelectedAgent(host);
+    agent->browser_expanded = false;
+    float collapsed = BrowserGlowAlpha(host, center);
+    agent->browser_expanded = true;
+    if (collapsed != 0) goto done;
+    good = true;
+done:
+    g_find_input_test = false;
+    if (!good) Fail("browser resize glow must be localized, proximity-faded, clipped, and non-interactive");
+    return good;
+}
 static bool BrowserResizeFrameBehavior(PicoHost *host)
 {
     bool good = false;
@@ -4848,6 +4939,7 @@ static bool BrowserResizeFrameBehavior(PicoHost *host)
     PicoHost_Frame(host);
     pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
     if (g_mouse_cursor != MOUSE_CURSOR_RESIZE_EW ||
+        BrowserGlowAlpha(host, (Vector2){pane.x + 1, pane.y + 1}) <= 0 ||
         Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED ||
         Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) goto done;
     /* Escape must stop resizing without handing the still-held gesture to
@@ -4856,6 +4948,7 @@ static bool BrowserResizeFrameBehavior(PicoHost *host)
     g_find_pointer.x -= 100; PicoHost_Frame(host);
     if (host->ui_drag_active || !PicoBrowser_BlocksPointer(host) ||
         g_mouse_cursor == MOUSE_CURSOR_RESIZE_EW ||
+        BrowserGlowAlpha(host, (Vector2){pane.x + 1, pane.y + 1}) != 0 ||
         !ShellBoxStable(pane, Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox) ||
         Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED ||
         Clay_GetPointerState().state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME) goto done;
@@ -4934,7 +5027,8 @@ static bool BrowserResizeBehavior(PicoHost *host, bool with_sidebar)
     Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
     Clay_BoundingBox main = Clay_GetElementData(CLAY_ID("MainColumn")).boundingBox;
     Clay_ElementData handle = Clay_GetElementData(CLAY_ID("BrowserResizeHandle"));
-    if (!handle.found || fabsf(handle.boundingBox.height - pane.height) > 0.01f) return false;
+    if (!handle.found || fabsf(handle.boundingBox.height - pane.height) > 0.01f ||
+        !BrowserResizeGlowBehavior(host)) return false;
     g_find_input_test = true;
     g_find_pointer = (Vector2){pane.x, pane.y + pane.height / 2};
     if (!PicoBrowser_ResizeHovered(host)) return false;

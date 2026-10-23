@@ -195,7 +195,10 @@
           # Optional real-window regression tools; not part of Pico's runtime.
           browser-tests = pkgs.mkShell {
             inputsFrom = [ default ];
-            packages = [ pkgs.xvfb-run pkgs.xdotool (pkgs.python3.withPackages (ps: [ ps.pillow ])) ];
+            packages = [
+              pkgs.xvfb-run pkgs.xdotool pkgs.weston pkgs.xwayland pkgs.mesa-demos
+              (pkgs.python3.withPackages (ps: [ ps.pillow ]))
+            ];
             inherit (default) FETCHCONTENT_SOURCE_DIR_RAYLIB CEF_ROOT;
           };
         }

@@ -430,8 +430,8 @@ or session IDs. Import timing measures host API wall time, **not GPU completion*
 Counters are host-wide, cumulative across explicit helper restarts, and are not a
 public extension API or a renderer CPU/RAM limit.
 
-See [profiling](../browser-profiling.md) for repeatable workloads and the historical
-CPU-transport baseline. Those old conversion/upload metrics do not describe this
+See [profiling](../browser-profiling.md) for repeatable workloads, the three-run
+GPU resource baseline, and the historical CPU-transport comparison. Those old conversion/upload metrics do not describe this
 GPU path. Suspension/eviction, helper-idle shutdown, and sharing one runtime between
 multiple Pico processes remain out of scope.
 

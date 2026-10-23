@@ -10,6 +10,7 @@ Use --output NEW_FILE to retain private JSON results. See docs/browser-profiling
 """
 import argparse
 import contextlib
+import hashlib
 import http.server
 import json
 import os
@@ -188,15 +189,29 @@ def terminate_tree(known):
             except ProcessLookupError: pass
 
 
+@contextlib.contextmanager
+def trial_directory(args, prefix):
+    """Optional private artifacts retain logs/counters after a failed trial."""
+    if args.artifacts_dir:
+        directory = tempfile.mkdtemp(prefix=prefix, dir=args.artifacts_dir)
+        print(f'profile artifacts: {directory}', file=sys.stderr, flush=True)
+        yield directory
+    else:
+        with tempfile.TemporaryDirectory(prefix=prefix) as directory:
+            yield directory
+
+
 def helper_trial(args, url, workload, count, visibility):
     traffic = {'frames': 0, 'frame_bytes': 0}
+    received_tokens = set()
     lock = threading.Lock()
 
     def frame(token, length):
         with lock:
             traffic['frames'] += 1; traffic['frame_bytes'] += length
+            received_tokens.add(token)
 
-    with tempfile.TemporaryDirectory(prefix='pico-browser-profile-') as root:
+    with trial_directory(args, 'helper-') as root:
         browser = Browser(args.helper, root, frame_callback=frame)
         try:
             names = [f'helper-{workload}-{count}-{visibility}-{i}' for i in range(count)]
@@ -216,11 +231,20 @@ def helper_trial(args, url, workload, count, visibility):
                 error, result = browser.inspect(token, 21, {'expression':'[innerWidth,innerHeight,canvas.width,canvas.height]'})
                 if error or json.loads(result)['data']['result']['value'] != [args.width, args.height,args.width,args.height]:
                     raise RuntimeError(f'viewport not applied: {result}')
+            expected = set(range(1, count+1)) if visibility == 'visible' else {1} if visibility == 'mixed' else set()
+            while True:
+                if not browser.reader.is_alive():
+                    raise RuntimeError('browser event reader stopped before frame readiness')
+                with lock:
+                    if expected <= received_tokens: break
+                time.sleep(.02)
             time.sleep(args.warmup)
             before_pages = fresh_reports(names,browser.process,time.monotonic())
             with lock:
                 before = dict(traffic)
             result = sample(browser.process, args.seconds)
+            if not browser.reader.is_alive():
+                raise RuntimeError('browser event reader stopped during measurement')
             measurement_end = time.monotonic()
             with lock:
                 result.update({key: traffic[key] - before[key] for key in before})
@@ -238,7 +262,7 @@ def host_trial(args, url, workload, visibility):
     """One actually presented browser; concurrent workloads measured above."""
     if not os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
         raise RuntimeError('--pico uses isolated X11 UI driving; use an isolated hardware-backed X11 display with WAYLAND_DISPLAY unset')
-    with tempfile.TemporaryDirectory(prefix='pico-browser-host-profile-') as directory:
+    with trial_directory(args, 'host-') as directory:
         root = Path(directory); metrics = root/'metrics.jsonl'; session = root/'session.jsonl'
         session.write_text(json.dumps({'type':'session','version':5,'id':'abcdef123456','kind':'normal','cwd':directory})+'\n')
         environment = dict(os.environ, XDG_CONFIG_HOME=str(root/'config'), XDG_SESSION_TYPE='x11', PICO_BROWSER_PROFILE=str(metrics))
@@ -251,7 +275,7 @@ def host_trial(args, url, workload, visibility):
                 return subprocess.check_output(['xdotool', *map(str,parts)], text=True).strip()
 
             def click(xpos, ypos):
-                x('mousemove','--window',window,xpos,ypos); x('mousedown',1,'sleep','.05','mouseup',1)
+                x('mousemove','--window',window,xpos,ypos); x('mousedown',1,'sleep','.05','mouseup',1,'sleep','.05')
 
             def records():
                 if not metrics.exists():
@@ -264,9 +288,9 @@ def host_trial(args, url, workload, visibility):
                 x('windowsize',window,1100,800); x('windowfocus','--sync',window)
                 while not (root/'config/pico/browser').exists():
                     click(1075,25); time.sleep(.05)
-                click(825,28); x('key','ctrl+a'); x('type','--clearmodifiers',f'{args.width}x{args.height}'); x('key','Return')
+                click(825,28); x('key','--delay',60,'ctrl+a'); x('type','--clearmodifiers','--delay',20,f'{args.width}x{args.height}'); x('key','--delay',60,'Return')
                 name = f'host-{workload}-{visibility}'
-                click(900,60); x('key','ctrl+a'); x('type','--clearmodifiers',f'{url}/?workload={workload}&name={name}&width={args.width}&height={args.height}'); x('key','Return')
+                click(900,60); x('key','--delay',60,'ctrl+a'); x('type','--clearmodifiers','--delay',20,f'{url}/?workload={workload}&name={name}&width={args.width}&height={args.height}'); x('key','--delay',60,'Return')
                 pages = wait_reports([name],process)
                 if any(page['error'] for page in pages.values()):
                     return dict(path='pico-presented',workload=workload,sessions=1,visibility=visibility,
@@ -286,7 +310,7 @@ def host_trial(args, url, workload, visibility):
                     screenshot = root/'pico_screenshot.png'
                     while True:
                         screenshot.unlink(missing_ok=True)
-                        x('key','F12')
+                        x('key','--delay',60,'F12')
                         for _ in range(20):
                             try:
                                 with Image.open(screenshot) as image:
@@ -322,6 +346,13 @@ def host_trial(args, url, workload, visibility):
                               viewport=[args.width,args.height],pages_before=before_pages,pages_after=fresh_reports([name],process,boundary))
                 check_progress(result['pages_before'],result['pages_after'])
                 return result
+            except BaseException:
+                if args.artifacts_dir and process.poll() is None:
+                    try:
+                        click(350,200); x('key','--delay',60,'F12'); time.sleep(.2)
+                    except (OSError, RuntimeError, UnboundLocalError):
+                        pass
+                raise
             finally:
                 known = process_tree(process.pid)
                 process.terminate()
@@ -353,6 +384,7 @@ def main():
     parser.add_argument('--workloads',nargs='+',choices=['static','animated','webgl'],default=['static','animated','webgl'])
     parser.add_argument('--width',type=int,default=1280); parser.add_argument('--height',type=int,default=720)
     parser.add_argument('--output',type=Path)
+    parser.add_argument('--artifacts-dir',type=Path,help='retain private per-trial profiles, logs, screenshots and host counters')
     args=parser.parse_args()
     if args.seconds<=0 or args.warmup<0 or any(n<1 for n in args.sessions) or not (1<=args.width<=4096 and 1<=args.height<=4096):
         parser.error('positive duration/session counts, nonnegative warmup, and 1–4096 viewport dimensions required')
@@ -363,6 +395,12 @@ def main():
         'cpu':platform.processor(),'cpus':os.cpu_count(),'helper':args.helper,'pico':args.pico,
         'graphics_env':{key:os.environ.get(key) for key in ('DISPLAY','WAYLAND_DISPLAY','LIBGL_ALWAYS_SOFTWARE','GALLIUM_DRIVER')},
         'warmup_seconds':args.warmup,'requested_seconds':args.seconds},'trials':[]}
+    report['environment']['binary_sha256'] = {
+        name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        for name, path in [('helper', args.helper), ('pico', args.pico)] if path}
+    report['environment']['fixture_sha256'] = hashlib.sha256(PAGE).hexdigest()
+    if args.artifacts_dir:
+        args.artifacts_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     # Reserve the output before doing work; never overwrite an existing report.
     output = os.fdopen(os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') if args.output else sys.stdout
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Fixture)

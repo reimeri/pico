@@ -1,0 +1,1745 @@
+{
+  "description": "Short-run slice-5 baseline, machine-reported clocks; sampled live-process CPU and summed RSS, not performance gates.",
+  "source_base_revision": "252705d35681fd3152176b586beab9023b33866b",
+  "source_state": "uncommitted slice-5 robustness/profiling changes; Debug build",
+  "cef": "151.3.16",
+  "chromium": "151.0.7922.109",
+  "runs": [
+    {
+      "environment": {
+        "utc": "2026-10-23T13:59:32Z",
+        "platform": "Linux-7.3.0-x86_64-with-glibc2.44",
+        "cpu": "",
+        "cpus": 16,
+        "helper": "app/build/debug/browser/runtime/pico_browser_helper",
+        "pico": "app/build/debug/pico",
+        "graphics_env": {
+          "DISPLAY": ":99",
+          "WAYLAND_DISPLAY": null,
+          "LIBGL_ALWAYS_SOFTWARE": "1",
+          "GALLIUM_DRIVER": null
+        },
+        "warmup_seconds": 2.0,
+        "requested_seconds": 3.0
+      },
+      "trials": [
+        {
+          "seconds": 3.0220091590017546,
+          "cpu_seconds": 0.01,
+          "cpu_percent_one_core": 0.3309056814143889,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 884915053.7142857,
+          "rss_peak_bytes": 884989952,
+          "processes_peak": 9,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "static",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-static-1-visible-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-static-1-visible-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.024974799998745,
+          "cpu_seconds": 0.02,
+          "cpu_percent_one_core": 0.6611625326600505,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 875125613.7142857,
+          "rss_peak_bytes": 875216896,
+          "processes_peak": 9,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "static",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-static-1-hidden-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-static-1-hidden-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.023785785000655,
+          "cpu_seconds": 0.02,
+          "cpu_percent_one_core": 0.6614225154178925,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1164589348.5714285,
+          "rss_peak_bytes": 1164767232,
+          "processes_peak": 11,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "static",
+          "sessions": 3,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-static-3-visible-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-visible-1": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-visible-2": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-static-3-visible-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-visible-1": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-visible-2": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.023175941001682,
+          "cpu_seconds": 0.03,
+          "cpu_percent_one_core": 0.9923339092881233,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1137991680.0,
+          "rss_peak_bytes": 1138057216,
+          "processes_peak": 11,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "static",
+          "sessions": 3,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-static-3-hidden-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-hidden-1": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-hidden-2": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-static-3-hidden-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-hidden-1": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-hidden-2": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0221392789972015,
+          "cpu_seconds": 0.04,
+          "cpu_percent_one_core": 1.3235657362976565,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1151539492.5714285,
+          "rss_peak_bytes": 1151733760,
+          "processes_peak": 11,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "static",
+          "sessions": 3,
+          "visibility": "mixed",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-static-3-mixed-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-mixed-1": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-mixed-2": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-static-3-mixed-0": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-mixed-1": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-static-3-mixed-2": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0230690099997446,
+          "cpu_seconds": 0.2,
+          "cpu_percent_one_core": 6.615793398643483,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1093601572.5714285,
+          "rss_peak_bytes": 1093627904,
+          "processes_peak": 10,
+          "host_counter_seconds": 4.000717999995686,
+          "host_counters": {
+            "frames": 0,
+            "frame_bytes": 0,
+            "replaced_frames": 0,
+            "uploads": 0,
+            "upload_bytes": 0,
+            "png_bytes": 0,
+            "convert_seconds": 0.0,
+            "upload_seconds": 0.0
+          },
+          "queue_peak_lifetime": 1,
+          "status": "measured",
+          "path": "pico-presented",
+          "workload": "static",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "host-static-visible": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "host-static-visible": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.023262496004463,
+          "cpu_seconds": 0.13,
+          "cpu_percent_one_core": 4.299990496088504,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1085995300.5714285,
+          "rss_peak_bytes": 1086173184,
+          "processes_peak": 10,
+          "host_counter_seconds": 4.000636000004306,
+          "host_counters": {
+            "frames": 0,
+            "frame_bytes": 0,
+            "replaced_frames": 0,
+            "uploads": 0,
+            "upload_bytes": 0,
+            "png_bytes": 0,
+            "convert_seconds": 0.0,
+            "upload_seconds": 0.0
+          },
+          "queue_peak_lifetime": 1,
+          "status": "measured",
+          "path": "pico-presented",
+          "workload": "static",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "host-static-hidden": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "host-static-hidden": {
+              "kind": "static",
+              "draws": 0,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.023688522000157,
+          "cpu_seconds": 0.24,
+          "cpu_percent_one_core": 7.937325496782355,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 918759716.5714285,
+          "rss_peak_bytes": 919822336,
+          "processes_peak": 9,
+          "frames": 91,
+          "frame_bytes": 335462400,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "animated",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-animated-1-visible-0": {
+              "kind": "animated",
+              "draws": 92,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-animated-1-visible-0": {
+              "kind": "animated",
+              "draws": 212,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0236290880056913,
+          "cpu_seconds": 0.04,
+          "cpu_percent_one_core": 1.3229135861496484,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 899969024.0,
+          "rss_peak_bytes": 901476352,
+          "processes_peak": 9,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "animated",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-animated-1-hidden-0": {
+              "kind": "animated",
+              "draws": 5,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-animated-1-hidden-0": {
+              "kind": "animated",
+              "draws": 9,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0249246360035613,
+          "cpu_seconds": 1.02,
+          "cpu_percent_one_core": 33.71984835124994,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1266876416.0,
+          "rss_peak_bytes": 1274650624,
+          "processes_peak": 11,
+          "frames": 274,
+          "frame_bytes": 1010073600,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "animated",
+          "sessions": 3,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-animated-3-visible-0": {
+              "kind": "animated",
+              "draws": 122,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-visible-1": {
+              "kind": "animated",
+              "draws": 123,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-visible-2": {
+              "kind": "animated",
+              "draws": 93,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-animated-3-visible-0": {
+              "kind": "animated",
+              "draws": 242,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-visible-1": {
+              "kind": "animated",
+              "draws": 243,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-visible-2": {
+              "kind": "animated",
+              "draws": 213,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0243634220023523,
+          "cpu_seconds": 0.08,
+          "cpu_percent_one_core": 2.6451847492268,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1234505142.857143,
+          "rss_peak_bytes": 1234788352,
+          "processes_peak": 11,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "animated",
+          "sessions": 3,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-animated-3-hidden-0": {
+              "kind": "animated",
+              "draws": 6,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-hidden-1": {
+              "kind": "animated",
+              "draws": 6,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-hidden-2": {
+              "kind": "animated",
+              "draws": 6,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-animated-3-hidden-0": {
+              "kind": "animated",
+              "draws": 10,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-hidden-1": {
+              "kind": "animated",
+              "draws": 10,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-hidden-2": {
+              "kind": "animated",
+              "draws": 10,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0249873520006076,
+          "cpu_seconds": 0.34,
+          "cpu_percent_one_core": 11.239716416504598,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1248934180.5714285,
+          "rss_peak_bytes": 1251307520,
+          "processes_peak": 11,
+          "frames": 92,
+          "frame_bytes": 339148800,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "animated",
+          "sessions": 3,
+          "visibility": "mixed",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-animated-3-mixed-0": {
+              "kind": "animated",
+              "draws": 93,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-mixed-1": {
+              "kind": "animated",
+              "draws": 5,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-mixed-2": {
+              "kind": "animated",
+              "draws": 5,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-animated-3-mixed-0": {
+              "kind": "animated",
+              "draws": 213,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-mixed-1": {
+              "kind": "animated",
+              "draws": 9,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-animated-3-mixed-2": {
+              "kind": "animated",
+              "draws": 9,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0240446430034353,
+          "cpu_seconds": 2.38,
+          "cpu_percent_one_core": 78.70254182610942,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1108348342.857143,
+          "rss_peak_bytes": 1108946944,
+          "processes_peak": 10,
+          "host_counter_seconds": 4.000691000001098,
+          "host_counters": {
+            "frames": 120,
+            "frame_bytes": 442368000,
+            "replaced_frames": 0,
+            "uploads": 120,
+            "upload_bytes": 442368000,
+            "png_bytes": 0,
+            "convert_seconds": 0.049754867999999994,
+            "upload_seconds": 0.019296255999999998
+          },
+          "queue_peak_lifetime": 1,
+          "status": "measured",
+          "path": "pico-presented",
+          "workload": "animated",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "host-animated-visible": {
+              "kind": "animated",
+              "draws": 92,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "host-animated-visible": {
+              "kind": "animated",
+              "draws": 212,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.025274287996581,
+          "cpu_seconds": 0.14,
+          "cpu_percent_one_core": 4.627679564642445,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1102310838.857143,
+          "rss_peak_bytes": 1102360576,
+          "processes_peak": 10,
+          "host_counter_seconds": 4.000690000000759,
+          "host_counters": {
+            "frames": 0,
+            "frame_bytes": 0,
+            "replaced_frames": 0,
+            "uploads": 0,
+            "upload_bytes": 0,
+            "png_bytes": 0,
+            "convert_seconds": 0.0,
+            "upload_seconds": 0.0
+          },
+          "queue_peak_lifetime": 1,
+          "status": "measured",
+          "path": "pico-presented",
+          "workload": "animated",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "host-animated-hidden": {
+              "kind": "animated",
+              "draws": 11,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "host-animated-hidden": {
+              "kind": "animated",
+              "draws": 15,
+              "error": null,
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "helper-webgl-1-visible-0": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "helper-webgl-1-hidden-0": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 3,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "helper-webgl-3-visible-0": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-visible-1": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-visible-2": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 3,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "helper-webgl-3-hidden-0": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-hidden-1": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-hidden-2": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 3,
+          "visibility": "mixed",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "helper-webgl-3-mixed-0": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-mixed-1": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-mixed-2": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 800,
+              "height": 600,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "pico-presented",
+          "workload": "webgl",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "host-webgl-visible": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "path": "pico-presented",
+          "workload": "webgl",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "status": "unavailable",
+          "pages": {
+            "host-webgl-hidden": {
+              "kind": "webgl",
+              "draws": 0,
+              "error": "Error: WebGL unavailable",
+              "renderer": null,
+              "pixel": null,
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        }
+      ],
+      "complete": true,
+      "label": "software-x11"
+    },
+    {
+      "environment": {
+        "utc": "2026-10-23T14:01:33Z",
+        "platform": "Linux-7.3.0-x86_64-with-glibc2.44",
+        "cpu": "",
+        "cpus": 16,
+        "helper": "app/build/debug/browser/runtime/pico_browser_helper",
+        "pico": null,
+        "graphics_env": {
+          "DISPLAY": ":0",
+          "WAYLAND_DISPLAY": "wayland-1",
+          "LIBGL_ALWAYS_SOFTWARE": null,
+          "GALLIUM_DRIVER": null
+        },
+        "warmup_seconds": 2.0,
+        "requested_seconds": 3.0
+      },
+      "trials": [
+        {
+          "seconds": 3.0248341230035294,
+          "cpu_seconds": 0.25,
+          "cpu_percent_one_core": 8.264916019651379,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 919777280.0,
+          "rss_peak_bytes": 919904256,
+          "processes_peak": 9,
+          "frames": 92,
+          "frame_bytes": 339148800,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 1,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-webgl-1-visible-0": {
+              "kind": "webgl",
+              "draws": 92,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-webgl-1-visible-0": {
+              "kind": "webgl",
+              "draws": 212,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.0245366519957315,
+          "cpu_seconds": 0.03,
+          "cpu_percent_one_core": 0.9918874674639697,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 910276900.5714285,
+          "rss_peak_bytes": 910872576,
+          "processes_peak": 9,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 1,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-webgl-1-hidden-0": {
+              "kind": "webgl",
+              "draws": 5,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-webgl-1-hidden-0": {
+              "kind": "webgl",
+              "draws": 9,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.026234024997393,
+          "cpu_seconds": 0.79,
+          "cpu_percent_one_core": 26.105053127894845,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1210553782.857143,
+          "rss_peak_bytes": 1214054400,
+          "processes_peak": 11,
+          "frames": 275,
+          "frame_bytes": 1013760000,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 3,
+          "visibility": "visible",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-webgl-3-visible-0": {
+              "kind": "webgl",
+              "draws": 92,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-visible-1": {
+              "kind": "webgl",
+              "draws": 93,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-visible-2": {
+              "kind": "webgl",
+              "draws": 93,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-webgl-3-visible-0": {
+              "kind": "webgl",
+              "draws": 212,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-visible-1": {
+              "kind": "webgl",
+              "draws": 213,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-visible-2": {
+              "kind": "webgl",
+              "draws": 213,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.024066935002338,
+          "cpu_seconds": 0.05,
+          "cpu_percent_one_core": 1.6534025560502794,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1193462637.7142856,
+          "rss_peak_bytes": 1193623552,
+          "processes_peak": 11,
+          "frames": 0,
+          "frame_bytes": 0,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 3,
+          "visibility": "hidden",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-webgl-3-hidden-0": {
+              "kind": "webgl",
+              "draws": 5,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-hidden-1": {
+              "kind": "webgl",
+              "draws": 5,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-hidden-2": {
+              "kind": "webgl",
+              "draws": 6,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-webgl-3-hidden-0": {
+              "kind": "webgl",
+              "draws": 9,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-hidden-1": {
+              "kind": "webgl",
+              "draws": 9,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-hidden-2": {
+              "kind": "webgl",
+              "draws": 10,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        },
+        {
+          "seconds": 3.024007418003748,
+          "cpu_seconds": 0.3,
+          "cpu_percent_one_core": 9.920610584944939,
+          "cpu_accounting": "sampled-live-processes",
+          "processes_disappeared": 0,
+          "processes_appeared": 0,
+          "rss_mean_bytes": 1205252681.142857,
+          "rss_peak_bytes": 1205407744,
+          "processes_peak": 11,
+          "frames": 92,
+          "frame_bytes": 339148800,
+          "status": "measured",
+          "path": "helper-only",
+          "workload": "webgl",
+          "sessions": 3,
+          "visibility": "mixed",
+          "viewport": [
+            1280,
+            720
+          ],
+          "pages_before": {
+            "helper-webgl-3-mixed-0": {
+              "kind": "webgl",
+              "draws": 92,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-mixed-1": {
+              "kind": "webgl",
+              "draws": 5,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-mixed-2": {
+              "kind": "webgl",
+              "draws": 6,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          },
+          "pages_after": {
+            "helper-webgl-3-mixed-0": {
+              "kind": "webgl",
+              "draws": 212,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-mixed-1": {
+              "kind": "webgl",
+              "draws": 9,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            },
+            "helper-webgl-3-mixed-2": {
+              "kind": "webgl",
+              "draws": 10,
+              "error": null,
+              "renderer": "ANGLE (AMD, AMD Radeon RX 7900 GRE (radeonsi navi31 ACO DRM 3.64 7.3.0), OpenGL ES 3.2)",
+              "pixel": [
+                32,
+                77,
+                128,
+                255
+              ],
+              "width": 1280,
+              "height": 720,
+              "canvas_width": 1280,
+              "canvas_height": 720
+            }
+          }
+        }
+      ],
+      "complete": true,
+      "label": "native-driver-helper-webgl"
+    }
+  ]
+}

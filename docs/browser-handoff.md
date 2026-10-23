@@ -11,7 +11,11 @@ validated the original human-facing browser on native Wayland/niri; the new
 agent loop is covered by real-helper and loopback-provider integration fixtures,
 not yet by a live-model/native-Wayland manual acceptance run. Slice 4 adds a
 same-page edit/hot-reload developer fixture and a non-vision loopback-provider
-fixture; native/manual acceptance is still pending.
+fixture. Slice 5 now has a bounded robustness/profiling increment: classified
+helper/renderer failures, stopped-state presentation and explicit recovery,
+fail-closed transport cleanup, and repeatable resource measurements. Native/manual
+acceptance and the remaining optional slice-5 features are still pending. See
+[the profiling procedure and baseline](browser-profiling.md).
 
 The continuation preserves the original requirements below. See
 [the current browser contract](extend/browser.md) for the implemented schemas,
@@ -150,8 +154,13 @@ ID, not its new in-memory agent ID, to retain storage.
   not implement dirty-region transport or GPU-buffer sharing.
 - The command queue is bounded. Exhaustion currently stops the helper rather
   than silently dropping lifecycle commands or key/button releases.
-- All sessions share one helper: a helper failure affects all live browser
-  instances. The UI currently asks the user to close/reopen to retry.
+- All sessions share one helper: helper failure stops its pages; a renderer
+  failure stops each affected page without stopping independent sessions. Causes
+  distinguish process exit/signal, transport/protocol failure, queue exhaustion,
+  and renderer termination. Stopped docks no longer show a startup placeholder.
+  Close/reopen remains explicit; there is no automatic recreation or command
+  replay. Runtime/page initialization watchdogs and process-group cleanup are
+  bounded, including escalation for unresponsive failed helpers.
 - CEF's profile root is a singleton: **one Pico process per config root** may own
   the browser runtime. Multiple sessions inside that process are supported.
   A second process is rejected explicitly; default Chrome relaunch behavior is
@@ -177,6 +186,8 @@ Paths in this table are relative to the repository root.
 | `app/tests/browser_integration.py` | Real helper/Chromium test without a Pico window. |
 | `app/tests/browser_agent_integration.py` | Real Pico and loopback Responses fixture: model-visible PNGs/input/media plus `--developer` non-vision tools, lazy startup and complete output-file handoff/lifetime. |
 | `app/tests/browser_developer_integration.py` | Real-helper diagnostics, accessibility/DOM, evaluation control, complete large output, storage failures, fixed viewport and same-page source edit/hot reload. |
+| `app/tests/browser_failure_integration.py` | Real renderer-kill cause, pending evaluation failure, independent session progress, explicit reopen, and malformed command reporting. |
+| `app/tests/browser_profile.py` | Repeatable static/animated/WebGL visible/hidden/concurrent CPU/RSS/IPC and actual host conversion/upload measurements. |
 | `app/tests/browser_ui_integration.py` | Real Pico window, navigation/reload pixels, fixed viewport/letterboxing, mapped input/margins, resized dock and repeated bottom-follow presentation under Xvfb. |
 | `app/tests/host_workspace_test.c` | Browser eligibility, new-session notification, repeated shell geometry. |
 | `app/tests/install_smoke.cmake` | Checks installed helper and required CEF assets. |
@@ -319,17 +330,43 @@ large-file handoff and viewport control. Neither is live-model certification.
 
 ### Slice 5 — robustness, resource profiling, and UX polish
 
-**Status: partial foundations only; prioritize measured problems.**
+**Status: bounded robustness/profiling increment implemented; remaining optional
+work below stays deferred.**
+
+Implemented in this increment:
+
+- Helper exit status/signals, command/event transport and protocol causes, queue
+  exhaustion, and renderer killed/crashed/OOM/launch classification are retained
+  in dock/tool errors. Stopped pages never claim to be starting. Pending mutating
+  operations report effect uncertainty, without automatic replay/retry.
+- Helper failure stops all its pages; renderer failure stops each affected page
+  while independent session pages continue. Recovery requires explicit close and
+  reopen. Runtime/page startup watchdogs are independent of queued-open success.
+- Terminal queue/transport state prevents later flushing of queued input. Failed
+  helpers and surviving Chromium process groups are cleaned up with bounded
+  escalation, even after the helper leader is reaped. Queue capacity is unchanged.
+- A maintained matrix covers static, animated and WebGL pages, visible/hidden and
+  several concurrent session browsers, sampled process-tree CPU/RSS, raw pixel
+  IPC bandwidth and actual host conversion/upload API wall times. Minimal private
+  opt-in counters use `PICO_BROWSER_PROFILE`; no public extension ABI change.
+  See [procedure, limitations and baseline](browser-profiling.md). WebGL backend
+  unavailability is explicit, not silently counted as a successful measurement.
+- Host fault fixtures cover exit/signal/protocol/queue/stopped-state/reopen;
+  real-helper renderer kill checks pending evaluation and independent sessions;
+  the real-Pico loopback provider has a helper-failure mode.
+
+Remaining scope and measured follow-up:
 
 - Profile CPU, memory, pixel-copy/upload bandwidth, and WebGL behavior with
-  visible, hidden, and several concurrent session browsers. Resource usage has
-  not been comprehensively benchmarked; user fan noise was reported during the
-  crash investigation, not independently diagnosed as a performance defect.
+  visible, hidden, and several concurrent session browsers. The synthetic matrix
+  is now repeatable, but native GPU/Wayland, large observations, long-soak memory
+  and realistic dev-app activity remain unbenchmarked; user fan noise was reported
+  during the crash investigation, not independently diagnosed as a performance defect.
 - Consider dirty-region transport/coalescing or GPU sharing only after profiling.
   Do not reintroduce tab suspension or idle page eviction without user approval.
-- Improve helper/renderer failure reporting and recovery: distinguish process
-  exit, signal, renderer failure, protocol errors, and queue exhaustion; avoid a
-  misleading “Starting browser...” state after the helper has exited.
+- Failure classification and explicit stopped-state recovery are now implemented.
+  Continue measuring failures/cleanup under realistic native loads rather than
+  adding automatic restart or replay.
 - Review backpressure/fairness, large observations, and action bursts. Never
   silently drop close commands or key/button releases to hide queue pressure.
 - Consider releasing the shared helper when unused, and decide whether
@@ -472,6 +509,48 @@ actual PNG contents delivered to a loopback Responses endpoint. No real API
 credentials are used. Hyper/xAI wire projection is covered by serializer tests;
 live service/model acceptance, including Codex authentication, remains a manual
 check.
+
+Slice-5 final validation passed the required host/workspace suite, the full
+48-test serial CTest suite (including geometry and install smoke), existing
+helper and developer fixtures, the new renderer-failure fixture, real-window
+navigation/viewport/input regression, and all three real-Pico loopback modes
+(vision, non-vision developer, and helper failure during evaluation). The final
+serial run used the already documented external orphan reaper and omitted the
+optional Enchant library path; no production spell behavior or assertions were
+changed. The resource matrix was measured separately, without concurrent test
+runs. Native/manual and packaged-artifact acceptance remain pending.
+
+Slice-5 validation and profiling commands:
+
+```sh
+nix develop -c app/build/debug/pico_host_workspace_tests --browser-failures
+
+nix develop -c timeout -k 5s 90s python3 app/tests/browser_failure_integration.py \
+  app/build/debug/browser/runtime/pico_browser_helper
+
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
+  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+  python3 app/tests/browser_agent_integration.py app/build/debug/pico --failure
+```
+
+The initial measured baseline includes 21 software-X11 helper/host trials and
+five native-driver, engine-only WebGL trials, with 2-second warmup and 3-second
+sampled intervals. Animated visible 1280×720 pages transported approximately
+106 MiB/s each, and three helper-visible pages approximately 318–320 MiB/s.
+Hidden fixtures kept progressing without display-frame transport. Forced-software
+WebGL was unavailable (Chromium blocklist); native-driver WebGL completed with
+ANGLE/radeonsi. These are short Debug-build observations, not production/native
+Wayland performance or long-soak certification. Full procedure, exact counters,
+CPU/RSS limitations and structured results are in
+[browser-profiling.md](browser-profiling.md) and
+[browser-profile-baseline.json](browser-profile-baseline.json).
+
+The robustness increment retains the current sandbox, helper warmth, per-session
+profiles and explicit recovery policy. Packaged archive/AppImage execution tests,
+automatic helper shutdown/restart, cross-process sharing, clipboard/files/tabs,
+native IME/HiDPI, and live-model acceptance remain deferred. Run the ordinary
+host/workspace and serial CTest suites plus existing helper/developer/UI/agent
+fixtures after core/helper changes, not just the new fault subset.
 
 Test-environment notes:
 

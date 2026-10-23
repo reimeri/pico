@@ -10,6 +10,8 @@
 #include "pico/auth.h"
 #include "host_internal.h"
 #include "browser.h"
+#include "browser/protocol.h"
+#include <sys/socket.h>
 #include "sanitizer_detect.h"
 #include "workspace_internal.h"
 #include "settings.h"
@@ -53,6 +55,14 @@
 int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state);
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static const char *g_browser_application_directory;
+static bool g_browser_fake_window;
+bool __real_IsWindowReady(void);
+bool __wrap_IsWindowReady(void) { return g_browser_fake_window || __real_IsWindowReady(); }
+const char *__real_GetApplicationDirectory(void);
+const char *__wrap_GetApplicationDirectory(void) {
+    return g_browser_application_directory ? g_browser_application_directory : __real_GetApplicationDirectory();
+}
 static bool g_find_input_test;
 static bool g_fixed_width_text_measure;
 static int g_find_key;
@@ -4509,6 +4519,162 @@ done:
 #else
     return 0;
 #endif
+}
+
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+/* Re-exec the test binary at the ordinary helper path: exercise production
+ * spawn/IPC/reaping rather than exposing browser service internals to tests. */
+static int BrowserFaultHelper(int argc, char **argv)
+{
+    if (argc != 4) return 99;
+    int commands = atoi(argv[1]), events = atoi(argv[2]);
+    const char *mode = getenv("PICO_TEST_BROWSER_FAILURE");
+    PbEvent ready = {.type=PB_RUNTIME_READY};
+    if (write(events, &ready, sizeof(ready)) != sizeof(ready)) return 98;
+    PbCommand command;
+    while (recv(commands, &command, sizeof(command), 0) == sizeof(command)) {
+        if (command.type == PB_STOP) return 0;
+        if (command.type == PB_CLOSE) {
+            PbEvent closed = {.type=PB_CLOSED, .token=command.token};
+            if (write(events, &closed, sizeof(closed)) != sizeof(closed)) return 97;
+        }
+        if (command.type != PB_OPEN) continue;
+        if (!strcmp(mode, "exit0")) return 0;
+        if (!strcmp(mode, "exit7")) return 7;
+        if (!strcmp(mode, "signal")) { raise(SIGKILL); return 96; }
+        ready.token = command.token; ready.type = PB_READY;
+        if (!strcmp(mode, "protocol")) ready.type = UINT32_MAX;
+        if (!strcmp(mode, "truncated")) {
+            if (write(events, &ready, 1) != 1) return 95;
+            return 0;
+        }
+        if (!strcmp(mode, "renderer")) {
+            const char cause[] = "Browser renderer crashed (code 11).";
+            PbEvent failed = {.type=PB_STOPPED, .token=command.token, .length=sizeof(cause)-1};
+            if (write(events, &failed, sizeof(failed)) != sizeof(failed) ||
+                write(events, cause, sizeof(cause)-1) != sizeof(cause)-1) return 94;
+            /* A later navigation warning must not replace the crash cause,
+             * even if all events arrive before the next host pump. */
+            const char warning[] = "Late page load warning";
+            PbEvent notice = {.type=PB_ERROR, .token=command.token, .length=sizeof(warning)-1};
+            if (write(events, &notice, sizeof(notice)) != sizeof(notice) ||
+                write(events, warning, sizeof(warning)-1) != sizeof(warning)-1) return 91;
+            PbEvent closed = {.type=PB_CLOSED, .token=command.token};
+            if (write(events, &closed, sizeof(closed)) != sizeof(closed)) return 93;
+            mode = "healthy";
+            continue;
+        }
+        if (write(events, &ready, sizeof(ready)) != sizeof(ready)) return 92;
+        if (!strcmp(mode, "queue")) {
+            signal(SIGTERM, SIG_IGN); /* Recovery must escalate, not hang. */
+            for (;;) pause();
+        }
+    }
+    return 0;
+}
+static void BrowserTestClick(PicoHost *host, const char *name)
+{
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    Clay_ElementData element = Clay_GetElementData(Clay_GetElementId((Clay_String){.length=(int)strlen(name), .chars=name}));
+    g_find_input_test = true; g_find_button = MOUSE_BUTTON_LEFT; g_find_press = true;
+    g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2,
+                              element.boundingBox.y + element.boundingBox.height / 2};
+    g_browser_fake_window = true;
+    PicoBrowser_Input(host);
+    g_browser_fake_window = false;
+    g_find_input_test = g_find_press = false;
+}
+#endif
+static int TestBrowserHelperFaultRecovery(void)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    const char *modes[] = {"exit0", "exit7", "signal", "protocol", "truncated", "renderer", "queue"};
+    const char *causes[] = {"Browser helper exited with status 0.", "Browser helper exited with status 7.",
+        "Browser helper terminated by signal 9 (Killed).", "Browser protocol error: invalid event header.",
+        "Browser protocol error: truncated event.", "Browser renderer crashed (code 11).",
+        "Browser stopped: command queue exhausted."};
+    for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
+        char dir[] = "/tmp/pico-browser-fault-XXXXXX", cfg[] = "/tmp/pico-browser-fault-config-XXXXXX";
+        char helper[4096], application[4096], executable[4096];
+        Clay_Context *previous = Clay_GetCurrentContext();
+        PicoHost *host = NULL; int rc = 1;
+        Clay_SetCurrentContext(NULL);
+        if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay((Clay_Dimensions){1100,800})) goto done;
+        snprintf(application, sizeof(application), "%s/", dir);
+        snprintf(helper, sizeof(helper), "%s/browser", dir); mkdir(helper, 0700);
+        snprintf(helper, sizeof(helper), "%s/browser/runtime", dir); mkdir(helper, 0700);
+        snprintf(helper, sizeof(helper), "%s/browser/runtime/pico_browser_helper", dir);
+        ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable)-1);
+        if (length < 0) goto done;
+        executable[length] = 0;
+        if (symlink(executable, helper)) goto done;
+        setenv("XDG_CONFIG_HOME", cfg, 1); setenv("PICO_TEST_BROWSER_FAILURE", modes[i], 1);
+        if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+        WaitPluginLoad(host);
+        PicoWorkspaceId workspace; PicoAgentId id;
+        PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .select=true, .session_start=PICO_SESSION_NEW};
+        if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+            pico_main_agent_create(host, workspace, &options, &id) != PICO_OK) goto done;
+        PicoAgent *agent = PicoHost_FindAgent(host, id);
+        snprintf(agent->session_id, sizeof(agent->session_id), "abcdef123456");
+        host->window_focused = true;
+        Clay_SetMeasureTextFunction(ShellMeasureText, NULL); RichText_SetMeasureFunction(ShellMeasureText, NULL);
+        g_browser_application_directory = application;
+        BrowserTestClick(host, "BrowserExpand");
+        PICO_TEST_WAIT_LOOP("classified browser fault") {
+            if (!strcmp(modes[i], "queue")) BrowserTestClick(host, "BrowserBack");
+            PicoBrowser_Pump(host);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+            Clay_RenderCommand *error = FindCardText(&commands, causes[i]);
+            /* FindCardText matches full text; detailed cause includes recovery
+             * guidance (and potentially a separately observed process status). */
+            bool found = error != NULL;
+            for (int j = 0; !found && j < commands.length; ++j) {
+                Clay_RenderCommand *c = Clay_RenderCommandArray_Get(&commands, j);
+                if (c->commandType == CLAY_RENDER_COMMAND_TYPE_TEXT) {
+                    Clay_StringSlice text = c->renderData.text.stringContents;
+                    found = text.length >= (int)strlen(causes[i]) && !memcmp(text.chars, causes[i], strlen(causes[i]));
+                }
+            }
+            bool process_ended = !strcmp(modes[i], "renderer");
+            for (int j = 0; !process_ended && j < commands.length; ++j) {
+                Clay_RenderCommand *c = Clay_RenderCommandArray_Get(&commands, j);
+                if (c->commandType == CLAY_RENDER_COMMAND_TYPE_TEXT) {
+                    Clay_StringSlice text = c->renderData.text.stringContents;
+                    process_ended = memmem(text.chars, text.length, "Browser helper exited", 21) ||
+                                    memmem(text.chars, text.length, "Browser helper terminated", 25);
+                }
+            }
+            if (!found || !process_ended) continue;
+            if (!FindCardText(&commands, "Browser stopped. Close and reopen to retry.") ||
+                FindCardText(&commands, "Starting browser...") || FindCardText(&commands, "Waiting for page paint...")) goto done;
+            break;
+        }
+        /* Human navigation must not implicitly revive a failed page. */
+        BrowserTestClick(host, "BrowserReload");
+        BrowserTestClick(host, "BrowserClose");
+        PicoBrowser_BeginLayout(host);
+        /* Permit bounded failed-runtime cleanup before explicit retry. */
+        setenv("PICO_TEST_BROWSER_FAILURE", "healthy", 1);
+        PicoBrowser_Pump(host);
+        BrowserTestClick(host, "BrowserStart");
+        PICO_TEST_WAIT_LOOP("explicit close/reopen recovery") {
+            PicoBrowser_Pump(host);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+            if (FindCardText(&commands, "Waiting for page paint...")) break;
+        }
+        rc = 0;
+    done:
+        if (host) pico_host_free(host);
+        g_browser_application_directory = NULL;
+        g_find_input_test = g_find_press = false;
+        Pico_FreeClay(); Clay_SetCurrentContext(previous);
+        unsetenv("XDG_CONFIG_HOME"); unsetenv("PICO_TEST_BROWSER_FAILURE");
+        RmRf(cfg); RmRf(dir);
+        if (rc) { Fail("browser failure cause/stopped presentation/explicit recovery"); return 1; }
+    }
+#endif
+    return 0;
 }
 
 static int TestBrowserMainSessionPolicy(void)
@@ -17859,11 +18025,15 @@ int TestClipboardPaste(void);
 
 int main(int argc, char **argv)
 {
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 4 && getenv("PICO_TEST_BROWSER_FAILURE")) return BrowserFaultHelper(argc, argv);
+#endif
 #ifdef PICO_OPENAI_LOGIN_TESTS
     if (argc == 2 && strcmp(argv[1], "--openai-retained-shutdown") == 0)
         return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
+    if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
     if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
     if (argc == 2 && strcmp(argv[1], "--fast-persistence") == 0) return PICO_TEST_RUN(TestFastSelectionPersistence());
 #ifdef PICO_OPENAI_LOGIN_TESTS
@@ -18021,6 +18191,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestBrowserUncreatedSessionNotification()) != 0) return 1;
+    if (PICO_TEST_RUN(TestBrowserHelperFaultRecovery()) != 0) return 1;
     if (PICO_TEST_RUN(TestBrowserMainSessionPolicy()) != 0) return 1;
     if (PICO_TEST_RUN(TestWorkspaceBuiltinsRegisterThroughWorkspaceInit()) != 0)
     {

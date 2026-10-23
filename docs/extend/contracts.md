@@ -412,6 +412,18 @@ through the displayed image, excluding margins. Dock resize alone leaves fixed
 page coordinates valid. Only actual logical size changes invalidate identity.
 Full-height shell panes remain exactly parent-bounded through repeated layouts.
 
+Helper failure stops all pages owned by that runtime; renderer termination stops
+and closes each affected page without stopping independent sessions. The dock
+and tools distinguish exit status/signal, transport/protocol failure, queue
+exhaustion, and renderer cause where available. Close/reopen is explicit; there
+is no automatic recreation, navigation replay, or action/evaluation retry. Pending
+mutating effects can be uncertain. Fail-closed queue/transport handling latches
+before any subsequent queue flush, and preserves bounded process-group cleanup
+even after the helper leader is reaped. Runtime/page initialization have bounded
+readiness watchdogs, separate from application readiness. Opt-in private resource
+metrics are aggregate host-owned data, not a public extension surface; they do
+not change page lifetime or enforce CPU/RAM budgets.
+
 The runtime is not extension-owned and survives extension reload. Live pages end
 on explicit close or session-runtime unload; cookie/local-storage profiles
 persist by durable session ID. Replay/resume alone never recreates a page.

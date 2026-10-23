@@ -341,6 +341,62 @@ within that process work independently. A second process fails explicitly; it
 does not open an external Chrome window. Sharing a browser service between Pico
 processes is not part of this slice.
 
+## Failures and explicit recovery
+
+A failed page is **stopped**, not still “Starting browser…”. The dock and tool
+errors retain the concrete cause: helper exit status or terminating signal,
+command/event transport or protocol failure, command-queue exhaustion, or
+Chromium renderer termination (including killed/crashed/OOM/launch failure when
+Chromium supplies that classification). Process status can arrive one pump after
+socket EOF; pending tools wait briefly for that classification rather than
+misreporting a signal as a startup failure.
+
+- Helper/runtime failure stops every page owned by that helper. Renderer failure
+  stops the affected page, fails its pending work, and closes its renderer-backed
+  browser; independent session pages continue. A renderer process shared by
+  Chromium may affect more than one page; each notified page stops.
+- Close (`x`) the stopped dock entry, then explicitly open it again. Other failed
+  session entries remain stopped even if another session starts a new helper.
+  There is **no automatic restart, navigation replay, or input/evaluation retry**.
+  Durable cookies/local storage remain; page state and viewport settings are not
+  recovered. Failed-runtime cleanup is bounded and may briefly delay reopening.
+- The host retains the helper process-group identity after reaping its leader,
+  terminates surviving Chromium subprocesses, and escalates to SIGKILL if needed.
+  A malformed event cannot leave an inaccessible helper holding the profile lock.
+- Queue exhaustion remains fail-closed; it does not increase queue capacity or
+  silently drop close/key-up/button-up commands. A terminal transport latch
+  prevents subsequent calls from flushing queued input after failure is declared.
+  Already delivered actions/evaluation effects are not undone and can be uncertain.
+- Runtime initialization and page initialization have independent 30-second
+  readiness watchdogs. A runtime timeout stops the shared helper; a page timeout
+  stops that page. Readiness is not application/network-idle readiness.
+
+### Opt-in resource profiling
+
+Set `PICO_BROWSER_PROFILE=/absolute/path/to/new-metrics.jsonl` before launching
+Pico to write private, cumulative JSONL counters. The file must not already exist
+and is created with mode `0600`; it is never overwritten. Without the variable,
+no profiling file, timing calls around conversion/upload, or periodic profiling
+wakeups are added. Write/flush errors returned by stdio disable metric output
+with a stderr warning, not a browser failure. Files survive exit until removed by their owner.
+
+Records contain monotonic timestamps, received raw-frame counts/bytes,
+latest-frame replacements, texture-upload counts/bytes, observation PNG bytes,
+BGRA conversion wall time, texture creation/update wall time, and the lifetime
+command-queue high-water mark. Records are emitted approximately once per second
+(and finally on graceful shutdown). Profiling adds a roughly one-Hz host wakeup
+when otherwise idle. It records no URLs, page text, image pixels or session IDs.
+Upload timing measures host API wall time, **not GPU completion**. Counters are
+host-wide across sessions and cumulative across explicit helper restarts; they
+are not a public extension API or a renderer CPU/RAM limit.
+
+See [the profiling procedure and measured baseline](../browser-profiling.md) for
+repeatable static/animated/WebGL workloads, visible/hidden/concurrent sessions,
+process-tree CPU/RSS, IPC bandwidth, and actual host upload measurements. Software
+Xvfb results do not establish native GPU/Wayland performance. Dirty-region/GPU
+transport changes, suspension/eviction, helper-idle shutdown, cross-process
+sharing, and packaged-artifact execution remain outside this increment.
+
 ## Implementation contracts
 
 - Browser lifetime belongs to core, outside hot-reloaded extension state.
@@ -467,3 +523,34 @@ nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
 ```
 
 These are local fixtures, not live-model/native-Wayland certification.
+
+## Robustness regressions
+
+The headless host/workspace suite checks classified helper exits/signals,
+malformed/truncated event framing, renderer-stop presentation, fail-closed queue
+exhaustion (including a helper ignoring SIGTERM), and explicit close/reopen
+through the ordinary dock controls. It must never show a startup placeholder for
+a stopped page. The focused subset can be run with:
+
+```sh
+nix develop -c app/build/debug/pico_host_workspace_tests --browser-failures
+```
+
+A real-helper fixture kills the active renderer during pending evaluation,
+checks the precise cause and continued independent session work, reopens the
+profile explicitly, and checks malformed command reporting:
+
+```sh
+nix develop -c timeout -k 5s 90s python3 app/tests/browser_failure_integration.py \
+  app/build/debug/browser/runtime/pico_browser_helper
+```
+
+The real-Pico loopback fixture also kills the shared helper during evaluation and
+checks actual registered tool errors, effect uncertainty, and refusal to revive
+a stopped browser via another `browser_open`:
+
+```sh
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
+  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+  python3 app/tests/browser_agent_integration.py app/build/debug/pico --failure
+```

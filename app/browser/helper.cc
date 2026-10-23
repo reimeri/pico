@@ -68,7 +68,7 @@ public:
     }) {}
     uint64_t token;
     int width = 800, height = 600;
-    bool visible = false, close_requested = false;
+    bool visible = false, close_requested = false, failed = false;
     CefRefPtr<CefBrowser> browser;
     std::vector<PbCommand> pending;
     CefRefPtr<CefRequestContext> context;
@@ -368,9 +368,40 @@ public:
         CefPostTask(TID_UI, base::BindOnce(&Page::Step, self));
     }
     void OnDevToolsAgentDetached(CefRefPtr<CefBrowser>) override {
-        inspector.Fail("Browser renderer disconnected; evaluation effects may be uncertain.");
-        inspector.log->Fail("Browser diagnostic channel disconnected; collection is incomplete.");
-        if (request) { uncertain = input_message != 0; Finish("Browser renderer disconnected; any in-flight input delivery is uncertain."); }
+        if (failed || close_requested || stopping) return;
+        /* Termination often detaches DevTools first. Allow its precise cause to
+         * win before completing pending work; bound the non-termination case. */
+        CefRefPtr<Page> self(this);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](CefRefPtr<Page> page) {
+            if (page->failed || page->close_requested || !page->browser) return;
+            page->inspector.Fail("Browser renderer disconnected; evaluation effects may be uncertain.");
+            page->inspector.log->Fail("Browser diagnostic channel disconnected; collection is incomplete.");
+            if (page->request) { page->uncertain = page->input_message != 0; page->Finish("Browser renderer disconnected; any in-flight input delivery is uncertain."); }
+        }, self), 100);
+    }
+    void OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus status,
+                                   int error_code, const CefString& error_string) override {
+        if (failed || close_requested || stopping) return;
+        failed = true;
+        const char* cause = "abnormal termination";
+        switch (status) {
+        case TS_PROCESS_WAS_KILLED: cause = "killed"; break;
+        case TS_PROCESS_CRASHED: cause = "crashed"; break;
+        case TS_PROCESS_OOM: cause = "out of memory"; break;
+        case TS_LAUNCH_FAILED: cause = "launch failed"; break;
+        case TS_INTEGRITY_FAILURE: cause = "integrity failure"; break;
+        default: break;
+        }
+        std::string error = "Browser renderer " + std::string(cause) + " (code " + std::to_string(error_code) + ").";
+        if (!error_string.empty()) error += " " + error_string.ToString();
+        /* Publish failure before results/close. The host retains a stopped dock
+         * instead of mistaking a crash for an explicit human close. */
+        Send(token, PB_STOPPED, error.data(), error.size());
+        inspector.Fail(error + " Evaluation effects may be uncertain; close and reopen the browser.");
+        inspector.log->Fail(error + " Diagnostic collection is incomplete.");
+        if (request) { uncertain = input_message != 0; Finish(error + " In-flight input may be uncertain; close and reopen the browser."); }
+        close_requested = true;
+        if (browser) browser->GetHost()->CloseBrowser(true);
     }
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
@@ -516,14 +547,20 @@ void Command(PbCommand cmd) {
         pages[cmd.token] = page;
         bool created = CefBrowserHost::CreateBrowser(window, page, "about:blank",
                                                         settings, nullptr, page->context);
-        if (!created) { pages.erase(cmd.token); Error(cmd.token, "CEF could not create a browser."); }
+        if (!created) { pages.erase(cmd.token); const std::string error = "CEF could not create a browser."; Send(cmd.token, PB_STOPPED, error.data(), error.size()); }
         return;
     }
     auto it = pages.find(cmd.token);
     if (it == pages.end()) return;
     auto page = it->second;
+    if (page->failed) return;
+    if (cmd.type == PB_CLOSE) {
+        page->close_requested = true;
+        page->pending.clear();
+        if (page->browser) page->browser->GetHost()->CloseBrowser(true);
+        return;
+    }
     if (!page->browser || !page->initialized) {
-        if (cmd.type == PB_CLOSE) { page->close_requested = true; return; }
         if (page->pending.size() < 256) page->pending.push_back(cmd);
         else Error(cmd.token, "Browser initialization command limit reached.");
         return;
@@ -664,13 +701,22 @@ int main(int argc, char** argv) {
     if (!CefInitialize(args, settings, app, nullptr)) {
         Error(0, "CEF initialization failed; check browser/cef.log and profile ownership."); return 1;
     }
+    Send(0, PB_RUNTIME_READY);
     std::thread reader([command_fd] {
         PbCommand cmd;
         for (;;) {
-            ssize_t n = recv(command_fd, &cmd, sizeof(cmd), 0);
+            ssize_t n = recv(command_fd, &cmd, sizeof(cmd), MSG_TRUNC);
             if (n < 0 && errno == EINTR) continue;
-            if (n != sizeof(cmd)) break;
-            cmd.text[sizeof(cmd.text)-1] = 0; cmd.profile[sizeof(cmd.profile)-1] = 0;
+            if (n != sizeof(cmd) || cmd.type < PB_OPEN || cmd.type > PB_VIEWPORT ||
+                !memchr(cmd.text, 0, sizeof(cmd.text)) || !memchr(cmd.profile, 0, sizeof(cmd.profile))) {
+                if (n) {
+                    std::string error = n < 0 ? "Browser command transport failed: " + std::string(strerror(errno)) :
+                                               "Browser command protocol error: malformed command.";
+                    CefPostTask(TID_UI, base::BindOnce([](std::string message) { Error(0, message); Stop(); }, error));
+                    return;
+                }
+                break;
+            }
             if (!CefPostTask(TID_UI, base::BindOnce(Command, cmd))) break;
             if (cmd.type == PB_STOP) return;
         }

@@ -18,8 +18,9 @@ import time
 import traceback
 import re
 
-DEVELOPER = "--developer" in sys.argv
-COMPLETION = "Developer loop verified." if DEVELOPER else "Visual loop verified."
+FAILURE = "--failure" in sys.argv
+DEVELOPER = "--developer" in sys.argv or FAILURE
+COMPLETION = "Failure loop verified." if FAILURE else "Developer loop verified." if DEVELOPER else "Visual loop verified."
 from PIL import Image
 
 
@@ -31,11 +32,26 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     stage = 0
     root = None
     output_file = None
+    process = None
 
     def log_message(self, *args):
         pass
 
     def do_GET(self):
+        if self.path == '/kill-helper' and FAILURE:
+            from browser_profile import process_tree
+            helpers = []
+            for pid,_ in process_tree(Fixture.process.pid):
+                try:
+                    command = Path(f'/proc/{pid}/cmdline').read_bytes()
+                    if b'pico_browser_helper' in command and b'--type=' not in command:
+                        helpers.append(pid)
+                except FileNotFoundError:
+                    pass
+            assert len(helpers) == 1, helpers
+            self.send_response(204); self.end_headers()
+            os.kill(helpers[0],signal.SIGKILL)
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -43,6 +59,26 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
 <input id="field" aria-label="Developer field" oninput="document.body.style.background='rgb(23,45,67)'">
 <script>console.log('developer-fixture-console'); onscroll=()=>document.body.style.background='rgb(65,43,21)'</script>''')
+
+    def failure_call(self, body):
+        results = [i for i in body['input'] if i['type'] == 'function_call_output']
+        text = results[-1]['output'] if results else ''
+        stage = Fixture.stage; Fixture.stage += 1
+        url = f'http://127.0.0.1:{self.server.server_port}/app'
+        if stage == 0:
+            return 'browser_open', {'url':url}
+        if stage == 1:
+            assert 'queued' in text.lower(), text
+            return 'browser_evaluate', {'expression':"new Promise(resolve=>{fetch('/kill-helper');setTimeout(()=>resolve('late'),20000)})"}
+        assert 'signal 9' in text and 'Close and reopen' in text, text
+        if stage == 2:
+            assert 'uncertain' in text, text
+            return 'browser_diagnostics', {}
+        if stage == 3:
+            return 'browser_open', {'url':url}
+        if stage == 4:
+            return None, None
+        raise AssertionError(f'unexpected failure stage {stage}')
 
     def developer_call(self, body):
         catalog = {t['name'] for t in body.get('tools', [])}
@@ -101,7 +137,9 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
             assert self.path == '/v1/responses'
             Fixture.round += 1
             current = Fixture.round
-            if DEVELOPER:
+            if FAILURE:
+                name, args = self.failure_call(body)
+            elif DEVELOPER:
                 name, args = self.developer_call(body)
             else:
                 catalog = {t['name'] for t in body.get('tools', [])}
@@ -185,6 +223,7 @@ def main():
                            LIBGL_ALWAYS_SOFTWARE='1', OPENAI_API_KEY='loopback-fixture-only')
         with (root/'pico.log').open('w') as log:
             process = subprocess.Popen([binary,'--safe'],cwd=root,env=environment,stdout=log,stderr=log)
+            Fixture.process = process
             def x(*args):
                 return subprocess.check_output(['xdotool',*map(str,args)],text=True).strip()
             try:
@@ -216,7 +255,7 @@ def main():
                     assert Path(image['path']).parent == root/'.pico/media/browser'/sid
                     assert Path(image['path']).is_file()
                 assert not any('base64,' in json.dumps(r) for r in records), 'image bytes leaked into JSONL'
-                print('PASS: non-vision developer tools, lazy lifecycle, complete large file outputs and viewport control' if DEVELOPER else 'PASS: real browser_open/observe/act, native click/type/scroll, model-visible PNG payloads, clipboard refusal, and owned history assets')
+                print('PASS: registered tools preserve helper signal cause, uncertain evaluation and explicit no-restart recovery' if FAILURE else 'PASS: non-vision developer tools, lazy lifecycle, complete large file outputs and viewport control' if DEVELOPER else 'PASS: real browser_open/observe/act, native click/type/scroll, model-visible PNG payloads, clipboard refusal, and owned history assets')
             except BaseException:
                 log.flush(); print((root/'pico.log').read_text(),file=sys.stderr); raise
             finally:
@@ -227,7 +266,7 @@ def main():
                 if owner.exists():
                     import fcntl
                     with owner.open() as lock: fcntl.flock(lock, fcntl.LOCK_EX)
-    if DEVELOPER:
+    if DEVELOPER and not FAILURE:
         assert Fixture.output_file and Fixture.output_file.exists(), 'returned output must survive browser/process close'
         Fixture.output_file.unlink()
     server.shutdown()

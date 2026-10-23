@@ -27,13 +27,14 @@ extern char **environ;
 typedef struct BrowserSession {
     struct BrowserSession *next;
     PicoAgentId agent_id;
-    uint64_t token;
+    uint64_t token, runtime;
     char session_id[40];
-    bool user_control, ready, opened, visible, focus, address_focus;
+    bool user_control, ready, opened, stopped, visible, focus, address_focus;
     unsigned mouse_buttons;
     bool keys[512];
     int width, height, dock_width, dock_height;
     bool fixed_viewport, viewport_focus;
+    double opened_at;
     float display_width, display_height;
     char viewport_text[32];
     PicoTextField viewport_field;
@@ -43,7 +44,7 @@ typedef struct BrowserSession {
     /* Only the receiver and main thread share these, under service->mu. */
     unsigned char *pixels;
     int pixel_width, pixel_height;
-    bool changed, received_ready, received_closed;
+    bool changed, received_ready, received_closed, received_stopped;
     char received_url[PB_URL_CAP], received_error[512];
 } BrowserSession;
 typedef struct BrowserRequest {
@@ -71,12 +72,21 @@ typedef struct PicoBrowserService {
     pthread_cond_t cv;
     BrowserSession *sessions, *retired;
     BrowserRequest *requests;
-    uint64_t next_token, next_request;
+    uint64_t next_token, next_request, runtime;
     int command_fd, event_fd;
-    pid_t pid;
+    pid_t pid, process_group;
+    bool transport_failed, runtime_ready;
+    double launched_at, failure_at;
     pthread_t receiver;
     bool thread_started, disconnected;
-    char error[512];
+    char error[512], exit_reason[96];
+    /* Opt-in aggregate counters: never URLs, page content or profile paths. */
+    FILE *profile;
+    bool profiling; /* Immutable until receiver shutdown; FILE belongs to main. */
+    double profile_last;
+    uint64_t frames, frame_bytes, replaced_frames, uploads, upload_bytes, png_bytes;
+    double convert_seconds, upload_seconds;
+    unsigned queue_peak;
     PbCommand queue[256];
     unsigned queue_head, queue_count;
     int modifiers;
@@ -86,6 +96,33 @@ static void Focus(PicoHost *host, BrowserSession *b, bool focus);
 static int WindowsKey(int key);
 static void ViewportLabel(BrowserSession *b);
 
+static double MonotonicSeconds(void)
+{
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec + now.tv_nsec / 1e9;
+}
+static void Profile(PicoBrowserService *s, bool final)
+{
+    if (!s->profile) return;
+    double now = MonotonicSeconds();
+    if (!final && now - s->profile_last < 1) { pico_host_request_redraw_after(s->host, (float)(1 - (now - s->profile_last))); return; }
+    pthread_mutex_lock(&s->mu);
+    uint64_t frames = s->frames, bytes = s->frame_bytes, replaced = s->replaced_frames, png = s->png_bytes;
+    pthread_mutex_unlock(&s->mu);
+    int rc = fprintf(s->profile,
+        "{\"monotonic_seconds\":%.6f,\"final\":%s,\"frames\":%llu,\"frame_bytes\":%llu,"
+        "\"replaced_frames\":%llu,\"uploads\":%llu,\"upload_bytes\":%llu,\"png_bytes\":%llu,"
+        "\"convert_seconds\":%.9f,\"upload_seconds\":%.9f,\"queue_peak\":%u}\n",
+        now, final ? "true" : "false", (unsigned long long)frames, (unsigned long long)bytes,
+        (unsigned long long)replaced, (unsigned long long)s->uploads, (unsigned long long)s->upload_bytes,
+        (unsigned long long)png, s->convert_seconds, s->upload_seconds, s->queue_peak);
+    if (rc < 0 || fflush(s->profile)) {
+        fclose(s->profile); s->profile = NULL;
+        fprintf(stderr, "Browser profiling stopped: could not write complete metrics.\n");
+    }
+    s->profile_last = now;
+    if (!final && s->profile) pico_host_request_redraw_after(s->host, 1.0f);
+}
 static BrowserSession *Session(PicoHost *host, PicoAgentId id)
 {
     PicoBrowserService *s = host ? host->browser : NULL;
@@ -109,33 +146,59 @@ void PicoBrowser_Init(PicoHost *host)
     }
     pthread_mutex_init(&s->mu, NULL); pthread_cond_init(&s->cv, NULL);
     host->browser = s;
+    const char *path = getenv("PICO_BROWSER_PROFILE");
+    if (path && path[0]) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0) { s->profile = fdopen(fd, "w"); if (!s->profile) close(fd); }
+        if (!s->profile) fprintf(stderr, "Browser profiling unavailable: cannot create a new private metrics file.\n");
+        else { s->profiling = true; s->profile_last = MonotonicSeconds(); }
+    }
 }
-static bool ReadAll(int fd, void *data, size_t n)
+/* A clean EOF is distinct from a truncated record and a socket failure. */
+static bool ReadAll(int fd, void *data, size_t n, bool header, char *error, size_t cap)
 {
     char *p = data;
-    while (n) {
-        ssize_t got = recv(fd, p, n, 0);
+    size_t remaining = n;
+    while (remaining) {
+        ssize_t got = recv(fd, p, remaining, 0);
         if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) return false;
-        p += got; n -= (size_t)got;
+        if (got <= 0) {
+            if (got < 0) snprintf(error, cap, "Browser event transport failed: %s.", strerror(errno));
+            else if (remaining != n || !header) snprintf(error, cap, "Browser protocol error: truncated event.");
+            /* Empty error for clean EOF: waitpid supplies the process cause. */
+            return false;
+        }
+        p += got; remaining -= (size_t)got;
     }
     return true;
+}
+static void FailureText(PicoBrowserService *s, char *out, size_t cap)
+{
+    snprintf(out, cap, "%.350s%s%.96s Close and reopen the browser to retry.",
+        s->error[0] ? s->error : s->exit_reason[0] ? "" : "Browser helper disconnected.",
+        s->error[0] && s->exit_reason[0] ? " " : "", s->exit_reason);
 }
 static void *Receive(void *arg)
 {
     PicoBrowserService *s = arg;
     PbEvent event;
-    while (ReadAll(s->event_fd, &event, sizeof(event))) {
+    char failure[512] = {0};
+    while (ReadAll(s->event_fd, &event, sizeof(event), true, failure, sizeof(failure))) {
         bool frame = event.type == PB_FRAME;
-        if (frame ? (!event.width || !event.height || event.width > PB_MAX_DIMENSION ||
+        if (event.type < PB_READY || event.type > PB_RUNTIME_READY ||
+            ((event.type == PB_READY || event.type == PB_CLOSED || event.type == PB_RUNTIME_READY) && event.length) ||
+            (frame ? (!event.width || !event.height || event.width > PB_MAX_DIMENSION ||
                      event.height > PB_MAX_DIMENSION || event.length != event.width * event.height * 4)
                   : event.type == PB_TEXT_RESULT ? event.length != sizeof(PbTextResult)
                   : event.type == PB_OBSERVATION ?
                     (event.length < sizeof(PbObservation) || event.length > sizeof(PbObservation) + PB_MAX_PNG ||
                      !event.width || !event.height || event.width > PB_MAX_DIMENSION || event.height > PB_MAX_DIMENSION)
-                    : event.length >= PB_URL_CAP) break;
+                    : event.length >= PB_URL_CAP)) {
+            snprintf(failure, sizeof(failure), "Browser protocol error: invalid event header."); break;
+        }
         unsigned char *data = malloc((size_t)event.length + 1);
-        if (!data || !ReadAll(s->event_fd, data, event.length)) { free(data); break; }
+        if (!data) { snprintf(failure, sizeof(failure), "Browser event allocation failed."); break; }
+        if (!ReadAll(s->event_fd, data, event.length, false, failure, sizeof(failure))) { free(data); break; }
         data[event.length] = 0;
         pthread_mutex_lock(&s->mu);
         if (event.type == PB_TEXT_RESULT) {
@@ -151,7 +214,7 @@ static void *Receive(void *arg)
             pthread_mutex_unlock(&s->mu);
             if (valid && !adopted && info.path[0]) unlink(info.path);
             free(data); pico_host_wakeup(s->host);
-            if (!valid) break;
+            if (!valid) { snprintf(failure, sizeof(failure), "Browser protocol error: invalid result payload."); break; }
             continue;
         }
         if (event.type == PB_OBSERVATION) {
@@ -160,6 +223,7 @@ static void *Receive(void *arg)
                          memchr(info.url, 0, sizeof(info.url)) && memchr(info.error, 0, sizeof(info.error));
             if (valid) for (BrowserRequest *r = s->requests; r; r = r->next) {
                 if (r->id != info.request || r->token != event.token || !r->dispatched || r->done) continue;
+                if (s->profiling) s->png_bytes += info.png_size;
                 r->observation = info; r->width = event.width; r->height = event.height;
                 r->error = info.error[0] || !info.png_size;
                 if (info.png_size && !r->cancelled) {
@@ -169,21 +233,27 @@ static void *Receive(void *arg)
                 r->done = true; pthread_cond_broadcast(&s->cv); break;
             }
             pthread_mutex_unlock(&s->mu); free(data); pico_host_wakeup(s->host);
-            if (!valid) break;
+            if (!valid) { snprintf(failure, sizeof(failure), "Browser protocol error: invalid result payload."); break; }
             continue;
         }
         BrowserSession *b = s->sessions;
         while (b && b->token != event.token) b = b->next;
+        if (!event.token && event.type == PB_RUNTIME_READY) s->runtime_ready = true;
         if (!event.token && event.type == PB_ERROR)
             snprintf(s->error, sizeof(s->error), "%s", data);
         if (b) {
             if (frame) {
+                if (s->profiling) { ++s->frames; s->frame_bytes += event.length; s->replaced_frames += b->pixels != NULL; }
                 free(b->pixels); b->pixels = data; data = NULL;
                 b->pixel_width = event.width; b->pixel_height = event.height;
             } else if (event.type == PB_READY) b->received_ready = true;
             else if (event.type == PB_CLOSED) b->received_closed = true;
             else if (event.type == PB_URL) snprintf(b->received_url, sizeof(b->received_url), "%s", data);
-            else if (event.type == PB_ERROR) snprintf(b->received_error, sizeof(b->received_error), "%s", data);
+            else if (event.type == PB_STOPPED) {
+                b->received_stopped = true;
+                snprintf(b->received_error, sizeof(b->received_error), "%s", data);
+            }
+            else if (event.type == PB_ERROR && !b->received_stopped && !b->stopped) snprintf(b->received_error, sizeof(b->received_error), "%s", data);
             b->changed = true;
         }
         pthread_mutex_unlock(&s->mu);
@@ -191,36 +261,57 @@ static void *Receive(void *arg)
         pico_host_wakeup(s->host);
     }
     pthread_mutex_lock(&s->mu); s->disconnected = true;
+    if (failure[0] && !s->error[0]) snprintf(s->error, sizeof(s->error), "%s", failure);
     pthread_mutex_unlock(&s->mu);
     pico_host_wakeup(s->host);
     return NULL;
 }
-static void Flush(PicoBrowserService *s)
+/* Main-thread terminal latch. Once fail-closed, no queued input can escape
+ * through a later Flush/Send, even before the receiver notices shutdown. */
+static void StopTransport(PicoBrowserService *s)
 {
+    if (s->transport_failed) return;
+    s->transport_failed = true; s->queue_count = 0;
+    s->failure_at = MonotonicSeconds();
+    if (s->command_fd >= 0) shutdown(s->command_fd, SHUT_RDWR);
+    if (s->event_fd >= 0) shutdown(s->event_fd, SHUT_RDWR);
+    if (s->process_group > 0) kill(-s->process_group, SIGTERM);
+}
+static bool Flush(PicoBrowserService *s)
+{
+    pthread_mutex_lock(&s->mu);
+    bool failed = s->disconnected || s->error[0];
+    pthread_mutex_unlock(&s->mu);
+    if (s->transport_failed || failed) return false;
     while (s->queue_count && s->command_fd >= 0) {
         PbCommand *c = &s->queue[s->queue_head];
         ssize_t n = send(s->command_fd, c, sizeof(*c), MSG_DONTWAIT | MSG_NOSIGNAL);
         if (n < 0 && errno == EINTR) continue;
-        if (n != sizeof(*c)) break;
+        if (n != sizeof(*c)) {
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+            pthread_mutex_lock(&s->mu);
+            snprintf(s->error, sizeof(s->error), "Browser command transport failed: %s.", n < 0 ? strerror(errno) : "short command");
+            pthread_mutex_unlock(&s->mu);
+            StopTransport(s); return false;
+        }
         s->queue_head = (s->queue_head + 1) % 256; s->queue_count--;
     }
+    return true;
 }
 static bool Send(PicoBrowserService *s, PbCommand command)
 {
-    if (!s || s->command_fd < 0) return false;
-    Flush(s);
+    if (!s || s->command_fd < 0 || !Flush(s)) return false;
     if (s->queue_count == 256) {
         /* Fail closed rather than silently lose a key-up or browser close. */
         pthread_mutex_lock(&s->mu);
         snprintf(s->error, sizeof(s->error), "Browser stopped: command queue exhausted.");
         pthread_mutex_unlock(&s->mu);
-        if (s->pid > 0) kill(-s->pid, SIGTERM);
-        return false;
+        StopTransport(s); return false;
     }
     s->queue[(s->queue_head + s->queue_count) % 256] = command;
     s->queue_count++;
-    Flush(s);
-    return true;
+    if (s->profile && s->queue_count > s->queue_peak) s->queue_peak = s->queue_count;
+    return Flush(s);
 }
 static bool MakeDirs(const char *path)
 {
@@ -237,7 +328,7 @@ static bool MakeDirs(const char *path)
 }
 static bool Start(PicoBrowserService *s)
 {
-    if (s->pid > 0) {
+    if (s->pid > 0 || s->thread_started || s->process_group > 0) {
         pthread_mutex_lock(&s->mu);
         bool connected = !s->disconnected && s->command_fd >= 0;
         pthread_mutex_unlock(&s->mu);
@@ -282,11 +373,16 @@ static bool Start(PicoBrowserService *s)
     close(commands[1]); close(events[1]);
     s->command_fd = commands[0]; s->event_fd = events[0];
     pthread_mutex_lock(&s->mu);
-    s->disconnected = false; s->error[0] = 0;
+    s->disconnected = false; s->runtime_ready = false; s->error[0] = s->exit_reason[0] = 0;
     pthread_mutex_unlock(&s->mu);
+    s->transport_failed = false; s->failure_at = 0; s->launched_at = MonotonicSeconds(); s->process_group = s->pid; ++s->runtime;
     s->queue_count = s->queue_head = 0;
     if (pthread_create(&s->receiver, NULL, Receive, s)) {
-        kill(-s->pid, SIGTERM); waitpid(s->pid, NULL, 0); s->pid = 0;
+        /* No receiver exists to drive graceful runtime cleanup. Fail closed
+         * immediately rather than blocking the graphics thread on SIGTERM. */
+        kill(-s->pid, SIGKILL);
+        while (waitpid(s->pid, NULL, 0) < 0 && errno == EINTR) {}
+        s->pid = s->process_group = 0;
         close(s->command_fd); close(s->event_fd); s->command_fd = s->event_fd = -1;
         snprintf(s->error, sizeof(s->error), "Cannot start browser receiver."); return false;
     }
@@ -311,8 +407,9 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
     PicoBrowserService *s = host->browser;
     if (!s) { snprintf(error, cap, "Out of memory."); return false; }
     BrowserSession *b = Session(host, agent->id);
+    if (b && b->stopped) { snprintf(error, cap, "%s", b->error); return false; }
     if (b && !user && b->user_control) { snprintf(error, cap, "Browser is under User control. Ask the user to select Agent control."); return false; }
-    if (!Start(s)) { snprintf(error, cap, "%s", s->error); return false; }
+    if (!Start(s)) { pthread_mutex_lock(&s->mu); FailureText(s, error, cap); pthread_mutex_unlock(&s->mu); return false; }
     if (!b) {
         b = calloc(1, sizeof(*b));
         if (!b) { snprintf(error, cap, "Out of memory."); return false; }
@@ -327,16 +424,20 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
     pthread_mutex_lock(&s->mu);
     if (!b->opened) b->token = ++s->next_token;
     pthread_mutex_unlock(&s->mu);
+    b->runtime = s->runtime;
     PbCommand command = {.type = PB_OPEN, .token = b->token};
     snprintf(command.text, sizeof(command.text), "%s", url);
     snprintf(command.profile, sizeof(command.profile), "%s", agent->session_id);
-    if (!Send(s, command)) { snprintf(error, cap, "Browser command queue unavailable; retry."); return false; }
+    if (!Send(s, command)) { pthread_mutex_lock(&s->mu); FailureText(s, error, cap); pthread_mutex_unlock(&s->mu); return false; }
     if (!b->opened) {
+        b->opened_at = MonotonicSeconds();
         b->opened = true; b->visible = false; b->width = b->height = 0;
         b->fixed_viewport = false; ViewportLabel(b);
         b->error[0] = 0;
     }
-    Send(s, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control});
+    if (!Send(s, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control})) {
+        pthread_mutex_lock(&s->mu); FailureText(s, error, cap); pthread_mutex_unlock(&s->mu); return false;
+    }
     if (user) agent->browser_expanded = true;
     PicoTextField_SetText(&b->field, url);
     pico_host_request_redraw(host);
@@ -744,7 +845,71 @@ void PicoBrowser_Pump(PicoHost *host)
 {
     PicoBrowserService *s = host ? host->browser : NULL;
     if (!s) return;
+    int status = 0;
+    if (s->pid > 0 && waitpid(s->pid, &status, WNOHANG) == s->pid) {
+        s->pid = 0;
+        if (s->process_group > 0) kill(-s->process_group, SIGTERM);
+        if (!s->failure_at) s->failure_at = MonotonicSeconds();
+        pthread_mutex_lock(&s->mu);
+        if (WIFSIGNALED(status)) snprintf(s->exit_reason, sizeof(s->exit_reason), "Browser helper terminated by signal %d (%s).", WTERMSIG(status), strsignal(WTERMSIG(status)));
+        else snprintf(s->exit_reason, sizeof(s->exit_reason), "Browser helper exited with status %d.", WEXITSTATUS(status));
+        pthread_mutex_unlock(&s->mu);
+    }
+    pthread_mutex_lock(&s->mu);
+    bool disconnected = s->disconnected;
+    pthread_mutex_unlock(&s->mu);
+    if (disconnected && s->thread_started) {
+        pthread_join(s->receiver, NULL); s->thread_started = false;
+        close(s->command_fd); close(s->event_fd); s->command_fd = s->event_fd = -1;
+        s->queue_count = 0;
+        /* A malformed event must not leave a live, inaccessible helper holding
+         * profiles. Also terminate any surviving Chromium subprocesses. */
+        if (!s->failure_at) s->failure_at = MonotonicSeconds();
+        pthread_mutex_lock(&s->mu); bool error = s->error[0] != 0; pthread_mutex_unlock(&s->mu);
+        if (error) StopTransport(s);
+    }
+    if (!s->pid && s->process_group > 0 && kill(-s->process_group, 0) < 0 && errno == ESRCH) s->process_group = 0;
+    if (s->failure_at) {
+        double elapsed = MonotonicSeconds() - s->failure_at;
+        if (elapsed > .25 && s->process_group > 0) kill(-s->process_group, SIGTERM);
+        if (elapsed > 2 && s->process_group > 0) {
+            kill(-s->process_group, SIGKILL);
+            s->process_group = 0;
+        }
+        /* Keep pumping even with a hidden dock until cleanup/classification. */
+        if (s->pid > 0 || s->process_group > 0) pico_host_request_redraw_after(host, 0.05f);
+    }
+    pthread_mutex_lock(&s->mu);
+    bool runtime_timeout = !s->runtime_ready && s->pid > 0 && MonotonicSeconds() - s->launched_at > 30;
+    if (runtime_timeout && !s->error[0]) snprintf(s->error, sizeof(s->error), "Browser helper initialization timed out.");
+    pthread_mutex_unlock(&s->mu);
+    if (runtime_timeout) StopTransport(s);
     Flush(s);
+    pthread_mutex_lock(&s->mu);
+    for (BrowserSession *b = s->sessions; b; b = b->next) {
+        if (b->runtime != s->runtime) continue; /* Older stopped entries retain their own cause. */
+        bool startup_timeout = b->opened && !b->ready && !b->received_ready && MonotonicSeconds() - b->opened_at > 30;
+        if (startup_timeout && !disconnected) {
+            snprintf(b->received_error, sizeof(b->received_error), "Browser page initialization timed out.");
+            b->received_stopped = true;
+            pthread_mutex_unlock(&s->mu);
+            Send(s, (PbCommand){.type=PB_CLOSE, .token=b->token});
+            pthread_mutex_lock(&s->mu);
+        }
+        if (!disconnected && !b->received_stopped) continue;
+        char previous[512]; snprintf(previous, sizeof(previous), "%s", b->error);
+        bool newly_stopped = !b->stopped;
+        if (disconnected) FailureText(s, b->error, sizeof(b->error));
+        else snprintf(b->error, sizeof(b->error), "%.400s Close and reopen the browser to retry.", b->received_error);
+        b->stopped = true; b->opened = b->ready = b->visible = b->focus = b->address_focus = b->viewport_focus = false;
+        b->received_ready = b->received_stopped = b->received_closed = false;
+        b->received_error[0] = 0;
+        b->mouse_buttons = 0; memset(b->keys, 0, sizeof(b->keys));
+        free(b->pixels); b->pixels = NULL;
+        if (b->texture.id) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
+        if (newly_stopped || strcmp(previous, b->error)) pico_host_request_redraw(host);
+    }
+    pthread_mutex_unlock(&s->mu);
     /* Dispatch and cancellation stay on the host thread. Never hold mu while
      * Send/Open run: Send's failure path also publishes under that mutex. */
     pthread_mutex_lock(&s->mu);
@@ -756,9 +921,14 @@ void PicoBrowser_Pump(PicoHost *host)
         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
         bool invalid = !agent || agent->runtime_generation != r->generation || !PicoAgent_IsUserMain(agent);
         bool timeout = now.tv_sec - r->started.tv_sec > 35;
-        if (!r->done && (r->cancelled || invalid || timeout || (s->disconnected && r->kind != PB_OPEN) ||
+        /* EOF may precede waitpid readiness by a pump. Stop the dock now, but
+         * let pending tools receive the actual exit cause, with bounded cleanup. */
+        bool awaiting_cause = s->disconnected && !s->error[0] && !s->exit_reason[0] &&
+                              s->failure_at && MonotonicSeconds() - s->failure_at < 2.25;
+        if (!r->done && awaiting_cause && !timeout && !r->cancelled && !invalid) { link = &r->next; continue; }
+        if (!r->done && (r->cancelled || invalid || timeout || (s->disconnected && r->kind != PB_OPEN) || (browser && browser->stopped) ||
                         (r->dispatched && r->kind != PB_OPEN && (!browser || browser->token != r->token)))) {
-            bool unavailable = timeout || s->disconnected;
+            bool unavailable = timeout || s->disconnected || (browser && browser->stopped);
             if (r->dispatched && r->kind != PB_OPEN && !unavailable) {
                 if (!r->cancel_sent) {
                     r->cancel_sent = true;
@@ -775,7 +945,13 @@ void PicoBrowser_Pump(PicoHost *host)
                     PicoBrowser_CloseAgent(host, r->agent_id);
                     pthread_mutex_lock(&s->mu);
                 }
-                snprintf(r->result, sizeof(r->result), "%s", timeout ? "Browser operation timed out; page closed and input delivery may be uncertain." : "Browser operation cancelled or helper unavailable.");
+                if (browser && browser->stopped) snprintf(r->result, sizeof(r->result), "%s", browser->error);
+                else if (s->disconnected) FailureText(s, r->result, sizeof(r->result));
+                else snprintf(r->result, sizeof(r->result), "%s", timeout ? "Browser operation timed out; page closed and input delivery may be uncertain." : "Browser operation cancelled or helper unavailable.");
+                if (r->dispatched && (r->kind == PB_BEGIN || r->kind == PB_EVALUATE)) {
+                    size_t length = strlen(r->result);
+                    snprintf(r->result + length, sizeof(r->result) - length, " Dispatched effects may be uncertain; no automatic retry.");
+                }
             }
         }
         bool busy = false;
@@ -815,7 +991,7 @@ void PicoBrowser_Pump(PicoHost *host)
                         ok = Send(s, step);
                     }
                     if (ok && r->kind == PB_BEGIN) ok = Send(s, (PbCommand){.type=PB_COMMIT, .token=r->token, .request=r->id});
-                    if (!ok) snprintf(error, sizeof(error), "Browser command transport failed.");
+                    if (!ok) { pthread_mutex_lock(&s->mu); FailureText(s, error, sizeof(error)); pthread_mutex_unlock(&s->mu); }
                 }
                 pthread_mutex_lock(&s->mu);
             }
@@ -827,22 +1003,6 @@ void PicoBrowser_Pump(PicoHost *host)
         else link = &r->next;
     }
     pthread_mutex_unlock(&s->mu);
-    pthread_mutex_lock(&s->mu);
-    bool disconnected = s->disconnected;
-    pthread_mutex_unlock(&s->mu);
-    if (disconnected && s->thread_started) {
-        pthread_join(s->receiver, NULL); s->thread_started = false;
-        close(s->command_fd); close(s->event_fd); s->command_fd = s->event_fd = -1;
-        s->queue_count = 0;
-        for (BrowserSession *b = s->sessions; b; b = b->next) {
-            b->opened = b->ready = b->visible = b->focus = b->address_focus = b->viewport_focus = false;
-            b->mouse_buttons = 0;
-            b->width = b->height = 0;
-            if (b->texture.id) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
-        }
-        pico_host_request_redraw(host);
-    }
-    if (s->pid > 0 && !s->thread_started && waitpid(s->pid, NULL, WNOHANG) == s->pid) s->pid = 0;
     for (BrowserSession *b = s->sessions, *next; b; b = next) {
         next = b->next;
         PicoAgent *a = PicoHost_FindAgent(host, b->agent_id);
@@ -856,27 +1016,35 @@ void PicoBrowser_Pump(PicoHost *host)
         bool changed = b->changed; b->changed = false;
         unsigned char *pixels = b->pixels; b->pixels = NULL;
         int w = b->pixel_width, h = b->pixel_height;
-        if (b->received_ready) { b->ready = true; b->received_ready = false; }
+        if (b->received_ready) { b->ready = !b->stopped; b->received_ready = false; }
         if (b->received_url[0]) { snprintf(b->url, sizeof(b->url), "%s", b->received_url); b->received_url[0] = 0; }
-        if (b->received_error[0]) { snprintf(b->error, sizeof(b->error), "%s", b->received_error); b->received_error[0] = 0; }
+        if (b->received_error[0]) { if (!b->stopped) snprintf(b->error, sizeof(b->error), "%s", b->received_error); b->received_error[0] = 0; }
         if (changed && !b->address_focus && b->url[0]) PicoTextField_SetText(&b->field, b->url);
         bool closed = b->received_closed;
-        if (disconnected && !b->error[0]) snprintf(b->error, sizeof(b->error), "%s", s->error[0] ? s->error : "Browser helper exited. Close and reopen the browser to retry; see browser/cef.log.");
         pthread_mutex_unlock(&s->mu);
-        if (closed) { PicoBrowser_CloseAgent(host, b->agent_id); pico_host_request_redraw(host); free(pixels); continue; }
-        if (pixels && visible && IsWindowReady() && w == b->width && h == b->height) {
+        if (closed && !b->stopped) { PicoBrowser_CloseAgent(host, b->agent_id); pico_host_request_redraw(host); free(pixels); continue; }
+        if (pixels && visible && !b->stopped && IsWindowReady() && w == b->width && h == b->height) {
             // CEF BGRA -> Raylib RGBA. Only this thread owns graphics resources.
+            double conversion = s->profile ? MonotonicSeconds() : 0;
             for (size_t i = 0; i < (size_t)w * h * 4; i += 4) { unsigned char c = pixels[i]; pixels[i] = pixels[i+2]; pixels[i+2] = c; }
+            double upload = s->profile ? MonotonicSeconds() : 0;
             if (b->texture.id && (b->texture.width != w || b->texture.height != h)) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
             if (!b->texture.id) b->texture = LoadTextureFromImage((Image){.data = pixels, .width = w, .height = h, .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
             else UpdateTexture(b->texture, pixels);
             SetTextureFilter(b->texture, TEXTURE_FILTER_BILINEAR);
+            if (s->profile) {
+                s->convert_seconds += upload - conversion;
+                s->upload_seconds += MonotonicSeconds() - upload;
+                ++s->uploads; s->upload_bytes += (uint64_t)w * h * 4;
+            }
             pico_host_request_redraw(host);
         }
         if (!visible && b->texture.id) { UnloadTexture(b->texture); b->texture = (Texture2D){0}; }
         free(pixels);
+        if (b->opened && !b->ready) pico_host_request_redraw_after(host, 0.1f);
         if (changed && visible) pico_host_request_redraw(host);
     }
+    Profile(s, false);
 }
 void PicoBrowser_Shutdown(PicoHost *host, const struct timespec *deadline)
 {
@@ -895,10 +1063,13 @@ void PicoBrowser_Shutdown(PicoHost *host, const struct timespec *deadline)
             (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) break;
         usleep(1000);
     }
-    if (s->pid > 0) { kill(-s->pid, SIGKILL); waitpid(s->pid, NULL, 0); }
+    if (s->process_group > 0) kill(-s->process_group, SIGKILL);
+    if (s->pid > 0) waitpid(s->pid, NULL, 0);
     if (s->command_fd >= 0) shutdown(s->command_fd, SHUT_RDWR);
     if (s->event_fd >= 0) shutdown(s->event_fd, SHUT_RDWR);
     if (s->thread_started) pthread_join(s->receiver, NULL);
+    Profile(s, true);
+    if (s->profile) fclose(s->profile);
     if (s->command_fd >= 0) close(s->command_fd);
     if (s->event_fd >= 0) close(s->event_fd);
     while (s->requests) { BrowserRequest *r = s->requests; s->requests = r->next; ReleaseRequest(r); }
@@ -1007,7 +1178,8 @@ void PicoBrowser_Layout(PicoHost *host)
                                               .height = CLAY_SIZING_FIXED(b->display_height > 0 ? b->display_height : 1)}},
                          /* Clay emits image backgrounds after their image. */
                          .image = {.imageData = b->texture.id && b->texture.width == b->width && b->texture.height == b->height ? &b->texture : NULL}}) {}
-                    if (!b->texture.id) Label(b->ready ? "Waiting for page paint..." : "Starting browser...");
+                    if (b->stopped) Label("Browser stopped. Close and reopen to retry.");
+                    else if (!b->texture.id) Label(b->ready ? "Waiting for page paint..." : "Starting browser...");
                 }
             }
         }
@@ -1090,7 +1262,7 @@ void PicoBrowser_Input(PicoHost *host)
     if (click && Over("BrowserClose")) {
         PicoBrowser_CloseAgent(host, a->id); pico_host_request_redraw(host); return;
     }
-    if (!b || !a->browser_expanded) return;
+    if (!b || b->stopped || !a->browser_expanded) return;
     if (click && Over("BrowserControl")) {
         b->user_control = !b->user_control; b->address_focus = b->viewport_focus = false; Focus(host, b, false);
         Send(host->browser, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control});

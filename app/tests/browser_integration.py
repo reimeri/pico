@@ -91,7 +91,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
 
 class Browser:
-    def __init__(self, helper, root):
+    def __init__(self, helper, root, frame_callback=None):
         self.commands, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         events, child_events = socket.socketpair()
         self.events = queue.Queue()
@@ -110,6 +110,8 @@ class Browser:
                     token, kind, length, width, height = struct.unpack('=QIIII',header)
                     data = events.recv(length, socket.MSG_WAITALL) if length else b''
                     assert len(data) == length
+                    if kind == 2 and frame_callback:
+                        frame_callback(token, length)
                     # Retain only metadata: do not enqueue unbounded video pixels.
                     self.events.put((token, kind, width, height, data if kind in (6, 7) else data[:100] if kind != 2 else b''))
             finally:

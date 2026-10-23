@@ -138,10 +138,11 @@ def main():
                 click(680, 28)
                 wait_page(PAGE_COLORS[1])
                 phase = 'mobile-sized viewport and mapped pointer'
+                # Keep a real composer draft while applying viewport choices.
+                click(420, 706)
+                x('type', '--clearmodifiers', '--delay', 25, 'keep this draft')
                 click(825, 28)
-                x('key', '--delay', 60, 'ctrl+a')
-                x('type', '--clearmodifiers', '--delay', 30, 'mobile')
-                x('key', '--delay', 60, 'Return')
+                click(795, 65)  # Mobile, first dropdown row.
 
                 def colored_bounds(image, color):
                     mask = Image.new('1', image.size)
@@ -204,6 +205,44 @@ def main():
                     alive()
                 assert Page.visits == 2, Page.visits
 
+                phase = 'custom viewport popover and Enter ownership'
+                click(825, 28)
+                x('key', '--delay', 60, 'Up', 'Return')  # Mobile wraps to Custom.
+                click(684, 87)   # Width.
+                x('key', '--delay', 60, 'ctrl+a')
+                x('type', '--clearmodifiers', '--delay', 30, '640')
+                click(808, 87)   # Height.
+                x('key', '--delay', 60, 'ctrl+a')
+                x('type', '--clearmodifiers', '--delay', 30, '480')
+                x('key', '--delay', 60, 'Return')
+                while True:
+                    image = screenshot()
+                    custom_bounds = colored_bounds(image, PAGE_COLORS[1])
+                    if custom_bounds and abs((custom_bounds[2]-custom_bounds[0])/(custom_bounds[3]-custom_bounds[1]) - 640/480) < .01:
+                        break
+                target = colored_bounds(image, TARGET_COLOR)
+                click((target[0]+target[2])//2, (target[1]+target[3])//2)
+                while len(Page.clicks) < 4:
+                    alive(); time.sleep(.02)
+                assert Page.clicks[-1]['width'] == ['640'] and Page.clicks[-1]['height'] == ['480'], Page.clicks
+                # Applying Custom must not submit the populated composer draft.
+                assert not any(json.loads(line).get('role') == 'user' for line in session.read_text().splitlines())
+                # Verify the preset has actually been presented before testing
+                # the separate transition back to remembered Custom dimensions.
+                phase = 'remembered custom viewport dimensions'
+                click(825, 28); click(795, 65)
+                mobile_image()
+                click(825, 28)
+                x('key', '--delay', 60, 'Up', 'Return')  # Mobile wraps to Custom.
+                click(826, 163)  # Apply.
+                while True:
+                    image = screenshot()
+                    bounds_now = colored_bounds(image, PAGE_COLORS[1])
+                    if bounds_now and abs((bounds_now[2]-bounds_now[0])/(bounds_now[3]-bounds_now[1]) - 640/480) < .01:
+                        break
+                click(825, 28); click(795, 65)  # Restore Mobile for letterboxing checks.
+                mobile_image()
+
                 phase = 'dock resize and stable letterboxing'
                 x('windowsize', window, 1300, 900)
                 image, bounds = mobile_image()
@@ -211,10 +250,10 @@ def main():
                     assert colored_bounds(screenshot(), PAGE_COLORS[1]) == bounds
                 target = colored_bounds(image, TARGET_COLOR)
                 click((target[0]+target[2])//2, (target[1]+target[3])//2)
-                while len(Page.clicks) < 4:
+                while len(Page.clicks) < 5:
                     alive(); time.sleep(.02)
-                assert len(Page.clicks) == 4 and Page.clicks[-1]['width'] == ['390'] and Page.clicks[-1]['height'] == ['844']
-                print('PASS: navigation/reload presentation, control slider click/drag, web icon collapse/reopen, fixed viewport, mapped clicks and stable resized dock')
+                assert len(Page.clicks) == 5 and Page.clicks[-1]['width'] == ['390'] and Page.clicks[-1]['height'] == ['844']
+                print('PASS: navigation/reload presentation, control slider click/drag, web icon collapse/reopen, viewport dropdown/custom and composer Enter ownership, mapped clicks and stable resized dock')
             except BaseException:
                 log.flush()
                 print((root / 'pico.log').read_text(), file=sys.stderr)

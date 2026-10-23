@@ -412,9 +412,15 @@ browser service mutex; the receiver handles only bounded result metadata. Small
 and cancelled/unadopted snapshots are cleaned up. Browser IPC remains private;
 no public extension ABI or generic file-result API is added by these tools.
 
-Viewport settings are live-browser-local, survive navigation/collapse/extension
-reload and reset on page retirement. Presets/custom sizes change dimensions, not
-device emulation. Fixed pages fit down in the dock with centered letterboxing;
+Viewport settings and remembered custom dimensions are live-browser-local,
+survive navigation/collapse/extension reload, and reset on page retirement. The
+human dropdown applies presets immediately; Custom opens a floating Width/Height
+popover and applies valid dimensions via Enter or Apply. Invalid values leave the
+current viewport unchanged. Dropdown/popover input stays browser-owned for the
+entire input pass, including after Enter or Escape closes it and through same-frame
+relayouts, so the same key cannot submit the composer or cancel an agent turn.
+The popovers do not resize the toolbar, browser surface, or bottom-follow shell.
+Presets/custom sizes change dimensions, not device emulation. Fixed pages fit down in the dock with centered letterboxing;
 images/agent coordinates retain full logical dimensions and human input maps
 through the displayed image, excluding margins. Dock resize alone leaves fixed
 page coordinates valid. Only actual logical size changes invalidate identity.

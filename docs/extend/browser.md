@@ -47,7 +47,7 @@ Select a main session and click the dim right-edge web icon to expand its browse
 uncreated session shows a non-blocking reminder to send a message first; it does
 not initialize Chromium or show an error overlay. On first use it opens `about:blank`; enter a full URL such as
 `http://localhost:5173` in the address field. The toolbar offers back, forward,
-reload icons, a control-mode slider, a viewport field, a shutdown icon to close
+reload icons, a control-mode slider, a viewport dropdown, a shutdown icon to close
 the page, and a bright web icon to collapse the pane. The footer stays below
 the chat/browser content row at its full shell width.
 
@@ -64,6 +64,19 @@ the chat/browser content row at its full shell width.
   User mode; an agent-created browser starts in Agent mode.
 - Click the page to focus its keyboard input; click outside to return keyboard
   input to Pico. Clicking the address field edits the URL, not the composer.
+- In User control, the viewport dropdown offers **Mobile, Tablet, Desktop, Dock,
+  and Custom**. Presets apply immediately; Dock (the initial mode) follows the
+  available panel size. These change logical page dimensions, not device emulation.
+- **Custom** opens a small popover with separate **Width** and **Height** fields.
+  Enter whole numbers from 1–4096 in each, then press Enter in either field or
+  click **Apply**. Tab / Shift+Tab moves between the fields and Apply. Invalid
+  dimensions keep the popover open with a validation message and leave the page
+  size unchanged. Each live browser remembers its custom values when switching
+  to a preset and back; they reset when that page is closed.
+- The dropdown supports Up/Down and Enter. Escape or clicking outside dismisses
+  it or the custom popover without applying edits. Browser controls own their
+  keyboard input through the end of the frame: Enter applies the viewport only,
+  never submits a draft in the composer.
 
 The builtin `browser` extension registers the agent tools; disabling that workspace
 extension removes agent access, not the core human-operated dock.

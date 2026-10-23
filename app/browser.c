@@ -31,6 +31,14 @@ typedef enum BrowserIcon {
     BROWSER_ICON_BACK, BROWSER_ICON_FORWARD, BROWSER_ICON_RELOAD,
     BROWSER_ICON_WEB, BROWSER_ICON_AGENT, BROWSER_ICON_USER, BROWSER_ICON_SHUTDOWN, BROWSER_ICON_COUNT
 } BrowserIcon;
+typedef enum BrowserViewport {
+    BROWSER_VIEWPORT_MOBILE, BROWSER_VIEWPORT_TABLET, BROWSER_VIEWPORT_DESKTOP,
+    BROWSER_VIEWPORT_DOCK, BROWSER_VIEWPORT_CUSTOM, BROWSER_VIEWPORT_COUNT
+} BrowserViewport;
+static const struct { const char *label, *preset; int width, height; } viewport_choices[] = {
+    {"Mobile", "mobile", 390, 844}, {"Tablet", "tablet", 768, 1024},
+    {"Desktop", "desktop", 1280, 720}, {"Dock", "dock", 0, 0}, {"Custom", NULL, 0, 0}
+};
 typedef struct BrowserFrame { PbFrame frame; PbFds fds; } BrowserFrame;
 typedef struct BrowserSession {
     struct BrowserSession *next;
@@ -43,11 +51,13 @@ typedef struct BrowserSession {
     double control_changed_at;
     bool keys[512];
     int width, height, dock_width, dock_height;
-    bool fixed_viewport, viewport_focus;
+    BrowserViewport viewport_mode;
+    bool viewport_menu, viewport_custom, viewport_error;
+    int viewport_selected, viewport_focus; /* None, width, height, Apply. */
     double opened_at;
     float display_width, display_height;
-    char viewport_text[32];
-    PicoTextField viewport_field;
+    char custom_width[16], custom_height[16];
+    PicoTextField custom_fields[2];
     char url[PB_URL_CAP], address[PB_URL_CAP], error[512];
     PicoTextField field;
     Texture2D texture;
@@ -77,7 +87,7 @@ typedef struct BrowserRequest {
     unsigned char *png;
     PbTextResult text_result;
     char argument_path[128];
-    bool fixed_viewport;
+    BrowserViewport viewport_mode;
 } BrowserRequest;
 typedef struct PicoBrowserService {
     PicoHost *host;
@@ -109,11 +119,22 @@ typedef struct PicoBrowserService {
     bool icons_tried;
     Texture2D icons[BROWSER_ICON_COUNT][2]; /* Muted / bright; main-thread owned. */
     uint64_t control_drag_token;
+    bool claimed_keyboard; /* Retained until the next input pass, not the next layout. */
 } PicoBrowserService;
 
 static void Focus(PicoHost *host, BrowserSession *b, bool focus);
 static int WindowsKey(int key);
-static void ViewportLabel(BrowserSession *b);
+static void RememberCustomViewport(BrowserSession *b)
+{
+    char text[16];
+    snprintf(text, sizeof(text), "%d", b->width); PicoTextField_SetText(&b->custom_fields[0], text);
+    snprintf(text, sizeof(text), "%d", b->height); PicoTextField_SetText(&b->custom_fields[1], text);
+}
+static void CloseViewport(BrowserSession *b)
+{
+    b->viewport_menu = b->viewport_custom = false;
+    b->viewport_focus = 0;
+}
 
 static double MonotonicSeconds(void)
 {
@@ -491,8 +512,9 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
         b->user_control = user; b->control_from = user;
         snprintf(b->session_id, sizeof(b->session_id), "%s", agent->session_id);
         PicoTextField_Bind(&b->field, b->address, sizeof(b->address));
-        PicoTextField_Bind(&b->viewport_field, b->viewport_text, sizeof(b->viewport_text));
-        ViewportLabel(b);
+        PicoTextField_Bind(&b->custom_fields[0], b->custom_width, sizeof(b->custom_width));
+        PicoTextField_Bind(&b->custom_fields[1], b->custom_height, sizeof(b->custom_height));
+        b->viewport_mode = BROWSER_VIEWPORT_DOCK;
         pthread_mutex_lock(&s->mu); b->next = s->sessions; s->sessions = b; pthread_mutex_unlock(&s->mu);
     }
     pthread_mutex_lock(&s->mu);
@@ -506,7 +528,7 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
     if (!b->opened) {
         b->opened_at = MonotonicSeconds();
         b->opened = true; b->visible = false; b->width = b->height = 0;
-        b->fixed_viewport = false; ViewportLabel(b);
+        b->viewport_mode = BROWSER_VIEWPORT_DOCK;
         b->error[0] = 0;
     }
     if (!Send(s, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control})) {
@@ -568,7 +590,9 @@ void PicoBrowser_BeginLayout(PicoHost *host)
     while (s && s->retired) {
         BrowserSession *b = s->retired; s->retired = b->next;
         DestroyDisplay(s, b);
-        PicoTextField_Unbind(&b->field); PicoTextField_Unbind(&b->viewport_field); free(b);
+        PicoTextField_Unbind(&b->field);
+        for (int i = 0; i < 2; ++i) PicoTextField_Unbind(&b->custom_fields[i]);
+        free(b);
     }
 }
 /* All request fields are protected by service->mu. Requests have a queue and a
@@ -814,19 +838,17 @@ void PicoBrowser_ToolObserve(PicoAgentContext *ctx, const char *args, bool act, 
     ReleaseRequest(r); pthread_mutex_unlock(&s->mu);
 }
 
-static bool ParseViewport(const JsonDoc *doc, bool *fixed, int *width, int *height)
+static bool ParseViewport(const JsonDoc *doc, BrowserViewport *viewport, int *width, int *height)
 {
     char *preset = String(doc, 0, "preset");
     bool ok = false;
-    *fixed = true;
     if (preset && JsonObjGet(doc, 0, "width") < 0 && JsonObjGet(doc, 0, "height") < 0) {
-        ok = true;
-        if (!strcmp(preset, "dock")) *fixed = false;
-        else if (!strcmp(preset, "desktop")) { *width = 1280; *height = 720; }
-        else if (!strcmp(preset, "tablet")) { *width = 768; *height = 1024; }
-        else if (!strcmp(preset, "mobile")) { *width = 390; *height = 844; }
-        else ok = false;
+        for (int i = 0; i < BROWSER_VIEWPORT_CUSTOM; ++i) if (!strcmp(preset, viewport_choices[i].preset)) {
+            *viewport = i; *width = viewport_choices[i].width; *height = viewport_choices[i].height;
+            ok = true; break;
+        }
     } else if (JsonObjGet(doc, 0, "preset") < 0) {
+        *viewport = BROWSER_VIEWPORT_CUSTOM;
         ok = Number(doc, 0, "width", 1, PB_MAX_DIMENSION, width) &&
              Number(doc, 0, "height", 1, PB_MAX_DIMENSION, height);
     }
@@ -872,7 +894,7 @@ void PicoBrowser_ToolInspect(PicoAgentContext *ctx, const char *args, uint32_t k
     bool valid = args && strlen(args) <= 65536 && JsonValidSyntax(args, strlen(args)) && !JsonParse(&doc, args, strlen(args));
     if (valid) {
         valid = JsonIsObject(&doc, 0);
-        if (kind == PB_VIEWPORT) valid = valid && ParseViewport(&doc, &r->fixed_viewport, &r->width, &r->height);
+        if (kind == PB_VIEWPORT) valid = valid && ParseViewport(&doc, &r->viewport_mode, &r->width, &r->height);
         else if (kind == PB_DIAGNOSTICS) {
             char *cursor = String(&doc, 0, "cursor");
             valid = valid && (JsonObjGet(&doc, 0, "cursor") < 0 || (cursor && strlen(cursor) <= 64)); free(cursor);
@@ -975,7 +997,8 @@ void PicoBrowser_Pump(PicoHost *host)
         bool newly_stopped = !b->stopped;
         if (disconnected) FailureText(s, b->error, sizeof(b->error));
         else snprintf(b->error, sizeof(b->error), "%.400s Close and reopen the browser to retry.", b->received_error);
-        b->stopped = true; b->opened = b->ready = b->visible = b->focus = b->address_focus = b->viewport_focus = false;
+        b->stopped = true; b->opened = b->ready = b->visible = b->focus = b->address_focus = false;
+        CloseViewport(b);
         b->received_ready = b->received_stopped = b->received_closed = false;
         b->received_error[0] = 0;
         b->mouse_buttons = 0; memset(b->keys, 0, sizeof(b->keys));
@@ -1048,17 +1071,18 @@ void PicoBrowser_Pump(PicoHost *host)
                     ok = Open(host, agent, r->url, false, error, sizeof(error));
                     if (ok) snprintf(error, sizeof(error), "Navigation queued. Use browser_observe to wait for a fresh page image.");
                 } else {
-                    if (r->kind == PB_VIEWPORT && !r->fixed_viewport) {
+                    if (r->kind == PB_VIEWPORT && r->viewport_mode == BROWSER_VIEWPORT_DOCK) {
                         r->width = browser->dock_width ? browser->dock_width : browser->width ? browser->width : 800;
                         r->height = browser->dock_height ? browser->dock_height : browser->height ? browser->height : 600;
                     }
                     PbCommand command = {.type=r->kind, .token=r->token, .request=r->id,
-                              .navigation=r->navigation, .viewport=r->viewport, .x=r->width, .y=r->height, .a=r->fixed_viewport};
+                              .navigation=r->navigation, .viewport=r->viewport, .x=r->width, .y=r->height, .a=r->kind == PB_VIEWPORT && r->viewport_mode != BROWSER_VIEWPORT_DOCK};
                     snprintf(command.text, sizeof(command.text), "%s", r->argument_path);
                     ok = Send(s, command);
                     if (ok && r->kind == PB_VIEWPORT) {
-                        browser->fixed_viewport = r->fixed_viewport; browser->width = r->width; browser->height = r->height;
-                        ViewportLabel(browser); pico_host_request_redraw(host);
+                        browser->viewport_mode = r->viewport_mode; browser->width = r->width; browser->height = r->height;
+                        if (browser->viewport_mode == BROWSER_VIEWPORT_CUSTOM) RememberCustomViewport(browser);
+                        pico_host_request_redraw(host);
                     }
                     for (int i = 0; ok && i < r->step_count; ++i) {
                         PbCommand step = r->steps[i]; step.token = r->token; step.request = r->id;
@@ -1084,7 +1108,7 @@ void PicoBrowser_Pump(PicoHost *host)
         bool visible = host->selected_agent_id == a->id && a->browser_expanded && !host->window_minimized;
         if (b->opened && visible != b->visible) {
             if (Send(s, (PbCommand){.type = PB_VISIBLE, .token = b->token, .a = visible})) b->visible = visible;
-            if (!visible) { Focus(host, b, false); b->address_focus = b->viewport_focus = false; }
+            if (!visible) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
         }
         pthread_mutex_lock(&s->mu);
         bool changed = b->changed; b->changed = false;
@@ -1294,29 +1318,81 @@ static void ControlSelector(PicoHost *host, BrowserSession *b)
         }
     }
 }
-static void ViewportLabel(BrowserSession *b)
+static void ViewportText(const char *text, uint16_t font, uint16_t size, Clay_Color color)
 {
-    char text[32];
-    if (b->fixed_viewport) snprintf(text, sizeof(text), "%dx%d", b->width, b->height);
-    else snprintf(text, sizeof(text), "dock");
-    PicoTextField_SetText(&b->viewport_field, text);
+    CLAY_TEXT(((Clay_String){.length = (int)strlen(text), .chars = text}),
+        CLAY_TEXT_CONFIG({.fontId = font, .fontSize = size, .textColor = color, .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
-static void HumanViewport(PicoHost *host, BrowserSession *b)
+static void ViewportTextField(const char *id, PicoTextField *field)
 {
-    JsonDoc doc; JsonBuf args; JsonBuf_Init(&args);
-    int w = 0, h = 0, consumed = 0;
-    if (sscanf(b->viewport_text, "%dx%d%n", &w, &h, &consumed) == 2 && !b->viewport_text[consumed]) {
-        JsonBuf_Puts(&args, "{\"width\":"); JsonBuf_Int(&args, w); JsonBuf_Puts(&args, ",\"height\":"); JsonBuf_Int(&args, h); JsonBuf_Putc(&args, '}');
-    } else { JsonBuf_Puts(&args, "{\"preset\":"); JsonBuf_String(&args, b->viewport_text); JsonBuf_Putc(&args, '}'); }
-    char *json = JsonBuf_Steal(&args); bool fixed = false;
-    bool valid = !JsonParse(&doc, json, strlen(json));
-    if (valid) { valid = ParseViewport(&doc, &fixed, &w, &h); JsonFree(&doc); }
-    free(json);
-    if (!valid) { PicoOverlay_Notify(host, "Viewport: dock, desktop, tablet, mobile, or WIDTHxHEIGHT (1–4096)."); return; }
-    if (!fixed) { w = b->dock_width ? b->dock_width : 800; h = b->dock_height ? b->dock_height : 600; }
-    if (Send(host->browser, (PbCommand){.type=PB_RESIZE, .token=b->token, .x=w, .y=h})) {
-        b->fixed_viewport = fixed; b->width = w; b->height = h; ViewportLabel(b);
-        b->viewport_focus = false; pico_host_request_redraw(host);
+    /* Match the sidebar edit popover's borderless inset fields. */
+    CLAY(Clay_GetElementId((Clay_String){.length = (int)strlen(id), .chars = id}),
+        {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(32)}, .padding = {7,7,6,6}},
+         .clip = {.horizontal = true, .childOffset = {.x = -field->scroll_x}},
+         .backgroundColor = {35,35,42,255}, .cornerRadius = CLAY_CORNER_RADIUS(4)}) {
+        Label(field->text);
+    }
+}
+static void ViewportPicker(BrowserSession *b)
+{
+    bool open = b && (b->viewport_menu || b->viewport_custom);
+    bool enabled = b && b->user_control && !b->stopped;
+    bool hovered = enabled && Clay_PointerOver(CLAY_ID("BrowserViewport"));
+    Clay_Color background = open ? (Clay_Color){54,54,66,255} : (hovered ? COLOR_CODE_BG : COLOR_COMPOSER_BG);
+    CLAY(CLAY_ID("BrowserViewport"),
+        {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(108), .height = CLAY_SIZING_FIXED(30)},
+                    .padding = {8,8,6,6}, .childGap = 6, .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}},
+         .backgroundColor = background, .cornerRadius = CLAY_CORNER_RADIUS(6)}) {
+        ViewportText(viewport_choices[b ? b->viewport_mode : BROWSER_VIEWPORT_DOCK].label,
+                     FONT_REGULAR, PICO_FONT_UI, enabled ? COLOR_TEXT : COLOR_MUTED);
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(1)}}}) {}
+        ViewportText("▾", FONT_REGULAR, PICO_FONT_CAPTION, COLOR_MUTED);
+        if (open) {
+            bool custom = b->viewport_custom;
+            /* Preset menus follow settings/footer; the custom form follows
+             * the bordered sidebar popovers. Neither participates in pane sizing. */
+            CLAY(CLAY_ID("BrowserViewportPopup"),
+                {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .zIndex = 25,
+                              .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP, .parent = CLAY_ATTACH_POINT_RIGHT_BOTTOM},
+                              .offset = {.y = 6}},
+                 .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = custom ? (Clay_Padding){10,10,10,10} : (Clay_Padding){6,6,6,6},
+                            .childGap = custom ? 5 : 2,
+                            .sizing = {.width = CLAY_SIZING_FIXED(custom ? 260 : 180), .height = custom ? CLAY_SIZING_FIXED(138) : CLAY_SIZING_FIT(0)}},
+                 .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(custom ? 7 : 6),
+                 .border = {.color = COLOR_MUTED, .width = CLAY_BORDER_ALL(custom ? 1 : 0)}}) {
+                if (!custom) {
+                    for (int i = 0; i < BROWSER_VIEWPORT_COUNT; ++i) {
+                        CLAY(CLAY_IDI("BrowserViewportOption", i),
+                            {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}, .padding = {8,8,4,4}},
+                             .backgroundColor = i == b->viewport_selected ? COLOR_CODE_BG : COLOR_CONTENT_BG,
+                             .cornerRadius = CLAY_CORNER_RADIUS(4)}) {
+                            ViewportText(viewport_choices[i].label, FONT_MONO, PICO_FONT_UI, COLOR_TEXT);
+                        }
+                    }
+                } else {
+                    CLAY(CLAY_ID("BrowserViewportFields"),
+                        {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(58)}, .childGap = 12}}) {
+                        for (int i = 0; i < 2; ++i) {
+                            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                                    .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(58)}, .childGap = 4}}) {
+                                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(22)}}}) {
+                                    ViewportText(i ? "Height" : "Width", FONT_REGULAR, PICO_FONT_UI, COLOR_MUTED);
+                                }
+                                ViewportTextField(i ? "BrowserViewportHeight" : "BrowserViewportWidth", &b->custom_fields[i]);
+                            }
+                        }
+                    }
+                    CLAY(CLAY_ID("BrowserViewportValidation"),
+                        {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(20)}}}) {
+                        if (b->viewport_error) ViewportText("Enter 1–4096 in each field.", FONT_REGULAR, PICO_FONT_CAPTION, COLOR_NOTICE_ERROR);
+                    }
+                    CLAY(CLAY_ID("BrowserViewportApply"),
+                        {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)}, .padding = {7,7,5,5}},
+                         .backgroundColor = b->viewport_focus == 3 || Clay_PointerOver(CLAY_ID("BrowserViewportApply")) ? (Clay_Color){52,52,62,255} : (Clay_Color){0},
+                         .cornerRadius = CLAY_CORNER_RADIUS(4)}) { Label("Apply"); }
+                }
+            }
+        }
     }
 }
 void PicoBrowser_Layout(PicoHost *host)
@@ -1346,11 +1422,7 @@ void PicoBrowser_Layout(PicoHost *host)
                 IconButton(host, "BrowserForward", BROWSER_ICON_FORWARD, user_control);
                 IconButton(host, "BrowserReload", BROWSER_ICON_RELOAD, user_control);
                 ControlSelector(host, b);
-                CLAY(CLAY_ID("BrowserViewport"),
-                    {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(108), .height = CLAY_SIZING_FIXED(30)},
-                                .padding = {5,5,4,4}},
-                     .clip = {.horizontal = true, .childOffset = {.x = b ? -b->viewport_field.scroll_x : 0}},
-                     .backgroundColor = COLOR_BG}) { Label(b ? b->viewport_text : "dock"); }
+                ViewportPicker(b);
                 CLAY(CLAY_ID("BrowserToolbarSpace"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)}}}) {}
                 IconButton(host, "BrowserClose", BROWSER_ICON_SHUTDOWN, true);
                 IconButton(host, "BrowserCollapse", BROWSER_ICON_WEB, true);
@@ -1405,6 +1477,90 @@ static bool Over(const char *id)
     return e.found && p.x >= e.boundingBox.x && p.y >= e.boundingBox.y &&
         p.x < e.boundingBox.x + e.boundingBox.width && p.y < e.boundingBox.y + e.boundingBox.height;
 }
+static bool ApplyViewport(PicoHost *host, BrowserSession *b, BrowserViewport viewport)
+{
+    int width = viewport_choices[viewport].width, height = viewport_choices[viewport].height;
+    if (viewport == BROWSER_VIEWPORT_CUSTOM) {
+        int dimensions[2];
+        for (int i = 0; i < 2; ++i) {
+            const char *text = b->custom_fields[i].text;
+            bool valid = text[0] != 0;
+            for (const char *c = text; *c; ++c) if (!isdigit((unsigned char)*c)) valid = false;
+            long value = valid ? strtol(text, NULL, 10) : 0;
+            if (value < 1 || value > PB_MAX_DIMENSION) {
+                b->viewport_error = true; b->viewport_focus = i + 1;
+                PicoTextField_SelectAll(&b->custom_fields[i]); pico_host_request_redraw(host); return false;
+            }
+            dimensions[i] = (int)value;
+        }
+        width = dimensions[0]; height = dimensions[1];
+    } else if (viewport == BROWSER_VIEWPORT_DOCK) {
+        width = b->dock_width ? b->dock_width : 800; height = b->dock_height ? b->dock_height : 600;
+    }
+    if (!Send(host->browser, (PbCommand){.type=PB_RESIZE, .token=b->token, .x=width, .y=height})) return false;
+    b->viewport_mode = viewport; b->width = width; b->height = height;
+    b->viewport_error = false; CloseViewport(b); pico_host_request_redraw(host);
+    return true;
+}
+static void SelectViewport(PicoHost *host, BrowserSession *b, int selected)
+{
+    if (selected == BROWSER_VIEWPORT_CUSTOM) {
+        if (!b->custom_width[0] && !b->custom_height[0]) RememberCustomViewport(b);
+        b->viewport_menu = false; b->viewport_custom = true; b->viewport_focus = 1; b->viewport_error = false;
+        PicoTextField_SelectAll(&b->custom_fields[0]);
+        pico_host_request_redraw(host);
+    } else ApplyViewport(host, b, selected);
+}
+static bool ViewportInput(PicoHost *host, BrowserSession *b, bool click)
+{
+    bool open = b->viewport_menu || b->viewport_custom;
+    if (click && Over("BrowserViewport")) {
+        b->address_focus = false; Focus(host, b, false);
+        CloseViewport(b);
+        if (!open) { b->viewport_menu = true; b->viewport_selected = b->viewport_mode; }
+        host->browser->claimed_keyboard = true; pico_host_request_redraw(host); return true;
+    }
+    if (!open) return false;
+    /* Ownership survives Apply/Enter/Escape closing the popup in this pass. */
+    host->browser->claimed_keyboard = true;
+    if (IsKeyPressed(KEY_ESCAPE) || (click && !Over("BrowserViewportPopup"))) {
+        CloseViewport(b); pico_host_request_redraw(host); return true;
+    }
+    if (b->viewport_menu) {
+        for (int i = 0; i < BROWSER_VIEWPORT_COUNT; ++i) {
+            Clay_ElementData item = Clay_GetElementData(CLAY_IDI("BrowserViewportOption", i));
+            Vector2 pointer = GetMousePosition();
+            bool over = item.found && CheckCollisionPointRec(pointer, (Rectangle){item.boundingBox.x, item.boundingBox.y, item.boundingBox.width, item.boundingBox.height});
+            if (over && (click || GetMouseDelta().x != 0 || GetMouseDelta().y != 0)) b->viewport_selected = i;
+            if (over && click) { SelectViewport(host, b, i); return true; }
+        }
+        if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP)) b->viewport_selected = (b->viewport_selected + BROWSER_VIEWPORT_COUNT - 1) % BROWSER_VIEWPORT_COUNT;
+        if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN)) b->viewport_selected = (b->viewport_selected + 1) % BROWSER_VIEWPORT_COUNT;
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) SelectViewport(host, b, b->viewport_selected);
+        while (GetCharPressed()) {}
+    } else {
+        if (click) {
+            if (Over("BrowserViewportWidth")) b->viewport_focus = 1;
+            else if (Over("BrowserViewportHeight")) b->viewport_focus = 2;
+            else if (Over("BrowserViewportApply")) { ApplyViewport(host, b, BROWSER_VIEWPORT_CUSTOM); return true; }
+        }
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) { ApplyViewport(host, b, BROWSER_VIEWPORT_CUSTOM); return true; }
+        if (IsKeyPressed(KEY_TAB)) {
+            bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            b->viewport_focus = (b->viewport_focus + (shift ? 1 : 3)) % 3 + 1;
+            if (b->viewport_focus <= 2) PicoTextField_SelectAll(&b->custom_fields[b->viewport_focus - 1]);
+        }
+        if (b->viewport_focus >= 1 && b->viewport_focus <= 2) {
+            PicoTextField *field = &b->custom_fields[b->viewport_focus - 1];
+            PicoTextField_HandlePointer(field, b->viewport_focus == 1 ? CLAY_ID("BrowserViewportWidth") : CLAY_ID("BrowserViewportHeight"), 7, FONT_REGULAR);
+            if (PicoTextField_HandleKeys(field)) { b->viewport_error = false; pico_host_request_redraw(host); }
+            Clay_ElementData bounds = Clay_GetElementData(b->viewport_focus == 1 ? CLAY_ID("BrowserViewportWidth") : CLAY_ID("BrowserViewportHeight"));
+            if (bounds.found) PicoTextField_KeepCaretVisible(field, bounds.boundingBox.width - 14, FONT_REGULAR);
+            pico_host_request_redraw_after(host, PicoTextField_NextBlink(field));
+        } else while (GetCharPressed()) {}
+    }
+    return true;
+}
 static int Modifiers(PicoHost *host)
 {
     return (host->browser ? host->browser->modifiers : 0) |
@@ -1430,21 +1586,28 @@ bool PicoBrowser_BlocksKeyboard(const PicoHost *host)
 {
     BrowserSession *b = Selected((PicoHost *)host);
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
-    return b && a->browser_expanded && b->user_control && (b->focus || b->address_focus || b->viewport_focus);
+    return (host && host->browser && host->browser->claimed_keyboard) ||
+           (b && a->browser_expanded && b->user_control && (b->focus || b->address_focus || b->viewport_menu || b->viewport_custom));
 }
 void PicoBrowser_Input(PicoHost *host)
 {
     PicoAgent *a = PicoHost_SelectedAgent(host);
     PicoBrowserService *s = host->browser;
+    if (s) {
+        s->claimed_keyboard = false;
+        for (BrowserSession *other = s->sessions; other; other = other->next)
+            if (!a || other->agent_id != a->id) CloseViewport(other);
+    }
     if (!PicoAgent_IsUserMain(a)) {
         if (s) s->control_drag_token = 0;
         return;
     }
     BrowserSession *b = Selected(host);
+    if (s && b && b->user_control && a->browser_expanded && (b->viewport_menu || b->viewport_custom)) s->claimed_keyboard = true;
     if (s && (!b || s->control_drag_token != b->token || !a->browser_expanded)) s->control_drag_token = 0;
     if (PicoUi_ModalOpen(host) || !host->window_focused) {
         if (s) s->control_drag_token = 0;
-        if (b) { Focus(host, b, false); b->address_focus = b->viewport_focus = false; }
+        if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
         return;
     }
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
@@ -1466,7 +1629,7 @@ void PicoBrowser_Input(PicoHost *host)
     if (click && Over("BrowserCollapse")) {
         a->browser_expanded = false;
         if (s) s->control_drag_token = 0;
-        if (b) { Focus(host, b, false); b->address_focus = b->viewport_focus = false; }
+        if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
         pico_host_request_redraw(host);
     }
     if (click && Over("BrowserClose")) {
@@ -1476,7 +1639,7 @@ void PicoBrowser_Input(PicoHost *host)
     if (click) {
         s->control_drag_token = Over("BrowserControl") ? b->token : 0;
         if (s->control_drag_token) {
-            b->address_focus = b->viewport_focus = false;
+            b->address_focus = false; CloseViewport(b);
             Focus(host, b, false); /* Clicking even the active side leaves page/field focus. */
         }
     }
@@ -1496,13 +1659,12 @@ void PicoBrowser_Input(PicoHost *host)
         return; /* The selector gesture never becomes page or address input. */
     }
     if (!b->user_control) return;
+    if (ViewportInput(host, b, click)) return;
     if (click) {
         if (Over("BrowserBack")) Send(host->browser, (PbCommand){.type=PB_BACK, .token=b->token});
         if (Over("BrowserForward")) Send(host->browser, (PbCommand){.type=PB_FORWARD, .token=b->token});
         if (Over("BrowserReload")) Send(host->browser, (PbCommand){.type=PB_RELOAD, .token=b->token});
         b->address_focus = Over("BrowserAddress");
-        b->viewport_focus = Over("BrowserViewport");
-        if (b->viewport_focus) PicoTextField_SelectAll(&b->viewport_field);
         Focus(host, b, Over("BrowserImage") || b->mouse_buttons);
     }
     if (b->address_focus) {
@@ -1515,13 +1677,6 @@ void PicoBrowser_Input(PicoHost *host)
         Clay_ElementData e = Clay_GetElementData(CLAY_ID("BrowserAddress"));
         if (e.found) PicoTextField_KeepCaretVisible(&b->field, e.boundingBox.width - 16, FONT_REGULAR);
         pico_host_request_redraw_after(host, PicoTextField_NextBlink(&b->field));
-    }
-    if (b->viewport_focus) {
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) HumanViewport(host, b);
-        else if (IsKeyPressed(KEY_ESCAPE)) { b->viewport_focus = false; ViewportLabel(b); }
-        else PicoTextField_HandleKeys(&b->viewport_field);
-        PicoTextField_KeepCaretVisible(&b->viewport_field, 98, FONT_REGULAR);
-        pico_host_request_redraw_after(host, PicoTextField_NextBlink(&b->viewport_field));
     }
     bool over = Over("BrowserImage") && Over("BrowserSurface");
     if (!over && !b->mouse_buttons) return;
@@ -1556,7 +1711,7 @@ void PicoBrowser_AfterLayout(PicoHost *host)
     if (w > PB_MAX_DIMENSION) w = PB_MAX_DIMENSION;
     if (h > PB_MAX_DIMENSION) h = PB_MAX_DIMENSION;
     b->dock_width = w; b->dock_height = h;
-    if (!b->fixed_viewport && (w != b->width || h != b->height) &&
+    if (b->viewport_mode == BROWSER_VIEWPORT_DOCK && (w != b->width || h != b->height) &&
         Send(host->browser, (PbCommand){.type=PB_RESIZE, .token=b->token, .x=w, .y=h})) { b->width=w; b->height=h; }
     float scale = b->width > 0 && b->height > 0 ? fminf(1, fminf(e.boundingBox.width / b->width, e.boundingBox.height / b->height)) : 1;
     float display_width = floorf(b->width * scale), display_height = floorf(b->height * scale);
@@ -1571,7 +1726,8 @@ void PicoBrowser_AfterRender(PicoHost *host)
 {
     BrowserSession *b = Selected(host);
     if (b && b->address_focus) PicoTextField_Draw(&b->field, CLAY_ID("BrowserAddress"), 8, 5, FONT_REGULAR);
-    if (b && b->viewport_focus) PicoTextField_Draw(&b->viewport_field, CLAY_ID("BrowserViewport"), 5, 4, FONT_REGULAR);
+    if (b && b->viewport_custom && b->viewport_focus >= 1 && b->viewport_focus <= 2)
+        PicoTextField_Draw(&b->custom_fields[b->viewport_focus - 1], b->viewport_focus == 1 ? CLAY_ID("BrowserViewportWidth") : CLAY_ID("BrowserViewportHeight"), 7, 6, FONT_REGULAR);
 }
 static int WindowsKey(int key)
 {

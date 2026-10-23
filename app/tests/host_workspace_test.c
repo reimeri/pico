@@ -2537,6 +2537,8 @@ done:
     return rc;
 }
 
+static int RunBrowserViewportCase(bool with_sidebar);
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false, false) != 0)
@@ -2568,6 +2570,7 @@ static int TestBottomFollowShellGeometryStable(void)
         RunNoticeTranscriptCase(false, true) != 0 || RunNoticeTranscriptCase(true, true) != 0) return 1;
     if (RunNonTextDiffFooterCase(false) || RunNonTextDiffFooterCase(true)) return 1;
     if (RunSessionReferenceShellCase(false) || RunSessionReferenceShellCase(true)) return 1;
+    if (RunBrowserViewportCase(false) || RunBrowserViewportCase(true)) return 1;
     return RunWorkspaceLessShellCase();
 }
 
@@ -4570,7 +4573,7 @@ static int BrowserFaultHelper(int argc, char **argv)
     FILE *log = log_path ? fopen(log_path, "w") : NULL;
     PbCommand command;
     while (recv(commands, &command, sizeof(command), 0) == sizeof(command)) {
-        if (log) { fprintf(log, "%u %d %d\n", command.type, command.a, command.b); fflush(log); }
+        if (log) { fprintf(log, "%u %d %d %d %d\n", command.type, command.a, command.b, command.x, command.y); fflush(log); }
         if (command.type == PB_STOP) { if (log) fclose(log); return 0; }
         if (command.type == PB_CLOSE) {
             PbEvent closed = {.type=PB_CLOSED, .token=command.token};
@@ -4617,7 +4620,7 @@ static void BrowserTestClick(PicoHost *host, const char *name)
     g_find_input_test = true; g_find_button = MOUSE_BUTTON_LEFT; g_find_press = true;
     g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2,
                               element.boundingBox.y + element.boundingBox.height / 2};
-    g_browser_fake_window = true;
+    g_browser_fake_window = !strcmp(name, "BrowserExpand") || !strcmp(name, "BrowserStart");
     PicoBrowser_Input(host);
     g_browser_fake_window = false;
     g_find_input_test = g_find_press = false;
@@ -4690,9 +4693,9 @@ static int TestBrowserControlSelector(void)
         PicoBrowser_Pump(host);
         FILE *log = fopen(log_path, "r");
         if (!log) continue;
-        unsigned type; int a, b, controls = 0, reloads = 0, right_down = 0, right_up = 0;
+        unsigned type; int a, b, x, y, controls = 0, reloads = 0, right_down = 0, right_up = 0;
         int modes[4] = {0};
-        while (fscanf(log, "%u %d %d", &type, &a, &b) == 3) {
+        while (fscanf(log, "%u %d %d %d %d", &type, &a, &b, &x, &y) == 5) {
             if (type == PB_CONTROL) { if (controls < 4) modes[controls] = a; controls++; }
             if (type == PB_RELOAD) reloads++;
             if (type == PB_MOUSE && a == 2) { if (b == 0) right_down++; if (b == 1) right_up++; }
@@ -4715,6 +4718,232 @@ done:
     if (rc) Fail("browser control selector must select sides, release focus/input, and preserve navigation ownership");
     return rc;
 #else
+    return 0;
+#endif
+}
+
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static void BrowserTestKey(PicoHost *host, int key)
+{
+    g_find_input_test = true; g_find_key = key;
+    PicoBrowser_Input(host);
+    PicoComposer_HandleInput(host);
+    g_find_input_test = false; g_find_key = 0;
+}
+static void BrowserTestEdit(PicoHost *host, const char *field, const char *text)
+{
+    BrowserTestClick(host, field);
+    g_find_ctrl = true; BrowserTestKey(host, KEY_A); g_find_ctrl = false;
+    for (const char *c = text; *c; ++c) {
+        g_find_character = *c; BrowserTestKey(host, 0);
+    }
+}
+/* Compare the real menus, not their source padding constants: text-scaled
+ * row bounds and outer insets must match at smaller and larger font sizes. */
+static bool BrowserMenuMatchesSettings(PicoHost *host)
+{
+    float old_scale = Pico_FontScale();
+    bool good = false;
+    const float scales[] = {0.75f, 1.25f};
+    PicoExt settings = pico_ext_settings();
+    g_clay_frame_test = g_fixed_width_text_measure = true;
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    for (int scale = 0; scale < 2; ++scale) {
+        Pico_SetFontScale(scales[scale]); Clay_ResetMeasureTextCache();
+        Clay_SetPointerState((Clay_Vector2){0}, false);
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementData menu = Clay_GetElementData(CLAY_ID("BrowserViewportPopup"));
+        Clay_ElementData first = Clay_GetElementData(CLAY_IDI("BrowserViewportOption", 0));
+        Clay_ElementData second = Clay_GetElementData(CLAY_IDI("BrowserViewportOption", 1));
+        Clay_ElementData last = Clay_GetElementData(CLAY_IDI("BrowserViewportOption", 4));
+        if (!menu.found || !first.found || !second.found || !last.found) goto done;
+        float actual[] = {first.boundingBox.height, second.boundingBox.y - first.boundingBox.y - first.boundingBox.height,
+                          first.boundingBox.x - menu.boundingBox.x, first.boundingBox.y - menu.boundingBox.y,
+                          menu.boundingBox.y + menu.boundingBox.height - last.boundingBox.y - last.boundingBox.height};
+        PicoSettingsUi_Open(host);
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementData picker = Clay_GetElementData(CLAY_ID("SettingsDefaultModel"));
+        if (!picker.found) goto done;
+        g_find_pointer = (Vector2){picker.boundingBox.x + picker.boundingBox.width / 2,
+                                  picker.boundingBox.y + picker.boundingBox.height / 2};
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+        g_find_input_test = g_find_press = true; g_find_button = MOUSE_BUTTON_LEFT;
+        settings.host_on_frame(host, PicoPlugins_HostState(host, "settings"), 0);
+        g_find_input_test = g_find_press = false;
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        menu = Clay_GetElementData(CLAY_ID("SettingsDefaultMenu"));
+        first = Clay_GetElementData(CLAY_IDI("SettingsDefaultItem", 0));
+        second = Clay_GetElementData(CLAY_IDI("SettingsDefaultItem", 1));
+        last = Clay_GetElementData(CLAY_IDI("SettingsDefaultItem", 4));
+        if (!menu.found || !first.found || !second.found || !last.found) goto done;
+        float reference[] = {first.boundingBox.height, second.boundingBox.y - first.boundingBox.y - first.boundingBox.height,
+                             first.boundingBox.x - menu.boundingBox.x, first.boundingBox.y - menu.boundingBox.y,
+                             menu.boundingBox.y + menu.boundingBox.height - last.boundingBox.y - last.boundingBox.height};
+        for (int i = 0; i < 5; ++i) if (fabsf(actual[i] - reference[i]) > 0.01f) {
+            Fail("browser preset menu row spacing and outer insets must match settings at each font scale");
+            goto done;
+        }
+        PicoSettingsUi_Close(host);
+    }
+    good = true;
+done:
+    PicoSettingsUi_Close(host);
+    Pico_SetFontScale(old_scale); Clay_ResetMeasureTextCache();
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    g_find_input_test = g_find_press = g_clay_frame_test = g_fixed_width_text_measure = false;
+    return good;
+}
+
+static void BrowserTestPreset(PicoHost *host, int option)
+{
+    BrowserTestClick(host, "BrowserViewport");
+    /* Clay's indexed IDs are not string-concatenated IDs. */
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    Clay_ElementData element = Clay_GetElementData(CLAY_IDI("BrowserViewportOption", option));
+    g_find_input_test = g_find_press = true; g_find_button = MOUSE_BUTTON_LEFT;
+    g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2,
+                              element.boundingBox.y + element.boundingBox.height / 2};
+    PicoBrowser_Input(host);
+    g_find_input_test = g_find_press = false;
+}
+#endif
+static int RunBrowserViewportCase(bool with_sidebar)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    char dir[] = "/tmp/pico-browser-viewport-XXXXXX", cfg[] = "/tmp/pico-browser-viewport-cfg-XXXXXX";
+    char helper[4096], application[4096], executable[4096], log_path[4096];
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    int rc = 1;
+    Clay_SetCurrentContext(NULL);
+    if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay((Clay_Dimensions){1100,800})) goto done;
+    snprintf(application, sizeof(application), "%s/", dir);
+    snprintf(helper, sizeof(helper), "%s/browser", dir); mkdir(helper, 0700);
+    snprintf(helper, sizeof(helper), "%s/browser/runtime", dir); mkdir(helper, 0700);
+    snprintf(helper, sizeof(helper), "%s/browser/runtime/pico_browser_helper", dir);
+    ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable)-1);
+    if (length < 0) goto done;
+    executable[length] = 0;
+    if (symlink(executable, helper)) goto done;
+    snprintf(log_path, sizeof(log_path), "%s/commands", dir);
+    setenv("XDG_CONFIG_HOME", cfg, 1); setenv("PICO_TEST_BROWSER_FAILURE", "healthy", 1);
+    setenv("PICO_TEST_BROWSER_COMMANDS", log_path, 1);
+    /* Five model rows let the settings and viewport menus compare both their
+     * row rhythm and their top/bottom insets without a scrolling menu. */
+    if (!with_sidebar) {
+        char settings_path[4096];
+        snprintf(settings_path, sizeof(settings_path), "%s/pico", cfg); mkdir(settings_path, 0700);
+        snprintf(settings_path, sizeof(settings_path), "%s/pico/settings.json", cfg);
+        FILE *settings = fopen(settings_path, "w");
+        if (!settings) goto done;
+        fputs("{\"model\":\"reference-0\",\"models\":[", settings);
+        for (int i = 0; i < 5; ++i)
+            fprintf(settings, "%s{\"id\":\"reference-%d\",\"provider\":\"openai\"}", i ? "," : "", i);
+        fputs("]}", settings); fclose(settings);
+    }
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace; PicoAgentId id;
+    PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .select=true, .session_start=PICO_SESSION_NEW};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    snprintf(agent->session_id, sizeof(agent->session_id), "abcdef123456");
+    host->window_focused = true;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL); RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_browser_application_directory = application;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    for (int i = 0; i < 40; ++i) PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Viewport bottom-follow history");
+    BrowserTestClick(host, "BrowserExpand");
+    PicoComposer_SetText(host, "keep this draft");
+    int messages = agent->message_count;
+    BrowserTestClick(host, "BrowserViewport");
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+    const char *choices[] = {"Mobile", "Tablet", "Desktop", "Dock", "Custom"};
+    for (int i = 0; i < 5; ++i)
+        if (!FindCardText(&commands, choices[i])) goto done;
+    if (!with_sidebar && !BrowserMenuMatchesSettings(host)) goto done;
+    /* Dock starts selected. Up selects Desktop; Enter must not submit draft. */
+    BrowserTestKey(host, KEY_UP); BrowserTestKey(host, KEY_ENTER);
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (Clay_GetElementData(CLAY_ID("BrowserViewportPopup")).found ||
+        agent->message_count != messages || agent->accepted_submit || strcmp(host->composer.text, "keep this draft")) goto done;
+    BrowserTestPreset(host, 0); /* Mobile. */
+    BrowserTestPreset(host, 4); /* Custom. */
+    commands = PicoHost_LayoutShell(host, 800, 0);
+    if (!FindCardText(&commands, "Width") || !FindCardText(&commands, "Height") || !FindCardText(&commands, "Apply")) goto done;
+
+    /* Menu, custom fields, and validation overlay cannot resize any panes
+     * during repeated bottom-follow layouts, including same-frame passes. */
+    const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll", "ComposerAlign", "Footer",
+                           "ChatBrowserRow", "BrowserPane", "BrowserSurface", "BrowserToolbar", "BrowserViewport", "Sidebar"};
+    Clay_BoundingBox expected[13];
+    int count = with_sidebar ? 13 : 12;
+    for (int i = 0; i < count; ++i)
+        expected[i] = Clay_GetElementData(Clay_GetElementId((Clay_String){.chars=panes[i], .length=(int)strlen(panes[i])})).boundingBox;
+    for (int frame = 0; frame < 90; ++frame) {
+        if (frame % 30 == 0) { BrowserTestKey(host, KEY_ESCAPE); BrowserTestClick(host, "BrowserViewport"); }
+        if (frame % 30 == 10) { BrowserTestKey(host, KEY_ESCAPE); BrowserTestPreset(host, 4); }
+        if (frame % 30 == 20) { BrowserTestEdit(host, "BrowserViewportWidth", "0"); BrowserTestKey(host, KEY_ENTER); }
+        (void)PicoHost_LayoutShell(host, 800, 1.0f / 60.0f);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        for (int i = 0; i < count; ++i) {
+            Clay_ElementData pane = Clay_GetElementData(Clay_GetElementId((Clay_String){.chars=panes[i], .length=(int)strlen(panes[i])}));
+            if (!pane.found || !ShellBoxStable(expected[i], pane.boundingBox)) goto done;
+        }
+    }
+    /* Invalid input keeps the popover open without changing viewport mode. */
+    commands = PicoHost_LayoutShell(host, 800, 0);
+    if (!Clay_GetElementData(CLAY_ID("BrowserViewportWidth")).found || !FindCardText(&commands, "Enter 1–4096 in each field.")) goto done;
+    BrowserTestEdit(host, "BrowserViewportWidth", "640");
+    BrowserTestEdit(host, "BrowserViewportHeight", "480");
+    BrowserTestKey(host, KEY_KP_ENTER);
+    (void)PicoHost_LayoutShell(host, 800, 0); /* Relayout must not release consumed Enter. */
+    g_find_input_test = true; g_find_key = KEY_KP_ENTER; PicoComposer_HandleInput(host);
+    g_find_input_test = false; g_find_key = 0;
+    if (Clay_GetElementData(CLAY_ID("BrowserViewportPopup")).found ||
+        agent->message_count != messages || agent->accepted_submit || strcmp(host->composer.text, "keep this draft")) goto done;
+    BrowserTestPreset(host, 3); BrowserTestPreset(host, 4); /* Dock then remembered Custom. */
+    commands = PicoHost_LayoutShell(host, 800, 0);
+    if (!FindCardText(&commands, "640") || !FindCardText(&commands, "480")) goto done;
+    BrowserTestClick(host, "BrowserViewportApply");
+    BrowserTestClick(host, "BrowserReload");
+    PICO_TEST_WAIT_LOOP("viewport commands reach helper") {
+        PicoBrowser_Pump(host);
+        FILE *log = fopen(log_path, "r"); if (!log) continue;
+        unsigned type; int a, b, x, y, reloads = 0, resizes = 0;
+        int dimensions[5][2] = {0};
+        while (fscanf(log, "%u %d %d %d %d", &type, &a, &b, &x, &y) == 5) {
+            if (type == PB_RESIZE) { if (resizes < 5) { dimensions[resizes][0] = x; dimensions[resizes][1] = y; } resizes++; }
+            if (type == PB_RELOAD) reloads++;
+        }
+        fclose(log); if (!reloads) continue;
+        if (resizes != 5 || dimensions[0][0] <= dimensions[0][1] || dimensions[1][0] >= dimensions[1][1] ||
+            dimensions[2][0] != 640 || dimensions[2][1] != 480 ||
+            dimensions[4][0] != 640 || dimensions[4][1] != 480) goto done;
+        break;
+    }
+    /* Closing the popup must not permanently capture composer keyboard input. */
+    BrowserTestKey(host, 0);
+    if (PicoBrowser_BlocksKeyboard(host)) goto done;
+    rc = 0;
+done:
+    g_find_input_test = g_find_press = g_find_down = g_find_released = g_find_ctrl = false;
+    g_find_key = g_find_character = 0; g_find_button = MOUSE_BUTTON_LEFT;
+    if (host) pico_host_free(host);
+    g_browser_application_directory = NULL;
+    Pico_FreeClay(); Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME"); unsetenv("PICO_TEST_BROWSER_FAILURE"); unsetenv("PICO_TEST_BROWSER_COMMANDS");
+    RmRf(cfg); RmRf(dir);
+    if (rc) Fail("viewport dropdown/custom input must preserve draft, remembered sizes, and bottom-follow geometry");
+    return rc;
+#else
+    (void)with_sidebar;
     return 0;
 #endif
 }
@@ -18169,6 +18398,7 @@ int main(int argc, char **argv)
     if (!IsolateTestHome()) return 1;
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
     if (argc == 2 && strcmp(argv[1], "--browser-controls") == 0) return PICO_TEST_RUN(TestBrowserControlSelector());
+    if (argc == 2 && strcmp(argv[1], "--browser-viewport") == 0) return PICO_TEST_RUN(RunBrowserViewportCase(false)) || PICO_TEST_RUN(RunBrowserViewportCase(true));
     if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
     if (argc == 2 && strcmp(argv[1], "--fast-persistence") == 0) return PICO_TEST_RUN(TestFastSelectionPersistence());
 #ifdef PICO_OPENAI_LOGIN_TESTS

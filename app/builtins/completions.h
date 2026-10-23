@@ -42,6 +42,7 @@ typedef struct PicoCompletionsCtx {
     char service_tier[32];
     char *error;
     bool failed;
+    bool capacity_error; /* explicit overload/capacity error or HTTP 429/503 */
     bool saw_text;
     long http;
 } PicoCompletionsCtx;

@@ -974,7 +974,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
         bearer = BearerOf(&auth, true);
         rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
     }
-    if (rc == PICO_LLM_FAIL && ctx.error && strstr(ctx.error, "easoning"))
+    if (rc == PICO_LLM_FAIL && !ctx.capacity_error && ctx.error && strstr(ctx.error, "easoning"))
     {
         char *stripped = pico_completions_body_without_thinking(body);
         if (stripped)

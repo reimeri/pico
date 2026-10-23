@@ -1128,7 +1128,8 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         rc = PostOnce(url, bearer, auth.account_id, true, body, turn->cache_key, &ctx, cancel, on_delta,
                       user);
     }
-    if (rc == PICO_LLM_FAIL && ctx.http != 401 && ctx.error && strstr(ctx.error, "easoning"))
+    if (rc == PICO_LLM_FAIL && !ctx.capacity_error && ctx.http != 401 &&
+        ctx.error && strstr(ctx.error, "easoning"))
     {
         char *stripped = pico_responses_body_without_reasoning(body);
         if (stripped)

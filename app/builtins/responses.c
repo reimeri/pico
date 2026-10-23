@@ -2,6 +2,7 @@
 
 #include "builtins/responses.h"
 #include "canonical.h"
+#include "builtins/provider_retry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -619,8 +620,9 @@ static void HandleResponseObject(PicoResponsesCtx *c, const JsonDoc *doc, int ob
     }
     CopyOutputArray(c, doc, JsonObjGet(doc, obj, "output"));
     int err = JsonObjGet(doc, obj, "error");
-    if (err >= 0)
+    if (err >= 0 && !JsonIsNull(doc, err))
     {
+        c->capacity_error |= pico_provider_capacity_error(doc, err);
         char *msg = NULL;
         if (JsonIsObject(doc, err))
         {
@@ -630,10 +632,7 @@ static void HandleResponseObject(PicoResponsesCtx *c, const JsonDoc *doc, int ob
         {
             msg = JsonStrDup(doc, err);
         }
-        if (msg && msg[0])
-        {
-            SetError(c, msg);
-        }
+        SetError(c, msg && msg[0] ? msg : "LLM request failed");
         free(msg);
     }
 }
@@ -893,9 +892,12 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
         return true;
     }
     int err = JsonObjGet(&doc, 0, "error");
-    if (err >= 0 && JsonIsObject(&doc, err))
+    bool capacity_event = pico_provider_capacity_message(event);
+    c->capacity_error |= capacity_event || pico_provider_capacity_error(&doc, err);
+    if (capacity_event || (err >= 0 && !JsonIsNull(&doc, err)))
     {
-        char *msg = JsonObjStr(&doc, err, "message");
+        char *msg = err < 0 ? JsonObjStr(&doc, 0, "message") :
+                    JsonIsObject(&doc, err) ? JsonObjStr(&doc, err, "message") : JsonStrDup(&doc, err);
         if (msg && msg[0])
         {
             SetError(c, msg);
@@ -912,6 +914,7 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
     int detail = JsonObjGet(&doc, 0, "detail");
     if (detail >= 0)
     {
+        c->capacity_error |= pico_provider_capacity_error(&doc, detail);
         char *msg = JsonStrDup(&doc, detail);
         if (!msg || !msg[0])
         {
@@ -1020,10 +1023,13 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
     {
         HandleResponseObject(c, &doc, JsonObjGet(&doc, 0, "response"));
     }
-    else if (type && (strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0 ||
+    else if ((type && (strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0 ||
                       strstr(type, "invalid_request") || strstr(type, "authentication") ||
-                      strstr(type, "permission") || strstr(type, "rate_limit")))
+                      strstr(type, "permission") || strstr(type, "rate_limit") ||
+                      pico_provider_capacity_message(type))) || pico_provider_capacity_error(&doc, 0))
     {
+        c->capacity_error |= pico_provider_capacity_error(&doc, 0);
+        HandleResponseObject(c, &doc, JsonObjGet(&doc, 0, "response"));
         char *msg = JsonObjStr(&doc, 0, "message");
         if (!msg)
         {
@@ -1374,15 +1380,6 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
                         const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoResponsesCtx *ctx)
 {
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->cancel = cancel;
-    ctx->on_delta = on_delta;
-    ctx->user = user;
-    ctx->summary_output_index = -1;
-    ctx->summary_index = -1;
-    JsonBuf_Init(&ctx->items);
-    JsonBuf_Init(&ctx->summary);
-
     char *auth = NULL;
     PicoHttpPost req;
     memset(&req, 0, sizeof(req));
@@ -1412,32 +1409,56 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
         }
     }
 
-    long http = 0;
-    char *err = NULL;
-    int rc = pico_http_post_sse(&req, &http, &err);
-    ctx->http = http;
-    free(auth);
-    if (rc == PICO_HTTP_CANCEL)
+    for (int retry = 0;; retry++)
     {
+        memset(ctx, 0, sizeof(*ctx));
+        ctx->cancel = cancel;
+        ctx->on_delta = on_delta;
+        ctx->user = user;
+        ctx->summary_output_index = -1;
+        ctx->summary_index = -1;
+        JsonBuf_Init(&ctx->items);
+        JsonBuf_Init(&ctx->summary);
+        long http = 0;
+        char *err = NULL;
+        int rc = pico_http_post_sse(&req, &http, &err);
+        ctx->http = http;
+        ctx->capacity_error |= http == 429 || http == 503;
+        if (rc != PICO_HTTP_CANCEL)
+        {
+            if (rc != PICO_HTTP_OK && !ctx->error)
+                SetError(ctx, err ? err : "LLM request failed");
+            if (!ctx->error && http >= 400)
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "HTTP %ld from %s", http, url ? url : "");
+                SetError(ctx, buf);
+            }
+        }
         free(err);
+        if (rc == PICO_HTTP_CANCEL)
+        {
+            free(auth);
+            pico_responses_ctx_free(ctx);
+            memset(ctx, 0, sizeof(*ctx));
+            return PICO_LLM_CANCEL;
+        }
+        if (!ctx->failed && !ctx->error)
+        {
+            free(auth);
+            return PICO_LLM_OK;
+        }
+        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error)
+        {
+            free(auth);
+            return PICO_LLM_FAIL;
+        }
         pico_responses_ctx_free(ctx);
         memset(ctx, 0, sizeof(*ctx));
-        return PICO_LLM_CANCEL;
+        if (!pico_provider_retry_wait(retry + 1, cancel, on_delta, user))
+        {
+            free(auth);
+            return PICO_LLM_CANCEL;
+        }
     }
-    if (rc != PICO_HTTP_OK && !ctx->error)
-    {
-        SetError(ctx, err ? err : "LLM request failed");
-    }
-    free(err);
-    if (!ctx->error && http >= 400)
-    {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "HTTP %ld from %s", http, url ? url : "");
-        SetError(ctx, buf);
-    }
-    if (ctx->failed || ctx->error)
-    {
-        return PICO_LLM_FAIL;
-    }
-    return PICO_LLM_OK;
 }

@@ -41,6 +41,8 @@ typedef enum TestMode {
     TEST_PROVIDER_BLOCK,
     TEST_PROVIDER_THINK_BLOCK,
     TEST_PROVIDER_STATUS_BLOCK,
+    TEST_PROVIDER_RESET,
+    TEST_PROVIDER_RESET_BUFFERED,
     TEST_PROVIDER_THINK_FAIL,
     TEST_PROVIDER_TEXT_FAIL,
     TEST_PROVIDER_TEXT_BLOCK,
@@ -424,6 +426,60 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     {
         snprintf(tool_name, sizeof(tool_name), "ask_test");
         snprintf(tool_args, sizeof(tool_args), "{}");
+    }
+    if ((mode == TEST_PROVIDER_RESET || mode == TEST_PROVIDER_RESET_BUFFERED) && !issue_tool)
+    {
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "discarded-thinking", 18);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING_SUMMARY, "discarded-summary", 17);
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "discarded-text", 14);
+        FakeToolBegin(on_delta, user, 0, "discarded-call", "echo_test");
+        FakeToolDone(on_delta, user, 0, "discarded-call", "echo_test", "{}");
+#ifdef PICO_TEST_CLOCK
+        if (mode == TEST_PROVIDER_RESET_BUFFERED) PicoTestClock_Advance(101.0);
+#endif
+        for (int stage = 1; stage <= 2; stage++)
+        {
+            if (mode == TEST_PROVIDER_RESET)
+            {
+                pthread_mutex_lock(&g_test.mu);
+                g_test.block_entered_count = stage;
+                pthread_mutex_unlock(&g_test.mu);
+                for (;;)
+                {
+                    pthread_mutex_lock(&g_test.mu);
+                    bool released = g_test.block_release;
+                    if (released) g_test.block_release = false;
+                    pthread_mutex_unlock(&g_test.mu);
+                    if (released || cancel(user)) break;
+                    SleepOneMs();
+                }
+                if (cancel(user)) return PICO_LLM_CANCEL;
+            }
+            if (stage == 1)
+            {
+                FakeDelta(on_delta, user, PICO_LLM_DELTA_RESET, NULL, 0);
+                FakeDelta(on_delta, user, PICO_LLM_DELTA_STATUS, "capacity retry", 14);
+            }
+        }
+        pthread_mutex_lock(&g_test.mu);
+        bool fail_after_reset = g_test.provider_fail;
+        pthread_mutex_unlock(&g_test.mu);
+        if (fail_after_reset)
+        {
+            out->error = JsonDup("last attempt failed");
+            return PICO_LLM_FAIL;
+        }
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_THINKING, "replacement-thinking", 20);
+#ifdef PICO_TEST_CLOCK
+        if (mode == TEST_PROVIDER_RESET_BUFFERED) PicoTestClock_Advance(103.0);
+#endif
+        FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "replacement-text", 16);
+        pico_llm_result_add_text(out, "replacement-text");
+        out->items[0].thinking = JsonDup("replacement-thinking");
+        pthread_mutex_lock(&g_test.mu);
+        g_test.block_done = true;
+        pthread_mutex_unlock(&g_test.mu);
+        return PICO_LLM_OK;
     }
     if (mode == TEST_PROVIDER_THINK_FAIL || mode == TEST_PROVIDER_TEXT_FAIL)
     {
@@ -5278,6 +5334,123 @@ static int TestFailedStreamPersistence(TestMode mode)
     return logged && history ? 0 : Fail(name, "partial output was not saved exactly once and retained for continuation");
 }
 
+/* Reset must clear published data and buffers without erasing completed rounds. */
+static int TestProviderAttemptReset(int finish)
+{
+    const char *name = "provider attempt reset";
+    ResetTest(TEST_PROVIDER_RESET, 1);
+    PicoHost app;
+    InitApp(&app);
+    TestAddTool(&app, "echo_test", "test", "{\"type\":\"object\"}", EchoTool, NULL);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    bool ok = WaitForBlockCount(&app, 1);
+    PicoAgent_Pump(&app, agent);
+    const PicoTraceLine *previous = ToolTraceByCallId(&app, "call-1-0");
+    /* Observe the stale output before asking the worker to reset it. */
+    bool saw_partial = false;
+    for (int i = 0; i < agent->message_count; i++)
+        if (agent->messages[i].source && strstr(agent->messages[i].source, "discarded-text")) saw_partial = true;
+    ok &= saw_partial && previous && ToolTraceByCallId(&app, "discarded-call");
+    int notice_index = agent->message_count;
+    PicoHost_AddNotice(&app, agent->id, PICO_NOTICE_INFO, "keep this notice");
+    ReleaseBlock();
+    ok &= WaitForBlockCount(&app, 2);
+    PicoAgent_Pump(&app, agent);
+    ok &= notice_index < agent->message_count &&
+          agent->messages[notice_index].role == PICO_ROLE_NOTICE &&
+          strcmp(agent->messages[notice_index].source, "keep this notice") == 0;
+    ok &= strcmp(agent->activity, "capacity retry") == 0 &&
+          ToolTraceByCallId(&app, "call-1-0") && !ToolTraceByCallId(&app, "discarded-call");
+    for (int i = 0; i < agent->message_count; i++)
+    {
+        PicoMessage *m = &agent->messages[i];
+        ok &= !m->source || !strstr(m->source, "discarded");
+        for (int t = 0; t < m->trace_count; t++)
+            ok &= !m->trace[t].text || !strstr(m->trace[t].text, "discarded");
+    }
+    if (finish == PICO_LLM_CANCEL) PicoAgent_Cancel(agent);
+    else
+    {
+        pthread_mutex_lock(&g_test.mu);
+        g_test.provider_fail = finish == PICO_LLM_FAIL;
+        pthread_mutex_unlock(&g_test.mu);
+        ReleaseBlock();
+    }
+    ok &= WaitForIdle(&app);
+    ok &= !strstr(g_test.logged_content, "discarded") && !strstr(g_test.logged_thinking, "discarded") &&
+          !strstr(g_test.logged_tool_ids, "discarded") && g_test.tool_invocations == 1;
+    if (finish == PICO_LLM_OK)
+        ok &= strcmp(g_test.logged_content, "replacement-text") == 0 &&
+              strcmp(g_test.logged_thinking, "replacement-thinking") == 0;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.mode = TEST_SINGLE;
+    g_test.provider_fail = false;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_StartTurn(&app, agent, "continue");
+    ok &= WaitForIdle(&app);
+    ok &= g_test.last_input && !strstr(g_test.last_input, "discarded") &&
+          (finish != PICO_LLM_OK || strstr(g_test.last_input, "replacement-thinking"));
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "reset retained discarded output or removed previous completed work");
+}
+
+static int TestBufferedProviderReset(void)
+{
+    const char *name = "buffered provider reset";
+    ResetTest(TEST_PROVIDER_RESET_BUFFERED, 0);
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Set(100.0);
+#endif
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    /* Do not pump until the worker has emitted reset and replacement together. */
+    PICO_TEST_WAIT_LOOP("buffered reset and replacement")
+    {
+        pthread_mutex_lock(&g_test.mu);
+        bool done = g_test.block_done;
+        pthread_mutex_unlock(&g_test.mu);
+        if (done) break;
+    }
+    bool ok = WaitForIdle(&app) && strcmp(g_test.logged_content, "replacement-text") == 0 &&
+              strcmp(g_test.logged_thinking, "replacement-thinking") == 0 &&
+              !strstr(g_test.logged_tool_ids, "discarded");
+#ifdef PICO_TEST_CLOCK
+    /* Only the 36 replacement bytes over two seconds count, not the failed attempt. */
+    ok &= TestAgent(&app)->has_tokens_per_second && TestAgent(&app)->tokens_per_second == 4.5;
+    PicoTestClock_Reset();
+#endif
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "reset and replacement between pumps did not discard buffered output");
+}
+
+static int TestCompactionRetryStatus(void)
+{
+    const char *name = "compaction capacity retry status";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "start");
+    bool ok = WaitForIdle(&app);
+    pthread_mutex_lock(&g_test.mu);
+    g_test.mode = TEST_PROVIDER_RESET;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoAgent_Compact(&app, agent);
+    ok &= WaitForBlockCount(&app, 1);
+    ReleaseBlock();
+    ok &= WaitForBlockCount(&app, 2);
+    PicoAgent_Pump(&app, agent);
+    ok &= agent->state == PICO_AGENT_COMPACT_WAIT && strcmp(agent->activity, "capacity retry") == 0;
+    PicoAgent_Cancel(agent);
+    ok &= WaitForIdle(&app) && !agent->activity[0] &&
+          !strstr(g_test.logged_content, "discarded") && !strstr(g_test.logged_thinking, "discarded");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "compaction retry was invisible or cancellation retained discarded output");
+}
+
 static int TestProviderStatus(void)
 {
     const char *name = "ephemeral provider status";
@@ -6157,6 +6330,11 @@ int main(void)
     failed |= PICO_TEST_RUN(TestFailedStreamPersistence(TEST_PROVIDER_TEXT_FAIL));
     failed |= PICO_TEST_RUN(TestTurnEndMarksInboxPending(TEST_PROVIDER_TPS));
     failed |= PICO_TEST_RUN(TestTurnEndMarksInboxPending(TEST_PROVIDER_TEXT_FAIL));
+    failed |= PICO_TEST_RUN(TestProviderAttemptReset(PICO_LLM_OK));
+    failed |= PICO_TEST_RUN(TestProviderAttemptReset(PICO_LLM_FAIL));
+    failed |= PICO_TEST_RUN(TestProviderAttemptReset(PICO_LLM_CANCEL));
+    failed |= PICO_TEST_RUN(TestBufferedProviderReset());
+    failed |= PICO_TEST_RUN(TestCompactionRetryStatus());
     failed |= PICO_TEST_RUN(TestProviderStatus());
     failed |= PICO_TEST_RUN(TestCancelledThinkingPersistence());
     failed |= PICO_TEST_RUN(TestStreamingTextActivity());

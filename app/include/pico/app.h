@@ -369,6 +369,7 @@ typedef enum PicoLlmDeltaKind {
     PICO_LLM_DELTA_TOOL_CALL_BEGIN, /* tool name known; arguments still streaming */
     PICO_LLM_DELTA_TOOL_CALL_ARGS,  /* text carries a raw arguments fragment */
     PICO_LLM_DELTA_TOOL_CALL_DONE,  /* arguments complete; text is the full arguments JSON */
+    PICO_LLM_DELTA_RESET, /* discard this request attempt's output before retry; no payload */
 } PicoLlmDeltaKind;
 
 typedef struct PicoLlmDelta {

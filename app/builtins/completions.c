@@ -2,6 +2,7 @@
 
 #include "builtins/completions.h"
 #include "canonical.h"
+#include "builtins/provider_retry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1128,7 +1129,6 @@ static bool ValidateCompletionsDelta(PicoCompletionsCtx *c, const JsonDoc *doc, 
 static bool HandleJson(void *user, const char *event, const char *json, size_t len)
 {
     PicoCompletionsCtx *c = (PicoCompletionsCtx *)user;
-    (void)event;
     if (!json || len == 0)
     {
         return true;
@@ -1143,10 +1143,16 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
         return true;
     }
     int err = JsonObjGet(&doc, 0, "error");
-    if (err >= 0)
+    bool capacity_event = pico_provider_capacity_message(event);
+    c->capacity_error |= capacity_event || pico_provider_capacity_error(&doc, err);
+    if (capacity_event || (err >= 0 && !JsonIsNull(&doc, err)))
     {
         char *msg = NULL;
-        if (JsonIsObject(&doc, err))
+        if (err < 0)
+        {
+            msg = JsonObjStr(&doc, 0, "message");
+        }
+        else if (JsonIsObject(&doc, err))
         {
             msg = JsonObjStr(&doc, err, "message");
         }
@@ -1154,6 +1160,20 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
         {
             msg = JsonStrDup(&doc, err);
         }
+        SetError(c, msg && msg[0] ? msg : "LLM request failed");
+        free(msg);
+        JsonFree(&doc);
+        return false;
+    }
+    char *type = JsonObjStr(&doc, 0, "type");
+    bool capacity = pico_provider_capacity_error(&doc, 0);
+    bool error_event = (event && strcmp(event, "error") == 0) ||
+                       (type && strcmp(type, "error") == 0);
+    free(type);
+    if (capacity || error_event)
+    {
+        c->capacity_error |= capacity;
+        char *msg = JsonObjStr(&doc, 0, "message");
         SetError(c, msg && msg[0] ? msg : "LLM request failed");
         free(msg);
         JsonFree(&doc);
@@ -1421,11 +1441,6 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
                           const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
                           PicoLlmDeltaFn on_delta, void *user, PicoCompletionsCtx *ctx)
 {
-    pico_completions_ctx_init(ctx);
-    ctx->cancel = cancel;
-    ctx->on_delta = on_delta;
-    ctx->user = user;
-
     char *auth = NULL;
     PicoHttpPost req;
     memset(&req, 0, sizeof(req));
@@ -1455,33 +1470,53 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
         }
     }
 
-    long http = 0;
-    char *err = NULL;
-    int rc = pico_http_post_sse(&req, &http, &err);
-    ctx->http = http;
-    free(auth);
-    if (rc == PICO_HTTP_CANCEL)
+    for (int retry = 0;; retry++)
     {
+        pico_completions_ctx_init(ctx);
+        ctx->cancel = cancel;
+        ctx->on_delta = on_delta;
+        ctx->user = user;
+        long http = 0;
+        char *err = NULL;
+        int rc = pico_http_post_sse(&req, &http, &err);
+        ctx->http = http;
+        ctx->capacity_error |= http == 429 || http == 503;
+        if (rc != PICO_HTTP_CANCEL)
+        {
+            if (rc != PICO_HTTP_OK && !ctx->error)
+                SetError(ctx, err ? err : "LLM request failed");
+            if (!ctx->error && http >= 400)
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "HTTP %ld from %s", http, url ? url : "");
+                SetError(ctx, buf);
+            }
+            ValidateCompletedCalls(ctx);
+        }
         free(err);
+        if (rc == PICO_HTTP_CANCEL)
+        {
+            free(auth);
+            pico_completions_ctx_free(ctx);
+            memset(ctx, 0, sizeof(*ctx));
+            return PICO_LLM_CANCEL;
+        }
+        if (!ctx->failed && !ctx->error)
+        {
+            free(auth);
+            return PICO_LLM_OK;
+        }
+        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error)
+        {
+            free(auth);
+            return PICO_LLM_FAIL;
+        }
         pico_completions_ctx_free(ctx);
         memset(ctx, 0, sizeof(*ctx));
-        return PICO_LLM_CANCEL;
+        if (!pico_provider_retry_wait(retry + 1, cancel, on_delta, user))
+        {
+            free(auth);
+            return PICO_LLM_CANCEL;
+        }
     }
-    if (rc != PICO_HTTP_OK && !ctx->error)
-    {
-        SetError(ctx, err ? err : "LLM request failed");
-    }
-    free(err);
-    if (!ctx->error && http >= 400)
-    {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "HTTP %ld from %s", http, url ? url : "");
-        SetError(ctx, buf);
-    }
-    ValidateCompletedCalls(ctx);
-    if (ctx->failed || ctx->error)
-    {
-        return PICO_LLM_FAIL;
-    }
-    return PICO_LLM_OK;
 }

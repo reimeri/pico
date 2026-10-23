@@ -227,6 +227,7 @@ add_executable(pico
     builtins/xai.c
     builtins/xai_auth.c
     builtins/responses.c
+    builtins/provider_retry.c
     builtins/completions.c
     builtins/extensions.c
     builtins/settings.c
@@ -535,6 +536,7 @@ if(BUILD_TESTING)
     add_executable(pico_responses_tests
         tests/responses_test.c
         builtins/responses.c
+        builtins/provider_retry.c
         builtins/hyper_auth.c
         canonical.c
         json.c)
@@ -552,6 +554,7 @@ if(BUILD_TESTING)
     add_executable(pico_completions_tests
         tests/completions_test.c
         builtins/completions.c
+        builtins/provider_retry.c
         canonical.c
         json.c)
     target_include_directories(pico_completions_tests PRIVATE
@@ -564,6 +567,22 @@ if(BUILD_TESTING)
     target_compile_options(pico_completions_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_completions_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_completions_tests COMMAND pico_completions_tests)
+
+    add_executable(pico_provider_retry_tests
+        tests/provider_retry_test.c
+        builtins/provider_retry.c
+        builtins/responses.c
+        builtins/completions.c
+        canonical.c
+        json.c)
+    target_include_directories(pico_provider_retry_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src
+        ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    pico_warnings_are_errors(pico_provider_retry_tests)
+    add_test(NAME pico_provider_retry_tests COMMAND pico_provider_retry_tests)
 
     add_executable(pico_openai_auth_tests
         tests/openai_auth_test.c builtins/openai_auth.c http.c http_capture.c json.c)
@@ -1028,6 +1047,7 @@ if(BUILD_TESTING)
         builtins/xai.c
         builtins/xai_auth.c
         builtins/responses.c
+        builtins/provider_retry.c
         builtins/completions.c
         builtins/extensions.c
         builtins/settings.c
@@ -1095,7 +1115,7 @@ endif()
 
 set(_pico_ref_builtins
     shell.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
-    completions.c completions.h hyper_auth.c hyper_auth.h)
+    completions.c completions.h provider_retry.c provider_retry.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/resources ${CMAKE_CURRENT_BINARY_DIR}/resources

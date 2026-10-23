@@ -196,6 +196,8 @@ struct PicoAgentRt {
     int summary_part_cap;
     int summary_steps;
     bool summary_new_step;
+    bool stream_reset_pending; /* worker -> main, snapshotted with the replacement buffers */
+    PicoStreamingTps attempt_tps;
 
     PicoProvStream *prov; /* worker-side, under mu */
     int prov_count;
@@ -223,6 +225,8 @@ struct PicoAgentRt {
     int offered_tool_count;
 
     int stream_msg;
+    size_t attempt_source_len; /* main-thread transcript boundary for this request */
+    int attempt_trace_count;
     bool stream_notices_pending;
     bool llm_started; /* current stream was dispatched, not merely prepared */
     bool stream_saved; /* completed normal response is canonical and persisted */
@@ -245,6 +249,8 @@ static double ThinkNow(void);
 static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg);
 static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt);
 static void ClearProvStream(PicoAgentRt *rt);
+static void ClearProvStreamLocked(PicoAgentRt *rt);
+static void ClearProvRows(PicoAgentRt *rt);
 static void FinishAssistantHistory(PicoHost *app, PicoAgent *agent, const char *thinking,
                                    const char *signature);
 static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const PicoAgent *agent);
@@ -737,6 +743,32 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
     const char *s = delta->text;
     size_t n = delta->len;
     pthread_mutex_lock(&rt->mu);
+    if (kind == PICO_LLM_DELTA_RESET)
+    {
+        free(rt->stream);
+        rt->stream = NULL;
+        rt->stream_len = rt->stream_cap = 0;
+        free(rt->think);
+        rt->think = NULL;
+        rt->think_len = rt->think_cap = 0;
+        free(rt->turn_think);
+        rt->turn_think = NULL;
+        rt->turn_think_len = rt->turn_think_cap = 0;
+        free(rt->summary);
+        rt->summary = NULL;
+        rt->summary_len = rt->summary_cap = 0;
+        ClearSummaryParts(rt);
+        rt->summary_steps = 0;
+        rt->summary_new_step = false;
+        ClearProvStreamLocked(rt);
+        rt->tps = rt->attempt_tps;
+        rt->provider_status[0] = '\0';
+        rt->provider_status_dirty = true;
+        rt->stream_reset_pending = true;
+        pthread_mutex_unlock(&rt->mu);
+        pico_host_wakeup(NULL);
+        return;
+    }
     if (kind == PICO_LLM_DELTA_STATUS)
     {
         size_t len = s ? (n < sizeof(rt->provider_status) - 1 ? n : sizeof(rt->provider_status) - 1) : 0;
@@ -1330,6 +1362,7 @@ static void *WorkerMain(void *arg)
         {
             pthread_mutex_lock(&rt->mu);
             if (!compact) PicoStreamingTps_Begin(&rt->tps);
+            rt->attempt_tps = rt->tps;
             rt->provider_status[0] = '\0';
             rt->provider_status_dirty = false;
             free(rt->summary);
@@ -1680,6 +1713,14 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->turn_think = NULL;
     rt->turn_think_len = 0;
     rt->turn_think_cap = 0;
+    rt->stream_reset_pending = false;
+    rt->attempt_source_len = 0;
+    rt->attempt_trace_count = 0;
+    if (rt->stream_msg >= 0 && rt->stream_msg < agent->message_count)
+    {
+        rt->attempt_source_len = agent->messages[rt->stream_msg].source_len;
+        rt->attempt_trace_count = agent->messages[rt->stream_msg].trace_count;
+    }
     rt->llm_started = true;
     rt->work = PICO_WORK_LLM;
     rt->work_stream = p->stream;
@@ -3040,9 +3081,9 @@ static bool PersistMediaParts(PicoHost *app, PicoAgent *agent, PicoLlmPart *part
     return true;
 }
 
-static void ClearProvStream(PicoAgentRt *rt)
+static void ClearProvStreamLocked(PicoAgentRt *rt)
 {
-    pthread_mutex_lock(&rt->mu);
+    /* rt->mu held */
     for (int i = 0; i < rt->prov_count; i++)
     {
         free(rt->prov[i].call_id);
@@ -3051,6 +3092,12 @@ static void ClearProvStream(PicoAgentRt *rt)
     }
     rt->prov_count = 0;
     rt->prov_dirty = false;
+}
+
+static void ClearProvStream(PicoAgentRt *rt)
+{
+    pthread_mutex_lock(&rt->mu);
+    ClearProvStreamLocked(rt);
     pthread_mutex_unlock(&rt->mu);
 }
 
@@ -3289,6 +3336,17 @@ static void TraceRemoveLine(PicoAgent *agent, int msg_idx, int trace_idx)
     MessageTouch(agent, msg_idx);
 }
 
+static void ClearProvRows(PicoAgentRt *rt)
+{
+    for (int i = 0; i < rt->prov_row_count; i++)
+    {
+        free(rt->prov_rows[i].call_id);
+        free(rt->prov_rows[i].name);
+        free(rt->prov_rows[i].args);
+    }
+    rt->prov_row_count = 0;
+}
+
 /* Drop provisional rows the completed result never claimed. An interrupted
  * call is not persisted to the session log, so the transcript must not show
  * it either. */
@@ -3319,13 +3377,7 @@ static void SweepProvisionalRows(PicoAgent *agent, PicoAgentRt *rt)
             }
         }
     }
-    for (int i = 0; i < rt->prov_row_count; i++)
-    {
-        free(rt->prov_rows[i].call_id);
-        free(rt->prov_rows[i].name);
-        free(rt->prov_rows[i].args);
-    }
-    rt->prov_row_count = 0;
+    ClearProvRows(rt);
     ClearProvStream(rt);
 }
 
@@ -4831,6 +4883,30 @@ void PicoAgent_DismissError(PicoAgent *agent)
     agent->error = NULL;
 }
 
+/* Preserve earlier rounds' tool traces and notices in this message group. */
+static void ResetAttemptTranscript(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt)
+{
+    ClearProvRows(rt);
+    if (rt->stream_msg >= 0 && rt->stream_msg < agent->message_count)
+    {
+        PicoMessage *m = &agent->messages[rt->stream_msg];
+        for (int i = rt->attempt_trace_count; i < m->trace_count; i++)
+            PicoTraceLine_Release(&m->trace[i]);
+        m->trace_count = rt->attempt_trace_count;
+        if (m->source && m->source_len > rt->attempt_source_len)
+        {
+            m->source_len = rt->attempt_source_len;
+            m->source[m->source_len] = '\0';
+        }
+        if (PicoHost_TranscriptAgent(app) == agent) PicoChatSel_Clear(app);
+        agent->transcript_reset_generation++;
+        MessageTouch(agent, rt->stream_msg);
+        ReparseMessage(app, agent, rt->stream_msg);
+    }
+    rt->stream_dirty = false;
+    rt->stream_reparse_at = 0;
+}
+
 void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
@@ -4859,6 +4935,8 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     memcpy(provider_status, rt->provider_status, sizeof(provider_status));
     bool status_dirty = rt->provider_status_dirty;
     rt->provider_status_dirty = false;
+    bool stream_reset = rt->stream_reset_pending;
+    rt->stream_reset_pending = false;
     char *stream = rt->stream;
     size_t stream_len = rt->stream_len;
     rt->stream = NULL;
@@ -4946,11 +5024,14 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     }
     pthread_mutex_unlock(&rt->mu);
 
-    if (tps_changed || status_dirty || stream_len || think_len || summary_len || prov_update_count || event_count)
+    if (stream_reset) ResetAttemptTranscript(app, agent, rt);
+
+    if (stream_reset || tps_changed || status_dirty || stream_len || think_len || summary_len || prov_update_count || event_count)
         pico_host_request_redraw(app);
 
-    if (status_dirty && agent->state == PICO_AGENT_LLM_WAIT)
-        SetActivity(app, agent, provider_status[0] ? provider_status : "Thinking…");
+    if (status_dirty && (agent->state == PICO_AGENT_LLM_WAIT || agent->state == PICO_AGENT_COMPACT_WAIT))
+        SetActivity(app, agent, provider_status[0] ? provider_status :
+                    agent->state == PICO_AGENT_COMPACT_WAIT ? "Compacting…" : "Thinking…");
 
     if (stream && stream_len && rt->stream_msg >= 0)
     {

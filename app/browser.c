@@ -8,6 +8,7 @@
 #include "agent.h"
 #include "clarification.h"
 #include "settings.h"
+#include "docs_path.h"
 #include "overlay.h"
 #include "text_field_ui.h"
 #include "json.h"
@@ -26,6 +27,10 @@
 #include <math.h>
 
 extern char **environ;
+typedef enum BrowserIcon {
+    BROWSER_ICON_BACK, BROWSER_ICON_FORWARD, BROWSER_ICON_RELOAD,
+    BROWSER_ICON_WEB, BROWSER_ICON_AGENT, BROWSER_ICON_USER, BROWSER_ICON_SHUTDOWN, BROWSER_ICON_COUNT
+} BrowserIcon;
 typedef struct BrowserFrame { PbFrame frame; PbFds fds; } BrowserFrame;
 typedef struct BrowserSession {
     struct BrowserSession *next;
@@ -34,6 +39,8 @@ typedef struct BrowserSession {
     char session_id[40];
     bool user_control, ready, opened, stopped, visible, focus, address_focus;
     unsigned mouse_buttons;
+    float control_from;
+    double control_changed_at;
     bool keys[512];
     int width, height, dock_width, dock_height;
     bool fixed_viewport, viewport_focus;
@@ -99,6 +106,9 @@ typedef struct PicoBrowserService {
     bool gpu_ready;
     unsigned queue_head, queue_count;
     int modifiers;
+    bool icons_tried;
+    Texture2D icons[BROWSER_ICON_COUNT][2]; /* Muted / bright; main-thread owned. */
+    uint64_t control_drag_token;
 } PicoBrowserService;
 
 static void Focus(PicoHost *host, BrowserSession *b, bool focus);
@@ -478,7 +488,7 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
         b = calloc(1, sizeof(*b));
         if (!b) { snprintf(error, cap, "Out of memory."); return false; }
         b->agent_id = agent->id; b->token = ++s->next_token;
-        b->user_control = user;
+        b->user_control = user; b->control_from = user;
         snprintf(b->session_id, sizeof(b->session_id), "%s", agent->session_id);
         PicoTextField_Bind(&b->field, b->address, sizeof(b->address));
         PicoTextField_Bind(&b->viewport_field, b->viewport_text, sizeof(b->viewport_text));
@@ -1160,6 +1170,9 @@ void PicoBrowser_Shutdown(PicoHost *host, const struct timespec *deadline)
     if (s->event_fd >= 0) close(s->event_fd);
     while (s->requests) { BrowserRequest *r = s->requests; s->requests = r->next; ReleaseRequest(r); }
     ClearQueue(s); PbGpuShutdown(&s->gpu);
+    for (int icon = 0; icon < BROWSER_ICON_COUNT; ++icon)
+        for (int bright = 0; bright < 2; ++bright)
+            if (s->icons[icon][bright].id) UnloadTexture(s->icons[icon][bright]);
     pthread_mutex_destroy(&s->mu); pthread_cond_destroy(&s->cv);
     free(s); host->browser = NULL;
 }
@@ -1187,6 +1200,99 @@ static void Button(const char *id, const char *text, float width)
         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(30)},
                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
          .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)}) { Label(text); }
+}
+/* Load only ordinary UI textures here; drawing the collapsed affordance must
+ * never start Chromium or require the browser GPU transport. */
+static void EnsureIcons(PicoHost *host)
+{
+    if (!IsWindowReady()) return;
+    PicoBrowser_Init(host);
+    PicoBrowserService *s = host->browser;
+    if (!s || s->icons_tried) return;
+    s->icons_tried = true;
+    const char *paths[BROWSER_ICON_COUNT] = {
+        "resources/arrow-left.png", "resources/arrow-left.png", "resources/reload.png",
+        "resources/web.png", "resources/robot.png", "resources/user.png", "resources/shutdown.png"
+    };
+    for (int icon = 0; icon < BROWSER_ICON_COUNT; ++icon) {
+        char path[4096];
+        if (!Pico_DataPath(paths[icon], path, sizeof(path))) continue;
+        Image source = LoadImage(path);
+        if (!source.data) continue;
+        if (icon == BROWSER_ICON_FORWARD) ImageFlipHorizontal(&source);
+        for (int bright = 0; bright < 2; ++bright) {
+            Clay_Color tint = bright ? COLOR_TEXT : COLOR_MUTED;
+            Image image = ImageCopy(source);
+            if (!image.data) continue;
+            ImageColorTint(&image, (Color){tint.r, tint.g, tint.b, tint.a});
+            Texture2D *texture = &s->icons[icon][bright];
+            *texture = LoadTextureFromImage(image);
+            UnloadImage(image);
+            if (texture->id) SetTextureFilter(*texture, TEXTURE_FILTER_BILINEAR);
+        }
+        UnloadImage(source);
+    }
+}
+static void Icon(PicoHost *host, BrowserIcon icon, bool bright)
+{
+    PicoBrowserService *s = host->browser;
+    Texture2D *texture = s ? &s->icons[icon][bright] : NULL;
+    if (texture && texture->id) {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(20), .height = CLAY_SIZING_FIXED(20)}},
+                      .image = {.imageData = texture}}) {}
+    } else {
+        const char *fallback[BROWSER_ICON_COUNT] = {"<", ">", "R", "W", "A", "U", "x"};
+        Label(fallback[icon]);
+    }
+}
+static void IconButton(PicoHost *host, const char *id, BrowserIcon icon, bool bright)
+{
+    CLAY(Clay_GetElementId((Clay_String){.length = (int)strlen(id), .chars = id}),
+        {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(28), .height = CLAY_SIZING_FIXED(30)},
+                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+         .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)}) {
+        Icon(host, icon, bright);
+    }
+}
+static float ControlPosition(const BrowserSession *b)
+{
+    if (!b) return 0;
+    float t = fminf(1, fmaxf(0, (GetTime() - b->control_changed_at) / 0.16));
+    t = t * t * (3 - 2 * t);
+    return b->control_from + ((float)b->user_control - b->control_from) * t;
+}
+static void ControlSelector(PicoHost *host, BrowserSession *b)
+{
+    bool enabled = b && !b->stopped;
+    float position = ControlPosition(b);
+    if (enabled && fabsf(position - (float)b->user_control) > 0.001f)
+        pico_host_request_redraw_after(host, 1.0f / 60.0f);
+    CLAY(CLAY_ID("BrowserControl"),
+        {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(70), .height = CLAY_SIZING_FIXED(30)}},
+         .backgroundColor = COLOR_BG, .cornerRadius = CLAY_CORNER_RADIUS(15)}) {
+        /* Floating presentation cannot change the toggle or toolbar bounds
+         * during animation or a same-frame bottom-follow relayout. */
+        CLAY(CLAY_ID("BrowserControlThumb"),
+            {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                          .offset = {2 + 33 * position, 2}},
+             .layout = {.sizing = {.width = CLAY_SIZING_FIXED(33), .height = CLAY_SIZING_FIXED(26)}},
+             .backgroundColor = COLOR_CODE_BG, .cornerRadius = CLAY_CORNER_RADIUS(13)}) {}
+        CLAY(CLAY_ID("BrowserControlOptions"),
+            {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                          .offset = {2, 2}},
+             .layout = {.sizing = {.width = CLAY_SIZING_FIXED(66), .height = CLAY_SIZING_FIXED(26)}}}) {
+            CLAY(CLAY_ID("BrowserControlAgent"),
+                {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(33), .height = CLAY_SIZING_FIXED(26)},
+                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}}}) {
+                Icon(host, BROWSER_ICON_AGENT, enabled && !b->user_control);
+            }
+            CLAY(CLAY_ID("BrowserControlUser"),
+                {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(33), .height = CLAY_SIZING_FIXED(26)},
+                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}}}) {
+                Icon(host, BROWSER_ICON_USER, enabled && b->user_control);
+            }
+        }
+    }
 }
 static void ViewportLabel(BrowserSession *b)
 {
@@ -1218,26 +1324,36 @@ void PicoBrowser_Layout(PicoHost *host)
     PicoAgent *a = PicoHost_SelectedAgent(host);
     if (!PicoAgent_IsUserMain(a)) return;
     BrowserSession *b = Selected(host);
+    EnsureIcons(host);
     CLAY(CLAY_ID("BrowserPane"),
         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                     .sizing = {.width = CLAY_SIZING_FIXED(PicoBrowser_ShellWidth(host)),
                                .height = CLAY_SIZING_PERCENT(1)}, .childGap = 4},
          .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(6)}) {
-        if (!a->browser_expanded) { Button("BrowserExpand", "<", 28); }
-        else {
+        if (!a->browser_expanded) {
+            /* Match the expanded toolbar's top inset and right-edge anchor. */
             CLAY(CLAY_ID("BrowserToolbar"),
                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(34)},
-                            .childGap = 4, .padding = {4,4,2,2}}}) {
-                Button("BrowserBack", "<", 28); Button("BrowserForward", ">", 28);
-                Button("BrowserReload", "R", 28);
-                Button("BrowserControl", b && b->user_control ? "User" : "Agent", 70);
+                            .padding = {0,0,2,2}}}) {
+                IconButton(host, "BrowserExpand", BROWSER_ICON_WEB, false);
+            }
+        } else {
+            CLAY(CLAY_ID("BrowserToolbar"),
+                {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(34)},
+                            .childGap = 4, .padding = {4,0,2,2}}}) {
+                bool user_control = b && !b->stopped && b->user_control;
+                IconButton(host, "BrowserBack", BROWSER_ICON_BACK, user_control);
+                IconButton(host, "BrowserForward", BROWSER_ICON_FORWARD, user_control);
+                IconButton(host, "BrowserReload", BROWSER_ICON_RELOAD, user_control);
+                ControlSelector(host, b);
                 CLAY(CLAY_ID("BrowserViewport"),
                     {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(108), .height = CLAY_SIZING_FIXED(30)},
                                 .padding = {5,5,4,4}},
                      .clip = {.horizontal = true, .childOffset = {.x = b ? -b->viewport_field.scroll_x : 0}},
                      .backgroundColor = COLOR_BG}) { Label(b ? b->viewport_text : "dock"); }
                 CLAY(CLAY_ID("BrowserToolbarSpace"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)}}}) {}
-                Button("BrowserClose", "x", 28); Button("BrowserCollapse", ">", 28);
+                IconButton(host, "BrowserClose", BROWSER_ICON_SHUTDOWN, true);
+                IconButton(host, "BrowserCollapse", BROWSER_ICON_WEB, true);
             }
             if (b) {
                 CLAY(CLAY_ID("BrowserAddress"),
@@ -1319,9 +1435,15 @@ bool PicoBrowser_BlocksKeyboard(const PicoHost *host)
 void PicoBrowser_Input(PicoHost *host)
 {
     PicoAgent *a = PicoHost_SelectedAgent(host);
-    if (!PicoAgent_IsUserMain(a)) return;
+    PicoBrowserService *s = host->browser;
+    if (!PicoAgent_IsUserMain(a)) {
+        if (s) s->control_drag_token = 0;
+        return;
+    }
     BrowserSession *b = Selected(host);
+    if (s && (!b || s->control_drag_token != b->token || !a->browser_expanded)) s->control_drag_token = 0;
     if (PicoUi_ModalOpen(host) || !host->window_focused) {
+        if (s) s->control_drag_token = 0;
         if (b) { Focus(host, b, false); b->address_focus = b->viewport_focus = false; }
         return;
     }
@@ -1343,6 +1465,7 @@ void PicoBrowser_Input(PicoHost *host)
     }
     if (click && Over("BrowserCollapse")) {
         a->browser_expanded = false;
+        if (s) s->control_drag_token = 0;
         if (b) { Focus(host, b, false); b->address_focus = b->viewport_focus = false; }
         pico_host_request_redraw(host);
     }
@@ -1350,10 +1473,27 @@ void PicoBrowser_Input(PicoHost *host)
         PicoBrowser_CloseAgent(host, a->id); pico_host_request_redraw(host); return;
     }
     if (!b || b->stopped || !a->browser_expanded) return;
-    if (click && Over("BrowserControl")) {
-        b->user_control = !b->user_control; b->address_focus = b->viewport_focus = false; Focus(host, b, false);
-        Send(host->browser, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!b->user_control});
-        pico_host_request_redraw(host);
+    if (click) {
+        s->control_drag_token = Over("BrowserControl") ? b->token : 0;
+        if (s->control_drag_token) {
+            b->address_focus = b->viewport_focus = false;
+            Focus(host, b, false); /* Clicking even the active side leaves page/field focus. */
+        }
+    }
+    if (s->control_drag_token) {
+        bool down = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+        if (click || down || IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            Clay_BoundingBox bounds = Bounds("BrowserControl").boundingBox;
+            bool user = GetMousePosition().x >= bounds.x + bounds.width / 2;
+            if (b->user_control != user) {
+                b->control_from = ControlPosition(b); b->control_changed_at = GetTime();
+                b->user_control = user;
+                Send(s, (PbCommand){.type=PB_CONTROL, .token=b->token, .a=!user});
+                pico_host_request_redraw(host);
+            }
+        }
+        if (!down) s->control_drag_token = 0;
+        return; /* The selector gesture never becomes page or address input. */
     }
     if (!b->user_control) return;
     if (click) {

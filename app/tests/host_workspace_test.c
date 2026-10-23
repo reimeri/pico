@@ -1229,7 +1229,9 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
     PicoAgent agent;
     ShellTestState state = {.composer_height = 44.0f};
     Clay_BoundingBox expected_browser = {0}, expected_surface = {0}, expected_viewport_control = {0};
+    Clay_BoundingBox expected_control = {0}, expected_agent_option = {0}, expected_user_option = {0};
     Clay_BoundingBox expected_content_row = {0};
+    Clay_BoundingBox expected_web_toggle = {0};
     Clay_BoundingBox expected_root = {0};
     Clay_BoundingBox expected_body = {0};
     Clay_BoundingBox expected_right = {0};
@@ -1341,8 +1343,18 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
             break;
         }
         Clay_ElementData browser = Clay_GetElementData(CLAY_ID("BrowserPane"));
+        Clay_ElementData web_toggle = Clay_GetElementData(with_browser ? CLAY_ID("BrowserCollapse") : CLAY_ID("BrowserExpand"));
         Clay_ElementData surface = Clay_GetElementData(CLAY_ID("BrowserSurface"));
         Clay_ElementData viewport_control = Clay_GetElementData(CLAY_ID("BrowserViewport"));
+        Clay_ElementData control = Clay_GetElementData(CLAY_ID("BrowserControl"));
+        Clay_ElementData agent_option = Clay_GetElementData(CLAY_ID("BrowserControlAgent"));
+        Clay_ElementData user_option = Clay_GetElementData(CLAY_ID("BrowserControlUser"));
+        if (with_browser && (!control.found || !agent_option.found || !user_option.found ||
+            agent_option.boundingBox.x >= user_option.boundingBox.x ||
+            !ShellVerticallyContains(control.boundingBox, agent_option.boundingBox) ||
+            !ShellVerticallyContains(control.boundingBox, user_option.boundingBox))) {
+            Fail("browser selector must keep Agent left and User right inside its fixed bounds"); break;
+        }
         if (with_browser && (!surface.found || !viewport_control.found ||
             !ShellVerticallyContains(browser.boundingBox, surface.boundingBox) ||
             !ShellVerticallyContains(browser.boundingBox, viewport_control.boundingBox))) {
@@ -1357,7 +1369,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
         Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
         Clay_ElementData composer = Clay_GetElementData(CLAY_ID("ComposerAlign"));
         Clay_ElementData footer = Clay_GetElementData(CLAY_ID("Footer"));
-        if (!browser.found || !content_row.found || !root.found || !body.found || !right.found || !main.found || !chat.found ||
+        if (!browser.found || !web_toggle.found || !content_row.found || !root.found || !body.found || !right.found || !main.found || !chat.found ||
             !composer.found || !footer.found || (with_sidebar && !sidebar.found))
         {
             Fail("production shell panes were not laid out");
@@ -1378,7 +1390,10 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
         if (frame == 30)
         {
             expected_browser = browser.boundingBox;
+            expected_web_toggle = web_toggle.boundingBox;
             expected_surface = surface.boundingBox; expected_viewport_control = viewport_control.boundingBox;
+            expected_control = control.boundingBox;
+            expected_agent_option = agent_option.boundingBox; expected_user_option = user_option.boundingBox;
             expected_content_row = content_row.boundingBox;
             expected_root = root.boundingBox;
             expected_body = body.boundingBox;
@@ -1392,7 +1407,11 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
         }
         else if (frame > 30 &&
                  (!ShellBoxStable(expected_browser, browser.boundingBox) ||
+                  !ShellBoxStable(expected_web_toggle, web_toggle.boundingBox) ||
                   (with_browser && (!ShellBoxStable(expected_surface, surface.boundingBox) ||
+                                    !ShellBoxStable(expected_control, control.boundingBox) ||
+                                    !ShellBoxStable(expected_agent_option, agent_option.boundingBox) ||
+                                    !ShellBoxStable(expected_user_option, user_option.boundingBox) ||
                                     !ShellBoxStable(expected_viewport_control, viewport_control.boundingBox))) ||
                   !ShellBoxStable(expected_content_row, content_row.boundingBox) ||
                   !ShellBoxStable(expected_root, root.boundingBox) ||
@@ -1409,6 +1428,15 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
                               : "bottom-follow shell geometry drifted without sidebar");
             break;
         }
+    }
+
+    if (!g_failed && !with_browser)
+    {
+        agent.browser_expanded = true;
+        (void)PicoHost_LayoutShell(&host, viewport.height, 0.0f);
+        Clay_ElementData expanded_toggle = Clay_GetElementData(CLAY_ID("BrowserCollapse"));
+        if (!expanded_toggle.found || !ShellBoxStable(expected_web_toggle, expanded_toggle.boundingBox))
+            Fail("browser web toggle must stay in place when its pane opens");
     }
 
     g_shell_test_inbox_rows = 0;
@@ -4538,9 +4566,12 @@ static int BrowserFaultHelper(int argc, char **argv)
     const char *mode = getenv("PICO_TEST_BROWSER_FAILURE");
     PbEvent ready = {.type=PB_RUNTIME_READY};
     if (write(events, &ready, sizeof(ready)) != sizeof(ready)) return 98;
+    const char *log_path = getenv("PICO_TEST_BROWSER_COMMANDS");
+    FILE *log = log_path ? fopen(log_path, "w") : NULL;
     PbCommand command;
     while (recv(commands, &command, sizeof(command), 0) == sizeof(command)) {
-        if (command.type == PB_STOP) return 0;
+        if (log) { fprintf(log, "%u %d %d\n", command.type, command.a, command.b); fflush(log); }
+        if (command.type == PB_STOP) { if (log) fclose(log); return 0; }
         if (command.type == PB_CLOSE) {
             PbEvent closed = {.type=PB_CLOSED, .token=command.token};
             if (write(events, &closed, sizeof(closed)) != sizeof(closed)) return 97;
@@ -4592,6 +4623,102 @@ static void BrowserTestClick(PicoHost *host, const char *name)
     g_find_input_test = g_find_press = false;
 }
 #endif
+static int TestBrowserControlSelector(void)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    char dir[] = "/tmp/pico-browser-control-XXXXXX", cfg[] = "/tmp/pico-browser-control-cfg-XXXXXX";
+    char helper[4096], application[4096], executable[4096], log_path[4096];
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    int rc = 1;
+    Clay_SetCurrentContext(NULL);
+    if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay((Clay_Dimensions){1100,800})) goto done;
+    snprintf(application, sizeof(application), "%s/", dir);
+    snprintf(helper, sizeof(helper), "%s/browser", dir); mkdir(helper, 0700);
+    snprintf(helper, sizeof(helper), "%s/browser/runtime", dir); mkdir(helper, 0700);
+    snprintf(helper, sizeof(helper), "%s/browser/runtime/pico_browser_helper", dir);
+    ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable)-1);
+    if (length < 0) goto done;
+    executable[length] = 0;
+    if (symlink(executable, helper)) goto done;
+    snprintf(log_path, sizeof(log_path), "%s/commands", dir);
+    setenv("XDG_CONFIG_HOME", cfg, 1); setenv("PICO_TEST_BROWSER_FAILURE", "healthy", 1);
+    setenv("PICO_TEST_BROWSER_COMMANDS", log_path, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace; PicoAgentId id;
+    PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .select=true, .session_start=PICO_SESSION_NEW};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    snprintf(agent->session_id, sizeof(agent->session_id), "abcdef123456");
+    host->window_focused = true;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL); RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_browser_application_directory = application;
+    BrowserTestClick(host, "BrowserExpand");
+    if (!PicoBrowser_BlocksKeyboard(host)) goto done; /* New manual page focuses its address. */
+    BrowserTestClick(host, "BrowserControlUser");
+    if (PicoBrowser_BlocksKeyboard(host)) goto done; /* Same-side click still leaves the field. */
+
+    /* A selector gesture must release already-held page input, even when its
+     * mode stays User. No test-only access to BrowserSession is needed. */
+    BrowserTestClick(host, "BrowserImage");
+    g_find_input_test = true; g_find_button = MOUSE_BUTTON_RIGHT;
+    g_find_press = g_find_down = true;
+    PicoBrowser_Input(host);
+    g_find_input_test = g_find_press = g_find_down = false;
+    BrowserTestClick(host, "BrowserControlUser");
+    if (PicoBrowser_BlocksKeyboard(host)) goto done;
+    BrowserTestClick(host, "BrowserControlAgent");
+    BrowserTestClick(host, "BrowserControlAgent"); /* Idempotent selection. */
+    BrowserTestClick(host, "BrowserReload"); /* Ignored under Agent control. */
+
+    /* Start on Agent and drag across to User, releasing beyond the track. */
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    Clay_BoundingBox control = Clay_GetElementData(CLAY_ID("BrowserControl")).boundingBox;
+    g_find_input_test = true; g_find_button = MOUSE_BUTTON_LEFT;
+    g_find_press = g_find_down = true;
+    g_find_pointer = (Vector2){control.x + control.width / 4, control.y + control.height / 2};
+    PicoBrowser_Input(host);
+    g_find_press = false; g_find_pointer.x = control.x + control.width + 10;
+    PicoBrowser_Input(host);
+    g_find_down = false; g_find_released = true;
+    PicoBrowser_Input(host);
+    g_find_input_test = g_find_released = false;
+    BrowserTestClick(host, "BrowserReload");
+    PICO_TEST_WAIT_LOOP("selector commands reach helper") {
+        PicoBrowser_Pump(host);
+        FILE *log = fopen(log_path, "r");
+        if (!log) continue;
+        unsigned type; int a, b, controls = 0, reloads = 0, right_down = 0, right_up = 0;
+        int modes[4] = {0};
+        while (fscanf(log, "%u %d %d", &type, &a, &b) == 3) {
+            if (type == PB_CONTROL) { if (controls < 4) modes[controls] = a; controls++; }
+            if (type == PB_RELOAD) reloads++;
+            if (type == PB_MOUSE && a == 2) { if (b == 0) right_down++; if (b == 1) right_up++; }
+        }
+        fclose(log);
+        if (!reloads) continue; /* Last command is the observation barrier. */
+        if (controls != 3 || modes[0] != 0 || modes[1] != 1 || modes[2] != 0 ||
+            reloads != 1 || right_down != 1 || right_up != 1) goto done;
+        break;
+    }
+    rc = 0;
+done:
+    g_find_input_test = g_find_press = g_find_down = g_find_released = false;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    if (host) pico_host_free(host);
+    g_browser_application_directory = NULL;
+    Pico_FreeClay(); Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME"); unsetenv("PICO_TEST_BROWSER_FAILURE"); unsetenv("PICO_TEST_BROWSER_COMMANDS");
+    RmRf(cfg); RmRf(dir);
+    if (rc) Fail("browser control selector must select sides, release focus/input, and preserve navigation ownership");
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static int TestBrowserHelperFaultRecovery(void)
 {
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
@@ -18041,6 +18168,7 @@ int main(int argc, char **argv)
 #endif
     if (!IsolateTestHome()) return 1;
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
+    if (argc == 2 && strcmp(argv[1], "--browser-controls") == 0) return PICO_TEST_RUN(TestBrowserControlSelector());
     if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
     if (argc == 2 && strcmp(argv[1], "--fast-persistence") == 0) return PICO_TEST_RUN(TestFastSelectionPersistence());
 #ifdef PICO_OPENAI_LOGIN_TESTS
@@ -18198,6 +18326,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestBrowserUncreatedSessionNotification()) != 0) return 1;
+    if (PICO_TEST_RUN(TestBrowserControlSelector()) != 0) return 1;
     if (PICO_TEST_RUN(TestBrowserHelperFaultRecovery()) != 0) return 1;
     if (PICO_TEST_RUN(TestBrowserMainSessionPolicy()) != 0) return 1;
     if (PICO_TEST_RUN(TestWorkspaceBuiltinsRegisterThroughWorkspaceInit()) != 0)

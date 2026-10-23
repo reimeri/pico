@@ -84,8 +84,9 @@ def main():
             def click(xpos, ypos):
                 x('mousemove', '--window', window, xpos, ypos)
                 # Hold across a frame; XTest's zero-duration down/up pair can
-                # both arrive in one Raylib poll and never become a press.
-                x('mousedown', 1, 'sleep', '.05', 'mouseup', 1)
+                # both arrive in one Raylib poll and never become a press. Let
+                # the release span a frame too, before a consecutive click.
+                x('mousedown', 1, 'sleep', '.05', 'mouseup', 1, 'sleep', '.05')
 
             def screenshot():
                 # F12 belongs to the focused page when native browser input
@@ -174,6 +175,35 @@ def main():
                     alive(); time.sleep(.02)
                 assert all(c['target'] == ['target'] for c in Page.clicks), Page.clicks
 
+                phase = 'control slider selection and drag takeover'
+                target_x = (target[0]+target[2])//2
+                target_y = (target[1]+target[3])//2
+                # Agent is the left side. Selecting it twice must not toggle
+                # back to User or let either page click through.
+                click(720, 28)
+                click(target_x, target_y)
+                click(720, 28)
+                click(target_x, target_y)
+                # Drag from Agent to User, releasing outside the track. The
+                # gesture belongs to the selector, not to the embedded page.
+                x('mousemove', '--window', window, 720, 28)
+                x('mousedown', 1, 'sleep', '.05')
+                x('mousemove', '--window', window, 780, 28)
+                x('sleep', '.05', 'mouseup', 1, 'sleep', '.05')
+                click(target_x, target_y)
+                while len(Page.clicks) < 3:
+                    alive(); time.sleep(.02)
+                assert len(Page.clicks) == 3, Page.clicks
+                # Collapse/reopen preserves the page and selected control mode.
+                phase = 'web icon collapse and reopen'
+                click(1070, 28)
+                collapsed = screenshot()
+                assert not colored_bounds(collapsed, PAGE_COLORS[1])
+                click(1070, 28)
+                while not colored_bounds(screenshot(), PAGE_COLORS[1]):
+                    alive()
+                assert Page.visits == 2, Page.visits
+
                 phase = 'dock resize and stable letterboxing'
                 x('windowsize', window, 1300, 900)
                 image, bounds = mobile_image()
@@ -181,10 +211,10 @@ def main():
                     assert colored_bounds(screenshot(), PAGE_COLORS[1]) == bounds
                 target = colored_bounds(image, TARGET_COLOR)
                 click((target[0]+target[2])//2, (target[1]+target[3])//2)
-                while len(Page.clicks) < 3:
+                while len(Page.clicks) < 4:
                     alive(); time.sleep(.02)
-                assert len(Page.clicks) == 3 and Page.clicks[-1]['width'] == ['390'] and Page.clicks[-1]['height'] == ['844']
-                print('PASS: navigation/reload presentation, fixed viewport, letterboxing, mapped clicks, ignored margins and stable resized dock')
+                assert len(Page.clicks) == 4 and Page.clicks[-1]['width'] == ['390'] and Page.clicks[-1]['height'] == ['844']
+                print('PASS: navigation/reload presentation, control slider click/drag, web icon collapse/reopen, fixed viewport, mapped clicks and stable resized dock')
             except BaseException:
                 log.flush()
                 print((root / 'pico.log').read_text(), file=sys.stderr)

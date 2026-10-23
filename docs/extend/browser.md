@@ -43,18 +43,22 @@ and PNG encoding **on demand**. No speedup or zero-copy claim is implied.
 
 ## Using it
 
-Select a main session and click the right-edge `<` to expand its browser. A new,
+Select a main session and click the dim right-edge web icon to expand its browser. A new,
 uncreated session shows a non-blocking reminder to send a message first; it does
 not initialize Chromium or show an error overlay. On first use it opens `about:blank`; enter a full URL such as
 `http://localhost:5173` in the address field. The toolbar offers back, forward,
-reload (`R`), control mode, a viewport field, close (`x`), and collapse (`>`). The footer stays
-below the chat/browser content row at its full shell width.
+reload icons, a control-mode slider, a viewport field, a shutdown icon to close
+the page, and a bright web icon to collapse the pane. The footer stays below
+the chat/browser content row at its full shell width.
 
 - Collapse hides the pane without discarding the page.
 - Close destroys that session's live page, not its cookies or local storage.
 - Switching sessions selects that session's dock and browser; it does not
   navigate or close other sessions' browsers.
-- **User / Agent** is the current control mode; click it to switch. User mode
+- The control slider shows **Agent (robot) on the left / User on the right**,
+  with a sliding highlight on the selected side. Click either side or drag
+  between them to transfer control immediately. Selecting the current side
+  leaves control unchanged. User mode
   blocks agent navigation, input, evaluation, and viewport changes, but permits read-only observations and inspection. Agent mode blocks human page/navigation input but
   always permits takeover, collapse, and close. A UI-created browser starts in
   User mode; an agent-created browser starts in Agent mode.

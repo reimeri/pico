@@ -357,6 +357,14 @@ and [providers](providers.md#image-bearing-tool-results).
 
 ## Embedded browser ownership
 
+The dock's web icon expands/collapses presentation without closing its page;
+it is muted while collapsed and bright while expanded. The icon-only control
+slider places Agent (robot) left and User right. Clicking a side or dragging
+between sides selects that mode immediately, never toggles an already-selected
+side, and retains the existing takeover/input-release behavior. Manual open
+starts in User mode; agent open starts in Agent mode. Selector animation is
+presentation-only and must not resize the toolbar or bottom-follow shell.
+
 The core browser service is lazy and per-main-session; subagents and clarification
 helpers cannot use any browser tool, including diagnostics, inspection,
 evaluation, or viewport control. Tools

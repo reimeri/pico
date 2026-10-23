@@ -6,6 +6,7 @@ A CTest/manual outer timeout should guard a hung browser, not page-speed guesses
 """
 import ctypes
 import http.server
+import json
 from pathlib import Path
 import queue
 import socket
@@ -23,6 +24,10 @@ class Command(ctypes.Structure):
     _fields_ = [("token", ctypes.c_uint64), ("type", ctypes.c_uint32)] + [
         (n, ctypes.c_int32) for n in ("x", "y", "a", "b", "modifiers")
     ] + [("text", ctypes.c_char * 2048), ("profile", ctypes.c_char * 80)] + [(n, ctypes.c_uint64) for n in ("request", "navigation", "viewport")] + [("end_action", ctypes.c_uint32)]
+
+class TextResult(ctypes.Structure):
+    _fields_ = [("request", ctypes.c_uint64), ("size", ctypes.c_uint64), ("error", ctypes.c_uint32),
+                ("path", ctypes.c_char * 256), ("failure", ctypes.c_char * 512)]
 
 class Observation(ctypes.Structure):
     _fields_ = [(n, ctypes.c_uint64) for n in ("request", "navigation", "viewport")] + [
@@ -91,6 +96,7 @@ class Browser:
         events, child_events = socket.socketpair()
         self.events = queue.Queue()
         self.observations = {}
+        self.text_results = {}
         self.sequence = 0
         self.process = subprocess.Popen([helper,str(child.fileno()),str(child_events.fileno()),root],
                                         pass_fds=(child.fileno(),child_events.fileno()))
@@ -105,7 +111,7 @@ class Browser:
                     data = events.recv(length, socket.MSG_WAITALL) if length else b''
                     assert len(data) == length
                     # Retain only metadata: do not enqueue unbounded video pixels.
-                    self.events.put((token, kind, width, height, data if kind == 6 else data[:100] if kind != 2 else b''))
+                    self.events.put((token, kind, width, height, data if kind in (6, 7) else data[:100] if kind != 2 else b''))
             finally:
                 events.close(); self.events.put(None)
         self.reader = threading.Thread(target=receive, daemon=True); self.reader.start()
@@ -144,6 +150,29 @@ class Browser:
         self.send(token, 16, request=request)
         if interrupt: self.send(token, interrupt, request=request, a=0)
         return self.observation(token, request)
+    def text_result(self, token, request):
+        while (token, request) not in self.text_results:
+            event = self.events.get()
+            if event is None: raise RuntimeError('helper exited before text result')
+            if event[1] != 7: continue
+            result = TextResult.from_buffer_copy(event[-1])
+            self.text_results[(event[0], result.request)] = result
+        result = self.text_results.pop((token, request))
+        path = Path(result.path.decode()) if result.path else None
+        text = path.read_text() if path else result.failure.decode()
+        if path:
+            assert path.stat().st_size == result.size
+            assert path.stat().st_mode & 0o777 == 0o600
+            path.unlink()
+        return bool(result.error), text
+    def inspect(self, token, kind, args=None, interrupt=None, **fields):
+        self.sequence += 1
+        request = self.sequence
+        with tempfile.NamedTemporaryFile(prefix='pico-browser-arguments-', mode='w') as argument:
+            json.dump(args or {}, argument); argument.flush()
+            self.send(token, kind, request=request, text=argument.name, **fields)
+            if interrupt: self.send(token, interrupt, request=request, a=0)
+            return self.text_result(token, request)
     def close(self):
         if self.process.poll() is None:
             try: self.send(0,13)

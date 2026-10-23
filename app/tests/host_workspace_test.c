@@ -1211,7 +1211,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
     PicoWorkspace workspace;
     PicoAgent agent;
     ShellTestState state = {.composer_height = 44.0f};
-    Clay_BoundingBox expected_browser = {0};
+    Clay_BoundingBox expected_browser = {0}, expected_surface = {0}, expected_viewport_control = {0};
     Clay_BoundingBox expected_content_row = {0};
     Clay_BoundingBox expected_root = {0};
     Clay_BoundingBox expected_body = {0};
@@ -1324,6 +1324,13 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
             break;
         }
         Clay_ElementData browser = Clay_GetElementData(CLAY_ID("BrowserPane"));
+        Clay_ElementData surface = Clay_GetElementData(CLAY_ID("BrowserSurface"));
+        Clay_ElementData viewport_control = Clay_GetElementData(CLAY_ID("BrowserViewport"));
+        if (with_browser && (!surface.found || !viewport_control.found ||
+            !ShellVerticallyContains(browser.boundingBox, surface.boundingBox) ||
+            !ShellVerticallyContains(browser.boundingBox, viewport_control.boundingBox))) {
+            Fail("browser content and viewport control must remain within the shell pane"); break;
+        }
         Clay_ElementData content_row = Clay_GetElementData(CLAY_ID("ChatBrowserRow"));
         Clay_ElementData root = Clay_GetElementData(CLAY_ID("Root"));
         Clay_ElementData body = Clay_GetElementData(CLAY_ID("Body"));
@@ -1354,6 +1361,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
         if (frame == 30)
         {
             expected_browser = browser.boundingBox;
+            expected_surface = surface.boundingBox; expected_viewport_control = viewport_control.boundingBox;
             expected_content_row = content_row.boundingBox;
             expected_root = root.boundingBox;
             expected_body = body.boundingBox;
@@ -1367,6 +1375,8 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
         }
         else if (frame > 30 &&
                  (!ShellBoxStable(expected_browser, browser.boundingBox) ||
+                  (with_browser && (!ShellBoxStable(expected_surface, surface.boundingBox) ||
+                                    !ShellBoxStable(expected_viewport_control, viewport_control.boundingBox))) ||
                   !ShellBoxStable(expected_content_row, content_row.boundingBox) ||
                   !ShellBoxStable(expected_root, root.boundingBox) ||
                   !ShellBoxStable(expected_body, body.boundingBox) ||

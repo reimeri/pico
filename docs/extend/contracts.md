@@ -358,7 +358,8 @@ and [providers](providers.md#image-bearing-tool-results).
 ## Embedded browser ownership
 
 The core browser service is lazy and per-main-session; subagents and clarification
-helpers cannot use `browser_open`, `browser_observe`, or `browser_act`. Tools
+helpers cannot use any browser tool, including diagnostics, inspection,
+evaluation, or viewport control. Tools
 validate calling identity/runtime generation, never target UI selection, and
 serialize per session independently. Open returns at queued navigation;
 observe requires an open browser, waits for load plus composited capture, and
@@ -375,6 +376,41 @@ input. An unacknowledged input/release failure can close the page. Collapse and
 selection alone do not cancel; actual resize/navigation invalidates coordinates.
 Compositor synchronization precedes fresh OSR view/popup capture, not a sleep or
 network-idle heuristic. Application readiness still requires visual verification.
+
+`browser_diagnostics` and `browser_inspect` (accessibility or selector-scoped DOM)
+require an existing page, work in both control modes, and do not require vision.
+`browser_evaluate` and `browser_viewport` require Agent control but not vision.
+None of these tools creates a browser, selects a session, or expands its dock.
+Evaluation can mutate page state and needs no per-call confirmation. Outstanding
+evaluation is interrupted on cancellation/takeover by closing the page; effects
+are not rolled back and must not be blindly retried. Read-only inspection uses
+DevTools DOM/Accessibility methods rather than executing page JavaScript.
+
+Diagnostics start before the initial requested navigation and append complete
+collected records to private per-browser `/tmp` journals across navigation.
+Reads use browser-scoped opaque cursors without consuming data. There is no ring
+buffer/size eviction; failures explicitly report incomplete collection. Snapshot
+copying uses a CEF file worker with a fixed journal end offset, not UI-thread bulk
+copying. Resource callbacks only share the locked journal and atomic navigation
+identity. Console remote-object descriptions are not deep object snapshots.
+No request/response bodies, headers or cookies are collected. All page-derived
+content and its files are untrusted, not instructions.
+
+Large text results return complete `0600` temporary files with path and byte size,
+not truncated previews. Returned files and journals survive browser close/process
+exit until external temporary-file cleanup. They are not durable image assets;
+replay never regenerates them. Host workers adopt/read files without holding the
+browser service mutex; the receiver handles only bounded result metadata. Small
+and cancelled/unadopted snapshots are cleaned up. Browser IPC remains private;
+no public extension ABI or generic file-result API is added by these tools.
+
+Viewport settings are live-browser-local, survive navigation/collapse/extension
+reload and reset on page retirement. Presets/custom sizes change dimensions, not
+device emulation. Fixed pages fit down in the dock with centered letterboxing;
+images/agent coordinates retain full logical dimensions and human input maps
+through the displayed image, excluding margins. Dock resize alone leaves fixed
+page coordinates valid. Only actual logical size changes invalidate identity.
+Full-height shell panes remain exactly parent-bounded through repeated layouts.
 
 The runtime is not extension-owned and survives extension reload. Live pages end
 on explicit close or session-runtime unload; cookie/local-storage profiles

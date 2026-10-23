@@ -15,15 +15,20 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from PIL import Image
 
 PAGE_COLORS = [(12, 34, 56), (65, 43, 21)]
+TARGET_COLOR = (220, 110, 40)
 
 
 class Page(http.server.BaseHTTPRequestHandler):
     visits = 0
+    clicks = []
 
     def do_GET(self):
+        if self.path.startswith('/click?'):
+            Page.clicks.append(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         if self.path != '/':
             self.send_response(204)
             self.end_headers()
@@ -35,7 +40,11 @@ class Page(http.server.BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write((f'<!doctype html><body style="margin:0;background:rgb{color}">' +
-                         '<h1>Browser rendering fixture</h1>').encode())
+                         '<h1>Browser rendering fixture</h1>' +
+                         '<button id="target" style="position:absolute;left:150px;top:300px;width:80px;height:60px;'
+                         f'border:0;background:rgb{TARGET_COLOR}">Target</button>' +
+                         '<script>document.onclick=e=>fetch("/click?"+new URLSearchParams({'
+                         'target:e.target.id,width:innerWidth,height:innerHeight}));</script>').encode())
 
     def log_message(self, *args):
         pass
@@ -48,6 +57,7 @@ def main():
     phase = 'startup'
 
     def interrupted(signum, frame):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise RuntimeError(f'UI test interrupted during {phase}')
 
     signal.signal(signal.SIGTERM, interrupted)
@@ -73,9 +83,15 @@ def main():
 
             def click(xpos, ypos):
                 x('mousemove', '--window', window, xpos, ypos)
-                x('click', 1)
+                # Hold across a frame; XTest's zero-duration down/up pair can
+                # both arrive in one Raylib poll and never become a press.
+                x('mousedown', 1, 'sleep', '.05', 'mouseup', 1)
 
             def screenshot():
+                # F12 belongs to the focused page when native browser input
+                # owns focus. Return focus to inert chat space before asking
+                # Pico for its normal window screenshot.
+                click(350, 200)
                 file = root / 'pico_screenshot.png'
                 file.unlink(missing_ok=True)
                 while True:
@@ -120,7 +136,55 @@ def main():
                 phase = 'toolbar reload'
                 click(680, 28)
                 wait_page(PAGE_COLORS[1])
-                print('PASS: address-bar navigation and toolbar reload visibly render page content')
+                phase = 'mobile-sized viewport and mapped pointer'
+                click(825, 28)
+                x('key', '--delay', 60, 'ctrl+a')
+                x('type', '--clearmodifiers', '--delay', 30, 'mobile')
+                x('key', '--delay', 60, 'Return')
+
+                def colored_bounds(image, color):
+                    mask = Image.new('1', image.size)
+                    mask.putdata([p == color for p in image.get_flattened_data()])
+                    return mask.getbbox()
+
+                def mobile_image():
+                    while True:
+                        image = screenshot()
+                        bounds = colored_bounds(image, PAGE_COLORS[1])
+                        if bounds:
+                            left, top, right, bottom = bounds
+                            # A tall, responsive page must be fitted, not stretched
+                            # across the wide dock or rendered at the dock's size.
+                            if abs((right-left)/(bottom-top) - 390/844) < .01:
+                                return image, bounds
+
+                image, bounds = mobile_image()
+                left, top, right, bottom = bounds
+                target = colored_bounds(image, TARGET_COLOR)
+                assert target
+                click((target[0]+target[2])//2, (target[1]+target[3])//2)
+                while not Page.clicks:
+                    alive(); time.sleep(.02)
+                assert Page.clicks[-1] == {'target':['target'], 'width':['390'], 'height':['844']}, Page.clicks
+                # The margins must not become page coordinates. A subsequent
+                # real click is an observable input barrier for this assertion.
+                click(left-10, (top+bottom)//2)
+                click((target[0]+target[2])//2, (target[1]+target[3])//2)
+                while len(Page.clicks) < 2:
+                    alive(); time.sleep(.02)
+                assert all(c['target'] == ['target'] for c in Page.clicks), Page.clicks
+
+                phase = 'dock resize and stable letterboxing'
+                x('windowsize', window, 1300, 900)
+                image, bounds = mobile_image()
+                for _ in range(8):
+                    assert colored_bounds(screenshot(), PAGE_COLORS[1]) == bounds
+                target = colored_bounds(image, TARGET_COLOR)
+                click((target[0]+target[2])//2, (target[1]+target[3])//2)
+                while len(Page.clicks) < 3:
+                    alive(); time.sleep(.02)
+                assert len(Page.clicks) == 3 and Page.clicks[-1]['width'] == ['390'] and Page.clicks[-1]['height'] == ['844']
+                print('PASS: navigation/reload presentation, fixed viewport, letterboxing, mapped clicks, ignored margins and stable resized dock')
             except BaseException:
                 log.flush()
                 print((root / 'pico.log').read_text(), file=sys.stderr)

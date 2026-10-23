@@ -21,7 +21,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `host` — process owner, preferences, host-scoped registrations, pump, shutdown
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits and capacity eviction
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
-- `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, model-visible observations, and agent input
+- `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, model-visible observations, agent input, developer inspection, evaluation, and viewport control
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context

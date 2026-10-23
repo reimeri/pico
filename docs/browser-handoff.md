@@ -4,16 +4,19 @@
 
 **Implementation baseline:** `731c819` — `First part of integrated browser implementation`.
 
-**Current status:** slices 1–3 are now implemented: human browsing,
-model-visible composited observations, and bounded agent input batches. The user
+**Current status:** slices 1–4 are now implemented: human browsing,
+model-visible composited observations, bounded agent input batches, developer
+inspection/evaluation, and independent logical viewport control. The user
 validated the original human-facing browser on native Wayland/niri; the new
 agent loop is covered by real-helper and loopback-provider integration fixtures,
-not yet by a live-model/native-Wayland manual acceptance run.
+not yet by a live-model/native-Wayland manual acceptance run. Slice 4 adds a
+same-page edit/hot-reload developer fixture and a non-vision loopback-provider
+fixture; native/manual acceptance is still pending.
 
 The continuation preserves the original requirements below. See
 [the current browser contract](extend/browser.md) for the implemented schemas,
-readiness, cancellation, coordinate identity, and limits. Next work should verify
-real model usage and measured robustness before adding developer inspection or
+readiness, cancellation, coordinate identity, complete output files, and limits.
+Next work should verify real model usage and measured robustness before adding
 more browser chrome.
 
 Read these alongside this handoff:
@@ -68,7 +71,29 @@ page loaded. It neither selects another session nor opens its dock.
 `browser_observe({})` supplies a PNG plus URL/viewport/coordinate identity;
 `browser_act({"observation_id":"…","actions":[…]})` executes native input and
 returns a fresh observation. Both require an existing browser and a capable
-vision model/provider. DOM and console inspection are not implemented.
+vision model/provider.
+
+Slice 4 adds `browser_diagnostics`, `browser_inspect` (accessibility and
+selector-scoped main-document DOM), `browser_evaluate`, and `browser_viewport`.
+They require an already-open browser but not vision. Diagnostics/inspection work
+in both control modes; evaluation and agent viewport changes require Agent mode.
+Evaluation needs no extra confirmation and can mutate the page. A pending
+evaluation interrupted by takeover/cancellation closes the page to prevent late
+execution; already performed effects are not undone.
+
+Diagnostics append complete collected records across navigation to private
+`/tmp/pico-browser-diagnostics-*` journals. Reads are non-destructive JSONL
+snapshots with browser-scoped cursors. Large text results (all inspection kinds)
+return complete `/tmp/pico-browser-output-*` files and byte sizes, not truncated
+previews. Returned files/journals survive close/exit until external temp cleanup.
+Console objects are Chromium descriptions, not promised deep snapshots. Storage
+failures explicitly report incomplete collection.
+
+The toolbar viewport field accepts `dock`, `desktop`, `tablet`, `mobile`, or
+`WIDTHxHEIGHT`. The tool supports the same presets plus custom dimensions.
+Presets are dimensions only, not mobile device emulation. Fixed pages fit down,
+centered/letterboxed, with mapped human input; screenshots keep full logical
+resolution. Settings are live-browser-local, not restored on restart.
 
 Human-created instances start in User mode; agent-created instances start in
 Agent mode. The toolbar label is the current mode and toggles on click. Disabling
@@ -140,17 +165,19 @@ Paths in this table are relative to the repository root.
 | --- | --- |
 | `app/browser.c`, `app/browser.h` | Host service, lazy process launch, request broker, per-session state, IPC receiver/queue, dock, focus/input, textures, shutdown. Private core API. |
 | `app/browser/helper.cc` | CEF lifecycle and request contexts, OSR painting/popup composition, event/input dispatch, feature configuration, private profile-root lock. |
+| `app/browser/inspection.h` | Helper-side diagnostic journal/resource completion handlers, asynchronous snapshot copying, DevTools inspection/evaluation, and complete temporary results. |
 | `app/browser/protocol.h` | Private command/event structures. Private observation/request metadata, bounded native input batches, cancellation and control messages. |
 | `app/browser/CMakeLists.txt` | Isolated C++20/CEF target, wrapper library, runtime assets and install layout. |
-| `app/builtins/browser.c` | `browser_open`, `browser_observe`, `browser_act`, main-session filtering and guidance. |
+| `app/builtins/browser.c` | Visual and developer browser tools, main-session filtering and guidance. |
 | `app/app.c` | Browser pump and shutdown, shell layout, input routing, layout/render boundaries. |
 | `app/main.c` | GLFW key/character interception and host lifetime. Modifier/release state must still reach Raylib appropriately. |
 | `app/agent.c`, `app/agent_internal.h` | Browser cleanup on agent destruction; session-local dock expansion flag. |
 | `app/builtins/composer.c` | Prevent browser input/file drops from leaking into the composer. |
 | `app/host_internal.h`, `app/plugin.c` | Core service ownership and builtin registration. |
 | `app/tests/browser_integration.py` | Real helper/Chromium test without a Pico window. |
-| `app/tests/browser_agent_integration.py` | Real Pico and loopback Responses fixture: model-visible PNG payloads, click/type/scroll, durable media, clipboard refusal. |
-| `app/tests/browser_ui_integration.py` | Real Pico window, address-bar navigation/reload, and screenshot-pixel assertions under Xvfb. |
+| `app/tests/browser_agent_integration.py` | Real Pico and loopback Responses fixture: model-visible PNGs/input/media plus `--developer` non-vision tools, lazy startup and complete output-file handoff/lifetime. |
+| `app/tests/browser_developer_integration.py` | Real-helper diagnostics, accessibility/DOM, evaluation control, complete large output, storage failures, fixed viewport and same-page source edit/hot reload. |
+| `app/tests/browser_ui_integration.py` | Real Pico window, navigation/reload pixels, fixed viewport/letterboxing, mapped input/margins, resized dock and repeated bottom-follow presentation under Xvfb. |
 | `app/tests/host_workspace_test.c` | Browser eligibility, new-session notification, repeated shell geometry. |
 | `app/tests/install_smoke.cmake` | Checks installed helper and required CEF assets. |
 | `flake.nix`, `packaging/cef.json`, `packaging/fetch-cef.sh` | Nix development dependency and pinned native-release download. |
@@ -246,20 +273,49 @@ added. Current initial/hidden viewport behavior is preserved.
 
 ### Slice 4 — developer-oriented inspection and viewport control
 
-**Status: not implemented; useful after the visual control loop.**
+**Status: implemented; native/live-model acceptance remains pending.**
 
-- Console messages and uncaught JavaScript exceptions.
-- Failed network requests and bounded diagnostic details.
-- Optional DOM/accessibility observations and, if approved, page evaluation.
-- Page viewport dimensions independent of dock size: fixed/mobile viewport
-  presets with documented scaling or letterboxing.
+- `browser_diagnostics`: console messages, uncaught exceptions, failed network
+  requests and HTTP 4xx/5xx, with URL/method/status/error details but no headers,
+  cookies or request/response bodies. Runtime diagnostics enable before initial
+  requested navigation; CEF resource callbacks supply network completion details
+  without retaining an unbounded in-memory request-ID map.
+- `browser_inspect`: the main page's Chromium accessibility tree or first
+  selector-matched element's outer HTML. Uses read-only DevTools methods, not
+  JavaScript. No cross-frame/shadow selector traversal or durable action handles.
+- `browser_evaluate`: arbitrary main-page JavaScript with by-value results and
+  promise awaiting, Agent-only, no extra confirmation. A synchronous 10-second
+  engine limit and 30-second helper deadline apply. Interrupted pending evaluation
+  closes its page; side effects are not rolled back or automatically retried.
+- `browser_viewport` and human toolbar editing: dock-size mode, desktop 1280×720,
+  tablet 768×1024, mobile-sized 390×844, or custom 1–4096 dimensions. Dimensions
+  only; no UA/touch/DPR emulation. Fixed pages scale down only, centered with
+  letterboxing; observations and agent coordinates retain full logical dimensions.
+  Only actual page dimension changes invalidate observation coordinate identity.
 
-Prefer CEF's DevTools messaging to the same embedded browser, rather than a
-second headless browser with separate state. A remote debugging port is not
-necessary. Treat page/DOM/console content as untrusted tool data, not instructions.
+User-approved output policy supersedes the original bounded-history proposal:
+**never discard overflow or truncate returned content.** Diagnostic journals are
+disk-backed, retained across navigation, and read non-destructively using opaque
+browser-scoped cursors. All large text results spill to complete private `/tmp`
+files with paths/byte sizes. Returned files and journals remain after close/exit;
+external temp cleanup owns their eventual deletion. Console object descriptors
+are not deep object snapshots. Resource/capture/storage failures are explicit,
+including incomplete collection; a file-size quota does not kill the helper with
+SIGXFSZ. Diagnostic snapshots copy an immutable journal prefix on a CEF file
+worker, without holding its append lock or blocking the UI for the bulk copy.
 
-**Acceptance:** reproduce a local UI bug, associate it with browser diagnostics,
-edit the app, and verify the result after hot reload in the same browser.
+These tools reuse the same embedded page, request broker and private DevTools
+connection. They never create/select/expand a browser and need no vision support.
+Read-only tools work in both control modes. Per-main-session ownership, runtime
+generation validation, subagent exclusion, lazy startup and sandboxing remain.
+All page-derived content/files are untrusted data, not instructions. No public
+extension ABI change was needed.
+
+**Automated acceptance:** the real-helper fixture reproduces a broken label,
+finds its console diagnostic, edits its source module, and verifies the hot-reload
+DOM and composited pixels without navigating/replacing the page. A real-Pico
+non-vision loopback provider also exercises the actual registered developer tools,
+large-file handoff and viewport control. Neither is live-model certification.
 
 ### Slice 5 — robustness, resource profiling, and UX polish
 
@@ -298,10 +354,12 @@ browser/navigation/viewport identity matches, and interruption on takeover.
 Provider-specific labeled observation-message projection is allowed; canonical
 history must remain tool output, not human input.
 
-Viewport presets, cross-process sharing, clipboard/files/downloads/tabs, DOM,
-console, and page evaluation remain deferred. Clarify their scope and permissions
-before implementation. The per-main-session ownership, subagent exclusion, lazy
-startup, persistence, and explicit control-mode requirements remain settled.
+Slice 4's scope and permissions are now approved and implemented as above,
+including no extra evaluation confirmation and complete file output rather than
+truncation. Cross-process sharing, clipboard/files/downloads/tabs, mobile device
+emulation and a visual developer-console panel remain deferred. The
+per-main-session ownership, subagent exclusion, lazy startup, persistence, and
+explicit control-mode requirements remain settled.
 
 ## 8. Build, test, and validation status
 
@@ -376,6 +434,35 @@ nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico
 ```
 
+Slice-4 validation commands:
+
+```sh
+nix develop -c timeout -k 5s 120s python3 app/tests/browser_developer_integration.py \
+  app/build/debug/browser/runtime/pico_browser_helper
+
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
+  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+  python3 app/tests/browser_agent_integration.py app/build/debug/pico --developer
+```
+
+Slice-4 validation has passed the full 48-test serial CTest suite, required
+host/workspace geometry suite, existing helper and vision-agent regressions,
+new developer helper and non-vision agent fixtures, and extended real-window
+viewport/input regression. Native Wayland/live-model validation remains manual.
+One initial existing helper capture timed out with Chromium subprocess
+stack-smashing messages; a repeat passed without weakening assertions or changing
+sandbox policy. This is not a measured robustness certification.
+
+The host suite also exposed an unrelated optional Enchant/Aspell loader/exit race
+under the inherited development `LD_LIBRARY_PATH` (confirmed by a debugger stack
+in `SpellLoaderMain` / `libaspell` during retained process shutdown). The successful
+serial run omitted the optional Enchant path and used the documented orphan
+reaper. No production spell behavior or test assertions were changed. Treat this
+as a separate shutdown issue rather than hiding it in browser logic. A later
+standalone host rerun also hit the existing session-reference completion-scope
+fixture; its retry was clean. No browser code executes in that failing fixture,
+and its assertions were not changed.
+
 The core tests now cover image payload mapping, unsupported providers, image
 ownership/transcript copies, malformed/missing media, replay/compaction retention,
 and browser-owned history deletion. Helper coverage includes hidden observations,
@@ -435,7 +522,6 @@ When debugging:
 
 **Recommended next deliverable:** manually verify the implemented observe–act
 loop with a real vision-capable model on native Wayland, including concurrent
-sessions and takeover. Then prioritize measured robustness or developer
-inspection rather than additional chrome. Loopback payload validation proves
+sessions and takeover. Then prioritize measured robustness rather than additional chrome. Loopback payload validation proves
 image transport and input behavior, not model comprehension or every backend's
 acceptance.

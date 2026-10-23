@@ -20,5 +20,6 @@ bool PicoBrowser_Key(PicoHost *host, int key, int scan, int action, int mods);
 bool PicoBrowser_Char(PicoHost *host, unsigned int codepoint);
 char *PicoBrowser_ToolOpen(PicoAgentContext *ctx, const char *url, bool *error);
 void PicoBrowser_ToolObserve(PicoAgentContext *ctx, const char *args, bool act, PicoToolResult *out);
+void PicoBrowser_ToolInspect(PicoAgentContext *ctx, const char *args, uint32_t kind, PicoToolResult *out);
 PicoExt pico_ext_browser(void);
 #endif

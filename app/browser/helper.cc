@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "inspection.h"
 #include "include/cef_app.h"
 #include "include/base/cef_bind.h"
 #include "include/base/cef_callback.h"
@@ -11,6 +12,7 @@
 #include "include/wrapper/cef_closure_task.h"
 #include <algorithm>
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <map>
 #include <string>
@@ -32,7 +34,7 @@ std::map<uint64_t, CefRefPtr<Page>> pages;
 
 bool Send(uint64_t token, uint32_t type, const void* bytes = nullptr,
           size_t size = 0, int width = 0, int height = 0) {
-    if (type != PB_FRAME && type != PB_OBSERVATION) size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
+    if (type != PB_FRAME && type != PB_OBSERVATION && type != PB_TEXT_RESULT) size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
     PbEvent event{token, type, static_cast<uint32_t>(size),
                   static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     const void* chunks[] = {&event, bytes};
@@ -57,7 +59,13 @@ class Page : public CefClient, public CefLifeSpanHandler, public CefRenderHandle
              public CefContextMenuHandler, public CefDialogHandler,
              public CefJSDialogHandler, public CefRequestHandler, public CefDevToolsMessageObserver {
 public:
-    explicit Page(uint64_t id) : token(id) {}
+    explicit Page(uint64_t id) : token(id), inspector(id, next_message, [id](const PbTextResult& result) {
+        Send(id, PB_TEXT_RESULT, &result, sizeof(result));
+    }, [id](const PbTextResult& result) {
+        auto found = pages.find(id);
+        if (found != pages.end()) found->second->inspector.SnapshotReady(result);
+        else if (result.path[0]) unlink(result.path);
+    }) {}
     uint64_t token;
     int width = 800, height = 600;
     bool visible = false, close_requested = false;
@@ -82,6 +90,67 @@ public:
     std::map<int, bool> held_keys;
     int mouse_x = 0, mouse_y = 0, next_message = 1, input_message = 0;
     CefRefPtr<CefRegistration> devtools;
+    browser_inspection::Inspector inspector;
+    int runtime_message = 0;
+    bool initialized = false;
+    std::string initial_url;
+    CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
+        CefRefPtr<CefRequest>, bool, bool, const CefString&, bool&) override {
+        return new browser_inspection::ResourceDiagnostics(inspector.log);
+    }
+    void OnDevToolsEvent(CefRefPtr<CefBrowser> browser, const CefString& method, const void* params, size_t size) override {
+        inspector.Event(method, params, size, navigation, browser);
+    }
+    void Initialize(bool success) {
+        if (!success) inspector.log->Fail("Chromium runtime diagnostics could not be enabled.");
+        initialized = true; runtime_message = 0;
+        Send(token, PB_READY);
+        if (stopping || close_requested) { browser->GetHost()->CloseBrowser(true); return; }
+        browser->GetMainFrame()->LoadURL(initial_url);
+        initial_url.clear();
+        auto commands = std::move(pending);
+        for (const auto& command : commands) Command(command);
+    }
+    void Inspect(const PbCommand& command) {
+        if (request || inspector.request || (command.type == PB_EVALUATE && !agent_control)) {
+            PbTextResult result{}; result.request = command.request; result.error = 1;
+            snprintf(result.failure, sizeof(result.failure), "%s", !agent_control && command.type == PB_EVALUATE ?
+                     "Browser is under User control." : "Browser is busy.");
+            Send(token, PB_TEXT_RESULT, &result, sizeof(result)); return;
+        }
+        inspector.Begin(command, browser, navigation, viewport, url);
+        CefPostDelayedTask(TID_UI, base::BindOnce([](uint64_t token, uint64_t id) {
+            auto found = pages.find(token);
+            if (found != pages.end() && found->second->inspector.request == id)
+                found->second->inspector.Cancel("Browser inspection timed out.");
+        }, token, command.request), 30000);
+    }
+    void Resize(int w, int h) {
+        w = std::clamp<int>(w, 1, PB_MAX_DIMENSION); h = std::clamp<int>(h, 1, PB_MAX_DIMENSION);
+        if (width == w && height == h) return;
+        ++viewport; Changed(); width = w; height = h;
+        pixels.clear(); popup.clear(); browser->GetHost()->WasResized();
+        if (request && capture_ready && !input_message) Capture();
+    }
+    void Viewport(const PbCommand& command) {
+        PbTextResult result{}; result.request = command.request;
+        if (!agent_control) {
+            result.error = 1; snprintf(result.failure, sizeof(result.failure), "Browser is under User control.");
+        } else {
+            Resize(command.x, command.y);
+            auto data = CefDictionaryValue::Create();
+            data->SetString("mode", command.a ? "fixed" : "dock"); data->SetInt("width", width); data->SetInt("height", height);
+            data->SetString("viewport", browser_inspection::Hex(viewport));
+            data->SetString("coordinates", "image pixels; 1:1 logical viewport units; dock is scaled down and letterboxed");
+            std::string path, text = browser_inspection::Json(data);
+            int fd = browser_inspection::Temporary(path, "output");
+            bool ok = fd >= 0 && browser_inspection::Write(fd, text.data(), text.size());
+            if (fd >= 0 && close(fd)) ok = false;
+            if (ok) { snprintf(result.path, sizeof(result.path), "%s", path.c_str()); result.size = text.size(); }
+            else { if (!path.empty()) unlink(path.c_str()); result.error = 1; snprintf(result.failure, sizeof(result.failure), "Viewport changed, but could not save the result."); }
+        }
+        Send(token, PB_TEXT_RESULT, &result, sizeof(result));
+    }
     CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
     void ReleaseInput() {
@@ -164,7 +233,7 @@ public:
         Finish(action_error, png);
     }
     void Begin(const PbCommand& command, bool actions) {
-        if (request) { // Host serializes by session; reject a protocol violation explicitly.
+        if (request || inspector.request) { // Host serializes by session; reject a protocol violation explicitly.
             PbObservation info{}; info.request = command.request;
             snprintf(info.error, sizeof(info.error), "Browser is busy.");
             Send(token, PB_OBSERVATION, &info, sizeof(info), width, height); return;
@@ -194,6 +263,7 @@ public:
     }
     void Changed() {
         fresh_view = fresh_popup = capturing = false;
+        inspector.log->navigation.store(navigation);
     }
     bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                          CefRefPtr<CefRequest>, bool, bool) override {
@@ -267,6 +337,8 @@ public:
     }
     void CloseUnresponsive() { if (browser) browser->GetHost()->CloseBrowser(true); }
     void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int id, bool success, const void* result, size_t result_size) override {
+        if (id == runtime_message) { Initialize(success); return; }
+        if (inspector.Result(id, success, result, result_size)) return;
         if (!request) return;
         if (id == capture_message) {
             capture_message = 0;
@@ -296,6 +368,8 @@ public:
         CefPostTask(TID_UI, base::BindOnce(&Page::Step, self));
     }
     void OnDevToolsAgentDetached(CefRefPtr<CefBrowser>) override {
+        inspector.Fail("Browser renderer disconnected; evaluation effects may be uncertain.");
+        inspector.log->Fail("Browser diagnostic channel disconnected; collection is incomplete.");
         if (request) { uncertain = input_message != 0; Finish("Browser renderer disconnected; any in-flight input delivery is uncertain."); }
     }
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
@@ -311,12 +385,12 @@ public:
     void OnAfterCreated(CefRefPtr<CefBrowser> value) override {
         browser = value;
         devtools = browser->GetHost()->AddDevToolsMessageObserver(this);
-        Send(token, PB_READY);
         if (stopping || close_requested) { browser->GetHost()->CloseBrowser(true); return; }
-        auto commands = std::move(pending);
-        for (const auto& command : commands) Command(command);
+        runtime_message = next_message++;
+        if (!browser->GetHost()->ExecuteDevToolsMethod(runtime_message, "Runtime.enable", nullptr)) Initialize(false);
     }
     void OnBeforeClose(CefRefPtr<CefBrowser>) override {
+        inspector.Fail("Browser closed; evaluation effects may be uncertain.");
         uncertain = input_message != 0; Finish("Browser closed; in-flight input may be uncertain."); devtools = nullptr;
         browser = nullptr;
         Send(token, PB_CLOSED);
@@ -430,6 +504,7 @@ void Command(PbCommand cmd) {
             Error(cmd.token, "Invalid session profile."); return;
         }
         CefRefPtr<Page> page = new Page(cmd.token);
+        page->initial_url = cmd.text;
         CefRequestContextSettings context_settings;
         CefString(&context_settings.cache_path) = profile_root + "/" + profile;
         context_settings.persist_session_cookies = true;
@@ -439,7 +514,7 @@ void Command(PbCommand cmd) {
         CefBrowserSettings settings;
         settings.windowless_frame_rate = 1;
         pages[cmd.token] = page;
-        bool created = CefBrowserHost::CreateBrowser(window, page, cmd.text,
+        bool created = CefBrowserHost::CreateBrowser(window, page, "about:blank",
                                                         settings, nullptr, page->context);
         if (!created) { pages.erase(cmd.token); Error(cmd.token, "CEF could not create a browser."); }
         return;
@@ -447,7 +522,7 @@ void Command(PbCommand cmd) {
     auto it = pages.find(cmd.token);
     if (it == pages.end()) return;
     auto page = it->second;
-    if (!page->browser) {
+    if (!page->browser || !page->initialized) {
         if (cmd.type == PB_CLOSE) { page->close_requested = true; return; }
         if (page->pending.size() < 256) page->pending.push_back(cmd);
         else Error(cmd.token, "Browser initialization command limit reached.");
@@ -463,6 +538,8 @@ void Command(PbCommand cmd) {
         return;
     }
     switch (cmd.type) {
+    case PB_DIAGNOSTICS: case PB_INSPECT: case PB_EVALUATE: page->Inspect(cmd); break;
+    case PB_VIEWPORT: page->Viewport(cmd); break;
     case PB_OBSERVE: page->Begin(cmd, false); break;
     case PB_BEGIN: page->Begin(cmd, true); break;
     case PB_COMMIT:
@@ -475,10 +552,12 @@ void Command(PbCommand cmd) {
         }
         break;
     case PB_CANCEL:
+        if (page->inspector.request == cmd.request) page->inspector.Cancel("Browser operation cancelled.");
         if (page->request == cmd.request) page->Interrupt("Browser operation cancelled; completed input was not undone.");
         break;
     case PB_CONTROL:
         page->agent_control = cmd.a;
+        if (!cmd.a && page->inspector.Evaluating()) page->inspector.Cancel("Browser control was taken by the user.");
         if (!cmd.a) { if (!page->steps.empty()) page->Interrupt("Browser control was taken by the user."); if (!page->request) { page->ReleaseInput(); host->SetFocus(false); } }
         break;
     case PB_OPEN: ++page->navigation; page->Changed(); browser->GetMainFrame()->LoadURL(cmd.text); break;
@@ -487,12 +566,7 @@ void Command(PbCommand cmd) {
     case PB_FORWARD: browser->GoForward(); break;
     case PB_RELOAD: browser->Reload(); break;
     case PB_RESIZE:
-        ++page->viewport; page->Changed();
-        page->width = std::clamp<int>(cmd.x, 1, PB_MAX_DIMENSION);
-        page->height = std::clamp<int>(cmd.y, 1, PB_MAX_DIMENSION);
-        page->pixels.clear(); page->popup.clear();
-        host->WasResized();
-        if (page->request && page->capture_ready && !page->input_message) page->Capture();
+        page->Resize(cmd.x, cmd.y);
         break;
     case PB_VISIBLE:
         page->visible = cmd.a;
@@ -562,6 +636,9 @@ int main(int argc, char** argv) {
     int subprocess = CefExecuteProcess(args, app, nullptr);
     if (subprocess >= 0) return subprocess;
     if (argc != 4) return 2;
+    // File-size quotas must produce explicit output/collection errors, not
+    // terminate every session's browser helper with SIGXFSZ.
+    signal(SIGXFSZ, SIG_IGN);
     int command_fd = atoi(argv[1]); events_fd = atoi(argv[2]); profile_root = argv[3];
     fcntl(command_fd, F_SETFD, FD_CLOEXEC);
     fcntl(events_fd, F_SETFD, FD_CLOEXEC);

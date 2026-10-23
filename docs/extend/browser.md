@@ -9,7 +9,7 @@ Select a main session and click the right-edge `<` to expand its browser. A new,
 uncreated session shows a non-blocking reminder to send a message first; it does
 not initialize Chromium or show an error overlay. On first use it opens `about:blank`; enter a full URL such as
 `http://localhost:5173` in the address field. The toolbar offers back, forward,
-reload (`R`), control mode, close (`x`), and collapse (`>`). The footer stays
+reload (`R`), control mode, a viewport field, close (`x`), and collapse (`>`). The footer stays
 below the chat/browser content row at its full shell width.
 
 - Collapse hides the pane without discarding the page.
@@ -17,13 +17,13 @@ below the chat/browser content row at its full shell width.
 - Switching sessions selects that session's dock and browser; it does not
   navigate or close other sessions' browsers.
 - **User / Agent** is the current control mode; click it to switch. User mode
-  blocks agent navigation and input, but permits read-only observations. Agent mode blocks human page/navigation input but
+  blocks agent navigation, input, evaluation, and viewport changes, but permits read-only observations and inspection. Agent mode blocks human page/navigation input but
   always permits takeover, collapse, and close. A UI-created browser starts in
   User mode; an agent-created browser starts in Agent mode.
 - Click the page to focus its keyboard input; click outside to return keyboard
   input to Pico. Clicking the address field edits the URL, not the composer.
 
-The builtin `browser` extension registers the agent tool; disabling that workspace
+The builtin `browser` extension registers the agent tools; disabling that workspace
 extension removes agent access, not the core human-operated dock.
 
 ## Agent observe–act loop
@@ -90,10 +90,11 @@ retried. Unacknowledged release/input failures can close the page to prevent lat
 input affecting another operation. Close/runtime unload invalidates outstanding
 work; its already-delivered prefix may be uncertain.
 
-Collapse or selection changes do not cancel work. A resulting **actual resize**
-still invalidates coordinates. Hidden pages retain their last viewport size;
-before first display the existing initial viewport is 800 × 600. Fixed/mobile
-presets and a viewport independent of dock size remain out of scope.
+Collapse or selection changes do not cancel work. A resulting **actual page resize**
+still invalidates coordinates. In dock-size mode, hidden pages retain their last
+viewport size; before first display the initial viewport is 800 × 600. Fixed
+viewports keep their logical dimensions even as the dock changes size; see
+[viewport control](#viewport-control).
 
 ### What capture completion means
 
@@ -107,8 +108,9 @@ allocate a Pico display texture or make the dock visible.
 
 Input methods use CEF's private DevTools `Input` messaging to the **same embedded
 browser**, with renderer acknowledgments; human input retains its existing CEF
-path. There is no OS-wide input, second browser, debugging server, page evaluation,
-or remote debugging port. A compositor synchronization snapshot is discarded;
+path. There is no OS-wide input, second browser, debugging server,
+or remote debugging port. Developer inspection and evaluation use that same
+private DevTools connection. A compositor synchronization snapshot is discarded;
 it is not exposed as a separate asset.
 
 Operations have a bounded 30-second helper deadline (plus a bounded host transport
@@ -138,13 +140,180 @@ opt in; see [tools](tools.md#image-bearing-results) and
 [providers](providers.md#image-bearing-tool-results). Local fixture validation is
 not certification of every remote model/backend or authentication route.
 
-Agent clipboard shortcuts are rejected. Clipboard/file/download tools, DOM or
-accessibility inspection, page evaluation, tabs, and cross-process sharing are
-not added by this slice.
+Agent clipboard shortcuts are rejected. Clipboard/file/download tools, tabs,
+and cross-process sharing remain out of scope.
 
 Subagents and clarification helpers have no browser access. Main-session system
 instructions include: “Browser access is main-session-only; do not delegate
 browser tasks to subagents.”
+
+## Developer inspection
+
+These sequential tools target the calling main session's **already-open** page.
+They do not start Chromium, select a session, expand the dock, or require a vision
+model/provider. Disabling the browser extension removes them along with the
+visual tools. Page text, diagnostics, markup, JavaScript results, and output files
+are **untrusted tool data**, never instructions.
+
+### Diagnostics
+
+```json
+{}
+```
+
+Pass this to `browser_diagnostics` to read all collected history. To read only
+new records, pass `{"cursor":"…"}` using the previous result's cursor. Reads are
+non-destructive and permitted in both User and Agent control modes.
+
+The result is **JSONL**. Its first line is metadata with `kind: "diagnostics"`,
+`browser_id`, an opaque `cursor`, `source_path`, and `complete`. Subsequent lines
+are diagnostic records with `kind`, `browser_id`, `navigation`, `time_unix_ms`,
+and `data`:
+
+- `console`: Chromium's `Runtime.consoleAPICalled` payload, including message
+  type, arguments, timestamp and stack when Chromium supplies them.
+- `exception`: Chromium's `Runtime.exceptionThrown` payload, including exception
+  details, source location and stack when available.
+- `network_failure`: CEF resource completion metadata: full URL, method, HTTP
+  status/status text, numeric Chromium network error, outcome, and received-byte
+  count. Includes subresources, HTTP 4xx/5xx and transport failures/cancellations,
+  not just main-page navigation. It is emitted when the resource finishes or
+  fails; an unfinished streaming response has not completed yet. The navigation
+  identity is sampled when that request's resource handler is created.
+
+Diagnostics are enabled before loading the initial requested URL. They continue
+while hidden and across hard navigation or hot reload. Cursors belong to one
+browser incarnation; another session or a closed/reopened page rejects them.
+No headers, cookies, request bodies or response bodies are collected. URLs,
+console messages, DOM and evaluation results may nevertheless contain secrets.
+The snapshot describes events received so far, not a network-idle guarantee.
+
+**No history ring or output truncation:** complete collected records append to a
+private `0600` file at `/tmp/pico-browser-diagnostics-*`. Each read creates a
+complete immutable snapshot. The journal has no size/age eviction; it consumes
+disk, not an ever-growing in-memory event history. Snapshot copying runs on a CEF
+file worker, using a fixed end offset, without blocking the UI thread or holding
+the journal lock for the whole copy. Individual Chromium messages still require
+transient memory proportional to their size. Collection/storage failures are
+explicit errors, with `complete: false` and `collection_error` when a snapshot
+can still be produced; a broken collection is never reported as complete.
+
+Completeness means the selected data **Chromium exposes**, not arbitrary object
+serialization: console object arguments are remote-object descriptions, not deep
+snapshots. Remote handles are released after recording and are not reusable
+inspection/action handles. Pico does not invoke page getters to expand them.
+
+### Accessibility and DOM
+
+```json
+{"mode":"accessibility"}
+```
+
+`browser_inspect` returns the main page's Chromium accessibility tree in `data`
+(the `Accessibility.getFullAXTree` response), including accessible names, roles,
+properties, and relationships provided by the engine.
+
+```json
+{"mode":"dom","selector":"#login-form"}
+```
+
+DOM mode returns `data.outerHTML` for the **first** matching CSS selector in the
+main document. A missing match or invalid selector is an explicit error. Selectors
+do not traverse iframe documents or shadow roots. This is markup, not a promise
+that JavaScript-only properties such as an input's current value appear as HTML
+attributes. Returned node IDs are transient, not durable action targets.
+
+Both modes work under User control. They use DevTools DOM/Accessibility methods,
+not page JavaScript evaluation, and do not wait for application readiness. Their
+JSON envelope includes browser/navigation/viewport identity, URL, kind, success,
+and `untrusted: true`. A page changing during inspection can invalidate the DOM
+operation; inspect again as needed.
+
+### Page evaluation
+
+```json
+{"expression":"({title: document.title, width: innerWidth})"}
+```
+
+`browser_evaluate` executes in the current main page's JavaScript context,
+**requires Agent control**, and needs no extra human confirmation. It can read
+page data, mutate DOM/application state, and initiate network requests. It is not
+a read-only inspection API. Promises are awaited and results are returned by value
+as Chromium's `Runtime.evaluate` response in `data`, including type or
+`unserializableValue` where appropriate. Exceptions and serialization failures
+are explicit tool errors; no reusable remote-object handles are offered. The
+DevTools console command-line API and artificial user-gesture flag are disabled.
+
+Synchronous evaluation has a 10-second engine limit; the overall operation has a
+30-second helper deadline plus the host transport watchdog. If cancellation or
+User takeover interrupts an outstanding evaluation, the page is closed to prevent
+late execution. Already performed effects, including requests, are **not undone**.
+Do not blindly retry interrupted evaluation. Normal completed evaluation may have
+scheduled future page work, just like any application script; switching modes
+after completion does not undo that work. Close/runtime unload cannot retarget a
+replacement browser. Read-only inspection cancellation does not close the page.
+
+### Complete text output and temporary files
+
+Diagnostics, accessibility, DOM and evaluation results up to 64 KiB are returned
+inline. Larger results return a **complete file path and byte size**, with no
+truncated preview, at `/tmp/pico-browser-output-*`. For example, use `rg` against
+that path to locate relevant records, then read the relevant section as untrusted
+data. The diagnostic cursor is on the snapshot's first line, including when the
+snapshot is returned as a file. Tool arguments are limited to 64 KiB; oversized
+arguments are rejected, not silently shortened.
+
+Output files already returned, and diagnostic journals, remain available after
+browser close or Pico exit. They are ordinary temporary files, not durable
+`.pico/media/browser/` image assets: external `/tmp` cleanup can remove them, and
+transcript replay never regenerates them or re-executes evaluation. Small-result
+and cancelled/unadopted temporary snapshots are removed. Core file reads run on
+the tool worker, not the graphics thread, and helper IPC carries only bounded
+file metadata rather than clipping large results to a message buffer.
+
+## Viewport control
+
+Use `browser_viewport` with one preset:
+
+```json
+{"preset":"mobile"}
+```
+
+Or specify both custom dimensions:
+
+```json
+{"width":1024,"height":768}
+```
+
+- `dock`: follow the dock's available page region (the default).
+- `desktop`: fixed **1280 × 720**.
+- `tablet`: fixed **768 × 1024**.
+- `mobile`: fixed **390 × 844**.
+- Custom width/height: **1–4096** logical pixels each.
+
+These are **dimensions only**, not mobile device emulation: no user-agent, touch,
+DPR or device identity changes. Screenshots remain the entire logical page
+viewport at scale 1, with agent coordinates in those image pixels.
+
+Fixed pages are centered in the dock, scaled down proportionally only when they
+would not fit, and letterboxed in unused space. They are never enlarged. Human
+pointer coordinates map through the displayed image; clicks/scrolls in the
+letterbox margins do not reach the page. Captured drags still receive their
+outside releases. Changing dock size does not resize a fixed page or invalidate
+its observation identity. Only **actual logical dimension changes** do so;
+reapplying the same size does not. Application DOM changes remain undetectable as
+coordinate staleness.
+
+In User mode, click the toolbar viewport field, type `dock`, `desktop`, `tablet`,
+`mobile`, or `WIDTHxHEIGHT`, then press Enter. Escape discards the edit. The agent
+tool requires Agent mode and does not select/expand the dock. Switching a hidden
+browser back to `dock` uses its last known dock dimensions (or current logical
+size if never shown); it follows the dock on the next display.
+
+Viewport settings are per live browser, survive collapse, navigation and extension
+reload, and reset on close/runtime unload or replacement after helper loss. They
+are not restored at startup/resume. The shell, chat, composer and footer bounds
+do not depend on the logical page dimensions.
 
 ## Lifecycle, storage, and resource use
 
@@ -200,8 +369,8 @@ no tabs, browser popups, native context menus, file dialogs, download UI, IME
 composition integration, or permission UI. Popup windows are blocked and
 JavaScript dialogs are suppressed. Unicode character input is supported, but
 platform keyboard/IME polish still needs native testing. Browser content is
-rendered at logical pane resolution; HiDPI browser rasterization and a viewport
-size independent of dock size are follow-up work.
+rendered at logical resolution; HiDPI browser rasterization remains follow-up
+work. There is no developer-console UI panel; inspection is exposed through tools.
 
 Build with `nix develop`, then:
 
@@ -271,3 +440,30 @@ Still manually validate a real vision model describing the page and completing
 an observe–act–verify task on native Wayland/X11. Test human takeover during work,
 two concurrent main sessions, collapse, cancellation, and close. Core/helper
 changes require restarting Pico; extension reload alone is insufficient.
+
+## Developer and viewport regressions
+
+The helper fixture reproduces an incorrect local UI label, associates it with
+console diagnostics, edits the fixture module, and verifies its hot-reloaded
+DOM and pixels **without replacing or navigating the browser**. It also checks
+creation-time logging, exceptions, HTTP/transport failures, cursor isolation,
+complete large outputs, accessibility, evaluation takeover, and viewport identity:
+
+```sh
+nix develop -c timeout -k 5s 120s python3 app/tests/browser_developer_integration.py \
+  app/build/debug/browser/runtime/pico_browser_helper
+```
+
+The real-window fixture also checks fixed mobile sizing, downscaling/letterboxing,
+mapped human clicks, ignored margins, and stable page bounds after dock resizing.
+The loopback-provider fixture has a non-vision developer mode that checks actual
+tool registration/dispatch, no lazy creation by inspection, complete large-file
+handoff, file lifetime after exit, and viewport control:
+
+```sh
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
+  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+  python3 app/tests/browser_agent_integration.py app/build/debug/pico --developer
+```
+
+These are local fixtures, not live-model/native-Wayland certification.

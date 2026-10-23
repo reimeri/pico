@@ -3,6 +3,23 @@
 CMake install rules define Pico's release contents. Keep distro packages and the
 AppImage based on `cmake --install` rather than copying a separate file list.
 
+## Embedded Chromium dependency
+
+The browser helper needs a C++20 compiler and a CEF binary distribution.
+`nix develop` supplies `CEF_ROOT` from the pinned nixpkgs `cef-binary` package.
+Native release builds run `packaging/fetch-cef.sh NEW_OUTPUT_DIRECTORY` and set
+`CEF_ROOT` to that directory. Keep `packaging/cef.json` aligned with the nixpkgs
+lock when upgrading Chromium; browser security updates are a release obligation.
+The fetch verifies the archive SHA-256 before extraction.
+
+CMake installs the helper and CEF resources under `libexec/pico/browser`, with
+CEF licenses/credits under `share/licenses/pico/cef`. Development builds use
+symlinks to avoid copying the large SDK; installed artifacts copy the runtime
+assets. The AppImage dependency scan includes the helper and CEF shared
+libraries. Archive/AppImage smoke testing of the browser is required separately
+from the ordinary CLI install smoke test. Never disable the Chromium sandbox to
+make a release run; Linux hosts need usable sandbox/user-namespace support.
+
 ## Linux archive
 
 ```bash

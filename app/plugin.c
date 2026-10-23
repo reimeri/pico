@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "pico/plugin.h"
+#include "browser.h"
 #include "agent.h"
 #include "docs_path.h"
 #include "workspace_internal.h"
@@ -67,6 +68,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_shell,
     pico_ext_background,
     pico_ext_subagent,
+    pico_ext_browser,
     pico_ext_commands,
     pico_ext_sessions,
     pico_ext_files,

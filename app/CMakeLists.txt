@@ -157,6 +157,8 @@ add_executable(pico
     main.c
     cli.c
     app.c
+    browser.c
+    builtins/browser.c
     ui.c
     plugin.c
     host_extensions.c
@@ -240,6 +242,8 @@ find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
+add_subdirectory(browser)
+add_dependencies(pico pico_browser_helper)
 
 target_include_directories(pico PRIVATE "${_pico_build_info_dir}")
 target_include_directories(pico PUBLIC
@@ -255,6 +259,7 @@ target_compile_definitions(pico PRIVATE
     $<$<CONFIG:Debug>:PICO_CLAY_DEBUG=1>
     "PICO_VERSION=\"${PROJECT_VERSION}\""
     "PICO_CC=\"cc\""
+    "PICO_BROWSER_HELPER=\"${CMAKE_INSTALL_FULL_LIBEXECDIR}/pico/browser/pico_browser_helper\""
     "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
 target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS})
@@ -615,6 +620,8 @@ if(BUILD_TESTING)
         tests/clay_impl.c
         chat_find.c
         app.c
+        browser.c
+        builtins/browser.c
         http.c
         http_capture.c
         ui.c
@@ -698,6 +705,8 @@ if(BUILD_TESTING)
         builtins/files.c
         file_mention.c
         app.c
+        browser.c
+        builtins/browser.c
         ui.c
         scrollbar.c
         agent.c
@@ -753,6 +762,8 @@ if(BUILD_TESTING)
         builtins/files.c
         file_mention.c
         app.c
+        browser.c
+        builtins/browser.c
         ui.c
         scrollbar.c
         agent.c
@@ -949,6 +960,8 @@ if(BUILD_TESTING)
         render_scale.c
         tests/clay_impl.c
         app.c
+        browser.c
+        builtins/browser.c
         worktree.c
         ui.c
         scrollbar.c
@@ -1157,6 +1170,7 @@ if(BUILD_TESTING AND UNIX AND NOT APPLE)
             -DPICO_NM=${CMAKE_NM}
             -DPICO_PREFIX=${CMAKE_INSTALL_PREFIX}
             -DPICO_BINDIR=${CMAKE_INSTALL_BINDIR}
+            -DPICO_LIBEXECDIR=${CMAKE_INSTALL_LIBEXECDIR}
             -DPICO_DATADIR=${CMAKE_INSTALL_DATADIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_smoke.cmake)
 endif()

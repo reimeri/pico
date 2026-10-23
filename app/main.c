@@ -4,6 +4,7 @@
 #include "clay/clay.h"
 #include "../clay/renderers/raylib/clay_renderer_raylib.c"
 #include "host_internal.h"
+#include "browser.h"
 #include "render_scale.h"
 #include "theme_internal.h"
 
@@ -26,6 +27,7 @@
  * explicit pre-wait PollInputEvents(). Track those callbacks without reading
  * (and consuming) Raylib's pressed-character/key queues. */
 static bool s_input_polled;
+static PicoHost *s_input_host;
 static GLFWkeyfun s_raylib_key;
 static GLFWcharfun s_raylib_char;
 static GLFWmousebuttonfun s_raylib_mouse_button;
@@ -36,13 +38,17 @@ static GLFWscrollfun s_raylib_scroll;
 static void OnKey(GLFWwindow *window, int key, int scan, int action, int mods)
 {
     s_input_polled = true;
-    if (s_raylib_key) s_raylib_key(window, key, scan, action, mods);
+    bool browser = PicoBrowser_Key(s_input_host, key, scan, action, mods);
+    /* Release events must always clear keys pressed before focus changed. */
+    bool modifier = key >= GLFW_KEY_LEFT_SHIFT && key <= GLFW_KEY_RIGHT_SUPER;
+    if ((!browser || action == GLFW_RELEASE || modifier) && s_raylib_key)
+        s_raylib_key(window, key, scan, action, mods);
 }
 
 static void OnChar(GLFWwindow *window, unsigned int codepoint)
 {
     s_input_polled = true;
-    if (s_raylib_char) s_raylib_char(window, codepoint);
+    if (!PicoBrowser_Char(s_input_host, codepoint) && s_raylib_char) s_raylib_char(window, codepoint);
 }
 
 static void OnMouseButton(GLFWwindow *window, int button, int action, int mods)
@@ -186,6 +192,7 @@ int main(int argc, char **argv)
         Clay_Raylib_Close();
         return 1;
     }
+    s_input_host = app;
     PicoHost_EnableWakeups(true);
     if (PicoCli_ShouldOpenDefaultWorkspace(&options))
     {
@@ -237,6 +244,7 @@ int main(int argc, char **argv)
     {
         snprintf(session_path, sizeof(session_path), "%s", active->session_path);
     }
+    s_input_host = NULL;
     PicoHost_EnableWakeups(false);
     PicoHostShutdownResult shutdown = pico_host_free(app);
 

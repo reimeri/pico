@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include "browser.h"
 #include "clarification.h"
 #include "render_scale.h"
 #include "theme_internal.h"
@@ -3171,6 +3172,7 @@ void pico_host_pump(PicoHost *host)
     {
         return;
     }
+    PicoBrowser_Pump(host);
     PicoHost_PumpTasks(host);
     PicoSession_LoadPump(host);
     {
@@ -3906,6 +3908,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         g_pico_process_retired = true;
         return PICO_HOST_SHUTDOWN_RETAINED;
     }
+    PicoBrowser_Shutdown(host, &deadline);
     PicoWorktree_Cleanup(host);
     PicoPlugins_Shutdown(host);
     for (i = 0; i < host->workspace_count; i++)
@@ -3973,6 +3976,8 @@ float PicoHost_MainColumnWidth(const PicoHost *host)
     {
         width -= SHELL_SIDEBAR_WIDTH + SHELL_BODY_GAP;
     }
+    float browser = PicoBrowser_ShellWidth(host);
+    if (browser > 0) width -= browser + SHELL_BODY_GAP;
     return width > 0.0f ? width : 0.0f;
 }
 
@@ -3994,6 +3999,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
         }
     }
     Clay_BeginLayout();
+    PicoBrowser_BeginLayout(app);
     app->session_load_row_known = false;
     app->session_load_row_rendered = false;
     MdView_BeginFrame();
@@ -4036,16 +4042,25 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                              .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)},
                              .childGap = 6}})
             {
-                CLAY(CLAY_ID("MainColumn"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                /* Content row grows only inside the exactly bounded RightColumn.
+                 * The footer retains its full shell width when the dock opens. */
+                CLAY(CLAY_ID("ChatBrowserRow"),
+                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
-                                 .childGap = 12}})
+                                 .childGap = SHELL_BODY_GAP}})
                 {
-                    RunSlot(app, PICO_SLOT_MAIN);
-                    if (PicoHost_SelectedAgent(app))
+                    CLAY(CLAY_ID("MainColumn"),
+                         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_PERCENT(1)},
+                                     .childGap = 12}})
                     {
-                        RunSlot(app, PICO_SLOT_COMPOSER);
+                        RunSlot(app, PICO_SLOT_MAIN);
+                        if (PicoHost_SelectedAgent(app))
+                        {
+                            RunSlot(app, PICO_SLOT_COMPOSER);
+                        }
                     }
+                    PicoBrowser_Layout(app);
                 }
                 if (PicoHost_SelectedAgent(app))
                 {
@@ -4345,7 +4360,9 @@ void PicoHost_Frame(PicoHost *app)
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
 
-    if (IsKeyPressed(KEY_F2))
+    PicoBrowser_Input(app);
+
+    if (!PicoBrowser_BlocksKeyboard(app) && IsKeyPressed(KEY_F2))
     {
         PicoExts_Toggle(app);
     }
@@ -4360,7 +4377,7 @@ void PicoHost_Frame(PicoHost *app)
     {
         TakeScreenshot("pico_screenshot.png");
     }
-    if (IsKeyPressed(KEY_F5))
+    if (!PicoBrowser_BlocksKeyboard(app) && IsKeyPressed(KEY_F5))
     {
         PicoHost_RequestReload(app);
     }
@@ -4369,7 +4386,7 @@ void PicoHost_Frame(PicoHost *app)
      * Remember ownership before callbacks so that same key cannot cancel a turn. */
     bool had_modal = pico_ui_modal_claimed(app);
     PicoPlugins_Poll(app);
-    PicoChatFind_HandleInput(app);
+    if (!PicoBrowser_BlocksKeyboard(app)) PicoChatFind_HandleInput(app);
     /* Builtin frame callbacks update scrollbar drags. Preserve that ownership
      * until Clay's scroll update so it cannot also drag the content. */
     PicoScrollbar_BeginFrame();
@@ -4389,7 +4406,7 @@ void PicoHost_Frame(PicoHost *app)
     bool had_complete = PicoComplete_IsOpen();
     bool had_todo = PicoTodo_IsExpanded(app);
     had_modal = had_modal || pico_ui_modal_claimed(app);
-    if (PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_todo, had_modal) &&
+    if (!PicoBrowser_BlocksKeyboard(app) && PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_todo, had_modal) &&
         IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgent *active = PicoHost_TranscriptAgent(app);
@@ -4512,6 +4529,7 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
 
+    PicoBrowser_AfterLayout(app);
     app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
 
     pico_run_hooks(app, PICO_HOOK_AFTER_LAYOUT, pico_agent_active(app));
@@ -4608,6 +4626,7 @@ void PicoHost_Frame(PicoHost *app)
             return;
         }
         PicoChat_RecordVirtualScroll();
+        PicoBrowser_AfterLayout(app);
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
         {
@@ -4639,6 +4658,7 @@ void PicoHost_Frame(PicoHost *app)
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
+    PicoBrowser_AfterRender(app);
     pico_run_hooks(app, PICO_HOOK_AFTER_RENDER, pico_agent_active(app));
     PicoChatFind_DrawInput(app);
     EndDrawing();

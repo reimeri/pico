@@ -63,6 +63,7 @@ struct PicoAgent {
 
     PicoAgentState state;
     bool unseen_complete;
+    bool browser_expanded; /* Session-local presentation; opening is explicit and lazy. */
     bool inbox_pending; /* inbox review flag; not a run state */
     uint64_t inbox_revision; /* protects newer live state from a failed offline ack */
     PicoAgentRt *runtime;

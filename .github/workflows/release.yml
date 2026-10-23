@@ -33,7 +33,9 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev libxext-dev \
             libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
             libxkbcommon-dev libwayland-dev wayland-protocols libffi-dev libexpat1-dev \
-            libdecor-0-dev libdecor-0-plugin-1-cairo libasound2-dev libpulse-dev
+            libdecor-0-dev libdecor-0-plugin-1-cairo libasound2-dev libpulse-dev \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libgbm1 libgtk-3-0 \
+            libxcomposite1 libxdamage1 libcups2
           python3 -m pip install --user --disable-pip-version-check "cmake==3.31.6"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -53,6 +55,11 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch pinned Chromium Embedded Framework
+        run: |
+          packaging/fetch-cef.sh "$RUNNER_TEMP/pico-cef"
+          echo "CEF_ROOT=$RUNNER_TEMP/pico-cef" >> "$GITHUB_ENV"
 
       - name: Configure, build, and test
         run: |

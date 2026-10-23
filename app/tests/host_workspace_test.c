@@ -9,6 +9,7 @@
 #include "pico/plugin.h"
 #include "pico/auth.h"
 #include "host_internal.h"
+#include "browser.h"
 #include "sanitizer_detect.h"
 #include "workspace_internal.h"
 #include "settings.h"
@@ -1201,7 +1202,7 @@ done_host:
     return rc;
 }
 
-static int RunShellStabilityCase(bool with_sidebar)
+static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
 {
     const Clay_Dimensions viewport = {1714, 1392};
     const int frames = 400;
@@ -1210,6 +1211,8 @@ static int RunShellStabilityCase(bool with_sidebar)
     PicoWorkspace workspace;
     PicoAgent agent;
     ShellTestState state = {.composer_height = 44.0f};
+    Clay_BoundingBox expected_browser = {0};
+    Clay_BoundingBox expected_content_row = {0};
     Clay_BoundingBox expected_root = {0};
     Clay_BoundingBox expected_body = {0};
     Clay_BoundingBox expected_right = {0};
@@ -1236,6 +1239,7 @@ static int RunShellStabilityCase(bool with_sidebar)
     workspace.agents[0] = &agent;
     workspace.count = 1;
     agent.id = 1;
+    agent.browser_expanded = with_browser;
     agent.workspace = &workspace;
     host.workspaces[0] = &workspace;
     host.workspace_count = 1;
@@ -1319,6 +1323,8 @@ static int RunShellStabilityCase(bool with_sidebar)
             Fail("floating chat find must remain within the viewport without resizing panes");
             break;
         }
+        Clay_ElementData browser = Clay_GetElementData(CLAY_ID("BrowserPane"));
+        Clay_ElementData content_row = Clay_GetElementData(CLAY_ID("ChatBrowserRow"));
         Clay_ElementData root = Clay_GetElementData(CLAY_ID("Root"));
         Clay_ElementData body = Clay_GetElementData(CLAY_ID("Body"));
         Clay_ElementData right = Clay_GetElementData(CLAY_ID("RightColumn"));
@@ -1327,7 +1333,7 @@ static int RunShellStabilityCase(bool with_sidebar)
         Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
         Clay_ElementData composer = Clay_GetElementData(CLAY_ID("ComposerAlign"));
         Clay_ElementData footer = Clay_GetElementData(CLAY_ID("Footer"));
-        if (!root.found || !body.found || !right.found || !main.found || !chat.found ||
+        if (!browser.found || !content_row.found || !root.found || !body.found || !right.found || !main.found || !chat.found ||
             !composer.found || !footer.found || (with_sidebar && !sidebar.found))
         {
             Fail("production shell panes were not laid out");
@@ -1337,6 +1343,8 @@ static int RunShellStabilityCase(bool with_sidebar)
             fabsf(root.boundingBox.height - viewport.height) > 0.001f ||
             !ShellVerticallyContains(root.boundingBox, body.boundingBox) ||
             !ShellVerticallyContains(body.boundingBox, right.boundingBox) ||
+            !ShellVerticallyContains(content_row.boundingBox, browser.boundingBox) ||
+            !ShellVerticallyContains(content_row.boundingBox, main.boundingBox) ||
             (with_sidebar && !ShellVerticallyContains(body.boundingBox, sidebar.boundingBox)))
         {
             Fail(with_sidebar ? "oversized content escaped viewport panes with sidebar"
@@ -1345,6 +1353,8 @@ static int RunShellStabilityCase(bool with_sidebar)
         }
         if (frame == 30)
         {
+            expected_browser = browser.boundingBox;
+            expected_content_row = content_row.boundingBox;
             expected_root = root.boundingBox;
             expected_body = body.boundingBox;
             expected_right = right.boundingBox;
@@ -1356,7 +1366,9 @@ static int RunShellStabilityCase(bool with_sidebar)
             expected_scroll = *scroll.scrollPosition;
         }
         else if (frame > 30 &&
-                 (!ShellBoxStable(expected_root, root.boundingBox) ||
+                 (!ShellBoxStable(expected_browser, browser.boundingBox) ||
+                  !ShellBoxStable(expected_content_row, content_row.boundingBox) ||
+                  !ShellBoxStable(expected_root, root.boundingBox) ||
                   !ShellBoxStable(expected_body, body.boundingBox) ||
                   !ShellBoxStable(expected_right, right.boundingBox) ||
                   (with_sidebar && !ShellBoxStable(expected_sidebar, sidebar.boundingBox)) ||
@@ -2472,14 +2484,16 @@ done:
 
 static int TestBottomFollowShellGeometryStable(void)
 {
-    if (RunShellStabilityCase(false) != 0)
+    if (RunShellStabilityCase(false, false) != 0)
     {
         return 1;
     }
-    if (RunShellStabilityCase(true) != 0)
+    if (RunShellStabilityCase(true, false) != 0)
     {
         return 1;
     }
+    if (RunShellStabilityCase(false, true) != 0 || RunShellStabilityCase(true, true) != 0)
+        return 1;
     if (RunChatRetainedSpacerCase(false) != 0)
     {
         return 1;
@@ -3168,12 +3182,23 @@ static int TestExpandedStreamingThinkStaysInsideChat(void)
             float right = chat.boundingBox.x + chat.boundingBox.width;
             int32_t c;
             bool saw_tail = false;
+            /* The browser dock may emit text alongside chat at the same y.
+             * Check chat content, not unrelated sibling-pane labels. */
+            int clip_depth = 0, chat_clip_depth = 0;
             for (c = 0; c < commands.length; c++)
             {
                 Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, c);
                 Clay_StringSlice text;
                 Clay_BoundingBox box;
-                if (!cmd || cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
+                if (cmd && cmd->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_START) {
+                    clip_depth++;
+                    if (ShellBoxStable(cmd->boundingBox, chat.boundingBox)) chat_clip_depth = clip_depth;
+                }
+                if (cmd && cmd->commandType == CLAY_RENDER_COMMAND_TYPE_SCISSOR_END) {
+                    if (clip_depth == chat_clip_depth) chat_clip_depth = 0;
+                    clip_depth--;
+                }
+                if (!cmd || !chat_clip_depth || cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT)
                 {
                     continue;
                 }
@@ -4417,6 +4442,96 @@ static int TestSidebarDragBehavior(void)
         return 1;
     }
     return 0;
+}
+
+static int TestBrowserUncreatedSessionNotification(void)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    char dir[] = "/tmp/pico-browser-new-session-XXXXXX";
+    char cfg[] = "/tmp/pico-browser-new-config-XXXXXX";
+    const Clay_Dimensions viewport = {1100, 800};
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    int rc = 1;
+    Clay_SetCurrentContext(NULL);
+    if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay(viewport)) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace;
+    PicoAgentId id;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                     .session_start = PICO_SESSION_NEW};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    if (!agent || agent->session_id[0]) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    Clay_ElementData expand = Clay_GetElementData(CLAY_ID("BrowserExpand"));
+    if (!expand.found) goto done;
+    host->window_focused = true;
+    g_find_input_test = true;
+    g_find_button = MOUSE_BUTTON_LEFT;
+    g_find_press = true;
+    g_find_pointer = (Vector2){expand.boundingBox.x + expand.boundingBox.width / 2,
+                              expand.boundingBox.y + expand.boundingBox.height / 2};
+    PicoBrowser_Input(host);
+    g_find_input_test = g_find_press = false;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+    char profile_root[4096];
+    snprintf(profile_root, sizeof(profile_root), "%s/pico/browser", cfg);
+    if (!Clay_GetElementData(CLAY_ID("NotifyToast")).found ||
+        !FindCardText(&commands, "Send a message to create this session before opening its browser.") ||
+        (host->status_warn && host->status_warn[0]) || PicoUi_ModalOpen(host) ||
+        agent->browser_expanded || access(profile_root, F_OK) == 0) goto done;
+    rc = 0;
+done:
+    g_find_input_test = g_find_press = false;
+    if (host) pico_host_free(host);
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (rc) Fail("opening a browser before session creation must only show an informational toast");
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+static int TestBrowserMainSessionPolicy(void)
+{
+    PicoHost host = {0};
+    PicoHost_SetPath(&host, ".");
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&host);
+    PicoAgent main = {.id = 1, .kind = PICO_AGENT_MAIN, .workspace = ws};
+    PicoAgent child = {.id = 2, .kind = PICO_AGENT_SUBAGENT, .workspace = ws};
+    ws->agents[0] = &main; ws->agents[1] = &child; ws->count = 2;
+    PicoExt ext = pico_ext_browser();
+    PicoHost_BeginRegistration(&host, PICO_REG_WORKSPACE, ws);
+    ext.workspace_init(ws, NULL);
+    PicoHost_PublishRegistration(&host, NULL);
+    for (int which = 0; which < 2; ++which) {
+        bool exclude[PICO_MAX_TOOLS] = {0};
+        PicoLlmEvent event = {.include_tools = true, .tools = ws->tools,
+                             .tool_count = ws->tool_count, .exclude = exclude};
+        for (int h = 0; h < ws->llm_hook_count; ++h)
+            ws->llm_hooks[h].fn(ws, which ? child.id : main.id, &event, ws->llm_hooks[h].state);
+        bool offered = false;
+        for (int i = 0; i < event.tool_count; ++i)
+            if (!strcmp(event.tools[i].name, "browser_open") && !exclude[i]) offered = true;
+        if (offered != !which || (!which && (!event.extra_instructions ||
+            !strstr(event.extra_instructions, "do not delegate browser tasks"))))
+            Fail("browser must be offered only to main sessions with no-delegation guidance");
+        free(event.extra_instructions);
+    }
+    PicoBrowser_Shutdown(&host, NULL);
+    ws->count = 0;
+    PicoWorkspace_RegistrationClear(ws);
+    free(ws);
+    return g_failed ? 1 : 0;
 }
 
 static int TestWorkspaceBuiltinsRegisterThroughWorkspaceInit(void)
@@ -17892,6 +18007,8 @@ int main(int argc, char **argv)
     {
         return 1;
     }
+    if (PICO_TEST_RUN(TestBrowserUncreatedSessionNotification()) != 0) return 1;
+    if (PICO_TEST_RUN(TestBrowserMainSessionPolicy()) != 0) return 1;
     if (PICO_TEST_RUN(TestWorkspaceBuiltinsRegisterThroughWorkspaceInit()) != 0)
     {
         return 1;

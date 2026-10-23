@@ -330,3 +330,20 @@ use normal session-failure rules. Schema 5 distinguishes acceptance, canonical
 delivered user records, and stopped records plus transcript-only notices. An
 acceptance-only crash restores as not delivered, never model input. See
 [steering](steering.md) for full eligibility, lifecycle, and ownership contracts.
+
+## Embedded browser ownership
+
+The core browser service is lazy and per-main-session; subagents and clarification
+helpers cannot use `browser_open`. The tool targets its calling session, is
+sequential within that agent, and returns after navigation is queued, not after
+load completes. User control refuses agent navigation. Worker requests carry
+copied agent/generation identity and are validated on the main thread.
+
+The runtime is not extension-owned and survives extension reload. Live pages end
+on explicit close or session-runtime unload; cookie/local-storage profiles
+persist by durable session ID. Replay/resume alone never recreates a page.
+Hidden pages keep executing but produce fewer paints and do not retain Pico
+textures. CEF callbacks never touch Clay or Raylib; core's graphics thread owns
+textures and retains retired render data through the current layout lifetime.
+The helper's local IPC is private, not a public extension API. See
+[browser](browser.md) for the singleton-root constraint, supported UI, and tests.

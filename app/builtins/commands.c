@@ -387,7 +387,7 @@ static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void 
 }
 
 static const char *const kDocTopics[] = {
-    "README", "subagents", "skills", "anatomy", "host", "workspace", "agents", "views", "hooks",
+    "README", "subagents", "skills", "browser", "anatomy", "host", "workspace", "agents", "views", "hooks",
     "context", "steering", "tools", "commands", "notices", "completers", "providers", "auth", "contracts",
 };
 

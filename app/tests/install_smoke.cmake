@@ -1,6 +1,7 @@
 if(NOT DEFINED PICO_BUILD_DIR OR NOT DEFINED PICO_SOURCE_DIR OR
    NOT DEFINED PICO_STAGE_DIR OR NOT DEFINED PICO_CC OR NOT DEFINED PICO_NM OR
-   NOT DEFINED PICO_PREFIX OR NOT DEFINED PICO_BINDIR OR NOT DEFINED PICO_DATADIR)
+   NOT DEFINED PICO_PREFIX OR NOT DEFINED PICO_BINDIR OR NOT DEFINED PICO_DATADIR OR
+   NOT DEFINED PICO_LIBEXECDIR)
     message(FATAL_ERROR "install smoke test is missing required -D arguments")
 endif()
 
@@ -23,11 +24,17 @@ endfunction()
 
 pico_staged_path(staged_bindir "${PICO_BINDIR}")
 pico_staged_path(staged_datadir "${PICO_DATADIR}")
+pico_staged_path(staged_libexecdir "${PICO_LIBEXECDIR}")
 set(pico_exe "${staged_bindir}/pico")
 set(data_dir "${staged_datadir}/pico")
 set(sdk_dir "${data_dir}/sdk/include")
 foreach(required
         "${pico_exe}"
+        "${staged_libexecdir}/pico/browser/pico_browser_helper"
+        "${staged_libexecdir}/pico/browser/libcef.so"
+        "${staged_libexecdir}/pico/browser/icudtl.dat"
+        "${staged_libexecdir}/pico/browser/v8_context_snapshot.bin"
+        "${data_dir}/docs/extend/browser.md"
         "${data_dir}/resources/Roboto-Regular.ttf"
         "${data_dir}/docs/extend/README.md"
         "${data_dir}/examples/settings.json"

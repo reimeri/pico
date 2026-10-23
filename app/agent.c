@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "agent.h"
+#include "browser.h"
 #include "clarification.h"
 #include "workspace_internal.h"
 #include "canonical.h"
@@ -4243,6 +4244,7 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
         FreeRt(rt);
         agent->runtime = NULL;
     }
+    PicoBrowser_CloseAgent(agent->workspace ? agent->workspace->host : NULL, agent->id);
     PicoAgent_ClearMessages(agent);
     free(agent->messages);
     free(agent->error);

@@ -88,6 +88,8 @@
           cmakeFlags = [
             "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=${raylib}"
             "-DCMAKE_BUILD_TYPE=Release"
+            # Keep packaging/cef.json aligned when updating the nixpkgs lock.
+            "-DCEF_ROOT=${pkgs.cef-binary}"
             "-DPICO_BUILD_REVISION=${self.rev or self.dirtyRev or ""}"
             "-DBUILD_TESTING=${if doCheck then "ON" else "OFF"}"
           ];
@@ -161,7 +163,7 @@
         let
           pico = picoFor pkgs { };
         in
-        {
+        rec {
           default = pkgs.mkShell {
             name = "pico";
             inputsFrom = [ pico ];
@@ -174,10 +176,12 @@
               gdb
               git
               curl
+              python3
               libnotify
             ];
 
             FETCHCONTENT_SOURCE_DIR_RAYLIB = "${raylib}";
+            CEF_ROOT = "${pkgs.cef-binary}";
             CMAKE_EXPORT_COMPILE_COMMANDS = "ON";
 
             shellHook = ''
@@ -187,6 +191,12 @@
               echo "  cmake -S app --preset release && cmake --build app/build/release"
               echo "  ./app/build/release/pico"
             '';
+          };
+          # Optional real-window regression tools; not part of Pico's runtime.
+          browser-tests = pkgs.mkShell {
+            inputsFrom = [ default ];
+            packages = [ pkgs.xvfb-run pkgs.xdotool (pkgs.python3.withPackages (ps: [ ps.pillow ])) ];
+            inherit (default) FETCHCONTENT_SOURCE_DIR_RAYLIB CEF_ROOT;
           };
         }
       );

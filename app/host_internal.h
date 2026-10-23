@@ -141,6 +141,7 @@ struct PicoProjectPreference;
 #define PICO_HOST_IDLE_WAIT_CAP 0.1 /* Max idle sleep; bounds latency of undeclared polling work. */
 
 struct PicoHost {
+    struct PicoBrowserService *browser; /* Lazy core-owned CEF service; survives extension reload. */
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;
     int pump_rr_index;

@@ -54,9 +54,9 @@ Local image textures use a least-recently-used cache. Unused retained entries ar
 ## Slots
 
 - `PICO_SLOT_SIDEBAR` — left column, **fixed 200px**, full content height. Builtin `sidebar` owns this slot: it lists disk workspaces under `~/.config/pico/sessions/` (not only live runtimes; entries whose path is not an existing directory are omitted), with a muted Projects header whose `+` opens the native folder picker and a wait modal, expand/collapse (latest 10 sessions, More/Less to page by 10; the selected session stays visible when its workspace is collapsed), per-workspace `+` for a new main agent, click-to-resume or select, and a bottom-left settings button that opens `/settings`. The column appears whenever at least one view is registered here; the builtin always registers, so the sidebar is always on. Extra host views in this slot stack with it (`z` order).
-- `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this).
+- `PICO_SLOT_MAIN` — chat column (builtin `chat` already fills this); it narrows when the core browser dock is expanded.
 - `PICO_SLOT_COMPOSER` — input box, temporarily replaced by the builtin non-modal `ask_user` panel while its questionnaire is pending. The entire slot, including extra host views, is not rendered when no agent is selected.
-- `PICO_SLOT_FOOTER` — status line in the main column (from the sidebar's right edge to the view's right edge, not under the sidebar). The entire slot, including extra host views, is not rendered when no agent is selected. Builtin footer: click cwd for a folder picker (native dialog; Pico dims the window with a “select a folder” modal until it closes), model/effort for dropdowns. In a git workspace with uncommitted changes the footer also shows a `+adds -dels` chip (including untracked files) that opens the unified diff modal. When changes have no added/deleted text lines, the chip instead shows a changed-file count. Binary edits, renames, mode/permission changes, and empty-file changes remain visible as labeled summary rows alongside textual hunks.
+- `PICO_SLOT_FOOTER` — status line beneath the chat/browser content row (from the sidebar's right edge to the view's right edge, not under the sidebar). The entire slot, including extra host views, is not rendered when no agent is selected. Builtin footer: click cwd for a folder picker (native dialog; Pico dims the window with a “select a folder” modal until it closes), model/effort for dropdowns. In a git workspace with uncommitted changes the footer also shows a `+adds -dels` chip (including untracked files) that opens the unified diff modal. When changes have no added/deleted text lines, the chip instead shows a changed-file count. Binary edits, renames, mode/permission changes, and empty-file changes remain visible as labeled summary rows alongside textual hunks.
 - `PICO_SLOT_OVERLAY` — drawn after the shell (warnings, popups, modals). Builtin `/extensions`, `/settings`, `/show-prompt`, the workspace folder-picker wait modal (footer cwd and sidebar Projects `+`), the subagent inspect chat, the composer image preview, and the diff modal are overlay modals.
 
 `z` sorts views in a slot: lower `z` runs first, higher `z` later. Max 16 views per slot (`PICO_MAX_SLOT_VIEWS`). Host views in a slot are process-global. Workspace views in a slot render only for the selected workspace. Builtin modal controls (`PicoExts_*`, `PicoSettingsUi_*`, and `PicoPrompt_*`) take an explicit `PicoHost *`; their open-state queries report only that host's instance.
@@ -180,3 +180,13 @@ pico_agent_ui_clear(host, id, "web_search");
 ```
 
 `pico_ui_latest` / `pico_ui_clear` are the same lookup for the UI-selected agent. `pico_ui_post` copies immediately and publishes on the next pump. TEXT appends; STATUS replaces. Force-cancelled leftovers and retired generations are dropped. Two agents may use the same name without collision; each `(agent_id, runtime_generation, name)` occupies one of at most `PICO_MAX_UI_POSTS` (16) slots in that workspace. The snapshot survives the tool returning and extension reload; workspace close, force-cancel, generation retirement, and `pico_agent_ui_clear` drop it. See [tools](tools.md#streaming-into-a-modal) and [`../../examples/stream_modal.c`](../../examples/stream_modal.c).
+
+## Core browser dock
+
+The shell also owns a collapsible right-side browser dock for the selected main
+session. Chat and composer share a bounded content row with this dock; the
+footer spans beneath both. This is not a new extension slot. Do not assume the
+main slot occupies the entire width to the right of the sidebar. Browser view
+callbacks remain declarative, and core retains retired browser render resources
+until pending Clay commands are discarded or consumed. See [browser](browser.md)
+for control ownership, per-session state, and current limitations.

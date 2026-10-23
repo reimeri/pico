@@ -137,6 +137,13 @@ cp -L "$sqlite_library" "$sqlite_target"
 chmod u+w "$sqlite_target"
 dependency_args+=(--deploy-deps-only "$sqlite_target")
 
+# The OSR helper is not linked into Pico. Scan its CEF dependencies explicitly;
+# keep libcef beside ICU/V8 data rather than relocating it to usr/lib.
+cef_runtime="$appdir/usr/libexec/pico/browser"
+for binary in "$cef_runtime/pico_browser_helper" "$cef_runtime/"*.so; do
+    dependency_args+=(--deploy-deps-only "$binary")
+done
+
 rm -f "$output" "${output}.zsync"
 if [[ "${output##*/}.zsync" != $zsync_pattern ]]; then
     echo "update information pattern $zsync_pattern does not match ${output##*/}.zsync" >&2

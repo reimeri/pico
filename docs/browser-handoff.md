@@ -182,6 +182,8 @@ Paths in this table are relative to the repository root.
 | `app/browser.c`, `app/browser.h` | Host service, lazy process launch, request broker, per-session state, IPC receiver/queue, dock, focus/input, textures, shutdown. Private core API. |
 | `app/browser/helper.cc` | CEF lifecycle and request contexts, OSR painting/popup composition, event/input dispatch, feature configuration, private profile-root lock. |
 | `app/browser/inspection.h` | Helper-side diagnostic journal/resource completion handlers, asynchronous snapshot copying, DevTools inspection/evaluation, and complete temporary results. |
+| `app/browser/gpu.c`, `app/browser/gpu.h` | EGL DMA-BUF import/export, owned GPU images, native fences, GPU copies and on-demand observation readback. |
+| `app/browser/transport.h` | Private descriptor transport and ownership, with close-on-exec and malformed-message cleanup. |
 | `app/browser/protocol.h` | Private command/event structures. Private observation/request metadata, bounded native input batches, cancellation and control messages. |
 | `app/browser/CMakeLists.txt` | Isolated C++20/CEF target, wrapper library, runtime assets and install layout. |
 | `app/builtins/browser.c` | Visual and developer browser tools, main-session filtering and guidance. |
@@ -194,8 +196,8 @@ Paths in this table are relative to the repository root.
 | `app/tests/browser_agent_integration.py` | Real Pico and loopback Responses fixture: model-visible PNGs/input/media plus `--developer` non-vision tools, lazy startup and complete output-file handoff/lifetime. |
 | `app/tests/browser_developer_integration.py` | Real-helper diagnostics, accessibility/DOM, evaluation control, complete large output, storage failures, fixed viewport and same-page source edit/hot reload. |
 | `app/tests/browser_failure_integration.py` | Real renderer-kill cause, pending evaluation failure, independent session progress, explicit reopen, and malformed command reporting. |
-| `app/tests/browser_profile.py` | Repeatable static/animated/WebGL visible/hidden/concurrent CPU/RSS/IPC and actual host conversion/upload measurements. |
-| `app/tests/browser_ui_integration.py` | Real Pico window, navigation/reload pixels, fixed viewport/letterboxing, mapped input/margins, resized dock and repeated bottom-follow presentation under Xvfb. |
+| `app/tests/browser_profile.py` | Repeatable static/animated/WebGL visible/hidden/concurrent CPU/RSS, frame-metadata traffic and host GPU-import API measurements. |
+| `app/tests/browser_ui_integration.py` | Real Pico window, navigation/reload pixels, fixed viewport/letterboxing, mapped input/margins, resized dock and repeated bottom-follow presentation on an isolated hardware-backed X11 display. |
 | `app/tests/host_workspace_test.c` | Browser eligibility, new-session notification, repeated shell geometry. |
 | `app/tests/install_smoke.cmake` | Checks installed helper and required CEF assets. |
 | `flake.nix`, `packaging/cef.json`, `packaging/fetch-cef.sh` | Nix development dependency and pinned native-release download. |
@@ -353,8 +355,8 @@ Implemented in this increment:
   helpers and surviving Chromium process groups are cleaned up with bounded
   escalation, even after the helper leader is reaped. Queue capacity is unchanged.
 - A maintained matrix covers static, animated and WebGL pages, visible/hidden and
-  several concurrent session browsers, sampled process-tree CPU/RSS, raw pixel
-  IPC bandwidth and actual host conversion/upload API wall times. Minimal private
+  several concurrent session browsers, sampled process-tree CPU/RSS, GPU-frame
+  metadata traffic and actual host import API wall times. Minimal private
   opt-in counters use `PICO_BROWSER_PROFILE`; no public extension ABI change.
   See [procedure, limitations and baseline](browser-profiling.md). WebGL backend
   unavailability is explicit, not silently counted as a successful measurement.
@@ -364,13 +366,16 @@ Implemented in this increment:
 
 Remaining scope and measured follow-up:
 
-- Profile CPU, memory, pixel-copy/upload bandwidth, and WebGL behavior with
-  visible, hidden, and several concurrent session browsers. The synthetic matrix
-  is now repeatable, but native GPU/Wayland, large observations, long-soak memory
-  and realistic dev-app activity remain unbenchmarked; user fan noise was reported
-  during the crash investigation, not independently diagnosed as a performance defect.
-- Consider dirty-region transport/coalescing or GPU sharing only after profiling.
-  Do not reintroduce tab suspension or idle page eviction without user approval.
+- The [GPU baseline](browser-profiling.md#gpu-only-baseline--2026-10-23) now records
+  CPU, summed RSS, metadata traffic and GPU imports across visible/hidden and
+  concurrent synthetic workloads on hardware-backed Xwayland. Native-Wayland host
+  profiling, GPU memory/timing, large observations, long-soak memory and realistic
+  dev-app activity remain follow-up measurements. Historical fan noise was not
+  independently diagnosed as a performance defect.
+- GPU sharing and bounded-pool coalescing are implemented; there is no CPU display
+  fallback or dirty-rectangle CPU transport to maintain. Optimize GPU copies or
+  import reuse only if measurements justify it. Do not reintroduce tab suspension
+  or idle page eviction without user approval.
 - Failure classification and explicit stopped-state recovery are now implemented.
   Continue measuring failures/cleanup under realistic native loads rather than
   adding automatic restart or replay.
@@ -435,10 +440,13 @@ timeout -k 5s 90s python3 app/tests/browser_integration.py \
   app/build/debug/browser/runtime/pico_browser_helper
 ```
 
-Real-window test, using its optional tooling shell and an isolated display:
+Real-window test, using its optional tooling shell and an isolated, hardware-backed
+X11 display. See the [Weston/Xwayland setup](browser-profiling.md#reproducing-an-isolated-gpu-backed-run);
+software Xvfb is not a supported browser presentation backend. Do not point these
+input-driving tests at the user's desktop:
 
 ```sh
-nix develop .#browser-tests -c xvfb-run -a -s '-screen 0 1600x1200x24' \
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY \
   timeout -k 5s 90s python3 app/tests/browser_ui_integration.py app/build/debug/pico
 ```
 
@@ -470,22 +478,20 @@ Recorded continuation validation:
   have not been manually tested. Existing human Wayland validation predates
   these changes.
 
-Continuation validation commands (in addition to the original helper/UI tests):
+Continuation validation commands (adapted to the current isolated GPU-backed display):
 
 ```sh
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
-  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico
 ```
 
-Slice-4 validation commands:
+Slice-4 validation commands (use the same isolated GPU-backed display):
 
 ```sh
 nix develop -c timeout -k 5s 120s python3 app/tests/browser_developer_integration.py \
   app/build/debug/browser/runtime/pico_browser_helper
 
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
-  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico --developer
 ```
 
@@ -527,7 +533,7 @@ optional Enchant library path; no production spell behavior or assertions were
 changed. The resource matrix was measured separately, without concurrent test
 runs. Native/manual and packaged-artifact acceptance remain pending.
 
-Slice-5 validation and profiling commands:
+Slice-5 validation commands (use the same isolated GPU-backed display):
 
 ```sh
 nix develop -c app/build/debug/pico_host_workspace_tests --browser-failures
@@ -535,8 +541,7 @@ nix develop -c app/build/debug/pico_host_workspace_tests --browser-failures
 nix develop -c timeout -k 5s 90s python3 app/tests/browser_failure_integration.py \
   app/build/debug/browser/runtime/pico_browser_helper
 
-nix develop .#browser-tests -c env -u WAYLAND_DISPLAY xvfb-run -a \
-  -s '-screen 0 1600x1200x24' timeout -k 5s 120s \
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
   python3 app/tests/browser_agent_integration.py app/build/debug/pico --failure
 ```
 
@@ -592,9 +597,10 @@ Test-environment notes:
 
 When debugging:
 
-1. Separate command delivery, page loading, frame receipt, texture upload, and
-   actual presentation. A server request or `OnPaint` callback alone is not proof
-   that the user or model sees the page.
+1. Separate command delivery, page loading, accelerated frame receipt, DMA-BUF
+   import and actual presentation. A server request or `OnAcceleratedPaint`
+   callback alone is not proof that the user or model sees the page. `OnPaint`
+   is only an unsupported-software-rendering error path, never a fallback.
 2. Check `$XDG_CONFIG_HOME/pico/browser/cef.log`, defaulting to
    `~/.config/pico/browser/cef.log`, and capture Pico's stdout/stderr.
 3. For process exits, inspect recent core dumps with `coredumpctl list` and select

@@ -44,7 +44,10 @@ std::map<uint64_t, CefRefPtr<Page>> pages;
 
 bool Send(uint64_t token, uint32_t type, const void* bytes = nullptr,
           size_t size = 0, int width = 0, int height = 0, const PbFds* fds = nullptr) {
-    if (type != PB_FRAME && type != PB_OBSERVATION && type != PB_TEXT_RESULT) size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
+    // Only textual events are bounded strings. Frames are fixed DMA-BUF
+    // metadata; observations carry their separate, bounded PNG payload.
+    if (type == PB_URL || type == PB_ERROR || type == PB_STOPPED)
+        size = std::min(size, static_cast<size_t>(PB_URL_CAP - 1));
     PbEvent event{token, type, static_cast<uint32_t>(size),
                   static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     const void* chunks[] = {&event, bytes};
@@ -117,7 +120,6 @@ public:
         Publish(false);
     }
     CefRect popup_rect;
-    int popup_width = 0, popup_height = 0;
     bool popup_shown = false;
     bool agent_control = false, capture_ready = false, priming_capture = false, capturing = false, fresh_view = false, fresh_popup = false;
     uint64_t navigation = 1, viewport = 1, observed_navigation = 0, observed_viewport = 0;
@@ -529,7 +531,7 @@ public:
             !PbGpuCopy(&gpu, &view, target, 0, 0, width, height, 0, 0)) { GpuFailure(gpu.error); return false; }
         if (popup_shown && popup.texture) {
             int x = std::max(0, popup_rect.x), y = std::max(0, popup_rect.y);
-            int right = std::min(width, popup_rect.x + popup_width), bottom = std::min(height, popup_rect.y + popup_height);
+            int right = std::min(width, popup_rect.x + popup.width), bottom = std::min(height, popup_rect.y + popup.height);
             if (right > x && bottom > y && !PbGpuCopy(&gpu, &popup, target, x-popup_rect.x, y-popup_rect.y, right-x, bottom-y, x, y)) {
                 GpuFailure(gpu.error); return false;
             }
@@ -599,7 +601,7 @@ public:
         if (!ok) { GpuFailure(gpu.error); return; }
         accelerated = true;
         if (type == PET_VIEW) { if (capturing) fresh_view = true; }
-        else { popup_width = w; popup_height = h; if (capturing) fresh_popup = true; }
+        else if (capturing) fresh_popup = true;
         if (type == PET_VIEW && priming_capture) CaptureFence();
         Publish(); Captured();
     }

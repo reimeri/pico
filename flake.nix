@@ -196,7 +196,7 @@
           browser-tests = pkgs.mkShell {
             inputsFrom = [ default ];
             packages = [
-              pkgs.xvfb-run pkgs.xdotool pkgs.weston pkgs.xwayland pkgs.mesa-demos
+              pkgs.xdotool pkgs.weston pkgs.xwayland pkgs.mesa-demos
               (pkgs.python3.withPackages (ps: [ ps.pillow ]))
             ];
             inherit (default) FETCHCONTENT_SOURCE_DIR_RAYLIB CEF_ROOT;

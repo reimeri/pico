@@ -1208,6 +1208,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         pico_responses_compact_result(&ctx, turn, oauth ? "codex" : "openai-api", scope, out);
     else pico_responses_fill_result(&ctx, out);
     free(scope);
+    pico_stream_guard_free(&ctx.guard);
     JsonBuf_Free(&ctx.items);
     JsonBuf_Free(&ctx.summary);
     free(ctx.completed_response);

@@ -4,6 +4,7 @@
 #include "pico/app.h"
 #include "pico/http.h"
 #include "json.h"
+#include "stream_guard.h"
 
 /* Internal Chat Completions helper. Hyper uses it; other OpenAI-compat
  * providers can pass PicoCompletionsBuildOpts rather than forking the wire format. */
@@ -28,6 +29,7 @@ typedef struct PicoCompletionsOutput {
 } PicoCompletionsOutput;
 
 typedef struct PicoCompletionsCtx {
+    PicoStreamGuard guard;
     PicoLlmCancelFn cancel;
     PicoLlmDeltaFn on_delta;
     void *user;

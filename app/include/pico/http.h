@@ -48,8 +48,12 @@ typedef struct PicoHttpReq {
 
 /* HTTP status is reported through `out_http`; a completed 4xx/5xx transfer still
  * returns PICO_HTTP_OK. When set, `out_body` and `out_error` are malloc'd and caller-owned.
- * Cancellation returns PICO_HTTP_CANCEL. SSE requests follow redirects and time out after
- * 600 seconds per attempt; buffered GET/POST requests use 30 seconds per attempt.
+ * Cancellation returns PICO_HTTP_CANCEL. SSE requests follow redirects, allow 600
+ * seconds without response-body bytes (including before the first byte), and have
+ * a 3600-second total limit and 600-second connect limit per attempt. Every nonempty
+ * body write, including SSE keepalives, resets inactivity; headers alone do not.
+ * Deadline expiry returns PICO_HTTP_FAIL with an explanatory out_error, not CANCEL.
+ * Buffered GET/POST requests use a 30-second total timeout per attempt.
  * Transient handshake/DNS/connect failures before any headers/body are retried up to
  * five times with cancellable 1/2/4/8/16-second waits. HTTP errors, certificate
  * verification failures, timeouts and partial responses are not retried. */

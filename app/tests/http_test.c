@@ -2,6 +2,9 @@
 #include "test_wait.h"
 #include "pico/http.h"
 #include "http_internal.h"
+#ifdef PICO_TEST_CLOCK
+#include "test_clock.h"
+#endif
 #include <arpa/inet.h>
 #include <curl/curl.h>
 #include <pthread.h>
@@ -89,6 +92,10 @@ static void Retrying(void *user, int retry, int max_retries, int delay, const ch
     if (r->cancel) r->cancelled = true;
     if (r->recover && r->waits == 1)
     {
+#ifdef PICO_TEST_CLOCK
+        /* The next connection attempt gets a fresh deadline after retry waits. */
+        PicoTestClock_Advance(10000);
+#endif
         r->invalid |= listen(r->server.fd, 1) != 0;
         r->invalid |= pthread_create(&r->thread, NULL, Serve, &r->server) != 0;
     }
@@ -340,6 +347,130 @@ static int ShutdownWhileBorrowed(void)
     return fail;
 }
 
+#ifdef PICO_TEST_CLOCK
+/* The server waits for each parsed event before sending the next chunk. Advance
+ * only the executable's monotonic clock: libcurl/socket I/O still uses real time.
+ * No multi-minute sleeps or scheduler-speed assumptions are needed. */
+typedef struct DeadlineStream {
+    int listener;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int events;
+    bool done;
+    bool silent;
+    bool headers_sent;
+    bool user_cancel;
+    bool total;
+    int retries;
+} DeadlineStream;
+
+static void *ServeDeadline(void *user)
+{
+    DeadlineStream *s = user;
+    int fd = accept(s->listener, NULL, NULL);
+    if (fd < 0) return NULL;
+    char request[4096];
+    (void)recv(fd, request, sizeof(request), 0);
+    const char header[] = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    send(fd, header, sizeof(header) - 1, MSG_NOSIGNAL);
+    pthread_mutex_lock(&s->mu);
+    s->headers_sent = true;
+    if (s->silent)
+    {
+        while (!s->done) pthread_cond_wait(&s->cv, &s->mu);
+    }
+    else
+    {
+        for (int i = 0; i < 10 && !s->done; i++)
+        {
+            pthread_mutex_unlock(&s->mu);
+            const char event[] = ": keepalive\n\ndata: {}\n\n";
+            if (send(fd, event, sizeof(event) - 1, MSG_NOSIGNAL) <= 0)
+            {
+                pthread_mutex_lock(&s->mu);
+                break;
+            }
+            pthread_mutex_lock(&s->mu);
+            while (s->events <= i && !s->done) pthread_cond_wait(&s->cv, &s->mu);
+        }
+    }
+    pthread_mutex_unlock(&s->mu);
+    close(fd);
+    return NULL;
+}
+
+static bool DeadlineJson(void *user, const char *event, const char *json, size_t len)
+{
+    (void)event; (void)json; (void)len;
+    DeadlineStream *s = user;
+    pthread_mutex_lock(&s->mu);
+    s->events++;
+    /* All gaps are under ten minutes. In total-limit mode the eighth event
+     * reaches one hour despite continuous incoming body bytes. */
+    PicoTestClock_Advance(100 + s->events * (s->total ? 450 : 120));
+    pthread_cond_signal(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+    return true;
+}
+
+static bool DeadlineCancel(void *user)
+{
+    DeadlineStream *s = user;
+    pthread_mutex_lock(&s->mu);
+    bool expired = s->silent && s->headers_sent;
+    if (expired) PicoTestClock_Advance(700);
+    pthread_mutex_unlock(&s->mu);
+    return expired && s->user_cancel;
+}
+
+static void DeadlineRetry(void *user, int retry, int max, int delay, const char *error)
+{
+    (void)retry; (void)max; (void)delay; (void)error;
+    ((DeadlineStream *)user)->retries++;
+}
+
+static int StreamingDeadlines(bool silent, bool total, bool user_cancel)
+{
+    DeadlineStream s = {.listener = socket(AF_INET, SOCK_STREAM, 0), .silent = silent,
+                        .total = total, .user_cancel = user_cancel};
+    pthread_mutex_init(&s.mu, NULL);
+    pthread_cond_init(&s.cv, NULL);
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    if (s.listener < 0 || bind(s.listener, (void *)&addr, size) || listen(s.listener, 1) ||
+        getsockname(s.listener, (void *)&addr, &size)) return 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, ServeDeadline, &s)) return 1;
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
+    PicoHttpPost req = {.url = url, .body = "{}", .on_json = DeadlineJson,
+                        .cancel = DeadlineCancel, .on_retry = DeadlineRetry, .user = &s};
+    char *error = NULL;
+    PicoTestClock_Set(100);
+    int rc = pico_http_post_sse(&req, NULL, &error);
+    PicoTestClock_Reset();
+    pthread_mutex_lock(&s.mu);
+    s.done = true;
+    pthread_cond_signal(&s.cv);
+    pthread_mutex_unlock(&s.mu);
+    pthread_join(thread, NULL);
+    close(s.listener);
+    pthread_cond_destroy(&s.cv);
+    pthread_mutex_destroy(&s.mu);
+    int fail;
+    if (user_cancel) fail = rc != PICO_HTTP_CANCEL || error;
+    else if (silent || total)
+        fail = rc != PICO_HTTP_FAIL || !error ||
+               !strstr(error, total ? "total-duration" : "without response-body bytes");
+    else fail = rc != PICO_HTTP_OK || s.events != 10 || error;
+    fail |= s.retries != 0;
+    if (fail) fprintf(stderr, "deadline silent=%d total=%d cancel=%d rc=%d events=%d error=%s\n",
+                      silent, total, user_cancel, rc, s.events, error ? error : "");
+    free(error);
+    return fail;
+}
+#endif
+
 int main(void)
 {
     setenv("NO_PROXY", "127.0.0.1", 1);
@@ -370,7 +501,19 @@ int main(void)
     PicoTest_Case("HTTP framing and callback cancellation");
     fail |= Request("application/json", sse_body, &explicit_json) || explicit_json.count != 1 ||
             strcmp(explicit_json.json[0], sse_body);
+#ifdef PICO_TEST_CLOCK
+    fail |= PICO_TEST_RUN(StreamingDeadlines(false, false, false));
+    fail |= PICO_TEST_RUN(StreamingDeadlines(true, false, false));
+    fail |= PICO_TEST_RUN(StreamingDeadlines(false, true, false));
+    fail |= PICO_TEST_RUN(StreamingDeadlines(true, false, true));
+#endif
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Set(100);
+#endif
     fail |= PICO_TEST_RUN(RetryRequest(true, true, false));
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Reset();
+#endif
     fail |= PICO_TEST_RUN(RetryRequest(false, true, false));
     fail |= PICO_TEST_RUN(RetryRequest(true, false, true));
     fail |= PICO_TEST_RUN(RetryRequest(false, false, false));

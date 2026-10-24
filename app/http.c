@@ -116,7 +116,8 @@ bool PicoHttp_ShutdownConnections(void)
 
 /* Never replay after headers (including redirects/interim responses) or body. */
 static CURLcode PerformWithRetries(CURL *curl, bool *received, PicoHttpCancelFn cancel,
-                                   PicoHttpRetryFn notify, void *user, char *error)
+                                   PicoHttpRetryFn notify, void *user, char *error,
+                                   void (*begin_attempt)(void *), void *attempt_user)
 {
     const int max_retries = 5;
     for (int attempt = 0;; attempt++)
@@ -124,6 +125,8 @@ static CURLcode PerformWithRetries(CURL *curl, bool *received, PicoHttpCancelFn 
         if (cancel && cancel(user))
             return CURLE_ABORTED_BY_CALLBACK;
         error[0] = '\0';
+        if (begin_attempt)
+            begin_attempt(attempt_user);
         CURLcode rc = curl_easy_perform(curl);
         if (cancel && cancel(user))
             return CURLE_ABORTED_BY_CALLBACK;
@@ -167,7 +170,37 @@ typedef struct HttpCtx
     bool buffer_failed;
     PicoHttpCapture capture;
     bool received;
+    double started_at;
+    double last_body_at;
+    const char *deadline_error;
 } HttpCtx;
+
+static double MonotonicSeconds(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+}
+
+static void BeginStreamAttempt(void *user)
+{
+    HttpCtx *c = user;
+    c->started_at = c->last_body_at = MonotonicSeconds();
+    c->deadline_error = NULL;
+}
+
+static bool StreamDeadlineExpired(HttpCtx *c)
+{
+    double now = MonotonicSeconds();
+    if (!c->deadline_error)
+    {
+        if (now - c->started_at >= 3600.0)
+            c->deadline_error = "Streaming request exceeded the 60-minute total-duration limit";
+        else if (now - c->last_body_at >= 600.0)
+            c->deadline_error = "Streaming request timed out after 10 minutes without response-body bytes";
+    }
+    return c->deadline_error != NULL;
+}
 
 static bool Cancelled(HttpCtx *c)
 {
@@ -271,8 +304,10 @@ static size_t OnWrite(char *ptr, size_t size, size_t nmemb, void *userdata)
     size_t n = size * nmemb;
     c->received |= n != 0;
     PicoHttpCapture_Write(&c->capture, ptr, n);
-    if (Cancelled(c))
+    if (Cancelled(c) || StreamDeadlineExpired(c))
         return 0;
+    if (n)
+        c->last_body_at = MonotonicSeconds();
     for (size_t i = 0; i < n && !c->json_abort; i++)
     {
         char ch = ptr[i];
@@ -331,7 +366,8 @@ static int OnXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_
     (void)dlnow;
     (void)ultotal;
     (void)ulnow;
-    return Cancelled((HttpCtx *)clientp) ? 1 : 0;
+    HttpCtx *c = clientp;
+    return Cancelled(c) || StreamDeadlineExpired(c) ? 1 : 0;
 }
 
 int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error)
@@ -396,13 +432,14 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 600L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3600L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
 
     char error[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
     CURLcode rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
-                                     req->user, error);
+                                     req->user, error, BeginStreamAttempt, &ctx);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -413,8 +450,17 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
         *out_http = http;
     }
 
+    /* Curl's own connect/total timeout may win the race with OnXfer. */
+    if (rc == CURLE_OPERATION_TIMEDOUT)
+        StreamDeadlineExpired(&ctx);
+    /* Deadline aborts are failures, not user cancellations, and are never retried. */
+    if (ctx.deadline_error)
+    {
+        rc = CURLE_OPERATION_TIMEDOUT;
+        snprintf(error, sizeof(error), "%s", ctx.deadline_error);
+    }
     bool cancelled = req->cancel && req->cancel(req->user);
-    if (!cancelled && !ctx.json_abort)
+    if (!cancelled && !ctx.json_abort && !ctx.deadline_error)
     {
         DrainSse(&ctx, true);
     }
@@ -583,7 +629,7 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     char error[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
     CURLcode rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
-                                     req->user, error);
+                                     req->user, error, NULL, NULL);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);

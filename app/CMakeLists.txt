@@ -238,6 +238,7 @@ add_executable(pico
     builtins/xai_auth.c
     builtins/responses.c
     builtins/provider_retry.c
+    builtins/stream_guard.c
     builtins/completions.c
     builtins/extensions.c
     builtins/settings.c
@@ -408,6 +409,12 @@ if(BUILD_TESTING)
     target_include_directories(pico_http_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(pico_http_tests PRIVATE CURL::libcurl Threads::Threads)
     pico_warnings_are_errors(pico_http_tests)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(pico_http_tests PRIVATE tests/test_clock.c)
+        target_compile_definitions(pico_http_tests PRIVATE PICO_TEST_CLOCK=1)
+        target_link_libraries(pico_http_tests PRIVATE Threads::Threads)
+        target_link_options(pico_http_tests PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait)
+    endif()
     add_test(NAME pico_http_tests COMMAND pico_http_tests)
 
     add_executable(pico_http_capture_tests
@@ -560,6 +567,7 @@ if(BUILD_TESTING)
         tests/responses_test.c
         builtins/responses.c
         builtins/provider_retry.c
+        builtins/stream_guard.c
         builtins/hyper_auth.c
         canonical.c
         json.c)
@@ -579,6 +587,7 @@ if(BUILD_TESTING)
         tests/completions_test.c
         builtins/completions.c
         builtins/provider_retry.c
+        builtins/stream_guard.c
         canonical.c
         json.c)
     target_include_directories(pico_completions_tests PRIVATE
@@ -593,9 +602,29 @@ if(BUILD_TESTING)
     target_link_options(pico_completions_tests PRIVATE -Wl,--gc-sections)
     add_test(NAME pico_completions_tests COMMAND pico_completions_tests)
 
+    add_executable(pico_provider_stream_tests
+        tests/provider_stream_test.c
+        builtins/responses.c builtins/completions.c builtins/stream_guard.c
+        builtins/provider_retry.c canonical.c json.c)
+    target_include_directories(pico_provider_stream_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/.. ${raylib_SOURCE_DIR}/src)
+    target_link_libraries(pico_provider_stream_tests PRIVATE pico_image)
+    pico_warnings_are_errors(pico_provider_stream_tests)
+    target_compile_options(pico_provider_stream_tests PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(pico_provider_stream_tests PRIVATE -Wl,--gc-sections)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(pico_provider_stream_tests PRIVATE tests/test_clock.c)
+        target_compile_definitions(pico_provider_stream_tests PRIVATE PICO_TEST_CLOCK=1)
+        target_link_libraries(pico_provider_stream_tests PRIVATE Threads::Threads)
+        target_link_options(pico_provider_stream_tests PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait)
+    endif()
+    add_test(NAME pico_provider_stream_tests COMMAND pico_provider_stream_tests)
+
     add_executable(pico_provider_retry_tests
         tests/provider_retry_test.c
         builtins/provider_retry.c
+        builtins/stream_guard.c
         builtins/responses.c
         builtins/completions.c
         canonical.c
@@ -1076,6 +1105,7 @@ if(BUILD_TESTING)
         builtins/xai_auth.c
         builtins/responses.c
         builtins/provider_retry.c
+        builtins/stream_guard.c
         builtins/completions.c
         builtins/extensions.c
         builtins/settings.c
@@ -1143,7 +1173,7 @@ endif()
 
 set(_pico_ref_builtins
     shell.c image.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
-    completions.c completions.h provider_retry.c provider_retry.h hyper_auth.c hyper_auth.h)
+    completions.c completions.h stream_guard.c stream_guard.h provider_retry.c provider_retry.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/resources ${CMAKE_CURRENT_BINARY_DIR}/resources

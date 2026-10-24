@@ -708,6 +708,14 @@ static void SetError(PicoCompletionsCtx *c, const char *msg)
     c->failed = true;
 }
 
+static bool GuardDelta(PicoCompletionsCtx *c, PicoStreamKind kind, int index,
+                       const char *text, size_t len)
+{
+    const char *error = pico_stream_guard_delta(&c->guard, kind, index, text, len);
+    if (error) SetError(c, error);
+    return !c->failed;
+}
+
 static void FailUnsupported(PicoCompletionsCtx *c, const char *type)
 {
     char buf[192];
@@ -912,6 +920,10 @@ static void ApplyRefusal(PicoCompletionsCtx *c, const JsonDoc *doc, int delta)
 
 static void EmitDelta(PicoCompletionsCtx *c, PicoLlmDeltaKind kind, const char *s, size_t n)
 {
+    if (c->failed ||
+        !GuardDelta(c, kind == PICO_LLM_DELTA_TEXT ? PICO_STREAM_TEXT : PICO_STREAM_THINKING,
+                    -1, s, n))
+        return;
     if (kind == PICO_LLM_DELTA_TEXT && s && n)
     {
         c->saw_text = true;
@@ -926,7 +938,7 @@ static void EmitDelta(PicoCompletionsCtx *c, PicoLlmDeltaKind kind, const char *
 
 static void EmitToolBegin(PicoCompletionsCtx *c, const PicoCompletionsCall *call)
 {
-    if (!c->on_delta || !call->name || !call->name[0])
+    if (c->failed || !c->on_delta || !call->name || !call->name[0])
     {
         return;
     }
@@ -940,7 +952,7 @@ static void EmitToolBegin(PicoCompletionsCtx *c, const PicoCompletionsCall *call
 static void EmitToolArgs(PicoCompletionsCtx *c, const PicoCompletionsCall *call, const char *s,
                          size_t n)
 {
-    if (!c->on_delta || !s || n == 0)
+    if (c->failed || !c->on_delta || !s || n == 0)
     {
         return;
     }
@@ -951,7 +963,7 @@ static void EmitToolArgs(PicoCompletionsCtx *c, const PicoCompletionsCall *call,
 
 static void EmitToolDone(PicoCompletionsCtx *c, const PicoCompletionsCall *call)
 {
-    if (!c->on_delta || !call)
+    if (c->failed || !c->on_delta || !call)
     {
         return;
     }
@@ -1067,6 +1079,11 @@ static void ApplyToolCallDelta(PicoCompletionsCtx *c, const JsonDoc *doc, int tc
         char *args = JsonObjStr(doc, fn, "arguments");
         if (args)
         {
+            if (!GuardDelta(c, PICO_STREAM_ARGUMENTS, call->index, args, strlen(args)))
+            {
+                free(args);
+                return;
+            }
             JsonBuf_Puts(&call->arguments, args);
             /* Chat Completions has no per-call done event. A complete JSON
              * value is this call's arguments; later fragments reopen it. */
@@ -1129,6 +1146,7 @@ static bool ValidateCompletionsDelta(PicoCompletionsCtx *c, const JsonDoc *doc, 
 static bool HandleJson(void *user, const char *event, const char *json, size_t len)
 {
     PicoCompletionsCtx *c = (PicoCompletionsCtx *)user;
+    if (c->failed) return false;
     if (!json || len == 0)
     {
         return true;
@@ -1230,7 +1248,7 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             if (JsonIsArray(&doc, tool_calls))
             {
                 int n = JsonArrayLen(&doc, tool_calls);
-                for (int i = 0; i < n; i++)
+                for (int i = 0; i < n && !c->failed; i++)
                 {
                     ApplyToolCallDelta(c, &doc, JsonArrayAt(&doc, tool_calls, i));
                 }
@@ -1394,6 +1412,7 @@ void pico_completions_ctx_free(PicoCompletionsCtx *c)
     {
         return;
     }
+    pico_stream_guard_free(&c->guard);
     JsonBuf_Free(&c->text);
     JsonBuf_Free(&c->think);
     for (int i = 0; i < c->output_count; i++)
@@ -1506,7 +1525,7 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
             free(auth);
             return PICO_LLM_OK;
         }
-        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error)
+        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error || ctx->guard.error)
         {
             free(auth);
             return PICO_LLM_FAIL;

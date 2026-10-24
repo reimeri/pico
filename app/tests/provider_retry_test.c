@@ -264,10 +264,63 @@ static void TestOtherErrors(bool responses)
     pico_llm_result_free(&out);
 }
 
+static char *ArgumentChunk(bool responses, size_t length)
+{
+    char *args = malloc(length + 1);
+    if (!args) return NULL;
+    memset(args, 'a', length);
+    memcpy(args, "{\"x\":\"", 6);
+    memcpy(args + length - 2, "\"}", 2);
+    args[length] = 0;
+    JsonBuf b = {0};
+    JsonBuf_Puts(&b, responses ?
+        "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":" :
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call\",\"function\":{\"name\":\"sh\",\"arguments\":");
+    JsonBuf_String(&b, args);
+    JsonBuf_Puts(&b, responses ? "}" : "}}]}}]}");
+    free(args);
+    return JsonBuf_Steal(&b);
+}
+
+static void TestGuardRetryPolicy(bool responses)
+{
+    Reset();
+    /* Each attempt is individually below the cap; together they exceed it. */
+    char *chunk = ArgumentChunk(responses, PICO_STREAM_TOOL_ARGUMENT_LIMIT * 3 / 4);
+    Check(chunk != NULL, "allocate retry guard fixture");
+    if (!chunk) return;
+    attempts[0] = (Attempt){503, {chunk}, NULL};
+    attempts[1] = Success(responses);
+    attempts[1].chunks[2] = attempts[1].chunks[1];
+    attempts[1].chunks[1] = attempts[1].chunks[0];
+    attempts[1].chunks[0] = chunk;
+    attempt_count = 2;
+    PicoLlmResult out = {0};
+    int rc = Post(responses, &out);
+    Check(rc == PICO_LLM_OK && !out.error && requests == 2 && resets == 1,
+          "capacity replay starts with a fresh argument budget");
+    pico_llm_result_free(&out);
+    free(chunk);
+
+    Reset();
+    chunk = ArgumentChunk(responses, PICO_STREAM_TOOL_ARGUMENT_LIMIT + 1u);
+    Check(chunk != NULL, "allocate oversized guard fixture");
+    if (!chunk) return;
+    attempts[0] = (Attempt){503, {chunk}, NULL};
+    attempt_count = 1;
+    rc = Post(responses, &out);
+    Check(rc == PICO_LLM_FAIL && out.error && strstr(out.error, "1 MiB") &&
+          !out.item_count && requests == 1 && !resets,
+          "a generation guard failure is never replayed, even with a capacity HTTP status");
+    pico_llm_result_free(&out);
+    free(chunk);
+}
+
 int main(void)
 {
     for (int responses = 0; responses <= 1; responses++)
     {
+        TestGuardRetryPolicy(responses);
         TestHttpRecovery(responses, 429);
         TestHttpRecovery(responses, 503);
         TestStreamRecovery(responses);

@@ -4,11 +4,13 @@
 #include "pico/app.h"
 #include "pico/http.h"
 #include "json.h"
+#include "stream_guard.h"
 
 /* Internal Responses-API helper used by the openai builtin. Completions
  * helpers for Hyper live in completions.c. */
 
 typedef struct PicoResponsesCtx {
+    PicoStreamGuard guard;
     PicoLlmCancelFn cancel;
     PicoLlmDeltaFn on_delta;
     void *user;

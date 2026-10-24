@@ -581,6 +581,38 @@ static void SetError(PicoResponsesCtx *c, const char *msg)
     c->failed = true;
 }
 
+static bool GuardDelta(PicoResponsesCtx *c, PicoStreamKind kind, int index,
+                       const char *text, size_t len)
+{
+    const char *error = pico_stream_guard_delta(&c->guard, kind, index, text, len);
+    if (error) SetError(c, error);
+    return !c->failed;
+}
+
+static bool GuardToolSize(PicoResponsesCtx *c, const char *arguments)
+{
+    const char *error = pico_stream_guard_tool_size(&c->guard, arguments ? strlen(arguments) : 0);
+    if (error) SetError(c, error);
+    return !c->failed;
+}
+
+/* Terminal snapshots may arrive without any preceding argument deltas. */
+static bool GuardOutputTools(PicoResponsesCtx *c, const JsonDoc *doc, int output)
+{
+    for (int i = 0; i < JsonArrayLen(doc, output); i++)
+    {
+        int item = JsonArrayAt(doc, output, i);
+        if (JsonEq(doc, JsonObjGet(doc, item, "type"), "function_call"))
+        {
+            char *arguments = JsonObjStr(doc, item, "arguments");
+            bool ok = GuardToolSize(c, arguments);
+            free(arguments);
+            if (!ok) return false;
+        }
+    }
+    return !c->failed;
+}
+
 static void AppendItem(PicoResponsesCtx *c, const char *raw)
 {
     if (!raw || !raw[0])
@@ -612,6 +644,8 @@ static void CopyOutputArray(PicoResponsesCtx *c, const JsonDoc *doc, int arr)
 
 static void HandleResponseObject(PicoResponsesCtx *c, const JsonDoc *doc, int obj)
 {
+    if (!GuardOutputTools(c, doc, JsonObjGet(doc, obj, "output")))
+        return;
     if (!JsonIsObject(doc, obj))
     {
         return;
@@ -733,6 +767,11 @@ static void EmitDelta(PicoResponsesCtx *c, PicoLlmDeltaKind kind, const char *s,
     {
         return;
     }
+    if (c->failed) return;
+    if ((kind == PICO_LLM_DELTA_TEXT || kind == PICO_LLM_DELTA_THINKING) &&
+        !GuardDelta(c, kind == PICO_LLM_DELTA_TEXT ? PICO_STREAM_TEXT : PICO_STREAM_THINKING,
+                    -1, s, n))
+        return;
     if (kind == PICO_LLM_DELTA_TEXT && s && n)
     {
         c->saw_text = true;
@@ -764,7 +803,7 @@ static void EmitDelta(PicoResponsesCtx *c, PicoLlmDeltaKind kind, const char *s,
 static void EmitToolBegin(PicoResponsesCtx *c, int output_index, const char *call_id,
                           const char *name)
 {
-    if (!c->on_delta || !name || !name[0])
+    if (c->failed || !c->on_delta || !name || !name[0])
     {
         return;
     }
@@ -777,6 +816,8 @@ static void EmitToolBegin(PicoResponsesCtx *c, int output_index, const char *cal
 
 static void EmitToolArgs(PicoResponsesCtx *c, int output_index, const char *s, size_t n)
 {
+    if (c->failed || !GuardDelta(c, PICO_STREAM_ARGUMENTS, output_index, s, n))
+        return;
     if (!c->on_delta || !s || n == 0)
     {
         return;
@@ -789,7 +830,7 @@ static void EmitToolArgs(PicoResponsesCtx *c, int output_index, const char *s, s
 static void EmitToolDone(PicoResponsesCtx *c, int output_index, const char *call_id,
                          const char *name, const char *arguments)
 {
-    if (!c->on_delta)
+    if (!GuardToolSize(c, arguments) || !c->on_delta)
     {
         return;
     }
@@ -835,6 +876,8 @@ static void HandleSummaryDelta(PicoResponsesCtx *c, const JsonDoc *doc, const ch
     {
         return;
     }
+    if (!GuardDelta(c, PICO_STREAM_SUMMARY, -1, delta, strlen(delta)))
+        return;
     JsonBuf_Puts(&c->summary, delta);
     EmitDelta(c, PICO_LLM_DELTA_THINKING_SUMMARY, c->summary.data, c->summary.len);
 }
@@ -916,6 +959,7 @@ static bool HandleCancel(void *user)
 static bool HandleJson(void *user, const char *event, const char *json, size_t len)
 {
     PicoResponsesCtx *c = (PicoResponsesCtx *)user;
+    if (c->failed) return false;
     JsonDoc doc;
     if (!(len == 6 && !memcmp(json, "[DONE]", 6)) && !JsonValidSyntax(json, len)) c->malformed = true;
     if (JsonParse(&doc, json, len) != 0)
@@ -1048,7 +1092,7 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             free(arguments);
         }
         char *raw = JsonObjRaw(&doc, 0, "item");
-        AppendItem(c, raw);
+        if (!c->failed) AppendItem(c, raw);
         free(raw);
     }
     else if (type && strcmp(type, "response.completed") == 0)
@@ -1081,7 +1125,7 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
     else if (!type || strcmp(type, "response") == 0)
     {
         HandleResponseObject(c, &doc, 0);
-        if (c->item_count > 0 && c->on_delta)
+        if (!c->saw_text && c->item_count > 0 && c->on_delta)
         {
             int output = JsonObjGet(&doc, 0, "output");
             if (output < 0)
@@ -1385,6 +1429,7 @@ void pico_responses_ctx_free(PicoResponsesCtx *c)
     {
         return;
     }
+    pico_stream_guard_free(&c->guard);
     JsonBuf_Free(&c->items);
     JsonBuf_Free(&c->summary);
     free(c->error);
@@ -1488,7 +1533,7 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
             free(auth);
             return PICO_LLM_OK;
         }
-        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error)
+        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error || ctx->guard.error)
         {
             free(auth);
             return PICO_LLM_FAIL;

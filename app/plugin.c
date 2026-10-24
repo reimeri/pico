@@ -28,7 +28,7 @@
 #define PICO_CC "cc"
 #endif
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.4.2"
+#define PICO_VERSION "0.5.0"
 #endif
 
 #define PICO_MAX_USER_PLUGINS 32
@@ -2166,7 +2166,8 @@ bool PicoPlugins_Get(const PicoHost *host, int index, PicoExtInfo *out)
     return true;
 }
 
-typedef struct PicoExtensionPreference {
+typedef struct PicoExtensionPreference
+{
     struct PicoExtensionPreference *next;
     PicoWorkspaceId workspace_id;
     char name[PICO_DISABLED_EXT_NAME];
@@ -2174,7 +2175,8 @@ typedef struct PicoExtensionPreference {
     int pending;
 } PicoExtensionPreference;
 
-typedef struct ExtensionSave {
+typedef struct ExtensionSave
+{
     PicoWorkspaceId workspace_id;
     char workspace_path[4096];
     char name[PICO_DISABLED_EXT_NAME];
@@ -2189,17 +2191,22 @@ static void ExtensionSaveRun(void *arg)
 
 static void ExtensionReload(PicoHost *host, PicoWorkspace *ws)
 {
-    if (ws) (void)pico_workspace_request_reload(host, ws->id);
-    else PicoHost_RequestHostReload(host);
+    if (ws)
+        (void)pico_workspace_request_reload(host, ws->id);
+    else
+        PicoHost_RequestHostReload(host);
 }
 
 static void ExtensionSaveCompleted(PicoHost *host, void *arg)
 {
     ExtensionSave *save = arg;
     PicoExtensionPreference *pref = host->extension_preferences;
-    while (pref && (pref->workspace_id != save->workspace_id || strcmp(pref->name, save->name))) pref = pref->next;
-    if (!pref) return;
-    if (save->saved) pref->confirmed_disabled = save->disabled;
+    while (pref && (pref->workspace_id != save->workspace_id || strcmp(pref->name, save->name)))
+        pref = pref->next;
+    if (!pref)
+        return;
+    if (save->saved)
+        pref->confirmed_disabled = save->disabled;
     pref->pending--;
     PicoWorkspace *ws = save->workspace_id ? PicoHost_FindWorkspace(host, save->workspace_id) : NULL;
     if (!save->saved)
@@ -2217,30 +2224,42 @@ bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
 {
     PicoExtInfo info;
     if (!app || !PicoPlugins_Get(app, index, &info) || !info.name || !info.name[0] ||
-        !strcmp(info.name, "extensions") || !strcmp(info.name, "settings")) return false;
-    if (info.enabled == enabled) return true;
+        !strcmp(info.name, "extensions") || !strcmp(info.name, "settings"))
+        return false;
+    if (info.enabled == enabled)
+        return true;
     PicoWorkspace *ws = info.scope == PICO_EXTENSION_HOST ? NULL : PicoHost_FindWorkspace(app, info.workspace_id);
-    if (info.scope != PICO_EXTENSION_HOST && !ws) return false;
+    if (info.scope != PICO_EXTENSION_HOST && !ws)
+        return false;
     PicoWorkspaceId ws_id = ws ? ws->id : 0;
     PicoExtensionPreference *pref = app->extension_preferences;
-    while (pref && (pref->workspace_id != ws_id || strcmp(pref->name, info.name))) pref = pref->next;
+    while (pref && (pref->workspace_id != ws_id || strcmp(pref->name, info.name)))
+        pref = pref->next;
     if (!pref)
     {
         pref = calloc(1, sizeof(*pref));
-        if (!pref) return false;
+        if (!pref)
+            return false;
         pref->workspace_id = ws_id;
         snprintf(pref->name, sizeof(pref->name), "%s", info.name);
         pref->next = app->extension_preferences;
         app->extension_preferences = pref;
     }
-    if (!pref->pending) pref->confirmed_disabled = !info.enabled;
+    if (!pref->pending)
+        pref->confirmed_disabled = !info.enabled;
     ExtensionSave *save = calloc(1, sizeof(*save));
-    if (!save) return false;
+    if (!save)
+        return false;
     save->workspace_id = ws_id;
-    if (ws) snprintf(save->workspace_path, sizeof(save->workspace_path), "%s", ws->path);
+    if (ws)
+        snprintf(save->workspace_path, sizeof(save->workspace_path), "%s", ws->path);
     snprintf(save->name, sizeof(save->name), "%s", info.name);
     save->disabled = !enabled;
-    if (!PicoSettings_ExtensionMemory(app, ws, info.name, !enabled)) { free(save); return false; }
+    if (!PicoSettings_ExtensionMemory(app, ws, info.name, !enabled))
+    {
+        free(save);
+        return false;
+    }
     if (!PicoHost_EnqueueUiPersist(app, save, ExtensionSaveRun, ExtensionSaveCompleted, free))
     {
         (void)PicoSettings_ExtensionMemory(app, ws, info.name, !info.enabled);

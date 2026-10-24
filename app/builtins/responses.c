@@ -219,6 +219,13 @@ static char *MapPicoItem(const char *json, const char *provider)
         }
         pico_canonical_free_parts(parts, n);
     }
+    else if (type && strcmp(type, "provider_state") == 0)
+    {
+        if (pico_canonical_provider_state_valid(&doc, 0) &&
+            JsonEq(&doc, JsonObjGet(&doc, 0, "provider"), provider) &&
+            JsonEq(&doc, JsonObjGet(&doc, 0, "format"), "openai.compaction.v1"))
+            out = JsonObjRaw(&doc, 0, "data");
+    }
     else if (type && strcmp(type, "context") == 0)
     {
         PicoLlmPart *parts = NULL;
@@ -375,7 +382,14 @@ char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesB
     }
     for (int i = 0; i < turn->input_count; i++)
     {
-        if (!ResponsesInputMediaValid(turn->input_json[i]))
+        JsonDoc state;
+        if (JsonParse(&state, turn->input_json[i], strlen(turn->input_json[i]))) return NULL;
+        bool opaque = pico_canonical_is_provider_state(&state, 0);
+        bool valid = !opaque || (pico_canonical_provider_state_valid(&state, 0) &&
+            JsonEq(&state, JsonObjGet(&state, 0, "provider"), opts->provider) &&
+            JsonEq(&state, JsonObjGet(&state, 0, "format"), "openai.compaction.v1"));
+        JsonFree(&state);
+        if (!valid || !ResponsesInputMediaValid(turn->input_json[i]))
         {
             return NULL;
         }
@@ -447,9 +461,12 @@ char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesB
         {
             JsonBuf_Putc(&b, ',');
         }
-        char *brief = BuildResponsesMessage("user", kBriefPrompt, false);
-        JsonBuf_Puts(&b, brief);
-        free(brief);
+        if (turn->native_compact) JsonBuf_Puts(&b, "{\"type\":\"compaction_trigger\"}");
+        else {
+            char *brief = BuildResponsesMessage("user", kBriefPrompt, false);
+            JsonBuf_Puts(&b, brief);
+            free(brief);
+        }
     }
     JsonBuf_Puts(&b, "]");
     if (turn->include_tools && turn->tools && turn->tool_count > 0)
@@ -475,7 +492,8 @@ char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesB
     }
     if (turn->compact)
     {
-        JsonBuf_Puts(&b, ",\"tool_choice\":\"none\"");
+        JsonBuf_Puts(&b, turn->native_compact ?
+            ",\"tool_choice\":\"auto\",\"parallel_tool_calls\":true" : ",\"tool_choice\":\"none\"");
     }
     const char *effort = turn->effort;
     if (effort && effort[0] && strcmp(effort, "none") != 0 && strcmp(effort, "off") != 0)
@@ -598,6 +616,18 @@ static void HandleResponseObject(PicoResponsesCtx *c, const JsonDoc *doc, int ob
     {
         return;
     }
+    if (JsonEq(doc, JsonObjGet(doc, obj, "status"), "completed")) c->completed = true;
+    if (c->completed) {
+        if (c->completed_response) SetError(c, "Duplicate terminal Responses object");
+        else {
+            c->completed_response = JsonRawDup(doc, obj);
+            if (!c->completed_response) SetError(c, "Could not copy terminal Responses object");
+        }
+    }
+    if (JsonEq(doc, JsonObjGet(doc, obj, "status"), "incomplete") ||
+        JsonEq(doc, JsonObjGet(doc, obj, "status"), "failed") ||
+        JsonEq(doc, JsonObjGet(doc, obj, "status"), "cancelled"))
+        SetError(c, "Responses request did not complete successfully");
     char *tier = JsonObjStr(doc, obj, "service_tier");
     if (tier && tier[0])
         snprintf(c->service_tier, sizeof(c->service_tier), "%s", tier);
@@ -887,8 +917,10 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
 {
     PicoResponsesCtx *c = (PicoResponsesCtx *)user;
     JsonDoc doc;
+    if (!(len == 6 && !memcmp(json, "[DONE]", 6)) && !JsonValidSyntax(json, len)) c->malformed = true;
     if (JsonParse(&doc, json, len) != 0)
     {
+        if (len != 6 || memcmp(json, "[DONE]", 6)) c->malformed = true;
         return true;
     }
     int err = JsonObjGet(&doc, 0, "error");
@@ -1021,7 +1053,14 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
     }
     else if (type && strcmp(type, "response.completed") == 0)
     {
+        int response = JsonObjGet(&doc, 0, "response");
+        if (JsonIsObject(&doc, response)) c->completed = true;
+        HandleResponseObject(c, &doc, response);
+    }
+    else if (type && strcmp(type, "response.incomplete") == 0)
+    {
         HandleResponseObject(c, &doc, JsonObjGet(&doc, 0, "response"));
+        SetError(c, "Responses request did not complete successfully");
     }
     else if ((type && (strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0 ||
                       strstr(type, "invalid_request") || strstr(type, "authentication") ||
@@ -1350,6 +1389,7 @@ void pico_responses_ctx_free(PicoResponsesCtx *c)
     JsonBuf_Free(&c->summary);
     free(c->error);
     c->error = NULL;
+    free(c->completed_response); c->completed_response = NULL;
 }
 
 bool pico_responses_feed(PicoResponsesCtx *c, const char *json, size_t len)
@@ -1461,4 +1501,164 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
             return PICO_LLM_CANCEL;
         }
     }
+}
+
+
+static bool ValidCompactionItem(const JsonDoc *doc, int item)
+{
+    int encrypted = JsonObjGet(doc, item, "encrypted_content");
+    int id = JsonObjGet(doc, item, "id");
+    return JsonIsObject(doc, item) && JsonEq(doc, JsonObjGet(doc, item, "type"), "compaction") &&
+        JsonIsString(doc, encrypted) && JsonTokEnd(doc, encrypted) > JsonTokStart(doc, encrypted) &&
+        (id < 0 || JsonIsNull(doc, id) ||
+         (JsonIsString(doc, id) && JsonTokEnd(doc, id) > JsonTokStart(doc, id)));
+}
+
+char *pico_responses_check_state(const PicoLlmTurn *turn, const char *backend, const char *scope)
+{
+    for (int i = 0; i < turn->input_count; ++i) {
+        JsonDoc doc;
+        if (JsonParse(&doc, turn->input_json[i], strlen(turn->input_json[i])))
+            return JsonDup("Invalid conversation history");
+        bool state = pico_canonical_is_provider_state(&doc, 0);
+        bool valid = !state || (pico_canonical_provider_state_valid(&doc, 0) &&
+            JsonEq(&doc, JsonObjGet(&doc, 0, "provider"), "openai") &&
+            JsonEq(&doc, JsonObjGet(&doc, 0, "format"), "openai.compaction.v1") &&
+            backend && scope && JsonEq(&doc, JsonObjGet(&doc, 0, "backend"), backend) &&
+            JsonEq(&doc, JsonObjGet(&doc, 0, "scope"), scope));
+        if (valid && state) {
+            int data = JsonObjGet(&doc, 0, "data");
+            valid = ValidCompactionItem(&doc, data);
+        }
+        JsonFree(&doc);
+        if (!valid) return JsonDup("Native compaction state cannot be used with this backend/account/key. "
+            "Restore the original OpenAI backend and account/key, or start a new session.");
+    }
+    return NULL;
+}
+
+/* Byte-level BPE cannot use more text tokens than UTF-8 bytes. Include
+ * canonical envelope overhead and a separate media allowance; never tokenize
+ * ciphertext. Cross-model native-state acceptance remains the backend's call. */
+static size_t RetainedTokens(const JsonDoc *doc, int item)
+{
+    PicoLlmPart *parts = NULL;
+    int n = 0;
+    size_t tokens = 32;
+    if (!pico_canonical_parse_parts(doc, item, &parts, &n)) return SIZE_MAX;
+    for (int i = 0; i < n; ++i) {
+        if (parts[i].text) tokens += strlen(parts[i].text) + 16;
+        if (parts[i].kind == PICO_LLM_PART_IMAGE || parts[i].kind == PICO_LLM_PART_AUDIO) tokens += 32768;
+    }
+    pico_canonical_free_parts(parts, n);
+    return tokens;
+}
+
+void pico_responses_compact_result(PicoResponsesCtx *c, const PicoLlmTurn *turn,
+                                  const char *backend, const char *scope, PicoLlmResult *out)
+{
+    out->input_tokens = c->input_tokens;
+    out->cached_tokens = c->cached_tokens;
+    snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
+    if (c->error) { out->error = JsonDup(c->error); return; }
+    if (!c->completed || c->malformed || !c->completed_response) {
+        out->error = JsonDup("Native compaction stream ended without a valid response.completed"); return;
+    }
+    JsonDoc terminal;
+    if (JsonParse(&terminal, c->completed_response, strlen(c->completed_response))) {
+        out->error = JsonDup("Invalid native compaction terminal response"); return;
+    }
+    int terminal_output = JsonObjGet(&terminal, 0, "output");
+    int terminal_artifact = -1, terminal_count = 0;
+    bool terminal_valid = JsonEq(&terminal, JsonObjGet(&terminal, 0, "status"), "completed") &&
+                          JsonIsArray(&terminal, terminal_output);
+    for (int i = 0; terminal_valid && i < JsonArrayLen(&terminal, terminal_output); ++i) {
+        int item = JsonArrayAt(&terminal, terminal_output, i);
+        if (JsonEq(&terminal, JsonObjGet(&terminal, item, "type"), "compaction")) {
+            terminal_artifact = item; terminal_count++;
+        } else if (!JsonEq(&terminal, JsonObjGet(&terminal, item, "type"), "reasoning")) terminal_valid = false;
+    }
+    char *terminal_encrypted = terminal_artifact >= 0 ? JsonObjStr(&terminal, terminal_artifact, "encrypted_content") : NULL;
+    terminal_valid = terminal_valid && terminal_count == 1 && terminal_encrypted && terminal_encrypted[0] &&
+        ValidCompactionItem(&terminal, terminal_artifact);
+    if (!terminal_valid) {
+        free(terminal_encrypted); JsonFree(&terminal);
+        out->error = JsonDup("Invalid native compaction terminal status/output"); return;
+    }
+    JsonBuf array; JsonBuf_Init(&array);
+    JsonBuf_Putc(&array, '['); JsonBuf_Append(&array, c->items.data, c->items.len); JsonBuf_Putc(&array, ']');
+    JsonDoc doc;
+    if (!array.data || array.failed || JsonParse(&doc, array.data, array.len)) {
+        JsonBuf_Free(&array); free(terminal_encrypted); JsonFree(&terminal);
+        out->error = JsonDup("Invalid native compaction output"); return;
+    }
+    int n = JsonArrayLen(&doc, 0), artifact = -1, count = 0;
+    bool valid = true;
+    for (int i = 0; i < n; ++i) {
+        int item = JsonArrayAt(&doc, 0, i);
+        if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "compaction")) { artifact = item; count++; }
+        else if (!JsonEq(&doc, JsonObjGet(&doc, item, "type"), "reasoning")) valid = false;
+    }
+    char *encrypted = artifact >= 0 ? JsonObjStr(&doc, artifact, "encrypted_content") : NULL;
+    valid = valid && count == 1 && encrypted && !strcmp(encrypted, terminal_encrypted) && backend && scope &&
+        ValidCompactionItem(&doc, artifact);
+    char *stream_id = artifact >= 0 ? JsonObjStr(&doc, artifact, "id") : NULL;
+    char *terminal_id = JsonObjStr(&terminal, terminal_artifact, "id");
+    valid = valid && ((!stream_id && !terminal_id) ||
+                     (stream_id && terminal_id && !strcmp(stream_id, terminal_id)));
+    free(stream_id); free(terminal_id); free(terminal_encrypted); free(encrypted);
+    if (!valid) {
+        out->error = JsonDup("Native compaction requires exactly one valid compaction item and no tool or message output");
+        JsonFree(&doc); JsonFree(&terminal); JsonBuf_Free(&array); return;
+    }
+    /* Keep whole recent user messages; stop at the first that does not fit,
+     * rather than retaining disconnected older turns or truncating attachments. */
+    size_t budget = 64000;
+    if (turn->context_limit > 0 && (size_t)turn->context_limit / 4 < budget)
+        budget = (size_t)turn->context_limit / 4;
+    size_t fixed = turn->instructions ? strlen(turn->instructions) : 0;
+    for (int i = 0; i < turn->tool_count; ++i) {
+        fixed += (turn->tools[i].params_json ? strlen(turn->tools[i].params_json) : 0);
+        fixed += (turn->tools[i].description ? strlen(turn->tools[i].description) : 0);
+    }
+    budget = fixed < budget ? budget - fixed : 0;
+    char *seed = turn->compact_seed ? pico_canonical_user_text(turn->compact_seed) : NULL;
+    if (turn->compact_seed && !seed) { valid = false; }
+    if (seed) {
+        size_t cost = strlen(turn->compact_seed) + 48;
+        if (cost > budget) valid = false;
+        else budget -= cost;
+    }
+    bool *keep = calloc((size_t)turn->input_count + 1, sizeof(*keep));
+    if (!keep) valid = false;
+    for (int i = turn->input_count - 1; valid && i >= 0; --i) {
+        JsonDoc user;
+        if (JsonParse(&user, turn->input_json[i], strlen(turn->input_json[i]))) { valid = false; break; }
+        if (JsonEq(&user, JsonObjGet(&user, 0, "type"), "user") &&
+            !JsonEq(&user, JsonObjGet(&user, 0, "synthetic"), "true") &&
+            (!seed || strcmp(seed, turn->input_json[i]))) {
+            size_t cost = RetainedTokens(&user, 0);
+            if (cost > budget) { JsonFree(&user); break; }
+            budget -= cost; keep[i] = true;
+        }
+        JsonFree(&user);
+    }
+    JsonBuf result; JsonBuf_Init(&result); JsonBuf_Putc(&result, '[');
+    bool wrote = false;
+    if (seed) { JsonBuf_Puts(&result, seed); wrote = true; }
+    for (int i = 0; valid && i < turn->input_count; ++i) if (keep[i]) {
+        if (wrote) JsonBuf_Putc(&result, ',');
+        JsonBuf_Puts(&result, turn->input_json[i]); wrote = true;
+    }
+    if (wrote) JsonBuf_Putc(&result, ',');
+    JsonBuf_Puts(&result, "{\"type\":\"provider_state\",\"provider\":\"openai\",\"format\":\"openai.compaction.v1\",\"backend\":");
+    JsonBuf_String(&result, backend); JsonBuf_Puts(&result, ",\"scope\":"); JsonBuf_String(&result, scope);
+    JsonBuf_Puts(&result, ",\"model\":"); JsonBuf_String(&result, turn->model);
+    JsonBuf_Puts(&result, ",\"data\":");
+    char *raw = JsonRawDup(&terminal, terminal_artifact);
+    if (!raw) valid = false;
+    JsonBuf_Puts(&result, raw); JsonBuf_Puts(&result, "}]");
+    if (valid) out->compaction_json = JsonBuf_Steal(&result);
+    if (!out->compaction_json) out->error = JsonDup("Could not prepare native compaction history");
+    free(raw); free(seed); free(keep); JsonBuf_Free(&result); JsonFree(&doc); JsonFree(&terminal); JsonBuf_Free(&array);
 }

@@ -13,7 +13,7 @@ A small (~3MB) C99 AI agent harness with a native chat UI. The core is a loader,
 - Find in the current conversation with Ctrl+F
 - Diff viewer
 - Native model support (api key or `/login {provider}`)
-  - OpenAI
+  - OpenAI, including native server-side compaction
   - Charm Hyper
   - xAI
 - By default the agent gets just the `sh` tool for reading, writing, and editing

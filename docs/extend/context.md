@@ -54,6 +54,10 @@ History items use Pico's provider-neutral JSON forms:
 {"type":"context","parts":[{"type":"text","text":"..."}]}
 ```
 
+Synthetic text-compaction briefings are user-shaped items with `"synthetic": true`.
+Genuine user messages are not marked. Native state has its own `provider_state`
+type and is neither text nor a reasoning signature.
+
 `context` items are request-only. Pico appends them after wrapping `extra_context`; they never appear in the hook's `history_json`. `thinking`, `thinking_signature`, and `item_id` are optional. User and assistant content is an ordered `parts` array (`text`, `refusal`, `image`, `audio`). Image/audio parts reference a `path` (optional `mime` / `url`); they never store bytes. Provider-native state appears only after a provider projects it into these canonical fields. Parse items with `json.h`. Treat all history strings as read-only and callback-scoped.
 
 ## Choosing the right hook
@@ -62,7 +66,19 @@ History items use Pico's provider-neutral JSON forms:
 - Use `pico_add_llm_hook` when changing system instructions or filtering tools.
 - Use normal user/assistant history when content must persist and replay.
 
-`/show-prompt` displays system instructions and therefore does not run context hooks. Context hooks run for every queued provider request, including compaction; check `compact` when the context should not influence a summary.
+`/show-prompt` displays system instructions and therefore does not run context hooks.
+Context hooks run for ordinary and text-compaction requests; check `compact` when
+context should not influence a text summary. Native compaction skips these hooks
+and does not submit `extra_context`, because the server could otherwise encode it
+into an opaque checkpoint. Earlier assistant/tool history may still reflect prior
+request context; this is direct exclusion, not semantic erasure of past influence.
+LLM instruction hooks still run for native compaction and intentionally can
+influence the artifact.
+
+After native compaction, `history_json` can include a scoped `provider_state` item
+as documented in [providers](providers.md#native-compaction). It is opaque, not a
+readable message or user utterance. Recognize/skip it when deriving textual
+context; never interpret it as a summary or forward it to another backend.
 
 ## Contract
 

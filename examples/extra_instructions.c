@@ -1,3 +1,5 @@
+// See /docs hooks and providers: LLM instructions also apply to native compaction
+// and may influence its opaque state. Use a context hook for ephemeral reminders.
 // Workspace-scoped LLM hook: append extra system instructions on every round.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
 //

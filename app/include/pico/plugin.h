@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 24 /* Native PNG/JPEG/WebP tool images; PicoToolImage.data */
+#define PICO_EXT_ABI 25 /* Native compaction results and scoped provider-state history. */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);

@@ -423,6 +423,7 @@ typedef struct PicoUiPost {
  *   {"type":"tool_call","call_id":"...","name":"...","arguments":"...","item_id":"..."}
  *   {"type":"tool_result","call_id":"...","name":"...","output":"...","is_error":false,"parts":[{"type":"image","path":"...","mime":"image/png"}]}
  *   {"type":"context","parts":[{"type":"text","text":"..."}]}
+ *   {"type":"provider_state","provider":"...","format":"...","backend":"...","scope":"...","model":"...","data":{...}}
  * `thinking`, `thinking_signature`, and `item_id` are optional. User/assistant
  * parts may also be `refusal`, `image`, or `audio` (`path`, optional `mime` / `url`).
  * `context` is request-only extra_context: text parts only, not persisted in
@@ -435,6 +436,9 @@ typedef struct PicoLlmTurn {
     const char *effort;
     bool fast; /* immutable for an agent turn, including tool follow-ups/compaction */
     bool compact;
+    bool native_compact; /* pinned mode; successful result must replace history */
+    int context_limit; /* resolved model capacity; bounds retained compaction input */
+    const char *compact_seed; /* immutable clarification seed, otherwise NULL */
     bool include_tools;
     bool vision;
     const char *const *input_json;
@@ -482,6 +486,9 @@ typedef struct PicoLlmResult {
     int cached_tokens;
     PicoLlmItem *items;
     int item_count;
+    /* malloc'd JSON array: complete replacement canonical history, ending in
+     * one provider_state item. Native compact only; mutually exclusive with items. */
+    char *compaction_json;
 } PicoLlmResult;
 
 typedef int (*PicoProviderStreamFn)(PicoAgentContext *ctx, const PicoLlmTurn *turn,
@@ -493,6 +500,10 @@ typedef struct PicoProvider {
     PicoProviderStreamFn stream;
     bool map_context; /* stream maps type:context items to a non-user role */
     bool tool_images; /* explicitly maps tool_result image parts; false fails closed */
+    /* Main-thread, read-only, nonblocking route query; NULL selects text.
+     * Also opts in to provider_state input. Worker must revalidate its actual
+     * route/credentials before sending state, including after auth refresh. */
+    bool (*native_compaction)(PicoHost *host, const PicoModel *model, void *state);
     /* Main-thread, nonblocking query. Borrowed arguments; no network or mutation.
      * Called only for models explicitly configured with supports_fast.
      * stream must independently validate the authentication route. NULL means unsupported. */

@@ -23,6 +23,9 @@ typedef struct PicoResponsesCtx {
     char *error;
     bool failed;
     bool capacity_error; /* explicit overload/capacity error or HTTP 429/503 */
+    bool completed; /* successful terminal response observed */
+    bool malformed;
+    char *completed_response; /* complete terminal object; authoritative native output */
     bool saw_text;
     bool saw_summary;
     long http;
@@ -48,5 +51,9 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
                         PicoLlmDeltaFn on_delta, void *user, PicoResponsesCtx *ctx);
 void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out);
 void pico_responses_ctx_free(PicoResponsesCtx *c);
+/* Checks scope before request construction; NULL on success, malloc'd error otherwise. */
+char *pico_responses_check_state(const PicoLlmTurn *turn, const char *backend, const char *scope);
+void pico_responses_compact_result(PicoResponsesCtx *c, const PicoLlmTurn *turn,
+                                  const char *backend, const char *scope, PicoLlmResult *out);
 
 #endif

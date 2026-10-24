@@ -21,6 +21,7 @@ bool PicoUsage_Apply(PicoAgent *agent, int input_tokens, int cached_tokens, int 
     {
         cached_tokens = input_tokens;
     }
+    agent->tokens_unknown = false;
     agent->tokens_used = input_tokens;
     agent->tokens_cached = cached_tokens;
     agent->session_input_tokens = SaturatingAddU64(agent->session_input_tokens, (uint64_t)input_tokens);

@@ -875,6 +875,7 @@ void pico_llm_result_free(PicoLlmResult *r)
         return;
     }
     free(r->error);
+    free(r->compaction_json);
     if (r->items && r->item_count > 0)
     {
         for (int i = 0; i < r->item_count; i++)
@@ -966,6 +967,7 @@ bool pico_llm_result_has_output(const PicoLlmResult *r)
     {
         return false;
     }
+    if (r->compaction_json) return true;
     for (int i = 0; i < r->item_count; i++)
     {
         const PicoLlmItem *item = &r->items[i];
@@ -1079,4 +1081,56 @@ bool pico_canonical_is_tool_result(const char *json)
     if (!json || JsonParse(&doc, json, strlen(json))) return false;
     bool result = JsonEq(&doc, JsonObjGet(&doc, 0, "type"), "tool_result");
     JsonFree(&doc); return result;
+}
+
+
+bool pico_canonical_is_provider_state(const JsonDoc *doc, int obj)
+{
+    return JsonEq(doc, JsonObjGet(doc, obj, "type"), "provider_state");
+}
+
+bool pico_canonical_provider_state_valid(const JsonDoc *doc, int obj)
+{
+    if (!doc || !JsonValidSyntax(doc->src, doc->len) ||
+        !JsonIsObject(doc, obj) || !pico_canonical_is_provider_state(doc, obj) ||
+        !JsonIsObject(doc, JsonObjGet(doc, obj, "data"))) return false;
+    const char *fields[] = {"provider", "format", "backend", "scope", "model"};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        char *value = JsonObjStr(doc, obj, fields[i]);
+        bool valid = JsonIsString(doc, JsonObjGet(doc, obj, fields[i])) && value && value[0];
+        free(value);
+        if (!valid) return false;
+    }
+    return true;
+}
+
+bool pico_canonical_compaction_valid(const JsonDoc *doc, int arr, const char *provider)
+{
+    int n = JsonArrayLen(doc, arr);
+    if (!doc || !JsonValidSyntax(doc->src, doc->len) || !JsonIsArray(doc, arr) || n < 1) return false;
+    for (int i = 0; i < n; ++i) {
+        int item = JsonArrayAt(doc, arr, i);
+        if (i == n - 1) {
+            return pico_canonical_provider_state_valid(doc, item) &&
+                   (!provider || JsonEq(doc, JsonObjGet(doc, item, "provider"), provider));
+        }
+        if (!JsonEq(doc, JsonObjGet(doc, item, "type"), "user") ||
+            JsonEq(doc, JsonObjGet(doc, item, "synthetic"), "true")) return false;
+        PicoLlmPart *parts = NULL;
+        int count = 0;
+        bool valid = pico_canonical_parse_parts(doc, item, &parts, &count) && count > 0;
+        pico_canonical_free_parts(parts, count);
+        if (!valid) return false;
+    }
+    return false;
+}
+
+char *pico_canonical_briefing_json(const char *summary)
+{
+    JsonBuf b; JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"type\":\"user\",\"synthetic\":true,\"parts\":[{\"type\":\"text\",\"text\":");
+    JsonBuf text; JsonBuf_Init(&text); JsonBuf_Puts(&text, "Briefing:\n"); JsonBuf_Puts(&text, summary);
+    if (text.failed) b.failed = true;
+    JsonBuf_String(&b, text.data); JsonBuf_Puts(&b, "}]}"); JsonBuf_Free(&text);
+    return JsonBuf_Steal(&b);
 }

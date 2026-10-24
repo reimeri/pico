@@ -944,7 +944,7 @@ void PicoFooter_Render(PicoHost *app, void *state)
         snprintf(g_tps, sizeof(g_tps), "TPS: --");
     char used[32];
     char limit[32];
-    snprintf(used, sizeof(used), "%s", FormatTokens((uint64_t)agent->tokens_used));
+    snprintf(used, sizeof(used), "%s", agent->tokens_unknown ? "--" : FormatTokens((uint64_t)agent->tokens_used));
     snprintf(limit, sizeof(limit), "%s", FormatTokens((uint64_t)agent->context_limit));
     int cache_percent = 0;
     bool show_cache = PicoUsage_SessionPercent(agent, &cache_percent);

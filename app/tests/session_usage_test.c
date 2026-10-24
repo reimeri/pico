@@ -37,9 +37,17 @@ static char g_last_think[2048];
 
 #ifdef PICO_TEST_JSON_ALLOC
 static bool g_fail_replay_header;
+static bool g_fail_native_replay_type;
 char *__real_JsonObjStr(const JsonDoc *doc, int obj, const char *key);
 char *__wrap_JsonObjStr(const JsonDoc *doc, int obj, const char *key)
 {
+    if (g_fail_native_replay_type && !strcmp(key, "type") &&
+        JsonEq(doc, JsonObjGet(doc, obj, "type"), "compaction") &&
+        JsonEq(doc, JsonObjGet(doc, obj, "kind"), "native")) {
+        g_fail_native_replay_type = false;
+        errno = ENOMEM;
+        return NULL;
+    }
     if (g_fail_replay_header && !strcmp(key, "id") &&
         JsonEq(doc, JsonObjGet(doc, obj, "type"), "session"))
     {
@@ -426,10 +434,27 @@ void PicoAgent_ClearInput(PicoAgent *agent)
     (void)agent;
 }
 
+bool PicoAgent_ReplaceHistory(PicoAgent *agent, const char *history_json)
+{
+    (void)agent;
+    JsonDoc doc;
+    if (JsonParse(&doc, history_json, strlen(history_json))) return false;
+    bool valid = pico_canonical_compaction_valid(&doc, 0, NULL);
+    JsonFree(&doc);
+    if (valid) { g_replayed_history[0] = '\0'; TrackHistory(history_json); }
+    return valid;
+}
+
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
 {
     (void)agent;
     TrackHistory(text);
+}
+
+void PicoAgent_PushHistoryBriefing(PicoAgent *agent, const char *summary)
+{
+    (void)agent;
+    TrackHistory("Briefing:\n"); TrackHistory(summary);
 }
 
 void PicoAgent_PushHistoryUserParts(PicoAgent *agent, const char *text, const char *parts_json)
@@ -4011,6 +4036,69 @@ static int TestSessionTailRecovery(void)
     return 0;
 }
 
+
+static int TestNativeCheckpointPersistence(void)
+{
+    const char *history = "[{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"retained task\"}]},"
+        "{\"type\":\"provider_state\",\"provider\":\"openai\",\"format\":\"openai.compaction.v1\","
+        "\"backend\":\"openai-api\",\"scope\":\"key:fingerprint\",\"model\":\"saved-model\","
+        "\"data\":{\"type\":\"compaction\",\"encrypted_content\":\"persisted-native-state\"}}]";
+    bool ok = true;
+    for (int fail = 0; fail < 2; ++fail) {
+        PicoHost host = {0}; PicoWorkspace ws = {0}; PicoAgent agent = {0}, resumed = {0};
+        ws.host = &host; snprintf(ws.path, sizeof(ws.path), "/workspace");
+        host.workspaces[0] = &ws; host.workspace_count = 1;
+        agent.workspace = resumed.workspace = &ws; agent.id = 71;
+        ws.agents[0] = &agent; ws.count = 1;
+        agent.persistence = resumed.persistence = PICO_SESSION_DURABLE;
+        snprintf(agent.model, sizeof(agent.model), "saved-model");
+        ok &= PicoSession_LogUser(&host, &agent, "original history", "original history", NULL) == PICO_SESSION_WRITE_OK;
+        int ready[2], proceed[2];
+        if (pipe(ready) || pipe(proceed)) return Fail("native checkpoint pipes");
+        PicoSessionPersist_Init(&host);
+        g_catalog_ready_fd = ready[1]; g_catalog_continue_fd = proceed[0];
+        ok &= PicoSession_LogUser(&host, &agent, "before checkpoint", "before checkpoint", NULL) == PICO_SESSION_WRITE_OK;
+        ok &= TransferByte(ready[0], false);
+        PicoSessionCheckpoint *first = PicoSession_QueueCompaction(&host, &agent, history, NULL, 1000);
+        PicoSessionCheckpoint *second = PicoSession_QueueCompaction(&host, &agent, history, NULL, 100);
+        ok &= first && second && atomic_load(&first->status) == 0 && atomic_load(&second->status) == 0;
+        ok &= PicoSession_LogUser(&host, &agent, "after checkpoint", "after checkpoint", NULL) == PICO_SESSION_WRITE_OK;
+        if (fail) g_session_fail_stage = "append_write";
+        ok &= TransferByte(proceed[1], true);
+        PicoSession_DrainPersist(&host, &agent); PicoSessionPersist_Shutdown(&host);
+        g_session_fail_stage = NULL;
+        ok &= first && second && atomic_load(&first->status) == (fail ? -1 : 1) &&
+              atomic_load(&second->status) == (fail ? -1 : 1);
+        PicoSession_CheckpointRelease(first); PicoSession_CheckpointRelease(second);
+        close(ready[0]); close(ready[1]); close(proceed[0]); close(proceed[1]);
+        if (!fail) {
+            g_replayed_history[0] = '\0';
+            ok &= PicoSession_Replay(&host, &resumed, agent.session_path, false) == 0 &&
+                strstr(g_replayed_history, "persisted-native-state") && strstr(g_replayed_history, "after checkpoint") &&
+                !strstr(g_replayed_history, "original history") && !strstr(g_replayed_history, "before checkpoint");
+            PicoAgent_ClearMessages(&resumed); free(resumed.messages); resumed.messages = NULL;
+#ifdef PICO_TEST_JSON_ALLOC
+            PicoSessionReplay *prepared = PicoSession_ReplayPrepare(&host, agent.session_path, PICO_AGENT_MAIN);
+            g_fail_native_replay_type = true;
+            ok &= prepared && !PicoSession_ReplayPrepared(&host, &resumed, agent.session_path, prepared, false) &&
+                  !g_fail_native_replay_type;
+            g_fail_native_replay_type = false;
+            PicoSession_ReplayFree(prepared);
+            PicoAgent_ClearMessages(&resumed); free(resumed.messages); resumed.messages = NULL;
+#endif
+            ok &= AppendRaw(agent.session_path,
+                "{\"type\":\"compaction\",\"kind\":\"native\",\"version\":1,\"history\":[{\"type\":\"user\",\"parts\":[]}]}" );
+            PicoSessionReplay *invalid = PicoSession_ReplayPrepare(&host, agent.session_path, PICO_AGENT_MAIN);
+            ok &= invalid == NULL; PicoSession_ReplayFree(invalid);
+        } else {
+            size_t length; char *file = Pico_ReadFile(agent.session_path, &length);
+            ok &= file && !strstr(file, "persisted-native-state") && !strstr(file, "after checkpoint"); free(file);
+        }
+        unlink(agent.session_path);
+    }
+    return ok ? 0 : Fail("native checkpoint acknowledgments, FIFO rollback, or replay validation failed");
+}
+
 int main(void)
 {
     PicoTest_Case("session usage: initial persistence, replay and failure cases");
@@ -4372,7 +4460,7 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
+    if (PICO_TEST_RUN(TestNativeCheckpointPersistence()) != 0 || PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
         PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 || PICO_TEST_RUN(TestToolImageReplayCompaction()) != 0 || PICO_TEST_RUN(TestInterruptedImageBatch()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||

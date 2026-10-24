@@ -17532,6 +17532,7 @@ static int TestFrameRetriesFailedArenaReplacement(void)
 #endif
 
 #ifdef PICO_OPENAI_LOGIN_TESTS
+#include "openai_compaction_test.c"
 #include "openai_login_test.c"
 #endif
 
@@ -18709,6 +18710,9 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
     if (argc == 2 && strcmp(argv[1], "--fast-persistence") == 0) return PICO_TEST_RUN(TestFastSelectionPersistence());
 #ifdef PICO_OPENAI_LOGIN_TESTS
+    if (argc == 2 && strcmp(argv[1], "--native-compaction") == 0)
+        return PICO_TEST_RUN(TestOpenAiNativeCompaction(false)) || PICO_TEST_RUN(TestOpenAiNativeCompaction(true));
+    if (PICO_TEST_RUN(TestOpenAiNativeCompaction(false)) || PICO_TEST_RUN(TestOpenAiNativeCompaction(true))) return 1;
     if (argc == 2 && strcmp(argv[1], "--openai-refresh") == 0)
         return PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(1, false)) ||
                PICO_TEST_RUN(TestOpenAiRejectedTokenRefresh(2, false)) ||

@@ -12,6 +12,7 @@ bool pico_canonical_normalize_user_parts(const char *json, char **canonical_out)
 char *pico_canonical_parts_json(const PicoLlmPart *parts, int n);
 char *pico_canonical_user_json(const PicoLlmPart *parts, int n);
 char *pico_canonical_user_text(const char *text);
+char *pico_canonical_briefing_json(const char *summary);
 char *pico_canonical_context_json(const PicoLlmPart *parts, int n);
 char *pico_canonical_context_text(const char *text);
 char *pico_canonical_assistant_json(const PicoLlmPart *parts, int n, const char *thinking,
@@ -42,5 +43,10 @@ char *pico_canonical_tool_images_markdown(const char *parts_json);
 bool pico_canonical_tool_images_valid(const JsonDoc *doc, bool read_files);
 
 bool pico_canonical_is_tool_result(const char *json);
+/* Provider state is opaque, explicitly scoped, and never rendered as conversation. */
+bool pico_canonical_is_provider_state(const JsonDoc *doc, int obj);
+bool pico_canonical_provider_state_valid(const JsonDoc *doc, int obj);
+/* Native replacement: genuine user items followed by exactly one scoped state. */
+bool pico_canonical_compaction_valid(const JsonDoc *doc, int arr, const char *provider);
 
 #endif

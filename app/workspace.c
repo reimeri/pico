@@ -637,8 +637,11 @@ static PicoResult CreateAgent(PicoWorkspace *workspace, const PicoAgentCreateOpt
     if (options->select) PicoSession_LoadCancel(app);
     if (replay)
     {
-        PicoSession_ReplayPrepared(app, agent, path, replay, false);
         replayed = true;
+        if (!PicoSession_ReplayPrepared(app, agent, path, replay, false)) {
+            result = PICO_SESSION_INVALID;
+            goto discard;
+        }
         PicoSession_ReplayFree(replay);
         replay = NULL;
     }

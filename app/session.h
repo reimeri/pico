@@ -209,7 +209,7 @@ void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
                                const PicoSessionReplay *replay, bool append_interrupted);
 /* Apply a prepared replay without re-reading its source. Borrows replay; caller
  * frees it after replay/finish. Main thread, unpublished/reserved agent only. */
-void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
+bool PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
                                  PicoSessionReplay *replay, bool append_interrupted);
 /* Replay a fully validated file into an unpublished/reserved agent. */
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
@@ -249,6 +249,16 @@ PicoSessionWriteResult PicoSession_LogToolResult(PicoHost *app, PicoAgent *agent
                                                  const char *details_json, const char *parts_json);
 PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent,
                                                  const char *summary, int tokens_before);
+/* Refcounted write acknowledgment. A queued checkpoint is a FIFO barrier;
+ * status becomes success only after that record's write/fsync completes. */
+typedef struct PicoSessionCheckpoint {
+    atomic_int status; /* -1 failed, 0 pending, 1 written */
+    atomic_int references;
+} PicoSessionCheckpoint;
+PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *agent,
+    const char *history_json, const char *summary, int tokens_before);
+void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint);
+
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,
                                                   const char *model, const char *effort);
 PicoSessionWriteResult PicoSession_LogCustom(PicoHost *app, PicoAgent *agent,

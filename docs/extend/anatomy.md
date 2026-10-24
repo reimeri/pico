@@ -31,7 +31,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 24). ABI 24 expands image-bearing tool results to native PNG/JPEG/WebP bytes (`PicoToolImage.data`); see [tools](tools.md#image-bearing-results) and [providers](providers.md#image-bearing-tool-results). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 25). ABI 25 adds scoped provider-state history and native compaction results; see [providers](providers.md#native-compaction). It includes native PNG/JPEG/WebP tool-result bytes (`PicoToolImage.data`); see [tools](tools.md#image-bearing-results) and [providers](providers.md#image-bearing-tool-results). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.

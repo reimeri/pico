@@ -130,6 +130,24 @@ static void OnCompact(PicoWorkspace *workspace, const PicoHookEvent *event, void
 
 Call only during `PICO_HOOK_ON_COMPACT`. Pico takes ownership. A stale/mismatched ID is rejected and the string is freed.
 
+A nonempty summary is an explicit, authoritative override of either native or
+text provider compaction. The provider is not called. It replaces the entire
+active history (including any opaque native state) with a synthetic briefing
+checkpoint and clears native affinity restrictions after successful persistence.
+The extension owns the adequacy of its summary: native state is not readable
+source text. If preparation/persistence fails, old context remains intact; there
+is no automatic conversion or text fallback when the hook supplies nothing.
+
+`AFTER_COMPACT` fires only after the replacement checkpoint has been written and
+installed (immediately in memory for ephemeral agents). During an accepted
+checkpoint write, cancellation settles against its write outcome rather than
+claiming to roll back a record that may already be committed. Successful-response
+hooks still report the completed provider call and its usage, even if later local
+checkpoint persistence fails. Native compaction skips request-context hooks; LLM
+instruction/tool-filter hooks still run with `compact == true`. Their instructions
+may influence the artifact, so use context hooks—not LLM instructions—for
+request-only reminders. See [providers](providers.md#native-compaction).
+
 ## Before-tool interceptor
 
 ```c

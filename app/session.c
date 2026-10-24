@@ -64,7 +64,7 @@ static bool CatalogDbSeed(sqlite3 *db, const char *path);
 static int CatalogDbList(sqlite3 *db, const char *workspace, const char *search,
                          PicoSessionInfo **out, bool parents_only, int maximum);
 static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent,
-                                                 const char *json);
+                                                 const char *json, PicoSessionCheckpoint *checkpoint);
 static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent,
                                                 const char *title);
 static bool DrainPersistUiBound(PicoHost *app, PicoAgent *agent);
@@ -866,7 +866,7 @@ static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const 
      * calling thread so the UI never blocks on the session lock or fsync. */
     if (app->persist_ready)
     {
-        return QueueSessionLine(app, agent, json);
+        return QueueSessionLine(app, agent, json, NULL);
     }
     PicoSession_DrainPersist(app, agent);
     if (agent->persistence == PICO_SESSION_FAILED)
@@ -1060,7 +1060,7 @@ typedef struct ReplayPreparedMessage {
 
 static bool ReadSteeringId(const JsonDoc *doc, uint64_t *out);
 
-static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int obj,
+static bool ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int obj,
                        bool into_input, int *active_group,
                        ReplayPreparedMessage *prepared)
 {
@@ -1069,7 +1069,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     char *type = JsonObjStr(doc, obj, "type");
     if (!type)
     {
-        return;
+        return false;
     }
     if (strcmp(type, "session") == 0)
     {
@@ -1226,18 +1226,19 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     {
         agent->tokens_used = 0;
         agent->tokens_cached = 0;
-        char *summary = JsonObjStr(doc, obj, "summary");
-        if (into_input)
-        {
+        bool native = JsonEq(doc, JsonObjGet(doc, obj, "kind"), "native");
+        agent->tokens_unknown = native;
+        if (into_input && native) {
+            char *history = JsonObjRaw(doc, obj, "history");
+            bool restored = history && PicoAgent_ReplaceHistory(agent, history);
+            free(history);
+            if (!restored) { free(type); return false; }
+        } else if (into_input) {
+            char *summary = JsonObjStr(doc, obj, "summary");
             PicoAgent_ClearInput(agent);
-            JsonBuf b;
-            JsonBuf_Init(&b);
-            JsonBuf_Puts(&b, "Briefing:\n");
-            JsonBuf_Puts(&b, summary ? summary : "");
-            PicoAgent_PushHistoryUser(agent, b.data ? b.data : "Briefing:\n");
-            JsonBuf_Free(&b);
+            PicoAgent_PushHistoryBriefing(agent, summary ? summary : "");
+            free(summary);
         }
-        free(summary);
     }
     else if (strcmp(type, "model_change") == 0)
     {
@@ -1267,6 +1268,7 @@ static void ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         agent->inbox_pending = JsonEq(doc, tok, "true") || JsonEq(doc, tok, "1");
     }
     free(type);
+    return true;
 }
 
 /* Only owned file data and JSON tokens live here; workers never hold a host,
@@ -1285,6 +1287,7 @@ typedef struct PicoSessionReplay {
     ReplayPreparedMessage *prepared;
     uint64_t last_steering_id;
     bool recovered_tail;
+    bool failed; /* required native history could not be restored */
     bool missing_newline;
     off_t tail_offset;
 } PicoSessionReplay;
@@ -1627,6 +1630,18 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
         }
         if (type && strcmp(type, "compaction") == 0)
         {
+            if (JsonObjGet(doc, 0, "kind") >= 0) {
+                if (!JsonEq(doc, JsonObjGet(doc, 0, "kind"), "native") ||
+                    JsonObjInt(doc, 0, "version", 0) != 1 ||
+                    !pico_canonical_compaction_valid(doc, JsonObjGet(doc, 0, "history"), NULL)) {
+                    free(type); goto invalid;
+                }
+            } else {
+                char *summary = JsonObjStr(doc, 0, "summary");
+                bool valid = summary != NULL;
+                free(summary);
+                if (!valid) { free(type); goto invalid; }
+            }
             last_compact = i;
         }
         else if (type && strcmp(type, "tool_result") == 0)
@@ -1635,7 +1650,7 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
 
         }
         free(type);
-        if (errno == ENOMEM) goto invalid;
+        if (errno == ENOMEM) { *failure = REPLAY_UNAVAILABLE; goto invalid; }
     }
     if (!valid_header) goto invalid;
 
@@ -1837,9 +1852,10 @@ bool PicoSession_ReplayBatch(PicoHost *app, PicoAgent *agent, PicoSessionReplay 
     for (int i = replay->cursor; i < end; i++)
     {
         bool into_input = replay->last_compact < 0 || i >= replay->last_compact;
-        ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group,
-                   replay->prepared ? &replay->prepared[i] : NULL);
+        bool applied = ReplayLine(app, agent, &replay->docs[i], 0, into_input, &replay->active_group,
+                                  replay->prepared ? &replay->prepared[i] : NULL);
         ReplayReleaseRecord(replay, i);
+        if (!applied) { replay->failed = true; replay->cursor = i + 1; return true; }
     }
     replay->cursor = end;
     return end == replay->count;
@@ -1865,17 +1881,19 @@ void PicoSession_ReplayFinish(PicoHost *app, PicoAgent *agent,
     agent->accepted_submit = true;
 }
 
-void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
+bool PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
                                  PicoSessionReplay *replay, bool append_interrupted)
 {
     snprintf(agent->session_path, sizeof(agent->session_path), "%s", path);
     PicoAgent_ClearInput(agent);
     (void)PicoSession_ReplayBatch(app, agent, replay, replay->count);
+    if (replay->failed) return false;
     app->chat_follow_bottom = true;
     PicoSession_ReplayFinish(app, agent, replay, append_interrupted);
     for (int i = 0; i < agent->message_count; i++)
         for (int t = 0; t < agent->messages[i].trace_count; t++)
             agent->messages[i].trace[t].tool_done_t0 = 0.0;
+    return true;
 }
 
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
@@ -1887,9 +1905,9 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
         agent->session_path[0] = '\0';
         return -1;
     }
-    PicoSession_ReplayPrepared(app, agent, path, replay, append_interrupted);
+    bool success = PicoSession_ReplayPrepared(app, agent, path, replay, append_interrupted);
     PicoSession_ReplayFree(replay);
-    return 0;
+    return success ? 0 : -1;
 }
 
 void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent)
@@ -2097,8 +2115,9 @@ void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, 
         ReplayWarnRecovered(app, repaired, replay != NULL);
         if (replay && (!ws || PicoWorkspace_ReserveSession(ws, agent->id, path)))
         {
-            PicoSession_ReplayPrepared(app, agent, path, replay, true);
-            if (skipped) WarnLatestFallback(app);
+            if (!PicoSession_ReplayPrepared(app, agent, path, replay, true))
+                PersistenceFailed(app, agent, "could not restore required native context");
+            else if (skipped) WarnLatestFallback(app);
         }
         else if (!no_session)
         {
@@ -2762,6 +2781,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     PicoAgent_RotateCacheKey(agent);
     agent->tokens_used = 0;
     agent->tokens_cached = 0;
+    agent->tokens_unknown = false;
     agent->has_llm_response = false;
     agent->session_input_tokens = 0;
     agent->session_cached_tokens = 0;
@@ -3102,6 +3122,52 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent
     free(line);
     free(pre);
     return result;
+}
+
+void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint)
+{
+    if (checkpoint && atomic_fetch_sub(&checkpoint->references, 1) == 1) free(checkpoint);
+}
+
+PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *agent,
+    const char *history_json, const char *summary, int tokens_before)
+{
+    if (!app || !agent || (!summary && !history_json)) return NULL;
+    if (history_json) {
+        JsonDoc doc;
+        if (JsonParse(&doc, history_json, strlen(history_json))) return NULL;
+        bool valid = pico_canonical_compaction_valid(&doc, 0, NULL);
+        JsonFree(&doc);
+        if (!valid) return NULL;
+    }
+    PicoSessionCheckpoint *checkpoint = calloc(1, sizeof(*checkpoint));
+    if (!checkpoint) return NULL;
+    atomic_init(&checkpoint->status, 0); atomic_init(&checkpoint->references, 1);
+    JsonBuf b; JsonBuf_Init(&b);
+    char *prefix = EventPrefix("compaction");
+    if (!prefix) { PicoSession_CheckpointRelease(checkpoint); return NULL; }
+    JsonBuf_Puts(&b, prefix); free(prefix);
+    if (history_json) {
+        JsonBuf_Puts(&b, ",\"kind\":\"native\",\"version\":1,\"history\":");
+        JsonBuf_Puts(&b, history_json);
+    } else {
+        JsonBuf_Puts(&b, ",\"summary\":"); JsonBuf_String(&b, summary);
+    }
+    JsonBuf_Puts(&b, ",\"tokens_before\":"); JsonBuf_Int(&b, tokens_before); JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    if (!line) { PicoSession_CheckpointRelease(checkpoint); return NULL; }
+    PicoSessionWriteResult result;
+    if (app->persist_ready && agent->persistence != PICO_SESSION_EPHEMERAL)
+        result = QueueSessionLine(app, agent, line, checkpoint);
+    else {
+        result = AppendLine(app, agent, line);
+        atomic_store(&checkpoint->status, result == PICO_SESSION_WRITE_FAILED ? -1 : 1);
+    }
+    free(line);
+    if (result == PICO_SESSION_WRITE_FAILED) {
+        PicoSession_CheckpointRelease(checkpoint); return NULL;
+    }
+    return checkpoint;
 }
 
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,
@@ -5986,6 +6052,11 @@ static void PersistJobClear(PicoSessionPersistJob *job)
     }
     chain = job->next;
     job->next = NULL;
+    if (job->checkpoint) {
+        int pending = 0;
+        atomic_compare_exchange_strong(&job->checkpoint->status, &pending, -1);
+        PicoSession_CheckpointRelease(job->checkpoint);
+    }
     free(job->header_json);
     free(job->event_json);
     free(job->title);
@@ -6038,6 +6109,8 @@ static PicoSessionPersistJob *PersistJobExtend(PicoSessionPersistJob *last, Pico
     node->event_len = src->event_len;
     node->event_capacity = src->event_capacity;
     node->title = src->title;
+    node->checkpoint = src->checkpoint;
+    src->checkpoint = NULL;
     src->header_json = NULL;
     src->event_json = NULL;
     src->event_len = src->event_capacity = 0;
@@ -6415,6 +6488,7 @@ static void *PersistThreadMain(void *arg)
                 {
                     failed = true;
                 }
+                if (cur->checkpoint) atomic_store(&cur->checkpoint->status, failed ? -1 : 1);
                 cur = cur->next;
             }
         }
@@ -6816,7 +6890,8 @@ static bool PersistCanQueueLocked(const PicoHost *app, const PicoSessionPersistJ
            bytes <= PICO_PERSIST_TOTAL_BYTES - app->persist_pending_bytes;
 }
 
-static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, const char *json)
+static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, const char *json,
+                                                 PicoSessionCheckpoint *checkpoint)
 {
     PicoSessionPersistJob *pending;
     PicoSessionPersistJob job;
@@ -6843,8 +6918,10 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
     job.event_len = strlen(json);
     job.event_capacity = job.event_len + 1;
     job.event_json = JsonDup(json);
+    if (checkpoint) { atomic_fetch_add(&checkpoint->references, 1); job.checkpoint = checkpoint; }
     if (!job.event_json)
     {
+        PersistJobClear(&job);
         PersistenceFailed(app, agent, "out of memory while queueing the session write");
         return PICO_SESSION_WRITE_FAILED;
     }
@@ -6891,8 +6968,8 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
         job.header_json = NULL;
     }
     if (!PersistCanQueueLocked(app, pending, job.queued_bytes +
-                               (pending && !PersistJobTail(pending)->title &&
-                                PersistJobTail(pending)->event_len ? 1 : 0)))
+                               (pending && !checkpoint && !PersistJobTail(pending)->checkpoint &&
+                                !PersistJobTail(pending)->title && PersistJobTail(pending)->event_len ? 1 : 0)))
     {
         pthread_mutex_unlock(&app->persist_mu);
         PersistJobClear(&job);
@@ -6902,7 +6979,7 @@ static PicoSessionWriteResult QueueSessionLine(PicoHost *app, PicoAgent *agent, 
     if (pending)
     {
         PicoSessionPersistJob *last = PersistJobTail(pending);
-        if (last && !last->title)
+        if (last && !last->title && !last->checkpoint && !checkpoint)
         {
             size_t have = last->event_len;
             size_t add = job.event_len;
@@ -7052,7 +7129,7 @@ static PicoSessionWriteResult QueueSessionTitle(PicoHost *app, PicoAgent *agent,
     if (pending)
     {
         PicoSessionPersistJob *last = PersistJobTail(pending);
-        if (last && !last->title)
+        if (last && !last->title && !last->checkpoint)
         {
             last->title = job.title;
             job.title = NULL;
@@ -7116,7 +7193,7 @@ void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
         PersistenceFailed(app, agent, "out of memory while logging the model change");
         return;
     }
-    (void)QueueSessionLine(app, agent, json);
+    (void)QueueSessionLine(app, agent, json, NULL);
     free(json);
 }
 
@@ -7430,6 +7507,7 @@ void PicoSession_LoadPump(PicoHost *host)
         host->session_replay_agent = load->candidate;
         bool finished = PicoSession_ReplayBatch(host, load->candidate, load->replay, 1);
         host->session_replay_agent = NULL;
+        if (load->replay->failed) goto failed;
         if (!finished)
         {
             clock_gettime(CLOCK_MONOTONIC, &now);

@@ -45,6 +45,98 @@ static int MyInit(PicoWorkspace *workspace, void **state_out)
 
 Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`, `xai`) is used instead.
 
+## Native compaction
+
+`/compact` and the existing automatic `compact_at` threshold use native server-side
+compaction on the official OpenAI API and ChatGPT/Codex OAuth routes. The builtin
+posts a normal streamed Responses request with a trailing `compaction_trigger`,
+`store: false`, and encrypted reasoning included. Ordinary official-route requests
+also use stateless replay (`store: false` and `reasoning.encrypted_content`). Custom
+OpenAI-compatible gateways, Hyper, and xAI retain text-briefing compaction.
+
+Native compaction requires a complete successful terminal response and exactly
+one valid encrypted compaction artifact, consistent with streamed output. It does
+not execute tools, produce a portable text summary, or retry as text on failure.
+Authentication and capacity retries remain retries of the same operation. Inline
+`context_management`, `/responses/compact`, response-ID chaining, WebSockets, and
+background compaction are not used.
+
+The replacement contains recent genuine user messages followed by one opaque
+provider-state item. Retention keeps whole messages, newest first within the
+budget, then restores chronological order; it stops at the first message that
+cannot fit. Synthetic briefings and tool observations are not retained as users.
+The ceiling is 64k tokens, further capped to a quarter of the model context and
+reduced by instruction/tool overhead. Text uses a conservative UTF-8 byte bound;
+media has a separate conservative allowance. This leaves headroom, but does not
+guarantee that another model accepts the artifact. An immutable clarification
+seed is retained exactly once; if it cannot fit, compaction fails without
+replacing history.
+
+A native checkpoint persists the entire ordered replacement and its authority:
+provider, backend (`openai-api` or `codex`), state format, and OAuth account or
+SHA-256 fingerprint of the effective API key. Raw keys and bearer tokens are
+never checkpoint metadata. OAuth token rotation within the same account is
+allowed. Model, effort, and Fast changes within the same authority are allowed;
+backend rejection remains an error, without stripping state or falling back.
+Changing backend, account, API key, or provider refuses continuation before
+transmitting native state. Custom gateways cannot receive an official-route
+checkpoint. Restore the original backend/account/key or start a new conversation.
+The transcript remains viewable even when continuation is unavailable.
+
+### Provider contract
+
+An optional `PicoProvider.native_compaction(host, model, state)` callback selects
+native compaction for the resolved route; NULL/false selects text. Like
+`supports_fast`, it runs on the main thread, is read-only and nonblocking, borrows
+its arguments, and may read a copied auth snapshot. It shares the provider's
+registration generation and concurrent workspace-instance state. No network,
+refresh, UI mutation, or retained argument pointers are allowed.
+
+A non-NULL callback also opts the provider into `provider_state` input. The core
+rejects state owned by another provider and providers without this opt-in. The
+worker must independently validate its actual backend, format, and credentials
+before request construction and after auth refresh; a main-thread query is not
+an authority check. False on a later route is not permission to discard state or
+summarize it through an incompatible backend.
+
+`PicoLlmTurn.native_compact` pins the selected mode. `context_limit` is the
+resolved model capacity; `compact_seed` is a borrowed immutable clarification
+seed or NULL. They have the same worker-callback lifetime as other turn fields.
+Continue using `stream` and `compact`; no second executor is registered.
+
+For native compaction return `PICO_LLM_OK` with malloc'd
+`PicoLlmResult.compaction_json`: a complete canonical JSON array containing zero
+or more genuine user items followed by exactly one scoped state item. It is
+mutually exclusive with ordinary `items`. A native request must return this
+variant; a normal/text request must not. `pico_llm_result_free` frees it.
+Usage/service-tier reporting remains on the ordinary result fields.
+
+```json
+{"type":"provider_state","provider":"openai","format":"openai.compaction.v1","backend":"openai-api","scope":"key:<fingerprint>","model":"originating-model","data":{"type":"compaction","id":"cmp_...","encrypted_content":"..."}}
+```
+
+Envelope fields are nonempty strings and `data` is an object. OpenAI's ciphertext
+must be a nonempty string; its optional item ID, when present and non-null, must
+be a nonempty string. Only `data` is projected onto the wire; local affinity
+metadata is never sent as conversation. Keep the artifact opaque and unchanged.
+Do not place it in assistant text, a reasoning signature, or a synthetic user
+message. Context-hook history readers must recognize this non-conversation item
+and not assume that every item contains readable message parts.
+
+After validation the host stages replacement history, writes one checkpoint,
+and only then installs it and dispatches `AFTER_COMPACT`. Failed/cancelled remote
+operations leave history intact. While a durable checkpoint write is pending,
+cancellation waits for its outcome: success installs the written checkpoint and
+then stops continuation; failure preserves old context and reports the error.
+Ephemeral agents commit in memory. The new window's token count is unknown until
+a later successful provider response reports usage (the footer shows `--`);
+compaction usage still contributes once to cumulative session totals.
+
+An explicit `ON_COMPACT` text-summary override remains authoritative, even with
+existing native state. A successful text checkpoint replaces that state and
+clears its affinity restriction. This is an intentional extension override, not
+automatic failure fallback; see [hooks](hooks.md#on_compact).
+
 ## Fast mode
 
 A model must explicitly declare `"supports_fast": true` in `settings.json` (or enable **Supports Fast mode** in `/settings`). This is capability metadata, not the selected mode. Omission defaults to false. Configure it only for models for which the service supports priority processing. Pico also checks the provider and current authentication route (including the presence of credentials); the model flag cannot bypass those checks.
@@ -80,9 +172,9 @@ Populate `PicoLlmResult.service_tier` with the actual backend-reported tier as a
 
 ## Turn
 
-`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `fast`, `compact`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`. `model`, `base_url`, `effort`, and `fast` are pinned at turn start: every request of a turn — tool follow-ups and compaction included — carries the same values, so a provider never observes a mid-turn model, effort, or Fast change. Selecting another model or effort while a turn is busy updates the selection for the next turn only.
+`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `fast`, `compact`, `native_compact`, `context_limit`, `compact_seed`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`. `model`, `base_url`, `effort`, and `fast` are pinned at turn start: every request of a turn — tool follow-ups and compaction included — carries the same values, so a provider never observes a mid-turn model, effort, or Fast change. Selecting another model or effort while a turn is busy updates the selection for the next turn only.
 
-`input_json` uses Pico's provider-neutral item forms. `user` and `assistant` carry a `parts` array (`text`, `refusal`, `image`, `audio`). `tool_call` and `tool_result` use `call_id` / `name` / `arguments` or `output`. Request-only `context` items are:
+`input_json` uses Pico's canonical item forms, including the scoped `provider_state` described above. Synthetic text-compaction briefings are user-shaped items marked `"synthetic": true`; genuine user submissions are not marked. `user` and `assistant` carry a `parts` array (`text`, `refusal`, `image`, `audio`). `tool_call` and `tool_result` use `call_id` / `name` / `arguments` or `output`. Request-only `context` items are:
 
 ```json
 {"type":"context","parts":[{"type":"text","text":"..."}]}
@@ -108,11 +200,12 @@ Builtin Chat Completions providers (Hyper and xAI) treat `finish_reason: "length
 
 Fill `PicoLlmResult` with malloc'd strings and ordered items. Pico calls `pico_llm_result_free`. Return `PICO_LLM_OK`, `PICO_LLM_FAIL` (set `out->error`), or `PICO_LLM_CANCEL`. Helpers such as `pico_llm_result_add_text`, `pico_llm_result_add_refusal`, and `pico_llm_result_add_tool_call` append items so simple providers do not hand-build arrays.
 
+- `compaction_json` — native compaction replacement history only; mutually exclusive with `items[]`
 - `items[]` — ordered canonical history objects for this provider completion: assistant items (`parts`, optional `thinking` / `thinking_signature`) and tool-call items (`call_id`, `name`, `arguments`, optional `item_id`)
 - Assistant `parts`: `text`, `refusal` (model declined; this is user-visible output), `image`, and `audio`. Image/audio store `path` (and optional `mime` / `url`), never file bytes. Completions thinking signatures use `"reasoning_content"`; Responses stores the reasoning item JSON on `thinking_signature`
 - `input_tokens`, `cached_tokens` report this completed provider call's input usage. `cached_tokens` is the cached portion of `input_tokens`. Pico ignores usage when `input_tokens <= 0` and clamps cached usage to the input range.
 
-Providers must project every replay-critical value into these canonical items, walking native output in order. Canonical item boundaries are provider-history boundaries, not chat-bubble boundaries: Pico combines all items rendered into one live assistant message and records that message group explicitly so session replay restores the identical bubble and trace layout. Unknown wire types, hosted tool calls, and non-empty annotations fail the turn with `unsupported output: <type>`. Pico does not drop unrecognized output. Request converters rebuild the active provider's wire format from canonical history (`path` is read at send time into data URLs / `input_image` / `image_url`). If history contains media and the model does not accept images, the turn fails.
+Providers must project every replay-critical value into these canonical items, walking native output in order. Canonical item boundaries are provider-history boundaries, not chat-bubble boundaries: Pico combines all items rendered into one live assistant message and records that message group explicitly so session replay restores the identical bubble and trace layout. Outside the explicit native-compaction result path, unknown wire types, hosted tool calls, and non-empty annotations fail the turn with `unsupported output: <type>`. Pico does not drop unrecognized output. Request converters rebuild the active provider's wire format from canonical history (`path` is read at send time into data URLs / `input_image` / `image_url`). If history contains media and the model does not accept images, the turn fails.
 
 Builtin Responses maps `type: "context"` to a `developer` input message; builtin Completions maps it to a trailing `system` message. Custom providers must do the same in a non-user role and set `map_context`.
 

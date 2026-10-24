@@ -117,6 +117,8 @@ int __wrap_pico_http_post(const PicoHttpReq *req, long *http, char **body, char 
 int __real_pico_http_post_sse(const PicoHttpPost *req, long *http, char **error);
 int __wrap_pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
 {
+    int native_result;
+    if (NativeCompactionWire(req, http, error, &native_result)) return native_result;
     pthread_mutex_lock(&oauth_mu);
     if (!oauth_test.stream_test)
     {

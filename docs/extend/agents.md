@@ -125,7 +125,14 @@ During `PICO_HOOK_ON_COMPACT`, call:
 pico_agent_set_compact_summary(pico_workspace_host(workspace), event->agent_id, malloc_briefing);
 ```
 
-Pico takes ownership. A stale or mismatched ID is rejected.
+Pico takes ownership. A stale or mismatched ID is rejected. A nonempty summary
+explicitly replaces native state as well as text history; the override clears
+native continuation affinity only after a successful checkpoint. Otherwise
+[OpenAI native compaction](providers.md#native-compaction) keeps encrypted state
+bound to its original backend/account/key. Switching models within that authority
+is permitted, but another provider/backend/account/key cannot continue it.
+Transcript viewing remains available. Restore the original authority or start a
+new conversation to recover from a continuation refusal.
 
 `pico_session_log_custom(host, agent_id, "myext", "{...}")` similarly targets an ID explicitly and returns `PICO_SESSION_WRITE_SKIPPED`, `_OK`, or `_FAILED`. Prefer replayable tool `details_json` for extension-owned session state.
 

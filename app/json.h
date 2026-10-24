@@ -49,6 +49,7 @@ int JsonInt(const JsonDoc *doc, int tok, int fallback);
 char *JsonObjStr(const JsonDoc *doc, int obj, const char *key);
 char *JsonObjRaw(const JsonDoc *doc, int obj, const char *key);
 int JsonObjInt(const JsonDoc *doc, int obj, const char *key, int fallback);
+bool JsonIsString(const JsonDoc *doc, int tok);
 bool JsonIsObject(const JsonDoc *doc, int tok);
 bool JsonIsArray(const JsonDoc *doc, int tok);
 bool JsonIsNull(const JsonDoc *doc, int tok);

@@ -1,5 +1,7 @@
 // Workspace-scoped request-context hook. Copy to ~/.config/pico/extensions/ or
 // <workspace>/.pico/extensions/ then press F5.
+// See /docs context and providers: native compaction skips request-context hooks;
+// text compaction still invokes them, so explicitly exclude that request here.
 
 #include "pico/plugin.h"
 #include "json.h"

@@ -668,8 +668,146 @@ static void TestToolImageObservation(void)
     free(parts); free(call1); free(call2); free(result1); free(result2); rmdir(dir);
 }
 
+
+static const char kCompactDone[] =
+    "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-state\"}}";
+static const char kCompactComplete[] =
+    "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1200},\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-state\"}]}}";
+
+static void Feed(PicoResponsesCtx *ctx, const char *event)
+{
+    (void)pico_responses_feed(ctx, event, strlen(event));
+}
+
+static void TestNativeCompaction(void)
+{
+    char *briefing = pico_canonical_briefing_json("synthetic history, not a genuine user");
+    const char *input[] = {briefing, "{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Briefing: real user input\"}]}",
+        "{\"type\":\"assistant\",\"parts\":[{\"type\":\"text\",\"text\":\"old assistant\"}]}"};
+    PicoLlmTurn turn = {.model="first-model", .compact=true, .native_compact=true, .context_limit=128000,
+        .input_json=input, .input_count=3};
+    PicoResponsesBuildOpts opts = {.provider="openai", .store_false=true, .include_encrypted_reasoning=true};
+    char *body = pico_responses_build_request(&turn, &opts);
+    Check(body && strstr(body, "compaction_trigger") && !strstr(body, "Handoff brief:"),
+          "native compaction requests a trigger rather than a summary");
+    free(body);
+    PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
+    Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
+    pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+    Check(!result.error && result.compaction_json && result.item_count == 0 && result.input_tokens == 1200 &&
+          strstr(result.compaction_json, "opaque-state") && strstr(result.compaction_json, "Briefing: real user input") &&
+          !strstr(result.compaction_json, "synthetic history") && !strstr(result.compaction_json, "old assistant"),
+          "native replacement retains genuine user input and opaque state, not briefings or assistant messages");
+    const char *next_input[] = {result.compaction_json};
+    JsonDoc replacement;
+    char *state = NULL;
+    if (result.compaction_json && !JsonParse(&replacement, result.compaction_json, strlen(result.compaction_json))) {
+        state = JsonRawDup(&replacement, JsonArrayAt(&replacement, 0, JsonArrayLen(&replacement, 0)-1));
+        JsonFree(&replacement);
+    }
+    next_input[0] = state;
+    turn = (PicoLlmTurn){.model="another-model", .input_json=next_input, .input_count=state ? 1 : 0};
+    char *error = pico_responses_check_state(&turn, "openai-api", "key:original");
+    Check(state && !error, "native state permits a different model within the same authority"); free(error);
+    body = pico_responses_build_request(&turn, &opts);
+    Check(body && strstr(body, "opaque-state") && !strstr(body, "provider_state") && !strstr(body, "key:original"),
+          "continuation sends the native item without local affinity metadata"); free(body);
+    error = pico_responses_check_state(&turn, "codex", "key:original");
+    Check(error != NULL, "native state refuses a backend change"); free(error);
+    error = pico_responses_check_state(&turn, "openai-api", "key:changed");
+    Check(error != NULL, "native state refuses a credential change"); free(error);
+    free(state); free(briefing); pico_llm_result_free(&result); pico_responses_ctx_free(&ctx);
+}
+
+static void TestNativeTerminalFailures(void)
+{
+    const char *terminals[] = {NULL,
+        "{\"type\":\"response.completed\",\"response\":{}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\",\"output\":[]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"encrypted_content\":\"changed\"}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-state\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-state\"},{\"type\":\"compaction\",\"encrypted_content\":\"extra\"}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":true}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":17}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":17,\"encrypted_content\":\"opaque-state\"}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"\",\"encrypted_content\":\"opaque-state\"}]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-state\",}]}}",
+    };
+    PicoLlmTurn turn = {.model="model", .native_compact=true};
+    for (size_t i = 0; i < sizeof(terminals)/sizeof(terminals[0]); ++i) {
+        PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
+        Feed(&ctx, kCompactDone);
+        if (terminals[i]) Feed(&ctx, terminals[i]);
+        pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+        Check(result.error && !result.compaction_json,
+              "partial, contradictory, or extra native terminal output must not produce replacement history");
+        pico_llm_result_free(&result); pico_responses_ctx_free(&ctx);
+    }
+}
+
+static void TestNativeRetentionBudget(void)
+{
+    char dense[9001];
+    for (size_t i = 0; i < sizeof(dense)-1; ++i) dense[i] = i % 2 ? ' ' : '1';
+    dense[sizeof(dense)-1] = '\0';
+    char *user = pico_canonical_user_text(dense);
+    const char *input[] = {user};
+    PicoLlmTurn turn = {.model="small", .context_limit=16000, .compact=true, .native_compact=true,
+                       .input_json=input, .input_count=1};
+    PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
+    Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
+    pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+    JsonDoc doc; int retained = -1;
+    if (result.compaction_json && !JsonParse(&doc, result.compaction_json, strlen(result.compaction_json))) {
+        retained = JsonArrayLen(&doc, 0); JsonFree(&doc);
+    }
+    Check(!result.error && retained == 1, "token-dense oversized user message is not retained outside the model budget");
+    pico_llm_result_free(&result);
+    turn.compact_seed = dense;
+    pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+    Check(result.error && !result.compaction_json, "mandatory seed that cannot fit fails compaction rather than exceeding retention budget");
+    pico_llm_result_free(&result); pico_responses_ctx_free(&ctx); free(user);
+}
+
+
+static void TestNativeSeedAndRepeatedCompaction(void)
+{
+    char *seed = pico_canonical_user_text("immutable seed");
+    char *recent = pico_canonical_user_text("latest genuine instruction");
+    const char *input[] = {seed, recent};
+    PicoLlmTurn turn = {.model="model", .context_limit=128000, .compact_seed="immutable seed",
+                       .compact=true, .native_compact=true, .input_json=input, .input_count=2};
+    PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
+    Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
+    char *old_state = NULL;
+    for (int round = 0; round < 2; ++round) {
+        if (round) { input[1] = old_state; }
+        pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+        JsonDoc doc;
+        bool valid = result.compaction_json && !JsonParse(&doc, result.compaction_json, strlen(result.compaction_json));
+        if (valid) {
+            int n = JsonArrayLen(&doc, 0), seeds = 0, states = 0;
+            for (int i = 0; i < n; ++i) {
+                int item = JsonArrayAt(&doc, 0, i), parts = JsonObjGet(&doc, item, "parts");
+                if (JsonEq(&doc, JsonObjGet(&doc, JsonArrayAt(&doc, parts, 0), "text"), "immutable seed")) seeds++;
+                if (JsonEq(&doc, JsonObjGet(&doc, item, "type"), "provider_state")) states++;
+            }
+            valid = seeds == 1 && states == 1;
+            if (!round) old_state = JsonRawDup(&doc, JsonArrayAt(&doc, 0, n-1));
+            JsonFree(&doc);
+        }
+        Check(valid && !result.error, "repeated native compaction preserves the immutable seed exactly once and replaces old native state");
+        pico_llm_result_free(&result);
+    }
+    free(seed); free(recent); free(old_state); pico_responses_ctx_free(&ctx);
+}
+
 int main(void)
 {
+    TestNativeCompaction();
+    TestNativeSeedAndRepeatedCompaction();
+    TestNativeTerminalFailures();
+    TestNativeRetentionBudget();
     TestToolImageObservation();
     TestRequestOptions();
     TestFastServiceTier();

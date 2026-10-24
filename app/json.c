@@ -893,6 +893,11 @@ int JsonObjInt(const JsonDoc *doc, int obj, const char *key, int fallback)
     return JsonInt(doc, JsonObjGet(doc, obj, key), fallback);
 }
 
+bool JsonIsString(const JsonDoc *doc, int tok)
+{
+    return doc && tok >= 0 && tok < doc->ntoks && Toks(doc)[tok].type == JSMN_STRING;
+}
+
 bool JsonIsObject(const JsonDoc *doc, int tok)
 {
     return doc && tok >= 0 && tok < doc->ntoks && Toks(doc)[tok].type == JSMN_OBJECT;

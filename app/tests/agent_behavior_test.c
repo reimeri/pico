@@ -148,6 +148,15 @@ typedef struct TestState {
     char context_workspace[4096];
 } TestState;
 
+static bool FakeNativeCompaction(PicoHost *host, const PicoModel *model, void *state);
+static bool g_native_mode, g_checkpoint_defer, g_checkpoint_fail;
+static PicoSessionCheckpoint *g_pending_checkpoint;
+static const char kNativeHistory[] =
+    "[{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"retained native task\"}]},"
+    "{\"type\":\"provider_state\",\"provider\":\"test\",\"format\":\"test.compaction.v1\","
+    "\"backend\":\"test-api\",\"scope\":\"test-account\",\"model\":\"test-model\","
+    "\"data\":{\"encrypted_content\":\"encrypted-native\"}}]";
+
 static TestState g_test = {
     .mu = PTHREAD_MUTEX_INITIALIZER,
     .cv = PTHREAD_COND_INITIALIZER,
@@ -188,6 +197,8 @@ static void ResetTest(TestMode mode, int tool_limit)
         }
     }
     g_test.logged_tool_ids[0] = '\0';
+    g_native_mode = false; g_checkpoint_defer = false; g_checkpoint_fail = false;
+    g_pending_checkpoint = NULL;
     g_test.mode = mode;
     g_test.provider_tool_limit = tool_limit;
     g_test.provider_tools_issued = 0;
@@ -414,6 +425,13 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     snprintf(tool_name, sizeof(tool_name), "%s", g_test.issue_tool_name);
     snprintf(tool_args, sizeof(tool_args), "%s", g_test.issue_tool_args);
     pthread_mutex_unlock(&g_test.mu);
+
+    if (turn->native_compact) {
+        if (fail) { out->error = JsonDup("native compaction failed"); return PICO_LLM_FAIL; }
+        out->compaction_json = JsonDup(kNativeHistory);
+        out->input_tokens = tokens; out->cached_tokens = cached_tokens;
+        return PICO_LLM_OK;
+    }
 
     if (mode == TEST_DELEGATION_CHILD_BLOCK && child_turn)
     {
@@ -1633,6 +1651,24 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent
     return PICO_SESSION_WRITE_OK;
 }
 
+PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *agent,
+    const char *history_json, const char *summary, int tokens_before)
+{
+    (void)app; (void)agent; (void)history_json; (void)summary; (void)tokens_before;
+    if (g_checkpoint_fail) return NULL;
+    PicoSessionCheckpoint *checkpoint = calloc(1, sizeof(*checkpoint));
+    if (!checkpoint) return NULL;
+    atomic_init(&checkpoint->status, g_checkpoint_defer ? 0 : 1);
+    atomic_init(&checkpoint->references, g_checkpoint_defer ? 2 : 1);
+    if (g_checkpoint_defer) g_pending_checkpoint = checkpoint;
+    return checkpoint;
+}
+
+void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint)
+{
+    if (checkpoint && atomic_fetch_sub(&checkpoint->references, 1) == 1) free(checkpoint);
+}
+
 static int g_log_title_calls;
 static char g_logged_title[PICO_COMPLETE_LABEL_MAX + 1];
 
@@ -1731,7 +1767,7 @@ void PicoPlugins_Load(PicoHost *app)
         if (ws && ws->provider_count == 0)
         {
             PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, ws);
-            pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast});
+            pico_add_provider(ws, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast, .native_compaction = FakeNativeCompaction});
             pico_add_tool(ws, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
             PicoHost_PublishRegistration(app, NULL);
         }
@@ -1784,7 +1820,7 @@ void PicoPlugins_InitWorkspace(PicoHost *host, PicoWorkspace *workspace)
         return;
     }
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
-    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast});
+    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast, .native_compaction = FakeNativeCompaction});
     pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(host, NULL);
 }
@@ -1891,11 +1927,11 @@ PicoSessionReplay *PicoSession_ReplayPrepare(PicoHost *host, const char *path, P
            strcmp(path, g_fake_session.path) == 0 ? (PicoSessionReplay *)&g_fake_session : NULL;
 }
 void PicoSession_ReplayFree(PicoSessionReplay *replay) { (void)replay; }
-void PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
+bool PicoSession_ReplayPrepared(PicoHost *app, PicoAgent *agent, const char *path,
                                  PicoSessionReplay *replay, bool append_interrupted)
 {
     (void)replay;
-    (void)PicoSession_Replay(app, agent, path, append_interrupted);
+    return PicoSession_Replay(app, agent, path, append_interrupted) == 0;
 }
 
 int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path, bool append_interrupted)
@@ -2063,6 +2099,12 @@ static PicoAgent *TestAgent(PicoHost *app)
     return PicoHost_FindAgent(app, pico_agent_active(app));
 }
 
+static bool FakeNativeCompaction(PicoHost *host, const PicoModel *model, void *state)
+{
+    (void)host; (void)model; (void)state;
+    return g_native_mode;
+}
+
 static void InitApp(PicoHost *app)
 {
     PicoWorkspace *workspace;
@@ -2094,7 +2136,7 @@ static void InitApp(PicoHost *app)
     app->workspaces[0] = workspace;
     app->workspace_count = 1;
     PicoHost_BeginRegistration(app, PICO_REG_WORKSPACE, workspace);
-    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast});
+    pico_add_provider(workspace, &(PicoProvider){.name = "test", .stream = FakeProvider, .map_context = true, .supports_fast = FakeSupportsFast, .native_compaction = FakeNativeCompaction});
     pico_add_tool(workspace, "ask_test", "test", "{}", AskTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(app, NULL);
     PicoAgentCreateOptions options = {
@@ -6069,7 +6111,7 @@ static void SteeringSummary(PicoWorkspace *workspace, const PicoHookEvent *event
 
 static int TestSteeringHookSummary(void)
 {
-    ResetTest(TEST_SINGLE, 0); g_test.provider_tokens = 100;
+    ResetTest(TEST_SINGLE, 0); g_test.provider_tokens = 100; g_native_mode = true;
     PicoHost app; InitApp(&app); AddLifeHooks(&app);
     TestAddHook(&app, PICO_HOOK_ON_COMPACT, SteeringSummary);
     PicoAgent *agent = TestAgent(&app);
@@ -6272,8 +6314,85 @@ static int TestSteeringCancelFollowupPlaceholder(void)
     return ok ? 0 : Fail("steering follow-up placeholder cancel", "placeholder callback cancellation was lost");
 }
 
+static int TestNativeCompactionLifecycle(void)
+{
+    ResetTest(TEST_SINGLE, 0); g_native_mode = true;
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "old task before compaction");
+    bool ok = WaitForIdle(&app);
+    PicoAgent_Compact(&app, agent);
+    ok &= WaitForIdle(&app) && agent->tokens_unknown && g_test.life_after_compact == 1;
+    PicoAgent_StartTurn(&app, agent, "continue after native compaction");
+    ok &= WaitForIdle(&app) && g_test.last_input && strstr(g_test.last_input, "encrypted-native") &&
+          strstr(g_test.last_input, "retained native task") && !strstr(g_test.last_input, "old task before compaction");
+    int requests = g_test.provider_tools_issued;
+    snprintf(TestWs(&app)->models[0].provider, sizeof(TestWs(&app)->models[0].provider), "foreign");
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, TestWs(&app));
+    pico_add_provider(TestWs(&app), &(PicoProvider){.name="foreign", .stream=FakeProvider, .map_context=true});
+    PicoHost_PublishRegistration(&app, NULL);
+    PicoAgent_StartTurn(&app, agent, "must not send to foreign provider");
+    ok &= agent->state == PICO_AGENT_ERROR && agent->error && strstr(agent->error, "native provider state") &&
+          g_test.provider_tools_issued == requests;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("native compaction lifecycle", "checkpoint was lost or leaked to an incompatible provider");
+}
+
+static int TestNativeCompactionFailure(void)
+{
+    bool ok = true;
+    for (int persistence = 0; persistence < 2; ++persistence) {
+        ResetTest(TEST_SINGLE, 0); g_native_mode = true;
+        PicoHost app; InitApp(&app);
+        PicoAgent *agent = TestAgent(&app);
+        PicoAgent_StartTurn(&app, agent, "keep this original context"); ok &= WaitForIdle(&app);
+        g_test.provider_fail = !persistence; g_checkpoint_fail = persistence;
+        PicoAgent_Compact(&app, agent);
+        ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_ERROR;
+        PicoAgent_DismissError(agent); g_test.provider_fail = false; g_checkpoint_fail = false;
+        PicoAgent_StartTurn(&app, agent, "recover without fallback");
+        ok &= WaitForIdle(&app) && g_test.last_input && strstr(g_test.last_input, "keep this original context") &&
+              !strstr(g_test.last_input, "encrypted-native");
+        PicoHost_Shutdown(&app);
+    }
+    return ok ? 0 : Fail("native compaction failure", "failed remote or checkpoint write destroyed history");
+}
+
+static int TestNativeCheckpointSettlement(void)
+{
+    bool ok = true;
+    for (int outcome = -1; outcome <= 1; outcome += 2) {
+        ResetTest(TEST_SINGLE, 0); g_native_mode = true; g_checkpoint_defer = true;
+        PicoHost app; InitApp(&app); AddLifeHooks(&app);
+        PicoAgent *agent = TestAgent(&app);
+        PicoAgent_PushHistoryUser(agent, "original until write completes");
+        PicoAgent_Compact(&app, agent);
+        PICO_TEST_WAIT(!g_pending_checkpoint && agent->state != PICO_AGENT_ERROR) {
+            PicoAgent_Pump(&app, agent); SleepOneMs();
+        }
+        ok &= g_pending_checkpoint && agent->state == PICO_AGENT_COMPACT_WAIT && g_test.life_after_compact == 0;
+        PicoAgent_ForceCancel(&app, agent);
+        ok &= agent->state == PICO_AGENT_COMPACT_WAIT;
+        if (g_pending_checkpoint) {
+            atomic_store(&g_pending_checkpoint->status, outcome);
+            PicoSession_CheckpointRelease(g_pending_checkpoint); g_pending_checkpoint = NULL;
+        }
+        ok &= WaitForIdle(&app);
+        ok &= outcome > 0 ? (g_test.life_after_compact == 1 && g_test.life_cancel == 1) :
+                             (agent->state == PICO_AGENT_ERROR && g_test.life_after_compact == 0);
+        PicoAgent_DismissError(agent); g_checkpoint_defer = false;
+        PicoAgent_StartTurn(&app, agent, "inspect settled context"); ok &= WaitForIdle(&app);
+        ok &= g_test.last_input && (outcome > 0 ? strstr(g_test.last_input, "encrypted-native") != NULL :
+                                   strstr(g_test.last_input, "original until write completes") != NULL);
+        PicoHost_Shutdown(&app);
+    }
+    return ok ? 0 : Fail("native checkpoint cancellation", "cancellation ignored the checkpoint write outcome");
+}
+
 int main(void)
 {
+    if (PICO_TEST_RUN(TestNativeCompactionLifecycle()) || PICO_TEST_RUN(TestNativeCompactionFailure()) ||
+        PICO_TEST_RUN(TestNativeCheckpointSettlement())) return 1;
     int failed = 0;
     failed |= PICO_TEST_RUN(TestSteeringCancelCompactionHook());
     failed |= PICO_TEST_RUN(TestSteeringCancelFollowupPlaceholder());

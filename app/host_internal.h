@@ -94,6 +94,7 @@ typedef enum PicoPersistJobKind {
 #define PICO_PERSIST_QUEUE_CAPACITY (PICO_MAX_TOTAL_AGENTS + 1)
 
 struct PicoInboxAckBatch;
+struct PicoSessionCheckpoint;
 
 /* Compiled-in FIFO work. run/destroy own copied data, never borrowed UI state;
  * complete runs on the main thread and resolves any current state afresh. */
@@ -119,6 +120,7 @@ typedef struct PicoSessionPersistJob {
     char *header_json;
     char *event_json;
     size_t event_len, event_capacity, queued_bytes;
+    struct PicoSessionCheckpoint *checkpoint; /* refcounted, this node is a write barrier */
     char *title; /* Rewrite after header/event writes; not coalesced with later titles. */
     struct PicoSessionPersistJob *next; /* Same-session work after a title barrier. */
     char *catalog_order_json;

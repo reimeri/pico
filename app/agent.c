@@ -171,6 +171,9 @@ struct PicoAgentRt {
     char **work_input;
     int work_input_count;
     bool work_compact;
+    bool work_native_compact;
+    int work_context_limit;
+    char *work_compact_seed;
     bool work_include_tools;
     bool work_vision;
     PicoTool *work_tools;
@@ -219,6 +222,11 @@ struct PicoAgentRt {
     char *instructions;
     bool compacting;
     bool compact_no_tools;
+    bool compact_native;
+    PicoInputItem *compact_input;
+    int compact_input_count;
+    PicoSessionCheckpoint *compact_checkpoint;
+    char compact_session_id[40];
 
     PicoPendingCall pending[PICO_MAX_PENDING_CALLS];
     int pending_count;
@@ -595,7 +603,11 @@ static char *EncodeResult(const PicoLlmResult *r)
         JsonBuf_Puts(&b, json ? json : "{}");
         free(json);
     }
-    JsonBuf_Puts(&b, "]}");
+    JsonBuf_Putc(&b, ']');
+    if (r && r->compaction_json) {
+        JsonBuf_Puts(&b, ",\"compaction\":"); JsonBuf_Puts(&b, r->compaction_json);
+    }
+    JsonBuf_Putc(&b, '}');
     return JsonBuf_Steal(&b);
 }
 
@@ -1206,11 +1218,21 @@ static void RunLlmHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool in
     *tool_count = kept;
 }
 
-static char *ValidateLlmResult(const PicoLlmResult *result)
+static char *ValidateLlmResult(const PicoLlmResult *result, bool native_compact)
 {
     if (!result || result->item_count < 0 || (result->item_count > 0 && !result->items))
     {
         return Dup("provider returned a malformed result item array");
+    }
+    if (native_compact || result->compaction_json) {
+        if (!native_compact || !result->compaction_json || result->item_count)
+            return Dup("provider returned the wrong compaction result kind");
+        JsonDoc doc;
+        if (JsonParse(&doc, result->compaction_json, strlen(result->compaction_json)))
+            return Dup("provider returned invalid compaction history");
+        bool valid = pico_canonical_compaction_valid(&doc, 0, NULL);
+        JsonFree(&doc);
+        return valid ? NULL : Dup("provider returned invalid compaction history");
     }
     int call_count = 0;
     for (int i = 0; i < result->item_count; i++)
@@ -1350,6 +1372,10 @@ static void *WorkerMain(void *arg)
         int input_count = rt->work_input_count;
         bool fast = rt->work_fast;
         bool compact = rt->work_compact;
+        bool native_compact = rt->work_native_compact;
+        int context_limit = rt->work_context_limit;
+        char *compact_seed = rt->work_compact_seed;
+        rt->work_compact_seed = NULL;
         bool include_tools = rt->work_include_tools;
         bool vision = rt->work_vision;
         PicoTool *work_tools = rt->work_tools;
@@ -1396,6 +1422,9 @@ static void *WorkerMain(void *arg)
             turn.effort = effort;
             turn.fast = fast;
             turn.compact = compact;
+            turn.native_compact = native_compact;
+            turn.context_limit = context_limit;
+            turn.compact_seed = compact_seed;
             turn.include_tools = include_tools;
             turn.vision = vision;
             turn.input_json = (const char *const *)input;
@@ -1429,7 +1458,7 @@ static void *WorkerMain(void *arg)
             }
             else
             {
-                char *call_error = ValidateLlmResult(&result);
+                char *call_error = ValidateLlmResult(&result, native_compact);
                 if (call_error)
                 {
                     PostEvent(rt, PICO_AEV_LLM_FAIL, call_error, NULL, 0, 0);
@@ -1437,8 +1466,9 @@ static void *WorkerMain(void *arg)
                 else
                 {
                     char *payload = EncodeResult(&result);
-                    PostEvent(rt, PICO_AEV_LLM_DONE, NULL, payload,
-                              result.input_tokens, result.cached_tokens);
+                    if (payload) PostEvent(rt, PICO_AEV_LLM_DONE, NULL, payload,
+                                           result.input_tokens, result.cached_tokens);
+                    else PostEvent(rt, PICO_AEV_LLM_FAIL, Dup("could not encode provider result"), NULL, 0, 0);
                 }
                 pico_llm_result_free(&result);
             }
@@ -1449,6 +1479,7 @@ static void *WorkerMain(void *arg)
         free(effort);
         free(instructions);
         free(cache_key);
+        free(compact_seed);
         for (int i = 0; i < input_count; i++)
         {
             free(input[i]);
@@ -1628,6 +1659,24 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         return false;
     }
 
+    bool native = compact && p->native_compaction && p->native_compaction(app, m, p->state);
+    for (int i = 0; i < rt->input_count; ++i) {
+        JsonDoc doc;
+        if (JsonParse(&doc, rt->input[i].json, strlen(rt->input[i].json))) {
+            SetErrorState(app, agent, "Invalid conversation history"); return false;
+        }
+        bool state = pico_canonical_is_provider_state(&doc, 0);
+        bool supported = !state || (p->native_compaction &&
+            pico_canonical_provider_state_valid(&doc, 0) &&
+            JsonEq(&doc, JsonObjGet(&doc, 0, "provider"), p->name));
+        JsonFree(&doc);
+        if (!supported) {
+            SetErrorState(app, agent, "This conversation contains native provider state. Restore its original "
+                          "OpenAI backend/account/key or start a new session."); return false;
+        }
+    }
+    if (compact) rt->compact_native = native;
+
     if (rt->turn_fast && (!m->supports_fast || !p->supports_fast ||
                          !p->supports_fast(app, m, p->state)))
     {
@@ -1665,7 +1714,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     PicoTool *tools = NULL;
     int tool_count = 0;
     RunLlmHooks(rt, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
-    if (!agent->clarification)
+    if (!agent->clarification && !native)
         RunContextHooks(rt, agent, compact, tools, tool_count, &input, &input_count);
 
     if (InputHasContextItem(input, input_count) && !p->map_context)
@@ -1710,10 +1759,17 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         free(input); free(instructions); free(tools);
         return false;
     }
+    char *compact_seed = native && agent->clarification ? Dup(agent->clarification->seed) : NULL;
+    if (native && agent->clarification && !compact_seed) {
+        for (int i = 0; i < input_count; ++i) free(input[i]);
+        free(input); free(instructions); free(tools);
+        SetErrorState(app, agent, "Could not snapshot mandatory compaction seed"); return false;
+    }
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
     {
         pthread_mutex_unlock(&rt->mu);
+        free(compact_seed);
         for (int i = 0; i < input_count; i++)
         {
             free(input[i]);
@@ -1747,6 +1803,9 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_instructions = instructions;
     rt->work_cache_key = Dup(rt->cache_key);
     rt->work_compact = compact;
+    rt->work_native_compact = native;
+    rt->work_context_limit = m->context_limit > 0 ? m->context_limit : agent->context_limit;
+    rt->work_compact_seed = compact_seed;
     rt->work_include_tools = include_tools;
     rt->work_vision = m->vision;
     ClearOfferedTools(rt);
@@ -2766,6 +2825,7 @@ static void SavePartialAssistant(PicoHost *app, PicoAgent *agent)
 static void ApplyCancel(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
+    if (rt->compact_checkpoint) return;
     if (rt->compacting)
     {
         GoIdle(app, agent);
@@ -2801,24 +2861,98 @@ static int CompactThreshold(const PicoAgent *agent)
     return t > 0 ? t : 0;
 }
 
-static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary)
+static void ContinueAfterCompact(PicoHost *app, PicoAgent *agent);
+
+static void FreeInputItems(PicoInputItem *input, int count)
 {
-    int before = agent->tokens_used;
-    PicoAgent_ClearInput(agent);
-    if (agent->clarification) PicoAgent_PushHistoryUser(agent, agent->clarification->seed);
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Puts(&b, "Briefing:\n");
-    JsonBuf_Puts(&b, summary ? summary : "");
-    PicoAgent_PushHistoryUser(agent, b.data ? b.data : "Briefing:\n");
-    JsonBuf_Free(&b);
+    for (int i = 0; i < count; ++i) free(input[i].json);
+    free(input);
+}
+
+static void ClearCompactStage(PicoAgentRt *rt)
+{
+    FreeInputItems(rt->compact_input, rt->compact_input_count);
+    rt->compact_input = NULL; rt->compact_input_count = 0;
+    PicoSession_CheckpointRelease(rt->compact_checkpoint); rt->compact_checkpoint = NULL;
+    rt->compact_session_id[0] = '\0';
+}
+
+static PicoInputItem *PrepareHistory(const char *json, int *count)
+{
+    *count = 0;
+    JsonDoc doc;
+    if (!json || JsonParse(&doc, json, strlen(json))) return NULL;
+    int n = JsonArrayLen(&doc, 0);
+    PicoInputItem *input = n > 0 ? calloc((size_t)n, sizeof(*input)) : NULL;
+    bool valid = input != NULL;
+    for (int i = 0; valid && i < n; ++i) {
+        input[i].json = JsonRawDup(&doc, JsonArrayAt(&doc, 0, i));
+        valid = input[i].json != NULL;
+    }
+    JsonFree(&doc);
+    if (!valid) { FreeInputItems(input, input ? n : 0); return NULL; }
+    *count = n; return input;
+}
+
+static void PollCompaction(PicoHost *app, PicoAgent *agent)
+{
+    PicoAgentRt *rt = agent->runtime;
+    if (!rt || !rt->compact_checkpoint) return;
+    if (strcmp(rt->compact_session_id, agent->session_id)) { ClearCompactStage(rt); return; }
+    int status = atomic_load(&rt->compact_checkpoint->status);
+    if (!status) return;
+    if (status < 0) {
+        ClearCompactStage(rt);
+        SetErrorState(app, agent, "Could not persist compaction checkpoint; previous context was retained");
+        return;
+    }
+    FreeInputItems(rt->input, rt->input_count);
+    rt->input = rt->compact_input; rt->input_count = rt->compact_input_count;
+    rt->input_cap = rt->compact_input_count;
+    rt->compact_input = NULL; rt->compact_input_count = 0;
+    bool native = rt->compact_native;
+    ClearCompactStage(rt);
     PicoAgent_RotateCacheKey(agent);
-    PicoSession_LogCompaction(app, agent, summary, before);
-    agent->tokens_used = 0;
-    agent->tokens_cached = 0;
-    free(agent->compact_summary);
-    agent->compact_summary = NULL;
+    agent->tokens_used = 0; agent->tokens_cached = 0; agent->tokens_unknown = native;
+    free(agent->compact_summary); agent->compact_summary = NULL;
     pico_run_hooks(app, PICO_HOOK_AFTER_COMPACT, agent->id);
+    if (agent->runtime == rt) ContinueAfterCompact(app, agent);
+}
+
+static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary, const char *native_json)
+{
+    PicoAgentRt *rt = agent->runtime;
+    JsonBuf history; JsonBuf_Init(&history);
+    if (native_json) JsonBuf_Puts(&history, native_json);
+    else {
+        JsonBuf_Putc(&history, '[');
+        if (agent->clarification) {
+            char *seed = pico_canonical_user_text(agent->clarification->seed);
+            if (!seed) history.failed = true;
+            JsonBuf_Puts(&history, seed); JsonBuf_Putc(&history, ','); free(seed);
+        }
+        char *item = pico_canonical_briefing_json(summary);
+        if (!item) history.failed = true;
+        JsonBuf_Puts(&history, item); JsonBuf_Putc(&history, ']'); free(item);
+    }
+    rt->compact_native = native_json != NULL;
+    rt->compact_input = history.failed ? NULL : PrepareHistory(history.data, &rt->compact_input_count);
+    if (!rt->compact_input) {
+        JsonBuf_Free(&history); SetErrorState(app, agent, "Could not prepare compaction checkpoint"); return;
+    }
+    /* Stage before submission; after this point cancellation settles against
+     * the actual write outcome, never discarding an accepted checkpoint. */
+    rt->compacting = true;
+    rt->compact_checkpoint = PicoSession_QueueCompaction(app, agent, native_json ? history.data : NULL,
+                                                        summary, agent->tokens_used);
+    JsonBuf_Free(&history);
+    if (!rt->compact_checkpoint) {
+        ClearCompactStage(rt); SetErrorState(app, agent, "Could not persist compaction checkpoint; previous context was retained");
+        return;
+    }
+    snprintf(rt->compact_session_id, sizeof(rt->compact_session_id), "%s", agent->session_id);
+    SetActivity(app, agent, "Saving compaction…");
+    PollCompaction(app, agent);
 }
 
 /* These boundaries have no provider/tool work left. A cancellation raised
@@ -2835,8 +2969,6 @@ static void ContinueSettled(PicoHost *app, PicoAgent *agent, PicoAgentRt *rt, bo
     else EndTurnIdle(app, agent);
 }
 
-static void ContinueAfterCompact(PicoHost *app, PicoAgent *agent);
-
 static void StartCompact(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
@@ -2851,8 +2983,7 @@ static void StartCompact(PicoHost *app, PicoAgent *agent)
     if (PicoAgent_CancelRequested(agent)) { ApplyCancel(app, agent); return; }
     if (agent->compact_summary && agent->compact_summary[0])
     {
-        ApplyCompaction(app, agent, agent->compact_summary);
-        if (agent->runtime == rt) ContinueAfterCompact(app, agent);
+        ApplyCompaction(app, agent, agent->compact_summary, NULL);
         return;
     }
     rt->compacting = true;
@@ -3597,6 +3728,19 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
         NotifyLlmResponse(app, agent, ev, true);
         if (agent->runtime != rt) return;
         if (PicoAgent_CancelRequested(agent)) { ApplyCancel(app, agent); return; }
+        if (rt->compact_native) {
+            JsonDoc doc;
+            if (!ev->payload || JsonParse(&doc, ev->payload, strlen(ev->payload))) {
+                SetErrorState(app, agent, "Invalid native compaction result"); return;
+            }
+            int compact = JsonObjGet(&doc, 0, "compaction");
+            PicoModel *model = PicoSettings_ActiveModel(agent);
+            bool valid = pico_canonical_compaction_valid(&doc, compact, model ? model->provider : NULL);
+            char *history = valid ? JsonRawDup(&doc, compact) : NULL;
+            JsonFree(&doc);
+            if (!history) { SetErrorState(app, agent, "Invalid native compaction result"); return; }
+            ApplyCompaction(app, agent, NULL, history); free(history); return;
+        }
         if (ResultCallCount(ev->payload) > 0 && !rt->compact_no_tools)
         {
             rt->compact_no_tools = true;
@@ -3615,9 +3759,8 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
         }
         if (text && text[0])
         {
-            ApplyCompaction(app, agent, text);
+            ApplyCompaction(app, agent, text, NULL);
             free(text);
-            if (agent->runtime == rt) ContinueAfterCompact(app, agent);
             return;
         }
         free(text);
@@ -4049,6 +4192,8 @@ static void FreeRt(PicoAgentRt *rt)
         free(rt->input[i].json);
     }
     free(rt->input);
+    ClearCompactStage(rt);
+    free(rt->work_compact_seed);
     ClearPending(rt);
     free(rt->stream);
     free(rt->think);
@@ -4498,6 +4643,7 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
         return;
     }
 
+    if (old->compact_checkpoint) { PicoAgent_Cancel(agent); return; }
     PicoWorkspace *workspace = agent->workspace;
     PicoAgent_Cancel(agent); /* invalidates steering at request time */
     PicoAgent_ReapRetired(workspace);
@@ -4932,6 +5078,8 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
     {
         return;
     }
+    PollCompaction(app, agent);
+    if (agent->runtime != rt) return;
     PublishAskSnapshot(app, agent);
     if (agent->runtime != rt) return;
 
@@ -5180,6 +5328,10 @@ void PicoAgent_ClearInput(PicoAgent *agent)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt) return;
+    if (rt->compact_checkpoint) {
+        ClearCompactStage(rt); rt->compacting = false;
+        if (agent->state == PICO_AGENT_COMPACT_WAIT) agent->state = PICO_AGENT_IDLE;
+    }
     for (int i = 0; i < rt->input_count; i++)
     {
         free(rt->input[i].json);
@@ -5188,9 +5340,30 @@ void PicoAgent_ClearInput(PicoAgent *agent)
     rt->input_count = 0;
 }
 
+bool PicoAgent_ReplaceHistory(PicoAgent *agent, const char *history_json)
+{
+    if (!agent || !agent->runtime) return false;
+    JsonDoc doc;
+    if (!history_json || JsonParse(&doc, history_json, strlen(history_json))) return false;
+    bool valid = pico_canonical_compaction_valid(&doc, 0, NULL);
+    JsonFree(&doc);
+    if (!valid) return false;
+    int count = 0;
+    PicoInputItem *input = PrepareHistory(history_json, &count);
+    if (!input) return false;
+    PicoAgent_ClearInput(agent); free(agent->runtime->input);
+    agent->runtime->input = input; agent->runtime->input_count = count; agent->runtime->input_cap = count;
+    return true;
+}
+
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text)
 {
     if (agent && agent->runtime) PushInput(agent->runtime, BuildUserItem(text, NULL));
+}
+
+void PicoAgent_PushHistoryBriefing(PicoAgent *agent, const char *summary)
+{
+    if (agent && agent->runtime) PushInput(agent->runtime, pico_canonical_briefing_json(summary));
 }
 
 void PicoAgent_PushHistoryUserParts(PicoAgent *agent, const char *text, const char *parts_json)

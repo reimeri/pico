@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <poll.h>
 #include <strings.h>
 #include <limits.h>
@@ -35,15 +36,14 @@ static bool FastAuthAvailable(const PicoAuthEntry *auth)
 
 static char *BuildRequest(const PicoLlmTurn *turn, bool codex)
 {
-    /* The ChatGPT Codex backend rejects stored responses, and with store off
-     * the server only replays reasoning items that carry their encrypted
-     * payload. Plain Responses endpoints (including OpenAI-compatible
-     * gateways behind models[].base_url) may reject either field. */
+    /* Official routes use stateless replay, including encrypted reasoning.
+     * Custom gateways retain their existing wire policy. */
+    bool official = pico_responses_openai_fast_route(turn->base_url, codex);
     PicoResponsesBuildOpts opts = {
         .provider = "openai",
         .service_tier = pico_responses_openai_service_tier(turn, codex),
-        .store_false = codex,
-        .include_encrypted_reasoning = codex,
+        .store_false = official,
+        .include_encrypted_reasoning = official,
         .reasoning_summary_auto = true,
     };
     return pico_responses_build_request(turn, &opts);
@@ -1040,6 +1040,53 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
     return auth->api_key;
 }
 
+/* Scope fingerprints identify credentials without persisting bearer secrets.
+ * OAuth binds to the stable account, not the rotating access/refresh token. */
+static char *CompactionScope(const PicoAuthEntry *auth)
+{
+    if (!strcmp(auth->active, PICO_AUTH_OAUTH)) {
+        if (!auth->account_id || !auth->account_id[0]) return NULL;
+        JsonBuf b; JsonBuf_Init(&b);
+        JsonBuf_Puts(&b, "account:"); JsonBuf_Puts(&b, auth->account_id);
+        return JsonBuf_Steal(&b);
+    }
+    if (!auth->api_key || !auth->api_key[0]) return NULL;
+    unsigned char digest[EVP_MAX_MD_SIZE]; unsigned int n = 0;
+    if (!EVP_Digest(auth->api_key, strlen(auth->api_key), digest, &n, EVP_sha256(), NULL) || n != 32)
+        return NULL;
+    char scope[69] = "key:";
+    for (unsigned int i = 0; i < n; ++i) snprintf(scope + 4 + i * 2, 3, "%02x", digest[i]);
+    OPENSSL_cleanse(digest, sizeof(digest));
+    return JsonDup(scope);
+}
+
+static char *CheckCompactionAuthority(const PicoLlmTurn *turn, const PicoAuthEntry *auth,
+                                      bool oauth, char **scope_out)
+{
+    *scope_out = NULL;
+    if (oauth != !strcmp(auth->active, PICO_AUTH_OAUTH))
+        return JsonDup("OpenAI authentication route changed during refresh; retry with the intended backend.");
+    bool official = pico_responses_openai_fast_route(turn->base_url, oauth);
+    *scope_out = official ? CompactionScope(auth) : NULL;
+    if (turn->native_compact && (!official || !*scope_out))
+        return JsonDup("Native compaction requires an official OpenAI route and an identifiable account/key.");
+    return pico_responses_check_state(turn, official ? (oauth ? "codex" : "openai-api") : NULL,
+                                      *scope_out);
+}
+
+typedef struct CompactDeltas { PicoLlmDeltaFn fn; PicoLlmCancelFn cancel; void *user; } CompactDeltas;
+static void CompactDelta(void *user, const PicoLlmDelta *delta)
+{
+    CompactDeltas *forward = user;
+    if (forward->fn && (delta->kind == PICO_LLM_DELTA_STATUS || delta->kind == PICO_LLM_DELTA_RESET))
+        forward->fn(forward->user, delta);
+}
+static bool CompactCancel(void *user)
+{
+    CompactDeltas *forward = user;
+    return forward->cancel && forward->cancel(forward->user);
+}
+
 static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
                         PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
 {
@@ -1089,6 +1136,9 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         return PICO_LLM_FAIL;
     }
 
+    char *scope = NULL;
+    out->error = CheckCompactionAuthority(turn, &auth, oauth, &scope);
+    if (out->error) { free(scope); pico_auth_entry_free(&auth); return PICO_LLM_FAIL; }
     char url[1024];
     if (oauth)
     {
@@ -1101,11 +1151,14 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     char *body = BuildRequest(turn, oauth);
     if (!body)
     {
+        free(scope);
         pico_auth_entry_free(&auth);
         out->error = JsonDup("failed to build request");
         return PICO_LLM_FAIL;
     }
 
+    CompactDeltas forward = {.fn = on_delta, .cancel = cancel, .user = user};
+    if (turn->native_compact) { cancel = CompactCancel; on_delta = CompactDelta; user = &forward; }
     const char *bearer = BearerOf(&auth, oauth);
     PicoResponsesCtx ctx;
     int rc = PostOnce(url, bearer, auth.account_id, oauth, body, turn->cache_key, &ctx, cancel, on_delta,
@@ -1116,6 +1169,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         if (!RefreshOauth(agent_ctx, &auth, &tc, true))
         {
             free(body);
+            free(scope);
             pico_auth_entry_free(&auth);
             if (TurnCancelled(&tc))
             {
@@ -1124,11 +1178,14 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
             out->error = JsonDup("Codex login expired. Run `/login openai`.");
             return PICO_LLM_FAIL;
         }
+        free(scope); scope = NULL;
+        out->error = CheckCompactionAuthority(turn, &auth, oauth, &scope);
+        if (out->error) { free(scope); free(body); pico_auth_entry_free(&auth); return PICO_LLM_FAIL; }
         bearer = BearerOf(&auth, true);
         rc = PostOnce(url, bearer, auth.account_id, true, body, turn->cache_key, &ctx, cancel, on_delta,
                       user);
     }
-    if (rc == PICO_LLM_FAIL && !ctx.capacity_error && ctx.http != 401 &&
+    if (rc == PICO_LLM_FAIL && !turn->native_compact && !ctx.capacity_error && ctx.http != 401 &&
         ctx.error && strstr(ctx.error, "easoning"))
     {
         char *stripped = pico_responses_body_without_reasoning(body);
@@ -1144,11 +1201,16 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     pico_auth_entry_free(&auth);
     if (rc == PICO_LLM_CANCEL)
     {
+        free(scope);
         return PICO_LLM_CANCEL;
     }
-    pico_responses_fill_result(&ctx, out);
+    if (turn->native_compact)
+        pico_responses_compact_result(&ctx, turn, oauth ? "codex" : "openai-api", scope, out);
+    else pico_responses_fill_result(&ctx, out);
+    free(scope);
     JsonBuf_Free(&ctx.items);
     JsonBuf_Free(&ctx.summary);
+    free(ctx.completed_response);
     if (rc != PICO_LLM_OK)
     {
         if (!out->error)
@@ -1159,7 +1221,8 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         free(ctx.error);
         return PICO_LLM_FAIL;
     }
-    if (!out->error && !ctx.saw_text && !pico_llm_result_has_output(out))
+    if (out->error) { free(ctx.error); return PICO_LLM_FAIL; }
+    if (!ctx.saw_text && !pico_llm_result_has_output(out))
     {
         char buf[sizeof(url) + 32];
         snprintf(buf, sizeof(buf), "empty response from %s", url);
@@ -1233,7 +1296,8 @@ static int OpenAiWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     pico_add_provider(workspace, &(PicoProvider){.name = "openai",
                                                  .stream = OpenAiStream,
                                                  .map_context = true, .tool_images = true,
-                                                 .supports_fast = OpenAiSupportsFast});
+                                                 .supports_fast = OpenAiSupportsFast,
+                                                 .native_compaction = OpenAiSupportsFast});
     return 0;
 }
 

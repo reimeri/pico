@@ -58,7 +58,10 @@ const char *PicoAgent_CacheKey(const PicoAgent *agent);
 void PicoAgent_SetCacheKey(PicoAgent *agent, const char *key);
 void PicoAgent_RotateCacheKey(PicoAgent *agent);
 void PicoAgent_ClearInput(PicoAgent *agent);
+/* Replay replaces all native history atomically; false leaves input intact. */
+bool PicoAgent_ReplaceHistory(PicoAgent *agent, const char *history_json);
 void PicoAgent_PushHistoryUser(PicoAgent *agent, const char *text);
+void PicoAgent_PushHistoryBriefing(PicoAgent *agent, const char *summary);
 void PicoAgent_PushHistoryUserParts(PicoAgent *agent, const char *text, const char *parts_json);
 void PicoAgent_PushHistoryAssistant(PicoAgent *agent, const char *text, const char *thinking,
                                     const char *signature);

@@ -1,19 +1,20 @@
 if(NOT DEFINED PICO_BUILD_DIR OR NOT DEFINED PICO_SOURCE_DIR OR
    NOT DEFINED PICO_STAGE_DIR OR NOT DEFINED PICO_CC OR NOT DEFINED PICO_NM OR
    NOT DEFINED PICO_PREFIX OR NOT DEFINED PICO_BINDIR OR NOT DEFINED PICO_DATADIR OR
-   NOT DEFINED PICO_LIBEXECDIR)
+   NOT DEFINED PICO_LIBEXECDIR OR NOT DEFINED PICO_CEF_ROOT OR
+   NOT DEFINED PICO_READELF)
     message(FATAL_ERROR "install smoke test is missing required -D arguments")
 endif()
 
-file(REMOVE_RECURSE "${PICO_STAGE_DIR}")
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env "DESTDIR=${PICO_STAGE_DIR}"
-            "${CMAKE_COMMAND}" --install "${PICO_BUILD_DIR}"
-    RESULT_VARIABLE install_result)
-if(NOT install_result EQUAL 0)
-    message(FATAL_ERROR "cmake --install failed: ${install_result}")
-endif()
+# Installing must not strip the SDK or delete its other locale packs: the
+# development runtime still uses those original files through symlinks.
+set(source_cef "${PICO_CEF_ROOT}/Release/libcef.so")
+file(SHA256 "${source_cef}" source_cef_before)
+file(GLOB source_locales_before RELATIVE "${PICO_CEF_ROOT}/Resources/locales"
+    "${PICO_CEF_ROOT}/Resources/locales/*")
 
+# AppImages relocate the configured prefix with --prefix and stage via DESTDIR.
+set(PICO_PREFIX "${PICO_PREFIX}/install-smoke")
 function(pico_staged_path out directory)
     if(IS_ABSOLUTE "${directory}")
         set("${out}" "${PICO_STAGE_DIR}${directory}" PARENT_SCOPE)
@@ -25,6 +26,19 @@ endfunction()
 pico_staged_path(staged_bindir "${PICO_BINDIR}")
 pico_staged_path(staged_datadir "${PICO_DATADIR}")
 pico_staged_path(staged_libexecdir "${PICO_LIBEXECDIR}")
+set(cef_runtime "${staged_libexecdir}/pico/browser")
+file(REMOVE_RECURSE "${PICO_STAGE_DIR}")
+# Installing into an existing destination must also enforce the language policy.
+file(MAKE_DIRECTORY "${cef_runtime}/locales")
+file(WRITE "${cef_runtime}/locales/fr.pak" "stale unsupported locale")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "DESTDIR=${PICO_STAGE_DIR}"
+            "${CMAKE_COMMAND}" --install "${PICO_BUILD_DIR}" --prefix "${PICO_PREFIX}"
+    RESULT_VARIABLE install_result)
+if(NOT install_result EQUAL 0)
+    message(FATAL_ERROR "cmake --install failed: ${install_result}")
+endif()
+
 set(pico_exe "${staged_bindir}/pico")
 set(data_dir "${staged_datadir}/pico")
 set(sdk_dir "${data_dir}/sdk/include")
@@ -34,6 +48,7 @@ foreach(required
         "${staged_libexecdir}/pico/browser/libcef.so"
         "${staged_libexecdir}/pico/browser/icudtl.dat"
         "${staged_libexecdir}/pico/browser/v8_context_snapshot.bin"
+        "${cef_runtime}/locales/en-US.pak"
         "${data_dir}/docs/extend/browser.md"
         "${data_dir}/resources/Roboto-Regular.ttf"
         "${data_dir}/docs/extend/README.md"
@@ -52,6 +67,41 @@ foreach(required
         message(FATAL_ERROR "installed file is missing: ${required}")
     endif()
 endforeach()
+
+# Keep every US English variant supplied by CEF, and no other locale packs.
+file(GLOB expected_locales RELATIVE "${PICO_CEF_ROOT}/Resources/locales"
+    "${PICO_CEF_ROOT}/Resources/locales/en-US.pak"
+    "${PICO_CEF_ROOT}/Resources/locales/en-US_*.pak")
+file(GLOB installed_locales RELATIVE "${cef_runtime}/locales" "${cef_runtime}/locales/*")
+if(NOT installed_locales STREQUAL expected_locales)
+    message(FATAL_ERROR "installed CEF locales must be US English only: ${installed_locales}; expected ${expected_locales}")
+endif()
+
+execute_process(
+    COMMAND "${PICO_READELF}" --sections --wide "${cef_runtime}/libcef.so"
+    RESULT_VARIABLE cef_sections_result
+    OUTPUT_VARIABLE cef_sections
+    ERROR_VARIABLE cef_sections_error)
+if(NOT cef_sections_result EQUAL 0 OR
+   cef_sections MATCHES "\\.(z?debug[^ \t]*|symtab|gnu_debugdata|gnu_debuglink)[ \t]")
+    message(FATAL_ERROR "installed CEF contains debug/unneeded symbols or cannot be inspected (${cef_sections_result}):\n${cef_sections}${cef_sections_error}")
+endif()
+execute_process(
+    COMMAND "${PICO_NM}" -D --defined-only "${cef_runtime}/libcef.so"
+    RESULT_VARIABLE cef_symbols_result
+    OUTPUT_VARIABLE cef_symbols
+    ERROR_VARIABLE cef_symbols_error)
+if(NOT cef_symbols_result EQUAL 0 OR NOT cef_symbols MATCHES "[ \t]cef_initialize([ \r\n]|$)")
+    message(FATAL_ERROR "installed CEF is missing its public initialization symbol (${cef_symbols_result}):\n${cef_symbols}${cef_symbols_error}")
+endif()
+
+file(SHA256 "${source_cef}" source_cef_after)
+file(GLOB source_locales_after RELATIVE "${PICO_CEF_ROOT}/Resources/locales"
+    "${PICO_CEF_ROOT}/Resources/locales/*")
+if(NOT source_cef_after STREQUAL source_cef_before OR
+   NOT source_locales_after STREQUAL source_locales_before)
+    message(FATAL_ERROR "installing the CEF runtime modified the source SDK")
+endif()
 
 set(desktop_file "${staged_datadir}/applications/io.github.reimeri.pico.desktop")
 file(READ "${desktop_file}" desktop_contents)

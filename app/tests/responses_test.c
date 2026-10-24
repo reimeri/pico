@@ -71,6 +71,35 @@ static void TestRequestOptions(void)
     free(body);
 }
 
+static void TestToolSchemaPolicy(void)
+{
+    PicoTool tools[] = {
+        {.name = "optional", .params_json = "{\"type\":\"object\",\"properties\":{\"cursor\":{\"type\":\"string\"}}}"},
+        {.name = "empty"},
+    };
+    PicoLlmTurn turn = {.model = "model", .include_tools = true, .tools = tools, .tool_count = 2};
+    PicoResponsesBuildOpts opts = {.provider = "openai"};
+    char *body = pico_responses_build_request(&turn, &opts);
+    JsonDoc doc;
+    int parsed = body ? JsonParse(&doc, body, strlen(body)) : -1;
+    Check(parsed == 0, "tool schema policy request parses");
+    if (parsed == 0) {
+        int array = JsonObjGet(&doc, 0, "tools");
+        Check(JsonArrayLen(&doc, array) == 2, "request includes registered tools and empty-schema tools");
+        for (int i = 0; i < JsonArrayLen(&doc, array); ++i) {
+            int tool = JsonArrayAt(&doc, array, i);
+            Check(JsonEq(&doc, JsonObjGet(&doc, tool, "strict"), "false"),
+                  "Responses explicitly opts out of optional-to-required normalization for every tool");
+        }
+        int parameters = JsonObjGet(&doc, JsonArrayAt(&doc, array, 0), "parameters");
+        Check(JsonObjGet(&doc, parameters, "required") < 0 &&
+              JsonObjGet(&doc, JsonObjGet(&doc, parameters, "properties"), "cursor") >= 0,
+              "registered optional fields remain omittable in the wire schema");
+        JsonFree(&doc);
+    }
+    free(body);
+}
+
 static void TestContextItemConversion(void)
 {
     PicoLlmPart assistant_part;
@@ -810,6 +839,7 @@ int main(void)
     TestNativeRetentionBudget();
     TestToolImageObservation();
     TestRequestOptions();
+    TestToolSchemaPolicy();
     TestFastServiceTier();
     TestContextItemConversion();
     TestImageRequestConversion();

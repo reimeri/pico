@@ -1,0 +1,20 @@
+set(cef_runtime "@CMAKE_INSTALL_LIBEXECDIR@/pico/browser")
+if(NOT IS_ABSOLUTE "${cef_runtime}")
+    set(cef_runtime "${CMAKE_INSTALL_PREFIX}/${cef_runtime}")
+endif()
+set(cef_runtime "$ENV{DESTDIR}${cef_runtime}")
+set(cef_library "${cef_runtime}/libcef.so")
+# The SDK can be read-only (notably in the Nix store). Only the installed copy
+# needs to be writable for strip; dynamic-linking symbols remain intact.
+file(CHMOD "${cef_library}" PERMISSIONS
+    OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+execute_process(
+    COMMAND "@CMAKE_STRIP@" --strip-unneeded "${cef_library}"
+    RESULT_VARIABLE strip_result
+    ERROR_VARIABLE strip_error)
+if(NOT strip_result STREQUAL "0")
+    message(FATAL_ERROR "Failed to strip installed CEF library (${strip_result}): ${strip_error}")
+endif()
+# Replace this core-owned resource directory so repeated installs cannot retain
+# locale packs that are not part of the supported language set.
+file(REMOVE_RECURSE "${cef_runtime}/locales")

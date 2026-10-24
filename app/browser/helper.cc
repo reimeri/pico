@@ -756,6 +756,9 @@ class App : public CefApp, public CefBrowserProcessHandler {
             if (!disabled.empty()) disabled += ",";
             command->AppendSwitchWithValue("disable-features", disabled + "ImmersiveReadAnything");
         }
+        // Only US English locale packs are distributed. CEF ignores
+        // CefSettings.locale on Linux, so override the environment via --lang.
+        command->AppendSwitchWithValue("lang", "en-US");
         // Native Ozone allocates exportable DMA-BUFs. Headless Ozone cannot
         // allocate accelerated OSR frames on the pinned CEF build. Still OSR:
         // no browser window is created on either display backend.

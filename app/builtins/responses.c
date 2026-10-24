@@ -482,7 +482,7 @@ char *pico_responses_build_request(const PicoLlmTurn *turn, const PicoResponsesB
             JsonBuf_String(&b, turn->tools[i].name ? turn->tools[i].name : "");
             JsonBuf_Puts(&b, ",\"description\":");
             JsonBuf_String(&b, turn->tools[i].description ? turn->tools[i].description : "");
-            JsonBuf_Puts(&b, ",\"parameters\":");
+            JsonBuf_Puts(&b, ",\"strict\":false,\"parameters\":");
             JsonBuf_Puts(&b, turn->tools[i].params_json && turn->tools[i].params_json[0]
                                  ? turn->tools[i].params_json
                                  : "{\"type\":\"object\",\"properties\":{}}");

@@ -15,9 +15,17 @@ The fetch verifies the archive SHA-256 before extraction.
 CMake installs the helper and CEF resources under `libexec/pico/browser`, with
 CEF licenses/credits under `share/licenses/pico/cef`. Development builds use
 symlinks to avoid copying the large SDK; installed artifacts copy the runtime
-assets. The AppImage dependency scan includes the helper and CEF shared
-libraries. Archive/AppImage smoke testing of the browser is required separately
-from the ordinary CLI install smoke test. Never disable the Chromium sandbox to
+assets. All installed/distributed copies strip debug data and unneeded symbols
+from `libcef.so`, preserving the dynamic symbols required by the helper. A working
+CMake `CMAKE_STRIP` tool is required, and installation fails if stripping fails.
+The original SDK and development runtime are not stripped. Only US English
+(`en-US.pak` and its `en-US_*.pak` variants) is installed; the helper explicitly
+selects `en-US` on Linux regardless of the host's locale. These rules apply to
+archives, AppImages, and distro/Nix installs alike.
+
+The AppImage dependency scan includes the helper and CEF shared libraries.
+Archive/AppImage smoke testing of the browser is required separately from the
+ordinary CLI install smoke test. Never disable the Chromium sandbox to
 make a release run; Linux hosts need usable sandbox/user-namespace support.
 
 ## Linux archive

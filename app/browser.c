@@ -627,9 +627,16 @@ static char *String(const JsonDoc *doc, int object, const char *name)
     if (start < 1 || doc->src[start-1] != '"') return NULL;
     return JsonStrDup(doc, token);
 }
+/* Optional nulls have the same meaning as absent fields. Required values still
+ * go through their ordinary type/range checks. */
+static int OptionalField(const JsonDoc *doc, int object, const char *name)
+{
+    int token = JsonObjGet(doc, object, name);
+    return JsonIsNull(doc, token) ? -1 : token;
+}
 static int ModifiersJson(const JsonDoc *doc, int object)
 {
-    int array = JsonObjGet(doc, object, "modifiers");
+    int array = OptionalField(doc, object, "modifiers");
     if (array < 0) return 0;
     if (!JsonIsArray(doc, array) || JsonArrayLen(doc, array) > 3) return -1;
     int flags = 0;
@@ -646,7 +653,7 @@ static int ModifiersJson(const JsonDoc *doc, int object)
 }
 static int ButtonJson(const JsonDoc *doc, int object)
 {
-    int button = JsonObjGet(doc, object, "button");
+    int button = OptionalField(doc, object, "button");
     if (button < 0 || JsonEq(doc, button, "left")) return 0;
     if (JsonEq(doc, button, "middle")) return 1;
     if (JsonEq(doc, button, "right")) return 2;
@@ -698,7 +705,7 @@ static bool ParseActions(BrowserRequest *r, const char *args)
             step.type = PB_MOUSE; step.a = -1;
             if (JsonEq(&doc, type, "click")) {
                 step.a = ButtonJson(&doc, action); int clicks = 1;
-                if (step.a < 0 || (JsonObjGet(&doc, action, "count") >= 0 && !Number(&doc, action, "count", 1, 2, &clicks))) { ok = false; break; }
+                if (step.a < 0 || (OptionalField(&doc, action, "count") >= 0 && !Number(&doc, action, "count", 1, 2, &clicks))) { ok = false; break; }
                 for (int c = 1; ok && c <= clicks; ++c) {
                     step.text[0] = c; step.b = 0; ok = AddStep(r, step);
                     step.b = 1; ok = ok && AddStep(r, step);
@@ -844,21 +851,27 @@ void PicoBrowser_ToolObserve(PicoAgentContext *ctx, const char *args, bool act, 
     ReleaseRequest(r); pthread_mutex_unlock(&s->mu);
 }
 
-static bool ParseViewport(const JsonDoc *doc, BrowserViewport *viewport, int *width, int *height)
+static const char *ParseViewport(const JsonDoc *doc, BrowserViewport *viewport, int *width, int *height)
 {
-    char *preset = String(doc, 0, "preset");
-    bool ok = false;
-    if (preset && JsonObjGet(doc, 0, "width") < 0 && JsonObjGet(doc, 0, "height") < 0) {
-        for (int i = 0; i < BROWSER_VIEWPORT_CUSTOM; ++i) if (!strcmp(preset, viewport_choices[i].preset)) {
-            *viewport = i; *width = viewport_choices[i].width; *height = viewport_choices[i].height;
-            ok = true; break;
-        }
-    } else if (JsonObjGet(doc, 0, "preset") < 0) {
+    bool has_width = OptionalField(doc, 0, "width") >= 0;
+    bool has_height = OptionalField(doc, 0, "height") >= 0;
+    if ((has_width && !Number(doc, 0, "width", 1, PB_MAX_DIMENSION, width)) ||
+        (has_height && !Number(doc, 0, "height", 1, PB_MAX_DIMENSION, height)))
+        return "browser_viewport: non-null width and height must each be integers from 1 to 4096. No viewport change was applied.";
+    if (has_width && has_height) {
         *viewport = BROWSER_VIEWPORT_CUSTOM;
-        ok = Number(doc, 0, "width", 1, PB_MAX_DIMENSION, width) &&
-             Number(doc, 0, "height", 1, PB_MAX_DIMENSION, height);
+        return NULL;
     }
-    free(preset); return ok;
+    if (OptionalField(doc, 0, "preset") >= 0) {
+        char *preset = String(doc, 0, "preset");
+        for (int i = 0; preset && i < BROWSER_VIEWPORT_CUSTOM; ++i) if (!strcmp(preset, viewport_choices[i].preset)) {
+            *viewport = i; *width = viewport_choices[i].width; *height = viewport_choices[i].height;
+            free(preset); return NULL;
+        }
+        free(preset);
+        return "browser_viewport: preset must be dock, desktop, tablet, or mobile when a complete width/height pair is not supplied. No viewport change was applied.";
+    }
+    return "browser_viewport: use {\"preset\":\"desktop\"} or {\"width\":1280,\"height\":720}. Custom sizing requires both dimensions; null counts as omitted. No viewport change was applied.";
 }
 static char *ReadTextResult(PbTextResult *result, bool *error)
 {
@@ -897,24 +910,31 @@ void PicoBrowser_ToolInspect(PicoAgentContext *ctx, const char *args, uint32_t k
     BrowserRequest *r = s ? Request(ctx, kind) : NULL;
     if (!r) { out->output = strdup("Browser service unavailable."); return; }
     JsonDoc doc;
+    const char *argument_error = "Browser tool arguments must be a valid JSON object.";
     bool valid = args && strlen(args) <= 65536 && JsonValidSyntax(args, strlen(args)) && !JsonParse(&doc, args, strlen(args));
+    if (args && strlen(args) > 65536) argument_error = "Browser tool arguments exceed the 64 KiB limit.";
     if (valid) {
         valid = JsonIsObject(&doc, 0);
-        if (kind == PB_VIEWPORT) valid = valid && ParseViewport(&doc, &r->viewport_mode, &r->width, &r->height);
-        else if (kind == PB_DIAGNOSTICS) {
+        if (valid && kind == PB_VIEWPORT) {
+            argument_error = ParseViewport(&doc, &r->viewport_mode, &r->width, &r->height);
+            valid = argument_error == NULL;
+        } else if (kind == PB_DIAGNOSTICS) {
             char *cursor = String(&doc, 0, "cursor");
-            valid = valid && (JsonObjGet(&doc, 0, "cursor") < 0 || (cursor && strlen(cursor) <= 64)); free(cursor);
+            valid = valid && (OptionalField(&doc, 0, "cursor") < 0 || (cursor && strlen(cursor) <= 64)); free(cursor);
+            argument_error = "browser_diagnostics: cursor must be a string of at most 64 bytes; omit it or use null for all history.";
         } else if (kind == PB_INSPECT) {
             char *mode = String(&doc, 0, "mode"), *selector = String(&doc, 0, "selector");
-            valid = valid && mode && ((!strcmp(mode, "accessibility") && JsonObjGet(&doc, 0, "selector") < 0) ||
+            valid = valid && mode && ((!strcmp(mode, "accessibility") && OptionalField(&doc, 0, "selector") < 0) ||
                     (!strcmp(mode, "dom") && selector && selector[0]));
             free(mode); free(selector);
+            argument_error = "browser_inspect: use {\"mode\":\"accessibility\"} with selector omitted or null, or {\"mode\":\"dom\",\"selector\":\"body\"} with a non-empty selector.";
         } else if (kind == PB_EVALUATE) {
             char *expression = String(&doc, 0, "expression"); valid = valid && expression && expression[0]; free(expression);
+            argument_error = "browser_evaluate: expression is required and must be a non-empty string.";
         } else valid = false;
         JsonFree(&doc);
     }
-    if (!valid) { out->output = strdup("Invalid browser tool arguments. See the tool schema; total arguments must not exceed 64 KiB."); ReleaseRequest(r); return; }
+    if (!valid) { out->output = strdup(argument_error); ReleaseRequest(r); return; }
     if (kind != PB_VIEWPORT) {
         strcpy(r->argument_path, "/tmp/pico-browser-arguments-XXXXXX");
         int fd = mkostemp(r->argument_path, O_CLOEXEC);

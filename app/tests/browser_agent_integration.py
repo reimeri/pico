@@ -73,7 +73,7 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
         assert 'signal 9' in text and 'Close and reopen' in text, text
         if stage == 2:
             assert 'uncertain' in text, text
-            return 'browser_diagnostics', {}
+            return 'browser_diagnostics', {'cursor':None}
         if stage == 3:
             return 'browser_open', {'url':url}
         if stage == 4:
@@ -95,7 +95,7 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
             return 'browser_open', {'url':f'http://127.0.0.1:{self.server.server_port}/app'}
         if stage == 2:
             assert 'queued' in text.lower()
-            return 'browser_diagnostics', {}
+            return 'browser_diagnostics', {'cursor':None}
         if stage == 3:
             records = [json.loads(line) for line in text.splitlines()]
             assert records[0]['complete'], records
@@ -105,7 +105,7 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
             return 'browser_inspect', {'mode':'dom','selector':'#field'}
         if stage == 4:
             assert 'Developer field' in json.loads(text)['data']['outerHTML'], text
-            return 'browser_inspect', {'mode':'accessibility'}
+            return 'browser_inspect', {'mode':'accessibility','selector':None}
         if stage == 5:
             assert any(n.get('name',{}).get('value') == 'Developer field' for n in json.loads(text)['data']['nodes'])
             return 'browser_evaluate', {'expression':"document.getElementById('field').value='changed'; 'A'.repeat(200000)+'tail'"}
@@ -115,18 +115,56 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
             assert path.stat().st_size == size
             assert json.loads(path.read_text())['data']['result']['value'] == 'A'*200000+'tail'
             Fixture.output_file = path
-            return 'browser_viewport', {'preset':'mobile'}
+            return 'browser_viewport', {'preset':'mobile','width':None,'height':None}
         if stage == 7:
             metadata = json.loads(text)
             assert (metadata['width'],metadata['height']) == (390,844) and metadata['mode'] == 'fixed'
             return 'browser_evaluate', {'expression':"[innerWidth,innerHeight,document.getElementById('field').value]"}
         if stage == 8:
             assert json.loads(text)['data']['result']['value'] == [390,844,'changed']
-            return 'browser_viewport', {'preset':'dock'}
+            return 'browser_viewport', {'preset':'desktop','width':960,'height':640}
         if stage == 9:
+            assert (json.loads(text)['width'],json.loads(text)['height']) == (960,640), text
+            return 'browser_viewport', {'preset':'unknown','width':1000,'height':700}
+        if stage == 10:
+            assert (json.loads(text)['width'],json.loads(text)['height']) == (1000,700), text
+            return 'browser_viewport', {'preset':None,'width':1024,'height':768}
+        if stage == 11:
+            assert (json.loads(text)['width'],json.loads(text)['height']) == (1024,768), text
+            return 'browser_viewport', {'preset':'tablet','width':1000,'height':None}
+        if stage == 12:
+            assert (json.loads(text)['width'],json.loads(text)['height']) == (768,1024), text
+            # Viewport acknowledgement precedes renderer layout. Establish the
+            # actual size before checking that an invalid call cannot change it.
+            return 'browser_evaluate', {'expression':"new Promise(resolve => { const ready = () => { if (innerWidth === 768 && innerHeight === 1024) { removeEventListener('resize', ready); resolve([innerWidth, innerHeight]); } }; addEventListener('resize', ready); ready(); })"}
+        if stage == 13:
+            assert json.loads(text)['data']['result']['value'] == [768,1024], text
+            return 'browser_viewport', {'preset':'mobile','width':0,'height':600}
+        if stage == 14:
+            assert 'width' in text and 'integer' in text and 'No viewport change' in text, text
+            return 'browser_evaluate', {'expression':'[innerWidth,innerHeight]'}
+        if stage == 15:
+            assert json.loads(text)['data']['result']['value'] == [768,1024], text
+            return 'browser_viewport', {'preset':None,'width':640,'height':None}
+        if stage == 16:
+            assert 'both dimensions' in text and '{"preset":"desktop"}' in text, text
+            return 'browser_viewport', {'width':960,'height':600}
+        if stage == 17:
+            assert (json.loads(text)['width'],json.loads(text)['height']) == (960,600), text
+            return 'browser_viewport', {'preset':'unknown'}
+        if stage == 18:
+            assert 'preset must be' in text, text
+            return 'browser_inspect', {'mode':'dom','selector':None}
+        if stage == 19:
+            assert 'non-empty selector' in text, text
+            return 'browser_evaluate', {'expression':None}
+        if stage == 20:
+            assert 'expression is required' in text, text
+            return 'browser_viewport', {'preset':'dock'}
+        if stage == 21:
             assert json.loads(text)['mode'] == 'dock'
             return 'browser_observe', {}
-        if stage == 10:
+        if stage == 22:
             assert 'does not support image' in text, text
             return None, None
         raise AssertionError(f'unexpected developer stage {stage}')
@@ -135,6 +173,7 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
         try:
             body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             assert self.path == '/v1/responses'
+            assert all(tool.get('strict') is False for tool in body.get('tools', [])), 'implicit strict policy'
             Fixture.round += 1
             current = Fixture.round
             if FAILURE:
@@ -155,7 +194,7 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
                     data = base64.b64decode(images[-1].split(',', 1)[1], validate=True)
                     with Image.open(io.BytesIO(data)) as image:
                         image = image.convert('RGB')
-                        expected = {3: (12,34,56), 4: (23,45,67), 5: (65,43,21), 6: (65,43,21)}[current]
+                        expected = {3: (12,34,56), 4: (23,45,67), 5: (65,43,21), 6: (65,43,21), 7: (65,43,21)}[current]
                         assert image.getpixel((400,400)) == expected, (current, image.getpixel((400,400)))
                         if meta:
                             assert image.size == (meta['width'], meta['height'])
@@ -171,15 +210,20 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
                     name, args = 'browser_observe', {}
                 elif current == 3:
                     name, args = 'browser_act', {'observation_id': meta['observation_id'], 'actions': [
-                        {'type':'click','x':40,'y':30}, {'type':'text','text':'Agent input é 🙂'}]}
+                        {'type':'click','x':40,'y':30,'button':None,'count':None,'modifiers':None,'points':None},
+                        {'type':'text','text':'Agent input é 🙂','modifiers':None,'x':None,'key':None}]}
                 elif current == 4:
                     # Old observation remains usable after typing, until geometry/navigation changes.
                     name, args = 'browser_act', {'observation_id': Fixture.first_observation, 'actions': [
                         {'type':'scroll','x':400,'y':400,'delta_x':0,'delta_y':450}]}
                 elif current == 5:
                     name, args = 'browser_act', {'observation_id': meta['observation_id'], 'actions': [
-                        {'type':'key','key':'V','modifiers':['Control']}]}
+                        {'type':'click','x':None,'y':30}]}
                 elif current == 6:
+                    assert 'Invalid browser_act' in results[-1]['output'], results[-1]
+                    name, args = 'browser_act', {'observation_id': Fixture.first_observation, 'actions': [
+                        {'type':'key','key':'V','modifiers':['Control']}]}
+                elif current == 7:
                     assert 'clipboard' in results[-1]['output'].lower()
                     name, args = None, None
                 else:
@@ -234,8 +278,12 @@ def main():
                 while not screenshot.exists():
                     assert process.poll() is None
                     x('key','F12'); time.sleep(.02)
-                x('mousemove','--window',window,350,720); x('click',1)
-                x('type','--clearmodifiers','--delay',15,'Exercise the embedded browser.'); x('key','Return')
+                # Raylib polls input once per frame; a complete synthetic press
+                # between frames can disappear. Hold each submission event.
+                x('mousemove','--window',window,350,720); x('mousedown',1)
+                time.sleep(.08); x('mouseup',1)
+                x('type','--clearmodifiers','--delay',15,'Exercise the embedded browser.')
+                x('keydown','Return'); time.sleep(.08); x('keyup','Return')
                 while not Fixture.done.wait(.05):
                     assert process.poll() is None, 'Pico exited before provider observation'
                 assert not Fixture.failure, Fixture.failure

@@ -336,6 +336,7 @@ an after-tool hook does not remove the independently owned images.
 
 - `name`, `description`, `params_json`, and optional group-title strings must outlive the extension — use string literals.
 - `params_json` is a valid JSON Schema object (OpenAI function parameters). Registration also rejects invalid execution policies. It returns `false` and omits the tool when non-empty text is malformed or is not a JSON object. `NULL` or `""` remains shorthand for an empty object schema. The overlay warning names the tool and the reason.
+- Builtin Responses requests preserve the registered schema and explicitly use `strict: false`; optional fields are not promoted to required fields. Validate arguments in the tool and describe preferred calls and any null/default semantics. See [providers](providers.md#function-tool-schemas).
 - Zero-initialize `PicoToolResult`. `output`, optional `details_json`, and all image-result allocations must be malloc'd; Pico frees them. Set `is_error` for tool-defined failures.
 - `details_json`, when present, must be exactly one JSON object no larger than `PICO_TOOL_DETAILS_MAX` (64 KiB).
 - Parse arguments with `#include "json.h"` (`JsonParse`, `JsonObjStr`, …).

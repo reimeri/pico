@@ -189,6 +189,11 @@ OAuth refresh is coordinated per provider by `pico_auth_begin_refresh_ctx(ctx, p
 
 Registration APIs (`pico_host_add_*`, `pico_workspace_add_*`, `pico_add_tool`, `pico_set_tool_group_title`, `pico_add_provider`, `pico_add_auth`, etc.) may only be called during their respective `host_init` or `workspace_init` phase; calls outside the active init scope fail and emit warnings. Registrations stage in an isolated staging area and are atomically published to an immutable registration generation only if `init` succeeds (returns 0). A turn retains the generation it accepted, including its tools, providers, hooks, and callback state, until the turn and its queued events are quiescent. If `init` fails or returns non-zero, staged registrations are discarded without modifying the active registry. Registrations are also ignored when a limit is full, arguments are NULL, or the kind/slot is invalid. `pico_add_tool` takes an explicit execution policy (`PICO_TOOL_SEQUENTIAL` or `PICO_TOOL_PARALLEL`) and additionally returns `false` for invalid policies, duplicate names, and malformed/non-object `params_json` schemas, and appends a `status_warn` line naming the tool and the reason. `pico_set_tool_group_title` assigns borrowed singular/plural transcript group labels to a tool already staged in that `workspace_init`; it returns `false` and warns when the call is outside init, the name is unknown, or either label is empty. Group titles are UI metadata, not model-facing catalog fields.
 
+Builtin Responses function tools explicitly use `strict: false`, preserving
+registered parameter schemas and their optional-field semantics rather than
+implicitly making every field required. Tool callbacks remain responsible for
+validating their arguments. See [providers](providers.md#function-tool-schemas).
+
 ## Directories
 
 - User extensions: `~/.config/pico/extensions/`
@@ -479,6 +484,14 @@ Evaluation can mutate page state and needs no per-call confirmation. Outstanding
 evaluation is interrupted on cancellation/takeover by closing the page; effects
 are not rolled back and must not be blindly retried. Read-only inspection uses
 DevTools DOM/Accessibility methods rather than executing page JavaScript.
+
+Optional browser-tool fields treat `null` as omission; required fields, including
+action-specific `browser_act` fields, remain required and non-null. Prefer
+preset-only or complete dimensions-only `browser_viewport` calls. A complete
+valid dimension pair overrides any preset; incomplete dimensions fall back to a
+valid preset's entire size. Invalid non-null dimensions never fall back. Argument
+validation errors leave the viewport unchanged and explain the invalid fields.
+See [browser](browser.md#viewport-control).
 
 Diagnostics start before the initial requested navigation and append complete
 collected records to private per-browser `/tmp` journals across navigation.

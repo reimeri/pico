@@ -6,6 +6,12 @@ if(NOT EXISTS "${CEF_ROOT}/cmake/FindCEF.cmake")
 endif()
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
+if(NOT CMAKE_STRIP)
+    message(FATAL_ERROR "A strip tool is required to install the CEF runtime")
+endif()
+if(NOT EXISTS "${CEF_ROOT}/Resources/locales/en-US.pak")
+    message(FATAL_ERROR "The CEF runtime must include the en-US locale")
+endif()
 add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/wrapper")
 add_executable(pico_browser_helper helper.cc)
 pico_warnings_are_errors(pico_browser_helper)
@@ -29,6 +35,16 @@ endforeach()
 install(TARGETS pico_browser_helper RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/pico/browser)
 install(DIRECTORY "${CEF_ROOT}/Release/" "${CEF_ROOT}/Resources/"
     DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/pico/browser
-    USE_SOURCE_PERMISSIONS)
+    USE_SOURCE_PERMISSIONS
+    DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    PATTERN "locales" EXCLUDE)
+# Transform only the installed copy, never the SDK or development symlinks.
+configure_file(install_runtime.cmake.in install_runtime.cmake @ONLY)
+install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_runtime.cmake")
+install(DIRECTORY "${CEF_ROOT}/Resources/locales/"
+    DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/pico/browser/locales
+    USE_SOURCE_PERMISSIONS
+    DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    FILES_MATCHING PATTERN "en-US.pak" PATTERN "en-US_*.pak")
 install(FILES "${CEF_ROOT}/LICENSE.txt" "${CEF_ROOT}/CREDITS.html"
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/pico/cef)

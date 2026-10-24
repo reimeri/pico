@@ -223,6 +223,15 @@ HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_htt
 - Empty/duplicate call IDs, malformed call arrays, and more than 16 pending calls fail the provider round explicitly.
 - Shutdown gives all provider/tool callbacks one shared deadline. A provider still blocked at expiry is detached; its extension/auth/curl services stay loaded and Pico becomes permanently unusable until process exit.
 
+### Function-tool schemas
+
+Builtin Responses requests explicitly set `strict: false` on function tools and
+forward their registered parameter schemas without making optional fields
+required or nullable. This prevents implicit upstream strict-mode normalization
+from changing omission-dependent tool contracts. The policy also applies to
+empty parameter schemas. Tool implementations remain responsible for runtime
+validation; non-strict generation does not guarantee correct arguments.
+
 ### Connection retries and live status
 
 Shared HTTP helpers retry transient TLS handshake, host/proxy DNS resolution, and connection failures up to five times after the initial attempt, waiting 1, 2, 4, 8, and 16 seconds. They never retry after receiving any response headers or body, including interim and redirect headers. Certificate verification failures, timeouts, HTTP errors, and interrupted streams are not retried. Timeouts apply to each attempt (600 seconds for SSE, 30 seconds for buffered requests), not the entire retry sequence. Cancellation is checked before attempts and throughout waits (approximately every 100 ms).

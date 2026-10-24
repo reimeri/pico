@@ -26,6 +26,11 @@ typedef struct PicoSteeringMessage {
     MdDocument doc;
 } PicoSteeringMessage;
 
+typedef struct PicoMissingImageWarning {
+    char *path;
+    char *notice;
+} PicoMissingImageWarning;
+
 struct PicoAgent {
     PicoWorkspace *workspace;
     PicoAgentId id;
@@ -58,6 +63,8 @@ struct PicoAgent {
     int steering_count;
     size_t steering_bytes;
     uint64_t last_steering_id;
+    PicoMissingImageWarning *missing_image_warnings;
+    int missing_image_warning_count; /* session-owned, restored from notice metadata */
     bool settling_error; /* no new turns/close while error callbacks are dispatched */
     bool steering_delivery; /* prevents recursive delivery from message hooks */
 

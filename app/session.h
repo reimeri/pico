@@ -156,6 +156,13 @@ typedef struct PicoSessionHeader {
     char model[128];
 } PicoSessionHeader;
 
+/* Main-thread request-copy recovery; canonical history/assets remain untouched.
+ * User-only warnings are once per path per session and survive replay. */
+bool PicoSession_PrepareRequestImages(PicoHost *app, PicoAgent *agent, char **input,
+                                     int count);
+bool PicoSession_RememberMissingImage(PicoAgent *agent, const char *path, const char *notice);
+void PicoSession_ClearMissingImageWarnings(PicoAgent *agent);
+
 void PicoSession_Start(PicoHost *app, PicoAgent *agent, PicoSessionStart start, const char *session_file);
 /* Internal UI loading: asynchronous reading/validation and bounded main-thread
  * replay into an unpublished agent. Public creation/reload remain synchronous. */

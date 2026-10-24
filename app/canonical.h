@@ -41,6 +41,10 @@ char *pico_canonical_tool_observation(const char *json);
 char *pico_canonical_tool_images_markdown(const char *parts_json);
 
 bool pico_canonical_tool_images_valid(const JsonDoc *doc, bool read_files);
+/* Request-copy only: omit ENOENT/ENOTDIR local image parts, preserving all other
+ * fields. Append unique malloc-owned paths to the caller-owned list. */
+bool pico_canonical_omit_missing_images(char **json, char ***paths, int *count);
+
 
 bool pico_canonical_is_tool_result(const char *json);
 /* Provider state is opaque, explicitly scoped, and never rendered as conversation. */

@@ -191,8 +191,15 @@ file references and MIME types, not base64 bytes. Expanded tool rows display
 images. Session replay reads existing references without starting Chromium or
 repeating input; compaction drops summarized images from active model context
 but retains the transcript/assets. Saved-session/project deletion removes owned
-images. Cancelled/unadopted results clean their files; missing images needed by a
-request fail explicitly. Workspace media-directory symlinks are rejected.
+images. Agents are explicitly instructed never to move, rename, delete, or modify
+Pico-owned `.pico/media/` assets or their parent directories, including during
+project cleanup. Cancelled/unadopted results clean their files. If a local image
+is missing, core omits it from the outgoing request copy without adding a
+model-facing warning. A user-only transcript warning names the path once per
+image per saved session, including after resume. Restoring the file allows later
+requests to include it again; saved history is not rewritten by recovery.
+Unreadable/corrupt images and malformed media remain errors. Workspace
+media-directory symlinks are rejected.
 
 OpenAI Responses (API-key and Codex routes), Hyper, and xAI adapters opt into the
 image-bearing tool-result contract for models configured with `vision: true`.

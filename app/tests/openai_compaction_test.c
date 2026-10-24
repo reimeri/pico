@@ -1,4 +1,6 @@
 #include "pico/http.h"
+#include "canonical.h"
+#include "image_fixtures.h"
 /* Included by host_workspace_test.c; the actual provider and persistence run,
  * only the network boundary is replaced. No credentials or network required. */
 static pthread_mutex_t native_wire_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -55,7 +57,9 @@ static int TestOpenAiNativeCompaction(bool oauth)
     PicoHost *host = NULL; PicoWorkspaceId ws_id = 0; PicoAgentId id = 0;
     bool ok = false;
     const char *phase = "fixture";
+    char missing_image[4096];
     if (!mkdtemp(config) || !mkdtemp(directory)) return 1;
+    snprintf(missing_image, sizeof(missing_image), "%s/missing.png", directory);
     char *old_config = getenv("XDG_CONFIG_HOME") ? strdup(getenv("XDG_CONFIG_HOME")) : NULL;
     setenv("XDG_CONFIG_HOME", config, 1);
     if (pico_host_init(&host, NULL, true) != PICO_OK ||
@@ -68,7 +72,8 @@ static int TestOpenAiNativeCompaction(bool oauth)
     memset(models, 0, 2 * sizeof(*models));
     snprintf(models[0].id, sizeof(models[0].id), "native-first");
     snprintf(models[0].provider, sizeof(models[0].provider), "openai");
-    models[0].context_limit = 128000;
+    models[0].context_limit = 256000;
+    models[0].vision = true;
     models[1] = models[0]; snprintf(models[1].id, sizeof(models[1].id), "native-second");
     ws->settings.compact_enabled = false;
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, ws);
@@ -82,7 +87,11 @@ static int TestOpenAiNativeCompaction(bool oauth)
     PicoAgent *agent = PicoHost_FindAgent(host, id);
     pthread_mutex_lock(&native_wire_mu); native_wire.active = true; pthread_mutex_unlock(&native_wire_mu);
     phase = "initial turn";
-    if (pico_agent_submit(host, id, "native original user task", NULL) != PICO_OK || !PumpUntilIdle(host, agent)) goto done;
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=missing_image, .mime="image/png"};
+    char *parts = oauth ? NULL : pico_canonical_parts_json(&image, 1);
+    PicoResult submitted = pico_agent_submit(host, id, "native original user task", parts);
+    free(parts);
+    if (submitted != PICO_OK || !PumpUntilIdle(host, agent)) goto done;
     phase = "native compaction";
     PicoAgent_Compact(host, agent);
     if (!PumpUntilIdle(host, agent) || agent->state != PICO_AGENT_IDLE || !agent->tokens_unknown) goto done;
@@ -90,7 +99,9 @@ static int TestOpenAiNativeCompaction(bool oauth)
     bool native_request = native_wire.compactions == 1 && native_wire.body &&
         !strstr(native_wire.body, "EPHEMERAL_NATIVE_CONTEXT") && strstr(native_wire.body, "compaction_trigger") &&
         strstr(native_wire.body, "\"store\":false") && strstr(native_wire.body, "reasoning.encrypted_content") &&
-        strstr(native_wire.url, oauth ? "chatgpt.com/backend-api/codex/responses" : "api.openai.com/v1/responses");
+        strstr(native_wire.url, oauth ? "chatgpt.com/backend-api/codex/responses" : "api.openai.com/v1/responses") &&
+        (oauth || (!strstr(native_wire.body, missing_image) &&
+                   !strstr(native_wire.body, "input_image")));
     pthread_mutex_unlock(&native_wire_mu);
     if (!native_request || !DrainSessionForAssertion(host, agent)) goto done;
     size_t length; char *saved = Pico_ReadFile(agent->session_path, &length);
@@ -119,6 +130,23 @@ static int TestOpenAiNativeCompaction(bool oauth)
     replayed = native_wire.body && strstr(native_wire.body, "integration-encrypted-state");
     pthread_mutex_unlock(&native_wire_mu);
     if (!replayed) goto done;
+    if (!oauth) {
+        phase = "restore missing image after native checkpoint and session resume";
+        int warnings = 0;
+        for (int i = 0; i < resumed->message_count; ++i)
+            if (resumed->messages[i].role == PICO_ROLE_NOTICE && resumed->messages[i].source &&
+                strstr(resumed->messages[i].source, missing_image)) warnings++;
+        FILE *file = fopen(missing_image, "wb");
+        if (!file) goto done;
+        bool written = fwrite(image_fixtures[0].data, 1, image_fixtures[0].size, file) == image_fixtures[0].size;
+        if (fclose(file) || !written || warnings != 1 ||
+            pico_agent_submit(host, resumed_id, "restored attachment", NULL) != PICO_OK ||
+            !PumpUntilIdle(host, resumed) || resumed->state != PICO_AGENT_IDLE) goto done;
+        pthread_mutex_lock(&native_wire_mu);
+        bool restored_image = native_wire.body && strstr(native_wire.body, "input_image");
+        pthread_mutex_unlock(&native_wire_mu);
+        if (!restored_image) goto done;
+    }
     phase = "account/key mismatch refused before HTTP";
     int requests = NativeRequestCount();
     if (oauth) pico_auth_set_oauth(host, "openai", "other-access", "other-refresh", "different-account", time(NULL)+3600);

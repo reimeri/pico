@@ -325,8 +325,14 @@ Unadopted, cancelled, and retired-generation results release buffers and delete
 their newly written files. Accepted assets survive close/reload/replay and
 compaction; compaction removes old image results from active model context, not
 saved history. Saved-history deletion removes the corresponding owned assets.
-A request that needs a missing/unreadable/corrupt image fails instead of silently
-losing visual context. Replay restores references and never re-executes a tool.
+Agents must not move, rename, delete, or modify Pico-owned `.pico/media/` assets
+or their parent directories during cleanup. Core omits missing local images
+from outgoing request copies and persists a user-only transcript warning once
+per image path per saved session (including after resume). No warning is added
+to model instructions or context. History retains the original
+references; restoring a file includes it again. Unreadable/corrupt images and
+malformed media remain errors. Replay restores references and never re-executes
+a tool. See [provider recovery](providers.md#image-bearing-tool-results).
 Expanded tool rows and copied/saved transcripts retain image presentation.
 `PicoTraceLine.tool_parts_json` is a borrowed core-owned reference array with the
 same lifetime as the other trace fields; do not mutate it. Text replacement by

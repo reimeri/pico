@@ -170,6 +170,8 @@ struct PicoAgentRt {
     char *work_cache_key;
     char **work_input;
     int work_input_count;
+    char **work_compaction_history;
+    int work_compaction_history_count;
     bool work_compact;
     bool work_native_compact;
     int work_context_limit;
@@ -1370,6 +1372,9 @@ static void *WorkerMain(void *arg)
         char *cache_key = rt->work_cache_key;
         char **input = rt->work_input;
         int input_count = rt->work_input_count;
+        char **compaction_history = rt->work_compaction_history;
+        int compaction_history_count = rt->work_compaction_history_count;
+        rt->work_compaction_history = NULL; rt->work_compaction_history_count = 0;
         bool fast = rt->work_fast;
         bool compact = rt->work_compact;
         bool native_compact = rt->work_native_compact;
@@ -1425,6 +1430,8 @@ static void *WorkerMain(void *arg)
             turn.native_compact = native_compact;
             turn.context_limit = context_limit;
             turn.compact_seed = compact_seed;
+            turn.compaction_history_json = (const char *const *)compaction_history;
+            turn.compaction_history_count = compaction_history_count;
             turn.include_tools = include_tools;
             turn.vision = vision;
             turn.input_json = (const char *const *)input;
@@ -1485,6 +1492,8 @@ static void *WorkerMain(void *arg)
             free(input[i]);
         }
         free(input);
+        for (int i = 0; i < compaction_history_count; ++i) free(compaction_history[i]);
+        free(compaction_history);
     }
     return NULL;
 }
@@ -1717,6 +1726,14 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     if (!agent->clarification && !native)
         RunContextHooks(rt, agent, compact, tools, tool_count, &input, &input_count);
 
+    if (!PicoSession_PrepareRequestImages(app, agent, input, input_count)) {
+        for (int i = 0; i < input_count; ++i) free(input[i]);
+        free(input); free(instructions); free(tools);
+        if (agent->runtime == rt && !PicoAgent_CancelRequested(agent))
+            SetErrorState(app, agent, "Could not prepare missing-image recovery");
+        return false;
+    }
+
     if (InputHasContextItem(input, input_count) && !p->map_context)
     {
         char buf[256];
@@ -1765,11 +1782,30 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         free(input); free(instructions); free(tools);
         SetErrorState(app, agent, "Could not snapshot mandatory compaction seed"); return false;
     }
+    char **compaction_history = NULL;
+    int compaction_history_count = native ? rt->input_count : 0;
+    if (compaction_history_count) {
+        compaction_history = calloc((size_t)compaction_history_count, sizeof(char *));
+        bool copied = compaction_history != NULL;
+        for (int i = 0; copied && i < compaction_history_count; ++i) {
+            compaction_history[i] = Dup(rt->input[i].json);
+            copied = compaction_history[i] != NULL;
+        }
+        if (!copied) {
+            for (int i = 0; compaction_history && i < compaction_history_count; ++i) free(compaction_history[i]);
+            free(compaction_history); free(compact_seed);
+            for (int i = 0; i < input_count; ++i) free(input[i]);
+            free(input); free(instructions); free(tools);
+            SetErrorState(app, agent, "Could not snapshot native compaction history"); return false;
+        }
+    }
     pthread_mutex_lock(&rt->mu);
     if (rt->busy || rt->stop)
     {
         pthread_mutex_unlock(&rt->mu);
         free(compact_seed);
+        for (int i = 0; i < compaction_history_count; ++i) free(compaction_history[i]);
+        free(compaction_history);
         for (int i = 0; i < input_count; i++)
         {
             free(input[i]);
@@ -1815,6 +1851,8 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_tool_count = rt->offered_tool_count;
     rt->work_input = input;
     rt->work_input_count = input_count;
+    rt->work_compaction_history = compaction_history;
+    rt->work_compaction_history_count = compaction_history_count;
     rt->busy = true;
     pthread_cond_broadcast(&rt->cv);
     pthread_mutex_unlock(&rt->mu);
@@ -4224,6 +4262,8 @@ static void FreeRt(PicoAgentRt *rt)
         free(rt->work_input[i]);
     }
     free(rt->work_input);
+    for (int i = 0; i < rt->work_compaction_history_count; ++i) free(rt->work_compaction_history[i]);
+    free(rt->work_compaction_history);
     ClearOfferedTools(rt);
     free(rt->instructions);
     PicoWorkspace_RegistrationRelease(rt->registration);
@@ -4526,6 +4566,7 @@ bool PicoAgent_DestroyBefore(PicoAgent *agent, const struct timespec *deadline)
         agent->runtime = NULL;
     }
     PicoAgent_ClearMessages(agent);
+    PicoSession_ClearMissingImageWarnings(agent);
     free(agent->messages);
     free(agent->error);
     free(agent->compact_summary);

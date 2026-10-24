@@ -427,7 +427,11 @@ typedef struct PicoUiPost {
  * `thinking`, `thinking_signature`, and `item_id` are optional. User/assistant
  * parts may also be `refusal`, `image`, or `audio` (`path`, optional `mime` / `url`).
  * `context` is request-only extra_context: text parts only, not persisted in
- * history. Map it to a non-user role. Pico refuses the turn unless map_context. */
+ * history. Map it to a non-user role. Pico refuses the turn unless map_context.
+ * Before dispatch, core omits missing local image parts from the request copy,
+ * and warns the user once per path per saved session. These transcript-only
+ * warnings do not enter model instructions or context. Canonical history is
+ * unchanged; other media errors remain errors. */
 typedef struct PicoLlmTurn {
     const char *model;
     const char *base_url;
@@ -439,6 +443,11 @@ typedef struct PicoLlmTurn {
     bool native_compact; /* pinned mode; successful result must replace history */
     int context_limit; /* resolved model capacity; bounds retained compaction input */
     const char *compact_seed; /* immutable clarification seed, otherwise NULL */
+    /* Native compaction retention/checkpoint source only: original canonical
+     * history before request-only omissions. Never send this instead of input_json.
+     * Borrowed for the worker callback; NULL/0 on non-native requests. */
+    const char *const *compaction_history_json;
+    int compaction_history_count;
     bool include_tools;
     bool vision;
     const char *const *input_json;

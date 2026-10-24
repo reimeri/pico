@@ -3172,6 +3172,14 @@ char *PicoSettings_LoadSystemPromptSpans(const PicoWorkspace *workspace, PicoPro
                      "Prefer concise answers.");
         PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE, 0, b.len);
     }
+    size_t before_media = b.len;
+    JsonBuf_Puts(&b, "\n\n# Pico session media\n\n"
+        "Files under `<workspace>/.pico/media/` are Pico-owned persistent session assets, "
+        "not disposable project artifacts. Never move, rename, delete, or modify these files "
+        "or their parent directories, including during cleanup or to make git status clean. "
+        "Keep them in place; Pico manages their lifecycle through saved-session/project deletion.");
+    PushSpan(spans, span_count, PICO_PROMPT_SPAN_MAX, PICO_PROMPT_SOURCE_BASE,
+             before_media + 2, b.len - before_media - 2);
     size_t before_software = b.len;
     AppendSoftwareGuidance(&b, workspace);
     if (b.len > before_software)

@@ -80,6 +80,9 @@ void PicoAgent_AddSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, c
 void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown);
 void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
                          const char *markdown);
+/* Internal acceptance result; public notice APIs remain fire-and-forget. */
+bool PicoAgent_AddNoticePersisted(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
+                                  const char *markdown);
 void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index);
 /* Replay-only: transfer worker-prepared markdown to the private candidate.
  * On allocation failure the caller still owns the document. */

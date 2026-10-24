@@ -222,6 +222,14 @@ Zero is invalid for every ID. Stale workspace, agent, ask, and runtime-generatio
 
 ## Compaction checkpoints and provider state
 
+ABI 26 separates `PicoLlmTurn.compaction_history_json` / `compaction_history_count`
+from outgoing `input_json`. Native providers borrow the original canonical source
+only for user retention, normal media budgeting, and checkpoint construction;
+they must send the filtered `input_json` instead. Non-native requests supply
+NULL/0. Both arrays and all strings are immutable and live only for the provider
+callback. Retained image references survive missing-file recovery and remain
+restorable; ordinary compaction can still drop messages outside its budget.
+
 ABI 25 adds `PicoProvider.native_compaction`, `PicoLlmTurn.native_compact`,
 `context_limit`, and `compact_seed`, and the malloc-owned, mutually exclusive
 `PicoLlmResult.compaction_json` result variant. The route query has the same
@@ -427,7 +435,18 @@ Interrupted replay repairs every unanswered tool-call ID independently, preservi
 completed image results even when siblings finished in reverse order.
 Replay does not capture or act. Compaction drops summarized images from active
 context but retains transcript/assets; saved-history deletion removes owned
-files. Missing/invalid required assets fail provider requests. Expanded tool
+files. Agents must never move, rename, delete, or modify Pico-owned `.pico/media/`
+assets or their parent directories during cleanup. Core omits missing local
+image parts (`ENOENT`/`ENOTDIR`) from request copies, across user/assistant/tool
+history and normal/text/native-compaction requests. No omission warning is added
+to model instructions or context. A user-only transcript warning is emitted once
+per path per saved session; notice records
+carry `missing_image_path` metadata so deduplication survives resume, independently
+of editable notice wording. Original history/assets are untouched by recovery;
+restoring a file includes it again (subject to ordinary compaction replacement).
+Unreadable/corrupt images, malformed media, audio, and remote URLs retain their
+existing failure/validation behavior. Providers still reject invalid media that
+reaches them, including files removed after core's request-copy check. Expanded tool
 rows and copied transcripts retain image references; `tool_parts_json` is
 borrowed core storage with ordinary trace invalidation rules. After-tool text
 replacement does not modify image ownership. Builtin adapters project real

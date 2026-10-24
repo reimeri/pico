@@ -104,6 +104,14 @@ resolved model capacity; `compact_seed` is a borrowed immutable clarification
 seed or NULL. They have the same worker-callback lifetime as other turn fields.
 Continue using `stream` and `compact`; no second executor is registered.
 
+ABI 26 supplies `compaction_history_json` / `compaction_history_count` on native
+requests: an immutable, callback-borrowed copy of original canonical history,
+before missing-image recovery. Use this source for retention, its media budgeting,
+and checkpoint construction; use only `input_json` for the model request. Never
+send the unfiltered retention source to the backend. Non-native requests supply
+NULL/0. Retained messages keep their original image references (even image-only
+messages), so restoring an omitted file can make it available after compaction.
+
 For native compaction return `PICO_LLM_OK` with malloc'd
 `PicoLlmResult.compaction_json`: a complete canonical JSON array containing zero
 or more genuine user items followed by exactly one scoped state item. It is
@@ -274,7 +282,17 @@ remains model/provider-dependent; report backend rejection without a text-only
 fallback.
 Never send a path or base64 string as ordinary text and claim vision support.
 Read the referenced image into a genuine provider image part; reject malformed
-parts, MIME/content mismatches, or unreadable/corrupt assets. Core refuses follow-up history containing
+parts, MIME/content mismatches, or unreadable/corrupt assets. Before dispatching
+any request (including text/native compaction), core omits local image parts
+whose file lookup fails with `ENOENT` or `ENOTDIR` from a request-only copy. This
+covers user/assistant attachments and tool images, preserves neighboring parts
+and item metadata, and does not rewrite canonical history or inject warnings
+into model instructions or context. A user-only transcript warning names the
+missing path and is persisted once per image path per saved session,
+including after resume. Restore a missing file to include it in subsequent
+requests. Existing but unreadable/corrupt images, audio, and remote image URLs
+are not covered. Providers must still fail on invalid media reaching them
+(including files disappearing after core's check). Core refuses follow-up history containing
 tool images when the selected model lacks vision or the provider lacks this
 capability. `pico_agent_context_accepts_tool_images` exposes the turn snapshot to
 tools, so they can fail before capture/mutation.

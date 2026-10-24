@@ -787,6 +787,11 @@ static void TestToolImageObservation(void)
     char *mismatched_parts = pico_canonical_parts_json(images, 4);
     char *mismatched_result = pico_canonical_tool_result_json("image-call", "view_image", "metadata", false, mismatched_parts);
     input[2] = mismatched_result;
+    char **invalid_missing = NULL; int invalid_count = 0;
+    Check(pico_canonical_omit_missing_images(&mismatched_result, &invalid_missing, &invalid_count) && !invalid_count,
+          "existing invalid image is not a missing-file recovery");
+    input[2] = mismatched_result;
+    free(invalid_missing);
     body = pico_completions_build_request(&turn, &opts);
     Check(!body, "saved MIME must match the actual image format"); free(body);
     free(mismatched_parts); free(mismatched_result); input[2] = result1;
@@ -802,7 +807,18 @@ static void TestToolImageObservation(void)
     }
     Check(unlink(paths[0]) == 0, "remove image fixture");
     body = pico_completions_build_request(&turn, &opts);
-    Check(!body, "missing tool image explicitly fails request, never silently drops vision"); free(body);
+    Check(!body, "adapter still rejects a file disappearing after core's recovery check"); free(body);
+    char *filtered = JsonDup(result1), **missing_paths = NULL; int missing_count = 0;
+    Check(pico_canonical_omit_missing_images(&filtered, &missing_paths, &missing_count),
+          "core prepares history with a missing image");
+    input[2] = filtered;
+    body = pico_completions_build_request(&turn, &opts);
+    char *remaining = pico_canonical_data_url(paths[1], image_fixtures[1].mime);
+    Check(body && remaining && strstr(body, remaining) && strstr(body, "metadata") &&
+          missing_count == 1 && !strcmp(missing_paths[0], paths[0]),
+          "recovered request retains valid images and tool output while identifying the missing image");
+    free(body); free(remaining); free(filtered);
+    for (int i = 0; i < missing_count; ++i) free(missing_paths[i]); free(missing_paths);
     input[2] = "{\"type\":\"tool_result\",\"call_id\":\"image-call\",\"output\":\"metadata\",\"parts\":{}}";
     body = pico_completions_build_request(&turn, &opts);
     Check(!body, "malformed tool parts fail request instead of becoming text-only"); free(body);

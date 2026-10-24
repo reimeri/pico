@@ -38,9 +38,13 @@ static char g_last_think[2048];
 #ifdef PICO_TEST_JSON_ALLOC
 static bool g_fail_replay_header;
 static bool g_fail_native_replay_type;
+static bool g_fail_missing_image_path;
 char *__real_JsonObjStr(const JsonDoc *doc, int obj, const char *key);
 char *__wrap_JsonObjStr(const JsonDoc *doc, int obj, const char *key)
 {
+    if (g_fail_missing_image_path && !strcmp(key, "missing_image_path")) {
+        g_fail_missing_image_path = false; errno = ENOMEM; return NULL;
+    }
     if (g_fail_native_replay_type && !strcmp(key, "type") &&
         JsonEq(doc, JsonObjGet(doc, obj, "type"), "compaction") &&
         JsonEq(doc, JsonObjGet(doc, obj, "kind"), "native")) {
@@ -694,6 +698,15 @@ void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity sev
     PicoAgent_AddMessage(app, agent, PICO_ROLE_NOTICE, text);
     agent->messages[agent->message_count - 1].notice_severity = severity;
 }
+
+bool PicoAgent_AddNoticePersisted(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
+                                  const char *text)
+{
+    PicoAgent_AddNotice(app, agent, severity, text);
+    return PicoSession_LogNotice(app, agent, severity, text) != PICO_SESSION_WRITE_FAILED;
+}
+
+bool PicoAgent_CancelRequested(const PicoAgent *agent) { (void)agent; return false; }
 
 void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, const char *text)
 {
@@ -1755,6 +1768,39 @@ static int TestNoticePersistence(void)
     ok &= PicoSession_LogNotice(&writer, &ephemeral, PICO_NOTICE_INFO, "temporary") ==
           PICO_SESSION_WRITE_SKIPPED && !ephemeral.session_path[0];
     return ok ? 0 : Fail("notices lost severity/order, entered history, or persisted an ephemeral agent");
+}
+
+static int TestMissingImageWarningPersistence(void)
+{
+    PicoHost writer = {0}, reader = {0};
+    PicoAgent source = {.persistence=PICO_SESSION_DURABLE}, restored = {.persistence=PICO_SESSION_DURABLE};
+    PicoHost_SetPath(&writer, "/workspace"); PicoHost_SetPath(&reader, "/workspace");
+    const char *path = "/pico-missing-persisted-image.png";
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=(char *)path};
+    char *item = pico_canonical_user_json(&image, 1);
+    bool ok = PicoSession_PrepareRequestImages(&writer, &source, &item, 1);
+    free(item);
+    g_replayed_history[0] = 0;
+    PicoSession_Start(&reader, &restored, PICO_SESSION_NEW, source.session_path);
+    int before = restored.message_count;
+    item = pico_canonical_user_json(&image, 1);
+    ok &= before == 1 && restored.messages[0].role == PICO_ROLE_NOTICE &&
+        restored.messages[0].notice_severity == PICO_NOTICE_WARNING &&
+        PicoSession_PrepareRequestImages(&reader, &restored, &item, 1) &&
+        restored.message_count == before && !strstr(item, path) &&
+        !strstr(g_replayed_history, "Missing image");
+    free(item);
+#ifdef PICO_TEST_JSON_ALLOC
+    PicoAgent failed_restore = {.persistence=PICO_SESSION_DURABLE};
+    g_fail_missing_image_path = true;
+    ok &= PicoSession_Replay(&reader, &failed_restore, source.session_path, false) != 0;
+    g_fail_missing_image_path = false;
+    PicoAgent_ClearMessages(&failed_restore); PicoSession_ClearMissingImageWarnings(&failed_restore);
+#endif
+    PicoAgent_ClearMessages(&source); PicoAgent_ClearMessages(&restored);
+    PicoSession_ClearMissingImageWarnings(&source); PicoSession_ClearMissingImageWarnings(&restored);
+    unlink(source.session_path);
+    return ok ? 0 : Fail("missing-image warning repeated after resume or entered canonical history");
 }
 
 static int TestSteeringPersistence(void)
@@ -4462,7 +4508,7 @@ int main(void)
     unlink(writer_agent.session_path);
     if (PICO_TEST_RUN(TestNativeCheckpointPersistence()) != 0 || PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
         PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 || PICO_TEST_RUN(TestToolImageReplayCompaction()) != 0 || PICO_TEST_RUN(TestInterruptedImageBatch()) != 0 ||
-        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
+        PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestMissingImageWarningPersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionTitleFailureStages()) != 0 || PICO_TEST_RUN(TestSessionTitleUtf8()) != 0 ||
         PICO_TEST_RUN(TestConcurrentAppendDuringTitle()) != 0 || PICO_TEST_RUN(TestConcurrentDoneCatalog()) != 0 ||

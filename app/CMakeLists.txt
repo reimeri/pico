@@ -192,6 +192,7 @@ add_executable(pico
     worktree.c
     subagent_config.c
     session.c
+    session_media.c
     usage.c
     chat_find.c
     chat_sel.c
@@ -700,6 +701,7 @@ if(BUILD_TESTING)
     set_source_files_properties(tests/parallel_tool_test.c PROPERTIES HEADER_FILE_ONLY TRUE)
     add_executable(pico_agent_behavior_tests
         tests/agent_behavior_test.c
+        session_media.c
         render_scale.c
         tests/workspace_test.c
         tests/subagent_config_test.c
@@ -760,6 +762,7 @@ if(BUILD_TESTING)
     add_executable(pico_session_usage_tests
         tests/session_usage_test.c
         session.c
+        session_media.c
         worktree.c
         tool_args.c
         canonical.c
@@ -817,6 +820,7 @@ if(BUILD_TESTING)
         settings.c
         auth.c
         session.c
+        session_media.c
         chat_find.c
         chat_sel.c
         text_range.c
@@ -874,6 +878,7 @@ if(BUILD_TESTING)
         settings.c
         auth.c
         session.c
+        session_media.c
         chat_find.c
         chat_sel.c
         text_range.c
@@ -1071,6 +1076,7 @@ if(BUILD_TESTING)
         settings.c
         auth.c
         session.c
+        session_media.c
         chat_find.c
         chat_sel.c
         builtins/ask_user.c

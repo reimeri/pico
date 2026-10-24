@@ -902,10 +902,17 @@ static int TestPromptSourceSpans(void)
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int n = 0;
     char *text = PicoSettings_LoadSystemPromptSpans(PicoHost_PrimaryWorkspace(&app), spans, &n);
-    int failed = !text || n != 3 || ExpectSpan(&spans[0], PICO_PROMPT_SOURCE_BASE, text, "user-system") ||
+    bool agents_span = false, media_base_span = false;
+    const char *media = text ? strstr(text, ".pico/media/") : NULL;
+    for (int i = 0; i < n; ++i) {
+        if (!ExpectSpan(&spans[i], PICO_PROMPT_SOURCE_AGENTS, text, "agents-md")) agents_span = true;
+        if (media && spans[i].source == PICO_PROMPT_SOURCE_BASE &&
+            spans[i].start <= (size_t)(media - text) &&
+            spans[i].start + spans[i].length > (size_t)(media - text)) media_base_span = true;
+    }
+    int failed = !text || ExpectSpan(&spans[0], PICO_PROMPT_SOURCE_BASE, text, "user-system") ||
                  ExpectSpan(&spans[1], PICO_PROMPT_SOURCE_WORKSPACE_SYSTEM, text, "workspace-system") ||
-                 ExpectSpan(&spans[2], PICO_PROMPT_SOURCE_AGENTS, text, "agents-md") ||
-                 strcmp(text, "user-system\n\nworkspace-system\n\nagents-md") != 0;
+                 !agents_span || !media_base_span || !strstr(text, "Never move, rename, delete, or modify");
 
     free(text);
     unsetenv("XDG_CONFIG_HOME");

@@ -48,7 +48,16 @@ Core makes an independent session-owned copy under
 extension. Editing/removing the source afterward does not change that accepted
 result. Saved images survive session replay and extension reload; compaction
 can remove them from active model context without removing saved history.
-Missing, corrupt, or MIME-mismatched saved assets fail requests explicitly.
+Agents must not move, rename, delete, or modify Pico-owned `.pico/media/` files
+or their parent directories as project cleanup. If any local image in history
+is missing, core omits that image only from the outgoing request and emits a
+user-only transcript warning once per path per saved session (including after
+resume). No omission warning is added to model instructions or context.
+The original history/reference remains intact; restoring the file includes it
+again. This recovery also applies to compaction requests; normal compaction
+replacement rules still apply. Unreadable/corrupt images, invalid media, audio,
+and remote image URLs are not covered by this missing-file recovery.
+Existing corrupt or MIME-mismatched saved assets still fail requests explicitly.
 
 ## Extension tools
 

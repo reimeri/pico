@@ -674,6 +674,11 @@ static void TestToolImageObservation(void)
     char *mismatched_parts = pico_canonical_parts_json(images, 4);
     char *mismatched_result = pico_canonical_tool_result_json("image-call", "view_image", "metadata", false, mismatched_parts);
     input[2] = mismatched_result;
+    char **invalid_missing = NULL; int invalid_count = 0;
+    Check(pico_canonical_omit_missing_images(&mismatched_result, &invalid_missing, &invalid_count) && !invalid_count,
+          "existing invalid image is not a missing-file recovery");
+    input[2] = mismatched_result;
+    free(invalid_missing);
     body = pico_responses_build_request(&turn, &opts);
     Check(!body, "saved MIME must match the actual image format"); free(body);
     free(mismatched_parts); free(mismatched_result); input[2] = result1;
@@ -689,7 +694,18 @@ static void TestToolImageObservation(void)
     }
     Check(unlink(paths[0]) == 0, "remove image fixture");
     body = pico_responses_build_request(&turn, &opts);
-    Check(!body, "missing tool image explicitly fails request, never silently drops vision"); free(body);
+    Check(!body, "adapter still rejects a file disappearing after core's recovery check"); free(body);
+    char *filtered = JsonDup(result1), **missing_paths = NULL; int missing_count = 0;
+    Check(pico_canonical_omit_missing_images(&filtered, &missing_paths, &missing_count),
+          "core prepares history with a missing image");
+    input[2] = filtered;
+    body = pico_responses_build_request(&turn, &opts);
+    char *remaining = pico_canonical_data_url(paths[1], image_fixtures[1].mime);
+    Check(body && remaining && strstr(body, remaining) && strstr(body, "metadata") &&
+          missing_count == 1 && !strcmp(missing_paths[0], paths[0]),
+          "recovered request retains valid images and tool output while identifying the missing image");
+    free(body); free(remaining); free(filtered);
+    for (int i = 0; i < missing_count; ++i) free(missing_paths[i]); free(missing_paths);
     input[2] = "{\"type\":\"tool_result\",\"call_id\":\"image-call\",\"output\":\"metadata\",\"parts\":{}}";
     body = pico_responses_build_request(&turn, &opts);
     Check(!body, "malformed tool parts fail request instead of becoming text-only"); free(body);
@@ -714,7 +730,7 @@ static void TestNativeCompaction(void)
     const char *input[] = {briefing, "{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Briefing: real user input\"}]}",
         "{\"type\":\"assistant\",\"parts\":[{\"type\":\"text\",\"text\":\"old assistant\"}]}"};
     PicoLlmTurn turn = {.model="first-model", .compact=true, .native_compact=true, .context_limit=128000,
-        .input_json=input, .input_count=3};
+        .input_json=input, .input_count=3, .compaction_history_json=input, .compaction_history_count=3};
     PicoResponsesBuildOpts opts = {.provider="openai", .store_false=true, .include_encrypted_reasoning=true};
     char *body = pico_responses_build_request(&turn, &opts);
     Check(body && strstr(body, "compaction_trigger") && !strstr(body, "Handoff brief:"),
@@ -746,6 +762,49 @@ static void TestNativeCompaction(void)
     error = pico_responses_check_state(&turn, "openai-api", "key:changed");
     Check(error != NULL, "native state refuses a credential change"); free(error);
     free(state); free(briefing); pico_llm_result_free(&result); pico_responses_ctx_free(&ctx);
+}
+
+static void TestNativeMissingImageRetention(void)
+{
+    const char *original[] = {
+        "{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"keep mixed input\"},{\"type\":\"image\",\"path\":\"/missing-mixed.png\"}]}",
+        "{\"type\":\"user\",\"parts\":[{\"type\":\"image\",\"path\":\"/missing-image-only.png\"}]}"};
+    char *filtered[] = {JsonDup(original[0]), JsonDup(original[1])};
+    char **missing = NULL; int count = 0;
+    bool prepared = pico_canonical_omit_missing_images(&filtered[0], &missing, &count) &&
+                    pico_canonical_omit_missing_images(&filtered[1], &missing, &count);
+    PicoLlmTurn turn = {.model="large", .context_limit=512000, .compact=true, .native_compact=true,
+        .input_json=(const char *const *)filtered, .input_count=2,
+        .compaction_history_json=original, .compaction_history_count=2};
+    PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
+    Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
+    pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+    JsonDoc doc;
+    bool valid = result.compaction_json && !JsonParse(&doc, result.compaction_json, strlen(result.compaction_json));
+    if (valid) {
+        valid = pico_canonical_compaction_valid(&doc, 0, "openai") &&
+                strstr(result.compaction_json, original[1]);
+        JsonFree(&doc);
+    }
+    /* Recovery must use exactly the same retention policy/budget as an
+     * unfiltered request, regardless of the configured model capacity. */
+    PicoLlmTurn intact = turn; intact.input_json = original;
+    PicoLlmResult expected = {0};
+    pico_responses_compact_result(&ctx, &intact, "openai-api", "key:original", &expected);
+    valid = valid && expected.compaction_json && !strcmp(expected.compaction_json, result.compaction_json);
+    pico_llm_result_free(&expected);
+    Check(prepared && count == 2 && !result.error && valid,
+          "native image-only retention preserves original references and ordinary media budgeting");
+    pico_llm_result_free(&result); pico_responses_ctx_free(&ctx);
+    /* Retain the mixed message on its own, without losing the omitted part. */
+    turn.input_count = turn.compaction_history_count = 1;
+    Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
+    pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
+    Check(result.compaction_json && strstr(result.compaction_json, original[0]) && !result.error,
+          "native retained mixed messages keep missing image references for later restoration");
+    pico_llm_result_free(&result); pico_responses_ctx_free(&ctx);
+    for (int i = 0; i < count; ++i) free(missing[i]); free(missing);
+    free(filtered[0]); free(filtered[1]);
 }
 
 static void TestNativeTerminalFailures(void)
@@ -782,7 +841,7 @@ static void TestNativeRetentionBudget(void)
     char *user = pico_canonical_user_text(dense);
     const char *input[] = {user};
     PicoLlmTurn turn = {.model="small", .context_limit=16000, .compact=true, .native_compact=true,
-                       .input_json=input, .input_count=1};
+                       .input_json=input, .input_count=1, .compaction_history_json=input, .compaction_history_count=1};
     PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
     Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
     pico_responses_compact_result(&ctx, &turn, "openai-api", "key:original", &result);
@@ -805,7 +864,8 @@ static void TestNativeSeedAndRepeatedCompaction(void)
     char *recent = pico_canonical_user_text("latest genuine instruction");
     const char *input[] = {seed, recent};
     PicoLlmTurn turn = {.model="model", .context_limit=128000, .compact_seed="immutable seed",
-                       .compact=true, .native_compact=true, .input_json=input, .input_count=2};
+                       .compact=true, .native_compact=true, .input_json=input, .input_count=2,
+                       .compaction_history_json=input, .compaction_history_count=2};
     PicoResponsesCtx ctx = {0}; PicoLlmResult result = {0};
     Feed(&ctx, kCompactDone); Feed(&ctx, kCompactComplete);
     char *old_state = NULL;
@@ -834,6 +894,7 @@ static void TestNativeSeedAndRepeatedCompaction(void)
 int main(void)
 {
     TestNativeCompaction();
+    TestNativeMissingImageRetention();
     TestNativeSeedAndRepeatedCompaction();
     TestNativeTerminalFailures();
     TestNativeRetentionBudget();

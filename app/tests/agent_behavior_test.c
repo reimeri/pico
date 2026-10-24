@@ -2023,6 +2023,7 @@ void PicoChat_InspectClose(void)
 }
 
 static bool g_composer_has_attachment;
+static char *g_composer_image_path;
 
 bool PicoComposer_HasAttachments(const PicoHost *app)
 {
@@ -2047,8 +2048,9 @@ bool PicoComposer_ApplyAttachments(PicoHost *app)
         return true;
     }
     free(app->agent_parts);
-    app->agent_parts = JsonDup(
-        "[{\"type\":\"text\",\"text\":\"\"},{\"type\":\"image\",\"path\":\"/tmp/pasted.png\"}]");
+    PicoLlmPart parts[] = {{.kind=PICO_LLM_PART_TEXT, .text=""},
+                           {.kind=PICO_LLM_PART_IMAGE, .path=g_composer_image_path}};
+    app->agent_parts = pico_canonical_parts_json(parts, 2);
     return app->agent_parts != NULL;
 }
 
@@ -2065,7 +2067,10 @@ void PicoComposer_DiscardAttachments(void)
 char *pico_composer_display_message(const char *text)
 {
     (void)text;
-    return g_composer_has_attachment ? JsonDup("![image](/tmp/pasted.png)") : NULL;
+    if (!g_composer_has_attachment) return NULL;
+    JsonBuf b; JsonBuf_Init(&b); JsonBuf_Puts(&b, "![image](");
+    JsonBuf_Puts(&b, g_composer_image_path); JsonBuf_Putc(&b, ')');
+    return JsonBuf_Steal(&b);
 }
 
 static PicoWorkspace *TestWs(PicoHost *host)
@@ -3045,7 +3050,7 @@ static int TestImageOnlySubmitStartsTurn(void)
         return Fail(name, "image-only turn did not finish");
     }
     pthread_mutex_lock(&g_test.mu);
-    bool sent = g_test.last_input && strstr(g_test.last_input, "pasted.png") &&
+    bool sent = g_test.last_input && strstr(g_test.last_input, g_composer_image_path) &&
                 strstr(g_test.last_input, "\"type\":\"image\"");
     pthread_mutex_unlock(&g_test.mu);
     bool ok = sent && !g_composer_has_attachment && app.composer.length == 0;
@@ -4667,6 +4672,88 @@ static int TestToolImageOwnership(void)
     return ok ? 0 : Fail(name, "tool image capability, persistence, or transcript ownership failed");
 }
 
+static bool WriteImageFixture(const char *path)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = fwrite(image_fixtures[0].data, 1, image_fixtures[0].size, file) == image_fixtures[0].size;
+    return fclose(file) == 0 && ok;
+}
+
+static int TestMissingImageRecovery(void)
+{
+    const char *name = "missing images recover without discarding history";
+    char dir[] = "/tmp/pico-missing-image-XXXXXX";
+    if (!mkdtemp(dir)) return Fail(name, "fixture directory");
+    char missing[4096], assistant_missing[4096], valid[4096];
+    snprintf(missing, sizeof(missing), "%s/deleted.png", dir);
+    snprintf(assistant_missing, sizeof(assistant_missing), "%s/assistant.png", dir);
+    snprintf(valid, sizeof(valid), "%s/retained.png", dir);
+    bool ok = WriteImageFixture(valid);
+    ResetTest(TEST_SINGLE, 1); PicoHost app; InitApp(&app);
+    TestWs(&app)->models[0].vision = true;
+    /* Recovery must not depend on the optional context-item capability. */
+    TestAddProvider(&app, &(PicoProvider){.name="images", .stream=FakeProvider, .tool_images=true});
+    snprintf(TestWs(&app)->models[0].provider, sizeof(TestWs(&app)->models[0].provider), "images");
+    TestAddTool(&app, "echo_test", "echo", "{}", EchoTool, NULL);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent *agent = TestAgent(&app);
+    PicoLlmPart user[] = {{.kind=PICO_LLM_PART_TEXT, .text="keep attachment text"},
+        {.kind=PICO_LLM_PART_IMAGE, .path=missing, .mime="image/png"},
+        {.kind=PICO_LLM_PART_IMAGE, .path=valid, .mime="image/png"},
+        {.kind=PICO_LLM_PART_IMAGE, .url="https://example.invalid/remote.png"},
+        {.kind=PICO_LLM_PART_AUDIO, .path="/missing-audio.wav", .mime="audio/wav"}};
+    char *parts = pico_canonical_parts_json(user, 5);
+    PicoAgent_PushHistoryUserParts(agent, "", parts); free(parts);
+    PicoLlmPart assistant[] = {{.kind=PICO_LLM_PART_TEXT, .text="keep assistant text"},
+        {.kind=PICO_LLM_PART_IMAGE, .path=assistant_missing, .mime="image/png"}};
+    parts = pico_canonical_parts_json(assistant, 2);
+    PicoAgent_PushHistoryAssistantParts(agent, "", "keep thinking", "keep signature", parts); free(parts);
+    PicoAgent_PushHistoryFunctionCall(agent, "capture", "browser_observe", "{}", "keep item id");
+    parts = pico_canonical_parts_json(user + 1, 2);
+    PicoAgent_PushHistoryFunctionOutput(agent, "capture", "browser_observe", "keep metadata", false, parts); free(parts);
+    PicoAgent_StartTurn(&app, agent, "continue after cleanup");
+    ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_IDLE && g_test.notice_log_count == 2;
+    const char *input = g_test.last_input ? g_test.last_input : "";
+    ok &= !strstr(input, missing) && !strstr(input, assistant_missing) && strstr(input, valid) &&
+        strstr(input, "keep attachment text") && strstr(input, "keep assistant text") &&
+        strstr(input, "keep thinking") && strstr(input, "keep signature") &&
+        strstr(input, "keep item id") && strstr(input, "keep metadata") &&
+        strstr(input, "remote.png") && strstr(input, "/missing-audio.wav");
+    ok &= strstr(g_test.notice_log_text, missing) && strstr(g_test.notice_log_text, assistant_missing) &&
+        (!g_test.last_instructions || (!strstr(g_test.last_instructions, missing) &&
+                                      !strstr(g_test.last_instructions, assistant_missing)));
+    /* Later requests omit the images without repeating the user warning or
+     * injecting an omission notice into model instructions. */
+    PicoAgent_StartTurn(&app, agent, "another turn");
+    ok &= WaitForIdle(&app) && g_test.notice_log_count == 2 &&
+        (!g_test.last_instructions || !strstr(g_test.last_instructions, missing));
+    /* Restoring files recovers the original references, not rewritten history. */
+    ok &= WriteImageFixture(missing) && WriteImageFixture(assistant_missing);
+    PicoAgent_StartTurn(&app, agent, "files restored");
+    ok &= WaitForIdle(&app) && g_test.last_input && strstr(g_test.last_input, missing) &&
+        strstr(g_test.last_input, assistant_missing) && g_test.notice_log_count == 2;
+    PicoHost_Shutdown(&app); unlink(valid); unlink(missing); unlink(assistant_missing); rmdir(dir);
+    return ok ? 0 : Fail(name, "omission, notice deduplication, metadata, or restoration failed");
+}
+
+static int TestMissingImageCompaction(bool native)
+{
+    ResetTest(TEST_SINGLE, 0); g_native_mode = native;
+    PicoHost app; InitApp(&app); PicoAgent *agent = TestAgent(&app);
+    TestWs(&app)->models[0].vision = true;
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path="/pico-missing-compaction-image.png"};
+    char *parts = pico_canonical_parts_json(&image, 1);
+    PicoAgent_PushHistoryUserParts(agent, "", parts); free(parts);
+    PicoAgent_Compact(&app, agent);
+    bool ok = WaitForIdle(&app) && agent->state == PICO_AGENT_IDLE && g_test.notice_log_count == 1 &&
+        g_test.last_input && !strstr(g_test.last_input, image.path) &&
+        strstr(g_test.notice_log_text, image.path) &&
+        (!g_test.last_instructions || !strstr(g_test.last_instructions, image.path));
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("missing image compaction", "text/native compaction lost user-only recovery");
+}
+
 static int TestToolTraceError(void)
 {
     const char *name = "tool trace error flag";
@@ -5357,8 +5444,10 @@ static int TestNonVisionMediaRejected(void)
     ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    PicoAgent_StartTurnParts(&app, TestAgent(&app), "see",
-                             "[{\"type\":\"text\",\"text\":\"see\"},{\"type\":\"image\",\"path\":\"/tmp/pic.png\"}]");
+    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=g_composer_image_path};
+    char *parts = pico_canonical_parts_json(&image, 1);
+    PicoAgent_StartTurnParts(&app, TestAgent(&app), "see", parts);
+    free(parts);
     bool ok = TestAgent(&app)->state == PICO_AGENT_ERROR &&
               TestAgent(&app)->error &&
               strcmp(TestAgent(&app)->error, "model does not accept images") == 0;
@@ -6236,9 +6325,9 @@ static int TestSteeringComposerPinnedModel(void)
     PicoSteeringInfo queued;
     ok &= app.composer.length == 0 && !g_composer_has_attachment && g_steering_accepted == 1 &&
           g_steering_submit_kind == PICO_SUBMIT_STEERING && pico_agent_steering_info(&app, agent->id, 0, &queued) &&
-          strcmp(queued.text, "preprocessed steering") == 0 && strstr(queued.parts_json, "/tmp/pasted.png");
+          strcmp(queued.text, "preprocessed steering") == 0 && strstr(queued.parts_json, g_composer_image_path);
     SteeringRelease(); ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_IDLE &&
-                            g_test.last_input && strstr(g_test.last_input, "/tmp/pasted.png");
+                            g_test.last_input && strstr(g_test.last_input, g_composer_image_path);
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail("composer steering pinned model", "preprocessing/attachment routing ignored the running turn");
 }
@@ -6391,6 +6480,11 @@ static int TestNativeCheckpointSettlement(void)
 
 int main(void)
 {
+    char composer_dir[] = "/tmp/pico-composer-fixture-XXXXXX";
+    if (!mkdtemp(composer_dir)) return 1;
+    g_composer_image_path = pico_canonical_persist_bytes(composer_dir, image_fixtures[0].extension,
+        image_fixtures[0].data, image_fixtures[0].size);
+    if (!g_composer_image_path) return 1;
     if (PICO_TEST_RUN(TestNativeCompactionLifecycle()) || PICO_TEST_RUN(TestNativeCompactionFailure()) ||
         PICO_TEST_RUN(TestNativeCheckpointSettlement())) return 1;
     int failed = 0;
@@ -6481,6 +6575,9 @@ int main(void)
     failed |= PICO_TEST_RUN(TestViewImageCatalogCapabilities());
     failed |= PICO_TEST_RUN(TestViewImageCatalogRetainsTurnCapabilities());
     failed |= PICO_TEST_RUN(TestToolImageOwnership());
+    failed |= PICO_TEST_RUN(TestMissingImageRecovery());
+    failed |= PICO_TEST_RUN(TestMissingImageCompaction(false));
+    failed |= PICO_TEST_RUN(TestMissingImageCompaction(true));
     failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(false));
     failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(true));
     failed |= PICO_TEST_RUN(TestToolTraceError());
@@ -6555,5 +6652,6 @@ int main(void)
     failed |= PICO_TEST_RUN(TestUiPostLimit());
     /* Retained shutdown permanently retires Pico in this process, so run last. */
     failed |= PICO_TEST_RUN(TestShutdownTimeout());
+    unlink(g_composer_image_path); free(g_composer_image_path); rmdir(composer_dir);
     return failed ? 1 : 0;
 }

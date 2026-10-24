@@ -1674,14 +1674,14 @@ void pico_responses_compact_result(PicoResponsesCtx *c, const PicoLlmTurn *turn,
         if (cost > budget) valid = false;
         else budget -= cost;
     }
-    bool *keep = calloc((size_t)turn->input_count + 1, sizeof(*keep));
+    bool *keep = calloc((size_t)turn->compaction_history_count + 1, sizeof(*keep));
     if (!keep) valid = false;
-    for (int i = turn->input_count - 1; valid && i >= 0; --i) {
+    for (int i = turn->compaction_history_count - 1; valid && i >= 0; --i) {
         JsonDoc user;
-        if (JsonParse(&user, turn->input_json[i], strlen(turn->input_json[i]))) { valid = false; break; }
+        if (JsonParse(&user, turn->compaction_history_json[i], strlen(turn->compaction_history_json[i]))) { valid = false; break; }
         if (JsonEq(&user, JsonObjGet(&user, 0, "type"), "user") &&
             !JsonEq(&user, JsonObjGet(&user, 0, "synthetic"), "true") &&
-            (!seed || strcmp(seed, turn->input_json[i]))) {
+            (!seed || strcmp(seed, turn->compaction_history_json[i]))) {
             size_t cost = RetainedTokens(&user, 0);
             if (cost > budget) { JsonFree(&user); break; }
             budget -= cost; keep[i] = true;
@@ -1691,9 +1691,9 @@ void pico_responses_compact_result(PicoResponsesCtx *c, const PicoLlmTurn *turn,
     JsonBuf result; JsonBuf_Init(&result); JsonBuf_Putc(&result, '[');
     bool wrote = false;
     if (seed) { JsonBuf_Puts(&result, seed); wrote = true; }
-    for (int i = 0; valid && i < turn->input_count; ++i) if (keep[i]) {
+    for (int i = 0; valid && i < turn->compaction_history_count; ++i) if (keep[i]) {
         if (wrote) JsonBuf_Putc(&result, ',');
-        JsonBuf_Puts(&result, turn->input_json[i]); wrote = true;
+        JsonBuf_Puts(&result, turn->compaction_history_json[i]); wrote = true;
     }
     if (wrote) JsonBuf_Putc(&result, ',');
     JsonBuf_Puts(&result, "{\"type\":\"provider_state\",\"provider\":\"openai\",\"format\":\"openai.compaction.v1\",\"backend\":");

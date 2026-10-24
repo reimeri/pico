@@ -32,7 +32,9 @@ static void ReadImage(PicoAgentContext *ctx, const char *args, PicoToolResult *o
     out->image_count = 1;
     out->output = JsonDup("Image supplied by read_image_example.");
     /* Core detects/validates PNG, JPEG, or WebP and creates an unchanged owned
-     * copy in .pico/media/tools/<session-id>/. It never takes ownership of path. */
+     * copy in .pico/media/tools/<session-id>/. It never takes ownership of path.
+     * Never move/delete the owned copy during cleanup: saved history references
+     * it. Missing copies are omitted with user-only notices; see the contracts. */
 }
 static int Init(PicoWorkspace *workspace, void **state)
 {

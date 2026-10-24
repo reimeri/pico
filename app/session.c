@@ -1090,10 +1090,20 @@ static bool ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
         PicoNoticeSeverity severity;
         if (active_group) *active_group = -1;
         char *content = JsonObjStr(doc, obj, "content");
-        if (content && ReadNoticeSeverity(doc, obj, &severity))
+        bool marked = JsonObjGet(doc, obj, "missing_image_path") >= 0;
+        bool readable = content && ReadNoticeSeverity(doc, obj, &severity);
+        if (marked && (!readable || steering_id)) { free(content); free(type); return false; }
+        if (readable)
         {
             if (steering_id) PicoAgent_AddSteeringNoticeReplay(app, agent, steering_id, content);
-            else PicoAgent_AddNotice(app, agent, severity, content);
+            else {
+                char *path = marked ? JsonObjStr(doc, obj, "missing_image_path") : NULL;
+                bool restored = !marked || (path && path[0] && severity == PICO_NOTICE_WARNING &&
+                    PicoSession_RememberMissingImage(agent, path, content));
+                free(path);
+                if (!restored) { free(content); free(type); return false; }
+                PicoAgent_AddNotice(app, agent, severity, content);
+            }
         }
         free(content);
     }
@@ -2777,6 +2787,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, agent->id);
     PicoAgent_DismissError(agent);
     PicoAgent_ClearMessages(agent);
+    PicoSession_ClearMissingImageWarnings(agent);
     PicoAgent_ClearInput(agent);
     PicoAgent_RotateCacheKey(agent);
     agent->tokens_used = 0;
@@ -2825,6 +2836,12 @@ PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
     JsonBuf_String(&b, name);
     JsonBuf_Puts(&b, ",\"content\":");
     JsonBuf_String(&b, content ? content : "");
+    for (int i = 0; severity == PICO_NOTICE_WARNING && i < agent->missing_image_warning_count; ++i) {
+        PicoMissingImageWarning *warning = &agent->missing_image_warnings[i];
+        if (content && !strcmp(content, warning->notice)) {
+            JsonBuf_Puts(&b, ",\"missing_image_path\":"); JsonBuf_String(&b, warning->path); break;
+        }
+    }
     JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     PicoSessionWriteResult result = AppendLine(app, agent, line);

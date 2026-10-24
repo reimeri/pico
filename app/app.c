@@ -1701,21 +1701,24 @@ static void RunSlot(PicoHost *host, PicoUiSlot slot)
     }
 }
 
-static void AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
+static bool AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
                                  PicoNoticeSeverity severity, const char *markdown,
                                  MdDocument *prepared, const char *prepared_source, bool persist_notice, uint64_t steering_id)
 {
     if (!app || !agent)
     {
-        return;
+        return false;
     }
+    char *source = JsonDup(markdown ? markdown : "");
+    if (!source) return false;
     if (agent->message_count >= agent->message_capacity)
     {
         int capacity = agent->message_capacity == 0 ? 8 : agent->message_capacity * 2;
         PicoMessage *next = (PicoMessage *)realloc(agent->messages, (size_t)capacity * sizeof(PicoMessage));
         if (!next)
         {
-            return;
+            free(source);
+            return false;
         }
         agent->messages = next;
         agent->message_capacity = capacity;
@@ -1726,14 +1729,10 @@ static void AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
     msg->steering_id = steering_id;
     msg->notice_severity = severity;
     size_t len = markdown ? strlen(markdown) : 0;
-    msg->source = (char *)malloc(len + 1);
-    if (msg->source)
-    {
-        memcpy(msg->source, markdown ? markdown : "", len + 1);
-        msg->source_len = len;
-        msg->source_cap = len + 1;
-        msg->revision = 1;
-    }
+    msg->source = source;
+    msg->source_len = len;
+    msg->source_cap = len + 1;
+    msg->revision = 1;
     if (prepared && prepared_source && strcmp(prepared_source, markdown ? markdown : "") == 0)
     {
         msg->doc = *prepared;
@@ -1744,6 +1743,7 @@ static void AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
                                       role == PICO_ROLE_USER ? MD_PARSE_PRESERVE_NEWLINES : MD_PARSE_DEFAULT);
     if (persist_notice) PicoAgent_PersistNotice(app, agent, agent->message_count - 1);
     pico_run_hooks(app, PICO_HOOK_ON_MESSAGE, agent->id);
+    return true;
 }
 
 void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role,
@@ -1759,6 +1759,12 @@ void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity sev
 {
     if (severity < PICO_NOTICE_INFO || severity > PICO_NOTICE_ERROR) return;
     AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, false, 0);
+}
+
+bool PicoAgent_AddNoticePersisted(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
+                                  const char *markdown)
+{
+    return AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, true, 0);
 }
 
 void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)

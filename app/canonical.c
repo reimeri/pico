@@ -1075,6 +1075,63 @@ bool pico_canonical_tool_images_valid(const JsonDoc *doc, bool read_files)
     return true;
 }
 
+bool pico_canonical_omit_missing_images(char **json, char ***paths, int *count)
+{
+    JsonDoc doc;
+    if (!json || !*json || JsonParse(&doc, *json, strlen(*json))) return false;
+    int type = JsonObjGet(&doc, 0, "type"), array = JsonObjGet(&doc, 0, "parts");
+    bool content = JsonEq(&doc, type, "user") || JsonEq(&doc, type, "assistant") ||
+                   JsonEq(&doc, type, "tool_result");
+    /* Malformed tool media must still fail provider validation, not disappear. */
+    if (!content || !JsonIsArray(&doc, array) || !pico_canonical_tool_images_valid(&doc, false)) {
+        JsonFree(&doc); return true;
+    }
+    PicoLlmPart *parsed = NULL; int parsed_count = 0;
+    if (!pico_canonical_parse_parts(&doc, 0, &parsed, &parsed_count)) {
+        JsonFree(&doc); return false;
+    }
+    pico_canonical_free_parts(parsed, parsed_count);
+    JsonBuf parts; JsonBuf_Init(&parts); JsonBuf_Putc(&parts, '[');
+    bool changed = false, wrote = false;
+    for (int i = 0; i < JsonArrayLen(&doc, array); ++i) {
+        int part = JsonArrayAt(&doc, array, i);
+        char *path = JsonObjStr(&doc, part, "path"), *url = JsonObjStr(&doc, part, "url");
+        struct stat st;
+        bool missing = JsonEq(&doc, JsonObjGet(&doc, part, "type"), "image") &&
+            path && path[0] && (!url || !url[0]) && stat(path, &st) != 0 &&
+            (errno == ENOENT || errno == ENOTDIR);
+        free(url);
+        if (missing) {
+            bool known = false;
+            for (int j = 0; j < *count; ++j) if (!strcmp((*paths)[j], path)) known = true;
+            if (!known) {
+                char **next = realloc(*paths, (size_t)(*count + 1) * sizeof(char *));
+                if (!next) { free(path); JsonBuf_Free(&parts); JsonFree(&doc); return false; }
+                *paths = next; (*paths)[(*count)++] = path; path = NULL;
+            }
+            changed = true;
+        } else {
+            if (wrote) JsonBuf_Putc(&parts, ',');
+            int start = JsonTokStart(&doc, part), end = JsonTokEnd(&doc, part);
+            JsonBuf_Append(&parts, doc.src + start, (size_t)(end - start)); wrote = true;
+        }
+        free(path);
+    }
+    JsonBuf_Putc(&parts, ']');
+    bool ok = !parts.failed;
+    if (ok && changed) {
+        int start = JsonTokStart(&doc, array), end = JsonTokEnd(&doc, array);
+        JsonBuf item; JsonBuf_Init(&item);
+        JsonBuf_Append(&item, doc.src, (size_t)start);
+        JsonBuf_Append(&item, parts.data, parts.len);
+        JsonBuf_Append(&item, doc.src + end, doc.len - (size_t)end);
+        char *replacement = JsonBuf_Steal(&item);
+        ok = replacement != NULL;
+        if (ok) { free(*json); *json = replacement; }
+    }
+    JsonBuf_Free(&parts); JsonFree(&doc); return ok;
+}
+
 bool pico_canonical_is_tool_result(const char *json)
 {
     JsonDoc doc;

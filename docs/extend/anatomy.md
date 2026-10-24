@@ -31,7 +31,7 @@ PicoExt pico_ext(void)
 }
 ```
 
-`abi` must be `PICO_EXT_ABI` (currently 26). ABI 26 separates native-compaction retention history from request-only media omissions; it includes scoped provider-state history and native compaction results; see [providers](providers.md#native-compaction). It includes native PNG/JPEG/WebP tool-result bytes (`PicoToolImage.data`); see [tools](tools.md#image-bearing-results) and [providers](providers.md#image-bearing-tool-results). `name` is for diagnostics and `/extensions`. Optional:
+`abi` must be `PICO_EXT_ABI` (currently 27). ABI 27 adds turn-local provider transport state and response-header callbacks, and compaction reuses normal prompt snapshots; see [providers](providers.md#cache-affinity-and-turn-local-routing) and [http](http.md). It separates native-compaction retention history from request-only media omissions; it includes scoped provider-state history and native compaction results; see [providers](providers.md#native-compaction). It includes native PNG/JPEG/WebP tool-result bytes (`PicoToolImage.data`); see [tools](tools.md#image-bearing-results) and [providers](providers.md#image-bearing-tool-results). `name` is for diagnostics and `/extensions`. Optional:
 
 - `description` — one-line summary in the `/extensions` modal. String literal, like `name`.
 - `host_init` / `workspace_init` — register through the matching context. Return 0 on success, nonzero on failure.

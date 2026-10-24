@@ -158,6 +158,9 @@ typedef struct HttpCtx
 {
     PicoHttpCancelFn cancel;
     PicoHttpJsonFn on_json;
+    PicoHttpHeadersFn on_headers;
+    JsonBuf headers;
+    long header_status;
     void *user;
     JsonBuf acc;
     bool saw_sse;
@@ -275,6 +278,13 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
     c->received |= n != 0;
     if (n >= 5 && memcmp(ptr, "HTTP/", 5) == 0)
     {
+        c->header_status = 0;
+        JsonBuf_Clear(&c->headers);
+        size_t i = 5;
+        while (i < n && ptr[i] != ' ') i++;
+        if (i + 3 < n && ptr[i+1] >= '0' && ptr[i+1] <= '9' &&
+            ptr[i+2] >= '0' && ptr[i+2] <= '9' && ptr[i+3] >= '0' && ptr[i+3] <= '9')
+            c->header_status = (ptr[i+1]-'0') * 100 + (ptr[i+2]-'0') * 10 + ptr[i+3]-'0';
         /* A redirect or interim response must not determine the final framing. */
         c->saw_sse = false;
         c->framing_known = false;
@@ -283,6 +293,15 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
         c->event[0] = '\0';
         JsonBuf_Clear(&c->acc);
         JsonBuf_Clear(&c->data);
+    }
+    if (c->on_headers && c->header_status) {
+        JsonBuf_Append(&c->headers, ptr, n);
+        if (c->headers.failed) { c->buffer_failed = true; return 0; }
+        if ((n == 2 && ptr[0] == '\r' && ptr[1] == '\n') || (n == 1 && ptr[0] == '\n')) {
+            c->on_headers(c->user, c->header_status, c->headers.data, c->headers.len);
+            c->header_status = 0; /* trailers are not a new response */
+            JsonBuf_Clear(&c->headers);
+        }
     }
     if (n >= 13 && strncasecmp(ptr, "Content-Type:", 13) == 0)
     {
@@ -393,6 +412,8 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     memset(&ctx, 0, sizeof(ctx));
     ctx.cancel = req->cancel;
     ctx.on_json = req->on_json;
+    ctx.on_headers = req->on_headers;
+    JsonBuf_Init(&ctx.headers);
     ctx.user = req->user;
     JsonBuf_Init(&ctx.acc);
     PicoHttpCapture_Begin(&ctx.capture);
@@ -424,6 +445,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(req->body));
+    curl_easy_setopt(curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, OnHeader);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnWrite);
@@ -485,6 +507,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
                            rc == CURLE_OK ? "" : (error[0] ? error : curl_easy_strerror(rc)));
     JsonBuf_Free(&ctx.acc);
     JsonBuf_Free(&ctx.data);
+    JsonBuf_Free(&ctx.headers);
 
     /* An aborting callback already recorded why it stopped, so report success
      * and let the caller surface its own error. */

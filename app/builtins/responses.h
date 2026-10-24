@@ -14,6 +14,7 @@ typedef struct PicoResponsesCtx {
     PicoLlmCancelFn cancel;
     PicoLlmDeltaFn on_delta;
     void *user;
+    char **turn_state; /* borrowed Codex token slot, shared across attempts */
     JsonBuf items;
     JsonBuf summary;
     int summary_output_index;
@@ -50,7 +51,7 @@ char *pico_responses_body_without_reasoning(const char *body);
 bool pico_responses_feed(PicoResponsesCtx *c, const char *json, size_t len);
 int pico_responses_post(const char *url, const char *body, const char *bearer,
                         const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
-                        PicoLlmDeltaFn on_delta, void *user, PicoResponsesCtx *ctx);
+                        PicoLlmDeltaFn on_delta, void *user, char **turn_state, PicoResponsesCtx *ctx);
 void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out);
 void pico_responses_ctx_free(PicoResponsesCtx *c);
 /* Checks scope before request construction; NULL on success, malloc'd error otherwise. */

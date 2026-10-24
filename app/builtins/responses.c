@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char kBriefPrompt[] =
     "Handoff brief: goals, constraints, progress, decisions, next steps, exact values; omit noise. "
@@ -1461,9 +1462,45 @@ static void HandleRetry(void *user, int retry, int max_retries, int delay, const
     c->on_delta(c->user, &delta);
 }
 
+static bool ValidTurnState(const char *value, size_t length)
+{
+    if (!length) return false;
+    for (size_t i = 0; i < length; ++i)
+        if ((unsigned char)value[i] < 32 || (unsigned char)value[i] == 127) return false;
+    return true;
+}
+
+static void HandleHeaders(void *user, long status, const char *headers, size_t length)
+{
+    PicoResponsesCtx *ctx = user;
+    if (!ctx->turn_state || *ctx->turn_state ||
+        !((status >= 200 && status < 300) || status == 429 || status == 503)) return;
+    const char name[] = "x-codex-turn-state:";
+    const char *end = headers + length;
+    for (const char *line = headers; line < end;) {
+        const char *next = memchr(line, '\n', (size_t)(end - line));
+        const char *finish = next ? next : end;
+        if ((size_t)(finish - line) >= sizeof(name) - 1 &&
+            !strncasecmp(line, name, sizeof(name) - 1)) {
+            const char *value = line + sizeof(name) - 1;
+            while (value < finish && (*value == ' ' || *value == '\t')) ++value;
+            while (finish > value && (finish[-1] == '\r' || finish[-1] == ' ' || finish[-1] == '\t')) --finish;
+            size_t n = (size_t)(finish - value);
+            if (ValidTurnState(value, n)) {
+                char *copy = malloc(n + 1);
+                if (!copy) { SetError(ctx, "Could not retain Codex routing state"); return; }
+                memcpy(copy, value, n); copy[n] = 0;
+                *ctx->turn_state = copy;
+                return; /* first token wins for the entire turn */
+            }
+        }
+        line = next ? next + 1 : end;
+    }
+}
+
 int pico_responses_post(const char *url, const char *body, const char *bearer,
                         const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
-                        PicoLlmDeltaFn on_delta, void *user, PicoResponsesCtx *ctx)
+                        PicoLlmDeltaFn on_delta, void *user, char **turn_state, PicoResponsesCtx *ctx)
 {
     char *auth = NULL;
     PicoHttpPost req;
@@ -1473,6 +1510,7 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
     req.cancel = HandleCancel;
     req.on_json = HandleJson;
     req.on_retry = HandleRetry;
+    req.on_headers = turn_state ? HandleHeaders : NULL;
     req.user = ctx;
     req.headers[req.header_count++] = "Content-Type: application/json";
     req.headers[req.header_count++] = "Accept: text/event-stream";
@@ -1494,9 +1532,14 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
         }
     }
 
+    int base_headers = req.header_count;
+    if (turn_state && *turn_state && !ValidTurnState(*turn_state, strlen(*turn_state))) {
+        free(*turn_state); *turn_state = NULL;
+    }
     for (int retry = 0;; retry++)
     {
         memset(ctx, 0, sizeof(*ctx));
+        ctx->turn_state = turn_state;
         ctx->cancel = cancel;
         ctx->on_delta = on_delta;
         ctx->user = user;
@@ -1506,7 +1549,20 @@ int pico_responses_post(const char *url, const char *body, const char *bearer,
         JsonBuf_Init(&ctx->summary);
         long http = 0;
         char *err = NULL;
+        char *routing_header = NULL;
+        req.header_count = base_headers;
+        if (turn_state && *turn_state) {
+            JsonBuf header; JsonBuf_Init(&header);
+            JsonBuf_Puts(&header, "x-codex-turn-state: "); JsonBuf_Puts(&header, *turn_state);
+            routing_header = JsonBuf_Steal(&header);
+            if (!routing_header || req.header_count == PICO_HTTP_MAX_HEADERS) {
+                free(routing_header); free(auth);
+                SetError(ctx, "Could not send Codex routing state"); return PICO_LLM_FAIL;
+            }
+            req.headers[req.header_count++] = routing_header;
+        }
         int rc = pico_http_post_sse(&req, &http, &err);
+        free(routing_header);
         ctx->http = http;
         ctx->capacity_error |= http == 429 || http == 503;
         if (rc != PICO_HTTP_CANCEL)

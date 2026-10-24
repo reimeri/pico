@@ -43,7 +43,19 @@ static void *Serve(void *arg)
     close(fd);
     return NULL;
 }
-typedef struct Result { int count; bool abort; char json[3][256]; char event[3][64]; } Result;
+typedef struct Result {
+    int count; bool abort; char json[3][256]; char event[3][64];
+    int header_count; long statuses[3]; char headers[3][512];
+} Result;
+static void GotHeaders(void *arg, long status, const char *headers, size_t len)
+{
+    Result *r = arg;
+    if (r->header_count < 3) {
+        r->statuses[r->header_count] = status;
+        snprintf(r->headers[r->header_count], 512, "%.*s", (int)len, headers);
+    }
+    r->header_count++;
+}
 static bool Got(void *arg, const char *event, const char *json, size_t len)
 {
     Result *r = arg;
@@ -55,9 +67,9 @@ static bool Got(void *arg, const char *event, const char *json, size_t len)
     r->count++;
     return !r->abort;
 }
-static int Request(const char *type, const char *body, Result *r)
+static int RequestHeaders(const char *type, const char *body, const char *headers, Result *r)
 {
-    Server s = {.fd = socket(AF_INET, SOCK_STREAM, 0), .type = type, .body = body};
+    Server s = {.fd = socket(AF_INET, SOCK_STREAM, 0), .type = type, .body = body, .header = headers};
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     socklen_t size = sizeof(addr);
     if (s.fd < 0 || bind(s.fd, (void *)&addr, sizeof(addr)) || listen(s.fd, 1) ||
@@ -66,7 +78,7 @@ static int Request(const char *type, const char *body, Result *r)
     if (pthread_create(&thread, NULL, Serve, &s)) { close(s.fd); return 1; }
     char url[128];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
-    PicoHttpPost req = {.url = url, .body = "{}", .on_json = Got, .user = r};
+    PicoHttpPost req = {.url = url, .body = "{}", .on_json = Got, .on_headers = GotHeaders, .user = r};
     long http;
     int result = pico_http_post_sse(&req, &http, NULL);
     if (result != PICO_HTTP_OK) shutdown(s.fd, SHUT_RDWR);
@@ -74,6 +86,25 @@ static int Request(const char *type, const char *body, Result *r)
     close(s.fd);
     return result != PICO_HTTP_OK || http != 200;
 }
+static int Request(const char *type, const char *body, Result *r)
+{
+    return RequestHeaders(type, body, NULL, r);
+}
+
+static int ResponseHeaderBlocks(void)
+{
+    Result result = {0};
+    const char *headers = "HTTP/1.1 103 Early Hints\r\nX-Interim: first\r\n\r\n"
+                          "HTTP/1.1 200 OK\r\nX-Final: second\r\nContent-Type: text/event-stream\r\n"
+                          "Content-Length: 10\r\nConnection: close\r\n\r\n";
+    bool ok = !RequestHeaders(NULL, "data: {}\n\n", headers, &result) && result.count == 1 &&
+        result.header_count == 2 && result.statuses[0] == 103 && result.statuses[1] == 200 &&
+        strstr(result.headers[0], "X-Interim: first") && !strstr(result.headers[0], "X-Final") &&
+        strstr(result.headers[1], "X-Final: second") && !strstr(result.headers[1], "X-Interim");
+    if (!ok) fprintf(stderr, "HTTP response-header blocks were lost or mixed\n");
+    return !ok;
+}
+
 typedef struct RetryResult {
     Server server;
     pthread_t thread;
@@ -476,6 +507,7 @@ int main(void)
     setenv("NO_PROXY", "127.0.0.1", 1);
     curl_global_init(CURL_GLOBAL_DEFAULT);
     PicoHttp_HostStarted();
+    if (PICO_TEST_RUN(ResponseHeaderBlocks())) return 1;
     Result json = {0}, sse = {0}, stopped = {.abort = true};
     const char *error = "{\"error\":\"invalid data: bad event: request\"}";
     const char *events = "event: first\r\ndata: {\"a\":1}\r\n\r\ndata: {\"b\":\n"

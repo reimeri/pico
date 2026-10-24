@@ -143,10 +143,12 @@ installed (immediately in memory for ephemeral agents). During an accepted
 checkpoint write, cancellation settles against its write outcome rather than
 claiming to roll back a record that may already be committed. Successful-response
 hooks still report the completed provider call and its usage, even if later local
-checkpoint persistence fails. Native compaction skips request-context hooks; LLM
-instruction/tool-filter hooks still run with `compact == true`. Their instructions
-may influence the artifact, so use context hooks—not LLM instructions—for
-request-only reminders. See [providers](providers.md#native-compaction).
+checkpoint persistence fails. Native compaction skips request-context hooks and
+reuses a compatible normal-request instruction/tool snapshot. If unavailable,
+LLM hooks build a fresh normal prefix (`compact == false`). Their retained
+instructions may influence the artifact, so use context hooks—not LLM
+instructions—for request-only reminders. Compaction keeps the session cache key.
+See [providers](providers.md#compaction-prompt-snapshots).
 
 ## Before-tool interceptor
 
@@ -202,7 +204,7 @@ static void Llm(PicoWorkspace *workspace, PicoAgentId agent_id, PicoLlmEvent *ev
 
 Full file: [`../../examples/extra_instructions.c`](../../examples/extra_instructions.c).
 
-LLM hooks run on the serialized main thread for every request, including compaction. They see only tools permitted by the agent policy. Each hook is invoked once per request in registration order. The callback may set `exclude[i] = true` to hide a tool from this request and/or malloc `extra_instructions`, which Pico appends under a shared `## Additional instructions` section. Later hooks see earlier exclusions and any extra-instruction section already appended. The heading is omitted when no hook contributes a non-empty extra.
+LLM hooks run on the serialized main thread for ordinary requests and prompt previews. Compaction reuses the last compatible normal-request prefix without rerunning them; when no usable snapshot exists, hooks build a fresh normal prefix with `compact == false`. See [snapshot invalidation](providers.md#compaction-prompt-snapshots). They see only tools permitted by the agent policy. Each hook is invoked once per prompt build in registration order. The callback may set `exclude[i] = true` to hide a tool from this request and/or malloc `extra_instructions`, which Pico appends under a shared `## Additional instructions` section. Later hooks see earlier exclusions and any extra-instruction section already appended. The heading is omitted when no hook contributes a non-empty extra.
 
 The provider receives a retained copy of the final catalog. `/show-prompt` runs the same hooks with the selected agent's workspace. Reload of that workspace cannot unload hooks while a runtime retains a callback/catalog snapshot; it waits for that workspace's quiescence and releases idle snapshots first. Other workspaces are not blocked.
 

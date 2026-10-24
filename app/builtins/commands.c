@@ -388,7 +388,7 @@ static void CmdQuit(PicoHost *app, PicoAgentId agent_id, const char *args, void 
 
 static const char *const kDocTopics[] = {
     "README", "subagents", "skills", "images", "browser", "anatomy", "host", "workspace", "agents", "views", "hooks",
-    "context", "steering", "tools", "commands", "notices", "completers", "providers", "auth", "contracts",
+    "context", "steering", "tools", "commands", "notices", "completers", "providers", "http", "auth", "contracts",
 };
 
 static size_t Append(char *buf, size_t cap, size_t n, const char *fmt, ...);

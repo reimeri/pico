@@ -999,7 +999,7 @@ static void OpenAiFrame(PicoHost *app, void *state, float dt)
 }
 
 static int PostOnce(const char *url, const char *bearer, const char *account_id, bool oauth,
-                    const char *body, const char *session_id, PicoResponsesCtx *ctx,
+                    const char *body, const char *session_id, char **turn_state, PicoResponsesCtx *ctx,
                     PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta, void *user)
 {
     char *acct = NULL;
@@ -1023,10 +1023,10 @@ static int PostOnce(const char *url, const char *bearer, const char *account_id,
     }
     if (session_id && session_id[0])
     {
-        snprintf(session_hdr, sizeof(session_hdr), "session_id: %s", session_id);
+        snprintf(session_hdr, sizeof(session_hdr), "session-id: %s", session_id);
         extras[extra_count++] = session_hdr;
     }
-    int rc = pico_responses_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, ctx);
+    int rc = pico_responses_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, turn_state, ctx);
     free(acct);
     return rc;
 }
@@ -1072,6 +1072,28 @@ static char *CheckCompactionAuthority(const PicoLlmTurn *turn, const PicoAuthEnt
         return JsonDup("Native compaction requires an official OpenAI route and an identifiable account/key.");
     return pico_responses_check_state(turn, official ? (oauth ? "codex" : "openai-api") : NULL,
                                       *scope_out);
+}
+
+/* Transport routing is deliberately separate from canonical provider_state.
+ * It never reaches history/disk and is valid only for this OAuth account/turn. */
+static char *ReadRoutingState(const char *state, const char *scope)
+{
+    JsonDoc doc;
+    if (!state || !scope || JsonParse(&doc, state, strlen(state))) return NULL;
+    char *token = NULL;
+    if (JsonEq(&doc, JsonObjGet(&doc, 0, "scope"), scope))
+        token = JsonObjStr(&doc, 0, "token");
+    JsonFree(&doc);
+    return token;
+}
+
+static char *WriteRoutingState(const char *token, const char *scope)
+{
+    if (!token || !scope) return NULL;
+    JsonBuf b; JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, "{\"scope\":"); JsonBuf_String(&b, scope);
+    JsonBuf_Puts(&b, ",\"token\":"); JsonBuf_String(&b, token); JsonBuf_Putc(&b, '}');
+    return JsonBuf_Steal(&b);
 }
 
 typedef struct CompactDeltas { PicoLlmDeltaFn fn; PicoLlmCancelFn cancel; void *user; } CompactDeltas;
@@ -1160,8 +1182,9 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     CompactDeltas forward = {.fn = on_delta, .cancel = cancel, .user = user};
     if (turn->native_compact) { cancel = CompactCancel; on_delta = CompactDelta; user = &forward; }
     const char *bearer = BearerOf(&auth, oauth);
+    char *routing_token = oauth ? ReadRoutingState(turn->turn_state, scope) : NULL;
     PicoResponsesCtx ctx;
-    int rc = PostOnce(url, bearer, auth.account_id, oauth, body, turn->cache_key, &ctx, cancel, on_delta,
+    int rc = PostOnce(url, bearer, auth.account_id, oauth, body, turn->cache_key, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
                       user);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
@@ -1170,6 +1193,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         {
             free(body);
             free(scope);
+            free(routing_token);
             pico_auth_entry_free(&auth);
             if (TurnCancelled(&tc))
             {
@@ -1178,11 +1202,15 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
             out->error = JsonDup("Codex login expired. Run `/login openai`.");
             return PICO_LLM_FAIL;
         }
-        free(scope); scope = NULL;
+        char *previous_scope = scope; scope = NULL;
         out->error = CheckCompactionAuthority(turn, &auth, oauth, &scope);
-        if (out->error) { free(scope); free(body); pico_auth_entry_free(&auth); return PICO_LLM_FAIL; }
+        if (!scope || !previous_scope || strcmp(scope, previous_scope)) {
+            free(routing_token); routing_token = NULL;
+        }
+        free(previous_scope);
+        if (out->error) { free(routing_token); free(scope); free(body); pico_auth_entry_free(&auth); return PICO_LLM_FAIL; }
         bearer = BearerOf(&auth, true);
-        rc = PostOnce(url, bearer, auth.account_id, true, body, turn->cache_key, &ctx, cancel, on_delta,
+        rc = PostOnce(url, bearer, auth.account_id, true, body, turn->cache_key, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
                       user);
     }
     if (rc == PICO_LLM_FAIL && !turn->native_compact && !ctx.capacity_error && ctx.http != 401 &&
@@ -1192,7 +1220,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         if (stripped)
         {
             pico_responses_ctx_free(&ctx);
-            rc = PostOnce(url, BearerOf(&auth, oauth), auth.account_id, oauth, stripped, turn->cache_key,
+            rc = PostOnce(url, BearerOf(&auth, oauth), auth.account_id, oauth, stripped, turn->cache_key, oauth ? &routing_token : NULL,
                           &ctx, cancel, on_delta, user);
             free(stripped);
         }
@@ -1201,12 +1229,18 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     pico_auth_entry_free(&auth);
     if (rc == PICO_LLM_CANCEL)
     {
+        free(routing_token);
         free(scope);
         return PICO_LLM_CANCEL;
     }
     if (turn->native_compact)
         pico_responses_compact_result(&ctx, turn, oauth ? "codex" : "openai-api", scope, out);
     else pico_responses_fill_result(&ctx, out);
+    if (rc == PICO_LLM_OK && !out->error && oauth && routing_token && scope) {
+        out->turn_state = WriteRoutingState(routing_token, scope);
+        if (!out->turn_state) out->error = JsonDup("Could not retain Codex routing state");
+    }
+    free(routing_token);
     free(scope);
     pico_stream_guard_free(&ctx.guard);
     JsonBuf_Free(&ctx.items);

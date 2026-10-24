@@ -56,6 +56,7 @@ static int TestOpenAiNativeCompaction(bool oauth)
     char config[] = "/tmp/pico-native-config-XXXXXX", directory[] = "/tmp/pico-native-workspace-XXXXXX";
     PicoHost *host = NULL; PicoWorkspaceId ws_id = 0; PicoAgentId id = 0;
     bool ok = false;
+    char *normal_instructions = NULL, *normal_tools = NULL;
     const char *phase = "fixture";
     char missing_image[4096];
     if (!mkdtemp(config) || !mkdtemp(directory)) return 1;
@@ -92,6 +93,14 @@ static int TestOpenAiNativeCompaction(bool oauth)
     PicoResult submitted = pico_agent_submit(host, id, "native original user task", parts);
     free(parts);
     if (submitted != PICO_OK || !PumpUntilIdle(host, agent)) goto done;
+    JsonDoc ordinary;
+    if (JsonParse(&ordinary, native_wire.body, strlen(native_wire.body))) goto done;
+    normal_instructions = JsonObjStr(&ordinary, 0, "instructions");
+    normal_tools = JsonObjRaw(&ordinary, 0, "tools");
+    JsonFree(&ordinary);
+    if (!normal_instructions || !normal_tools) goto done;
+    char original_cache_key[65];
+    snprintf(original_cache_key, sizeof(original_cache_key), "%s", PicoAgent_CacheKey(agent));
     phase = "native compaction";
     PicoAgent_Compact(host, agent);
     if (!PumpUntilIdle(host, agent) || agent->state != PICO_AGENT_IDLE || !agent->tokens_unknown) goto done;
@@ -103,7 +112,16 @@ static int TestOpenAiNativeCompaction(bool oauth)
         (oauth || (!strstr(native_wire.body, missing_image) &&
                    !strstr(native_wire.body, "input_image")));
     pthread_mutex_unlock(&native_wire_mu);
-    if (!native_request || !DrainSessionForAssertion(host, agent)) goto done;
+    if (!native_request || strcmp(original_cache_key, PicoAgent_CacheKey(agent)) ||
+        !DrainSessionForAssertion(host, agent)) goto done;
+    JsonDoc compacted;
+    if (JsonParse(&compacted, native_wire.body, strlen(native_wire.body))) goto done;
+    char *compact_instructions = JsonObjStr(&compacted, 0, "instructions");
+    char *compact_tools = JsonObjRaw(&compacted, 0, "tools");
+    bool same_prefix = compact_instructions && compact_tools &&
+        !strcmp(normal_instructions, compact_instructions) && !strcmp(normal_tools, compact_tools);
+    free(compact_instructions); free(compact_tools); JsonFree(&compacted);
+    if (!same_prefix) goto done;
     size_t length; char *saved = Pico_ReadFile(agent->session_path, &length);
     bool persisted = saved && strstr(saved, "integration-encrypted-state") && !strstr(saved, "native-original-key") &&
         !strstr(saved, "native-original-access"); free(saved);
@@ -123,13 +141,22 @@ static int TestOpenAiNativeCompaction(bool oauth)
     PicoAgentId resumed_id = 0;
     if (pico_main_agent_create(host, ws_id, &options, &resumed_id) != PICO_OK) goto done;
     PicoAgent *resumed = PicoHost_FindAgent(host, resumed_id);
-    if (PicoSession_Replay(host, resumed, agent->session_path, false) != 0 ||
-        pico_agent_submit(host, resumed_id, "resumed continuation", NULL) != PICO_OK ||
+    if (PicoSession_Replay(host, resumed, agent->session_path, false) != 0) goto done;
+    /* Resume has history but no in-memory prompt snapshot. A standalone compact
+     * must rebuild the full normal prefix, not send empty/stale instructions. */
+    PicoAgent_Compact(host, resumed);
+    if (!PumpUntilIdle(host, resumed) || resumed->state != PICO_AGENT_IDLE) goto done;
+    JsonDoc restored;
+    if (JsonParse(&restored, native_wire.body, strlen(native_wire.body))) goto done;
+    char *restored_instructions = JsonObjStr(&restored, 0, "instructions");
+    bool normal_fallback = restored_instructions && !strcmp(normal_instructions, restored_instructions);
+    free(restored_instructions); JsonFree(&restored);
+    if (!normal_fallback || pico_agent_submit(host, resumed_id, "resumed continuation", NULL) != PICO_OK ||
         !PumpUntilIdle(host, resumed) || resumed->state != PICO_AGENT_IDLE) goto done;
     pthread_mutex_lock(&native_wire_mu);
     replayed = native_wire.body && strstr(native_wire.body, "integration-encrypted-state");
     pthread_mutex_unlock(&native_wire_mu);
-    if (!replayed) goto done;
+    if (!replayed || strcmp(original_cache_key, PicoAgent_CacheKey(resumed))) goto done;
     if (!oauth) {
         phase = "restore missing image after native checkpoint and session resume";
         int warnings = 0;
@@ -199,6 +226,7 @@ static int TestOpenAiNativeCompaction(bool oauth)
             pico_agent_submit(host, id, "must refuse gateway", NULL) != PICO_OK ||
             !PumpUntilIdle(host, agent) || agent->state != PICO_AGENT_ERROR || NativeRequestCount() != requests) goto done;
         PicoSession_Reset(host, agent);
+        if (!strcmp(original_cache_key, PicoAgent_CacheKey(agent))) goto done;
         PicoAgent_PushHistoryUser(agent, "new gateway task");
         PicoAgent_Compact(host, agent);
         if (!PumpUntilIdle(host, agent) || agent->state != PICO_AGENT_IDLE) goto done;
@@ -210,6 +238,7 @@ static int TestOpenAiNativeCompaction(bool oauth)
     }
     ok = true;
 done:
+    free(normal_instructions); free(normal_tools);
     if (host) pico_host_free(host);
     pthread_mutex_lock(&native_wire_mu);
     free(native_wire.body); memset(&native_wire, 0, sizeof(native_wire));

@@ -1,6 +1,8 @@
 // See /docs hooks and providers: LLM instructions also apply to native compaction
 // and may influence its opaque state. Use a context hook for ephemeral reminders.
-// Workspace-scoped LLM hook: append extra system instructions on every round.
+// Compaction reuses the normal prompt snapshot; fallback builds use normal hook
+// semantics too. See /docs providers (Compaction prompt snapshots).
+// Workspace-scoped LLM hook: append extra instructions on each normal prompt build.
 // Copy to ~/.config/pico/extensions/ or <workspace>/.pico/extensions/ then F5.
 //
 //   mkdir -p ~/.config/pico/extensions/extra
@@ -29,7 +31,7 @@ PicoExt pico_ext(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "extra_instructions",
-        .description = "Append a line to the system prompt each LLM round",
+        .description = "Append a line to each normal system-prompt build",
         .workspace_init = ExtraInit,
     };
 }

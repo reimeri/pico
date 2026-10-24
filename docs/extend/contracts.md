@@ -220,6 +220,34 @@ The model catalog is resolved per workspace from user-global configuration plus 
 
 Zero is invalid for every ID. Stale workspace, agent, ask, and runtime-generation IDs fail without affecting a different object.
 
+## Turn-local transport state and prompt snapshots
+
+ABI 27 adds borrowed `PicoLlmTurn.turn_state` and malloc-owned
+`PicoLlmResult.turn_state`. A validated successful result replaces the runtime's
+transport state (NULL clears it); all other returned state is freed with the result.
+Only the provider worker accesses retained transport state. Core forwards it to
+subsequent requests of that same agent turn, including tools, steering, and automatic
+compaction, but never across a new user turn, standalone compaction, or runtime
+replacement. It is neither model-visible canonical history nor session metadata.
+The provider must bind it to the actual backend/credential owner and keep retries
+local to its callback; shared provider state is not a per-agent routing store.
+
+The session cache key survives compaction and resume; new/reset sessions rotate it.
+A main-thread prompt snapshot retains final normal instructions and a filtered
+catalog for compaction. Its tool entries borrow the runtime's retained registration;
+core drops them before releasing that generation. Compatible compaction does not
+invoke LLM hooks again. Fallback builds use normal hook semantics (`compact == false`),
+including after resume. Model/provider/URL/capability, effort/Fast, base-instruction,
+tool-eligibility, registration, and history-reset changes invalidate reuse. Request
+context is excluded from snapshots. See [providers](providers.md#compaction-prompt-snapshots).
+
+`PicoHttpPost.on_headers` runs synchronously on the calling worker, once per complete
+origin response header block, before its body. Status and raw non-NUL-terminated bytes
+are borrowed for that callback only. Informational and redirect blocks are included;
+proxy CONNECT headers and trailers are not delivered as response blocks. Providers
+must check status, copy only required values, validate values before sending them as
+headers, and never persist secrets/routing tokens. See [http](http.md).
+
 ## Compaction checkpoints and provider state
 
 ABI 26 separates `PicoLlmTurn.compaction_history_json` / `compaction_history_count`
@@ -253,7 +281,7 @@ transcript history is not erased by either checkpoint kind.
 Replacement is staged without modifying active input. For durable sessions a
 checkpoint is a FIFO persistence barrier with a refcounted completion acknowledgment;
 queue acceptance is not completion. Only a successful record write/fsync installs
-the prepared history, rotates cache affinity, and fires `AFTER_COMPACT`. Ephemeral
+the prepared history, preserves session cache affinity, and fires `AFTER_COMPACT`. Ephemeral
 sessions commit in memory. Failed preparation, remote compaction, or persistence
 leaves old history intact. After checkpoint submission cancellation stops further
 work but settles against the write result: a written checkpoint is installed before
@@ -275,8 +303,9 @@ compatible credentials.
 it removes opaque state and its restriction. The extension owns that summary's
 adequacy. Synthetic briefings are marked `synthetic: true` in canonical user-shaped
 history, so native retention cannot mistake them for genuine user input. Native
-compaction excludes request-context hooks; LLM instruction/tool filtering still
-runs and can influence the artifact. Successful provider usage is counted once
+compaction excludes request-context hooks and reuses a compatible normal prompt
+snapshot (or builds a normal prefix on fallback). Those instructions can influence
+the artifact. Successful provider usage is counted once
 regardless of a subsequent local write failure; replacement-window usage is unknown
 until a later successful request measures it. See [hooks](hooks.md#on_compact) and
 [context](context.md).

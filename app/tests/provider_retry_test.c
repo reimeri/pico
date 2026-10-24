@@ -19,6 +19,7 @@ typedef struct Attempt {
     long http;
     const char *chunks[5];
     const char *event;
+    const char *headers;
 } Attempt;
 
 static Attempt attempts[8];
@@ -26,6 +27,8 @@ static int attempt_count, requests, resets, announced, max_retries, delay;
 static double slept;
 static bool cancel_wait, cancelled;
 static JsonBuf visible;
+static bool routing_test;
+static char *routing_state;
 
 /* Replace only the wait boundary, keeping the production retry/cancellation loop. */
 int nanosleep(const struct timespec *duration, struct timespec *remaining)
@@ -69,7 +72,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
     for (int i = 0; i < req->header_count; i++)
     {
         auth |= strcmp(req->headers[i], "Authorization: Bearer test-token") == 0;
-        session |= strcmp(req->headers[i], "session_id: stable") == 0;
+        session |= strcmp(req->headers[i], "session-id: stable") == 0;
     }
     Check(strcmp(req->body, "{\"request\":true}") == 0 && auth && session,
           "capacity retries replay the original body and headers");
@@ -77,6 +80,24 @@ int pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
                         "each replay follows a reset and the full advertised wait");
     if (requests > 32) { Check(false, "retry loop is bounded"); *http = 400; return PICO_HTTP_OK; }
     const Attempt *a = &attempts[requests < attempt_count ? requests : attempt_count - 1];
+    if (routing_test) {
+        bool found = false;
+        for (int i = 0; i < req->header_count; ++i) {
+            if (!strncmp(req->headers[i], "x-codex-turn-state:", 19)) {
+                found = true;
+                Check(!strcmp(req->headers[i], "x-codex-turn-state: original-route"),
+                      "retry sends the first server routing token unchanged");
+            }
+        }
+        Check(found == (requests > 0), "routing token is absent initially and present on retry");
+        Check(req->on_headers != NULL, "Codex receives response headers");
+        if (req->on_headers) {
+            const char *ignored = "HTTP/1.1 103 Early Hints\r\nx-codex-turn-state: interim\r\n\r\n";
+            req->on_headers(req->user, 103, ignored, strlen(ignored));
+            req->on_headers(req->user, 302, ignored, strlen(ignored));
+            if (a->headers) req->on_headers(req->user, a->http, a->headers, strlen(a->headers));
+        }
+    }
     requests++;
     *http = a->http;
     *error = NULL;
@@ -88,6 +109,7 @@ int pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
 
 static void Reset(void)
 {
+    free(routing_state); routing_state = NULL; routing_test = false;
     memset(attempts, 0, sizeof(attempts));
     attempt_count = requests = resets = announced = max_retries = delay = 0;
     slept = 0;
@@ -98,12 +120,12 @@ static void Reset(void)
 
 static int Post(bool responses, PicoLlmResult *out)
 {
-    const char *extras[] = {"session_id: stable"};
+    const char *extras[] = {"session-id: stable"};
     if (responses)
     {
         PicoResponsesCtx ctx;
         int rc = pico_responses_post("https://provider.invalid", "{\"request\":true}", "test-token",
-                                     extras, 1, Cancel, Delta, NULL, &ctx);
+                                     extras, 1, Cancel, Delta, NULL, routing_test ? &routing_state : NULL, &ctx);
         if (rc != PICO_LLM_CANCEL) pico_responses_fill_result(&ctx, out);
         pico_responses_ctx_free(&ctx);
         return rc;
@@ -316,6 +338,24 @@ static void TestGuardRetryPolicy(bool responses)
     free(chunk);
 }
 
+static void TestRoutingAcrossCapacityRetry(void)
+{
+    Reset(); routing_test = true;
+    /* A provider must never turn a stored value into injected request headers. */
+    routing_state = JsonDup("bad\r\ninjected: value");
+    attempts[0].http = 503;
+    attempts[0].headers = "HTTP/1.1 503 Unavailable\r\nX-CoDeX-Turn-State: original-route \t\r\n\r\n";
+    attempts[1] = Success(true);
+    attempts[1].headers = "HTTP/1.1 200 OK\r\nx-codex-turn-state: replacement-must-be-ignored\r\n\r\n";
+    attempt_count = 2;
+    PicoLlmResult out = {0};
+    CheckRecovered(Post(true, &out), &out);
+    Check(routing_state && !strcmp(routing_state, "original-route"),
+          "interim/redirect headers cannot set routing; the first final token survives retries");
+    pico_llm_result_free(&out);
+    Reset();
+}
+
 int main(void)
 {
     for (int responses = 0; responses <= 1; responses++)
@@ -332,6 +372,7 @@ int main(void)
         TestCapacityTextIsNotAnError(responses);
     }
     TestNestedCodeOnlyError();
+    TestRoutingAcrossCapacityRetry();
     JsonBuf_Free(&visible);
     return failed;
 }

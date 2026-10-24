@@ -317,7 +317,7 @@ typedef struct PicoToolRowEvent {
 typedef void (*PicoToolRowFn)(PicoWorkspace *workspace, PicoToolRowEvent *event, void *state);
 
 typedef struct PicoLlmEvent {
-    bool compact;
+    bool compact; /* false: hooks build normal prefixes, also used by compaction */
     bool include_tools; /* read-only; false => catalog omitted, exclude ignored */
     const PicoTool *tools;
     int tool_count;
@@ -436,7 +436,10 @@ typedef struct PicoLlmTurn {
     const char *model;
     const char *base_url;
     const char *instructions;
-    const char *cache_key;
+    const char *cache_key; /* session-stable affinity, including compaction/resume */
+    /* Opaque transport state from this agent turn's preceding successful call.
+     * Borrowed, NULL on the first request; never history or persistent state. */
+    const char *turn_state;
     const char *effort;
     bool fast; /* immutable for an agent turn, including tool follow-ups/compaction */
     bool compact;
@@ -498,6 +501,9 @@ typedef struct PicoLlmResult {
     /* malloc'd JSON array: complete replacement canonical history, ending in
      * one provider_state item. Native compact only; mutually exclusive with items. */
     char *compaction_json;
+    /* malloc'd replacement transport state for the next request in this turn.
+     * NULL clears it. Adopted only on success; freed by pico_llm_result_free. */
+    char *turn_state;
 } PicoLlmResult;
 
 typedef int (*PicoProviderStreamFn)(PicoAgentContext *ctx, const PicoLlmTurn *turn,

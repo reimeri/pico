@@ -25,6 +25,24 @@ static const char oauth_good_token[] =
     "{\"access_token\":\"synthetic-access\",\"refresh_token\":\"synthetic-refresh\","
     "\"token_type\":\"Bearer\",\"expires_in\":3600}";
 
+static void RoutingEnableRefresh(void)
+{
+    pthread_mutex_lock(&oauth_mu);
+    oauth_test.active = true;
+    oauth_test.token_response = oauth_good_token;
+    pthread_mutex_unlock(&oauth_mu);
+}
+
+static bool RoutingDisableRefresh(void)
+{
+    pthread_mutex_lock(&oauth_mu);
+    bool once = oauth_test.tokens == 1;
+    free(oauth_test.url); free(oauth_test.form);
+    memset(&oauth_test, 0, sizeof(oauth_test));
+    pthread_mutex_unlock(&oauth_mu);
+    return once;
+}
+
 int __real_RAND_bytes(unsigned char *buf, int n);
 int __wrap_RAND_bytes(unsigned char *buf, int n)
 {
@@ -119,6 +137,7 @@ int __wrap_pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
 {
     int native_result;
     if (NativeCompactionWire(req, http, error, &native_result)) return native_result;
+    if (RoutingWire(req, http, error, &native_result)) return native_result;
     pthread_mutex_lock(&oauth_mu);
     if (!oauth_test.stream_test)
     {

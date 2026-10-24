@@ -45,6 +45,57 @@ static int MyInit(PicoWorkspace *workspace, void **state_out)
 
 Add a catalog entry with `"provider": "myllm"` or a builtin (`openai`, `hyper`, `xai`) is used instead.
 
+## Cache affinity and turn-local routing
+
+`PicoLlmTurn.cache_key` is stable for the saved session, including text/native
+compaction and resume. Only a new/reset session gets a new key. OpenAI sends it as
+`prompt_cache_key` and the `session-id` header; xAI sends `x-grok-conv-id`.
+Affinity is a routing hint, not a promise that a provider will retain the cache.
+
+ABI 27 adds `PicoLlmTurn.turn_state` and `PicoLlmResult.turn_state` for **ephemeral
+transport state**, distinct from canonical `provider_state` history:
+
+- A provider borrows immutable `turn->turn_state`, or NULL on the first request.
+- On success, return a malloc'd replacement in `out->turn_state`; NULL clears it.
+  Core adopts it after validating the result and frees it at replacement/runtime
+  destruction. Other results are freed by `pico_llm_result_free`.
+- State is isolated per agent/runtime and forwarded only within the same turn:
+  tool follow-ups, delivered steering, and automatic compaction. A new user turn
+  or standalone `/compact` starts without it, including after cancellation/error.
+- It is never serialized, placed in model input, copied to another agent, or
+  restored from a session. Providers must validate its backend/credential scope
+  against actual authentication, including after refresh.
+- Retries inside one provider callback must retain their state locally; core only
+  sees the final result. Never store turn routing in shared provider instance state.
+
+Codex captures the first valid `x-codex-turn-state` response header and echoes it
+unchanged through tool continuations, capacity/authentication retries, and automatic
+compaction. It ignores interim/redirect routing headers, rejects control characters,
+and clears old routing when the OAuth account changes. Ordinary access-token refresh
+within the same account preserves routing. The API-key/custom-gateway routes neither
+capture nor replay Codex turn tokens. See [HTTP response headers](http.md#response-headers).
+
+### Compaction prompt snapshots
+
+Normal requests retain their final instructions and filtered tool catalog in memory.
+Compaction reuses that prefix without rerunning LLM instruction/tool-filter hooks.
+If no usable snapshot exists (including after resume), it builds a fresh normal
+prefix: those hooks see `compact == false` and the normal tool catalog. The provider
+still sees `PicoLlmTurn.compact == true` and the appropriate compaction trigger.
+
+A snapshot is invalidated by a registration-generation change, history reset,
+changed base instructions, model/provider/URL/capabilities, effort/Fast selection,
+or agent tool eligibility. Standalone compaction refreshes base instructions before
+checking compatibility. Snapshot tool strings borrow the retained registration;
+core discards the snapshot before releasing that generation. No snapshot is persisted.
+A text-compaction retry after an unwanted tool call can omit tools while retaining
+the same instructions. Native compaction does not use this fallback.
+
+Request-only context is not part of this prefix. Native compaction excludes context
+hooks; text compaction invokes them with `compact == true`. LLM instructions can
+still influence the compacted artifact, even when replayed from a snapshot. Use
+context hooks for transient reminders. See [hooks](hooks.md#llm-interceptor).
+
 ## Native compaction
 
 `/compact` and the existing automatic `compact_at` threshold use native server-side
@@ -180,7 +231,7 @@ Populate `PicoLlmResult.service_tier` with the actual backend-reported tier as a
 
 ## Turn
 
-`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (stable prompt-cache affinity id; empty when unset), `effort`, `fast`, `compact`, `native_compact`, `context_limit`, `compact_seed`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`. `model`, `base_url`, `effort`, and `fast` are pinned at turn start: every request of a turn — tool follow-ups and compaction included — carries the same values, so a provider never observes a mid-turn model, effort, or Fast change. Selecting another model or effort while a turn is busy updates the selection for the next turn only.
+`PicoLlmTurn` is read-only. Important fields: `model`, `base_url` (may be empty), `instructions`, `cache_key` (session-stable prompt-cache affinity id; empty when unset), `turn_state` (borrowed turn-local transport state; NULL when unset), `effort`, `fast`, `compact`, `native_compact`, `context_limit`, `compact_seed`, `include_tools`, `vision`, `input_json` / `input_count` (canonical items, oldest first), `tools` / `tool_count`. `model`, `base_url`, `effort`, and `fast` are pinned at turn start: every request of a turn — tool follow-ups and compaction included — carries the same values, so a provider never observes a mid-turn model, effort, or Fast change. Selecting another model or effort while a turn is busy updates the selection for the next turn only.
 
 `input_json` uses Pico's canonical item forms, including the scoped `provider_state` described above. Synthetic text-compaction briefings are user-shaped items marked `"synthetic": true`; genuine user submissions are not marked. `user` and `assistant` carry a `parts` array (`text`, `refusal`, `image`, `audio`). `tool_call` and `tool_result` use `call_id` / `name` / `arguments` or `output`. Request-only `context` items are:
 
@@ -231,7 +282,7 @@ Builtin Responses maps `type: "context"` to a `developer` input message; builtin
 
 Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.
 
-HTTP helpers: `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_http_form_encode` in `pico/http.h`. Requests may run concurrently; sequential requests can reuse connections from a bounded idle-handle pool, without retaining caller-owned callback or header pointers. The pool remains usable while any host is live, and a clean shutdown of the last host allows a later host to initialize it again. `pico_http_get` uses the same `PicoHttpReq` as POST and ignores `body`. Buffered requests return `PICO_HTTP_OK` when the transfer completes even for HTTP 4xx/5xx; inspect `out_http` for application status. Streaming responses use `Content-Type: text/event-stream`. When that header is absent, the helper recognizes SSE from a first line beginning with `event:`, `data:`, `id:`, `retry:`, or `:`. An explicit content type takes precedence; non-SSE responses are delivered as one JSON body. Mixed LF/CRLF/CR event boundaries are supported. See [contracts](contracts.md#http-helpers) for ownership, cancellation, redirects, and timeout behavior.
+HTTP helpers (see [HTTP](http.md) for response headers and callback ownership): `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_http_form_encode` in `pico/http.h`. Requests may run concurrently; sequential requests can reuse connections from a bounded idle-handle pool, without retaining caller-owned callback or header pointers. The pool remains usable while any host is live, and a clean shutdown of the last host allows a later host to initialize it again. `pico_http_get` uses the same `PicoHttpReq` as POST and ignores `body`. Buffered requests return `PICO_HTTP_OK` when the transfer completes even for HTTP 4xx/5xx; inspect `out_http` for application status. Streaming responses use `Content-Type: text/event-stream`. When that header is absent, the helper recognizes SSE from a first line beginning with `event:`, `data:`, `id:`, `retry:`, or `:`. An explicit content type takes precedence; non-SSE responses are delivered as one JSON body. Mixed LF/CRLF/CR event boundaries are supported. See [contracts](contracts.md#http-helpers) for ownership, cancellation, redirects, and timeout behavior.
 
 ## Contract
 

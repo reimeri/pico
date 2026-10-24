@@ -139,6 +139,17 @@ typedef struct PicoToolJob {
     bool snap_retired;
 } PicoToolJob;
 
+typedef struct PicoPromptSnapshot {
+    char *base;
+    char *instructions;
+    PicoTool *tools; /* strings/callbacks borrowed from the retained registration */
+    int tool_count;
+    PicoModel model;
+    char effort[PICO_EFFORT_LEN];
+    bool fast;
+    bool eligible[PICO_MAX_TOOLS];
+} PicoPromptSnapshot;
+
 struct PicoAgentRt {
     /* Heap-owned worker services and callback-scoped public context. */
     PicoAgentContext context;
@@ -166,6 +177,9 @@ struct PicoAgentRt {
     char *work_effort;
     bool turn_fast; /* main-thread snapshot at the start of an agent turn */
     bool work_fast;
+    bool new_turn; /* main thread: consumed by the first queued request */
+    bool work_new_turn;
+    char *provider_turn_state; /* worker-owned, never serialized */
     char *work_instructions;
     char *work_cache_key;
     char **work_input;
@@ -222,6 +236,7 @@ struct PicoAgentRt {
     int input_cap;
     char cache_key[33];
     char *instructions;
+    PicoPromptSnapshot prompt;
     bool compacting;
     bool compact_no_tools;
     bool compact_native;
@@ -358,6 +373,14 @@ static void ClearOfferedTools(PicoAgentRt *rt)
     free(rt->offered_tools);
     rt->offered_tools = NULL;
     rt->offered_tool_count = 0;
+}
+
+static void ClearPromptSnapshot(PicoPromptSnapshot *prompt)
+{
+    free(prompt->base);
+    free(prompt->instructions);
+    free(prompt->tools);
+    memset(prompt, 0, sizeof(*prompt));
 }
 
 static void ClearPending(PicoAgentRt *rt)
@@ -1220,6 +1243,76 @@ static void RunLlmHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool in
     *tool_count = kept;
 }
 
+static const char *TurnEffort(const PicoAgent *agent)
+{
+    const char *effort = agent->has_running_model ? agent->running_effort : PicoSettings_ActiveEffort(agent);
+    return effort ? effort : "";
+}
+
+static bool PromptSnapshotUsable(const PicoAgentRt *rt, const PicoAgent *agent)
+{
+    const PicoPromptSnapshot *snapshot = &rt->prompt;
+    const PicoModel *model = PicoSettings_ActiveModelConst(agent);
+    if (!snapshot->instructions || !model || !rt->registration ||
+        strcmp(snapshot->base, rt->instructions ? rt->instructions : "") ||
+        strcmp(snapshot->model.id, model->id) || strcmp(snapshot->model.provider, model->provider) ||
+        strcmp(snapshot->model.base_url, model->base_url) || snapshot->model.vision != model->vision ||
+        snapshot->model.context_limit != model->context_limit ||
+        snapshot->model.supports_fast != model->supports_fast ||
+        strcmp(snapshot->effort, TurnEffort(agent)) || snapshot->fast != rt->turn_fast)
+        return false;
+    for (int i = 0; i < rt->registration->tool_count; ++i)
+        if (snapshot->eligible[i] != AgentAllowsTool(agent, rt->registration->tools[i].name)) return false;
+    return true;
+}
+
+static PicoTool *CopyPromptTools(const PicoTool *tools, int count)
+{
+    PicoTool *copy = count ? malloc((size_t)count * sizeof(*copy)) : NULL;
+    if (copy) memcpy(copy, tools, (size_t)count * sizeof(*copy));
+    return copy;
+}
+
+static bool SavePromptSnapshot(PicoAgentRt *rt, const PicoAgent *agent,
+                                const char *instructions, const PicoTool *tools, int count)
+{
+    PicoPromptSnapshot next = {0};
+    next.base = Dup(rt->instructions);
+    next.instructions = Dup(instructions);
+    next.tools = CopyPromptTools(tools, count);
+    if (!next.base || !next.instructions || (count && !next.tools)) {
+        ClearPromptSnapshot(&next);
+        return false;
+    }
+    next.tool_count = count;
+    next.model = *PicoSettings_ActiveModelConst(agent);
+    snprintf(next.effort, sizeof(next.effort), "%s", TurnEffort(agent));
+    next.fast = rt->turn_fast;
+    for (int i = 0; rt->registration && i < rt->registration->tool_count; ++i)
+        next.eligible[i] = AgentAllowsTool(agent, rt->registration->tools[i].name);
+    ClearPromptSnapshot(&rt->prompt);
+    rt->prompt = next;
+    return true;
+}
+
+/* Compaction preserves the last normal prefix rather than invoking hooks with
+ * different semantics. A fresh fallback also uses ordinary hook semantics.
+ * Request-context hooks are deliberately outside this snapshot. */
+static bool BuildRequestPrompt(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool include_tools,
+                                char **instructions, PicoTool **tools, int *count)
+{
+    if (compact && PromptSnapshotUsable(rt, agent)) {
+        *instructions = Dup(rt->prompt.instructions);
+        *count = include_tools ? rt->prompt.tool_count : 0;
+        *tools = CopyPromptTools(rt->prompt.tools, *count);
+        return *instructions && (!*count || *tools);
+    }
+    RunLlmHooks(rt, agent, false, compact || include_tools, rt->instructions, instructions, tools, count);
+    if (!*instructions) return false;
+    if (!include_tools) { free(*tools); *tools = NULL; *count = 0; }
+    return true;
+}
+
 static char *ValidateLlmResult(const PicoLlmResult *result, bool native_compact)
 {
     if (!result || result->item_count < 0 || (result->item_count > 0 && !result->items))
@@ -1376,6 +1469,7 @@ static void *WorkerMain(void *arg)
         int compaction_history_count = rt->work_compaction_history_count;
         rt->work_compaction_history = NULL; rt->work_compaction_history_count = 0;
         bool fast = rt->work_fast;
+        bool new_turn = rt->work_new_turn;
         bool compact = rt->work_compact;
         bool native_compact = rt->work_native_compact;
         int context_limit = rt->work_context_limit;
@@ -1424,6 +1518,8 @@ static void *WorkerMain(void *arg)
             turn.base_url = base_url;
             turn.instructions = instructions;
             turn.cache_key = cache_key;
+            if (new_turn) { free(rt->provider_turn_state); rt->provider_turn_state = NULL; }
+            turn.turn_state = rt->provider_turn_state;
             turn.effort = effort;
             turn.fast = fast;
             turn.compact = compact;
@@ -1472,6 +1568,9 @@ static void *WorkerMain(void *arg)
                 }
                 else
                 {
+                    free(rt->provider_turn_state);
+                    rt->provider_turn_state = result.turn_state;
+                    result.turn_state = NULL;
                     char *payload = EncodeResult(&result);
                     if (payload) PostEvent(rt, PICO_AEV_LLM_DONE, NULL, payload,
                                            result.input_tokens, result.cached_tokens);
@@ -1722,7 +1821,12 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     char *instructions = NULL;
     PicoTool *tools = NULL;
     int tool_count = 0;
-    RunLlmHooks(rt, agent, compact, include_tools, rt->instructions, &instructions, &tools, &tool_count);
+    if (!BuildRequestPrompt(rt, agent, compact, include_tools, &instructions, &tools, &tool_count)) {
+        for (int i = 0; i < input_count; ++i) free(input[i]);
+        free(input); free(instructions); free(tools);
+        SetErrorState(app, agent, "Could not snapshot request instructions/tools");
+        return false;
+    }
     if (!agent->clarification && !native)
         RunContextHooks(rt, agent, compact, tools, tool_count, &input, &input_count);
 
@@ -1800,7 +1904,9 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         }
     }
     pthread_mutex_lock(&rt->mu);
-    if (rt->busy || rt->stop)
+    bool snapshot_failed = !rt->busy && !rt->stop && (!compact || !PromptSnapshotUsable(rt, agent)) &&
+                           !SavePromptSnapshot(rt, agent, instructions, tools, tool_count);
+    if (rt->busy || rt->stop || snapshot_failed)
     {
         pthread_mutex_unlock(&rt->mu);
         free(compact_seed);
@@ -1813,6 +1919,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
         free(input);
         free(instructions);
         free(tools);
+        if (snapshot_failed) SetErrorState(app, agent, "Could not retain request instructions/tools");
         return false;
     }
     free(rt->turn_think);
@@ -1836,6 +1943,8 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_effort = Dup(agent->has_running_model ? agent->running_effort
                                                    : PicoSettings_ActiveEffort(agent));
     rt->work_fast = rt->turn_fast;
+    rt->work_new_turn = rt->new_turn;
+    rt->new_turn = false;
     rt->work_instructions = instructions;
     rt->work_cache_key = Dup(rt->cache_key);
     rt->work_compact = compact;
@@ -2950,7 +3059,6 @@ static void PollCompaction(PicoHost *app, PicoAgent *agent)
     rt->compact_input = NULL; rt->compact_input_count = 0;
     bool native = rt->compact_native;
     ClearCompactStage(rt);
-    PicoAgent_RotateCacheKey(agent);
     agent->tokens_used = 0; agent->tokens_cached = 0; agent->tokens_unknown = native;
     free(agent->compact_summary); agent->compact_summary = NULL;
     pico_run_hooks(app, PICO_HOOK_AFTER_COMPACT, agent->id);
@@ -4266,6 +4374,8 @@ static void FreeRt(PicoAgentRt *rt)
     free(rt->work_compaction_history);
     ClearOfferedTools(rt);
     free(rt->instructions);
+    free(rt->provider_turn_state);
+    ClearPromptSnapshot(&rt->prompt);
     PicoWorkspace_RegistrationRelease(rt->registration);
     rt->registration = NULL;
     pthread_mutex_destroy(&rt->mu);
@@ -4301,6 +4411,7 @@ static void RefreshWorkerContext(PicoAgentRt *rt, const PicoHost *app, const Pic
                 PicoWorkspace_RegistrationRetain(active);
             }
             old = rt->registration;
+            ClearPromptSnapshot(&rt->prompt);
             rt->registration = active;
         }
         else
@@ -4473,6 +4584,27 @@ bool PicoAgent_ShutdownRetired(PicoWorkspace *workspace, const struct timespec *
     return all_done;
 }
 
+static void LoadAgentInstructions(PicoAgent *agent)
+{
+    free(agent->runtime->instructions);
+    agent->runtime->instructions = agent->clarification ? Dup(PicoClarification_Instructions()) :
+                                  PicoSettings_LoadSystemPrompt(PicoAgent_Workspace(agent));
+    if (agent->kind == PICO_AGENT_SUBAGENT)
+    {
+        JsonBuf instructions;
+        JsonBuf_Init(&instructions);
+        JsonBuf_Puts(&instructions, agent->runtime->instructions ? agent->runtime->instructions : "");
+        JsonBuf_Puts(&instructions, "\n\n---\nSubagent profile: ");
+        JsonBuf_Puts(&instructions, agent->profile);
+        JsonBuf_Puts(&instructions, "\nPurpose:\n");
+        JsonBuf_Puts(&instructions, agent->purpose);
+        JsonBuf_Puts(&instructions, "\n---");
+        free(agent->runtime->instructions);
+        agent->runtime->instructions = JsonBuf_Steal(&instructions);
+    }
+    agent->runtime->new_turn = true;
+}
+
 void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
 {
     if (!app || !agent || !agent->runtime || PicoAgent_IsBusy(agent) ||
@@ -4492,6 +4624,7 @@ void PicoAgent_Compact(PicoHost *app, PicoAgent *agent)
         snprintf(agent->running_effort, sizeof(agent->running_effort), "%s", agent->effort);
     }
     else PicoSettings_PinTurnModel(agent);
+    LoadAgentInstructions(agent);
     StartCompact(app, agent);
 }
 
@@ -4629,22 +4762,7 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
                                                       : agent->workspace->settings.max_parallel_tools;
     agent->runtime->max_parallel_tools = parallel >= 1 && parallel <= PICO_MAX_PARALLEL_TOOLS
                                              ? parallel : PICO_DEFAULT_PARALLEL_TOOLS;
-    free(agent->runtime->instructions);
-    agent->runtime->instructions = agent->clarification ? Dup(PicoClarification_Instructions()) :
-                                  PicoSettings_LoadSystemPrompt(PicoAgent_Workspace(agent));
-    if (agent->kind == PICO_AGENT_SUBAGENT)
-    {
-        JsonBuf instructions;
-        JsonBuf_Init(&instructions);
-        JsonBuf_Puts(&instructions, agent->runtime->instructions ? agent->runtime->instructions : "");
-        JsonBuf_Puts(&instructions, "\n\n---\nSubagent profile: ");
-        JsonBuf_Puts(&instructions, agent->profile);
-        JsonBuf_Puts(&instructions, "\nPurpose:\n");
-        JsonBuf_Puts(&instructions, agent->purpose);
-        JsonBuf_Puts(&instructions, "\n---");
-        free(agent->runtime->instructions);
-        agent->runtime->instructions = JsonBuf_Steal(&instructions);
-    }
+    LoadAgentInstructions(agent);
     PushInput(agent->runtime, BuildUserItem(user_text, parts_json));
     StartLlm(app, agent);
 }
@@ -5369,6 +5487,8 @@ void PicoAgent_ClearInput(PicoAgent *agent)
 {
     PicoAgentRt *rt = agent ? agent->runtime : NULL;
     if (!rt) return;
+    ClearPromptSnapshot(&rt->prompt);
+    rt->new_turn = true;
     if (rt->compact_checkpoint) {
         ClearCompactStage(rt); rt->compacting = false;
         if (agent->state == PICO_AGENT_COMPACT_WAIT) agent->state = PICO_AGENT_IDLE;

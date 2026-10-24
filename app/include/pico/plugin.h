@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 26 /* Separate native-compaction retention history from request-only media omissions. */
+#define PICO_EXT_ABI 27 /* Turn-local provider routing, response headers, and compaction prompt snapshots. */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);

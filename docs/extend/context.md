@@ -72,8 +72,10 @@ context should not influence a text summary. Native compaction skips these hooks
 and does not submit `extra_context`, because the server could otherwise encode it
 into an opaque checkpoint. Earlier assistant/tool history may still reflect prior
 request context; this is direct exclusion, not semantic erasure of past influence.
-LLM instruction hooks still run for native compaction and intentionally can
-influence the artifact.
+Native compaction reuses a compatible normal instruction/tool snapshot, or builds
+a fresh normal prefix with LLM hooks (`compact == false`) when no snapshot is usable.
+Those instructions can influence the artifact. See
+[compaction prompt snapshots](providers.md#compaction-prompt-snapshots).
 
 After native compaction, `history_json` can include a scoped `provider_state` item
 as documented in [providers](providers.md#native-compaction). It is opaque, not a

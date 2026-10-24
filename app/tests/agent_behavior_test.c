@@ -3633,6 +3633,58 @@ static int TestBuildInstructionsMatchTurn(void)
     return ok ? 0 : Fail(name, "preview did not match the instructions sent to the provider");
 }
 
+static int g_prompt_revision;
+
+static void ChangingPrompt(PicoWorkspace *workspace, PicoAgentId id, PicoLlmEvent *event, void *state)
+{
+    (void)workspace; (void)id; (void)state;
+    char text[96];
+    snprintf(text, sizeof(text), "prompt revision %d%s", g_prompt_revision,
+             event->compact ? " UNEXPECTED COMPACTION PREFIX" : "");
+    event->extra_instructions = JsonDup(text);
+    if (g_prompt_revision > 1 && event->exclude)
+        for (int i = 0; i < event->tool_count; ++i)
+            if (!strcmp(event->tools[i].name, "ask_test")) event->exclude[i] = true;
+}
+
+static int TestCompactionPromptSnapshot(bool native)
+{
+    ResetTest(TEST_SINGLE, 0);
+    g_native_mode = native; g_prompt_revision = 1;
+    PicoHost app; InitApp(&app);
+    TestAddLlmHook(&app, ChangingPrompt);
+    PicoAgent *agent = TestAgent(&app);
+    PicoAgent_StartTurn(&app, agent, "snapshot this ordinary request");
+    bool ok = WaitForIdle(&app);
+    char *instructions = JsonDup(g_test.last_instructions);
+    char *tools = JsonDup(g_test.last_tools);
+    g_prompt_revision = 2;
+    PicoAgent_Compact(&app, agent);
+    ok &= WaitForIdle(&app) && instructions && tools && g_test.last_instructions &&
+          !strcmp(instructions, g_test.last_instructions) && !strcmp(tools, g_test.last_tools);
+    free(instructions); free(tools);
+    /* Changed capabilities invalidate the retained catalog even for the same model ID. */
+    PicoHost_PrimaryWorkspace(&app)->models[0].vision = true;
+    PicoAgent_Compact(&app, agent);
+    ok &= WaitForIdle(&app) && g_test.last_instructions && strstr(g_test.last_instructions, "prompt revision 2") &&
+          !strstr(g_test.last_instructions, "UNEXPECTED") && !strstr(g_test.last_tools, "ask_test");
+    /* A new extension generation must not keep advertising the old catalog. */
+    g_prompt_revision = 3;
+    TestAddTool(&app, "new_tool", "new generation", "{}", AskTool, NULL);
+    PicoAgent_Compact(&app, agent);
+    ok &= WaitForIdle(&app) && g_test.last_instructions && strstr(g_test.last_instructions, "prompt revision 3") &&
+          strstr(g_test.last_tools, "new_tool");
+    /* No serialized snapshot exists on history reset/replay: rebuild normally. */
+    PicoAgent_ClearInput(agent);
+    PicoAgent_PushHistoryUser(agent, "restored history");
+    g_prompt_revision = 4;
+    PicoAgent_Compact(&app, agent);
+    ok &= WaitForIdle(&app) && g_test.last_instructions && strstr(g_test.last_instructions, "prompt revision 4") &&
+          !strstr(g_test.last_instructions, "UNEXPECTED");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("compaction prompt snapshot", "prefix changed or fallback ignored current model/registration/history");
+}
+
 static int TestAgentPolicyPrecedesLlmHooks(void)
 {
     const char *name = "agent policy precedes llm hooks";
@@ -6544,6 +6596,8 @@ int main(void)
     failed |= PICO_TEST_RUN(TestDeniedDetailsDoNotApply());
     failed |= PICO_TEST_RUN(TestRequestOnlyContext());
     failed |= PICO_TEST_RUN(TestUnmappedContextFails());
+    failed |= PICO_TEST_RUN(TestCompactionPromptSnapshot(false));
+    failed |= PICO_TEST_RUN(TestCompactionPromptSnapshot(true));
     failed |= PICO_TEST_RUN(TestLlmExtraInstructions());
     failed |= PICO_TEST_RUN(TestBuildInstructionsExtraSpan());
     failed |= PICO_TEST_RUN(TestBuildInstructionsMatchTurn());

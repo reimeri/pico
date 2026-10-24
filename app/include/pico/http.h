@@ -22,6 +22,12 @@ typedef bool (*PicoHttpJsonFn)(void *user, const char *event, const char *json, 
 typedef void (*PicoHttpRetryFn)(void *user, int retry, int max_retries,
                                 int delay_seconds, const char *error);
 
+/* Worker-thread callback after each complete HTTP response header block, before
+ * its body. Redirect/interim blocks are included: inspect status before use.
+ * headers includes the status line and terminating blank line; borrowed bytes,
+ * not necessarily NUL-terminated. Never persist authentication/routing headers. */
+typedef void (*PicoHttpHeadersFn)(void *user, long status, const char *headers, size_t len);
+
 typedef struct PicoHttpPost {
     const char *url;
     const char *body;
@@ -30,6 +36,7 @@ typedef struct PicoHttpPost {
     PicoHttpCancelFn cancel;
     PicoHttpRetryFn on_retry;
     PicoHttpJsonFn on_json;
+    PicoHttpHeadersFn on_headers;
     void *user; /* passed to all callbacks */
 } PicoHttpPost;
 

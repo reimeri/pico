@@ -876,6 +876,7 @@ void pico_llm_result_free(PicoLlmResult *r)
     }
     free(r->error);
     free(r->compaction_json);
+    free(r->turn_state);
     if (r->items && r->item_count > 0)
     {
         for (int i = 0; i < r->item_count; i++)

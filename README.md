@@ -79,12 +79,12 @@ Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO
 
 ## Build from source
 
-Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:
+Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, libwebp, libjpeg, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:
 
 ```bash
 sudo apt update
 sudo apt install build-essential cmake ninja-build meson pkg-config git curl \
-  libcurl4-openssl-dev libssl-dev libsqlite3-dev libutf8proc-dev \
+  libcurl4-openssl-dev libssl-dev libsqlite3-dev libutf8proc-dev libwebp-dev libjpeg-dev \
   libgl1-mesa-dev libegl-dev libx11-dev libx11-xcb-dev \
   libxcb1-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev \
   libxinerama-dev libxrandr-dev libxrender-dev libxkbcommon-dev \

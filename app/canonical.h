@@ -39,7 +39,6 @@ char *pico_canonical_persist_data_url(const char *dir, const char *data_url);
 char *pico_canonical_tool_observation(const char *json);
 char *pico_canonical_tool_images_markdown(const char *parts_json);
 
-bool pico_canonical_valid_png(const void *bytes, size_t size);
 bool pico_canonical_tool_images_valid(const JsonDoc *doc, bool read_files);
 
 bool pico_canonical_is_tool_result(const char *json);

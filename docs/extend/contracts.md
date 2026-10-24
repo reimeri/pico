@@ -335,14 +335,32 @@ acceptance-only crash restores as not delivered, never model input. See
 
 ## Image-bearing tool results
 
-ABI 22 adds encoded PNG tool results and `PicoProvider.tool_images` opt-in.
+ABI 24 accepts original encoded PNG/JPEG/WebP tool results through
+`PicoToolImage.data`, with `PicoProvider.tool_images` opt-in.
 `pico_agent_context_accepts_tool_images` reports the immutable turn snapshot:
 vision model AND capable retained provider. Unsupported results fail explicitly.
-Core validates/decodes PNGs and persists them on the worker; up to four images,
-64 MiB encoded total, and 4096 × 4096 per image. Core owns all transferred
+Core detects format from content, validates/decodes images, and persists them on
+the worker; up to four images, 64 MiB encoded total, and 4096 × 4096 per image. Core owns all transferred
 allocations and cleans unadopted/cancelled-generation assets. Accepted files live
 at `<workspace>/.pico/media/{tools|browser}/<session-id>/`; only those two namespace
 values are accepted, default `tools`. Parent-directory symlinks are refused.
+Stored MIME/extensions match the detected content; original encoded bytes are
+preserved without resizing, conversion, or metadata stripping. Animated WebP
+validation decodes all frames, but persistence and provider projection preserve
+the entire encoded animation; backend acceptance/frame handling is provider-
+dependent. Transcript previews show the first frame. Canonical MIME must match
+the actual file content when preparing a request.
+
+The parallel-eligible builtin `view_image` resolves relative paths against the
+calling agent's workspace and accepts absolute paths outside it, including
+symlink targets. It reads regular local files only and uses the same image
+limits/capability gate. Its per-request LLM hook excludes it unless the calling
+agent's active model and retained provider both accept tool images; agent/profile
+restrictions still apply, and the execution-time guard remains. In-flight turns
+keep their pinned model and retained provider across follow-ups. A model change
+between turns updates the catalog without re-registering the builtin.
+Source files remain caller-owned; accepted tool images
+are independent session-owned copies. See [images](images.md).
 
 Canonical/session `tool_result.parts` contains image paths/MIME, never bytes.
 Interrupted replay repairs every unanswered tool-call ID independently, preserving

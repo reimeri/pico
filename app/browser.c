@@ -833,7 +833,7 @@ void PicoBrowser_ToolObserve(PicoAgentContext *ctx, const char *args, bool act, 
         JsonBuf_Putc(&result, '}'); out->output = JsonBuf_Steal(&result);
         out->images = calloc(1, sizeof(*out->images));
         if (out->images) {
-            out->images[0] = (PicoToolImage){.png=r->png, .size=r->observation.png_size}; r->png = NULL;
+            out->images[0] = (PicoToolImage){.data=r->png, .size=r->observation.png_size}; r->png = NULL;
             out->image_count = 1; out->media_namespace = strdup("browser");
         } else { free(out->output); out->output = strdup("Could not allocate screenshot result."); out->is_error = true; }
     } else {

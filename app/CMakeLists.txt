@@ -153,6 +153,15 @@ target_include_directories(pico_chat_search PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pico_chat_search PUBLIC PkgConfig::UTF8PROC)
 pico_warnings_are_errors(pico_chat_search)
 
+# Worker-side validation does not call Raylib. WebP also supplies first-frame
+# pixels for transcript previews; persisted/provider assets remain unchanged.
+pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp libwebpdemux)
+pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
+add_library(pico_image STATIC image.c)
+target_include_directories(pico_image PRIVATE ${raylib_SOURCE_DIR}/src)
+target_link_libraries(pico_image PUBLIC PkgConfig::WEBP PkgConfig::JPEG)
+pico_warnings_are_errors(pico_image)
+
 add_executable(pico
     main.c
     cli.c
@@ -212,6 +221,7 @@ add_executable(pico
     builtins/background.c
     builtins/background_model.c
     builtins/shell.c
+    builtins/image.c
     builtins/subagent.c
     builtins/complete.c
     builtins/commands.c
@@ -267,7 +277,7 @@ target_compile_definitions(pico PRIVATE
     "PICO_BROWSER_HELPER=\"${CMAKE_INSTALL_FULL_LIBEXECDIR}/pico/browser/pico_browser_helper\""
     "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
 
-target_link_libraries(pico PUBLIC pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS} pico_browser_gpu)
+target_link_libraries(pico PUBLIC pico_image pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS} pico_browser_gpu)
 target_link_options(pico PRIVATE "-rdynamic")
 
 # GLFW dlopens Wayland/Xcursor instead of linking them. On Nix those .so files are
@@ -365,6 +375,19 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_skills_builtin_tests)
     add_test(NAME pico_skills_builtin_tests COMMAND pico_skills_builtin_tests)
 
+    add_executable(pico_image_tests
+        tests/image_test.c
+        builtins/image.c
+        json.c)
+    target_include_directories(pico_image_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${raylib_SOURCE_DIR}/src)
+    target_link_libraries(pico_image_tests PRIVATE pico_image)
+    pico_warnings_are_errors(pico_image_tests)
+    add_test(NAME pico_image_tests COMMAND pico_image_tests)
+
     add_executable(pico_shell_tests
         tests/shell_test.c
         builtins/shell.c
@@ -450,7 +473,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_md_scroll_layout_tests)
     target_compile_options(pico_md_scroll_layout_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_md_scroll_layout_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_md_scroll_layout_tests PRIVATE pico_chat_search raylib md4c)
+    target_link_libraries(pico_md_scroll_layout_tests PRIVATE pico_image pico_chat_search raylib md4c)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(pico_md_scroll_layout_tests PRIVATE PICO_TEST_IMAGES=1)
         target_link_options(pico_md_scroll_layout_tests PRIVATE
@@ -546,6 +569,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src
         ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    target_link_libraries(pico_responses_tests PRIVATE pico_image)
     pico_warnings_are_errors(pico_responses_tests)
     target_compile_options(pico_responses_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_responses_tests PRIVATE -Wl,--gc-sections)
@@ -563,6 +587,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src
         ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    target_link_libraries(pico_completions_tests PRIVATE pico_image)
     pico_warnings_are_errors(pico_completions_tests)
     target_compile_options(pico_completions_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_completions_tests PRIVATE -Wl,--gc-sections)
@@ -581,6 +606,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/..
         ${raylib_SOURCE_DIR}/src
         ${raylib_SOURCE_DIR}/src/external/glfw/include)
+    target_link_libraries(pico_provider_retry_tests PRIVATE pico_image)
     pico_warnings_are_errors(pico_provider_retry_tests)
     add_test(NAME pico_provider_retry_tests COMMAND pico_provider_retry_tests)
 
@@ -655,6 +681,7 @@ if(BUILD_TESTING)
         app.c
         browser.c
         builtins/browser.c
+        builtins/image.c
         http.c
         http_capture.c
         ui.c
@@ -693,7 +720,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_agent_behavior_tests)
     target_compile_options(pico_agent_behavior_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_agent_behavior_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_chat_search raylib CURL::libcurl Threads::Threads OpenSSL::Crypto pico_browser_gpu)
+    target_link_libraries(pico_agent_behavior_tests PRIVATE pico_image pico_chat_search raylib CURL::libcurl Threads::Threads OpenSSL::Crypto pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_agent_behavior_tests PRIVATE tests/test_clock.c)
         target_compile_definitions(pico_agent_behavior_tests PRIVATE PICO_TEST_CLOCK=1)
@@ -718,7 +745,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_session_usage_tests)
     target_compile_options(pico_session_usage_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_session_usage_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_session_usage_tests PRIVATE SQLite::SQLite3 Threads::Threads)
+    target_link_libraries(pico_session_usage_tests PRIVATE pico_image SQLite::SQLite3 Threads::Threads)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_session_usage_tests PRIVATE tests/test_lock.c)
         target_compile_definitions(pico_session_usage_tests PRIVATE PICO_TEST_LOCK=1 PICO_TEST_JSON_ALLOC=1)
@@ -776,7 +803,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_files_tests)
     target_compile_options(pico_files_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_files_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_files_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
+    target_link_libraries(pico_files_tests PRIVATE pico_image pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(pico_files_tests PRIVATE PICO_TEST_FILE_KEYS=1)
         target_link_options(pico_files_tests PRIVATE -Wl,--wrap=IsKeyPressed)
@@ -833,7 +860,7 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_composer_tests)
     target_compile_options(pico_composer_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_composer_tests PRIVATE -Wl,--gc-sections)
-    target_link_libraries(pico_composer_tests PRIVATE pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
+    target_link_libraries(pico_composer_tests PRIVATE pico_image pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
     add_test(NAME pico_composer_tests COMMAND pico_composer_tests)
 
     add_executable(pico_spell_tests
@@ -1033,6 +1060,7 @@ if(BUILD_TESTING)
         builtins/notify.c
         builtins/cache_miss.c
         builtins/shell.c
+        builtins/image.c
         builtins/commands.c
         builtins/sessions.c
         builtins/complete.c
@@ -1087,7 +1115,7 @@ if(BUILD_TESTING)
         "PICO_VERSION=\"${PROJECT_VERSION}\""
         "PICO_CC=\"cc\""
         "PICO_INSTALL_DATADIR=\"${CMAKE_INSTALL_FULL_DATADIR}/pico\"")
-    target_link_libraries(pico_host_workspace_tests PRIVATE pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS} pico_browser_gpu)
+    target_link_libraries(pico_host_workspace_tests PRIVATE pico_image pico_chat_search raylib md4c CURL::libcurl OpenSSL::Crypto SQLite::SQLite3 Threads::Threads ${CMAKE_DL_LIBS} pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_host_workspace_tests PRIVATE tests/test_clock.c tests/test_io.c)
         target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_TEST_CLOCK=1 PICO_TEST_IO=1)
@@ -1114,7 +1142,7 @@ if(BUILD_TESTING)
 endif()
 
 set(_pico_ref_builtins
-    shell.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    shell.c image.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
     completions.c completions.h provider_retry.c provider_retry.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory

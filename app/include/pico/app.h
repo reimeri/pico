@@ -201,17 +201,19 @@ typedef struct PicoHookEvent {
 typedef void (*PicoHostHookFn)(PicoHost *host, const PicoHookEvent *event, void *state);
 typedef void (*PicoWorkspaceHookFn)(PicoWorkspace *workspace, const PicoHookEvent *event, void *state);
 
-/* Encoded PNG bytes. All allocations transfer to core on callback return.
- * Up to 4 images / 64 MiB total. Core persists immutable session-owned assets. */
+/* Encoded PNG, JPEG, or WebP bytes; core detects the format from content.
+ * All allocations transfer to core on callback return. Up to 4 images,
+ * 64 MiB total, 4096 x 4096 per image. Core persists original bytes unchanged,
+ * including animated WebP; backend acceptance/frame handling varies. */
 typedef struct PicoToolImage {
-    unsigned char *png;
+    unsigned char *data;
     size_t size;
 } PicoToolImage;
 
 typedef struct PicoToolResult {
     char *output;       /* malloc; Pico frees */
     char *details_json; /* optional malloc'd JSON object; Pico validates and frees */
-    PicoToolImage *images; /* malloc array and nested PNG bytes; Pico frees */
+    PicoToolImage *images; /* malloc array and nested encoded bytes; Pico frees */
     int image_count;
     char *media_namespace; /* optional malloc "tools" (default) or "browser" storage namespace */
     bool is_error;

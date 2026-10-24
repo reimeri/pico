@@ -29,6 +29,8 @@ char *PicoSteering_NotDelivered(const char *display, const char *reason);
 void PicoAgent_Cancel(PicoAgent *agent);
 void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent);
 bool PicoAgent_IsBusy(const PicoAgent *agent);
+/* Main-thread query against the active model and retained registration. */
+bool PicoAgent_AcceptsToolImages(const PicoAgent *agent);
 /* Main-thread: which pending call this id is. IDLE if it is not in the live queue. */
 PicoToolCallProgress PicoAgent_ToolCallProgress(const PicoAgent *agent, const char *call_id);
 /* Milliseconds since the current LLM or tool wait started. 0 if idle. */

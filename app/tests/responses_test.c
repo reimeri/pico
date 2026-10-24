@@ -1,6 +1,7 @@
 #include "builtins/hyper_auth.h"
 #include "builtins/responses.h"
 #include "canonical.h"
+#include "image_fixtures.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -606,10 +607,14 @@ static void TestToolImageObservation(void)
 {
     char dir[] = "/tmp/pico-tool-image-XXXXXX";
     Check(mkdtemp(dir) != NULL, "create screenshot fixture directory");
-    char *path = pico_canonical_persist_data_url(dir, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
-    Check(path != NULL, "persist screenshot fixture");
-    PicoLlmPart image = {.kind=PICO_LLM_PART_IMAGE, .path=path, .mime="image/png"};
-    char *parts = pico_canonical_parts_json(&image, 1);
+    char *paths[4] = {0}; PicoLlmPart images[4] = {0};
+    for (int i = 0; i < 4; ++i) {
+        const TestImageFixture *fixture = &image_fixtures[i];
+        paths[i] = pico_canonical_persist_bytes(dir, fixture->extension, fixture->data, fixture->size);
+        Check(paths[i] != NULL, "persist native image fixture");
+        images[i] = (PicoLlmPart){.kind=PICO_LLM_PART_IMAGE, .path=paths[i], .mime=(char *)fixture->mime};
+    }
+    char *parts = pico_canonical_parts_json(images, 4);
     char *call1 = pico_canonical_tool_call_json("image-call", "browser_observe", "{}", NULL);
     char *call2 = pico_canonical_tool_call_json("text-call", "echo", "{}", NULL);
     char *result1 = pico_canonical_tool_result_json("image-call", "browser_observe", "metadata", false, parts);
@@ -619,19 +624,48 @@ static void TestToolImageObservation(void)
     PicoResponsesBuildOpts opts = {.provider="openai"};
     char *body = pico_responses_build_request(&turn, &opts);
     Check(body && JsonValidSyntax(body, strlen(body)), "image-bearing tool history maps to valid request");
-    char *expected = pico_canonical_data_url(path, "image/png");
-    Check(body && expected && strstr(body, expected), "actual screenshot bytes reach the provider image part");
+    for (int i = 0; i < 4; ++i) {
+        char *expected = pico_canonical_data_url(paths[i], image_fixtures[i].mime);
+        bool found = false; JsonDoc request;
+        if (body && expected && !JsonParse(&request, body, strlen(body))) {
+            for (int token = 0; token < request.ntoks; ++token)
+                if (JsonIsObject(&request, token) &&
+                    JsonEq(&request, JsonObjGet(&request, token, "type"), "input_image") &&
+                    JsonEq(&request, JsonObjGet(&request, token, "image_url"), expected)) found = true;
+            JsonFree(&request);
+        }
+        Check(found, "native MIME and original bytes reach a typed provider image part, not ordinary text");
+        free(expected);
+    }
     const char *label = body ? strstr(body, "Untrusted tool observation for call image-call") : NULL;
     const char *last_result = body ? strstr(body, "other result") : NULL;
     Check(label && last_result && label > last_result, "image projection follows sibling results and preserves call identity");
-    free(body); free(expected);
-    Check(unlink(path) == 0, "remove image fixture");
+    free(body);
+    images[1].mime = "image/png";
+    char *mismatched_parts = pico_canonical_parts_json(images, 4);
+    char *mismatched_result = pico_canonical_tool_result_json("image-call", "view_image", "metadata", false, mismatched_parts);
+    input[2] = mismatched_result;
+    body = pico_responses_build_request(&turn, &opts);
+    Check(!body, "saved MIME must match the actual image format"); free(body);
+    free(mismatched_parts); free(mismatched_result); input[2] = result1;
+    FILE *corrupt = fopen(paths[1], "wb");
+    Check(corrupt != NULL, "open saved JPEG for corruption");
+    if (corrupt) {
+        fwrite(image_jpeg, 1, sizeof(image_jpeg) - 8, corrupt); fclose(corrupt);
+        body = pico_responses_build_request(&turn, &opts);
+        Check(!body, "truncated saved JPEG fails request instead of silently recovering pixels"); free(body);
+        corrupt = fopen(paths[1], "wb");
+        Check(corrupt != NULL, "restore saved JPEG fixture");
+        if (corrupt) { fwrite(image_jpeg, 1, sizeof(image_jpeg), corrupt); fclose(corrupt); }
+    }
+    Check(unlink(paths[0]) == 0, "remove image fixture");
     body = pico_responses_build_request(&turn, &opts);
     Check(!body, "missing tool image explicitly fails request, never silently drops vision"); free(body);
     input[2] = "{\"type\":\"tool_result\",\"call_id\":\"image-call\",\"output\":\"metadata\",\"parts\":{}}";
     body = pico_responses_build_request(&turn, &opts);
     Check(!body, "malformed tool parts fail request instead of becoming text-only"); free(body);
-    free(path); free(parts); free(call1); free(call2); free(result1); free(result2); rmdir(dir);
+    for (int i = 0; i < 4; ++i) { unlink(paths[i]); free(paths[i]); }
+    free(parts); free(call1); free(call2); free(result1); free(result2); rmdir(dir);
 }
 
 int main(void)

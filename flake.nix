@@ -41,6 +41,8 @@
           runtimeLibraries = with pkgs; [
             curl
             utf8proc
+            libwebp
+            libjpeg
             openssl
             sqlite
             glfw

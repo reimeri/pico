@@ -6,6 +6,7 @@
 #endif
 #include "agent.h"
 #include "canonical.h"
+#include "image_fixtures.h"
 #include "workspace_internal.h"
 #include "json.h"
 #include "path.h"
@@ -4418,6 +4419,80 @@ static int TestAfterCompact(void)
     return ok ? 0 : Fail(name, "compaction did not retain cumulative usage or fire lifecycle hooks");
 }
 
+static int TestViewImageCatalogCapabilities(void)
+{
+    const char *name = "view_image catalog follows model and provider capabilities";
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app; InitApp(&app);
+    PicoWorkspace *ws = TestWs(&app);
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    pico_add_provider(ws, &(PicoProvider){.name="images", .stream=FakeProvider, .map_context=true, .tool_images=true});
+    pico_add_provider(ws, &(PicoProvider){.name="text-only", .stream=FakeProvider, .map_context=true});
+    PicoHost_PublishRegistration(&app, NULL);
+    InitExt(&app, ws, pico_ext_image(), NULL, NULL);
+    const struct { bool vision; const char *provider; } cases[] = {
+        {false, "images"}, {true, "images"}, {true, "text-only"}, {false, "text-only"},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+        ws->models[0].vision = cases[i].vision;
+        snprintf(ws->models[0].provider, sizeof(ws->models[0].provider), "%s", cases[i].provider);
+        PicoAgent_StartTurn(&app, TestAgent(&app), "inspect catalog");
+        ok = WaitForIdle(&app) && ok;
+        pthread_mutex_lock(&g_test.mu);
+        bool advertised = strstr(g_test.last_tools, "view_image") != NULL;
+        ok = (advertised == (cases[i].vision && !strcmp(cases[i].provider, "images"))) &&
+             strstr(g_test.last_tools, "ask_test") && ok;
+        pthread_mutex_unlock(&g_test.mu);
+    }
+    /* Capability filtering must not restore a profile/policy-hidden tool. */
+    ws->models[0].vision = true;
+    snprintf(ws->models[0].provider, sizeof(ws->models[0].provider), "images");
+    PicoAgent *agent = TestAgent(&app);
+    agent->allowed_tools = calloc(1, sizeof(*agent->allowed_tools));
+    agent->allowed_tools[0] = JsonDup("ask_test"); agent->allowed_tool_count = 1;
+    PicoAgent_StartTurn(&app, agent, "restricted catalog");
+    ok = WaitForIdle(&app) && ok;
+    pthread_mutex_lock(&g_test.mu);
+    ok = !strcmp(g_test.last_tools, "ask_test") && ok;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "provider saw an unusable image tool, lost an unrelated tool, or bypassed policy");
+}
+
+static int TestViewImageCatalogRetainsTurnCapabilities(void)
+{
+    const char *name = "view_image catalog retains running turn capabilities";
+    ResetTest(TEST_CATALOG_BLOCK, 1);
+    PicoHost app; InitApp(&app);
+    PicoWorkspace *ws = TestWs(&app);
+    ws->models[0].vision = true;
+    snprintf(ws->models[0].provider, sizeof(ws->models[0].provider), "images");
+    PicoHost_BeginRegistration(&app, PICO_REG_WORKSPACE, ws);
+    pico_add_provider(ws, &(PicoProvider){.name="images", .stream=FakeProvider, .map_context=true, .tool_images=true});
+    pico_add_tool(ws, "echo_test", "echo", "{}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
+    PicoHost_PublishRegistration(&app, NULL);
+    InitExt(&app, ws, pico_ext_image(), NULL, NULL);
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "echo_test");
+    PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    if (!WaitForBlock(&app)) {
+        PicoHost_Shutdown(&app); return Fail(name, "provider did not reach its gate");
+    }
+    /* A live registry/settings update must not change this turn's pinned model
+     * or retained provider, including the request after the echo result. */
+    ws->models[0].vision = false;
+    for (int i = 0; i < ws->provider_count; ++i) ws->providers[i].tool_images = false;
+    pthread_mutex_lock(&g_test.mu);
+    g_test.block_release = true; pthread_cond_broadcast(&g_test.cv);
+    pthread_mutex_unlock(&g_test.mu);
+    bool ok = WaitForIdle(&app);
+    pthread_mutex_lock(&g_test.mu);
+    ok = g_test.provider_tools_issued == 2 && strstr(g_test.last_tools, "view_image") && ok;
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "follow-up advertisement used live capabilities instead of retained turn state");
+}
+
 static void ImageTool(PicoAgentContext *ctx, const char *args, PicoToolResult *out, void *state)
 {
     (void)ctx; (void)args;
@@ -4425,7 +4500,7 @@ static void ImageTool(PicoAgentContext *ctx, const char *args, PicoToolResult *o
     size_t size = 0;
     unsigned char *png = (unsigned char *)Pico_ReadFile(path, &size);
     out->images = calloc(1, sizeof(*out->images)); out->image_count = 1;
-    out->images[0] = (PicoToolImage){.png=png, .size=size};
+    out->images[0] = (PicoToolImage){.data=png, .size=size};
     out->output = JsonDup("image metadata");
     if (strstr(args, "wait")) {
         pthread_mutex_lock(&g_test.mu); g_test.block_entered = true; pthread_cond_broadcast(&g_test.cv);
@@ -4484,11 +4559,16 @@ static int TestToolImageOwnership(void)
     const char *name = "image-bearing tool result ownership";
     char dir[] = "/tmp/pico-image-tool-XXXXXX";
     if (!mkdtemp(dir)) return Fail(name, "fixture directory");
-    char *path = pico_canonical_persist_data_url(dir,
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
-    if (!path) return Fail(name, "PNG fixture");
     bool ok = true;
-    for (int supported = 0; supported < 2; ++supported) {
+    const int fixture_count = (int)(sizeof(image_fixtures) / sizeof(*image_fixtures));
+    for (int test = -1; test <= fixture_count; ++test) {
+        bool supported = test >= 0;
+        bool corrupt = test == fixture_count;
+        bool expect_image = supported && !corrupt;
+        const TestImageFixture *fixture = &image_fixtures[corrupt ? 1 : supported ? test : 0];
+        size_t size = corrupt ? fixture->size - 8 : fixture->size;
+        char *path = pico_canonical_persist_bytes(dir, fixture->extension, fixture->data, size);
+        if (!path) return Fail(name, "image fixture");
         ResetTest(TEST_SINGLE, 1); PicoHost app; InitApp(&app);
         PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
         snprintf(ws->path, sizeof(ws->path), "%s", dir);
@@ -4504,15 +4584,19 @@ static int TestToolImageOwnership(void)
         PicoAgent_StartTurn(&app, TestAgent(&app), "start");
         ok = ok && WaitForIdle(&app);
         PicoTraceLine *line = LastToolTrace(&app);
-        ok = ok && line && line->tool_error == !supported;
-        if (supported && line) {
+        ok = ok && line && line->tool_error == !expect_image;
+        if (expect_image && line) {
             ok = ok && line->tool_parts_json &&
-                 g_test.last_input && strstr(g_test.last_input, "image/png") &&
+                 g_test.last_input && strstr(g_test.last_input, fixture->mime) &&
                  strstr(g_test.last_input, "image-session");
             JsonDoc doc;
             if (line->tool_parts_json && !JsonParse(&doc, line->tool_parts_json, strlen(line->tool_parts_json))) {
                 char *owned = JsonObjStr(&doc, JsonArrayAt(&doc, 0, 0), "path");
-                ok = ok && owned && strcmp(owned, path) && access(owned, R_OK) == 0;
+                size_t saved_size = 0;
+                char *saved = owned ? Pico_ReadFile(owned, &saved_size) : NULL;
+                ok = ok && owned && strcmp(owned, path) && saved && saved_size == fixture->size &&
+                     !memcmp(saved, fixture->data, fixture->size);
+                free(saved);
                 PicoMessage *copy = NULL; int count = 0;
                 PicoAgent *agent = TestAgent(&app);
                 ok = ok && PicoMessages_Copy(agent->messages, agent->message_count, &copy, &count);
@@ -4523,16 +4607,17 @@ static int TestToolImageOwnership(void)
                 if (owned) unlink(owned); free(owned); JsonFree(&doc);
             } else ok = false;
         }
+        if (!expect_image) ok = ok && line && !line->tool_parts_json;
         PicoHost_Shutdown(&app);
+        unlink(path); free(path);
     }
     unsigned char truncated[24] = "\x89PNG\r\n\x1a\n";
-    ok = ok && !pico_canonical_valid_png(truncated, sizeof(truncated));
     char link[4096], redirected[4096];
     snprintf(link, sizeof(link), "%s/link", dir);
     snprintf(redirected, sizeof(redirected), "%s/link/new", dir);
     ok = ok && symlink(dir, link) == 0;
     char *escaped = pico_canonical_persist_bytes(redirected, "png", truncated, sizeof(truncated));
-    ok = ok && !escaped; free(escaped); unlink(link); unlink(path); free(path);
+    ok = ok && !escaped; free(escaped); unlink(link);
     char child[4096]; snprintf(child, sizeof(child), "%s/.pico/media/tools/image-session", dir); rmdir(child);
     snprintf(child, sizeof(child), "%s/.pico/media/tools", dir); rmdir(child);
     snprintf(child, sizeof(child), "%s/.pico/media", dir); rmdir(child);
@@ -6274,6 +6359,8 @@ int main(void)
     failed |= PICO_TEST_RUN(TestFastTurnSnapshot());
     failed |= PICO_TEST_RUN(TestUsageNormalizationAndSaturation());
     failed |= PICO_TEST_RUN(TestAfterCompact());
+    failed |= PICO_TEST_RUN(TestViewImageCatalogCapabilities());
+    failed |= PICO_TEST_RUN(TestViewImageCatalogRetainsTurnCapabilities());
     failed |= PICO_TEST_RUN(TestToolImageOwnership());
     failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(false));
     failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(true));

@@ -533,6 +533,7 @@ int main(void)
     int result = 0;
 #ifdef PICO_TEST_IMAGES
     result = PICO_TEST_RUN(TestImageCache());
+    if (result == 0) result = PICO_TEST_RUN(TestWebPImagePreview());
 #endif
     if (result == 0) result = PICO_TEST_RUN(TestWideCodeBlock());
     if (result == 0)

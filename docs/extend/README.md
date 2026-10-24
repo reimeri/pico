@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 23 adds provider request-attempt reset deltas for capacity retries; it includes image-bearing tool results, explicit provider image capability, browser observe/act tools, successful LLM-response notifications and host-extension opt-in preferences, rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 24 expands tool images to native PNG/JPEG/WebP bytes (`PicoToolImage.data`) and adds local `view_image`; it includes provider request-attempt reset deltas for capacity retries, image-bearing tool results, explicit provider image capability, browser observe/act tools, successful LLM-response notifications and host-extension opt-in preferences, rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 
@@ -21,6 +21,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `host` — process owner, preferences, host-scoped registrations, pump, shutdown
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits and capacity eviction
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
+- `images` — local `view_image`, native formats, unchanged bytes, limits, and animated WebP
 - `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, model-visible observations, agent input, developer inspection, evaluation, and viewport control
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
@@ -46,7 +47,7 @@ Copy-templates (paths from this README):
 
 - [`../../examples/hello.c`](../../examples/hello.c) — host sidebar view
 - [`../../examples/empty_banner.c`](../../examples/empty_banner.c) — empty-state banner above the Tools / Context / Skills cards
-- [`../../examples/image_tool.c`](../../examples/image_tool.c) — owned PNG tool result
+- [`../../examples/image_tool.c`](../../examples/image_tool.c) — owned PNG/JPEG/WebP tool result
 - [`../../examples/echo_tool.c`](../../examples/echo_tool.c) — workspace tool + `json.h`
 - [`../../examples/counter_tool.c`](../../examples/counter_tool.c) — stateful per-workspace tool
 - [`../../examples/ask_tool.c`](../../examples/ask_tool.c) — `pico_tool_ask` + builtin confirm overlay
@@ -66,6 +67,7 @@ The JSON profiles are examples only. Copy or adapt them under `$XDG_CONFIG_HOME/
 
 These are the in-app implementations, shipped for reading. They are not loaded from this folder.
 
+- [`../../builtins/image.c`](../../builtins/image.c) — `view_image` (compiled builtin, not an extension template)
 - [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`
 - [`../../builtins/background.c`](../../builtins/background.c) — `run_background` / `kill_background` / `list_background` / `log_background` (uses [`../../builtins/background_model.c`](../../builtins/background_model.c))
 - [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c) and [`../../builtins/openai_auth.c`](../../builtins/openai_auth.c))

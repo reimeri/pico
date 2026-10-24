@@ -152,10 +152,15 @@ canonical tool results. False is unsupported, independent of the model's
  "parts":[{"type":"image","path":"/workspace/.pico/media/browser/SESSION/part.png","mime":"image/png"}]}
 ```
 
-`parts` is optional; when present it is an array of owned local PNG references.
+`parts` is optional; when present it is an array of owned local PNG, JPEG, or
+WebP references, with MIME `image/png`, `image/jpeg`, or `image/webp`. ABI 24
+preserves original encoded bytes, including animated WebP. Do not re-encode or
+flatten animation in the provider adapter. Backend acceptance/frame handling
+remains model/provider-dependent; report backend rejection without a text-only
+fallback.
 Never send a path or base64 string as ordinary text and claim vision support.
 Read the referenced image into a genuine provider image part; reject malformed
-parts or unreadable/corrupt assets. Core refuses follow-up history containing
+parts, MIME/content mismatches, or unreadable/corrupt assets. Core refuses follow-up history containing
 tool images when the selected model lacks vision or the provider lacks this
 capability. `pico_agent_context_accepts_tool_images` exposes the turn snapshot to
 tools, so they can fail before capture/mutation.

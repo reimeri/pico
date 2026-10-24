@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 23 /* Provider stream-attempt reset delta */
+#define PICO_EXT_ABI 24 /* Native PNG/JPEG/WebP tool images; PicoToolImage.data */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);
@@ -38,6 +38,7 @@ PicoExt pico_ext_notify(void);
 PicoExt pico_ext_ask_user(void);
 PicoExt pico_ext_todo(void);
 PicoExt pico_ext_shell(void);
+PicoExt pico_ext_image(void);
 PicoExt pico_ext_background(void);
 PicoExt pico_ext_subagent(void);
 PicoExt pico_ext_commands(void);

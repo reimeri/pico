@@ -5,6 +5,7 @@
 #include "clarification.h"
 #include "workspace_internal.h"
 #include "canonical.h"
+#include "image.h"
 #include "json.h"
 #include "path.h"
 #include "session.h"
@@ -260,23 +261,23 @@ static bool AgentContextActive(const PicoAgentContext *ctx);
 static char *PersistToolImages(PicoAgentContext *ctx, PicoToolResult *result)
 {
     if (!result->image_count) return NULL;
-    if (!ctx->accepts_tool_images || result->image_count < 0 || result->image_count > 4 ||
+    if (!ctx->accepts_tool_images || result->image_count < 0 || result->image_count > PICO_TOOL_MAX_IMAGES ||
         !result->images || !ctx->session_id[0]) goto invalid;
     const char *group = result->media_namespace ? result->media_namespace : "tools";
     if (strcmp(group, "tools") && strcmp(group, "browser")) goto invalid;
     size_t total = 0;
+    PicoImageInfo images[PICO_TOOL_MAX_IMAGES];
     for (int i = 0; i < result->image_count; ++i) {
         PicoToolImage *image = &result->images[i];
-        if (!image->png || image->size < 24 || image->size > 64 * 1024 * 1024 ||
-            !pico_canonical_valid_png(image->png, image->size) ||
-            (total += image->size) > 64 * 1024 * 1024) goto invalid;
+        if (!PicoImage_Validate(image->data, image->size, &images[i]) ||
+            (total += image->size) > PICO_IMAGE_MAX_BYTES) goto invalid;
     }
     char dir[4096];
     if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico/media/%s/%s", ctx->workspace, group, ctx->session_id)) goto invalid;
-    PicoLlmPart parts[4] = {0}; bool ok = true;
+    PicoLlmPart parts[PICO_TOOL_MAX_IMAGES] = {0}; bool ok = true;
     for (int i = 0; i < result->image_count; ++i) {
-        parts[i].kind = PICO_LLM_PART_IMAGE; parts[i].mime = "image/png";
-        parts[i].path = pico_canonical_persist_bytes(dir, "png", result->images[i].png, result->images[i].size);
+        parts[i].kind = PICO_LLM_PART_IMAGE; parts[i].mime = (char *)images[i].mime;
+        parts[i].path = pico_canonical_persist_bytes(dir, images[i].extension, result->images[i].data, result->images[i].size);
         if (!parts[i].path) { ok = false; break; }
     }
     char *json = ok ? pico_canonical_parts_json(parts, result->image_count) : NULL;
@@ -1107,6 +1108,19 @@ static bool AgentAllowsTool(const PicoAgent *agent, const char *name)
     return false;
 }
 
+bool PicoAgent_AcceptsToolImages(const PicoAgent *agent)
+{
+    const PicoModel *model = PicoSettings_ActiveModelConst(agent);
+    const PicoRegistrationGeneration *registration = agent && agent->runtime ? agent->runtime->registration : NULL;
+    if (!model || !model->vision || !registration) return false;
+    for (int i = 0; i < registration->provider_count; ++i) {
+        const PicoProvider *provider = &registration->providers[i];
+        if (provider->name && !strcmp(provider->name, model->provider))
+            return provider->stream && provider->tool_images;
+    }
+    return false;
+}
+
 static void RunLlmHooks(PicoAgentRt *rt, PicoAgent *agent, bool compact, bool include_tools,
                         const char *base, char **instructions, PicoTool **tools, int *tool_count)
 {
@@ -1483,7 +1497,7 @@ static void *ToolWorkerMain(void *arg)
     }
     free(denial);
     char *parts = WorkerIsCancelled(rt) ? NULL : PersistToolImages(&job->context, &result);
-    for (int i = 0; result.images && i < result.image_count; ++i) free(result.images[i].png);
+    for (int i = 0; result.images && i < result.image_count; ++i) free(result.images[i].data);
     free(result.images); free(result.media_namespace);
     PostEventEx(rt, PICO_AEV_TOOL_DONE, result.output ? result.output : Dup(""), Dup(job->call_id),
                 Dup(job->args), result.details_json, parts, 0, 0, true, executed, result.is_error);

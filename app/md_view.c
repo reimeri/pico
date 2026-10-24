@@ -10,6 +10,7 @@
 #include "md_view_internal.h"
 
 #include "raylib.h"
+#include "image.h"
 
 #include <stdio.h>
 #include <limits.h>
@@ -386,7 +387,15 @@ static CachedImage *GetCachedImage(const char *path)
     clock_gettime(CLOCK_MONOTONIC, &now);
     double seconds = (double)now.tv_sec + now.tv_nsec / 1e9;
     if (!changed && (!entry->retry_pending || seconds < entry->retry_after)) return entry;
-    Image img = LoadImage(path);
+    Image img = {0};
+    if (IsFileExtension(path, ".webp")) {
+        int size = 0;
+        unsigned char *bytes = LoadFileData(path, &size);
+        img.data = PicoImage_DecodeWebP(bytes, size > 0 ? (size_t)size : 0, &img.width, &img.height);
+        if (bytes) UnloadFileData(bytes);
+        img.mipmaps = 1;
+        img.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    } else img = LoadImage(path);
     Texture2D replacement = {0};
     if (img.data && img.width > 0 && img.height > 0)
     {

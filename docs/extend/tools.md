@@ -290,9 +290,9 @@ The apply callback returns `false` to reject details. A live rejection converts 
 
 ## Image-bearing results
 
-ABI 22 adds `PicoToolResult.images` (`PicoToolImage *`), `image_count`, and optional
-`media_namespace`. Each image owns encoded PNG `png` bytes and a `size`; the
-array, every byte buffer, and the optional namespace string must be malloc'd.
+ABI 24 supports PNG, JPEG, and WebP in `PicoToolResult.images`
+(`PicoToolImage *`), `image_count`, and optional `media_namespace`. Each image
+owns original encoded `data` bytes and a `size`; the array, every byte buffer, and the optional namespace string must be malloc'd.
 Ownership transfers to core when the callback returns, including errors and
 cancellation. Keep `output` for model-visible text/metadata and `details_json`
 for structured replay state; neither is an image transport.
@@ -300,17 +300,25 @@ for structured replay state; neither is an image transport.
 Call `pico_agent_context_accepts_tool_images(ctx)` before expensive capture. It
 snapshots the turn's vision model **and** the retained provider's `tool_images`
 capability. False means unsupported. Core also rejects image results when false;
-it never silently strips their images. Up to four valid PNGs, 64 MiB of encoded
+it never silently strips their images. Up to four valid images, 64 MiB of encoded
 bytes total, and 4096 × 4096 pixels per image are accepted. Decoding/persistence
 happens on the core tool worker, not the graphics thread. Do not use Raylib on a
 tool worker to produce an image.
+
+Core detects MIME from the bytes, not the original filename, and validates by
+fully decoding (including every WebP animation frame). It saves the original
+encoded bytes with the matching `.png`, `.jpg`, or `.webp` extension and
+`image/png`, `image/jpeg`, or `image/webp` MIME. There is no resize, conversion,
+or metadata stripping. Animated WebP is passed through unchanged; provider
+acceptance/frame handling varies. Transcript previews show its first frame.
+The builtin [`view_image`](images.md) uses this same contract for local files.
 
 Core writes exclusive private files below
 `<workspace>/.pico/media/tools/<session-id>/`. Optional namespace `"browser"`
 selects `.pico/media/browser/<session-id>/`; only `"tools"` and `"browser"` are
 accepted. Directory symlinks are rejected. A session identity is required.
 Canonical results gain image `parts` with absolute `path` and `mime` references.
-Bytes never enter canonical history or JSONL. Invalid PNGs or persistence failure
+Bytes never enter canonical history or JSONL. Invalid images or persistence failure
 become tool errors. See [`../../examples/image_tool.c`](../../examples/image_tool.c).
 
 Unadopted, cancelled, and retired-generation results release buffers and delete

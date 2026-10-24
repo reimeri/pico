@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "canonical.h"
+#include "image.h"
 
 #include "path.h"
 
@@ -13,14 +14,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#define STB_IMAGE_STATIC
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_PNG
-#define STBI_NO_STDIO
-#define STBI_NO_HDR
-#define STBI_NO_LINEAR
-#define STBI_MAX_DIMENSIONS 4096
-#include "external/stb_image.h"
 
 static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -37,15 +30,6 @@ static int MediaDirectory(const char *path)
         close(fd); fd = next;
     }
     free(copy); return fd;
-}
-
-bool pico_canonical_valid_png(const void *bytes, size_t size)
-{
-    if (!bytes || size < 24 || size > 64 * 1024 * 1024 || memcmp(bytes, "\x89PNG\r\n\x1a\n", 8)) return false;
-    int w, h, channels;
-    if (!stbi_info_from_memory(bytes, (int)size, &w, &h, &channels) || w < 1 || h < 1 || w > 4096 || h > 4096) return false;
-    unsigned char *pixels = stbi_load_from_memory(bytes, (int)size, &w, &h, &channels, 4);
-    bool valid = pixels != NULL; stbi_image_free(pixels); return valid;
 }
 
 static const char *Ext(const char *path)
@@ -1069,19 +1053,22 @@ bool pico_canonical_tool_images_valid(const JsonDoc *doc, bool read_files)
     if (!JsonEq(doc, JsonObjGet(doc, 0, "type"), "tool_result")) return true;
     int array = JsonObjGet(doc, 0, "parts");
     if (array < 0) return true;
-    if (!JsonIsArray(doc, array) || JsonArrayLen(doc, array) > 4) return false;
+    if (!JsonIsArray(doc, array) || JsonArrayLen(doc, array) > PICO_TOOL_MAX_IMAGES) return false;
     size_t total = 0;
     for (int i = 0; i < JsonArrayLen(doc, array); ++i) {
         int part = JsonArrayAt(doc, array, i);
         char *path = JsonObjStr(doc, part, "path");
+        char *mime = JsonObjStr(doc, part, "mime");
         bool ok = path && path[0] == '/' && JsonEq(doc, JsonObjGet(doc, part, "type"), "image") &&
-                  JsonEq(doc, JsonObjGet(doc, part, "mime"), "image/png") && JsonObjGet(doc, part, "url") < 0;
+                  (mime && (!strcmp(mime, "image/png") || !strcmp(mime, "image/jpeg") || !strcmp(mime, "image/webp"))) && JsonObjGet(doc, part, "url") < 0;
         if (ok && read_files) {
-            size_t size = 0; char *bytes = Pico_ReadFileLimited(path, 64 * 1024 * 1024, &size);
-            ok = pico_canonical_valid_png(bytes, size) && (total += size) <= 64 * 1024 * 1024;
+            size_t size = 0; char *bytes = Pico_ReadFileLimited(path, PICO_IMAGE_MAX_BYTES, &size);
+            PicoImageInfo info;
+            ok = PicoImage_Validate(bytes, size, &info) && !strcmp(mime, info.mime) &&
+                 (total += size) <= PICO_IMAGE_MAX_BYTES;
             free(bytes);
         }
-        free(path); if (!ok) return false;
+        free(path); free(mime); if (!ok) return false;
     }
     return true;
 }

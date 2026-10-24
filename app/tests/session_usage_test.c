@@ -6,6 +6,7 @@
 #endif
 #include "agent.h"
 #include "canonical.h"
+#include "image_fixtures.h"
 #include "json.h"
 #include "path.h"
 #include "session.h"
@@ -134,11 +135,14 @@ static int TestToolImageReplayCompaction(void)
     PicoHost_SetPath(&host, "/workspace"); writer.persistence = PICO_SESSION_DURABLE;
     char directory[] = "/tmp/pico-replay-image-XXXXXX";
     if (!mkdtemp(directory)) return Fail("image replay fixture directory");
-    char *image = pico_canonical_persist_data_url(directory,
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0Z0AAAAASUVORK5CYII=");
-    if (!image) return Fail("image replay fixture");
-    PicoLlmPart part = {.kind=PICO_LLM_PART_IMAGE, .path=image, .mime="image/png"};
-    char *parts = pico_canonical_parts_json(&part, 1);
+    char *images[4] = {0}; PicoLlmPart image_parts[4] = {0};
+    for (int i = 0; i < 4; ++i) {
+        const TestImageFixture *fixture = &image_fixtures[i];
+        images[i] = pico_canonical_persist_bytes(directory, fixture->extension, fixture->data, fixture->size);
+        if (!images[i]) return Fail("image replay fixture");
+        image_parts[i] = (PicoLlmPart){.kind=PICO_LLM_PART_IMAGE, .path=images[i], .mime=(char *)fixture->mime};
+    }
+    char *parts = pico_canonical_parts_json(image_parts, 4);
     bool ok = PicoSession_LogToolCall(&host, &writer, 0, "capture", "browser_observe", "{}", NULL) == PICO_SESSION_WRITE_OK &&
               PicoSession_LogToolResult(&host, &writer, "capture", "browser_observe", "metadata", false, NULL, parts) == PICO_SESSION_WRITE_OK;
     for (int compacted = 0; compacted < 2; ++compacted) {
@@ -146,17 +150,21 @@ static int TestToolImageReplayCompaction(void)
         PicoAgent restored = {.persistence=PICO_SESSION_DURABLE};
         g_replayed_history[0] = 0;
         ok &= PicoSession_Replay(&host, &restored, writer.session_path, false) == 0;
-        bool image_in_context = strstr(g_replayed_history, image) != NULL;
-        ok &= image_in_context == !compacted && access(image, R_OK) == 0;
+        for (int i = 0; i < 4; ++i) {
+            bool image_in_context = strstr(g_replayed_history, images[i]) != NULL;
+            ok &= image_in_context == !compacted && access(images[i], R_OK) == 0;
+        }
         bool retained = false;
         for (int i = 0; i < restored.message_count; ++i) for (int t = 0; t < restored.messages[i].trace_count; ++t) {
             PicoTraceLine *line = &restored.messages[i].trace[t];
-            if (line->tool_parts_json && strstr(line->tool_parts_json, image)) retained = true;
+            if (line->tool_parts_json && !strcmp(line->tool_parts_json, parts)) retained = true;
             free(line->tool_parts_json); line->tool_parts_json = NULL;
         }
         ok &= retained; PicoAgent_ClearMessages(&restored); free(restored.messages);
     }
-    unlink(writer.session_path); unlink(image); rmdir(directory); free(image); free(parts);
+    unlink(writer.session_path);
+    for (int i = 0; i < 4; ++i) { unlink(images[i]); free(images[i]); }
+    rmdir(directory); free(parts);
     return ok ? 0 : Fail("compaction must omit image context while replay retains the saved tool image without capture");
 }
 

@@ -1,5 +1,6 @@
 /* Included by md_scroll_layout_test.c. Exercise public layout commands with
  * synthetic textures, without requiring a GPU or exposing the cache internals. */
+#include "image_fixtures.h"
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -7,6 +8,7 @@ static unsigned image_next_id;
 static unsigned image_unloads;
 static bool *image_alive;
 static size_t image_alive_cap;
+static unsigned char image_last_pixel[4];
 
 Image __wrap_LoadImage(const char *path)
 {
@@ -18,6 +20,8 @@ Image __wrap_LoadImage(const char *path)
 }
 Texture2D __wrap_LoadTextureFromImage(Image image)
 {
+    if (image.data && image.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8)
+        memcpy(image_last_pixel, image.data, sizeof(image_last_pixel));
     unsigned id = ++image_next_id;
     if (id >= image_alive_cap)
     {
@@ -163,4 +167,29 @@ static int TestImageCache(void)
     free(image_alive); image_alive = NULL; image_alive_cap = 0; image_next_id = 0;
     rmdir(root);
     return 0;
+}
+
+static int TestWebPImagePreview(void)
+{
+    char root[] = "/tmp/pico-webp-preview-XXXXXX", path[4096];
+    if (!mkdtemp(root)) return Fail("WebP preview fixture directory");
+    MdView_SetImageBaseDir(root);
+    bool ok = true;
+    for (int i = 2; i < 4; ++i) {
+        const TestImageFixture *fixture = &image_fixtures[i];
+        snprintf(path, sizeof(path), "%s/preview.webp", root);
+        FILE *file = fopen(path, "wb");
+        if (!file) return Fail("WebP preview fixture file");
+        ok &= fwrite(fixture->data, 1, fixture->size, file) == fixture->size;
+        ok &= fclose(file) == 0;
+        MdDocument document = ImageDocument("preview.webp");
+        Texture2D *texture = ImageCommand(RenderImages(&document, 1), 0);
+        ok &= texture && texture->id && texture->width == 2 && texture->height == 1;
+        if (i == 3) ok &= image_last_pixel[0] > 200 && image_last_pixel[2] < 40;
+        MdDocument_Free(&document); MdView_ClearImages();
+    }
+    MdView_SetImageBaseDir(NULL);
+    free(image_alive); image_alive = NULL; image_alive_cap = 0; image_next_id = 0;
+    unlink(path); rmdir(root);
+    return ok ? 0 : Fail("static and animated WebP must render first-frame transcript previews");
 }

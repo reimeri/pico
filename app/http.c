@@ -5,7 +5,7 @@
 #include "json.h"
 
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.5.1"
+#define PICO_VERSION "0.5.2"
 #endif
 
 #include <curl/curl.h>
@@ -281,10 +281,11 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
         c->header_status = 0;
         JsonBuf_Clear(&c->headers);
         size_t i = 5;
-        while (i < n && ptr[i] != ' ') i++;
-        if (i + 3 < n && ptr[i+1] >= '0' && ptr[i+1] <= '9' &&
-            ptr[i+2] >= '0' && ptr[i+2] <= '9' && ptr[i+3] >= '0' && ptr[i+3] <= '9')
-            c->header_status = (ptr[i+1]-'0') * 100 + (ptr[i+2]-'0') * 10 + ptr[i+3]-'0';
+        while (i < n && ptr[i] != ' ')
+            i++;
+        if (i + 3 < n && ptr[i + 1] >= '0' && ptr[i + 1] <= '9' &&
+            ptr[i + 2] >= '0' && ptr[i + 2] <= '9' && ptr[i + 3] >= '0' && ptr[i + 3] <= '9')
+            c->header_status = (ptr[i + 1] - '0') * 100 + (ptr[i + 2] - '0') * 10 + ptr[i + 3] - '0';
         /* A redirect or interim response must not determine the final framing. */
         c->saw_sse = false;
         c->framing_known = false;
@@ -294,10 +295,16 @@ static size_t OnHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
         JsonBuf_Clear(&c->acc);
         JsonBuf_Clear(&c->data);
     }
-    if (c->on_headers && c->header_status) {
+    if (c->on_headers && c->header_status)
+    {
         JsonBuf_Append(&c->headers, ptr, n);
-        if (c->headers.failed) { c->buffer_failed = true; return 0; }
-        if ((n == 2 && ptr[0] == '\r' && ptr[1] == '\n') || (n == 1 && ptr[0] == '\n')) {
+        if (c->headers.failed)
+        {
+            c->buffer_failed = true;
+            return 0;
+        }
+        if ((n == 2 && ptr[0] == '\r' && ptr[1] == '\n') || (n == 1 && ptr[0] == '\n'))
+        {
             c->on_headers(c->user, c->header_status, c->headers.data, c->headers.len);
             c->header_status = 0; /* trailers are not a new response */
             JsonBuf_Clear(&c->headers);
@@ -554,7 +561,8 @@ static size_t OnBody(char *ptr, size_t size, size_t nmemb, void *userdata)
     {
         return 0;
     }
-    if (c->max_body && n > c->max_body - c->acc.len) {
+    if (c->max_body && n > c->max_body - c->acc.len)
+    {
         c->too_large = true;
         return 0;
     }
@@ -658,10 +666,8 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long timeout, size_
 
     char error[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
-    CURLcode rc = BodyCancelled(&ctx) ? CURLE_ABORTED_BY_CALLBACK :
-        single_attempt ? curl_easy_perform(curl) :
-        PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
-                           req->user, error, NULL, NULL);
+    CURLcode rc = BodyCancelled(&ctx) ? CURLE_ABORTED_BY_CALLBACK : single_attempt ? curl_easy_perform(curl)
+                                                                                   : PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry, req->user, error, NULL, NULL);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -682,9 +688,9 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long timeout, size_
     {
         if (out_error)
         {
-            *out_error = JsonDup(ctx.too_large ? "HTTP response exceeds the configured byte limit" :
-                                 ctx.acc.failed ? "Out of memory buffering HTTP response" :
-                                 error[0] ? error : curl_easy_strerror(rc));
+            *out_error = JsonDup(ctx.too_large ? "HTTP response exceeds the configured byte limit" : ctx.acc.failed ? "Out of memory buffering HTTP response"
+                                                                                                 : error[0]         ? error
+                                                                                                                    : curl_easy_strerror(rc));
         }
         JsonBuf_Free(&ctx.acc);
         return PICO_HTTP_FAIL;

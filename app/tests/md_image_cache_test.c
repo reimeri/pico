@@ -88,7 +88,7 @@ static int TestImageCache(void)
     char root[] = "/tmp/pico-image-cache-XXXXXX", path[4096], name[64];
     if (!mkdtemp(root)) return Fail("image cache fixture");
     MdView_ClearImages();
-    MdView_SetImageBaseDir(root);
+    MdView_SetBaseDir(root);
     unsigned initial_unloads = image_unloads;
     int count = 0;
     /* Discover eviction through behavior, not the private/configurable cache
@@ -163,7 +163,7 @@ static int TestImageCache(void)
     MdView_ClearImages();
     for (unsigned i = 1; i <= image_next_id; i++)
         if (image_alive[i]) return Fail("image clear leaked a texture");
-    MdView_SetImageBaseDir(NULL);
+    MdView_SetBaseDir(NULL);
     free(image_alive); image_alive = NULL; image_alive_cap = 0; image_next_id = 0;
     rmdir(root);
     return 0;
@@ -173,7 +173,7 @@ static int TestWebPImagePreview(void)
 {
     char root[] = "/tmp/pico-webp-preview-XXXXXX", path[4096];
     if (!mkdtemp(root)) return Fail("WebP preview fixture directory");
-    MdView_SetImageBaseDir(root);
+    MdView_SetBaseDir(root);
     bool ok = true;
     for (int i = 2; i < 4; ++i) {
         const TestImageFixture *fixture = &image_fixtures[i];
@@ -188,7 +188,7 @@ static int TestWebPImagePreview(void)
         if (i == 3) ok &= image_last_pixel[0] > 200 && image_last_pixel[2] < 40;
         MdDocument_Free(&document); MdView_ClearImages();
     }
-    MdView_SetImageBaseDir(NULL);
+    MdView_SetBaseDir(NULL);
     free(image_alive); image_alive = NULL; image_alive_cap = 0; image_next_id = 0;
     unlink(path); rmdir(root);
     return ok ? 0 : Fail("static and animated WebP must render first-frame transcript previews");

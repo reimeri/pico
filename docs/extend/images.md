@@ -17,6 +17,10 @@ saved subagent transcripts. Absolute paths are used unchanged; remote image URLs
 are not fetched. A chat preview alone does not attach image content to a model;
 use `view_image` or an image-bearing tool result for that.
 
+An ordinary file link, `[mountain.png](mountain.png)`, uses the same workspace
+base but opens in the system's default application instead of displaying inline.
+See [Markdown paths and links](views.md#markdown-paths-and-links).
+
 ## Local files: `view_image`
 
 The builtin tool accepts one file:

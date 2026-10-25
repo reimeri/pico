@@ -43,9 +43,28 @@ Treat Clay-owned pointers—including render-command storage and `Clay_ScrollCon
 
 The builtin chat window-renders very tall wrapped paragraphs (also in expanded thinking) and fenced code blocks: only nearby lines create Clay elements, while the full message retains its scroll height and search/copy text. Other Markdown block types retain their normal rendering. The saved-subagent inspect overlay can show a Loading state while its transcript and Markdown are prepared on a core worker; no partial snapshot is published.
 
+## Markdown paths and links
+
+`MdView_SetBaseDir()` sets the base for relative image paths and file-link targets
+in subsequent document renders. This main/render-thread setting is copied
+internally; custom Markdown views should set their own base before rendering
+rather than relying on whichever view rendered previously. Passing `NULL` or an
+empty string resets the base to the process working directory. Chat uses the
+displayed transcript's workspace, including live and saved subagent transcripts.
+
+A Markdown file link such as `[mountain.png](mountain.png)` opens through the
+system's default handler, with its relative target resolved against that
+transcript's workspace. Absolute paths, URI schemes (such as `https:`, `mailto:`,
+and `file:`), and fragment-only targets are passed through unchanged. Links do
+not open Pico's image-preview overlay or perform in-document anchor navigation.
+`MdView_HoveredLink()` returns a borrowed target for the current layout; relative
+file targets are already resolved using the hovered document's base. A later view
+changing its base does not retarget that pending click. Do not retain the target
+past the next `MdView_BeginFrame()`.
+
 ## Markdown image lifetime
 
-Chat resolves relative Markdown image paths against the displayed transcript's workspace, including live and saved subagent transcripts. Absolute paths are used unchanged. `MdView_SetImageBaseDir()` is a main/render-thread setting copied internally for subsequent document renders; custom Markdown views should set their own base before rendering rather than relying on whichever view rendered previously. Passing `NULL` or an empty string resets the base to the process working directory.
+Relative Markdown image paths use the same document base described above. Absolute image paths are used unchanged.
 
 `MdView_BeginFrame()` starts one layout pass; Pico calls it before invoking views. Image pointers/textures in the resulting Clay commands remain valid until those commands are consumed or discarded and the next `MdView_BeginFrame()` begins. Extensions rendering Markdown in normal view callbacks must not restart the pass themselves. Like other Clay storage, image pointers must not be retained across layouts.
 

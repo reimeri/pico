@@ -1184,6 +1184,7 @@ if(BUILD_TESTING)
             -Wl,--wrap=GetMouseWheelMoveV
             -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx
             -Wl,--wrap=LoadTextureFromImage -Wl,--wrap=UnloadTexture
+            -Wl,--wrap=OpenURL
             -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=SetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)

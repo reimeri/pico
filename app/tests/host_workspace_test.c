@@ -125,6 +125,16 @@ Vector2 __wrap_GetMouseWheelMoveV(void)
 
 static bool g_clay_frame_test;
 static bool g_browser_resize_frame;
+static bool g_chat_link_test;
+static int g_chat_link_launches;
+static char g_chat_link_target[8192];
+void __real_OpenURL(const char *url);
+void __wrap_OpenURL(const char *url)
+{
+    if (!g_chat_link_test) { __real_OpenURL(url); return; }
+    g_chat_link_launches++;
+    snprintf(g_chat_link_target, sizeof(g_chat_link_target), "%s", url);
+}
 /* Decode real image files, but keep chat image layout tests independent of a GPU. */
 static bool g_chat_image_test;
 static unsigned g_chat_image_texture_id;
@@ -2708,7 +2718,7 @@ static int TestChatImageWorkspacePaths(void)
 done:
     MdView_ClearImages();
     g_chat_image_test = false;
-    MdView_SetImageBaseDir(NULL);
+    MdView_SetBaseDir(NULL);
     Clay_SetCurrentContext(previous);
     if (host) pico_host_free(host);
     free(memory);
@@ -17204,6 +17214,72 @@ static void InteractionFixtureFree(InteractionFixture *f)
     RmRf(f->dir); RmRf(f->cfg);
 }
 
+static int TestChatLinkWorkspacePaths(void)
+{
+    InteractionFixture f = {0};
+    char other[] = "/tmp/pico-chat-link-other-XXXXXX";
+    char first_path[4096], other_path[4096], markdown[8192];
+    PicoWorkspaceId workspace = 0;
+    PicoAgentId agent = 0;
+    bool good = false;
+    if (!InteractionFixtureInit(&f) || !mkdtemp(other)) goto done;
+    if (!PicoPath_Format(first_path, sizeof(first_path), "%s/mountain.png", f.dir) ||
+        !PicoPath_Format(other_path, sizeof(other_path), "%s/mountain.png", other)) goto done;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                      .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(f.host, other, &workspace) != PICO_OK ||
+        pico_main_agent_create(f.host, workspace, &options, &agent) != PICO_OK) goto done;
+    PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_ROLE_ASSISTANT,
+                         "[Relative](mountain.png)");
+    PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, agent), PICO_ROLE_ASSISTANT,
+                         "[Relative](mountain.png)");
+    snprintf(markdown, sizeof(markdown), "[Absolute](%s)", other_path);
+    PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_ROLE_ASSISTANT, markdown);
+    PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_ROLE_ASSISTANT,
+                         "[Web](https://example.invalid/image.png) [Mail](mailto:test@example.invalid) [Fragment](#section)");
+    if (!WaitHostTasks(f.host)) goto done;
+    InteractionOmitDrawHooks(f.host);
+    f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    struct { PicoAgentId agent; const char *label, *target; } cases[] = {
+        {f.agent, "Relative", first_path},
+        {agent, "Relative", other_path},
+        {f.agent, "Relative", first_path},
+        {f.agent, "Absolute", other_path},
+        {f.agent, "Web", "https://example.invalid/image.png"},
+        {f.agent, "Mail", "mailto:test@example.invalid"},
+        {f.agent, "Fragment", "#section"},
+    };
+    g_chat_link_test = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        if (!pico_agent_select(f.host, cases[i].agent)) goto done;
+        PicoChatSel_Clear(f.host);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+        Clay_RenderCommand *label = FindCardText(&commands, cases[i].label);
+        if (!label) goto done;
+        g_find_pointer = (Vector2){label->boundingBox.x + label->boundingBox.width / 2,
+                                   label->boundingBox.y + label->boundingBox.height / 2};
+        g_chat_link_launches = 0;
+        g_find_released = true;
+        PicoHost_Frame(f.host);
+        g_find_released = false;
+        if (g_chat_link_launches != 1 || strcmp(g_chat_link_target, cases[i].target))
+        {
+            fprintf(stderr, "link %s: expected '%s', got '%s' (%d launches)\n",
+                    cases[i].label, cases[i].target, g_chat_link_target, g_chat_link_launches);
+            Fail("clicked file links must use the displayed workspace without changing absolute paths or URIs");
+            goto done;
+        }
+    }
+    good = true;
+done:
+    g_chat_link_test = false;
+    InteractionFixtureFree(&f);
+    RmRf(other);
+    if (!good && !g_failed) Fail("chat file-link click fixture");
+    return good ? 0 : 1;
+}
+
 static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char *text)
 {
     if (!SidebarFrameClick(host, Clay_GetElementData(id))) return false;
@@ -18813,8 +18889,10 @@ int main(int argc, char **argv)
 #endif
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--chat-links") == 0) return PICO_TEST_RUN(TestChatLinkWorkspacePaths());
     if (argc == 2 && strcmp(argv[1], "--chat-images") == 0) return PICO_TEST_RUN(TestChatImageWorkspacePaths());
     if (PICO_TEST_RUN(TestChatImageWorkspacePaths())) return 1;
+    if (PICO_TEST_RUN(TestChatLinkWorkspacePaths())) return 1;
 #endif
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
     if (argc == 2 && strcmp(argv[1], "--browser-controls") == 0) return PICO_TEST_RUN(TestBrowserControlSelector());

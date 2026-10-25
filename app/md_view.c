@@ -8,6 +8,7 @@
 #include "highlight.h"
 #include "hl_colors.h"
 #include "md_view_internal.h"
+#include "path.h"
 
 #include "raylib.h"
 #include "image.h"
@@ -40,6 +41,7 @@ static RichTextStyle BaseStyle = {
 };
 
 static const char *hovered_link = NULL;
+static char hovered_link_path[8192];
 static bool notice_tinted;
 
 /* Highlight span cache stored in the document arena (MdBlock.hl_cache);
@@ -143,7 +145,7 @@ static void CodeLineSegment(const char *chars, int length, Clay_Color color)
                                                     .textColor = color,
                                                     .wrapMode = CLAY_TEXT_WRAP_NONE});
 }
-static char image_base_dir[4096] = ".";
+static char base_dir[4096] = ".";
 static Clay_ElementId *horizontal_scroll_ids;
 static int horizontal_scroll_count;
 static int horizontal_scroll_capacity;
@@ -276,14 +278,14 @@ static void ImagesBeginLayout(void)
     }
 }
 
-void MdView_SetImageBaseDir(const char *dir)
+void MdView_SetBaseDir(const char *dir)
 {
     if (!dir || dir[0] == '\0')
     {
-        strcpy(image_base_dir, ".");
+        strcpy(base_dir, ".");
         return;
     }
-    snprintf(image_base_dir, sizeof(image_base_dir), "%s", dir);
+    snprintf(base_dir, sizeof(base_dir), "%s", dir);
 }
 
 static void ChatImageFit(int src_w, int src_h, float max_w, float max_h, int *out_w, int *out_h)
@@ -334,8 +336,35 @@ static const char *ResolveImagePath(const char *src)
     {
         return src;
     }
-    snprintf(resolved, sizeof(resolved), "%s/%s", image_base_dir, src);
+    snprintf(resolved, sizeof(resolved), "%s/%s", base_dir, src);
     return resolved;
+}
+
+static bool HasUriScheme(const char *target)
+{
+    unsigned char first = (unsigned char)*target;
+    if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))) return false;
+    for (const unsigned char *p = (const unsigned char *)target + 1; *p; p++)
+    {
+        if (*p == ':') return true;
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '+' || *p == '-' || *p == '.')) return false;
+    }
+    return false;
+}
+
+static void SetHoveredLink(const char *target)
+{
+    if (!target || !target[0]) return;
+    if (target[0] == '/' || target[0] == '#' || HasUriScheme(target))
+    {
+        hovered_link = target;
+        return;
+    }
+    /* Capture this document's base now: later views may select a different
+     * workspace before the frame dispatches the click. Never open a truncation. */
+    hovered_link = PicoPath_Format(hovered_link_path, sizeof(hovered_link_path),
+                                   "%s/%s", base_dir, target) ? hovered_link_path : NULL;
 }
 
 static bool SameImageFile(const struct stat *a, const struct stat *b)
@@ -1120,7 +1149,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
         }
         if (emit.hovered_link)
         {
-            hovered_link = emit.hovered_link;
+            SetHoveredLink(emit.hovered_link);
         }
         return;
     }
@@ -1165,7 +1194,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
     }
     if (emit.hovered_link)
     {
-        hovered_link = emit.hovered_link;
+        SetHoveredLink(emit.hovered_link);
     }
 }
 

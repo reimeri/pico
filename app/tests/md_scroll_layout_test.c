@@ -508,6 +508,53 @@ static int TestSearchRenderedText(void)
     return result;
 }
 
+static Clay_RenderCommandArray RenderLinkDocuments(MdDocument *first, MdDocument *second)
+{
+    Clay_SetLayoutDimensions((Clay_Dimensions){640, 300});
+    MdView_BeginFrame();
+    PicoChatSel_BeginFrame(0);
+    PicoChatSel_SetMessage(-1);
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("LinkTestRoot"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .sizing = {.width = CLAY_SIZING_FIXED(640), .height = CLAY_SIZING_FIXED(300)}}})
+    {
+        MdView_SetBaseDir("/workspace/first");
+        MdView_RenderDocument(first, 901, 640);
+        MdView_SetBaseDir("/workspace/second");
+        MdView_RenderDocument(second, 902, 640);
+    }
+    return Clay_EndLayout(0);
+}
+
+static int TestHoveredLinkKeepsDocumentBase(void)
+{
+    const char *source = "[File](<images/mountain icon.png>)";
+    const char *later = "[Other](other.png)";
+    MdDocument first = MdDocument_Parse(source, strlen(source));
+    MdDocument second = MdDocument_Parse(later, strlen(later));
+    int result = 1;
+    Clay_SetPointerState((Clay_Vector2){600, 280}, false);
+    Clay_RenderCommandArray commands = RenderLinkDocuments(&first, &second);
+    Clay_RenderCommand *label = FindTextCommand(&commands, "File", FONT_REGULAR);
+    if (!label) goto done;
+    Clay_SetPointerState((Clay_Vector2){label->boundingBox.x + label->boundingBox.width / 2,
+                                       label->boundingBox.y + label->boundingBox.height / 2}, false);
+    RenderLinkDocuments(&first, &second);
+    /* Another view changing its base must not change the pending click. */
+    MdView_SetBaseDir("/workspace/third");
+    const char *target = MdView_HoveredLink();
+    if (!target || strcmp(target, "/workspace/first/images/mountain icon.png")) goto done;
+    result = 0;
+done:
+    MdView_SetBaseDir(NULL);
+    MdView_BeginFrame();
+    MdDocument_Free(&first);
+    MdDocument_Free(&second);
+    if (result) return Fail("hovered links must retain their document's base across later views");
+    return 0;
+}
+
 #ifdef PICO_TEST_IMAGES
 #include "md_image_cache_test.c"
 #endif
@@ -530,9 +577,9 @@ int main(void)
     Clay_SetMeasureTextFunction(MeasureRichText, NULL);
     RichText_SetMeasureFunction(MeasureRichText, NULL);
 
-    int result = 0;
+    int result = PICO_TEST_RUN(TestHoveredLinkKeepsDocumentBase());
 #ifdef PICO_TEST_IMAGES
-    result = PICO_TEST_RUN(TestImageCache());
+    if (result == 0) result = PICO_TEST_RUN(TestImageCache());
     if (result == 0) result = PICO_TEST_RUN(TestWebPImagePreview());
 #endif
     if (result == 0) result = PICO_TEST_RUN(TestWideCodeBlock());

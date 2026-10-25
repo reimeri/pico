@@ -45,6 +45,17 @@ Full file: [`../../examples/time_cmd.c`](../../examples/time_cmd.c). User types 
 
 To offer argument completions (`/docs topic`), add a `pico_host_add_completer` or `pico_workspace_add_completer` — see `completers.md`. The builtin command completer already knows `/model`, `/effort`, `/login`, `/logout`, `/docs`, `/resume`, `/cd`. `/resume` completions list parent sessions from an asynchronously refreshed core snapshot, so the popup may initially be empty or briefly stale while disk scanning completes; a subagent session can still be opened by typing its session ID.
 
+## Shipped documentation links
+
+`/docs` keeps each loaded document's absolute source directory in its notice
+metadata. Relative links and images therefore resolve beside that document,
+including sibling topics and `../../examples/` links. Saved notices keep their
+original directory through session resume, inspection, snapshots, and reload;
+upgrading or moving Pico does not redirect them to a different manual. Linked
+pages and examples open through the system's default application. The Markdown
+body is unchanged. See [notices](notices.md) and
+[external links](views.md#markdown-paths-and-links).
+
 ## Application notices
 
 Use `PicoHost_AddNotice` for command feedback instead of assistant messages.

@@ -16,6 +16,17 @@ as labeled blocks (red Error, amber Warning, informational Info). Markdown links
 selection, copying, and chat search remain available. The severity label is UI
 chrome, not part of the copied body.
 
+Ordinary notices resolve relative image paths and file links against the agent's
+workspace. File-backed builtin `/docs` notices additionally carry
+`PicoMessage.markdown_base_dir`: the copied absolute directory of the document
+originally loaded. That origin is core-owned metadata, not part of visible or
+copied Markdown. It survives transcript copies, session inspection, resume, and
+reload. A later Pico installation does not retarget saved notices to newer docs;
+if the original files disappear, their links can no longer open. Links to other
+documentation pages and examples open externally in the system's default
+application, not as another `/docs` message. See
+[Markdown paths and links](views.md#markdown-paths-and-links).
+
 Durable agents save notices as dedicated session events and restore their order
 and severity, including in session inspection. Ephemeral agents keep them only in
 memory. Notices never enter provider conversation history or compaction input.

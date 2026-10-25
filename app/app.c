@@ -147,29 +147,37 @@ static void PicoHost_PumpTasks(PicoHost *host)
     }
 }
 
-static void PicoHost_ReapBrowsers(PicoHost *host)
+static void PicoHost_ReapExternal(PicoHost *host)
 {
-    for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
+    for (size_t i = 0; i < sizeof(host->external_children) / sizeof(host->external_children[0]); i++)
     {
-        pid_t pid = host->browser_children[i];
+        pid_t pid = host->external_children[i];
         if (pid <= 0)
             continue;
-        pid_t result = waitpid(pid, NULL, WNOHANG);
+        int status = 0;
+        pid_t result = waitpid(pid, &status, WNOHANG);
         if (result == pid || (result < 0 && errno == ECHILD))
-            host->browser_children[i] = 0;
+        {
+            bool report_failure = host->external_report_failures[i];
+            host->external_children[i] = 0;
+            host->external_report_failures[i] = false;
+            if (result == pid && report_failure &&
+                (!WIFEXITED(status) || WEXITSTATUS(status) != 0))
+                PicoOverlay_Notify(host, "Could not open link: the system opener reported an error.");
+        }
     }
 }
 
-/* A browser may keep its launcher alive. After host teardown, a reaper owns
- * just the pids, never host/curl state, and does not terminate the user's browser. */
-typedef struct PicoBrowserReaper
+/* An external application may keep its launcher alive. After host teardown, a
+ * reaper owns just the pids, never host/curl state, and does not terminate it. */
+typedef struct PicoExternalReaper
 {
     pid_t pids[16];
-} PicoBrowserReaper;
+} PicoExternalReaper;
 
-static void *PicoHost_BrowserReaper(void *user)
+static void *PicoHost_ExternalReaper(void *user)
 {
-    PicoBrowserReaper *reaper = user;
+    PicoExternalReaper *reaper = user;
     bool pending;
     do
     {
@@ -195,18 +203,18 @@ static void *PicoHost_BrowserReaper(void *user)
     return NULL;
 }
 
-static bool PicoHost_DetachBrowsers(PicoHost *host)
+static bool PicoHost_DetachExternal(PicoHost *host)
 {
-    PicoHost_ReapBrowsers(host);
+    PicoHost_ReapExternal(host);
     bool any = false;
-    for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
-        any |= host->browser_children[i] > 0;
+    for (size_t i = 0; i < sizeof(host->external_children) / sizeof(host->external_children[0]); i++)
+        any |= host->external_children[i] > 0;
     if (!any)
         return true;
-    PicoBrowserReaper *reaper = calloc(1, sizeof(*reaper));
+    PicoExternalReaper *reaper = calloc(1, sizeof(*reaper));
     if (!reaper)
         return false;
-    memcpy(reaper->pids, host->browser_children, sizeof(reaper->pids));
+    memcpy(reaper->pids, host->external_children, sizeof(reaper->pids));
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) != 0)
     {
@@ -215,37 +223,38 @@ static bool PicoHost_DetachBrowsers(PicoHost *host)
     }
     pthread_t thread;
     bool ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
-              pthread_create(&thread, &attr, PicoHost_BrowserReaper, reaper) == 0;
+              pthread_create(&thread, &attr, PicoHost_ExternalReaper, reaper) == 0;
     pthread_attr_destroy(&attr);
     if (!ok)
     {
         free(reaper);
         return false;
     }
-    memset(host->browser_children, 0, sizeof(host->browser_children));
+    memset(host->external_children, 0, sizeof(host->external_children));
+    memset(host->external_report_failures, 0, sizeof(host->external_report_failures));
     return true;
 }
 
-bool PicoHost_OpenBrowser(PicoHost *host, const char *url)
+bool PicoHost_OpenExternal(PicoHost *host, const char *target, bool report_failure)
 {
-    if (!host || !url || host->terminal_shutdown || g_pico_process_retired)
+    if (!host || !target || !target[0] || host->terminal_shutdown || g_pico_process_retired)
         return false;
-    PicoHost_ReapBrowsers(host);
+    PicoHost_ReapExternal(host);
     pid_t *slot = NULL;
-    for (size_t i = 0; i < sizeof(host->browser_children) / sizeof(host->browser_children[0]); i++)
-        if (!host->browser_children[i])
+    for (size_t i = 0; i < sizeof(host->external_children) / sizeof(host->external_children[0]); i++)
+        if (!host->external_children[i])
         {
-            slot = &host->browser_children[i];
+            slot = &host->external_children[i];
             break;
         }
     if (!slot)
         return false;
     extern char **environ;
-    char *argv[] = {"xdg-open", (char *)url, NULL};
+    char *argv[] = {"xdg-open", (char *)target, NULL};
     posix_spawn_file_actions_t actions;
     if (posix_spawn_file_actions_init(&actions) != 0)
         return false;
-    /* No shell, no blocking wait, and no URL-bearing browser diagnostics in logs. */
+    /* No shell, no blocking wait, and no target-bearing diagnostics in logs. */
     pid_t pid = 0;
     bool ok = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0 &&
               posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
@@ -253,7 +262,10 @@ bool PicoHost_OpenBrowser(PicoHost *host, const char *url)
               posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ) == 0;
     posix_spawn_file_actions_destroy(&actions);
     if (ok)
+    {
         *slot = pid;
+        host->external_report_failures[slot - host->external_children] = report_failure;
+    }
     return ok;
 }
 
@@ -1702,7 +1714,7 @@ static void RunSlot(PicoHost *host, PicoUiSlot slot)
 }
 
 static bool AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
-                                 PicoNoticeSeverity severity, const char *markdown,
+                                 PicoNoticeSeverity severity, const char *markdown, const char *base_dir,
                                  MdDocument *prepared, const char *prepared_source, bool persist_notice, uint64_t steering_id)
 {
     if (!app || !agent)
@@ -1711,6 +1723,8 @@ static bool AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
     }
     char *source = JsonDup(markdown ? markdown : "");
     if (!source) return false;
+    char *origin = base_dir && base_dir[0] ? JsonDup(base_dir) : NULL;
+    if (base_dir && base_dir[0] && !origin) { free(source); return false; }
     if (agent->message_count >= agent->message_capacity)
     {
         int capacity = agent->message_capacity == 0 ? 8 : agent->message_capacity * 2;
@@ -1718,6 +1732,7 @@ static bool AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
         if (!next)
         {
             free(source);
+            free(origin);
             return false;
         }
         agent->messages = next;
@@ -1730,6 +1745,7 @@ static bool AddTranscriptMessage(PicoHost *app, PicoAgent *agent, PicoRole role,
     msg->notice_severity = severity;
     size_t len = markdown ? strlen(markdown) : 0;
     msg->source = source;
+    msg->markdown_base_dir = origin;
     msg->source_len = len;
     msg->source_cap = len + 1;
     msg->revision = 1;
@@ -1751,35 +1767,35 @@ void PicoAgent_AddMessagePrepared(PicoHost *app, PicoAgent *agent, PicoRole role
                                   const char *prepared_source, uint64_t steering_id)
 {
     if (role != PICO_ROLE_USER && role != PICO_ROLE_ASSISTANT) return;
-    AddTranscriptMessage(app, agent, role, PICO_NOTICE_INFO, markdown, prepared, prepared_source, false, steering_id);
+    AddTranscriptMessage(app, agent, role, PICO_NOTICE_INFO, markdown, NULL, prepared, prepared_source, false, steering_id);
 }
 
 void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
-                         const char *markdown)
+                         const char *markdown, const char *base_dir)
 {
     if (severity < PICO_NOTICE_INFO || severity > PICO_NOTICE_ERROR) return;
-    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, false, 0);
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, base_dir, NULL, NULL, false, 0);
 }
 
 bool PicoAgent_AddNoticePersisted(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
                                   const char *markdown)
 {
-    return AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, true, 0);
+    return AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, NULL, true, 0);
 }
 
 void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)
 {
-    AddTranscriptMessage(app, agent, PICO_ROLE_USER, PICO_NOTICE_INFO, markdown, NULL, NULL, false, id);
+    AddTranscriptMessage(app, agent, PICO_ROLE_USER, PICO_NOTICE_INFO, markdown, NULL, NULL, NULL, false, id);
 }
 
 void PicoAgent_AddSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)
 {
-    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, PICO_NOTICE_WARNING, markdown, NULL, NULL, true, id);
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, PICO_NOTICE_WARNING, markdown, NULL, NULL, NULL, true, id);
 }
 
 void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown)
 {
-    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, PICO_NOTICE_WARNING, markdown, NULL, NULL, false, id);
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, PICO_NOTICE_WARNING, markdown, NULL, NULL, NULL, false, id);
 }
 
 void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const char *markdown)
@@ -1985,13 +2001,19 @@ void PicoAgent_SetToolOutputByCallId(PicoAgent *agent, const char *call_id,
     }
 }
 
-void PicoHost_AddNotice(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity,
-                        const char *markdown)
+void PicoHost_AddNoticeWithBaseDir(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity,
+                                   const char *markdown, const char *base_dir)
 {
     PicoAgent *agent = PicoHost_FindAgent(app, agent_id);
     if (!agent) return;
     if (severity < PICO_NOTICE_INFO || severity > PICO_NOTICE_ERROR) return;
-    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, NULL, NULL, true, 0);
+    AddTranscriptMessage(app, agent, PICO_ROLE_NOTICE, severity, markdown, base_dir, NULL, NULL, true, 0);
+}
+
+void PicoHost_AddNotice(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity,
+                        const char *markdown)
+{
+    PicoHost_AddNoticeWithBaseDir(app, agent_id, severity, markdown, NULL);
 }
 
 void PicoHost_AddMessage(PicoHost *app, PicoAgentId agent_id, PicoRole role, const char *markdown)
@@ -3237,7 +3259,7 @@ void pico_host_pump(PicoHost *host)
             }
         }
     }
-    PicoHost_ReapBrowsers(host);
+    PicoHost_ReapExternal(host);
     PicoHost_PumpLifecycle(host);
     PicoSessionPersist_Pump(host);
     float dt = host->frame_at > 0.0 ? host->frame_delta : GetFrameTime();
@@ -3700,6 +3722,7 @@ void PicoMessages_Free(PicoMessage *messages, int count)
     for (int i = 0; i < count; i++)
     {
         free(messages[i].source);
+        free(messages[i].markdown_base_dir);
         for (int t = 0; t < messages[i].trace_count; t++)
         {
             PicoTraceLine_Release(&messages[i].trace[t]);
@@ -3769,7 +3792,9 @@ bool PicoMessages_Copy(const PicoMessage *src, int count, PicoMessage **dst, int
         copy[i].steering_id = src[i].steering_id;
         copy[i].notice_severity = src[i].notice_severity;
         copy[i].source = src[i].source ? JsonDup(src[i].source) : NULL;
-        if (src[i].source && !copy[i].source)
+        copy[i].markdown_base_dir = src[i].markdown_base_dir ? JsonDup(src[i].markdown_base_dir) : NULL;
+        if ((src[i].source && !copy[i].source) ||
+            (src[i].markdown_base_dir && !copy[i].markdown_base_dir))
         {
             PicoMessages_Free(copy, i + 1);
             return false;
@@ -3848,6 +3873,7 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
     for (int i = 0; i < agent->message_count; i++)
     {
         free(agent->messages[i].source);
+        free(agent->messages[i].markdown_base_dir);
         for (int t = 0; t < agent->messages[i].trace_count; t++)
         {
             PicoTraceLine_Release(&agent->messages[i].trace[t]);
@@ -3905,7 +3931,7 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         clean = false;
     if (!PicoPlugins_QuiesceScannerBefore(host, &deadline))
         clean = false;
-    if (!PicoHost_DetachBrowsers(host))
+    if (!PicoHost_DetachExternal(host))
         clean = false;
     if (!PicoCatalog_DrainPersistBefore(host, &deadline))
     {
@@ -4667,7 +4693,8 @@ void PicoHost_Frame(PicoHost *app)
     if (!PicoChatFind_PointerOver(app) && app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
         !PicoChatSel_HasSelection(app))
     {
-        OpenURL(app->hovered_link);
+        if (!PicoHost_OpenExternal(app, app->hovered_link, true))
+            PicoOverlay_Notify(app, "Could not open link: the system opener could not be started.");
     }
 
     if (ClayLayoutUnusable(render_commands))

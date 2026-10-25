@@ -225,7 +225,7 @@ void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent);
 void PicoSession_Reset(PicoHost *app, PicoAgent *agent);
 void PicoSession_ReplayToolDetails(PicoHost *app, PicoAgent *agent);
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
-                                            PicoNoticeSeverity severity, const char *content);
+                                            PicoNoticeSeverity severity, const char *content, const char *base_dir);
 PicoSessionWriteResult PicoSession_LogSteering(PicoHost *app, PicoAgent *agent, uint64_t id,
     const char *content, const char *display, const char *parts_json);
 PicoSessionWriteResult PicoSession_LogSteeringDelivered(PicoHost *app, PicoAgent *agent, uint64_t id,

@@ -1,6 +1,6 @@
 # Extending Pico
 
-Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 27 adds turn-local provider transport state, streaming response-header callbacks, and compaction prompt snapshots. It separates native-compaction retention history from request-only missing-image recovery; it includes native compaction results and scoped provider-state history; it includes native tool images to native PNG/JPEG/WebP bytes (`PicoToolImage.data`) and adds local `view_image`; it includes provider request-attempt reset deltas for capacity retries, image-bearing tool results, explicit provider image capability, browser observe/act tools, successful LLM-response notifications and host-extension opt-in preferences, rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
+Pico loads C99 `.c` files as shared libraries. Write one file, export `pico_ext()`, and register from `host_init` and/or `workspace_init`. Pico compiles and `dlopen`s it. ABI 28 adds persisted Markdown document origins to transcript snapshots. ABI 27 added turn-local provider transport state, streaming response-header callbacks, and compaction prompt snapshots. It separates native-compaction retention history from request-only missing-image recovery; it includes native compaction results and scoped provider-state history; it includes native tool images to native PNG/JPEG/WebP bytes (`PicoToolImage.data`) and adds local `view_image`; it includes provider request-attempt reset deltas for capacity retries, image-bearing tool results, explicit provider image capability, browser observe/act tools, successful LLM-response notifications and host-extension opt-in preferences, rejected-token-aware OAuth refresh coordination, queued durable steering, submission-kind hooks, typed transcript-only notices, Fast-mode provider capabilities and served-tier reporting, explicit tool execution policies, per-call worker contexts, and profile-specific parallel safety. Host and workspace instances are separate; there is no compatibility layer.
 
 ## Where to put files
 
@@ -30,7 +30,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `steering` — user input queued for an active turn, delivery, persistence, and hooks
 - `tools` — image-bearing results, LLM-callable tools, parallel execution policies, and structured replayable details
 - `commands` — slash commands (`/foo`)
-- `notices` — severity-labeled application feedback, transcript persistence, context exclusion
+- `notices` — severity-labeled application feedback, transcript persistence, document origins, context exclusion
 - `completers` — composer completion, `@` files, and `#` session-reference chips
 - `providers` — LLM backends, native compaction/state replay, tool-image projection, Fast-mode capabilities and service tiers
 - `http` — blocking HTTP helpers, streamed JSON, response headers, retries, and callback ownership

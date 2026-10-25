@@ -52,8 +52,8 @@ int __wrap_RAND_bytes(unsigned char *buf, int n)
     return fail ? 0 : __real_RAND_bytes(buf, n);
 }
 
-bool __real_PicoHost_OpenBrowser(PicoHost *host, const char *url);
-bool __wrap_PicoHost_OpenBrowser(PicoHost *host, const char *url)
+bool __real_PicoHost_OpenExternal(PicoHost *host, const char *url, bool report_failure);
+bool __wrap_PicoHost_OpenExternal(PicoHost *host, const char *url, bool report_failure)
 {
     pthread_mutex_lock(&oauth_mu);
     bool active = oauth_test.active;
@@ -64,7 +64,7 @@ bool __wrap_PicoHost_OpenBrowser(PicoHost *host, const char *url)
         oauth_test.url = strdup(url);
     }
     pthread_mutex_unlock(&oauth_mu);
-    return active ? true : __real_PicoHost_OpenBrowser(host, url);
+    return active ? true : __real_PicoHost_OpenExternal(host, url, report_failure);
 }
 
 int __real_pico_openai_listen(const unsigned short *ports, size_t count, unsigned short *port);
@@ -539,7 +539,7 @@ static int TestOpenAiBrowserLauncher(void)
     PicoHost *host = NULL;
     bool ok = pico_host_init(&host, NULL, true) == PICO_OK;
     const char *url = "https://example.invalid/?literal=$(printf NOT_LITERAL)&quote='";
-    ok &= host && __real_PicoHost_OpenBrowser(host, url);
+    ok &= host && __real_PicoHost_OpenExternal(host, url, false);
     pid_t pid = 0;
     PICO_TEST_WAIT(ok && pid == 0)
     {
@@ -550,7 +550,7 @@ static int TestOpenAiBrowserLauncher(void)
     ok &= pid > 0;
     /* Failure to exec also reports synchronously, without a shell or wait. */
     setenv("PATH", "/nonexistent-pico-browser-launcher", 1);
-    ok &= host && !__real_PicoHost_OpenBrowser(host, url);
+    ok &= host && !__real_PicoHost_OpenExternal(host, url, false);
     setenv("PATH", path, 1);
     if (host) ok &= pico_host_free(host) == PICO_HOST_SHUTDOWN_CLEAN;
     WriteFile(release, "release\n");

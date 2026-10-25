@@ -2328,10 +2328,14 @@ static void RenderTranscriptMessage(const TranscriptView *view, int i, float ava
         {
             uint64_t markdown_identity = RevisionMix(view->virtual_identity, (uint64_t)(i + 1));
             int markdown_id_base = (int)(uint32_t)(markdown_identity ^ (markdown_identity >> 32));
+            if (msg->markdown_base_dir) MdView_SetBaseDir(msg->markdown_base_dir);
             if (notice && msg->notice_severity != PICO_NOTICE_INFO)
                 MdView_RenderNoticeDocument(&msg->doc, markdown_id_base, available_width, accent);
             else
                 MdView_RenderDocument(&msg->doc, markdown_id_base, available_width);
+            if (msg->markdown_base_dir)
+                MdView_SetBaseDir(view->owner ? PicoAgent_WorkspacePath(view->owner)
+                                             : PicoWorkspace_Path(PicoHost_SelectedWorkspace(view->app)));
         }
         RichText_ClearViewport();
         if (view->selectable)

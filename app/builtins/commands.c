@@ -428,7 +428,17 @@ static void CmdDocs(PicoHost *app, PicoAgentId agent_id, const char *args, void 
         Note(app, agent_id, PICO_NOTICE_INFO, buf);
         return;
     }
-    Note(app, agent_id, PICO_NOTICE_INFO, src);
+    char base_dir[4096];
+    if (!realpath(path, base_dir))
+    {
+        free(src);
+        Note(app, agent_id, PICO_NOTICE_ERROR, "Could not resolve the extension document's directory.");
+        return;
+    }
+    char *slash = strrchr(base_dir, '/');
+    if (slash == base_dir) slash[1] = '\0';
+    else *slash = '\0';
+    PicoHost_AddNoticeWithBaseDir(app, agent_id, PICO_NOTICE_INFO, src, base_dir);
     free(src);
 }
 

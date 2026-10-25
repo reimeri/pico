@@ -45,6 +45,8 @@
 #include <math.h>
 #include <limits.h>
 #include <poll.h>
+#include <spawn.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,12 +130,19 @@ static bool g_browser_resize_frame;
 static bool g_chat_link_test;
 static int g_chat_link_launches;
 static char g_chat_link_target[8192];
-void __real_OpenURL(const char *url);
-void __wrap_OpenURL(const char *url)
+int __real_posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *actions,
+                        const posix_spawnattr_t *attr, char *const argv[], char *const envp[]);
+int __wrap_posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *actions,
+                        const posix_spawnattr_t *attr, char *const argv[], char *const envp[])
 {
-    if (!g_chat_link_test) { __real_OpenURL(url); return; }
-    g_chat_link_launches++;
-    snprintf(g_chat_link_target, sizeof(g_chat_link_target), "%s", url);
+    if (g_chat_link_test && !strcmp(file, "xdg-open"))
+    {
+        g_chat_link_launches++;
+        snprintf(g_chat_link_target, sizeof(g_chat_link_target), "%s", argv[1]);
+        char *stub[] = {"sh", "-c", "exit 0", NULL};
+        return __real_posix_spawnp(pid, "/bin/sh", actions, attr, stub, envp);
+    }
+    return __real_posix_spawnp(pid, file, actions, attr, argv, envp);
 }
 /* Decode real image files, but keep chat image layout tests independent of a GPU. */
 static bool g_chat_image_test;
@@ -17217,7 +17226,7 @@ static void InteractionFixtureFree(InteractionFixture *f)
 static int TestChatLinkWorkspacePaths(void)
 {
     InteractionFixture f = {0};
-    char other[] = "/tmp/pico-chat-link-other-XXXXXX";
+    char other[] = "/tmp/pico-chat-link-Alice's project-XXXXXX";
     char first_path[4096], other_path[4096], markdown[8192];
     PicoWorkspaceId workspace = 0;
     PicoAgentId agent = 0;
@@ -17230,10 +17239,10 @@ static int TestChatLinkWorkspacePaths(void)
     if (pico_workspace_open(f.host, other, &workspace) != PICO_OK ||
         pico_main_agent_create(f.host, workspace, &options, &agent) != PICO_OK) goto done;
     PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_ROLE_ASSISTANT,
-                         "[Relative](mountain.png)");
+                         "[Relative](<mountain.png>)");
     PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, agent), PICO_ROLE_ASSISTANT,
-                         "[Relative](mountain.png)");
-    snprintf(markdown, sizeof(markdown), "[Absolute](%s)", other_path);
+                         "[Relative](<mountain.png>)");
+    snprintf(markdown, sizeof(markdown), "[Absolute](<%s>)", other_path);
     PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_ROLE_ASSISTANT, markdown);
     PicoAgent_AddMessage(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_ROLE_ASSISTANT,
                          "[Web](https://example.invalid/image.png) [Mail](mailto:test@example.invalid) [Fragment](#section)");
@@ -17279,6 +17288,8 @@ done:
     if (!good && !g_failed) Fail("chat file-link click fixture");
     return good ? 0 : 1;
 }
+
+#include "link_navigation_test.c"
 
 static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char *text)
 {
@@ -18889,10 +18900,14 @@ int main(int argc, char **argv)
 #endif
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--external-links") == 0) return PICO_TEST_RUN(TestExternalLinkOpener());
+    if (argc == 2 && strcmp(argv[1], "--docs-links") == 0) return PICO_TEST_RUN(TestDocsLinkOrigins());
     if (argc == 2 && strcmp(argv[1], "--chat-links") == 0) return PICO_TEST_RUN(TestChatLinkWorkspacePaths());
     if (argc == 2 && strcmp(argv[1], "--chat-images") == 0) return PICO_TEST_RUN(TestChatImageWorkspacePaths());
     if (PICO_TEST_RUN(TestChatImageWorkspacePaths())) return 1;
     if (PICO_TEST_RUN(TestChatLinkWorkspacePaths())) return 1;
+    if (PICO_TEST_RUN(TestDocsLinkOrigins())) return 1;
+    if (PICO_TEST_RUN(TestExternalLinkOpener())) return 1;
 #endif
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
     if (argc == 2 && strcmp(argv[1], "--browser-controls") == 0) return PICO_TEST_RUN(TestBrowserControlSelector());

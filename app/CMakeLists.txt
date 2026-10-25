@@ -1170,7 +1170,8 @@ if(BUILD_TESTING)
         target_compile_definitions(pico_host_workspace_tests PRIVATE
             PICO_CLAY_FRAME_FAULT_TESTS=1 PICO_OPENAI_LOGIN_TESTS=1)
         target_link_options(pico_host_workspace_tests PRIVATE
-            -Wl,--wrap=RAND_bytes -Wl,--wrap=PicoHost_OpenBrowser
+            -Wl,--wrap=RAND_bytes -Wl,--wrap=PicoHost_OpenExternal
+            -Wl,--wrap=posix_spawnp
             -Wl,--wrap=pico_openai_listen -Wl,--wrap=pico_openai_await_callback
             -Wl,--wrap=pico_http_post -Wl,--wrap=pico_http_post_sse)
         target_link_options(pico_host_workspace_tests PRIVATE
@@ -1184,7 +1185,6 @@ if(BUILD_TESTING)
             -Wl,--wrap=GetMouseWheelMoveV
             -Wl,--wrap=MdDocument_ParseEx -Wl,--wrap=MeasureTextEx
             -Wl,--wrap=LoadTextureFromImage -Wl,--wrap=UnloadTexture
-            -Wl,--wrap=OpenURL
             -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=SetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)

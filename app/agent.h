@@ -79,7 +79,7 @@ void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, 
 void PicoAgent_AddSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown);
 void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *markdown);
 void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
-                         const char *markdown);
+                         const char *markdown, const char *base_dir);
 /* Internal acceptance result; public notice APIs remain fire-and-forget. */
 bool PicoAgent_AddNoticePersisted(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
                                   const char *markdown);

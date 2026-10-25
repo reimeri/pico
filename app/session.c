@@ -1102,7 +1102,9 @@ static bool ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
                     PicoSession_RememberMissingImage(agent, path, content));
                 free(path);
                 if (!restored) { free(content); free(type); return false; }
-                PicoAgent_AddNotice(app, agent, severity, content);
+                char *base_dir = JsonObjStr(doc, obj, "markdown_base_dir");
+                PicoAgent_AddNotice(app, agent, severity, content, base_dir);
+                free(base_dir);
             }
         }
         free(content);
@@ -2250,6 +2252,7 @@ static void LoadedTranscriptFree(PicoMessage *messages, int count)
     for (int i = 0; i < count; i++)
     {
         free(messages[i].source);
+        free(messages[i].markdown_base_dir);
         for (int t = 0; t < messages[i].trace_count; t++)
         {
             PicoTraceLine_Release(&messages[i].trace[t]);
@@ -2584,7 +2587,11 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
             if (content && ReadNoticeSeverity(&doc, 0, &severity))
             {
                 failed = !LoadedAddMessage(&messages, &count, &capacity, PICO_ROLE_NOTICE, content);
-                if (!failed) messages[count - 1].notice_severity = severity;
+                if (!failed)
+                {
+                    messages[count - 1].notice_severity = severity;
+                    messages[count - 1].markdown_base_dir = JsonObjStr(&doc, 0, "markdown_base_dir");
+                }
             }
             free(content);
         }
@@ -2818,7 +2825,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
 }
 
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
-                                            PicoNoticeSeverity severity, const char *content)
+                                            PicoNoticeSeverity severity, const char *content, const char *base_dir)
 {
     const char *name;
     switch (severity)
@@ -2836,6 +2843,10 @@ PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
     JsonBuf_String(&b, name);
     JsonBuf_Puts(&b, ",\"content\":");
     JsonBuf_String(&b, content ? content : "");
+    if (base_dir && base_dir[0]) {
+        JsonBuf_Puts(&b, ",\"markdown_base_dir\":");
+        JsonBuf_String(&b, base_dir);
+    }
     for (int i = 0; severity == PICO_NOTICE_WARNING && i < agent->missing_image_warning_count; ++i) {
         PicoMissingImageWarning *warning = &agent->missing_image_warnings[i];
         if (content && !strcmp(content, warning->notice)) {

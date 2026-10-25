@@ -51,12 +51,24 @@ internally; custom Markdown views should set their own base before rendering
 rather than relying on whichever view rendered previously. Passing `NULL` or an
 empty string resets the base to the process working directory. Chat uses the
 displayed transcript's workspace, including live and saved subagent transcripts.
+File-backed `/docs` notices override that default with their original document's
+absolute directory (`PicoMessage.markdown_base_dir`). The origin is preserved in
+saved history and snapshots, even after the installation path changes; later
+messages still use their own workspace default.
 
 A Markdown file link such as `[mountain.png](mountain.png)` opens through the
 system's default handler, with its relative target resolved against that
 transcript's workspace. Absolute paths, URI schemes (such as `https:`, `mailto:`,
 and `file:`), and fragment-only targets are passed through unchanged. Links do
 not open Pico's image-preview overlay or perform in-document anchor navigation.
+The system opener receives the target as a literal argument, without a shell or
+a blocking UI-thread wait, so apostrophes, spaces, and shell metacharacters in
+paths are not interpreted. Failure to start the opener, a later nonzero exit,
+or termination by a signal produces a visible error toast while the host is
+alive. Successful spawning is not proof that the application displayed the
+file. External applications are not killed when Pico closes; independent child
+reaping may continue after the host is gone, without retaining host/UI state or
+reporting further errors.
 `MdView_HoveredLink()` returns a borrowed target for the current layout; relative
 file targets are already resolved using the hovered document's base. A later view
 changing its base does not retarget that pending click. Do not retain the target

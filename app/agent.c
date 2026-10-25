@@ -2228,6 +2228,7 @@ static void RemoveMessage(PicoHost *app, PicoAgent *agent, int i)
     }
     agent->transcript_reset_generation++;
     free(agent->messages[i].source);
+    free(agent->messages[i].markdown_base_dir);
     for (int t = 0; t < agent->messages[i].trace_count; t++)
     {
         PicoTraceLine_Release(&agent->messages[i].trace[t]);
@@ -2925,7 +2926,7 @@ void PicoAgent_PersistNotice(PicoHost *app, PicoAgent *agent, int message_index)
     }
     PicoMessage *message = &agent->messages[message_index];
     if (message->steering_id) PicoSession_LogSteeringNotice(app, agent, message->steering_id, message->source);
-    else PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+    else PicoSession_LogNotice(app, agent, message->notice_severity, message->source, message->markdown_base_dir);
 }
 
 static void FlushStreamNotices(PicoHost *app, PicoAgent *agent)
@@ -2939,7 +2940,7 @@ static void FlushStreamNotices(PicoHost *app, PicoAgent *agent)
         if (message->role == PICO_ROLE_NOTICE)
         {
             if (message->steering_id) PicoSession_LogSteeringNotice(app, agent, message->steering_id, message->source);
-            else PicoSession_LogNotice(app, agent, message->notice_severity, message->source);
+            else PicoSession_LogNotice(app, agent, message->notice_severity, message->source, message->markdown_base_dir);
         }
     }
 }

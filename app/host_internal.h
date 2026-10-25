@@ -181,7 +181,8 @@ struct PicoHost {
     int session_load_row_id;
     PicoAgent *session_replay_agent; /* only valid during a main-thread replay callback */
     uint64_t next_session_load_serial;
-    pid_t browser_children[16]; /* Independent processes; reap, never wait on the UI thread. */
+    pid_t external_children[16]; /* Independent processes; reap, never wait on the UI thread. */
+    bool external_report_failures[16]; /* Main-thread error toast for explicit link clicks. */
     bool submit_cancel;
     char *agent_input;
     char *agent_parts;
@@ -459,6 +460,10 @@ bool PicoHost_StartTaskCompleted(PicoHost *host, void *(*run)(void *), void *sta
 bool PicoHost_StartTask(PicoHost *host, void *(*run)(void *), void *state,
                         void (*cancel)(void *), void (*destroy)(void *));
 bool PicoHost_StartLocalSession(PicoHost *host, PicoAgentId from_agent_id);
-bool PicoHost_OpenBrowser(PicoHost *host, const char *url);
+/* Literal argv, no shell or blocking wait. Clicks opt into asynchronous failure notices. */
+bool PicoHost_OpenExternal(PicoHost *host, const char *target, bool report_failure);
+/* Builtin file-backed notices: copies and persists an absolute document directory. */
+void PicoHost_AddNoticeWithBaseDir(PicoHost *host, PicoAgentId agent_id, PicoNoticeSeverity severity,
+                                   const char *markdown, const char *base_dir);
 
 #endif

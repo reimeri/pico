@@ -856,7 +856,7 @@ static void DrainLoginNotes(HostAuthState *s)
             Note(s->host, login->agent_id, PICO_NOTICE_INFO, message);
             free(message);
         }
-        if (!PicoHost_OpenBrowser(s->host, url))
+        if (!PicoHost_OpenExternal(s->host, url, false))
             Note(s->host, login->agent_id, PICO_NOTICE_WARNING, "Could not open your browser automatically. Use the sign-in link above.");
     }
     for (int i = 0; i < count; i++)

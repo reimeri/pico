@@ -1506,9 +1506,10 @@ void MdDocument_Free(MdDocument *doc)
 }
 
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
-                                            PicoNoticeSeverity severity, const char *content)
+                                            PicoNoticeSeverity severity, const char *content, const char *base_dir)
 {
     (void)app; (void)agent; (void)severity;
+    (void)base_dir;
     g_test.notice_log_count++;
     strncat(g_test.notice_log_text, content ? content : "",
             sizeof(g_test.notice_log_text) - strlen(g_test.notice_log_text) - 1);
@@ -1576,7 +1577,7 @@ PicoSessionWriteResult PicoSession_LogSteeringDelivered(PicoHost *app, PicoAgent
 PicoSessionWriteResult PicoSession_LogSteeringNotice(PicoHost *app, PicoAgent *agent, uint64_t id, const char *content)
 {
     (void)id;
-    return PicoSession_LogNotice(app, agent, PICO_NOTICE_WARNING, content);
+    return PicoSession_LogNotice(app, agent, PICO_NOTICE_WARNING, content, NULL);
 }
 PicoSessionWriteResult PicoSession_LogSteeringStopped(PicoHost *app, PicoAgent *agent, uint64_t id,
     const char *reason)

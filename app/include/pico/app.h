@@ -128,6 +128,7 @@ typedef struct PicoMessage {
     uint64_t steering_id; /* session-local ID for delivered input / stopped notices; zero otherwise */
     PicoNoticeSeverity notice_severity; /* meaningful only for PICO_ROLE_NOTICE */
     char *source;
+    char *markdown_base_dir; /* core-owned optional absolute document origin; NULL uses workspace */
     size_t source_len;
     size_t source_cap;
     uint64_t revision;

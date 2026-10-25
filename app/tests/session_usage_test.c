@@ -693,17 +693,18 @@ void PicoAgent_AddMessage(PicoHost *app, PicoAgent *agent, PicoRole role, const 
 }
 
 void PicoAgent_AddNotice(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
-                         const char *text)
+                         const char *text, const char *base_dir)
 {
     PicoAgent_AddMessage(app, agent, PICO_ROLE_NOTICE, text);
     agent->messages[agent->message_count - 1].notice_severity = severity;
+    agent->messages[agent->message_count - 1].markdown_base_dir = base_dir ? JsonDup(base_dir) : NULL;
 }
 
 bool PicoAgent_AddNoticePersisted(PicoHost *app, PicoAgent *agent, PicoNoticeSeverity severity,
                                   const char *text)
 {
-    PicoAgent_AddNotice(app, agent, severity, text);
-    return PicoSession_LogNotice(app, agent, severity, text) != PICO_SESSION_WRITE_FAILED;
+    PicoAgent_AddNotice(app, agent, severity, text, NULL);
+    return PicoSession_LogNotice(app, agent, severity, text, NULL) != PICO_SESSION_WRITE_FAILED;
 }
 
 bool PicoAgent_CancelRequested(const PicoAgent *agent) { (void)agent; return false; }
@@ -715,7 +716,7 @@ void PicoAgent_AddSteeringMessage(PicoHost *app, PicoAgent *agent, uint64_t id, 
 }
 void PicoAgent_AddSteeringNoticeReplay(PicoHost *app, PicoAgent *agent, uint64_t id, const char *text)
 {
-    PicoAgent_AddNotice(app, agent, PICO_NOTICE_WARNING, text);
+    PicoAgent_AddNotice(app, agent, PICO_NOTICE_WARNING, text, NULL);
     agent->messages[agent->message_count - 1].steering_id = id;
 }
 
@@ -938,6 +939,7 @@ void PicoMessages_Free(PicoMessage *messages, int count)
     for (int i = 0; i < count; i++)
     {
         free(messages[i].source);
+        free(messages[i].markdown_base_dir);
         for (int t = 0; t < messages[i].trace_count; t++)
         {
             PicoTraceLine_Release(&messages[i].trace[t]);
@@ -1746,11 +1748,11 @@ static int TestNoticePersistence(void)
     PicoHost_SetPath(&reader, "/workspace");
     PicoSession_LogUser(&writer, &source, "task", NULL, NULL);
     PicoSession_LogAssistant(&writer, &source, 1, "draft", NULL, NULL, NULL, NULL, 0);
-    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_ERROR, "notice-only-error");
+    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_ERROR, "notice-only-error", NULL);
     PicoSession_LogAssistant(&writer, &source, 1, "continued", NULL, NULL, NULL, NULL, 0);
-    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_INFO, "notice-only-info");
+    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_INFO, "notice-only-info", NULL);
     PicoSession_LogCompaction(&writer, &source, "summary", 0);
-    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_WARNING, "notice-only-warning");
+    PicoSession_LogNotice(&writer, &source, PICO_NOTICE_WARNING, "notice-only-warning", NULL);
     PicoSession_LogAssistant(&writer, &source, 6, "done", NULL, NULL, NULL, NULL, 0);
     PicoMessage *loaded = NULL;
     int count = 0;
@@ -1765,7 +1767,7 @@ static int TestNoticePersistence(void)
     PicoAgent_ClearMessages(&restored);
     unlink(source.session_path);
     PicoAgent ephemeral = {.persistence = PICO_SESSION_EPHEMERAL};
-    ok &= PicoSession_LogNotice(&writer, &ephemeral, PICO_NOTICE_INFO, "temporary") ==
+    ok &= PicoSession_LogNotice(&writer, &ephemeral, PICO_NOTICE_INFO, "temporary", NULL) ==
           PICO_SESSION_WRITE_SKIPPED && !ephemeral.session_path[0];
     return ok ? 0 : Fail("notices lost severity/order, entered history, or persisted an ephemeral agent");
 }

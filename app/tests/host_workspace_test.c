@@ -25,6 +25,7 @@
 #include "scrollbar.h"
 #include "trace_group.h"
 #include "richtext.h"
+#include "pico/md_view.h"
 #include "chat_sel.h"
 #include "builtins/chat.h"
 #include "builtins/background_model.h"
@@ -124,6 +125,21 @@ Vector2 __wrap_GetMouseWheelMoveV(void)
 
 static bool g_clay_frame_test;
 static bool g_browser_resize_frame;
+/* Decode real image files, but keep chat image layout tests independent of a GPU. */
+static bool g_chat_image_test;
+static unsigned g_chat_image_texture_id;
+Texture2D __real_LoadTextureFromImage(Image image);
+Texture2D __wrap_LoadTextureFromImage(Image image)
+{
+    if (!g_chat_image_test) return __real_LoadTextureFromImage(image);
+    return (Texture2D){.id = ++g_chat_image_texture_id, .width = image.width,
+                       .height = image.height, .mipmaps = image.mipmaps, .format = image.format};
+}
+void __real_UnloadTexture(Texture2D texture);
+void __wrap_UnloadTexture(Texture2D texture)
+{
+    if (!g_chat_image_test) __real_UnloadTexture(texture);
+}
 /* Probe composited opacity at a point, independent of the gradient's radius,
  * opacity, or number of drawing primitives. Scissoring is part of the result. */
 static bool g_glow_probe, g_glow_clip_active;
@@ -2611,6 +2627,97 @@ static int TestBottomFollowShellGeometryStable(void)
     if (RunBrowserViewportCase(false) || RunBrowserViewportCase(true)) return 1;
     return RunWorkspaceLessShellCase();
 }
+
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static int TestChatImageWorkspacePaths(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dirs[2][64] = {"/tmp/pico-chat-images-A-XXXXXX", "/tmp/pico-chat-images-B-XXXXXX"};
+    char cfg[] = "/tmp/pico-chat-images-cfg-XXXXXX";
+    char paths[2][4096], markdown[8192];
+    PicoHost *host = NULL;
+    PicoAgentId agents[2] = {0};
+    const int widths[2] = {12, 24};
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    int result = 1;
+    if (!memory || !mkdtemp(dirs[0]) || !mkdtemp(dirs[1]) || !mkdtemp(cfg))
+    {
+        free(memory);
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    for (int i = 0; i < 2; i++)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/mountain.png", dirs[i]);
+        Image image = GenImageColor(widths[i], 12, RED);
+        bool saved = ExportImage(image, paths[i]);
+        UnloadImage(image);
+        if (!saved) goto done;
+        PicoWorkspaceId workspace_id = 0;
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                           .session_start = PICO_SESSION_NONE};
+        if (pico_workspace_open(host, dirs[i], &workspace_id) != PICO_OK ||
+            pico_main_agent_create(host, workspace_id, &options, &agents[i]) != PICO_OK) goto done;
+        PicoAgent_AddMessage(host, PicoHost_FindAgent(host, agents[i]), PICO_ROLE_ASSISTANT,
+                             "![Mountain](mountain.png)");
+    }
+    /* Absolute references keep their meaning even in another workspace. */
+    snprintf(markdown, sizeof(markdown), "![Other workspace](%s)", paths[0]);
+    PicoAgent_AddMessage(host, PicoHost_FindAgent(host, agents[1]), PICO_ROLE_ASSISTANT, markdown);
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory), viewport,
+                         (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_chat_image_test = true;
+    /* The process cwd is neither fixture workspace. Same-named files must not
+     * alias in the image cache when switching away and back. */
+    const int selected[] = {0, 1, 0};
+    for (size_t frame = 0; frame < sizeof(selected) / sizeof(selected[0]); frame++)
+    {
+        int workspace = selected[frame];
+        if (!pico_agent_select(host, agents[workspace])) goto done;
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        int image_count = 0;
+        for (int i = 0; i < commands.length; i++)
+        {
+            Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+            if (command->commandType != CLAY_RENDER_COMMAND_TYPE_IMAGE) continue;
+            Texture2D *texture = command->renderData.image.imageData;
+            int expected_width = image_count == 0 ? widths[workspace] : widths[0];
+            if (!texture || !texture->id || texture->width != expected_width)
+            {
+                Fail("chat images must resolve against their workspace, preserving absolute paths");
+                goto done;
+            }
+            image_count++;
+        }
+        if (image_count != (workspace == 0 ? 1 : 2))
+        {
+            Fail("relative chat images must display when the process cwd is outside the workspace");
+            goto done;
+        }
+    }
+    result = 0;
+done:
+    MdView_ClearImages();
+    g_chat_image_test = false;
+    MdView_SetImageBaseDir(NULL);
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dirs[0]); RmRf(dirs[1]);
+    if (result && !g_failed) Fail("chat image workspace fixture");
+    return result;
+}
+#endif
 
 static int TestChatBottomFollowClearsComposer(void)
 {
@@ -18705,6 +18812,10 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--chat-images") == 0) return PICO_TEST_RUN(TestChatImageWorkspacePaths());
+    if (PICO_TEST_RUN(TestChatImageWorkspacePaths())) return 1;
+#endif
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
     if (argc == 2 && strcmp(argv[1], "--browser-controls") == 0) return PICO_TEST_RUN(TestBrowserControlSelector());
     if (argc == 2 && strcmp(argv[1], "--browser-viewport") == 0) return PICO_TEST_RUN(RunBrowserViewportCase(false)) || PICO_TEST_RUN(RunBrowserViewportCase(true));

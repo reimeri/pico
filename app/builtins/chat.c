@@ -2359,6 +2359,10 @@ static void RenderTranscriptSpacer(const TranscriptView *view, int begin, int en
 
 static void RenderTranscript(const TranscriptView *view, float available_width)
 {
+    /* Live transcripts belong to their agent's workspace; saved subagent
+     * snapshots are loaded from the selected workspace. Never use process cwd. */
+    MdView_SetImageBaseDir(view->owner ? PicoAgent_WorkspacePath(view->owner)
+                                     : PicoWorkspace_Path(PicoHost_SelectedWorkspace(view->app)));
     PicoTranscriptVirtual *cache = view->virtual_cache;
     ToolWrapCacheSet_Begin(view->tool_wrap_cache, view->virtual_identity);
     int old_count = cache ? cache->count : 0;

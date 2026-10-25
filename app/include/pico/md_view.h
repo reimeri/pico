@@ -9,7 +9,9 @@
 // retain stable image pointers/textures until the next BeginFrame or ClearImages.
 void MdView_BeginFrame(void);
 
-// Directory used to resolve relative image paths. Copied internally.
+// Main/render-thread setting for subsequent document renders. Copied internally.
+// Chat sets this to the displayed transcript's workspace before rendering.
+// Custom views should set their own base; NULL/empty resets it to process cwd.
 void MdView_SetImageBaseDir(const char *dir);
 // Main/render thread, with a live graphics context and no pending commands.
 // The graphics owner calls this before closing its context; clears all textures.

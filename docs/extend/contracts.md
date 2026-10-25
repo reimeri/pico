@@ -42,6 +42,8 @@ Builtin file completion/submission share `@bare/path` and `@"escaped path"` repr
 
 ## Markdown image resources
 
+Relative image paths in chat resolve against the displayed transcript's workspace, including live and saved subagent transcripts, never process CWD. Absolute paths remain unchanged and remote image URLs are not fetched. `MdView_SetImageBaseDir()` copies a main/render-thread setting used by subsequent document renders; custom Markdown views must set their own base when needed (`NULL`/empty resets to process CWD). See [images](images.md#images-in-chat-markdown).
+
 `MdView_BeginFrame()` invalidates the prior layout's image borrows, just as a new Clay layout invalidates its command storage. Image nodes/textures remain stable through the current layout's render consumption; keep neither pointer beyond that lifetime. Unused retained cache entries are evictable, but the current/previous working sets may exceed the idle retention budget. File changes trigger refresh/redraw; failed refresh keeps a usable old texture and is retryable. `MdView_ClearImages()` is main/render-thread-only with a live graphics context and no pending command references. The graphics owner clears before context teardown; extensions must not restart or clear the shared image lifetime from view callbacks. See [views](views.md#markdown-image-lifetime).
 
 ## Fast-mode provider contract

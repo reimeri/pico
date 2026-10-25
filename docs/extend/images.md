@@ -8,6 +8,15 @@ For generating/editing images with ChatGPT login, see
 [`generate_image`](image-generation.md). It saves to an explicit caller-owned path
 and can return an image using the same preview/ownership contracts below.
 
+## Images in chat Markdown
+
+A standalone Markdown image such as `![Mountain](mountain.png)` displays a local
+file in chat. Relative image paths resolve against the displayed session's
+workspace, not Pico's process working directory. This also applies to live and
+saved subagent transcripts. Absolute paths are used unchanged; remote image URLs
+are not fetched. A chat preview alone does not attach image content to a model;
+use `view_image` or an image-bearing tool result for that.
+
 ## Local files: `view_image`
 
 The builtin tool accepts one file:

@@ -6,6 +6,7 @@
 #include "json.h"
 #include "builtins/responses.h"
 #include "builtins/openai_auth.h"
+#include "builtins/openai_image.h"
 #include "host_internal.h"
 
 #include <pthread.h>
@@ -472,6 +473,13 @@ static bool RefreshOauth(PicoAgentContext *ctx, PicoAuthEntry *auth, TurnCancel 
 
     pico_auth_end_refresh_ctx(ctx, "openai");
     return ok;
+}
+
+bool pico_openai_refresh_oauth(PicoAgentContext *ctx, PicoAuthEntry *auth,
+                               PicoHttpCancelFn cancel, void *user, bool force)
+{
+    TurnCancel tc = {.fn = cancel, .user = user};
+    return RefreshOauth(ctx, auth, &tc, force) && !strcmp(auth->active, PICO_AUTH_OAUTH);
 }
 
 static int IntervalOf(const JsonDoc *doc, int obj)
@@ -1333,7 +1341,7 @@ static int OpenAiWorkspaceInit(PicoWorkspace *workspace, void **state_out)
                                                  .map_context = true, .tool_images = true,
                                                  .supports_fast = OpenAiSupportsFast,
                                                  .native_compaction = OpenAiSupportsFast});
-    return 0;
+    return pico_openai_image_init(workspace);
 }
 
 PicoExt pico_ext_openai(void)

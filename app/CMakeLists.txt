@@ -232,6 +232,7 @@ add_executable(pico
     builtins/skills.c
     builtins/skill_load.c
     builtins/openai.c
+    builtins/openai_image.c
     builtins/openai_auth.c
     builtins/hyper.c
     builtins/hyper_auth.c
@@ -389,6 +390,15 @@ if(BUILD_TESTING)
     target_link_libraries(pico_image_tests PRIVATE pico_image)
     pico_warnings_are_errors(pico_image_tests)
     add_test(NAME pico_image_tests COMMAND pico_image_tests)
+
+    add_executable(pico_openai_image_tests
+        tests/openai_image_test.c builtins/openai_image.c json.c)
+    target_include_directories(pico_openai_image_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/.. ${raylib_SOURCE_DIR}/src)
+    target_link_libraries(pico_openai_image_tests PRIVATE pico_image OpenSSL::Crypto)
+    pico_warnings_are_errors(pico_openai_image_tests)
+    add_test(NAME pico_openai_image_tests COMMAND pico_openai_image_tests)
 
     add_executable(pico_shell_tests
         tests/shell_test.c
@@ -1104,6 +1114,7 @@ if(BUILD_TESTING)
         builtins/skills.c
         builtins/skill_load.c
         builtins/openai.c
+        builtins/openai_image.c
         builtins/openai_auth.c
         builtins/hyper.c
         builtins/hyper_auth.c
@@ -1178,7 +1189,7 @@ if(BUILD_TESTING)
 endif()
 
 set(_pico_ref_builtins
-    shell.c image.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    shell.c image.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h openai_image.c openai_image.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
     completions.c completions.h stream_guard.c stream_guard.h provider_retry.c provider_retry.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory

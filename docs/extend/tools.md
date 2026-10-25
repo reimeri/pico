@@ -288,6 +288,14 @@ pico_add_tool(workspace, "stateful", "Update state", kParams, RunStateful, Apply
 
 The apply callback returns `false` to reject details. A live rejection converts the tool result to an error and omits details from persistence. A replay rejection ignores that snapshot and preserves the latest valid state. Pico replays details chronologically on session resume and after extension reload, so details should be complete snapshots and apply should be idempotent. The callback runs on the main thread and may update extension state, but should not call Clay outside a view callback.
 
+## Builtin image generation
+
+[`generate_image`](image-generation.md) creates/edits one PNG with ChatGPT OAuth.
+It requires an explicit new output path, never overwrites files, and returns
+image-bearing results when the calling model/provider supports them. Non-vision
+callers receive a saved path without image parts. See that topic for usage,
+reference-image uploads, cancellation, and backend limitations.
+
 ## Image-bearing results
 
 ABI 24 supports PNG, JPEG, and WebP in `PicoToolResult.images`

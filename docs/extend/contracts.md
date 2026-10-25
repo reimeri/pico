@@ -483,6 +483,29 @@ images as labeled untrusted observation messages after sibling tool replies,
 without adding canonical human input. See [tools](tools.md#image-bearing-results)
 and [providers](providers.md#image-bearing-tool-results).
 
+## Image generation
+
+The OpenAI workspace builtin registers `generate_image`; its per-request auth
+filter and execution-time guard require selected OpenAI OAuth credentials.
+Agent/profile tool restrictions remain authoritative. It is a sequential,
+callback-local tool worker, not a background task. Different agents may overlap;
+it shares the provider's single-flight OAuth refresh coordinator and retries a
+definite 401 once. Other image outcomes are not automatically replayed, and image
+POSTs do not redirect credentials. No public registration/auth/HTTP ABI changes
+are introduced.
+
+An explicit new `.png` output path is required; relative paths use the calling
+workspace. Parents must exist, owned `.pico/media` destinations are rejected,
+and atomic publication never replaces an existing destination, including one
+created while the request runs. Outputs are caller-owned. Optional local
+references are uploaded explicitly, not taken implicitly from history. The
+result contains original validated image bytes only when the turn accepts tool
+images; otherwise it explicitly returns file metadata without a visual preview.
+Core's accepted preview copies retain ordinary image-result ownership/lifetime.
+Cancellation cannot refund remote usage or roll back an already published
+caller-owned output file. See [image generation](image-generation.md) for limits,
+request models, backend availability, and detailed cancellation behavior.
+
 ## Embedded browser ownership
 
 The dock's web icon expands/collapses presentation without closing its page;

@@ -502,12 +502,62 @@ static int StreamingDeadlines(bool silent, bool total, bool user_cancel)
 }
 #endif
 
+static int BoundedImagePost(bool overflow, bool redirect)
+{
+    const char *payload = "{\"data\":[]}";
+    Server s = {.fd = socket(AF_INET, SOCK_STREAM, 0), .type = "application/json", .body = payload};
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    if (s.fd < 0 || bind(s.fd, (void *)&addr, sizeof(addr)) || listen(s.fd, 1) ||
+        getsockname(s.fd, (void *)&addr, &size)) return 1;
+    char url[128], headers[512];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
+    snprintf(headers, sizeof(headers), "HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", url, strlen(payload));
+    if (redirect) s.header = headers;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, Serve, &s)) { close(s.fd); return 1; }
+    PicoHttpReq req = {.url = url, .body = "{}"};
+    char *body = NULL, *error = NULL; long http = 0;
+    int rc = PicoHttp_PostOnce(&req, 2, strlen(payload) - (overflow ? 1 : 0), &http, &body, &error);
+    shutdown(s.fd, SHUT_RDWR); pthread_join(thread, NULL); close(s.fd);
+    bool ok = overflow ? rc == PICO_HTTP_FAIL && !body && error :
+        rc == PICO_HTTP_OK && body && !strcmp(body, payload) && http == (redirect ? 302 : 200);
+    free(body); free(error);
+    if (!ok) fprintf(stderr, "bounded image POST: overflow=%d redirect=%d rc=%d http=%ld\n", overflow, redirect, rc, http);
+    return !ok;
+}
+
+static void ForbidImageRetry(void *user, int retry, int max, int delay, const char *error)
+{
+    (void)retry; (void)max; (void)delay; (void)error;
+    *(bool *)user = true;
+}
+static bool ImageRetryCancelled(void *user) { return *(bool *)user; }
+static int ImagePostDoesNotRetry(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    /* Bound but not listening: connection refused, without another process being
+     * able to steal the selected port during this request. */
+    if (fd < 0 || bind(fd, (void *)&addr, sizeof(addr)) || getsockname(fd, (void *)&addr, &size)) return 1;
+    char url[128]; snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
+    bool retried = false;
+    PicoHttpReq req = {.url = url, .body = "{}", .on_retry = ForbidImageRetry, .cancel = ImageRetryCancelled, .user = &retried};
+    int rc = PicoHttp_PostOnce(&req, 2, 1024, NULL, NULL, NULL);
+    close(fd);
+    if (rc != PICO_HTTP_FAIL || retried) { fprintf(stderr, "non-idempotent image POST was replayed\n"); return 1; }
+    return 0;
+}
+
 int main(void)
 {
     setenv("NO_PROXY", "127.0.0.1", 1);
     curl_global_init(CURL_GLOBAL_DEFAULT);
     PicoHttp_HostStarted();
-    if (PICO_TEST_RUN(ResponseHeaderBlocks())) return 1;
+    if (PICO_TEST_RUN(ResponseHeaderBlocks()) || PICO_TEST_RUN(BoundedImagePost(false, false)) ||
+        PICO_TEST_RUN(BoundedImagePost(true, false)) || PICO_TEST_RUN(BoundedImagePost(false, true)) ||
+        PICO_TEST_RUN(ImagePostDoesNotRetry())) return 1;
     Result json = {0}, sse = {0}, stopped = {.abort = true};
     const char *error = "{\"error\":\"invalid data: bad event: request\"}";
     const char *events = "event: first\r\ndata: {\"a\":1}\r\n\r\ndata: {\"b\":\n"

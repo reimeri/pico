@@ -8,6 +8,12 @@
 
 #include "pico/http.h"
 
+/* Shared by the provider and builtin image tool; implemented in openai.c. */
+struct PicoAgentContext;
+struct PicoAuthEntry;
+bool pico_openai_refresh_oauth(struct PicoAgentContext *ctx, struct PicoAuthEntry *auth,
+                               PicoHttpCancelFn cancel, void *user, bool force);
+
 typedef struct PicoOpenAiPkce {
     char verifier[87];
     char challenge[44];

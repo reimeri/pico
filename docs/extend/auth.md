@@ -71,6 +71,10 @@ This builtin mechanism is private; it does **not** permit user `.so` auth
 extensions to leave their own threads running across frames. See
 [contracts](contracts.md#threads).
 
+The builtin [`generate_image`](image-generation.md) also uses the selected OpenAI
+OAuth login, including coordinated expiry/401 refresh. It never falls back to an
+API key and makes separate subscription-backed image requests.
+
 ## Store
 
 - Main thread: `pico_auth_copy(host, name, &e)`.

@@ -4,6 +4,10 @@ Pico can send images to a vision-capable model in user attachments, browser
 observations, and tool results. Displaying a file in another application, or
 printing its filename/base64 with `sh`, does not attach visual content.
 
+For generating/editing images with ChatGPT login, see
+[`generate_image`](image-generation.md). It saves to an explicit caller-owned path
+and can return an image using the same preview/ownership contracts below.
+
 ## Local files: `view_image`
 
 The builtin tool accepts one file:

@@ -22,6 +22,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits and capacity eviction
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
 - `images` — local `view_image`, native formats, unchanged bytes, limits, and animated WebP
+- `image-generation` — ChatGPT-login image generation/editing, explicit output paths, previews, and usage
 - `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, model-visible observations, agent input, developer inspection, evaluation, and viewport control
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
@@ -69,6 +70,7 @@ The JSON profiles are examples only. Copy or adapt them under `$XDG_CONFIG_HOME/
 These are the in-app implementations, shipped for reading. They are not loaded from this folder.
 
 - [`../../builtins/image.c`](../../builtins/image.c) — `view_image` (compiled builtin, not an extension template)
+- [`../../builtins/openai_image.c`](../../builtins/openai_image.c) — `generate_image` using ChatGPT OAuth (compiled builtin)
 - [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`
 - [`../../builtins/background.c`](../../builtins/background.c) — `run_background` / `kill_background` / `list_background` / `log_background` (uses [`../../builtins/background_model.c`](../../builtins/background_model.c))
 - [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c) and [`../../builtins/openai_auth.c`](../../builtins/openai_auth.c))

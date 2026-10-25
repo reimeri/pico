@@ -536,6 +536,8 @@ typedef struct BodyCtx
     void *user;
     JsonBuf acc;
     bool received;
+    size_t max_body;
+    bool too_large;
 } BodyCtx;
 
 static bool BodyCancelled(BodyCtx *c)
@@ -552,8 +554,12 @@ static size_t OnBody(char *ptr, size_t size, size_t nmemb, void *userdata)
     {
         return 0;
     }
+    if (c->max_body && n > c->max_body - c->acc.len) {
+        c->too_large = true;
+        return 0;
+    }
     JsonBuf_Append(&c->acc, ptr, n);
-    return BodyCancelled(c) ? 0 : n;
+    return BodyCancelled(c) || c->acc.failed ? 0 : n;
 }
 
 static size_t OnBodyHeader(char *ptr, size_t size, size_t nmemb, void *userdata)
@@ -575,8 +581,8 @@ static int OnBodyXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_
     return BodyCancelled((BodyCtx *)clientp) ? 1 : 0;
 }
 
-static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, char **out_body,
-                           char **out_error)
+static int BufferedRequest(const PicoHttpReq *req, bool get, long timeout, size_t max_body,
+                           bool single_attempt, long *out_http, char **out_body, char **out_error)
 {
     if (out_http)
     {
@@ -603,6 +609,7 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     memset(&ctx, 0, sizeof(ctx));
     ctx.cancel = req->cancel;
     ctx.user = req->user;
+    ctx.max_body = max_body;
     JsonBuf_Init(&ctx.acc);
 
     CURL *curl = HttpAcquire();
@@ -645,14 +652,16 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnBodyXfer);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, single_attempt ? 0L : 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Pico/" PICO_VERSION);
 
     char error[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
-    CURLcode rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
-                                     req->user, error, NULL, NULL);
+    CURLcode rc = BodyCancelled(&ctx) ? CURLE_ABORTED_BY_CALLBACK :
+        single_attempt ? curl_easy_perform(curl) :
+        PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
+                           req->user, error, NULL, NULL);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -671,11 +680,13 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
     }
     if (rc != CURLE_OK)
     {
-        JsonBuf_Free(&ctx.acc);
         if (out_error)
         {
-            *out_error = JsonDup(error[0] ? error : curl_easy_strerror(rc));
+            *out_error = JsonDup(ctx.too_large ? "HTTP response exceeds the configured byte limit" :
+                                 ctx.acc.failed ? "Out of memory buffering HTTP response" :
+                                 error[0] ? error : curl_easy_strerror(rc));
         }
+        JsonBuf_Free(&ctx.acc);
         return PICO_HTTP_FAIL;
     }
     if (out_body)
@@ -691,12 +702,18 @@ static int BufferedRequest(const PicoHttpReq *req, bool get, long *out_http, cha
 
 int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error)
 {
-    return BufferedRequest(req, false, out_http, out_body, out_error);
+    return BufferedRequest(req, false, 30, 0, false, out_http, out_body, out_error);
 }
 
 int pico_http_get(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error)
 {
-    return BufferedRequest(req, true, out_http, out_body, out_error);
+    return BufferedRequest(req, true, 30, 0, false, out_http, out_body, out_error);
+}
+
+int PicoHttp_PostOnce(const PicoHttpReq *req, long timeout_seconds, size_t max_body,
+                      long *out_http, char **out_body, char **out_error)
+{
+    return BufferedRequest(req, false, timeout_seconds, max_body, true, out_http, out_body, out_error);
 }
 
 static void FormPct(JsonBuf *b, const char *s)

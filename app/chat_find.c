@@ -232,14 +232,15 @@ void PicoChatFind_Render(PicoHost *app)
     if (f->search.failed) snprintf(f->counter, sizeof(f->counter), "Unavailable");
     else if (f->field.length) snprintf(f->counter, sizeof(f->counter), "%d of %d", f->search.active + 1, f->search.count);
     else snprintf(f->counter, sizeof(f->counter), "0 of 0");
-    float width = fminf(440, fmaxf(160, Clay_GetLayoutDimensions().width - 24));
+    float width = fminf(440, fmaxf(160, PicoHost_MainColumnWidth(app) - 24));
     float field_width = fmaxf(20, width - 200);
     const char *query = f->field.text ? f->field.text : "";
     PicoTextField_KeepCaretVisible(&f->field, field_width - 14.0f, FONT_REGULAR);
     CLAY(CLAY_ID("ChatFind"),
-         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 30,
-                       .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP, .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
-                       .offset = {.x = -12, .y = 12}},
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID, .parentId = CLAY_ID("MainColumn").id,
+                       .zIndex = 30,
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP},
+                       .offset = {.x = 12, .y = 12}},
           .layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .padding = CLAY_PADDING_ALL(6), .childGap = 4,
                      .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(40)},
                      .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}},

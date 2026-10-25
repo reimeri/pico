@@ -1292,9 +1292,9 @@ done_host:
     return rc;
 }
 
-static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
+static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float viewport_width)
 {
-    const Clay_Dimensions viewport = {1714, 1392};
+    const Clay_Dimensions viewport = {viewport_width, 1392};
     const int frames = 400;
     Clay_Context *previous = Clay_GetCurrentContext();
     PicoHost host;
@@ -1408,13 +1408,6 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
         }
 
         Clay_ElementData find = Clay_GetElementData(CLAY_ID("ChatFind"));
-        if (find.found != host.find.open || (find.found &&
-            (find.boundingBox.x < 0 || find.boundingBox.y < 0 ||
-             find.boundingBox.x + find.boundingBox.width > viewport.width)))
-        {
-            Fail("floating chat find must remain within the viewport without resizing panes");
-            break;
-        }
         Clay_ElementData browser = Clay_GetElementData(CLAY_ID("BrowserPane"));
         Clay_ElementData web_toggle = Clay_GetElementData(with_browser ? CLAY_ID("BrowserCollapse") : CLAY_ID("BrowserExpand"));
         Clay_ElementData surface = Clay_GetElementData(CLAY_ID("BrowserSurface"));
@@ -1446,6 +1439,16 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser)
             !composer.found || !footer.found || (with_sidebar && !sidebar.found))
         {
             Fail("production shell panes were not laid out");
+            break;
+        }
+        if (find.found != host.find.open || (find.found &&
+            (find.boundingBox.x < main.boundingBox.x ||
+             find.boundingBox.x + find.boundingBox.width > main.boundingBox.x + main.boundingBox.width ||
+             find.boundingBox.x + find.boundingBox.width * 0.5f > main.boundingBox.x + main.boundingBox.width * 0.5f ||
+             !ShellVerticallyContains(main.boundingBox, find.boundingBox) ||
+             find.boundingBox.y + find.boundingBox.height * 0.5f > main.boundingBox.y + main.boundingBox.height * 0.5f)))
+        {
+            Fail("floating chat find must stay in the chat pane's top-left, clear of sidebar and browser controls");
             break;
         }
         if (fabsf(root.boundingBox.y) > 0.001f ||
@@ -2614,15 +2617,18 @@ static int RunBrowserViewportCase(bool with_sidebar);
 
 static int TestBottomFollowShellGeometryStable(void)
 {
-    if (RunShellStabilityCase(false, false) != 0)
+    if (RunShellStabilityCase(false, false, 1714) != 0)
     {
         return 1;
     }
-    if (RunShellStabilityCase(true, false) != 0)
+    if (RunShellStabilityCase(true, false, 1714) != 0)
     {
         return 1;
     }
-    if (RunShellStabilityCase(false, true) != 0 || RunShellStabilityCase(true, true) != 0)
+    if (RunShellStabilityCase(false, true, 1714) != 0 || RunShellStabilityCase(true, true, 1714) != 0)
+        return 1;
+    /* The find bar must also fit when the sidebar and browser narrow the chat. */
+    if (RunShellStabilityCase(true, true, 1000) != 0)
         return 1;
     if (RunChatRetainedSpacerCase(false) != 0)
     {

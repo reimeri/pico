@@ -17416,6 +17416,70 @@ static void InteractionFixtureFree(InteractionFixture *f)
     RmRf(f->dir); RmRf(f->cfg);
 }
 
+/* Acknowledging older inbox sessions must not make them newer than the
+ * selected conversation. Cover live and offline acknowledgements together. */
+static int TestSidebarInboxKeepsSessionOrder(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    PicoAgentId live_inbox_id = 0;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f)) goto done;
+    phase = "older conversations";
+    for (int i = 0; i < 3; i++)
+    {
+        PicoAgentId id = 0;
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+            .session_start = PICO_SESSION_NEW};
+        if (pico_main_agent_create(f.host, f.workspace, &options, &id) != PICO_OK) goto done;
+        if (i == 0) live_inbox_id = id;
+        PicoAgent *agent = PicoHost_FindAgent(f.host, id);
+        if (PicoSession_LogUser(f.host, agent, "Older conversation", "Older conversation", NULL) != PICO_SESSION_WRITE_OK ||
+            PicoSession_LogInboxPending(f.host, agent, true) != PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(f.host, agent)) goto done;
+        struct timespec older[2] = {{.tv_sec = 1700000000 + i}, {.tv_sec = 1700000000 + i}};
+        if (utimensat(AT_FDCWD, agent->session_path, older, 0) != 0 ||
+            (i > 0 && pico_agent_close(f.host, id) != PICO_OK)) goto done;
+    }
+    phase = "selected conversation";
+    PicoAgent *selected = PicoHost_FindAgent(f.host, f.agent);
+    PicoSession_Start(f.host, selected, PICO_SESSION_NEW, NULL);
+    if (PicoSession_LogUser(f.host, selected, "Selected conversation", "Selected conversation", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, selected)) goto done;
+    /* Reconcile the historical activity dates, then let the sidebar adopt its
+     * normal asynchronous catalog snapshot. */
+    phase = "catalog snapshot";
+    PicoCatalogWorkspace *catalog = NULL;
+    int count = PicoCatalog_Scan(&catalog);
+    PicoCatalog_Free(catalog, count);
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_RenderCommand *label = FindCardText(&commands, "Selected conversation");
+    if (!label || !Clay_GetElementData(CLAY_IDI("SidebarInbox", 2)).found) goto done;
+    float selected_y = label->boundingBox.y;
+    phase = "clear inbox";
+    int cleared_snapshot = g_catalog_snapshot_done_calls + 1;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarInboxDone"))) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL) ||
+        !DrainSessionForAssertion(f.host, PicoHost_FindAgent(f.host, live_inbox_id))) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, cleared_snapshot)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    label = FindCardText(&commands, "Selected conversation");
+    good = label && label->boundingBox.y == selected_y &&
+           pico_agent_active(f.host) == f.agent &&
+           !Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found;
+done:
+    InteractionFixtureFree(&f);
+    if (!good)
+    {
+        fprintf(stderr, "inbox session order phase: %s\n", phase);
+        Fail("clearing older inbox sessions must leave the selected conversation in the same sidebar position");
+    }
+    return good ? 0 : 1;
+}
+
 static int TestChatLinkWorkspacePaths(void)
 {
     InteractionFixture f = {0};
@@ -19139,6 +19203,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(false)) ||
         PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(true))) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
+    if (PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_TOGGLE)) != 0 ||

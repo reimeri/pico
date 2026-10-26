@@ -369,6 +369,19 @@ static long StatCtimeNsec(const struct stat *st)
 #endif
 }
 
+/* Session mtime is the durable recency key used by the sidebar, /resume,
+ * and resume-last. Bookkeeping still changes ctime/size (or inode for a title
+ * rewrite), so preserving mtime does not hide it from catalog reconciliation.
+ * Call only under the session writer lock, before syncing/publishing the file. */
+static bool SessionRestoreMtime(int fd, const struct stat *st)
+{
+    struct timespec times[2] = {
+        {.tv_nsec = UTIME_OMIT},
+        {.tv_sec = st->st_mtime, .tv_nsec = StatMtimeNsec(st)},
+    };
+    return futimens(fd, times) == 0;
+}
+
 static void CopyStatToCatalog(PicoCatalogSession *session, const struct stat *st)
 {
     if (!session || !st)
@@ -554,6 +567,34 @@ static bool SyncParentDir(const char *path)
     return ok;
 }
 
+/* Persist workers coalesce records. Preserve recency only when every record
+ * is bookkeeping; a mixed batch must still count its conversation activity.
+ * Unknown/malformed records conservatively count as activity. */
+static bool SessionAppendChangesRecency(const char *json)
+{
+    for (const char *line = json; *line;)
+    {
+        size_t len = strcspn(line, "\n");
+        if (len)
+        {
+            JsonDoc doc;
+            if (JsonParse(&doc, line, len) != 0) return true;
+            int type = JsonObjGet(&doc, 0, "type");
+            bool bookkeeping = JsonEq(&doc, type, "inbox_pending") ||
+                               JsonEq(&doc, type, "unseen_complete") ||
+                               JsonEq(&doc, type, "model_change") ||
+                               JsonEq(&doc, type, "title") ||
+                               JsonEq(&doc, type, "usage") ||
+                               JsonEq(&doc, type, "custom");
+            JsonFree(&doc);
+            if (!bookkeeping) return true;
+        }
+        line += len;
+        if (*line) line++;
+    }
+    return false;
+}
+
 static bool WriteLineAtPath(const char *session_path, const char *json, bool write_catalog,
                             PicoAgentKind kind, PicoSessionPersistence persistence,
                             const char *session_id, const char *workspace_path,
@@ -599,16 +640,19 @@ static bool WriteLineAtPath(const char *session_path, const char *json, bool wri
     {
         original_size = lseek(fd, 0, SEEK_END);
         have_previous_stat = fstat(fd, &previous_stat) == 0;
-        size_t len = strlen(json);
-        if (SessionTestFail("append_write") || !PicoIO_WriteAll(fd, json, len) ||
-            !PicoIO_WriteAll(fd, "\n", 1) || fsync(fd) != 0)
+        if (original_size < 0 || !have_previous_stat)
+            failure = errno ? errno : EIO;
+        else if (SessionTestFail("append_write") || !PicoIO_WriteAll(fd, json, strlen(json)) ||
+                 !PicoIO_WriteAll(fd, "\n", 1) ||
+                 (!SessionAppendChangesRecency(json) && !SessionRestoreMtime(fd, &previous_stat)) ||
+                 fsync(fd) != 0)
         {
             failure = errno ? errno : EIO;
-            if (original_size >= 0)
-            {
-                int rollback_result = ftruncate(fd, original_size);
-                (void)rollback_result;
-            }
+            /* A rolled-back write is not conversation activity either. Keep
+             * the original error even if the best-effort rollback also fails. */
+            bool rolled_back = ftruncate(fd, original_size) == 0 &&
+                               SessionRestoreMtime(fd, &previous_stat) && fsync(fd) == 0;
+            (void)rolled_back;
         }
         if (close(fd) != 0 && failure == 0)
         {
@@ -1822,7 +1866,8 @@ static PicoSessionReplay *ReplayPrepareBefore(const char *path, PicoAgentKind ki
         else if (ok)
             /* A valid record without its delimiter must survive continuation. */
             ok = lseek(fd, 0, SEEK_END) >= 0 && PicoIO_WriteAll(fd, "\n", 1);
-        if (ok) ok = !SessionTestFail("replay_after_repair") && fsync(fd) == 0;
+        if (ok) ok = SessionRestoreMtime(fd, &read_stat) &&
+                     !SessionTestFail("replay_after_repair") && fsync(fd) == 0;
         if (fd >= 0 && close(fd) != 0) ok = false;
         if (!ok)
         {
@@ -3413,6 +3458,11 @@ static bool RewriteSessionTitleAtPath(const char *session_path, const char *titl
     }
 
     have_previous_stat = stat(session_path, &previous_stat) == 0;
+    if (!have_previous_stat)
+    {
+        failure = errno ? errno : EIO;
+        goto done;
+    }
     src = fopen(session_path, "rb");
     if (!src)
     {
@@ -3473,7 +3523,8 @@ static bool RewriteSessionTitleAtPath(const char *session_path, const char *titl
     if (!PicoIO_WriteAll(fd, header, strlen(header)) || !PicoIO_WriteAll(fd, "\n", 1) ||
         !CopyRemainder(src, fd) || SessionTestFail("title_after_copy") ||
         !PicoIO_WriteAll(fd, event_line, strlen(event_line)) ||
-        !PicoIO_WriteAll(fd, "\n", 1) || SessionTestFail("title_fsync") || fsync(fd) != 0)
+        !PicoIO_WriteAll(fd, "\n", 1) || !SessionRestoreMtime(fd, &previous_stat) ||
+        SessionTestFail("title_fsync") || fsync(fd) != 0)
     {
         failure = errno ? errno : EIO;
         goto done;

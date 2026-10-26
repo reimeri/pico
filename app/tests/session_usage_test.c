@@ -3348,6 +3348,181 @@ static int TestInboxPendingRoundTrip(void)
     return 0;
 }
 
+/* Bookkeeping must stay durable and visible without making an older
+ * conversation more recent. Filesystem dates stand in for past activity. */
+static int TestSessionBookkeepingPreservesRecency(void)
+{
+    char dir[] = "/tmp/pico-recency-XXXXXX";
+    PicoHost host = {0};
+    PicoWorkspace workspace = {.host = &host};
+    PicoAgent older = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+    PicoAgent newer = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+    PicoSessionInfo *listed = NULL;
+    const char *failure = "recency fixture";
+    if (!mkdtemp(dir)) return Fail(failure);
+    snprintf(workspace.path, sizeof(workspace.path), "%s", dir);
+    host.workspaces[0] = &workspace; host.workspace_count = 1;
+    if (PicoSession_LogUser(&host, &older, "Older", "Older", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(&host, &newer, "Newer", "Newer", NULL) != PICO_SESSION_WRITE_OK) goto done;
+    struct timespec past[2] = {{.tv_sec = 1700000000, .tv_nsec = 123456789},
+                              {.tv_sec = 1700000000, .tv_nsec = 123456789}};
+    if (utimensat(AT_FDCWD, older.session_path, past, 0)) goto done;
+    past[0].tv_sec++; past[1].tv_sec++;
+    if (utimensat(AT_FDCWD, newer.session_path, past, 0)) goto done;
+    int count = PicoSession_List(&workspace, &listed, true);
+    if (count != 2 || strcmp(listed[0].id, newer.session_id)) goto done;
+    time_t activity_time = listed[1].mtime;
+    long activity_nsec = listed[1].mtime_nsec;
+    free(listed); listed = NULL;
+    const char *operations[] = {"inbox flag", "completion flag", "read marker",
+        "inbox acknowledgement", "title edit", "model setting", "token accounting", "extension state"};
+    for (size_t i = 0; i < sizeof(operations) / sizeof(operations[0]); i++)
+    {
+        failure = operations[i];
+        PicoSessionWriteResult result = PICO_SESSION_WRITE_FAILED;
+        switch (i)
+        {
+            case 0: result = PicoSession_LogInboxPending(&host, &older, true); break;
+            case 1: result = PicoSession_LogUnseenComplete(&host, &older, true); break;
+            case 2: result = PicoSession_LogUnseenComplete(&host, &older, false); break;
+            case 3: result = PicoCatalog_SetInboxPending(dir, older.session_id, false) == 0
+                                ? PICO_SESSION_WRITE_OK : PICO_SESSION_WRITE_FAILED; break;
+            case 4: result = PicoSession_LogTitle(&host, &older, "Renamed"); break;
+            case 5: result = PicoSession_LogModelChange(&host, &older, "changed-model", "high"); break;
+            case 6: result = PicoSession_LogUsage(&host, &older, 100, 0, false, "", false); break;
+            case 7: result = PicoSession_LogCustom(&host, &older, "example", "{}"); break;
+        }
+        count = PicoSession_List(&workspace, &listed, true);
+        if (result != PICO_SESSION_WRITE_OK || count != 2 ||
+            strcmp(listed[0].id, newer.session_id) || strcmp(listed[1].id, older.session_id) ||
+            listed[1].mtime != activity_time || listed[1].mtime_nsec != activity_nsec) goto done;
+        free(listed); listed = NULL;
+    }
+    failure = "bookkeeping must still refresh catalog metadata";
+    count = PicoSession_List(&workspace, &listed, true);
+    if (count != 2 || strcmp(listed[1].title, "Renamed") ||
+        strcmp(listed[1].model, "changed-model") || listed[1].inbox_pending || listed[1].unseen_complete) goto done;
+    free(listed); listed = NULL;
+    failure = "new conversation activity must advance recency";
+    if (PicoSession_LogAssistant(&host, &older, 0, "New reply", NULL, NULL, NULL, NULL, 0) != PICO_SESSION_WRITE_OK)
+        goto done;
+    count = PicoSession_List(&workspace, &listed, true);
+    if (count != 2 || strcmp(listed[0].id, older.session_id)) goto done;
+    failure = NULL;
+done:
+    free(listed);
+    unlink(older.session_path); unlink(newer.session_path); rmdir(dir);
+    return failure ? Fail(failure) : 0;
+}
+
+/* Hold a different session's write so the queued records form one batch.
+ * Metadata-only batches keep their place; activity inside a mixed batch wins. */
+static int TestQueuedSessionRecency(bool conversation)
+{
+    char dir[] = "/tmp/pico-queued-recency-XXXXXX";
+    PicoHost host = {0};
+    PicoWorkspace workspace = {.host = &host};
+    PicoAgent older = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE, .id = 81};
+    PicoAgent newer = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE, .id = 82};
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool blocked = false, good = false;
+    PicoSessionInfo *listed = NULL;
+    if (!mkdtemp(dir)) return Fail("queued recency fixture");
+    snprintf(workspace.path, sizeof(workspace.path), "%s", dir);
+    host.workspaces[0] = &workspace; host.workspace_count = 1;
+    workspace.agents[0] = &older; workspace.agents[1] = &newer; workspace.count = 2;
+    if (PicoSession_LogUser(&host, &older, "Older", "Older", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(&host, &newer, "Newer", "Newer", NULL) != PICO_SESSION_WRITE_OK ||
+        pipe(ready) || pipe(proceed)) goto done;
+    struct timespec past[2] = {{.tv_sec = 1700000000}, {.tv_sec = 1700000000}};
+    if (utimensat(AT_FDCWD, older.session_path, past, 0)) goto done;
+    past[0].tv_sec++; past[1].tv_sec++;
+    if (utimensat(AT_FDCWD, newer.session_path, past, 0)) goto done;
+    PicoSessionPersist_Init(&host);
+    if (!host.persist_ready) goto done;
+    g_catalog_ready_fd = ready[1]; g_catalog_continue_fd = proceed[0];
+    if (PicoSession_LogInboxPending(&host, &newer, true) != PICO_SESSION_WRITE_OK) goto done;
+    blocked = true;
+    if (!TransferByte(ready[0], false) ||
+        PicoSession_LogInboxPending(&host, &older, true) != PICO_SESSION_WRITE_OK ||
+        (conversation && PicoSession_LogUser(&host, &older, "Continued", "Continued", NULL) != PICO_SESSION_WRITE_OK) ||
+        PicoSession_LogInboxPending(&host, &older, false) != PICO_SESSION_WRITE_OK) goto done;
+    if (!TransferByte(proceed[1], true)) goto done;
+    blocked = false;
+    if (!PicoSession_DrainPersistBefore(&host, &older, NULL) ||
+        !PicoSession_DrainPersistBefore(&host, &newer, NULL)) goto done;
+    int count = PicoSession_List(&workspace, &listed, true);
+    good = count == 2 && !strcmp(listed[0].id, conversation ? older.session_id : newer.session_id) &&
+           !listed[conversation ? 0 : 1].inbox_pending;
+done:
+    if (blocked) (void)TransferByte(proceed[1], true);
+    PicoSessionPersist_Shutdown(&host);
+    g_catalog_ready_fd = g_catalog_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
+    free(listed);
+    unlink(older.session_path); unlink(newer.session_path); rmdir(dir);
+    return good ? 0 : Fail("queued metadata and conversation writes must retain their recency semantics");
+}
+
+/* Neither a rejected append nor repairing a crash-torn delimiter/prefix
+ * constitutes new conversation activity. Resume ordering must stay intact. */
+static int TestSessionRecoveryKeepsRecency(void)
+{
+    char dir[] = "/tmp/pico-recovery-recency-XXXXXX";
+    PicoHost host = {0};
+    PicoWorkspace workspace = {.host = &host};
+    PicoAgent older = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+    PicoAgent newer = {.workspace = &workspace, .persistence = PICO_SESSION_DURABLE};
+    PicoSessionInfo *listed = NULL;
+    bool good = false;
+    if (!mkdtemp(dir)) return Fail("recovery recency fixture");
+    snprintf(workspace.path, sizeof(workspace.path), "%s", dir);
+    host.workspaces[0] = &workspace; host.workspace_count = 1;
+    if (PicoSession_LogUser(&host, &older, "Older", "Older", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUser(&host, &newer, "Newer", "Newer", NULL) != PICO_SESSION_WRITE_OK) goto done;
+    struct timespec past[2] = {{.tv_sec = 1700000000}, {.tv_sec = 1700000000}};
+    if (utimensat(AT_FDCWD, newer.session_path, past, 0)) goto done;
+    past[0].tv_sec--; past[1].tv_sec--;
+    const char *tails[] = {NULL, "{\"type\":", "{\"type\":\"message\",\"role\":\"user\",\"content\":\"intact\"}"};
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++)
+    {
+        if (tails[i])
+        {
+            FILE *f = fopen(older.session_path, "ab");
+            if (!f) goto done;
+            fputs(tails[i], f); fclose(f);
+        }
+        if (utimensat(AT_FDCWD, older.session_path, past, 0)) goto done;
+        if (!tails[i])
+        {
+            g_session_fail_stage = "append_write";
+            PicoSessionWriteResult result = PicoSession_LogUser(&host, &older, "Rejected", "Rejected", NULL);
+            g_session_fail_stage = NULL;
+            if (result != PICO_SESSION_WRITE_FAILED) goto done;
+        }
+        else
+        {
+            PicoSessionReplay *replay = PicoSession_ReplayPrepare(&host, older.session_path, PICO_AGENT_MAIN);
+            if (!replay) goto done;
+            PicoSession_ReplayFree(replay);
+        }
+        int count = PicoSession_List(&workspace, &listed, true);
+        bool same_order = count == 2 && !strcmp(listed[0].id, newer.session_id);
+        free(listed); listed = NULL;
+        if (!same_order) goto done;
+    }
+    good = true;
+done:
+    g_session_fail_stage = NULL;
+    free(listed);
+    unlink(older.session_path); unlink(newer.session_path); rmdir(dir);
+    return good ? 0 : Fail("failed writes and tail repair must not reorder conversations");
+}
+
 static int TestCatalogOmitsMissingPath(void)
 {
     char ws[] = "/tmp/pico-catalog-gone-XXXXXX";
@@ -4521,6 +4696,10 @@ int main(void)
         PICO_TEST_RUN(TestCatalogCacheCoversOlderSessions()) != 0 ||
         PICO_TEST_RUN(TestUnseenCompleteRoundTrip()) != 0 ||
         PICO_TEST_RUN(TestInboxPendingRoundTrip()) != 0 ||
+        PICO_TEST_RUN(TestSessionBookkeepingPreservesRecency()) != 0 ||
+        PICO_TEST_RUN(TestQueuedSessionRecency(false)) != 0 ||
+        PICO_TEST_RUN(TestQueuedSessionRecency(true)) != 0 ||
+        PICO_TEST_RUN(TestSessionRecoveryKeepsRecency()) != 0 ||
         PICO_TEST_RUN(TestCatalogOmitsMissingPath()) != 0 || PICO_TEST_RUN(TestModelResumeReplay()) != 0 ||
         PICO_TEST_RUN(TestQueuedModelChangeOrdersUserWrite()) != 0 || PICO_TEST_RUN(TestQueuedModelChangeFailureThenDrain()) != 0 ||
         PICO_TEST_RUN(TestQueuedModelChangeCreatesHeaderPerAgent()) != 0 ||

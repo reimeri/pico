@@ -14,6 +14,7 @@
 #include "include/wrapper/cef_closure_task.h"
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <map>
@@ -129,6 +130,18 @@ public:
     unsigned delivered_events = 0, events_in_action = 0;
     int capture_message = 0;
     uint64_t capture_navigation = 0, capture_viewport = 0;
+    static constexpr int kCaptureDeadlineMs = 30000;
+    static constexpr int kPaintRetryMs = 1000;
+    uint64_t paint_wait_generation = 0;
+    unsigned paint_retries = 0;
+    // UI-thread-only request telemetry. Log transitions, never individual frames
+    // or input events; counters still reveal whether those callbacks progressed.
+    using CaptureClock = std::chrono::steady_clock;
+    CaptureClock::time_point capture_started{}, phase_started{};
+    const char* capture_phase = "begin";
+    bool capture_actions = false;
+    uint64_t view_paints = 0, popup_paints = 0, compositor_replies = 0;
+    uint64_t rejected_view_paints = 0;
     std::vector<PbCommand> steps;
     size_t step_index = 0;
     unsigned completed = 0, held_buttons = 0;
@@ -211,8 +224,55 @@ public:
         }
         held_buttons = 0; held_keys.clear();
     }
+    void TraceCapture(const char* event, const char* phase = nullptr, const char* outcome = nullptr) {
+        if (!request) return;
+        auto now = CaptureClock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_started).count();
+        auto phase_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - phase_started).count();
+        if (phase) {
+            capture_phase = phase; phase_started = now;
+        }
+        auto data = CefDictionaryValue::Create();
+        data->SetString("request_id", browser_inspection::Hex(request));
+        data->SetString("operation", capture_actions ? "act" : "observe");
+        data->SetString("event", event); data->SetString("phase", capture_phase);
+        data->SetDouble("elapsed_ms", elapsed); data->SetDouble("phase_elapsed_ms", phase ? 0 : phase_elapsed);
+        if (phase && strcmp(event, "begin")) data->SetDouble("previous_phase_ms", phase_elapsed);
+        if (outcome) data->SetString("outcome", outcome);
+        data->SetBool("loading", browser && browser->IsLoading()); data->SetBool("visible", visible);
+        data->SetInt("width", width); data->SetInt("height", height);
+        data->SetString("viewport", browser_inspection::Hex(viewport));
+        data->SetBool("capture_ready", capture_ready); data->SetBool("priming_capture", priming_capture);
+        data->SetBool("capturing", capturing); data->SetBool("fresh_view", fresh_view);
+        data->SetBool("fresh_popup", fresh_popup); data->SetBool("popup_shown", popup_shown);
+        data->SetBool("compositor_pending", capture_message != 0); data->SetBool("input_pending", input_message != 0);
+        data->SetDouble("view_paints", view_paints); data->SetDouble("popup_paints", popup_paints);
+        data->SetDouble("rejected_view_paints", rejected_view_paints);
+        data->SetDouble("compositor_replies", compositor_replies);
+        data->SetInt("paint_retries", paint_retries);
+        data->SetInt("completed_actions", completed); data->SetInt("delivered_events", delivered_events);
+        data->SetBool("delivery_uncertain", uncertain);
+        inspector.log->Append("capture", navigation, data);
+    }
+    std::string CaptureTimeout() {
+        auto now = CaptureClock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_started).count();
+        auto phase_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - phase_started).count();
+        char text[384];
+        snprintf(text, sizeof(text),
+                 " [capture request=%llx phase=%s elapsed_ms=%lld phase_ms=%lld paint_retries=%u loading=%d visible=%d size=%dx%d "
+                 "view_paints=%llu popup_paints=%llu rejected_view_paints=%llu compositor_pending=%d input_pending=%d fresh_view=%d fresh_popup=%d popup_shown=%d]",
+                 static_cast<unsigned long long>(request), capture_phase, static_cast<long long>(elapsed),
+                 static_cast<long long>(phase_elapsed), paint_retries, browser && browser->IsLoading(), visible, width, height,
+                 static_cast<unsigned long long>(view_paints), static_cast<unsigned long long>(popup_paints),
+                 static_cast<unsigned long long>(rejected_view_paints), capture_message != 0, input_message != 0,
+                 fresh_view, fresh_popup, popup_shown);
+        return text;
+    }
     void Finish(const std::string& error, const std::vector<unsigned char>& png = {}) {
         if (!request) return;
+        ++paint_wait_generation;
+        TraceCapture("finish", nullptr, error.empty() ? "success" : "error");
         PbObservation info{};
         info.request = request; info.navigation = navigation; info.viewport = viewport;
         info.completed = completed; info.delivered_events = delivered_events;
@@ -229,8 +289,10 @@ public:
     }
     void Interrupt(const std::string& error) {
         if (!request) return;
+        ++paint_wait_generation;
         action_error = error; interrupted = true; priming_capture = capturing = capture_ready = false;
         capture_message = 0;
+        TraceCapture("interrupted");
         if (!input_message) Cleanup();
     }
     void Cleanup() {
@@ -244,14 +306,52 @@ public:
         }
         Step();
     }
+    void SchedulePaintRetry() {
+        // Chromium can strand its low-priority automatic refreshes after a
+        // failed resize readback. Reissue only the missing high-priority paint
+        // demand: never replay input, restart the fence, or bypass paint freshness checks.
+        const auto generation = paint_wait_generation;
+        CefPostDelayedTask(TID_UI, base::BindOnce([](uint64_t token, uint64_t id, uint64_t generation,
+                                                   uint64_t nav, uint64_t vp) {
+            auto found = pages.find(token);
+            if (found == pages.end()) return;
+            auto page = found->second;
+            if (!page->request || page->request != id || page->paint_wait_generation != generation ||
+                !page->browser || stopping || page->failed || page->close_requested || page->interrupted ||
+                !page->capture_ready || page->capture_message || page->input_message ||
+                page->navigation != nav || page->viewport != vp || page->browser->IsLoading() ||
+                CaptureClock::now() - page->capture_started >= std::chrono::milliseconds(kCaptureDeadlineMs)) return;
+            const bool initial_paint = page->priming_capture && !page->capturing;
+            if (!initial_paint && !page->capturing) return;
+            const bool missing_view = initial_paint || !page->fresh_view;
+            const bool missing_popup = !initial_paint && page->popup_shown && !page->fresh_popup;
+            if (!missing_view && !missing_popup) return;
+            ++page->paint_retries;
+            page->TraceCapture("paint_retry");
+            if (missing_popup) page->browser->GetHost()->Invalidate(PET_POPUP);
+            if (missing_view) page->browser->GetHost()->Invalidate(PET_VIEW);
+            // Invalidate is asynchronous, but don't let a completed/replaced
+            // attempt create a second chain if a callback ran in the meantime.
+            if (page->request == id && page->paint_wait_generation == generation)
+                page->SchedulePaintRetry();
+        }, token, request, generation, navigation, viewport), kPaintRetryMs);
+    }
     void Capture() {
-        if (!request || !browser || !capture_ready || browser->IsLoading() || capture_message) return;
+        if (!request || !browser || !capture_ready || capture_message) return;
+        ++paint_wait_generation;
+        if (browser->IsLoading()) {
+            if (strcmp(capture_phase, "waiting_load")) TraceCapture("phase", "waiting_load");
+            return;
+        }
         capturing = false; fresh_view = false; fresh_popup = !popup_shown;
         priming_capture = true;
+        TraceCapture("phase", "waiting_initial_paint");
+        SchedulePaintRetry();
         browser->GetHost()->Invalidate(PET_VIEW);
     }
     void CaptureFence() {
         if (!request || !capture_ready || !priming_capture || browser->IsLoading()) return;
+        ++paint_wait_generation;
         priming_capture = false;
         capture_navigation = navigation; capture_viewport = viewport;
         /* A compositor snapshot is a render fence, not the returned image.
@@ -260,14 +360,18 @@ public:
         auto params = CefDictionaryValue::Create(); params->SetString("format", "png");
         params->SetBool("fromSurface", true);
         capture_message = next_message++;
+        TraceCapture("phase", "waiting_compositor");
         if (!browser->GetHost()->ExecuteDevToolsMethod(capture_message, "Page.captureScreenshot", params))
             Finish("Could not synchronize the browser compositor.");
     }
     void Captured() {
         if (!request || !capturing || !fresh_view || !fresh_popup || browser->IsLoading()) return;
+        TraceCapture("phase", "composing");
         if (!Compose(&composite)) return;
+        TraceCapture("phase", "readback");
         std::vector<unsigned char> bitmap(static_cast<size_t>(width) * height * 4);
         if (!PbGpuRead(&gpu, &composite, bitmap.data())) { GpuFailure(gpu.error); return; }
+        TraceCapture("phase", "encoding");
         auto image = CefImage::CreateImage();
         if (!image->AddBitmap(1, width, height, CEF_COLOR_TYPE_RGBA_8888, CEF_ALPHA_TYPE_OPAQUE,
                               bitmap.data(), bitmap.size())) { Finish("Could not encode observation."); return; }
@@ -287,6 +391,10 @@ public:
         request = command.request; capture_ready = !actions; interrupted = releasing = uncertain = false;
         delivered_events = events_in_action = 0; completed = 0; step_index = 0; steps.clear(); action_error.clear();
         action_navigation = command.navigation; action_viewport = command.viewport;
+        capture_actions = actions; capture_started = phase_started = CaptureClock::now();
+        view_paints = popup_paints = rejected_view_paints = compositor_replies = 0;
+        paint_retries = 0;
+        TraceCapture("begin", actions ? "input" : "begin");
         if (actions && (!agent_control || navigation != command.navigation || viewport != command.viewport ||
                         observed_navigation != navigation || observed_viewport != viewport || command.x != width || command.y != height)) {
             Finish(!agent_control ? "Browser is under User control." : "Stale observation: observe again before acting."); return;
@@ -300,16 +408,20 @@ public:
                 bool input_active = unacknowledged || self->held_buttons || self->events_in_action;
                 for (const auto& [key, held] : self->held_keys) input_active = input_active || held;
                 self->uncertain = unacknowledged;
-                self->Finish(input_active ? "Input operation timed out. Browser closed to prevent late input; check delivery uncertainty." :
-                                             "Browser observation timed out; no application readiness is implied.");
+                self->TraceCapture("timeout");
+                std::string error = input_active ? "Input operation timed out. Browser closed to prevent late input; check delivery uncertainty." :
+                                                   "Browser observation timed out; no application readiness is implied.";
+                self->Finish(error + self->CaptureTimeout());
                 if (input_active && self->browser) self->browser->GetHost()->CloseBrowser(true);
             }
-        }, token, request), 30000);
+        }, token, request), kCaptureDeadlineMs);
         if (!actions) Capture();
     }
     void Changed() {
+        ++paint_wait_generation;
         fresh_view = fresh_popup = capturing = false;
         inspector.log->navigation.store(navigation);
+        TraceCapture("identity_changed");
     }
     bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                          CefRefPtr<CefRequest>, bool, bool) override {
@@ -317,8 +429,11 @@ public:
         return false;
     }
     void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool loading, bool, bool) override {
-        if (loading) { fresh_view = fresh_popup = false; }
-        else if (request && capture_ready && !input_message) Capture();
+        if (loading) { ++paint_wait_generation; fresh_view = fresh_popup = false; }
+        TraceCapture("loading_changed");
+        if (loading && request && capture_ready && !input_message && !capture_message && strcmp(capture_phase, "waiting_load"))
+            TraceCapture("phase", "waiting_load");
+        if (!loading && request && capture_ready && !input_message) Capture();
     }
     void Step() {
         if (!request || input_message || !browser) return;
@@ -387,10 +502,15 @@ public:
         if (inspector.Result(id, success, result, result_size)) return;
         if (!request) return;
         if (id == capture_message) {
+            ++compositor_replies;
             capture_message = 0;
+            TraceCapture("compositor_reply");
             if (!success) { Finish("Browser compositor synchronization failed: " + std::string(static_cast<const char*>(result), result_size)); return; }
             if (navigation != capture_navigation || viewport != capture_viewport || browser->IsLoading()) { Capture(); return; }
             capturing = true; fresh_view = false; fresh_popup = !popup_shown;
+            TraceCapture("phase", "waiting_fresh_paint");
+            ++paint_wait_generation;
+            SchedulePaintRetry();
             if (popup_shown) browser->GetHost()->Invalidate(PET_POPUP);
             browser->GetHost()->Invalidate(PET_VIEW); return;
         }
@@ -561,6 +681,7 @@ public:
         popup_shown = show;
         if (!show) { PbGpuCurrent(&gpu); PbGpuDestroy(&gpu, &popup); fresh_popup = true; }
         else fresh_popup = false;
+        TraceCapture("popup_changed");
         Publish(); Captured();
     }
     void OnPopupSize(CefRefPtr<CefBrowser>, const CefRect& rect) override { popup_rect = rect; }
@@ -573,7 +694,11 @@ public:
         if (!visible && !request && accelerated) return;
         const auto& rect = info.extra.visible_rect;
         int w = rect.width, h = rect.height;
-        if (type == PET_VIEW && (w != width || h != height)) return; // old resize in flight
+        if (request) { if (type == PET_VIEW) ++view_paints; else ++popup_paints; }
+        if (type == PET_VIEW && (w != width || h != height)) {
+            if (request) ++rejected_view_paints;
+            return; // old resize in flight
+        }
         if (rect.x < 0 || rect.y < 0 || w <= 0 || h <= 0 ||
             rect.x + w > info.extra.coded_size.width || rect.y + h > info.extra.coded_size.height ||
             info.plane_count < 1 || info.plane_count > PB_MAX_PLANES ||
@@ -701,6 +826,7 @@ void Command(PbCommand cmd) {
         break;
     case PB_VISIBLE:
         page->visible = cmd.a;
+        page->TraceCapture("visibility_changed");
         // Do not WasHidden(true): background sessions must keep making progress.
         host->SetWindowlessFrameRate(cmd.a ? 30 : 1);
         if (cmd.a) host->Invalidate(PET_VIEW);

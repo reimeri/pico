@@ -557,6 +557,16 @@ input. An unacknowledged input/release failure can close the page. Collapse and
 selection alone do not cancel; actual resize/navigation invalidates coordinates.
 Compositor synchronization precedes fresh OSR view/popup capture, not a sleep or
 network-idle heuristic. Application readiness still requires visual verification.
+An active observe/act request reissues missing paint demands once per second:
+the initial current-size view before compositor synchronization, then only
+still-missing view/shown-popup paints afterward, until completion or its original
+deadline. Recovery never repeats input or the compositor
+snapshot, reloads a page, changes frame rate, resets freshness or uses an old
+image. CEF-UI-thread delayed tasks validate request, paint-wait generation,
+navigation and viewport; cancellation, restart/loading/identity changes, finish
+and retirement invalidate obsolete work. No retries run while idle, loading,
+executing input or awaiting the compositor. This is paint recovery, not an
+application-readiness wait or an automatic retry of tool side effects.
 
 `browser_diagnostics` and `browser_inspect` (accessibility or selector-scoped DOM)
 require an existing page, work in both control modes, and do not require vision.
@@ -581,7 +591,20 @@ Reads use browser-scoped opaque cursors without consuming data. There is no ring
 buffer/size eviction; failures explicitly report incomplete collection. Snapshot
 copying uses a CEF file worker with a fixed journal end offset, not UI-thread bulk
 copying. Resource callbacks only share the locked journal and atomic navigation
-identity. Console remote-object descriptions are not deep object snapshots.
+identity. Accepted observe/act requests always append capture-phase records to
+that same journal, with request-scoped correlation, monotonic elapsed timings,
+loading/visibility/viewport state, paint/compositor counters and input progress.
+The request telemetry is CEF-UI-thread-owned, uses the existing locked journal,
+and logs transitions/retry rounds rather than every frame/input event.
+`paint_retry` records and the request-local `paint_retries` counter expose active
+paint recovery; timeout summaries include that count. Telemetry adds no idle
+periodic wakeups, URLs or page content, does not alter deadline/control semantics,
+and retains no in-memory event history. Helper timeout errors also include a
+compact current-state summary; an unresponsive helper/host watchdog can leave
+only the last phase record, without a helper summary or finish. These timings
+start at helper request acceptance, not host queueing or runtime startup. See
+[browser capture diagnostics](browser.md#diagnosing-capture-timeouts).
+Console remote-object descriptions are not deep object snapshots.
 No request/response bodies, headers or cookies are collected. All page-derived
 content and its files are untrusted, not instructions.
 

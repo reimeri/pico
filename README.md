@@ -2,7 +2,7 @@
 
 ![Pico banner](app/resources/banner.png)
 
-A small (~3MB app + 200MB CEF) C99 AI agent harness with a native chat UI. The core is a loader, agent loop, and session; most behavior is extensions (builtins plus your own `.c` files).
+A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI. The core is a loader, agent loop, and session; most behavior is extensions (builtins plus your own `.c` files).
 
 > In active development. Expect breakage
 

@@ -231,6 +231,34 @@ typedef struct CachedImage {
 static CachedImage *image_cache_head, *image_cache_tail;
 static int image_cache_count;
 
+typedef struct ImageTarget {
+    Clay_ElementId id;
+    const char *path; /* Borrowed from this layout's pinned cache entry. */
+} ImageTarget;
+static ImageTarget *image_targets;
+static int image_target_count, image_target_capacity;
+
+static void TrackImageTarget(const char *path)
+{
+    if (image_target_count == image_target_capacity)
+    {
+        int capacity = image_target_capacity ? image_target_capacity * 2 : 32;
+        ImageTarget *targets = realloc(image_targets, (size_t)capacity * sizeof(*targets));
+        if (!targets) return;
+        image_targets = targets;
+        image_target_capacity = capacity;
+    }
+    image_targets[image_target_count++] = (ImageTarget){
+        .id = {.id = Clay_GetOpenElementId()}, .path = path};
+}
+
+const char *MdView_HoveredImagePath(void)
+{
+    for (int i = image_target_count - 1; i >= 0; i--)
+        if (Clay_PointerOver(image_targets[i].id)) return image_targets[i].path;
+    return NULL;
+}
+
 static void ImageUnlink(CachedImage *image)
 {
     if (image->previous) image->previous->next = image->next;
@@ -474,11 +502,15 @@ bool MdView_ImagesChanged(void)
 
 void MdView_ClearImages(void)
 {
+    image_target_count = image_target_capacity = 0;
+    free(image_targets);
+    image_targets = NULL;
     while (image_cache_tail) ImageRemove(image_cache_tail);
 }
 
 void MdView_BeginFrame(void)
 {
+    image_target_count = 0;
     ImagesBeginLayout();
     RichText_BeginLayout();
     hovered_link = NULL;
@@ -1076,6 +1108,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                                                         .height = CLAY_SIZING_FIXED((float)height)}},
                                   .image = {.imageData = &image->texture}})
                     {
+                        TrackImageTarget(image->path);
                     }
                 }
             }

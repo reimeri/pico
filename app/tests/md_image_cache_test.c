@@ -193,3 +193,50 @@ static int TestWebPImagePreview(void)
     unlink(path); rmdir(root);
     return ok ? 0 : Fail("static and animated WebP must render first-frame transcript previews");
 }
+
+
+static int TestImageHitTargets(void)
+{
+    char root[] = "/tmp/pico-image-target-XXXXXX", path[4096];
+    if (!mkdtemp(root)) return Fail("image hit-target fixture directory");
+    snprintf(path, sizeof(path), "%s/image.png", root);
+    if (!WriteImageFixture(path, "A")) return Fail("image hit-target fixture");
+    MdView_SetBaseDir(root);
+    /* The second image is laid out below the clipped chat viewport. */
+    const char *markdown = "![visible](image.png)\n\n```\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n```\n\n![clipped](image.png)";
+    MdDocument document = MdDocument_Parse(markdown, strlen(markdown));
+    /* Keep offscreen commands so the clipped image can be probed at its actual
+     * laid-out center rather than assuming a position from text metrics. */
+    Clay_SetCullingEnabled(false);
+    Clay_RenderCommandArray commands = RenderDocument(&document, 600, 640, false);
+    Clay_SetCullingEnabled(true);
+    Clay_BoundingBox boxes[2] = {0};
+    int count = 0;
+    for (int i = 0; i < commands.length && count < 2; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (command->commandType == CLAY_RENDER_COMMAND_TYPE_IMAGE) boxes[count++] = command->boundingBox;
+    }
+    Clay_ElementData chat = Clay_GetElementData(CLAY_ID("MdScrollTestChat"));
+    if (!chat.found || count != 2 || boxes[1].y < chat.boundingBox.y + chat.boundingBox.height)
+        return Fail("image hit-target viewport must clip the second image");
+    Clay_SetPointerState((Clay_Vector2){boxes[0].x + boxes[0].width / 2,
+                                      boxes[0].y + boxes[0].height / 2}, false);
+    const char *target = MdView_HoveredImagePath();
+    bool ok = target && !strcmp(target, path);
+    Clay_SetPointerState((Clay_Vector2){boxes[1].x + boxes[1].width / 2,
+                                      boxes[1].y + boxes[1].height / 2}, false);
+    ok &= MdView_HoveredImagePath() == NULL;
+    MdDocument_Free(&document);
+    const char *unavailable = "![missing](missing.png)\n\n![remote](https://example.com/image.png)";
+    document = MdDocument_Parse(unavailable, strlen(unavailable));
+    (void)RenderDocument(&document, 600, 640, false);
+    Clay_SetPointerState((Clay_Vector2){chat.boundingBox.x + 5, chat.boundingBox.y + 5}, false);
+    ok &= MdView_HoveredImagePath() == NULL;
+    MdDocument_Free(&document);
+    MdView_ClearImages();
+    MdView_SetBaseDir(NULL);
+    free(image_alive); image_alive = NULL; image_alive_cap = 0; image_next_id = 0;
+    unlink(path); rmdir(root);
+    return ok ? 0 : Fail("only displayed, unclipped local images may be clicked; placeholders must not inherit stale targets");
+}

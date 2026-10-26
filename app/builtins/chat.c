@@ -3433,6 +3433,16 @@ static void InspectHandlePointer(PicoHost *app)
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
+        if (MdView_HoveredImagePath())
+        {
+            /* Composer opens the shared viewer after this hook. Do not leave
+             * a row/backdrop press armed behind it for the dismissal release. */
+            g_inspect_pressed_dim = false;
+            g_inspect_pressed_back = false;
+            g_inspect_pressed_group = false;
+            g_inspect_pressed_tool = false;
+            return;
+        }
         g_inspect_pressed_dim = over_dim && !over_card;
         g_inspect_pressed_back = over_back;
         g_inspect_pressed_group = group_msg >= 0;
@@ -3565,6 +3575,11 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over_chat)
     {
+        if (MdView_HoveredImagePath())
+        {
+            PicoChatSel_Clear(app);
+            return;
+        }
         int group_msg = -1;
         int tool_msg = -1;
         int tool_idx = -1;

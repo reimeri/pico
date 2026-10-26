@@ -4603,6 +4603,11 @@ void PicoHost_Frame(PicoHost *app)
     {
         SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
     }
+    else if ((!PicoUi_ModalOpen(app) || pico_ui_modal_is_top(app, "inspect")) &&
+             !PicoChatFind_PointerOver(app) && MdView_HoveredImagePath())
+    {
+        SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+    }
     else if (!modal_open && PicoComposer_PointerOverAttachmentRemove())
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);

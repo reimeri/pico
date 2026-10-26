@@ -12,6 +12,10 @@ void MdView_RenderNoticeDocument(MdDocument *doc, int id_base, float available_w
 // Poll the last layout's image files; true requests an idle UI redraw.
 bool MdView_ImagesChanged(void);
 
+/* Hit-test the last layout's displayed images, respecting Clay clipping and
+ * overlay capture. Resolved path is borrowed until BeginFrame/ClearImages. */
+const char *MdView_HoveredImagePath(void);
+
 // Applies a horizontal wheel delta to the topmost rendered markdown scroller
 // under the pointer. Returns true when an overflowing scroller handled it.
 bool MdView_ScrollHoveredHorizontal(float delta_x);

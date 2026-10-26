@@ -7,6 +7,8 @@
 #include "render_scale.h"
 #include "complete_internal.h"
 #include "composer_internal.h"
+#include "md_view_internal.h"
+#include "image.h"
 #include "session_ref.h"
 #include "json.h"
 #include "path.h"
@@ -299,7 +301,8 @@ typedef struct ComposerState {
     PicoHost *app;
     ComposerAttach attach[COMPOSER_MAX_ATTACH];
     int attach_n;
-    int preview;
+    bool preview_open;
+    int preview; /* Attachment index, or -1 for a chat image. */
     Texture2D preview_tex;
     Image preview_src;
     bool preview_loaded;
@@ -357,6 +360,7 @@ static int WrapComposerCached(ComposerState *s, const PicoComposer *c, Font font
 #define g_app (ActiveComposerState()->app)
 #define g_attach (ActiveComposerState()->attach)
 #define g_attach_n (ActiveComposerState()->attach_n)
+#define g_preview_open (ActiveComposerState()->preview_open)
 #define g_preview (ActiveComposerState()->preview)
 #define g_preview_tex (ActiveComposerState()->preview_tex)
 #define g_preview_src (ActiveComposerState()->preview_src)
@@ -399,12 +403,13 @@ static void ResetPreview(void)
     memset(&g_preview_tex, 0, sizeof(g_preview_tex));
     memset(&g_preview_src, 0, sizeof(g_preview_src));
     g_preview_loaded = false;
+    g_preview_open = false;
     g_preview = -1;
 }
 
 static bool ClosePreview(void)
 {
-    if (g_preview < 0)
+    if (!g_preview_open)
     {
         return true;
     }
@@ -476,7 +481,7 @@ static void PreviewFitSize(int src_w, int src_h, int screen_w, int screen_h, int
 
 static void UpdatePreviewDisplay(void)
 {
-    if (g_preview < 0 || !g_preview_src.data || g_preview_src.width < 1 || g_preview_src.height < 1)
+    if (!g_preview_open || !g_preview_src.data || g_preview_src.width < 1 || g_preview_src.height < 1)
     {
         return;
     }
@@ -1671,22 +1676,29 @@ void PicoComposer_Copy(PicoHost *app)
     free(copy);
 }
 
-static void OpenPreview(int index)
+static void OpenPreview(const char *path, int attachment_index)
 {
-    if (index < 0 || index >= g_attach_n)
+    if (!path || !path[0] || !ClosePreview() || !g_app || !pico_ui_modal_push(g_app, "preview"))
     {
         return;
     }
-    if (!ClosePreview() || !g_app || !pico_ui_modal_push(g_app, "preview"))
-    {
-        return;
-    }
-    g_preview = index;
+    g_preview_open = true;
+    g_preview = attachment_index;
     if (!IsWindowReady())
     {
         return;
     }
-    g_preview_src = LoadImage(g_attach[index].path);
+    if (IsFileExtension(path, ".webp"))
+    {
+        int size = 0;
+        unsigned char *bytes = LoadFileData(path, &size);
+        g_preview_src.data = PicoImage_DecodeWebP(bytes, size > 0 ? (size_t)size : 0,
+                                                 &g_preview_src.width, &g_preview_src.height);
+        if (bytes) UnloadFileData(bytes);
+        g_preview_src.mipmaps = 1;
+        g_preview_src.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    }
+    else g_preview_src = LoadImage(path);
     UpdatePreviewDisplay();
 }
 
@@ -2008,7 +2020,7 @@ static bool ComposerHandleAttachPointer(void)
     {
         if (Clay_PointerOver(CLAY_IDI("CompAttach", i)))
         {
-            OpenPreview(i);
+            OpenPreview(g_attach[i].path, i);
             return true;
         }
     }
@@ -2330,7 +2342,7 @@ void PicoComposer_Render(PicoHost *app, void *state)
 static void ComposerPreviewRender(PicoHost *app, void *state)
 {
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || g_preview < 0)
+    if (!s_active_composer_state || !g_preview_open)
     {
         return;
     }
@@ -2354,7 +2366,7 @@ static void ComposerPreviewRender(PicoHost *app, void *state)
                      .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
           .backgroundColor = {0, 0, 0, 180}})
     {
-        if (g_preview_loaded && img_w > 1 && img_h > 1)
+        if (g_preview_loaded && img_w > 0 && img_h > 0)
         {
             CLAY(CLAY_ID("ComposerPreviewImage"),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(img_w),
@@ -2479,7 +2491,7 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     if (!s_active_composer_state || !PicoHost_SelectedAgent(app)) return;
     if (PicoUi_QuestionnaireOpen(app))
     {
-        if (g_preview >= 0 && pico_ui_modal_is_top(app, "preview") &&
+        if (g_preview_open && pico_ui_modal_is_top(app, "preview") &&
             (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) ClosePreview();
         return;
     }
@@ -2494,7 +2506,7 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         s_composer_width = composer.boundingBox.width;
     }
     app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
-    if (g_preview >= 0)
+    if (g_preview_open)
     {
         if (!pico_ui_modal_is_top(app, "preview"))
         {
@@ -2508,7 +2520,14 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         EnsureCaretVisible(app);
         return;
     }
-    if (!PicoUi_ModalOpen(app))
+    const char *image_path = MdView_HoveredImagePath();
+    if (!app->status_warn && !PicoChatFind_PointerOver(app) && image_path &&
+        (!PicoUi_ModalOpen(app) || pico_ui_modal_is_top(app, "inspect")) &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        OpenPreview(image_path, -1);
+    }
+    else if (!PicoUi_ModalOpen(app))
     {
         if (!PicoClarification_View(app) && ComposerHandleAttachPointer())
         {
@@ -2622,7 +2641,7 @@ static void ComposerShutdown(PicoHost *app, void *state)
 #if defined(__linux__)
     PicoComposer_CancelClipboardPaste();
 #endif
-    if (s->preview >= 0 && s->app)
+    if (s->preview_open && s->app)
     {
         (void)pico_ui_modal_pop(s->app, "preview");
     }

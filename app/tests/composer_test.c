@@ -5,6 +5,7 @@
 #include "host_internal.h"
 
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+const char *MdView_HoveredImagePath(void) { return NULL; }
 
 #include <stdio.h>
 #include <stdlib.h>

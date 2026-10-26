@@ -26,6 +26,8 @@
 #include "trace_group.h"
 #include "richtext.h"
 #include "pico/md_view.h"
+#include "md_view_internal.h"
+#include "image_fixtures.h"
 #include "chat_sel.h"
 #include "builtins/chat.h"
 #include "builtins/background_model.h"
@@ -158,6 +160,11 @@ void __real_UnloadTexture(Texture2D texture);
 void __wrap_UnloadTexture(Texture2D texture)
 {
     if (!g_chat_image_test) __real_UnloadTexture(texture);
+}
+void __real_SetTextureFilter(Texture2D texture, int filter);
+void __wrap_SetTextureFilter(Texture2D texture, int filter)
+{
+    if (!g_chat_image_test) __real_SetTextureFilter(texture, filter);
 }
 /* Probe composited opacity at a point, independent of the gradient's radius,
  * opacity, or number of drawing primitives. Scissoring is part of the result. */
@@ -2742,6 +2749,186 @@ done:
     if (result && !g_failed) Fail("chat image workspace fixture");
     return result;
 }
+
+static Clay_RenderCommand *ChatImageCommand(Clay_RenderCommandArray *commands, int index)
+{
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (command->commandType == CLAY_RENDER_COMMAND_TYPE_IMAGE && index-- == 0) return command;
+    }
+    return NULL;
+}
+
+static int TestChatImageExpansion(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-chat-expand-XXXXXX", cfg[] = "/tmp/pico-chat-expand-cfg-XXXXXX";
+    char photo[4096], webp[4096], parts[8192];
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id;
+    PicoAgentId agent_id;
+    PicoAgent *agent;
+    ShellTestState shell = {.composer_height = 44};
+    int result = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { free(memory); return 1; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &shell);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                      .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id))) goto done;
+    snprintf(photo, sizeof(photo), "%s/photo.png", dir);
+    Image image = GenImageColor(800, 400, RED);
+    bool saved = ExportImage(image, photo);
+    UnloadImage(image);
+    snprintf(webp, sizeof(webp), "%s/tool.webp", dir);
+    if (!saved || !SaveFileData(webp, (void *)image_animated_webp, sizeof(image_animated_webp))) goto done;
+
+    /* Exercise sent attachments, ordinary markdown, and native tool previews
+     * through their real transcript paths, not a separate test-only renderer. */
+    if (!pico_composer_attach_path(photo, false)) goto done;
+    char *display = pico_composer_display_message("");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, display);
+    free(display);
+    PicoComposer_DiscardAttachments();
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "![Markdown](photo.png)");
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "");
+    PicoAgent_AddToolCallWithId(host, agent, "image-result", "view_image", "{}");
+    snprintf(parts, sizeof(parts), "[{\"type\":\"image\",\"path\":\"%s\",\"mime\":\"image/webp\"}]", webp);
+    PicoAgent_SetToolOutputByCallId(agent, "image-result", "Tool preview", false, parts);
+    agent->messages[2].trace[0].expanded = true;
+    agent->messages[2].trace_group_expanded = true;
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory), viewport,
+                         (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_clay_frame_test = g_find_input_test = g_chat_image_test = g_browser_fake_window = true;
+    g_find_key = -1;
+    for (int index = 0; index < 3; index++)
+    {
+        g_find_press = g_find_down = false;
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        Clay_RenderCommand *thumbnail = ChatImageCommand(&commands, index);
+        if (!thumbnail) { Fail("all chat image sources must render clickable thumbnails"); goto done; }
+        Clay_BoundingBox thumb = thumbnail->boundingBox;
+        g_find_pointer = (Vector2){thumb.x + thumb.width / 2, thumb.y + thumb.height / 2};
+        g_find_press = g_find_down = true;
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+        /* A later view changing the markdown base cannot retarget this image. */
+        MdView_SetBaseDir(cfg);
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+        if (!pico_ui_modal_is_top(host, "preview") || host->chat_sel.mouse_selecting ||
+            host->chat_sel.pressed_tool)
+        { Fail("clicking a chat image must open the viewer without selecting text or toggling a tool"); goto done; }
+        g_find_press = g_find_down = false;
+        commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        Clay_ElementData preview = Clay_GetElementData(CLAY_ID("ComposerPreviewImage"));
+        if (!preview.found || (index < 2 &&
+            (preview.boundingBox.width <= thumb.width || preview.boundingBox.height <= thumb.height ||
+             fabsf(preview.boundingBox.width / preview.boundingBox.height - 2) > 0.01f)) ||
+            !ShellVerticallyContains((Clay_BoundingBox){0, 0, viewport.width, viewport.height}, preview.boundingBox))
+        { Fail("the viewer must load full-size images, including first-frame WebP, and fit the viewport"); goto done; }
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        if (MdView_HoveredImagePath())
+        { Fail("the expanded viewer must capture the pointer instead of the chat behind it"); goto done; }
+        /* Both dismissal methods must work, without the closing click reopening
+         * the underlying image in the same dispatch. */
+        if (index == 1) g_find_press = true;
+        else g_find_key = KEY_ESCAPE;
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+        g_find_key = -1;
+        g_find_press = false;
+        if (pico_ui_modal_has(host, "preview"))
+        { Fail("click or Escape must dismiss the expanded image"); goto done; }
+    }
+    if (!agent->messages[2].trace[0].expanded)
+    { Fail("previewing a tool image must not collapse its result"); goto done; }
+
+    /* Inspected subagent transcripts share the viewer, but must not arm a
+     * tool-row action that fires when the preview's closing click releases. */
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
+    PicoAgentCreateOptions child_options = {.kind = PICO_AGENT_SUBAGENT,
+        .parent_id = agent_id, .session_start = PICO_SESSION_NONE};
+    PicoAgentId child_id = 0;
+    if (PicoWorkspace_CreateAgent(workspace, &child_options, &child_id) != PICO_OK) goto done;
+    PicoAgent *child = PicoHost_FindAgent(host, child_id);
+    PicoAgent_AddMessage(host, child, PICO_ROLE_ASSISTANT, "");
+    PicoAgent_AddToolCallWithId(host, child, "child-image", "view_image", "{}");
+    snprintf(parts, sizeof(parts), "[{\"type\":\"image\",\"path\":\"%s\",\"mime\":\"image/png\"}]", photo);
+    PicoAgent_SetToolOutputByCallId(child, "child-image", "Inspected preview", false, parts);
+    child->messages[0].trace[0].expanded = true;
+    child->messages[0].trace_group_expanded = true;
+    PicoToolRowEvent inspect = {.name = "subagent", .agent_id = agent_id, .child_id = child_id};
+    PicoChat_SubagentToolRow(workspace, &inspect, NULL);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+    Clay_ElementData inspect_scroll = Clay_GetElementData(CLAY_ID("SubagentChatScroll"));
+    Clay_RenderCommand *inspected_image = NULL;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (command->commandType == CLAY_RENDER_COMMAND_TYPE_IMAGE && inspect_scroll.found &&
+            ShellVerticallyContains(inspect_scroll.boundingBox, command->boundingBox) &&
+            command->boundingBox.x >= inspect_scroll.boundingBox.x)
+            inspected_image = command;
+    }
+    if (!inspected_image) { Fail("inspected transcript must display its tool image"); goto done; }
+    Clay_BoundingBox box = inspected_image->boundingBox;
+    g_find_pointer = (Vector2){box.x + box.width / 2, box.y + box.height / 2};
+    g_find_press = g_find_down = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    if (!pico_ui_modal_is_top(host, "preview"))
+    { Fail("inspected images must open the shared viewer above inspect"); goto done; }
+    for (int phase = 0; phase < 3; phase++)
+    {
+        g_find_press = g_find_down = phase == 1;
+        g_find_released = phase != 1;
+        (void)PicoHost_LayoutShell(host, viewport.height, 0);
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, g_find_down);
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    }
+    g_find_released = false;
+    if (!pico_ui_modal_is_top(host, "inspect") || !child->messages[0].trace[0].expanded)
+    { Fail("click-dismissal must leave inspect open and its tool result expanded"); goto done; }
+    PicoChat_InspectClose();
+
+    /* The same viewer must still work for unsent composer attachments. */
+    if (!pico_composer_attach_path(photo, false)) goto done;
+    (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    Clay_ElementData attachment = Clay_GetElementData(CLAY_IDI("CompAttach", 0));
+    if (!attachment.found) goto done;
+    g_find_pointer = (Vector2){attachment.boundingBox.x + 4, attachment.boundingBox.y + 4};
+    g_find_press = g_find_down = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+    if (!pico_ui_modal_is_top(host, "preview"))
+    { Fail("composer attachments must retain click-to-expand behavior"); goto done; }
+    result = 0;
+done:
+    if (host) pico_host_free(host);
+    MdView_ClearImages();
+    MdView_SetBaseDir(NULL);
+    g_clay_frame_test = g_find_input_test = g_chat_image_test = g_browser_fake_window = false;
+    g_find_key = -1;
+    g_find_press = g_find_down = g_find_released = false;
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (result && !g_failed) Fail("chat image expansion fixture");
+    return result;
+}
+
 #endif
 
 static int TestChatBottomFollowClearsComposer(void)
@@ -18909,8 +19096,9 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--external-links") == 0) return PICO_TEST_RUN(TestExternalLinkOpener());
     if (argc == 2 && strcmp(argv[1], "--docs-links") == 0) return PICO_TEST_RUN(TestDocsLinkOrigins());
     if (argc == 2 && strcmp(argv[1], "--chat-links") == 0) return PICO_TEST_RUN(TestChatLinkWorkspacePaths());
-    if (argc == 2 && strcmp(argv[1], "--chat-images") == 0) return PICO_TEST_RUN(TestChatImageWorkspacePaths());
-    if (PICO_TEST_RUN(TestChatImageWorkspacePaths())) return 1;
+    if (argc == 2 && strcmp(argv[1], "--chat-images") == 0)
+        return PICO_TEST_RUN(TestChatImageWorkspacePaths()) || PICO_TEST_RUN(TestChatImageExpansion());
+    if (PICO_TEST_RUN(TestChatImageWorkspacePaths()) || PICO_TEST_RUN(TestChatImageExpansion())) return 1;
     if (PICO_TEST_RUN(TestChatLinkWorkspacePaths())) return 1;
     if (PICO_TEST_RUN(TestDocsLinkOrigins())) return 1;
     if (PICO_TEST_RUN(TestExternalLinkOpener())) return 1;

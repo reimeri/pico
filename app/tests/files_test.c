@@ -5,8 +5,11 @@
 #include "sanitizer_detect.h"
 #include "pico/app.h"
 #include "host_internal.h"
+#include "md_view_internal.h"
 
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+/* These completion tests do not mount Markdown image views. */
+const char *MdView_HoveredImagePath(void) { return NULL; }
 
 #include "clay/clay.h"
 

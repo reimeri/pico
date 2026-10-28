@@ -215,6 +215,15 @@ Builtin wire mappings:
 
 OpenAI-compatible custom endpoints and Hyper do not advertise Fast support. xAI OAuth Fast is enabled experimentally: Pico sends priority requests, but backend acceptance and account eligibility have not been verified. OAuth credentials may be an access token or a refresh token; normal token refresh still runs before inference. Fast off preserves the existing OAuth request behavior by omitting the tier. Codex model eligibility is explicitly configured by the user rather than fetched from the backend. API/account/model rejection is surfaced as a request error; Pico does not retry without priority. Existing authentication/reasoning retries preserve the tier. OpenAI API off is explicit so a project's default tier cannot silently enable priority.
 
+ChatGPT/Codex OAuth requests also send the advisory header
+`x-codex-routing-hint: model=<model>;tier=priority` with Fast on, or
+`x-codex-routing-hint: model=<model>` with Fast off. The hint uses the turn's
+pinned model and requested tier, including tool follow-ups, compaction, and
+retries; it does not claim which tier the backend actually served. Models with
+invalid HTTP-header bytes omit the hint. API-key requests (including custom
+endpoints) do not send it. This header is separate from the server-issued,
+turn-local `x-codex-turn-state` affinity token.
+
 ### Provider capability contract
 
 Set `PicoProvider.supports_fast` to a callback with signature:

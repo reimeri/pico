@@ -1006,18 +1006,38 @@ static void OpenAiFrame(PicoHost *app, void *state, float dt)
     DrainLoginNotes(s);
 }
 
+/* Advisory Codex routing follows the same pinned model/tier as the body.
+ * Invalid header bytes omit the hint rather than changing the model request. */
+static char *RoutingHint(const PicoLlmTurn *turn)
+{
+    const char *model = turn->model ? turn->model : "";
+    for (const unsigned char *p = (const unsigned char *)model; *p; ++p)
+        if ((*p < 32 && *p != '\t') || *p == 127) return NULL;
+    JsonBuf header; JsonBuf_Init(&header);
+    JsonBuf_Puts(&header, "x-codex-routing-hint: model=");
+    JsonBuf_Puts(&header, model);
+    const char *tier = pico_responses_openai_service_tier(turn, true);
+    if (tier) {
+        JsonBuf_Puts(&header, ";tier=");
+        JsonBuf_Puts(&header, tier);
+    }
+    return JsonBuf_Steal(&header);
+}
+
 static int PostOnce(const char *url, const char *bearer, const char *account_id, bool oauth,
-                    const char *body, const char *session_id, char **turn_state, PicoResponsesCtx *ctx,
+                    const char *body, const PicoLlmTurn *turn, char **turn_state, PicoResponsesCtx *ctx,
                     PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta, void *user)
 {
-    char *acct = NULL;
+    char *acct = NULL, *routing_hint = NULL;
     char session_hdr[80];
-    const char *extras[4];
+    const char *extras[5];
     int extra_count = 0;
     if (oauth)
     {
         extras[extra_count++] = "originator: pico";
         extras[extra_count++] = "OpenAI-Beta: responses=experimental";
+        routing_hint = RoutingHint(turn);
+        if (routing_hint) extras[extra_count++] = routing_hint;
         if (account_id && account_id[0])
         {
             size_t n = strlen(account_id) + 32;
@@ -1029,13 +1049,14 @@ static int PostOnce(const char *url, const char *bearer, const char *account_id,
             }
         }
     }
-    if (session_id && session_id[0])
+    if (turn->cache_key && turn->cache_key[0])
     {
-        snprintf(session_hdr, sizeof(session_hdr), "session-id: %s", session_id);
+        snprintf(session_hdr, sizeof(session_hdr), "session-id: %s", turn->cache_key);
         extras[extra_count++] = session_hdr;
     }
     int rc = pico_responses_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, turn_state, ctx);
     free(acct);
+    free(routing_hint);
     return rc;
 }
 
@@ -1192,7 +1213,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     const char *bearer = BearerOf(&auth, oauth);
     char *routing_token = oauth ? ReadRoutingState(turn->turn_state, scope) : NULL;
     PicoResponsesCtx ctx;
-    int rc = PostOnce(url, bearer, auth.account_id, oauth, body, turn->cache_key, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
+    int rc = PostOnce(url, bearer, auth.account_id, oauth, body, turn, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
                       user);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
@@ -1218,7 +1239,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         free(previous_scope);
         if (out->error) { free(routing_token); free(scope); free(body); pico_auth_entry_free(&auth); return PICO_LLM_FAIL; }
         bearer = BearerOf(&auth, true);
-        rc = PostOnce(url, bearer, auth.account_id, true, body, turn->cache_key, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
+        rc = PostOnce(url, bearer, auth.account_id, true, body, turn, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
                       user);
     }
     if (rc == PICO_LLM_FAIL && !turn->native_compact && !ctx.capacity_error && ctx.http != 401 &&
@@ -1228,7 +1249,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         if (stripped)
         {
             pico_responses_ctx_free(&ctx);
-            rc = PostOnce(url, BearerOf(&auth, oauth), auth.account_id, oauth, stripped, turn->cache_key, oauth ? &routing_token : NULL,
+            rc = PostOnce(url, BearerOf(&auth, oauth), auth.account_id, oauth, stripped, turn, oauth ? &routing_token : NULL,
                           &ctx, cancel, on_delta, user);
             free(stripped);
         }

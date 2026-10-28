@@ -8,7 +8,7 @@ static pthread_cond_t routing_cv = PTHREAD_COND_INITIALIZER;
 static struct {
     bool active, failed, change_account;
     int round, entered;
-    struct { char key[65], token[128]; int calls; } sessions[2];
+    struct { char key[65], token[128]; int calls; bool fast; } sessions[2];
 } routing_wire;
 
 static bool RoutingWire(const PicoHttpPost *req, long *http, char **error, int *result)
@@ -29,13 +29,16 @@ static bool RoutingWire(const PicoHttpPost *req, long *http, char **error, int *
     int slot = key && !strcmp(key, routing_wire.sessions[0].key) ? 0 : 1;
     if (!key || strcmp(key, routing_wire.sessions[slot].key)) routing_wire.failed = true;
     int call = routing_wire.sessions[slot].calls++;
-    const char *session_header = NULL, *token_header = NULL;
+    const char *session_header = NULL, *token_header = NULL, *hint_header = NULL;
     for (int i = 0; i < req->header_count; ++i) {
         const char *h = req->headers[i];
         if (!strncmp(h, "session-id: ", 12)) session_header = h + 12;
         if (!strncmp(h, "session_id:", 11)) routing_wire.failed = true;
         if (!strncmp(h, "x-codex-turn-state: ", 20)) token_header = h + 20;
+        if (!strncmp(h, "x-codex-routing-hint: ", 22)) hint_header = h + 22;
     }
+    const char *hint = routing_wire.sessions[slot].fast ? "model=routing-model;tier=priority" : "model=routing-model";
+    routing_wire.failed |= !hint_header || strcmp(hint_header, hint);
     bool fresh = call == 0 || (routing_wire.round == 3 && call == 1);
     routing_wire.failed |= !session_header || !key || strcmp(session_header, key) ||
         (fresh ? token_header != NULL : (!token_header || strcmp(token_header, routing_wire.sessions[slot].token))) ||
@@ -88,7 +91,11 @@ static void RoutingRound(int round, PicoAgent *first, PicoAgent *second)
     routing_wire.entered = 0;
     memset(routing_wire.sessions, 0, sizeof(routing_wire.sessions));
     snprintf(routing_wire.sessions[0].key, sizeof(routing_wire.sessions[0].key), "%s", PicoAgent_CacheKey(first));
-    if (second) snprintf(routing_wire.sessions[1].key, sizeof(routing_wire.sessions[1].key), "%s", PicoAgent_CacheKey(second));
+    routing_wire.sessions[0].fast = first->fast;
+    if (second) {
+        snprintf(routing_wire.sessions[1].key, sizeof(routing_wire.sessions[1].key), "%s", PicoAgent_CacheKey(second));
+        routing_wire.sessions[1].fast = second->fast;
+    }
     pthread_mutex_unlock(&routing_mu);
 }
 
@@ -109,6 +116,7 @@ static int TestCodexCacheAffinity(void)
     snprintf(model->id, sizeof(model->id), "routing-model");
     snprintf(model->provider, sizeof(model->provider), "openai");
     model->context_limit = 4096;
+    model->supports_fast = true;
     ws->settings.compact_enabled = false;
     PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, ws);
     pico_add_tool(ws, "cache_echo", "echo", "{}", RoutingEcho, RoutingApply, PICO_TOOL_PARALLEL);
@@ -121,6 +129,8 @@ static int TestCodexCacheAffinity(void)
     PicoAgent *a = PicoHost_FindAgent(host, ids[0]), *b = PicoHost_FindAgent(host, ids[1]);
     a->compact_enabled = b->compact_enabled = true;
     a->compact_ratio = b->compact_ratio = 0.1;
+    /* Concurrent turns must not share a selected tier, even on the same model. */
+    if (!PicoSettings_SetFast(a, true)) goto done;
     RoutingRound(0, a, b);
     pthread_mutex_lock(&routing_mu); routing_wire.active = true; pthread_mutex_unlock(&routing_mu);
     if (pico_agent_submit(host, ids[0], "first", NULL) != PICO_OK ||

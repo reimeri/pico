@@ -4952,6 +4952,33 @@ int PicoCatalog_SearchReferences(const char *project_path, const char *query,
     return n;
 }
 
+bool PicoCatalog_ReadSessionTitles(PicoSessionRef *sessions, int count, const atomic_bool *cancelled)
+{
+    if (count == 0) return true;
+    if (!sessions || count < 0 || CatalogCancelled(cancelled)) return false;
+    sqlite3 *db = CatalogDbOpen();
+    if (!db) return false;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "SELECT title FROM sessions WHERE workspace_path=? AND id=? AND kind=0");
+    for (int i = 0; ok && i < count; i++)
+    {
+        if (CatalogCancelled(cancelled)) { ok = false; break; }
+        sessions[i].title[0] = '\0';
+        sqlite3_bind_text(stmt, 1, sessions[i].checkout, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, sessions[i].id, -1, SQLITE_TRANSIENT);
+        int rc = sqlite3_step(stmt);
+        if (rc == SQLITE_ROW)
+            snprintf(sessions[i].title, sizeof(sessions[i].title), "%s", CatalogDbText(stmt, 0));
+        else if (rc != SQLITE_DONE) ok = false;
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return ok;
+}
+
 static void CatalogDbFillWorkspace(sqlite3_stmt *stmt, PicoCatalogWorkspace *ws)
 {
     memset(ws, 0, sizeof(*ws));

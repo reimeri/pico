@@ -107,6 +107,10 @@ int PicoCatalog_SearchReferences(const char *project_path, const char *query,
     const char *exclude_checkout, const char *exclude_id,
     PicoCatalogReferenceMatch **out, int maximum);
 
+/* Worker-side exact title lookup for copied live session identities. Missing
+ * rows leave an empty title; false means the read failed or was cancelled. */
+bool PicoCatalog_ReadSessionTitles(PicoSessionRef *sessions, int count, const atomic_bool *cancelled);
+
 void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
 /* JSONL remains authoritative for session contents. One SQLite catalog under the
  * sessions root stores workspace/project preferences, order and a rebuildable

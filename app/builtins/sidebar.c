@@ -64,6 +64,8 @@ typedef struct SidebarScanWorker
     int workspace_count;
     PicoCatalogPage *pages;
     int page_count;
+    PicoSessionRef *live_titles;
+    int live_title_count;
     bool failed;
     bool reconcile;
 } SidebarScanWorker;
@@ -96,7 +98,7 @@ typedef struct SidebarLiveAgent
 typedef struct InboxVisit
 {
     const char *path;
-    const char *title;
+    char title[PICO_SESSION_TITLE_MAX_BYTES + 1];
     char session_id[40];
     PicoAgentId live_id;
     int ws_index;
@@ -112,8 +114,10 @@ typedef struct SidebarState
     SidebarLiveAgent live[PICO_MAX_TOTAL_AGENTS];
     int live_count;
     bool live_snapshot_valid;
-    PicoAgentId extras[PICO_MAX_CATALOG_WORKSPACES][PICO_MAX_TOTAL_AGENTS];
-    int extra_counts[PICO_MAX_CATALOG_WORKSPACES];
+    PicoSessionRef *live_titles;
+    int live_title_count;
+    PicoAgentId drafts[PICO_MAX_CATALOG_WORKSPACES][PICO_MAX_TOTAL_AGENTS];
+    int draft_counts[PICO_MAX_CATALOG_WORKSPACES];
     InboxVisit *inbox_rows;
     int inbox_count, inbox_capacity;
     bool inbox_valid;
@@ -461,6 +465,25 @@ static void SidebarAdoptCatalog(SidebarState *s, PicoCatalogWorkspace *next, int
     s->last_scan = GetTime();
 }
 
+static bool SidebarCopyLiveTitleTargets(SidebarState *s, SidebarScanWorker *worker)
+{
+    int count = pico_agent_count(s->host);
+    if (count == 0) return true;
+    worker->live_titles = calloc((size_t)count, sizeof(*worker->live_titles));
+    if (!worker->live_titles) return false;
+    for (int i = 0; i < count; i++)
+    {
+        PicoAgentInfo info;
+        if (!pico_agent_info(s->host, i, &info)) continue;
+        const PicoAgent *agent = PicoHost_FindAgentConst(s->host, info.id);
+        if (!PicoAgent_IsUserMain(agent) || !info.session_id[0]) continue;
+        PicoSessionRef *title = &worker->live_titles[worker->live_title_count++];
+        snprintf(title->checkout, sizeof(title->checkout), "%s", PicoAgent_WorkspacePath(agent));
+        snprintf(title->id, sizeof(title->id), "%s", info.session_id);
+    }
+    return true;
+}
+
 static void *SidebarScanRun(void *arg)
 {
     SidebarScanWorker *worker = (SidebarScanWorker *)arg;
@@ -472,7 +495,9 @@ static void *SidebarScanRun(void *arg)
                                                     : PicoCatalog_ReadGroupedPaged(&worker->workspaces, &worker->cancelled,
                                                                                    worker->pages, worker->page_count);
     }
-    if (worker->workspace_count < 0)
+    if (worker->workspace_count < 0 ||
+        (!atomic_load(&worker->cancelled) &&
+         !PicoCatalog_ReadSessionTitles(worker->live_titles, worker->live_title_count, &worker->cancelled)))
         worker->failed = true;
     worker->token_after_valid = PicoCatalog_ReadChangeToken(worker->token_after);
     return NULL;
@@ -488,6 +513,7 @@ static void SidebarScanDestroy(void *arg)
     SidebarScanWorker *worker = (SidebarScanWorker *)arg;
     PicoCatalog_Free(worker->workspaces, worker->workspace_count);
     free(worker->pages);
+    free(worker->live_titles);
     free(worker);
 }
 
@@ -495,8 +521,15 @@ static void SidebarScanDestroy(void *arg)
  * An unchanged reconciliation must not replace labels, paging or scroll state. */
 static bool SidebarCatalogEqual(const SidebarState *s, const SidebarScanWorker *worker)
 {
-    if (!s->catalog_scanned || s->workspace_count != worker->workspace_count)
+    if (!s->catalog_scanned || s->workspace_count != worker->workspace_count ||
+        s->live_title_count != worker->live_title_count)
         return false;
+    for (int i = 0; i < s->live_title_count; i++)
+    {
+        const PicoSessionRef *a = &s->live_titles[i], *b = &worker->live_titles[i];
+        if (strcmp(a->checkout, b->checkout) || strcmp(a->id, b->id) || strcmp(a->title, b->title))
+            return false;
+    }
     for (int i = 0; i < s->workspace_count; i++)
     {
         const PicoCatalogWorkspace *a = &s->workspaces[i], *b = &worker->workspaces[i];
@@ -583,6 +616,11 @@ static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
                             worker->token_after_valid, worker->token_after);
         worker->workspaces = NULL;
         worker->workspace_count = 0;
+        free(s->live_titles);
+        s->live_titles = worker->live_titles;
+        s->live_title_count = worker->live_title_count;
+        worker->live_titles = NULL;
+        worker->live_title_count = 0;
     }
     else
     {
@@ -613,9 +651,11 @@ static void SidebarRefreshSync(SidebarState *s, bool reconcile)
     SidebarScanWorker worker = {.reconcile = reconcile, .pages = s->ui, .page_count = s->ui_count,
                                 .inbox_epoch = PicoCatalog_InboxEpoch(s->host),
                                 .project_epoch = s->host->project_preference_epoch};
-    SidebarScanRun(&worker);
+    if (!SidebarCopyLiveTitleTargets(s, &worker)) worker.failed = true;
+    else SidebarScanRun(&worker);
     SidebarFinishRefresh(s, &worker);
     PicoCatalog_Free(worker.workspaces, worker.workspace_count);
+    free(worker.live_titles);
 }
 
 static bool SidebarHostCanTask(const PicoHost *host)
@@ -669,11 +709,16 @@ static void SidebarStartRefresh(SidebarState *s, bool reconcile)
         }
         memcpy(worker->pages, s->ui, (size_t)worker->page_count * sizeof(*worker->pages));
     }
+    if (!SidebarCopyLiveTitleTargets(s, worker))
+    {
+        SidebarScanDestroy(worker);
+        s->dirty = true;
+        return;
+    }
     if (!PicoHost_StartTaskCompleted(s->host, SidebarScanRun, worker, SidebarScanCancel,
                                      SidebarScanCompleted, SidebarScanDestroy))
     {
-        free(worker->pages);
-        free(worker);
+        SidebarScanDestroy(worker);
         s->dirty = true;
         return;
     }
@@ -829,10 +874,25 @@ static bool CatalogHasSession(const PicoCatalogWorkspace *ws, const char *checko
     return false;
 }
 
+static const PicoSessionRef *SidebarLiveTitle(const SidebarState *s, const char *path, const char *id)
+{
+    for (int i = 0; i < s->live_title_count; i++)
+        if (!strcmp(s->live_titles[i].checkout, path) && !strcmp(s->live_titles[i].id, id))
+            return &s->live_titles[i];
+    return NULL;
+}
+
+static int NewestDraftFirst(const void *a, const void *b)
+{
+    PicoAgentId x = *(const PicoAgentId *)a, y = *(const PicoAgentId *)b;
+    /* Host agent IDs are allocated monotonically at creation, across workspaces. */
+    return x > y ? -1 : x < y ? 1 : 0;
+}
+
 static void SidebarBuildLiveSnapshot(SidebarState *s)
 {
     s->live_count = 0;
-    memset(s->extra_counts, 0, sizeof(s->extra_counts));
+    memset(s->draft_counts, 0, sizeof(s->draft_counts));
     for (int w = 0; w < s->host->workspace_count; w++)
     {
         PicoWorkspace *workspace = s->host->workspaces[w];
@@ -849,11 +909,17 @@ static void SidebarBuildLiveSnapshot(SidebarState *s)
             live->id = agent->id;
             snprintf(live->path, sizeof(live->path), "%s", workspace->path);
             snprintf(live->session_id, sizeof(live->session_id), "%s", agent->session_id);
-            if (ws_index >= 0 && ws_index < PICO_MAX_CATALOG_WORKSPACES &&
-                (!agent->session_id[0] || !CatalogHasSession(&s->workspaces[ws_index], workspace->path, agent->session_id)))
-                s->extras[ws_index][s->extra_counts[ws_index]++] = agent->id;
+            /* A saved session missing from this page is not a draft. Its
+             * visibility and order belong exclusively to catalog pagination. */
+            if (ws_index >= 0 && ws_index < PICO_MAX_CATALOG_WORKSPACES && !agent->session_id[0])
+                s->drafts[ws_index][s->draft_counts[ws_index]++] = agent->id;
+            if (agent->session_id[0] && !SidebarLiveTitle(s, workspace->path, agent->session_id))
+                s->dirty = true;
         }
     }
+    for (int i = 0; i < s->workspace_count && i < PICO_MAX_CATALOG_WORKSPACES; i++)
+        if (s->draft_counts[i] > 1)
+            qsort(s->drafts[i], (size_t)s->draft_counts[i], sizeof(s->drafts[i][0]), NewestDraftFirst);
     s->live_snapshot_valid = true;
     s->inbox_valid = false;
 }
@@ -1657,8 +1723,8 @@ static void RenderSessionRow(PicoHost *host, SidebarState *s, const char *ws_pat
 }
 
 static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorkspace *ws);
-static PicoAgentId LiveExtraAt(SidebarState *s, const PicoCatalogWorkspace *ws, int extra_index);
-static int CountLiveExtras(SidebarState *s, const PicoCatalogWorkspace *ws);
+static PicoAgentId DraftAt(SidebarState *s, const PicoCatalogWorkspace *ws, int draft_index);
+static int CountDrafts(SidebarState *s, const PicoCatalogWorkspace *ws);
 
 typedef struct SidebarPin
 {
@@ -1677,37 +1743,39 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, SidebarState *s, const 
 {
     SidebarPin pin = {0};
     PicoAgentInfo info;
-    int extras;
+    int drafts;
     int j;
     if (!host || !ws)
     {
         return pin;
     }
-    extras = CountLiveExtras(s, ws);
-    for (j = 0; j < extras; j++)
+    drafts = CountDrafts(s, ws);
+    int total = drafts + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
+    int shown = ShownForIndex(s, ws_index, total);
+    for (j = 0; j < drafts && j < shown; j++)
     {
-        PicoAgentId extra = LiveExtraAt(s, ws, j);
-        if (!pico_agent_find(host, extra, &info))
+        PicoAgentId draft = DraftAt(s, ws, j);
+        if (!pico_agent_find(host, draft, &info))
         {
             continue;
         }
-        PicoAgent *selected_agent = PicoHost_FindAgent(host, extra);
-        if (!SessionIsSelected(host, PicoAgent_WorkspacePath(selected_agent), info.session_id, extra))
+        PicoAgent *selected_agent = PicoHost_FindAgent(host, draft);
+        if (!SessionIsSelected(host, PicoAgent_WorkspacePath(selected_agent), info.session_id, draft))
         {
             continue;
         }
         pin.found = true;
-        pin.live_id = extra;
+        pin.live_id = draft;
         pin.row_id = SessionRowId(ws_index, j);
-        pin.title = info.session_id[0] ? "Untitled" : "New session";
+        pin.title = "New session";
         pin.session_id = "";
-        PicoAgent *live_agent = PicoHost_FindAgent(host, extra);
+        PicoAgent *live_agent = PicoHost_FindAgent(host, draft);
         pin.checkout_path = PicoAgent_WorkspacePath(live_agent);
         pin.worktree = live_agent && live_agent->workspace && live_agent->workspace->worktree;
         pin.unseen_complete = false;
         return pin;
     }
-    for (j = 0; j < ws->session_count; j++)
+    for (j = 0; j < ws->session_count && drafts + j < shown; j++)
     {
         if (!SessionIsSelected(host, ws->sessions[j].checkout_path, ws->sessions[j].id, 0))
         {
@@ -1715,7 +1783,7 @@ static SidebarPin FindSelectedSidebarRow(PicoHost *host, SidebarState *s, const 
         }
         pin.found = true;
         pin.live_id = 0;
-        pin.row_id = SessionRowId(ws_index, extras + j);
+        pin.row_id = SessionRowId(ws_index, drafts + j);
         pin.title = ws->sessions[j].title;
         pin.session_id = ws->sessions[j].id;
         pin.checkout_path = ws->sessions[j].checkout_path;
@@ -1798,16 +1866,16 @@ static void RenderMoreLessRow(int ws_index, int shown, int total)
     }
 }
 
-static void RenderLiveExtras(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
-                             int ws_index, int max_extras)
+static void RenderDrafts(PicoHost *host, SidebarState *s, const PicoCatalogWorkspace *ws,
+                         int ws_index, int max_drafts)
 {
-    for (int extra = 0; extra < max_extras; extra++)
+    for (int draft = 0; draft < max_drafts; draft++)
     {
-        PicoAgentId id = LiveExtraAt(s, ws, extra);
+        PicoAgentId id = DraftAt(s, ws, draft);
         PicoAgent *agent = PicoHost_FindAgent(host, id);
         if (!agent) continue;
-        RenderSessionRow(host, s, PicoAgent_WorkspacePath(agent), agent->session_id[0] ? "Untitled" : "New session",
-                         agent->session_id, id, SessionRowId(ws_index, extra), false,
+        RenderSessionRow(host, s, PicoAgent_WorkspacePath(agent), "New session",
+                         agent->session_id, id, SessionRowId(ws_index, draft), false,
                          agent->workspace && agent->workspace->worktree, false, false);
     }
 }
@@ -1847,28 +1915,33 @@ static int EnumerateInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void
     for (i = 0; i < s->workspace_count; i++)
     {
         const PicoCatalogWorkspace *ws = &s->workspaces[i];
-        int extras = CountLiveExtras(s, ws);
-        for (j = 0; j < extras; j++)
+        int drafts = CountDrafts(s, ws);
+        /* Inbox attention is independent of project-list pagination. Include
+         * off-page live sessions, but never turn them into project-list drafts. */
+        for (j = 0; j < s->live_count; j++)
         {
-            PicoAgentId id = LiveExtraAt(s, ws, j);
+            PicoAgentId id = s->live[j].id;
             PicoAgent *agent = PicoHost_FindAgent(host, id);
-            PicoAgentInfo info;
-            const char *path;
-            InboxVisit row;
-            if (!agent || !pico_agent_find(host, id, &info))
-                continue;
-            path = PicoAgent_WorkspacePath(agent);
-            if (!InboxVisible(host, path, info.session_id, agent->unseen_complete, agent->inbox_pending, id))
+            if (!AgentInCatalogProject(agent, ws)) continue;
+            const char *path = PicoAgent_WorkspacePath(agent);
+            if (CatalogHasSession(ws, path, agent->session_id) ||
+                !InboxVisible(host, path, agent->session_id, agent->unseen_complete, agent->inbox_pending, id))
                 continue;
             if (fn)
             {
-                memset(&row, 0, sizeof(row));
+                InboxVisit row = {0};
+                const PicoSessionRef *title = SidebarLiveTitle(s, path, agent->session_id);
                 row.path = path;
-                row.title = info.session_id[0] ? "Untitled" : "New session";
-                snprintf(row.session_id, sizeof(row.session_id), "%s", info.session_id);
+                const char *label = "New session";
+                if (agent->session_id[0])
+                    label = !title ? "Loading session…" : title->title[0] ? title->title : "Untitled";
+                snprintf(row.title, sizeof(row.title), "%s", label);
+                snprintf(row.session_id, sizeof(row.session_id), "%s", agent->session_id);
                 row.live_id = id;
                 row.ws_index = i;
-                row.slot = j;
+                row.slot = -1;
+                for (int k = 0; k < drafts; k++)
+                    if (DraftAt(s, ws, k) == id) { row.slot = k; break; }
                 row.unseen = agent->unseen_complete;
                 row.worktree = agent->workspace && agent->workspace->worktree;
                 if (fn(host, s, &row, index, ctx))
@@ -1888,11 +1961,11 @@ static int EnumerateInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void
             {
                 memset(&row, 0, sizeof(row));
                 row.path = session->checkout_path;
-                row.title = session->title[0] ? session->title : "Untitled";
+                snprintf(row.title, sizeof(row.title), "%s", session->title[0] ? session->title : "Untitled");
                 snprintf(row.session_id, sizeof(row.session_id), "%s", session->id);
                 row.live_id = live;
                 row.ws_index = i;
-                row.slot = extras + j;
+                row.slot = drafts + j;
                 row.unseen = session->unseen_complete;
                 row.worktree = session->worktree;
                 row.missing = session->missing_checkout;
@@ -2010,7 +2083,10 @@ static void RevealInboxSession(PicoHost *host, SidebarState *s, const InboxVisit
     if (ws->stashed)
         s->stash_expanded = true;
     ExpandWorkspace(s, row->ws_index);
-    total = CountLiveExtras(s, ws) + ws->session_count +
+    /* Selecting a saved Inbox item does not bypass project pagination, even
+     * when a larger previously fetched page still contains its catalog row. */
+    if (row->session_id[0] || row->slot < 0) return;
+    total = CountDrafts(s, ws) + ws->session_count +
             (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
     needed = row->slot + 1;
     shown = ShownForIndex(s, row->ws_index, total);
@@ -2093,7 +2169,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
     int i;
     int j;
-    int extras;
+    int drafts;
     int total;
     int shown;
     bool add_hover;
@@ -2187,14 +2263,14 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                     }
                     else
                     {
-                        extras = CountLiveExtras(s, ws);
-                        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
+                        drafts = CountDrafts(s, ws);
+                        total = drafts + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
                         shown = ShownForIndex(s, i, total);
-                        RenderLiveExtras(host, s, ws, i, shown < extras ? shown : extras);
-                        for (j = 0; j < shown - extras && j < ws->session_count; j++)
+                        RenderDrafts(host, s, ws, i, shown < drafts ? shown : drafts);
+                        for (j = 0; j < shown - drafts && j < ws->session_count; j++)
                         {
                             RenderSessionRow(host, s, ws->sessions[j].checkout_path, ws->sessions[j].title,
-                                             ws->sessions[j].id, 0, SessionRowId(i, extras + j),
+                                             ws->sessions[j].id, 0, SessionRowId(i, drafts + j),
                                              ws->sessions[j].unseen_complete, ws->sessions[j].worktree,
                                              ws->sessions[j].missing_checkout, false);
                         }
@@ -2658,25 +2734,25 @@ static bool AgentInCatalogProject(const PicoAgent *agent, const PicoCatalogWorks
     return strcmp(project, ws->path) == 0;
 }
 
-static int CountLiveExtras(SidebarState *s, const PicoCatalogWorkspace *ws)
+static int CountDrafts(SidebarState *s, const PicoCatalogWorkspace *ws)
 {
     int index = (int)(ws - s->workspaces);
     return index >= 0 && index < s->workspace_count && index < PICO_MAX_CATALOG_WORKSPACES
-               ? s->extra_counts[index] : 0;
+               ? s->draft_counts[index] : 0;
 }
 
-static PicoAgentId LiveExtraAt(SidebarState *s, const PicoCatalogWorkspace *ws, int extra_index)
+static PicoAgentId DraftAt(SidebarState *s, const PicoCatalogWorkspace *ws, int draft_index)
 {
     int index = (int)(ws - s->workspaces);
-    return extra_index >= 0 && extra_index < CountLiveExtras(s, ws)
-               ? s->extras[index][extra_index] : 0;
+    return draft_index >= 0 && draft_index < CountDrafts(s, ws)
+               ? s->drafts[index][draft_index] : 0;
 }
 
 static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
 {
     int i;
     int j;
-    int extras;
+    int drafts;
     int total;
     int shown;
     if (PointerOverInbox(host, s) ||
@@ -2703,23 +2779,23 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
             }
             continue;
         }
-        extras = CountLiveExtras(s, ws);
-        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
+        drafts = CountDrafts(s, ws);
+        total = drafts + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)) || Clay_PointerOver(CLAY_IDI("SidebarLess", i)))
         {
             return true;
         }
-        for (j = 0; j < extras && j < shown; j++)
+        for (j = 0; j < drafts && j < shown; j++)
         {
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, j))))
             {
                 return true;
             }
         }
-        for (j = 0; j < ws->session_count && extras + j < shown; j++)
+        for (j = 0; j < ws->session_count && drafts + j < shown; j++)
         {
-            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, extras + j))))
+            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, drafts + j))))
             {
                 return true;
             }
@@ -2759,7 +2835,7 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
 {
     int i;
     int j;
-    int extras;
+    int drafts;
     int total;
     int shown;
     if (!host || !s)
@@ -2799,13 +2875,13 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
                 continue;
             return FillSessionHit(out, path, sid, pin.row_id);
         }
-        extras = CountLiveExtras(s, ws);
-        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
+        drafts = CountDrafts(s, ws);
+        total = drafts + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
-        for (j = 0; j < extras && j < shown; j++)
+        for (j = 0; j < drafts && j < shown; j++)
         {
-            PicoAgentId extra = LiveExtraAt(s, ws, j);
-            PicoAgent *agent = PicoHost_FindAgent(host, extra);
+            PicoAgentId draft = DraftAt(s, ws, j);
+            PicoAgent *agent = PicoHost_FindAgent(host, draft);
             const char *path = agent ? PicoAgent_WorkspacePath(agent) : NULL;
             const char *sid = agent ? agent->session_id : "";
             int row_id = SessionRowId(i, j);
@@ -2821,10 +2897,10 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
                 continue;
             return FillSessionHit(out, path, sid, row_id);
         }
-        for (j = 0; j < ws->session_count && extras + j < shown; j++)
+        for (j = 0; j < ws->session_count && drafts + j < shown; j++)
         {
             const PicoCatalogSession *session = &ws->sessions[j];
-            int row_id = SessionRowId(i, extras + j);
+            int row_id = SessionRowId(i, drafts + j);
             if (pointer_only)
             {
                 if (!Clay_PointerOver(CLAY_IDI("SidebarSess", row_id)))
@@ -3046,7 +3122,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
     int i;
     int j;
-    int extras;
+    int drafts;
     int total;
     int shown;
     (void)event;
@@ -3219,8 +3295,8 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
             }
             continue;
         }
-        extras = CountLiveExtras(s, ws);
-        total = extras + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
+        drafts = CountDrafts(s, ws);
+        total = drafts + ws->session_count + (ws->has_more_sessions ? SIDEBAR_SESSION_PAGE : 0);
         shown = ShownForIndex(s, i, total);
         if (Clay_PointerOver(CLAY_IDI("SidebarMore", i)))
         {
@@ -3233,18 +3309,18 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
             AdjustShown(s, i, -SIDEBAR_SESSION_PAGE, total);
             return;
         }
-        for (j = 0; j < extras && j < shown; j++)
+        for (j = 0; j < drafts && j < shown; j++)
         {
-            PicoAgentId extra = LiveExtraAt(s, ws, j);
+            PicoAgentId draft = DraftAt(s, ws, j);
             if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, j))))
             {
-                SelectAgent(host, extra);
+                SelectAgent(host, draft);
                 return;
             }
         }
-        for (j = 0; j < ws->session_count && extras + j < shown; j++)
+        for (j = 0; j < ws->session_count && drafts + j < shown; j++)
         {
-            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, extras + j))))
+            if (Clay_PointerOver(CLAY_IDI("SidebarSess", SessionRowId(i, drafts + j))))
             {
                 OpenCatalogSession(host, s, ws->sessions[j].checkout_path, ws->sessions[j].id);
                 return;
@@ -3411,6 +3487,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->ui);
     free(s->inbox_rows);
+    free(s->live_titles);
     for (SidebarLabelChunk *chunk = s->label_chunks; chunk;)
     {
         SidebarLabelChunk *next = chunk->next;

@@ -17747,39 +17747,269 @@ done:
     return good ? 0 : 1;
 }
 
-/* Distinct live extras are not catalog rows; their cached IDs must remain
- * owned and correctly associated with each inbox and context-menu action. */
+static Clay_RenderCommand *FindSidebarTextIn(Clay_RenderCommandArray *commands, const char *title,
+                                             Clay_ElementId container)
+{
+    Clay_ElementData element = Clay_GetElementData(container);
+    if (!element.found) return NULL;
+    size_t length = strlen(title);
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (!command || command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+        Clay_StringSlice contents = command->renderData.text.stringContents;
+        if (contents.length != (int32_t)length || memcmp(contents.chars, title, length)) continue;
+        Clay_BoundingBox text = command->boundingBox, box = element.boundingBox;
+        if (text.x >= box.x && text.x < box.x + box.width &&
+            text.y >= box.y && text.y < box.y + box.height) return command;
+    }
+    return NULL;
+}
+
+static Clay_RenderCommand *FindSidebarSessionTitle(Clay_RenderCommandArray *commands, const char *title)
+{
+    return FindSidebarTextIn(commands, title, CLAY_ID("SidebarScroll"));
+}
+
+/* Live saved sessions remain ordinary catalog rows even when activity pushes
+ * them beyond the loaded page. Inbox discovery is independent of that page. */
+static int TestSidebarLiveSavedPagination(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    PicoAgentId old_id = 0;
+    const char *phase = "fixture";
+    const char *title = "Older saved title";
+    char newest_title[64] = {0};
+    if (!InteractionFixtureInit(&f)) goto done;
+
+    phase = "create old live saved session";
+    PicoAgent *old = PicoHost_FindAgent(f.host, f.agent);
+    if (!old) goto done;
+    PicoSession_Start(f.host, old, PICO_SESSION_NEW, NULL);
+    if (PicoSession_LogUser(f.host, old, "Original request", "Original request", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogTitle(f.host, old, title) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogInboxPending(f.host, old, true) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, old)) goto done;
+    old_id = f.agent;
+    struct timespec older[2] = {{.tv_sec = 1600000000}, {.tv_sec = 1600000000}};
+    if (utimensat(AT_FDCWD, old->session_path, older, 0) != 0) goto done;
+
+    /* Stop at the first page boundary instead of depending on the configured
+     * page size. One More then reveals the older live session. */
+    phase = "write newer catalog sessions";
+    PicoCatalogWorkspace *catalog = NULL;
+    int count = PicoCatalog_Scan(&catalog);
+    const PicoCatalogWorkspace *fixture_ws = NULL;
+    for (int i = 0; i < count; i++) if (!strcmp(catalog[i].path, f.dir)) fixture_ws = &catalog[i];
+    char session_dir[4096];
+    bool have_dir = fixture_ws && PicoPath_Format(session_dir, sizeof(session_dir),
+                                                   "%s/pico/sessions/%s", f.cfg, fixture_ws->key);
+    PicoCatalog_Free(catalog, count);
+    if (!have_dir) goto done;
+    for (int i = 0; ; i++)
+    {
+        char path[4096], id[40];
+        snprintf(id, sizeof(id), "newer-%02d", i);
+        snprintf(newest_title, sizeof(newest_title), "Newer activity %02d", i);
+        if (!PicoPath_Format(path, sizeof(path), "%s/2026-02-01T00-00-%02dZ_%s.jsonl",
+                             session_dir, i, id)) goto done;
+        FILE *file = fopen(path, "wb");
+        if (!file) goto done;
+        fprintf(file, "{\"type\":\"session\",\"version\":5,\"id\":\"%s\","
+                      "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
+                      "{\"type\":\"message\",\"role\":\"user\",\"content\":\"%s\"}\n",
+                id, f.dir, newest_title);
+        if (fclose(file) != 0) goto done;
+        struct timespec time[2] = {{.tv_sec = 1700000000 + i}, {.tv_sec = 1700000000 + i}};
+        if (utimensat(AT_FDCWD, path, time, 0) != 0) goto done;
+        count = PicoCatalog_ScanGrouped(&catalog);
+        bool has_more = count == 1 && catalog[0].has_more_sessions;
+        PicoCatalog_Free(catalog, count);
+        if (count != 1) goto done;
+        if (has_more) break;
+    }
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_RenderCommand *newest = FindSidebarSessionTitle(&commands, newest_title);
+    if (!FindSidebarTextIn(&commands, newest_title, CLAY_IDI("SidebarSess", 0)) ||
+        FindSidebarSessionTitle(&commands, title)) goto done;
+
+    phase = "off-page inbox title and live identity";
+    if (!FindSidebarTextIn(&commands, title, CLAY_IDI("SidebarInbox", 0))) goto done;
+    if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).found ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInbox", 0))) ||
+        pico_agent_active(f.host) != old_id) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindCardText(&commands, title) || FindSidebarSessionTitle(&commands, title)) goto done;
+
+    phase = "off-page title refresh";
+    title = "Renamed saved title";
+    if (PicoSession_LogTitle(f.host, old, title) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, old)) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindSidebarTextIn(&commands, title, CLAY_IDI("SidebarInbox", 0))) goto done;
+
+    phase = "More reveals saved title after newer activity";
+    int next_snapshot = g_catalog_snapshot_done_calls + 1;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarMore", 0))) ||
+        !WaitCatalogSnapshotDone(f.host, next_snapshot)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    newest = FindSidebarSessionTitle(&commands, newest_title);
+    Clay_RenderCommand *older_title = FindSidebarSessionTitle(&commands, title);
+    if (!older_title || !newest || older_title->boundingBox.y <= newest->boundingBox.y) goto done;
+
+    phase = "Less remains authoritative for cached and collapsed rows";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarLess", 0))) ||
+        !SidebarFrameClickWorkspace(f.host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0)))) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (FindSidebarSessionTitle(&commands, title)) goto done;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)))) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (FindSidebarSessionTitle(&commands, title)) goto done;
+
+    phase = "new conversation activity promotes the saved title";
+    old = PicoHost_FindAgent(f.host, old_id);
+    if (!old || PicoSession_LogUser(f.host, old, "A later message", "A later message", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, old)) goto done;
+    count = PicoCatalog_Scan(&catalog);
+    if (count < 0) goto done;
+    PicoCatalog_Free(catalog, count);
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    older_title = FindSidebarSessionTitle(&commands, title);
+    newest = FindSidebarSessionTitle(&commands, newest_title);
+    good = older_title && newest && older_title->boundingBox.y < newest->boundingBox.y;
+done:
+    InteractionFixtureFree(&f);
+    if (!good)
+    {
+        fprintf(stderr, "sidebar live saved pagination phase: %s\n", phase);
+        Fail("live saved sessions must obey catalog activity ordering and pagination while Inbox stays independently addressable");
+    }
+    return good ? 0 : 1;
+}
+
+static int TestSidebarInboxMissingSavedTitle(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
+    PicoSession_Start(f.host, agent, PICO_SESSION_NEW, NULL);
+    if (PicoSession_LogUser(f.host, agent, "Removed file", "Removed file", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogInboxPending(f.host, agent, true) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, agent) || unlink(agent->session_path)) goto done;
+    PicoCatalogWorkspace *catalog = NULL;
+    int count = PicoCatalog_Scan(&catalog);
+    PicoCatalog_Free(catalog, count);
+    if (count < 1) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    good = FindSidebarTextIn(&commands, "Untitled", CLAY_IDI("SidebarInbox", 0)) &&
+           SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInbox", 0))) &&
+           pico_agent_active(f.host) == f.agent;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("a completed missing-title lookup must leave an addressable Inbox row, not a perpetual loading label");
+    return good ? 0 : 1;
+}
+
+/* New drafts are distinct live rows and sort ahead of saved catalog sessions,
+ * with the most recently created blank first. */
+static int TestSidebarBlankDraftOrdering(void)
+{
+    InteractionFixture f = {0};
+    PicoAgentId older_draft, newer_draft, saved_id = 0;
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    older_draft = f.agent;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NONE};
+    if (pico_main_agent_create(f.host, f.workspace, &options, &newer_draft) != PICO_OK) goto done;
+    PicoAgentId saved_agent = 0;
+    options.session_start = PICO_SESSION_NEW;
+    if (pico_main_agent_create(f.host, f.workspace, &options, &saved_agent) != PICO_OK) goto done;
+    PicoAgent *saved = PicoHost_FindAgent(f.host, saved_agent);
+    if (!saved || PicoSession_LogUser(f.host, saved, "Saved draft-order title", "Saved draft-order title", NULL) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, saved)) goto done;
+    saved_id = saved_agent;
+    PicoCatalogWorkspace *catalog = NULL;
+    int count = PicoCatalog_Scan(&catalog);
+    PicoCatalog_Free(catalog, count);
+    if (count < 1) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    PicoHost_Frame(f.host);
+    if (!Clay_GetElementData(CLAY_IDI("SidebarSess", 0)).found ||
+        !Clay_GetElementData(CLAY_IDI("SidebarSess", 1)).found ||
+        !Clay_GetElementData(CLAY_IDI("SidebarSess", 2)).found) goto done;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarSess", 0))) ||
+        pico_agent_active(f.host) != newer_draft) goto done;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarSess", 1))) ||
+        pico_agent_active(f.host) != older_draft) goto done;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarSess", 2))) ||
+        pico_agent_active(f.host) != saved_id) goto done;
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("blank drafts must precede saved sessions newest first while preserving each row's live identity");
+    return good ? 0 : 1;
+}
+
+/* Real persisted live rows must retain their IDs through independent Inbox
+ * ordering and row context actions. */
 static int TestSidebarCachedLiveRowIdentity(void)
 {
     InteractionFixture f = {0};
     PicoAgentId ids[2] = {0};
+    char session_ids[2][40] = {{0}};
     bool good = false;
     if (!InteractionFixtureInit(&f)) goto done;
-    ids[0] = f.agent;
-    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
-    if (pico_main_agent_create(f.host, f.workspace, &options, &ids[1]) != PICO_OK) goto done;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
+        .session_start = PICO_SESSION_NEW};
     for (int i = 0; i < 2; i++)
     {
+        if (i == 0) ids[i] = f.agent;
+        else if (pico_main_agent_create(f.host, f.workspace, &options, &ids[i]) != PICO_OK) goto done;
         PicoAgent *agent = PicoHost_FindAgent(f.host, ids[i]);
-        snprintf(agent->session_id, sizeof(agent->session_id), "uncataloged-%d", i);
-        agent->inbox_pending = true;
+        if (!agent) goto done;
+        PicoSession_Start(f.host, agent, PICO_SESSION_NEW, NULL);
+        char title[48];
+        snprintf(title, sizeof(title), "Identity title %d", i);
+        if (PicoSession_LogUser(f.host, agent, title, title, NULL) != PICO_SESSION_WRITE_OK ||
+            PicoSession_LogInboxPending(f.host, agent, true) != PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(f.host, agent)) goto done;
+        snprintf(session_ids[i], sizeof(session_ids[i]), "%s", agent->session_id);
+        struct timespec activity[2] = {{.tv_sec = 1700000000 + i}, {.tv_sec = 1700000000 + i}};
+        if (utimensat(AT_FDCWD, agent->session_path, activity, 0)) goto done;
     }
-    pico_host_request_redraw(f.host);
+    PicoCatalogWorkspace *catalog = NULL;
+    int count = PicoCatalog_Scan(&catalog);
+    PicoCatalog_Free(catalog, count);
+    if (count < 1) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
     PicoHost_Frame(f.host);
     for (int i = 0; i < 2; i++)
     {
-        if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInbox", i))) ||
-            pico_agent_active(f.host) != ids[i]) goto done;
+        if (!Clay_GetElementData(CLAY_IDI("SidebarInbox", i)).found ||
+            !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInbox", i)))) goto done;
+        int expected = 1 - i; /* The newer saved conversation is first. */
+        if (pico_agent_active(f.host) != ids[expected]) goto done;
         if (!SidebarFrameClickButton(f.host, Clay_GetElementData(CLAY_IDI("SidebarSess", i)), MOUSE_BUTTON_RIGHT) ||
             !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSessionCopy")))) goto done;
-        char expected[40];
-        snprintf(expected, sizeof(expected), "uncataloged-%d", i);
-        if (!GetClipboardText() || strcmp(GetClipboardText(), expected)) goto done;
+        if (!GetClipboardText() || strcmp(session_ids[expected], GetClipboardText())) goto done;
     }
     good = true;
 done:
     InteractionFixtureFree(&f);
-    if (!good) Fail("cached sidebar rows must preserve distinct live session identities across layout and input");
+    if (!good) Fail("real saved sidebar rows must preserve live session identity through Inbox and context actions");
     return good ? 0 : 1;
 }
 
@@ -19158,6 +19388,11 @@ int main(int argc, char **argv)
 #endif
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--sidebar-pagination") == 0)
+        return PICO_TEST_RUN(TestSidebarLiveSavedPagination()) ||
+               PICO_TEST_RUN(TestSidebarBlankDraftOrdering()) ||
+               PICO_TEST_RUN(TestSidebarInboxMissingSavedTitle()) ||
+               PICO_TEST_RUN(TestSidebarCachedLiveRowIdentity());
     if (argc == 2 && strcmp(argv[1], "--external-links") == 0) return PICO_TEST_RUN(TestExternalLinkOpener());
     if (argc == 2 && strcmp(argv[1], "--docs-links") == 0) return PICO_TEST_RUN(TestDocsLinkOrigins());
     if (argc == 2 && strcmp(argv[1], "--chat-links") == 0) return PICO_TEST_RUN(TestChatLinkWorkspacePaths());
@@ -19203,6 +19438,9 @@ int main(int argc, char **argv)
             PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, true))) return 1;
     if (PICO_TEST_RUN(TestFooterUsesWorkspaceIdentity()) ||
         PICO_TEST_RUN(TestSidebarCachedLiveRowIdentity()) ||
+        PICO_TEST_RUN(TestSidebarLiveSavedPagination()) ||
+        PICO_TEST_RUN(TestSidebarBlankDraftOrdering()) ||
+        PICO_TEST_RUN(TestSidebarInboxMissingSavedTitle()) ||
         PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(false)) ||
         PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(true))) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;

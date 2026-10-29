@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <utime.h>
 
@@ -230,6 +231,13 @@ static bool TransferByte(int fd, bool write_byte)
 }
 
 /* Session tests exercise persistence without a desktop event loop. */
+double PicoClock_Monotonic(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 void pico_host_wakeup(PicoHost *host)
 {
     (void)host;

@@ -154,6 +154,8 @@ struct PicoHost {
     PicoComposer clarification_parked_composer;
     PicoChatFind find;
     PicoHostPreferences preferences;
+    bool sidebar_inbox_mode;
+    bool sidebar_mode_loaded;
     bool settings_reload_blocked; /* save/failure modal owns its draft until applied or closed */
     struct PicoExtensionPreference *extension_preferences;
     struct PicoProjectPreference *project_preferences;
@@ -376,6 +378,8 @@ PicoWorkspace *PicoHost_FindWorkspace(PicoHost *host, PicoWorkspaceId id);
 PicoAgent *PicoHost_FindAgent(PicoHost *host, PicoAgentId id);
 const PicoAgent *PicoHost_FindAgentConst(const PicoHost *host, PicoAgentId id);
 /* UI-only. Backend code must take an explicit agent ID or pointer. */
+/* Return to the session picker without closing agents or cancelling their work. */
+void PicoHost_ClearAgentSelection(PicoHost *host);
 PicoAgent *PicoHost_SelectedAgent(PicoHost *host);
 const PicoAgent *PicoHost_SelectedAgentConst(const PicoHost *host);
 /* Host-extension replacement only. Does not pause or reload workspaces. */

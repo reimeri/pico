@@ -1,3 +1,4 @@
+#include "builtins/sidebar.h"
 #include "clarification.h"
 #include "pico/plugin.h"
 #include "host_internal.h"
@@ -2096,6 +2097,7 @@ static void RunEmpty(PicoHost *app, PicoEmptyKind kind)
 static void RenderEmptyState(PicoHost *app)
 {
     bool has_selected_agent = PicoHost_TranscriptAgentConst(app) != NULL;
+    if (!has_selected_agent && PicoSidebar_RenderProjectPicker(app)) return;
     if (has_selected_agent && EmptyReplaced(app))
     {
         RunEmpty(app, PICO_EMPTY_REPLACE);

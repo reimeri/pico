@@ -2903,6 +2903,7 @@ static void GoIdle(PicoHost *app, PicoAgent *agent)
 
 static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
 {
+    agent->inbox_activity = PicoClock_Monotonic();
     GoIdle(app, agent);
     if (PicoAgent_IsUserMain(agent))
         PicoSession_SetInboxPending(app, agent, true);

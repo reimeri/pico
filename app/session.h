@@ -70,6 +70,9 @@ typedef struct PicoCatalogWorkspace {
     int session_count;
     int session_capacity;
     bool has_more_sessions;
+    /* Undismissed saved sessions, independent of the project history page. */
+    PicoCatalogSession *inbox_sessions;
+    int inbox_count;
 } PicoCatalogWorkspace;
 
 /* Host-owned optimistic project presentation and its last durable baseline. */

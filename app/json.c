@@ -185,6 +185,43 @@ void JsonBuf_Putc(JsonBuf *b, char c)
     JsonBuf_Append(b, &c, 1);
 }
 
+/* Length of one UTF-8 scalar, or zero for an incomplete/invalid sequence. */
+static int Utf8SequenceLength(const unsigned char *src, size_t len)
+{
+    if (!len) return 0;
+    unsigned char first = src[0];
+    unsigned cp;
+    int bytes;
+    if (first < 0x80) return 1;
+    if (first >= 0xC2 && first <= 0xDF)
+    {
+        cp = first & 0x1F;
+        bytes = 2;
+    }
+    else if (first >= 0xE0 && first <= 0xEF)
+    {
+        cp = first & 0x0F;
+        bytes = 3;
+    }
+    else if (first >= 0xF0 && first <= 0xF4)
+    {
+        cp = first & 0x07;
+        bytes = 4;
+    }
+    else return 0;
+    if ((size_t)bytes > len) return 0;
+    for (int j = 1; j < bytes; j++)
+    {
+        unsigned char next = src[j];
+        if ((next & 0xC0) != 0x80) return 0;
+        cp = (cp << 6) | (next & 0x3F);
+    }
+    if ((bytes == 3 && cp < 0x800) || (bytes == 4 && cp < 0x10000) ||
+        (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+        return 0;
+    return bytes;
+}
+
 void JsonBuf_String(JsonBuf *b, const char *s)
 {
     JsonBuf_Putc(b, '"');
@@ -193,9 +230,22 @@ void JsonBuf_String(JsonBuf *b, const char *s)
         JsonBuf_Putc(b, '"');
         return;
     }
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+    size_t len = strlen(s);
+    for (size_t i = 0; i < len; i++)
     {
-        unsigned char c = *p;
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 0x80)
+        {
+            int bytes = Utf8SequenceLength((const unsigned char *)s + i, len - i);
+            if (bytes)
+            {
+                JsonBuf_Append(b, s + i, (size_t)bytes);
+                i += (size_t)bytes - 1;
+            }
+            else
+                JsonBuf_Puts(b, "\xEF\xBF\xBD");
+            continue;
+        }
         switch (c)
         {
         case '"':
@@ -402,51 +452,8 @@ bool JsonValidUtf8(const char *src, size_t len)
     size_t i = 0;
     while (i < len)
     {
-        unsigned char first = (unsigned char)src[i];
-        unsigned cp;
-        int bytes;
-        if (first < 0x80)
-        {
-            i++;
-            continue;
-        }
-        if (first >= 0xC2 && first <= 0xDF)
-        {
-            cp = first & 0x1F;
-            bytes = 2;
-        }
-        else if (first >= 0xE0 && first <= 0xEF)
-        {
-            cp = first & 0x0F;
-            bytes = 3;
-        }
-        else if (first >= 0xF0 && first <= 0xF4)
-        {
-            cp = first & 0x07;
-            bytes = 4;
-        }
-        else
-        {
-            return false;
-        }
-        if (i + (size_t)bytes > len)
-        {
-            return false;
-        }
-        for (int j = 1; j < bytes; j++)
-        {
-            unsigned char next = (unsigned char)src[i + (size_t)j];
-            if ((next & 0xC0) != 0x80)
-            {
-                return false;
-            }
-            cp = (cp << 6) | (next & 0x3F);
-        }
-        if ((bytes == 3 && cp < 0x800) || (bytes == 4 && cp < 0x10000) ||
-            (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
-        {
-            return false;
-        }
+        int bytes = Utf8SequenceLength((const unsigned char *)src + i, len - i);
+        if (!bytes) return false;
         i += (size_t)bytes;
     }
     return true;

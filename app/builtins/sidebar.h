@@ -3,6 +3,10 @@
 
 #include <stdbool.h>
 
+typedef struct PicoHost PicoHost;
+/* Renders the internal Inbox project picker, returning whether it replaced the empty state. */
+bool PicoSidebar_RenderProjectPicker(PicoHost *host);
+
 /* Internal interaction model shared by the sidebar and behavior tests. */
 bool PicoSidebar_DragMoved(float press_x, float press_y, float mouse_x, float mouse_y);
 int PicoSidebar_DragTarget(const float *midpoints, int count, int source, float mouse_y);

@@ -898,6 +898,9 @@ static int CreateNew(PicoHost *app, PicoAgent *agent)
 
 static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const char *json)
 {
+    if (agent && json && SessionAppendChangesRecency(json))
+        agent->inbox_activity = PicoClock_Monotonic();
+
     if (!app || !agent || !json || !json[0])
     {
         return PICO_SESSION_WRITE_FAILED;
@@ -2867,6 +2870,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->last_steering_id = 0;
     agent->unseen_complete = false;
     agent->inbox_pending = false;
+    agent->inbox_activity = 0;
 }
 
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
@@ -3620,26 +3624,25 @@ PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, con
     return PICO_SESSION_WRITE_OK;
 }
 
-PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
+static char *UnseenCompleteJson(bool complete)
 {
-    char *pre;
+    char *pre = EventPrefix("unseen_complete");
     JsonBuf b;
-    char *line;
-    PicoSessionWriteResult result;
-    if (agent)
-    {
-        agent->unseen_complete = complete;
-    }
-    pre = EventPrefix("unseen_complete");
     JsonBuf_Init(&b);
     JsonBuf_Puts(&b, pre);
     JsonBuf_Puts(&b, ",\"complete\":");
     JsonBuf_Bool(&b, complete);
     JsonBuf_Putc(&b, '}');
-    line = JsonBuf_Steal(&b);
-    result = AppendLine(app, agent, line);
-    free(line);
     free(pre);
+    return JsonBuf_Steal(&b);
+}
+
+PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
+{
+    if (agent) agent->unseen_complete = complete;
+    char *line = UnseenCompleteJson(complete);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
+    free(line);
     return result;
 }
 
@@ -3725,6 +3728,19 @@ int PicoCatalog_SetInboxPending(const char *checkout_path, const char *session_i
     sqlite3_finalize(stmt);
     sqlite3_close(db);
     line = InboxPendingJson(pending);
+    if (!pending && line)
+    {
+        /* Both review flags clear under one file lock, without changing activity order. */
+        char *unseen = UnseenCompleteJson(false);
+        JsonBuf batch;
+        JsonBuf_Init(&batch);
+        JsonBuf_Puts(&batch, unseen);
+        JsonBuf_Putc(&batch, '\n');
+        JsonBuf_Puts(&batch, line);
+        free(unseen);
+        free(line);
+        line = JsonBuf_Steal(&batch);
+    }
     if (!line || !path[0])
     {
         free(line);
@@ -4159,6 +4175,9 @@ static void CatalogClearSessions(PicoCatalogWorkspace *ws)
         return;
     }
     free(ws->sessions);
+    free(ws->inbox_sessions);
+    ws->inbox_sessions = NULL;
+    ws->inbox_count = 0;
     ws->sessions = NULL;
     ws->session_count = 0;
     ws->session_capacity = 0;
@@ -5824,16 +5843,17 @@ int PicoCatalog_DeleteProject(PicoHost *host, const char *project)
 }
 
 static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int requested,
-                               const atomic_bool *cancelled)
+                               const atomic_bool *cancelled, bool inbox_only)
 {
     sqlite3_stmt *stmt = NULL;
     if (!CatalogDbPrepare(db, &stmt,
         "SELECT s.id,s.title,s.model,s.effort,s.kind,s.mtime,s.mtime_nsec,s.ctime,s.ctime_nsec,"
         "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree,s.inbox"
         " FROM sessions s JOIN workspaces w ON w.path=s.workspace_path"
-        " WHERE s.project_path=? AND s.kind=0"
+        " WHERE s.project_path=? AND s.kind=0 AND (?=0 OR s.inbox=1 OR s.unseen=1)"
         " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC")) return false;
     sqlite3_bind_text(stmt, 1, group->path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, inbox_only);
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW && !CatalogCancelled(cancelled))
     {
@@ -5923,8 +5943,14 @@ static int CatalogGroupSnapshot(sqlite3 *db, PicoCatalogWorkspace *leaves, int c
             if (!strcmp(pages[j].path, groups[i].path) && pages[j].shown > requested)
                 requested = pages[j].shown;
         if (requested >= INT_MAX) requested = INT_MAX - 1;
-        if (!CatalogDbGroupRows(db, &groups[i], requested, cancelled))
+        if (!CatalogDbGroupRows(db, &groups[i], requested, cancelled, false))
         { failed = true; break; }
+        PicoCatalogWorkspace inbox = {0};
+        snprintf(inbox.path, sizeof(inbox.path), "%s", groups[i].path);
+        bool inbox_ok = CatalogDbGroupRows(db, &inbox, INT_MAX, cancelled, true);
+        groups[i].inbox_sessions = inbox.sessions;
+        groups[i].inbox_count = inbox.session_count;
+        if (!inbox_ok) { failed = true; break; }
     }
     if (failed) { PicoCatalog_Free(groups, group_count); return -1; }
     if (group_count > 1) qsort(groups, (size_t)group_count, sizeof(*groups), CmpCatalogOrder);
@@ -6024,6 +6050,7 @@ typedef struct PicoInboxAck {
     bool superseded;
     PicoAgentId replay_agent;
     uint64_t replay_revision;
+    bool replay_unseen;
 } PicoInboxAck;
 
 typedef struct PicoInboxAckBatch {
@@ -6057,13 +6084,13 @@ static bool InboxAckSnapshotCovers(const PicoInboxAck *ack,
 {
     if (ack->superseded || atomic_load(&ack->status) == PICO_CATALOG_PERSIST_FAILED) return true;
     for (int w = 0; w < count; w++)
-        for (int i = 0; i < workspaces[w].session_count; i++)
+        for (int i = 0; i < workspaces[w].inbox_count; i++)
         {
-            const PicoCatalogSession *row = &workspaces[w].sessions[i];
+            const PicoCatalogSession *row = &workspaces[w].inbox_sessions[i];
             if (!strcmp(row->checkout_path, ack->target.checkout_path) &&
-                !strcmp(row->id, ack->target.session_id)) return !row->inbox_pending;
+                !strcmp(row->id, ack->target.session_id)) return false;
         }
-    return false;
+    return true;
 }
 
 void PicoCatalog_InboxSnapshotApplied(PicoHost *host, uint64_t epoch,
@@ -6110,6 +6137,8 @@ static void InboxAckReplay(PicoHost *host, PicoAgent *agent)
             if (ack->superseded || atomic_load(&ack->status) == PICO_CATALOG_PERSIST_FAILED ||
                 strcmp(ack->target.checkout_path, path) ||
                 strcmp(ack->target.session_id, agent->session_id)) continue;
+            ack->replay_unseen = agent->unseen_complete;
+            agent->unseen_complete = false;
             agent->inbox_pending = false;
             ack->replay_agent = agent->id;
             ack->replay_revision = ++agent->inbox_revision;
@@ -6787,6 +6816,7 @@ void PicoSessionPersist_Pump(PicoHost *host)
                     agent->inbox_revision == ack->replay_revision)
                 {
                     agent->inbox_pending = true;
+                    agent->unseen_complete = ack->replay_unseen;
                     agent->inbox_revision++;
                 }
                 inbox_failed = true;

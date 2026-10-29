@@ -17,6 +17,7 @@ void JsonBuf_Clear(JsonBuf *b);
 void JsonBuf_Append(JsonBuf *b, const char *s, size_t n);
 void JsonBuf_Puts(JsonBuf *b, const char *s);
 void JsonBuf_Putc(JsonBuf *b, char c);
+/* Quote a C string, preserving valid UTF-8 and replacing each malformed byte with U+FFFD. */
 void JsonBuf_String(JsonBuf *b, const char *s);
 void JsonBuf_Int(JsonBuf *b, int v);
 void JsonBuf_Bool(JsonBuf *b, bool v);

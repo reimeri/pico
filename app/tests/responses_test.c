@@ -71,6 +71,31 @@ static void TestRequestOptions(void)
     free(body);
 }
 
+static void TestMalformedToolOutput(void)
+{
+    /* Raw canonical input also exercises replay of an older, unsanitized session. */
+    const char *input[] = {
+        "{\"type\":\"tool_call\",\"call_id\":\"binary-output\",\"name\":\"sh\",\"arguments\":\"{}\"}",
+        "{\"type\":\"tool_result\",\"call_id\":\"binary-output\",\"output\":\"before\xFF\xFF\xFF" "after ✓\"}",
+    };
+    PicoLlmTurn turn = {.model = "model", .input_json = input, .input_count = 2};
+    PicoResponsesBuildOpts opts = {.provider = "openai"};
+    char *body = pico_responses_build_request(&turn, &opts);
+    JsonDoc doc;
+    bool valid = body && JsonValidSyntax(body, strlen(body)) && !JsonParse(&doc, body, strlen(body));
+    char *output = NULL;
+    if (valid)
+    {
+        int items = JsonObjGet(&doc, 0, "input");
+        output = JsonObjStr(&doc, JsonArrayAt(&doc, items, 1), "output");
+        JsonFree(&doc);
+    }
+    Check(output && !strcmp(output, "before���after ✓"),
+          "malformed tool output must replay as valid request JSON without losing surrounding text");
+    free(output);
+    free(body);
+}
+
 static void TestToolSchemaPolicy(void)
 {
     PicoTool tools[] = {
@@ -900,6 +925,7 @@ int main(void)
     TestNativeRetentionBudget();
     TestToolImageObservation();
     TestRequestOptions();
+    TestMalformedToolOutput();
     TestToolSchemaPolicy();
     TestFastServiceTier();
     TestContextItemConversion();

@@ -786,6 +786,19 @@ bool pico_agent_select(PicoHost *app, PicoAgentId id)
     return true;
 }
 
+void PicoHost_ClearAgentSelection(PicoHost *host)
+{
+    if (!host) return;
+    PicoSession_LoadCancel(host);
+    SyncSelectedAgent(host, 0);
+    PicoChatSel_Clear(host);
+    memset(&host->chat_scrollbar, 0, sizeof(host->chat_scrollbar));
+    host->chat_follow_bottom = true;
+    host->chat_overflow = true;
+    host->hovered_tool = false;
+    host->ui_relayout_requested = true;
+}
+
 PicoResult pico_agent_close(PicoHost *app, PicoAgentId id)
 {
     if (app && app->session_replay_agent && app->session_replay_agent->id == id)

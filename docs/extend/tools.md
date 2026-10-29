@@ -50,6 +50,16 @@ On Linux, a background job stays `running` until its command and descendants in 
 
 `kill_background`, session reset, agent destruction, workspace free, and host shutdown signal the entire owned group, including descendants remaining after launcher exit. Explicit kill reports `killed` with its signal. Linux parent-death handling also kills the group when the host disappears; merely finishing the tool's worker thread does not stop the job. A process that deliberately leaves the group with `setsid`/`setpgid` is outside this ownership boundary. Jobs retain their existing reload lifetime and bounded output capture; no extension-owned thread or callback is added. See [contracts](contracts.md#threads).
 
+## Text output and JSON encoding
+
+Tool output is text, not a binary transport. When serialized into session or
+provider JSON, valid UTF-8 is preserved and each malformed byte is replaced with
+U+FFFD (`�`) so arbitrary shell output cannot corrupt a later request.
+The SDK's `JsonBuf_String()` applies the same rule while quoting C strings.
+This does not repair raw JSON passed through `JsonBuf_Puts()`/`JsonBuf_Append()`;
+`details_json` and other raw JSON fields must still contain valid JSON. Use the
+image APIs for image bytes, and save other binary data to a file.
+
 ## Execution policy and parallel calls
 
 The final argument to `pico_add_tool` is a required `PicoToolExecution`:

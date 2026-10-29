@@ -28,7 +28,7 @@
 #define PICO_CC "cc"
 #endif
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.5.3"
+#define PICO_VERSION "0.5.4"
 #endif
 
 #define PICO_MAX_USER_PLUGINS 32

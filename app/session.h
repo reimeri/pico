@@ -283,7 +283,8 @@ PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *a
 void PicoSession_SetUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete);
 PicoSessionWriteResult PicoSession_LogInboxPending(PicoHost *app, PicoAgent *agent, bool pending);
 void PicoSession_SetInboxPending(PicoHost *app, PicoAgent *agent, bool pending);
-/* Appends the inbox event for a closed session. Does not change agent run state. */
+/* Appends the inbox event for a closed session. Clearing also clears its unread
+ * completion marker under the same writer lock. Does not change run state. */
 int PicoCatalog_SetInboxPending(const char *checkout_path, const char *session_id, bool pending);
 typedef enum PicoCatalogPersistStatus {
     PICO_CATALOG_PERSIST_FAILED = -1,

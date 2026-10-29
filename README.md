@@ -78,6 +78,22 @@ Supports `x86_64-linux` and `aarch64-linux`; the package puts GCC on `PATH` so e
 
 Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`.
 
+## Projects and Inbox
+
+Click the title at the top of the sidebar to switch modes. Pico starts in **Projects**
+by default and remembers your last-used mode across restarts. Switching modes leaves
+the selected conversation open and other sessions running.
+
+- **Projects** groups sessions by project, with the existing Stashed section.
+- **Inbox** groups active and undismissed sessions under **Needs input** (questions,
+  approvals, and errors), **Working**, and **Completed** (finished or stopped turns).
+  Rows include their project name and move between sections as work progresses.
+- The checkmark beside **Completed** dismisses those sessions from Inbox, including
+  unread completions. Their history remains available in Projects.
+- In Inbox, **+** opens a centered project picker without stopping ongoing work.
+  Choose a non-stashed project to create a session, or return to its empty draft.
+  The picker also offers **Add project**.
+
 ## Build from source
 
 Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, libwebp, libjpeg, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:

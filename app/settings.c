@@ -1643,6 +1643,14 @@ static bool PatchTokSpan(char **src, size_t *len, const JsonDoc *doc, int tok, c
     {
         return false;
     }
+    /* String token spans exclude their quotes, while json_value is a complete
+     * encoded value. Replace both delimiters as well as the string contents. */
+    if (JsonIsString(doc, tok))
+    {
+        if (start == 0 || (size_t)end >= *len) return false;
+        start--;
+        end++;
+    }
     char *next = Splice(*src, *len, start, end - start, json_value);
     if (!next)
     {
@@ -2472,21 +2480,7 @@ static bool PatchObjectValue(char **src, size_t *len, const char *key, const cha
     tok = JsonObjGet(&doc, 0, key);
     if (tok >= 0)
     {
-        int start = JsonTokStart(&doc, tok);
-        int end = JsonTokEnd(&doc, tok);
-        if (start > 0 && end >= start && (*src)[start - 1] == '"' && (*src)[end] == '"')
-        {
-            start--;
-            end++;
-        }
-        char *next = start >= 0 && end >= start ? Splice(*src, *len, start, end - start, json_value) : NULL;
-        ok = next != NULL;
-        if (next)
-        {
-            free(*src);
-            *src = next;
-            *len = strlen(next);
-        }
+        ok = PatchTokSpan(src, len, &doc, tok, json_value);
     }
     else
     {

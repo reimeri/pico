@@ -2899,14 +2899,17 @@ static void GoIdle(PicoHost *app, PicoAgent *agent)
     rt->compacting = false;
     rt->compact_no_tools = false;
     agent->activity[0] = '\0';
+    /* Successful and stopped turns both remain reviewable in Completed.
+     * Do this at settlement, not at the cancellation request: tools may still
+     * be working while their cancellation is draining. */
+    agent->inbox_activity = PicoClock_Monotonic();
+    if (PicoAgent_IsUserMain(agent))
+        PicoSession_SetInboxPending(app, agent, true);
 }
 
 static void EndTurnIdle(PicoHost *app, PicoAgent *agent)
 {
-    agent->inbox_activity = PicoClock_Monotonic();
     GoIdle(app, agent);
-    if (PicoAgent_IsUserMain(agent))
-        PicoSession_SetInboxPending(app, agent, true);
     if (pico_agent_active(app) != agent->id)
     {
         PicoSession_SetUnseenComplete(app, agent, true);

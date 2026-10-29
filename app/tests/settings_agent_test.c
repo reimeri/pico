@@ -1241,6 +1241,42 @@ static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
     return failed ? Fail("saving user settings wrote workspace .pico/settings.json") : 0;
 }
 
+static int TestSidebarModeSavesValidJson(void)
+{
+    char temp[] = "/tmp/pico-settings-sidebar-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create sidebar settings directory");
+    char pico[sizeof(temp) + 8], path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/settings.json", pico);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    int failed = WriteFile(path, "{\n  // keep this note\n  \"custom\": {\"keep\": true}\n}\n");
+    /* Insert the preference, then replace an existing JSON string in both
+     * directions. A first-write-only test misses doubled surrounding quotes. */
+    const bool modes[] = {false, true, false};
+    for (size_t i = 0; !failed && i < sizeof(modes) / sizeof(modes[0]); i++)
+    {
+        if (!PicoSettings_WriteSidebarInboxMode(modes[i])) { failed = 1; break; }
+        size_t len = 0;
+        char *saved = Pico_ReadFile(path, &len);
+        JsonDoc doc = {0};
+        if (!saved || !strstr(saved, "// keep this note")) failed = 1;
+        if (!failed)
+        {
+            JsonStripComments(saved, len);
+            if (!JsonValidSyntax(saved, len) || JsonParse(&doc, saved, len) != 0 ||
+                !JsonEq(&doc, JsonObjGet(&doc, 0, "sidebar_mode"), modes[i] ? "inbox" : "projects") ||
+                !JsonEq(&doc, JsonObjGet(&doc, JsonObjGet(&doc, 0, "custom"), "keep"), "true") ||
+                PicoSettings_ReadSidebarInboxMode() != modes[i]) failed = 1;
+        }
+        JsonFree(&doc);
+        free(saved);
+    }
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("repeated sidebar mode changes must preserve valid JSON and other settings") : 0;
+}
+
 static int TestFreshUserSettingsCanSave(void)
 {
     char temp[] = "/tmp/pico-settings-fresh-XXXXXX";
@@ -1754,6 +1790,7 @@ static int TestParallelSettingsResolution(void)
 
 int main(void)
 {
+    if (PICO_TEST_RUN(TestSidebarModeSavesValidJson())) return 1;
     if (PICO_TEST_RUN(TestFreshUserSettingsCanSave())) return 1;
     if (PICO_TEST_RUN(TestUserDraftSavesCommentsOnlyObject())) return 1;
     if (PICO_TEST_RUN(TestUserDraftRepairsTrailingCommas())) return 1;

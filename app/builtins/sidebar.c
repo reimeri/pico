@@ -2323,12 +2323,15 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                      .childGap = 6,
                      .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_PERCENT(1)}}})
     {
+        /* Keep the known-height title out of Clay's compression distribution;
+         * overflowing Inbox rows must not displace the fixed settings row. */
         CLAY(CLAY_ID("SidebarProjectsHeader"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                          .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
                          .childGap = SIDEBAR_ROW_GAP,
-                         .sizing = {.width = CLAY_SIZING_PERCENT(1)}}})
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                    .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI) + 8)}}})
         {
             CLAY(CLAY_ID("SidebarMode"), {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 6,
                                                       .sizing = {.width = CLAY_SIZING_GROW(0)}}})

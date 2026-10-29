@@ -15329,6 +15329,7 @@ static int TestSidebarInbox(void)
     other->state = PICO_AGENT_LLM_WAIT;
     (void)PicoHost_LayoutShell(host, viewport.height, 0);
     (void)PicoHost_LayoutShell(host, viewport.height, 0.05f);
+    (void)PicoHost_LayoutShell(host, viewport.height, 0);
     float moving_y = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0)).boundingBox.y;
     for (int frame = 0; frame < 20; frame++)
         commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60);
@@ -17355,6 +17356,51 @@ done:
     return !good;
 }
 
+/* Provider and tool cancellation settle through different event paths. Both
+ * must move a fresh (never-completed) turn from Working into Completed. */
+static int TestSidebarStoppedInInbox(bool during_tool)
+{
+    InteractionFixture f = {0};
+    MatrixProviderState state;
+    MatrixStateInit(&state, during_tool ? MATRIX_PROVIDER_TOOL : MATRIX_PROVIDER_BLOCK);
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(f.host, f.workspace);
+    if (!ConfigureMatrixWorkspace(f.host, workspace, &state, false)) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
+    if (!PicoSettings_SetModel(agent, "matrix-model")) goto done;
+    f.host->sidebar_inbox_mode = true;
+    PicoAgent_StartTurn(f.host, agent, "Stop this turn before completion");
+    if (during_tool)
+    {
+        if (!MatrixWaitToolEntered(f.host, &state)) goto done;
+    }
+    else
+    {
+        PICO_TEST_WAIT(PicoAgent_IsBusy(agent) && !MatrixStateFlag(&state, false)) pico_host_pump(f.host);
+        if (!MatrixStateFlag(&state, false)) goto done;
+    }
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarCommandsContain(&commands, "Working · 1")) goto done;
+    PicoAgent_Cancel(agent);
+    MatrixStateRelease(&state);
+    MatrixReleaseTool(&state);
+    if (!PumpUntilIdle(f.host, agent)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    good = SidebarCommandsContain(&commands, "Completed · 1") &&
+           SidebarCommandsContain(&commands, "Working · 0") &&
+           ClickSidebarId(f.host, CLAY_ID("SidebarInboxDone"));
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    good = good && SidebarCommandsContain(&commands, "Completed · 0");
+done:
+    MatrixStateRelease(&state);
+    MatrixReleaseTool(&state);
+    InteractionFixtureFree(&f);
+    MatrixStateDestroy(&state);
+    if (!good) Fail("a stopped provider/tool turn must remain in Completed until dismissed");
+    return !good;
+}
+
 static int TestSidebarModesAndPicker(void)
 {
     InteractionFixture f = {0};
@@ -17431,9 +17477,9 @@ static int RunSidebarModeShellCase(bool with_sidebar)
     PicoAgent *selected = PicoHost_FindAgent(f.host, f.agent);
     for (int i = 0; i < 60; i++)
         PicoAgent_AddMessage(f.host, selected, PICO_ROLE_ASSISTANT, "Repeated bottom-follow geometry with Inbox and Projects.");
-    PicoAgentId ids[24] = {0};
+    PicoAgentId ids[6] = {0};
     PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
-    for (int i = 0; i < 24; i++)
+    for (int i = 0; i < 6; i++)
     {
         if (pico_main_agent_create(f.host, f.workspace, &options, &ids[i]) != PICO_OK) goto done;
         PicoHost_FindAgent(f.host, ids[i])->inbox_pending = true;
@@ -17443,20 +17489,26 @@ static int RunSidebarModeShellCase(bool with_sidebar)
         /* Exercise full, empty and overflowing modes, including moving rows,
          * while the independent chat remains pinned to its content bottom. */
         f.host->sidebar_inbox_mode = frame >= 40 && frame < 200;
-        for (int i = 0; i < 24; i++)
+        for (int i = 0; i < 6; i++)
         {
             PicoAgent *agent = PicoHost_FindAgent(f.host, ids[i]);
+            if (!agent) goto done;
             agent->inbox_pending = frame < 120 || frame >= 160;
             agent->state = frame < 80 ? PICO_AGENT_IDLE :
                            frame < 120 ? (i % 2 ? PICO_AGENT_ERROR : PICO_AGENT_LLM_WAIT) : PICO_AGENT_IDLE;
         }
-        LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 800});
+        LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 360});
         Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
         if (!scroll.found || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
         PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height,
                                    &scroll.scrollPosition->y);
-        (void)PicoHost_LayoutShell(f.host, 800, 0);
+        (void)PicoHost_LayoutShell(f.host, 360, 0);
         if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
+        if (with_sidebar && frame == 40)
+        {
+            Clay_ScrollContainerData sidebar = Clay_GetScrollContainerData(CLAY_ID("SidebarScroll"));
+            if (!sidebar.found || sidebar.contentDimensions.height <= sidebar.scrollContainerDimensions.height) goto done;
+        }
         if (frame == 20)
         {
             expected = current;
@@ -17465,7 +17517,14 @@ static int RunSidebarModeShellCase(bool with_sidebar)
         }
         else if (frame > 20 && (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
             (with_sidebar && (!ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox) ||
-                              !ShellBoxStable(settings, Clay_GetElementData(CLAY_ID("SidebarSettingsRow")).boundingBox))))) goto done;
+                              !ShellBoxStable(settings, Clay_GetElementData(CLAY_ID("SidebarSettingsRow")).boundingBox)))))
+        {
+            fprintf(stderr, "mode geometry frame %d chatstable=%d root old=%f new=%f settings old=%f new=%f\n", frame,
+                ChatStabilitySnapshotStable(&expected, &current, with_sidebar), sidebar_root.height,
+                Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox.height, settings.y,
+                Clay_GetElementData(CLAY_ID("SidebarSettingsRow")).boundingBox.y);
+            goto done;
+        }
     }
     good = true;
 done:
@@ -17921,6 +17980,16 @@ static int TestSidebarLiveSavedPagination(void)
     if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
     commands = PicoHost_LayoutShell(f.host, 800, 0);
     if (!FindSidebarTextIn(&commands, title, CLAY_IDI("SidebarInbox", 0))) goto done;
+
+    phase = "off-page saved Inbox survives closing the live agent";
+    if (pico_agent_close(f.host, old_id) != PICO_OK) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindSidebarTextIn(&commands, title, CLAY_IDI("SidebarInbox", 0)) ||
+        !ClickSidebarId(f.host, CLAY_IDI("SidebarInbox", 0))) goto done;
+    PICO_TEST_WAIT(PicoSession_LoadPending(f.host)) pico_host_pump(f.host);
+    old_id = pico_agent_active(f.host);
+    old = PicoHost_FindAgent(f.host, old_id);
+    if (!old || !old->inbox_pending) goto done;
 
     phase = "More reveals saved title after newer activity";
     if (!ClickSidebarId(f.host, CLAY_ID("SidebarMode"))) goto done;
@@ -19466,7 +19535,8 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
     if (argc == 2 && strcmp(argv[1], "--sidebar-modes") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
-               PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(RunSidebarModeShellCase(false)) ||
+               PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
+               PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunSidebarModeShellCase(false)) ||
                PICO_TEST_RUN(RunSidebarModeShellCase(true)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_SUCCESS)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) ||
@@ -19527,7 +19597,8 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(false)) ||
         PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(true))) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
-    if (PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
+    if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
+        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
         PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder())) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;

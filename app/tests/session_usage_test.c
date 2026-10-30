@@ -3342,13 +3342,13 @@ static int TestInboxPendingRoundTrip(void)
     resumed.workspace = &writer_ws;
     resumed.kind = PICO_AGENT_MAIN;
     if (!found || found->session_count < 1 || found->sessions[0].inbox_pending ||
-        !found->sessions[0].unseen_complete ||
+        found->sessions[0].unseen_complete ||
         PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
-        resumed.inbox_pending || !resumed.unseen_complete)
+        resumed.inbox_pending || resumed.unseen_complete)
     {
         PicoCatalog_Free(catalog, catalog_n);
         unlink(writer_agent.session_path);
-        return Fail("inbox acknowledgement must not clear the green dot");
+        return Fail("inbox acknowledgement must clear both review flags in the catalog and replay");
     }
     PicoCatalog_Free(catalog, catalog_n);
     unlink(writer_agent.session_path);

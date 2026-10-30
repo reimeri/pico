@@ -17432,6 +17432,18 @@ static int TestSidebarModesAndPicker(void)
         Clay_GetElementData(CLAY_ID("ComposerAlign")).found ||
         fabsf(picker.boundingBox.y + picker.boundingBox.height / 2 -
               (chat.boundingBox.y + chat.boundingBox.height / 2)) > 1) goto done;
+    phase = "compact picker rows";
+    Clay_ElementData project = Clay_GetElementData(CLAY_IDI("InboxProject", 0));
+    Clay_ElementData add = Clay_GetElementData(CLAY_ID("InboxAddProject"));
+    Clay_RenderCommand *label = FindCardText(&commands, "Original");
+    Clay_RenderCommand *hint = FindCardText(&commands, "Choose a project to get started");
+    /* Compact choices use less than a text line of vertical padding and sit
+     * closer to each other than to the introductory text. */
+    if (!project.found || !add.found || !label || !hint ||
+        project.boundingBox.height >= 2 * label->boundingBox.height ||
+        add.boundingBox.y < project.boundingBox.y + project.boundingBox.height ||
+        add.boundingBox.y - (project.boundingBox.y + project.boundingBox.height) >=
+            project.boundingBox.y - (hint->boundingBox.y + hint->boundingBox.height)) goto done;
     phase = "create in chosen project";
     if (!ClickSidebarId(f.host, CLAY_IDI("InboxProject", 0))) goto done;
     PicoAgentId draft = pico_agent_active(f.host);

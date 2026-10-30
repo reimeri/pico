@@ -2265,31 +2265,35 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
                     .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
         CLAY_TEXT(CLAY_STRING("Choose a project to get started"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                     .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED}));
-        for (int i = 0; i < s->workspace_count; i++)
+        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
+                                 .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            const PicoCatalogWorkspace *ws = &s->workspaces[i];
-            if (ws->stashed) continue;
-            Clay_ElementId id = CLAY_IDI("InboxProject", i);
-            CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 12,
-                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .padding = CLAY_PADDING_ALL(12),
-                                 .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                      .backgroundColor = RowFill(false, Clay_PointerOver(id)), .cornerRadius = CLAY_CORNER_RADIUS(8)})
+            for (int i = 0; i < s->workspace_count; i++)
             {
-                RenderFolderIcon(&s->folder_collapsed, ">");
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                const PicoCatalogWorkspace *ws = &s->workspaces[i];
+                if (ws->stashed) continue;
+                Clay_ElementId id = CLAY_IDI("InboxProject", i);
+                CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 12,
+                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .padding = {12, 12, 6, 6},
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                          .backgroundColor = RowFill(false, Clay_PointerOver(id)), .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {
-                    CLAY_TEXT(CStr(ws->name), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+                    RenderFolderIcon(&s->folder_collapsed, ">");
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    {
+                        CLAY_TEXT(CStr(ws->name), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                    .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+                    }
+                    RenderGlyph("+", COLOR_MUTED);
                 }
-                RenderGlyph("+", COLOR_MUTED);
             }
-        }
-        CLAY(CLAY_ID("InboxAddProject"), {.layout = {.padding = CLAY_PADDING_ALL(12),
-                                                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
-              .backgroundColor = RowFill(false, Clay_PointerOver(CLAY_ID("InboxAddProject"))),
-              .cornerRadius = CLAY_CORNER_RADIUS(8)})
-        {
-            RenderGlyph("+ Add project", COLOR_MUTED);
+            CLAY(CLAY_ID("InboxAddProject"), {.layout = {.padding = {12, 12, 6, 6},
+                                                          .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                  .backgroundColor = RowFill(false, Clay_PointerOver(CLAY_ID("InboxAddProject"))),
+                  .cornerRadius = CLAY_CORNER_RADIUS(8)})
+            {
+                RenderGlyph("+ Add project", COLOR_MUTED);
+            }
         }
     }
     return true;

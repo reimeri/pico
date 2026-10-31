@@ -209,7 +209,7 @@ validating their arguments. See [providers](providers.md#function-tool-schemas).
 - User extensions: `~/.config/pico/extensions/`
 - Workspace extensions: `<workspace>/.pico/extensions/`
 - User subagent profiles: `~/.config/pico/subagents/` (or the matching `$XDG_CONFIG_HOME` path)
-- User-global settings: `$XDG_CONFIG_HOME/pico/settings.json` or `~/.config/pico/settings.json`. This single file stores host preferences, host-extension disables, models, and workspace defaults. On startup, Pico copies the bundled `examples/settings.json` here only if the path is absent; it leaves any existing file, symlink, or directory untouched. `/settings` (and the sidebar settings button) patches this file for the catalog, default model, compact ratio, resume-last, max parallel tools, font scale, and chat width. Apply validates the complete draft, preserves comments and unrecognized model properties, and publishes all managed fields with one atomic replacement. Disable lists stay in `/extensions`.
+- User-global settings: `$XDG_CONFIG_HOME/pico/settings.json` or `~/.config/pico/settings.json`. This single file stores host preferences, host-extension disables, models, and workspace defaults. On startup, Pico copies the bundled `examples/settings.json` here only if the path is absent; it leaves any existing file, symlink, or directory untouched. `/settings` (and the settings button at the bottom of the right-side icon strip) patches this file for the catalog, default model, compact ratio, resume-last, max parallel tools, font scale, and chat width. Apply validates the complete draft, preserves comments and unrecognized model properties, and publishes all managed fields with one atomic replacement. Disable lists stay in `/extensions`.
 - Workspace settings: `<workspace>/.pico/settings.json`. Settings read-modify-write updates preserve the existing file mode and hold an inter-process sidecar lock through atomic replacement.
 - Pico-created Git worktrees: `$XDG_DATA_HOME/pico/worktrees/<project-key>/<name>` or `~/.local/share/pico/worktrees/<project-key>/<name>`. Names are a single safe path component and branch name. Creation snapshots the main checkout's committed `HEAD`, does not copy dirty/untracked files, and never removes the worktree automatically.
 - Session catalog: `~/.config/pico/sessions/<encoded-key>/` (or `$XDG_CONFIG_HOME/pico/sessions/`). Each directory remains one exact checkout/storage workspace. Parent `*.jsonl` files are sessions; subagent jsonl is omitted from `/resume` and the sidebar. `.workspace.json` stores required `path` (encoded keys are not reversible), display `name`, fallback `order`, `collapsed`, and a listing cache of parent sessions (`id`, `title`, `model`, `effort`, `kind`, the JSONL stat generation, `unseen_complete`, and `inbox_pending`). The canonical sidebar order is the path list in catalog-level `.workspace-order.json`; a drag updates the UI immediately and queues one coalesced atomic replacement on Pico's persistence thread. Successful saves are silent. A failed save preserves the in-memory order and raises a status warning. jsonl is authoritative. Scan stats every jsonl and reuses a cached row when its size, inode, and nanosecond mtime/ctime generation match; a mismatch, a new file, or missing metadata re-reads jsonl (header plus last `model_change`, last `unseen_complete`, and last `inbox_pending`). Overlay-only ids without a jsonl file do not appear. Catalog read-modify-write operations use inter-process locks, and session append/title write-through holds the session lock until the matching catalog generation is committed. Pico rewrites missing metadata from JSONL `cwd` plus its project/worktree fields on scan, and rewrites the listing cache when it changes. The sidebar groups exact checkout-root catalogs by their recorded main checkout while session files and reservations remain checkout-local. A project-level catalog record holds the grouped display label and stash flag; the Stashed sidebar section is collapsed by default, remains browsable/resumable, and opening a stashed workspace does not restore it. The sidebar pen popover renames the group without changing any checkout path, stashes/restores the group, or confirms deletion of all Pico saved history across its checkout catalogs and media. Delete refuses while any group agent is live in the current process; it does not take the inter-process catalog locks, so deletion is not coordinated with other running Pico processes. Media removal covers the composer and listed parent sessions; subagent session media may remain. Delete does not remove project directories or unrelated files. Scan omits a missing ordinary workspace; a recorded linked-worktree catalog remains visible and unavailable when its checkout path disappears, and resume never falls back to the main checkout.
@@ -527,8 +527,11 @@ request models, backend availability, and detailed cancellation behavior.
 
 ## Embedded browser ownership
 
-The dock's web icon expands/collapses presentation without closing its page;
-it is muted while collapsed and bright while expanded. The icon-only control
+The persistent far-right shell strip's web icon expands/collapses the dock to its
+left without closing its page; it is muted while collapsed and bright while
+expanded. The strip extends beside the footer and keeps settings at its bottom,
+independent of sidebar visibility or agent selection. Only user main agents show
+the web icon. A collapsed dock takes no space beside the strip. The icon-only control
 slider places Agent (robot) left and User right. Clicking a side or dragging
 between sides selects that mode immediately, never toggles an already-selected
 side, and retains the existing takeover/input-release behavior. Manual open
@@ -540,7 +543,8 @@ resize cursor. A proximity spotlight is clipped to that border and remains lit
 while resizing; it is presentation-only and does not enlarge the input target or
 change shell geometry. The dock width is main-session-local presentation state,
 retained through collapse/reopen and selection changes but never persisted. Expanded
-width is bounded to 300 logical pixels minimum and half the right column maximum;
+width is bounded to 300 logical pixels minimum and half the right column (excluding
+the sidebar and persistent icon strip) maximum;
 the maximum wins when space is narrower. Passive window/sidebar changes clamp
 presentation without overwriting the preferred width. Toolbar controls wrap into
 fixed-height rows when needed. A resize gesture owns pointer input through

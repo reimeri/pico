@@ -1318,6 +1318,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
     Clay_BoundingBox expected_control = {0}, expected_agent_option = {0}, expected_user_option = {0};
     Clay_BoundingBox expected_content_row = {0};
     Clay_BoundingBox expected_web_toggle = {0};
+    Clay_BoundingBox expected_strip = {0}, expected_settings = {0};
     Clay_BoundingBox expected_root = {0};
     Clay_BoundingBox expected_body = {0};
     Clay_BoundingBox expected_right = {0};
@@ -1421,8 +1422,10 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
         }
 
         Clay_ElementData find = Clay_GetElementData(CLAY_ID("ChatFind"));
+        Clay_ElementData strip = Clay_GetElementData(CLAY_ID("ShellStrip"));
+        Clay_ElementData settings = Clay_GetElementData(CLAY_ID("ShellSettings"));
         Clay_ElementData browser = Clay_GetElementData(CLAY_ID("BrowserPane"));
-        Clay_ElementData web_toggle = Clay_GetElementData(with_browser ? CLAY_ID("BrowserCollapse") : CLAY_ID("BrowserExpand"));
+        Clay_ElementData web_toggle = Clay_GetElementData(CLAY_ID("BrowserToggle"));
         Clay_ElementData surface = Clay_GetElementData(CLAY_ID("BrowserSurface"));
         Clay_ElementData profile_control = Clay_GetElementData(CLAY_ID("BrowserProfile"));
         Clay_ElementData viewport_control = Clay_GetElementData(CLAY_ID("BrowserViewport"));
@@ -1450,10 +1453,24 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
         Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
         Clay_ElementData composer = Clay_GetElementData(CLAY_ID("ComposerAlign"));
         Clay_ElementData footer = Clay_GetElementData(CLAY_ID("Footer"));
-        if (!browser.found || !web_toggle.found || !content_row.found || !root.found || !body.found || !right.found || !main.found || !chat.found ||
+        if (browser.found != with_browser || !strip.found || !settings.found || !web_toggle.found || !content_row.found || !root.found || !body.found || !right.found || !main.found || !chat.found ||
             !composer.found || !footer.found || (with_sidebar && !sidebar.found))
         {
             Fail("production shell panes were not laid out");
+            break;
+        }
+        if (fabsf(strip.boundingBox.y - body.boundingBox.y) > 0.01f ||
+            fabsf(strip.boundingBox.height - body.boundingBox.height) > 0.01f ||
+            fabsf(strip.boundingBox.x + strip.boundingBox.width - body.boundingBox.x - body.boundingBox.width) > 0.01f ||
+            strip.boundingBox.x < right.boundingBox.x + right.boundingBox.width ||
+            !ShellVerticallyContains(strip.boundingBox, settings.boundingBox) ||
+            settings.boundingBox.y + settings.boundingBox.height < footer.boundingBox.y + footer.boundingBox.height - settings.boundingBox.height ||
+            settings.boundingBox.x < strip.boundingBox.x ||
+            settings.boundingBox.x + settings.boundingBox.width > strip.boundingBox.x + strip.boundingBox.width ||
+            (with_browser && (browser.boundingBox.x < main.boundingBox.x + main.boundingBox.width ||
+                             browser.boundingBox.x + browser.boundingBox.width > strip.boundingBox.x)))
+        {
+            Fail("persistent strip must sit to the right of chat/browser and extend beside the footer with settings at its bottom");
             break;
         }
         if (find.found != host.find.open || (find.found &&
@@ -1470,7 +1487,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
             fabsf(root.boundingBox.height - viewport.height) > 0.001f ||
             !ShellVerticallyContains(root.boundingBox, body.boundingBox) ||
             !ShellVerticallyContains(body.boundingBox, right.boundingBox) ||
-            !ShellVerticallyContains(content_row.boundingBox, browser.boundingBox) ||
+            (with_browser && !ShellVerticallyContains(content_row.boundingBox, browser.boundingBox)) ||
             !ShellVerticallyContains(content_row.boundingBox, main.boundingBox) ||
             (with_sidebar && !ShellVerticallyContains(body.boundingBox, sidebar.boundingBox)))
         {
@@ -1482,6 +1499,8 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
         {
             expected_browser = browser.boundingBox;
             expected_web_toggle = web_toggle.boundingBox;
+            expected_strip = strip.boundingBox;
+            expected_settings = settings.boundingBox;
             expected_profile_control = profile_control.boundingBox;
             expected_surface = surface.boundingBox; expected_viewport_control = viewport_control.boundingBox;
             expected_control = control.boundingBox;
@@ -1498,7 +1517,9 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
             expected_scroll = *scroll.scrollPosition;
         }
         else if (frame > 30 &&
-                 (!ShellBoxStable(expected_browser, browser.boundingBox) ||
+                 ((with_browser && !ShellBoxStable(expected_browser, browser.boundingBox)) ||
+                  !ShellBoxStable(expected_strip, strip.boundingBox) ||
+                  !ShellBoxStable(expected_settings, settings.boundingBox) ||
                   !ShellBoxStable(expected_web_toggle, web_toggle.boundingBox) ||
                   (with_browser && (!ShellBoxStable(expected_surface, surface.boundingBox) ||
                                     !ShellBoxStable(expected_profile_control, profile_control.boundingBox) ||
@@ -1527,9 +1548,25 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
     {
         agent.browser_expanded = true;
         (void)PicoHost_LayoutShell(&host, viewport.height, 0.0f);
-        Clay_ElementData expanded_toggle = Clay_GetElementData(CLAY_ID("BrowserCollapse"));
-        if (!expanded_toggle.found || !ShellBoxStable(expected_web_toggle, expanded_toggle.boundingBox))
-            Fail("browser web toggle must stay in place when its pane opens");
+        Clay_ElementData expanded_toggle = Clay_GetElementData(CLAY_ID("BrowserToggle"));
+        if (!expanded_toggle.found || !ShellBoxStable(expected_web_toggle, expanded_toggle.boundingBox) ||
+            !ShellBoxStable(expected_strip, Clay_GetElementData(CLAY_ID("ShellStrip")).boundingBox) ||
+            !ShellBoxStable(expected_settings, Clay_GetElementData(CLAY_ID("ShellSettings")).boundingBox))
+            Fail("strip and controls must stay in place when the browser opens");
+    }
+
+    /* The shell strip is global, but browsers belong only to user main agents. */
+    for (int selection = 0; selection < 2 && !g_failed; selection++)
+    {
+        agent.kind = PICO_AGENT_SUBAGENT;
+        if (selection == 1) host.selected_agent_id = 0;
+        (void)PicoHost_LayoutShell(&host, viewport.height, 0);
+        Clay_ElementData strip = Clay_GetElementData(CLAY_ID("ShellStrip"));
+        Clay_ElementData settings = Clay_GetElementData(CLAY_ID("ShellSettings"));
+        if (!strip.found || !settings.found || Clay_GetElementData(CLAY_ID("BrowserToggle")).found ||
+            Clay_GetElementData(CLAY_ID("BrowserPane")).found ||
+            !ShellBoxStable(expected_strip, strip.boundingBox) || !ShellBoxStable(expected_settings, settings.boundingBox))
+            Fail("subagent and empty selections must retain settings and strip bounds without browser controls");
     }
 
     g_shell_test_inbox_rows = 0;
@@ -2323,8 +2360,12 @@ static int RunFastFooterCase(bool with_sidebar, bool cold_history)
         {
             Clay_String name = {.chars = panes[i], .length = (int32_t)strlen(panes[i])};
             Clay_ElementData box = Clay_GetElementData(Clay_GetElementId(name));
-            bool tps_text_changed = strcmp(panes[i], "FooterTps") == 0 && (frame == 40 || frame == 80);
-            if (!box.found || (frame > (cold_history ? 30 : 2) && !tps_text_changed &&
+            /* Changing TPS text can redistribute compressed footer children
+             * at narrow widths. Shell bounds must not change, and every control
+             * must remain stable between these intentional content updates. */
+            bool footer_content_changed = (frame == 40 || frame == 80) &&
+                (!strcmp(panes[i], "FooterTps") || !strcmp(panes[i], "FooterEffort") || !strcmp(panes[i], "FooterFastIcon"));
+            if (!box.found || (frame > (cold_history ? 30 : 2) && !footer_content_changed &&
                                !ShellBoxStable(expected[i], box.boundingBox)))
             {
                 Fail("batched transcript measurement changed bottom-follow shell bounds");
@@ -2812,8 +2853,10 @@ static int TestBottomFollowShellGeometryStable(void)
     }
     if (RunShellStabilityCase(false, true, 1714) != 0 || RunShellStabilityCase(true, true, 1714) != 0)
         return 1;
-    /* The find bar must also fit when the sidebar and browser narrow the chat. */
-    if (RunShellStabilityCase(true, true, 1000) != 0)
+    /* Cover a narrow chat and a window where the browser cap wins over its
+     * normal minimum, while the find bar still fits in the chat pane. */
+    if (RunShellStabilityCase(true, true, 1000) != 0 ||
+        RunShellStabilityCase(true, true, 800) != 0)
         return 1;
     if (RunChatRetainedSpacerCase(false) != 0)
     {
@@ -5066,7 +5109,7 @@ static int TestBrowserUncreatedSessionNotification(void)
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
     (void)PicoHost_LayoutShell(host, viewport.height, 0);
-    Clay_ElementData expand = Clay_GetElementData(CLAY_ID("BrowserExpand"));
+    Clay_ElementData expand = Clay_GetElementData(CLAY_ID("BrowserToggle"));
     if (!expand.found) goto done;
     host->window_focused = true;
     g_find_input_test = true;
@@ -5170,7 +5213,7 @@ static void BrowserTestClick(PicoHost *host, const char *name)
     g_find_input_test = true; g_find_button = MOUSE_BUTTON_LEFT; g_find_press = true;
     g_find_pointer = (Vector2){element.boundingBox.x + element.boundingBox.width / 2,
                               element.boundingBox.y + element.boundingBox.height / 2};
-    g_browser_fake_window = !strcmp(name, "BrowserExpand") || !strcmp(name, "BrowserStart");
+    g_browser_fake_window = !strcmp(name, "BrowserToggle") || !strcmp(name, "BrowserStart");
     PicoBrowser_Input(host);
     g_browser_fake_window = false;
     g_find_input_test = g_find_press = false;
@@ -5214,7 +5257,7 @@ static int TestBrowserProfiles(void)
         PicoAgent *a = PicoHost_FindAgent(host, ids[i]);
         if (PicoSession_LogUsage(host, a, 0, 0, false, "", false) != PICO_SESSION_WRITE_OK) goto done;
         PicoSession_DrainPersist(host, a);
-        BrowserTestClick(host, "BrowserExpand");
+        BrowserTestClick(host, "BrowserToggle");
     }
     if (!pico_agent_select(host, ids[0])) goto done;
     PicoAgent *a = PicoHost_FindAgent(host, ids[0]);
@@ -5337,7 +5380,7 @@ static int TestBrowserControlSelector(void)
     host->window_focused = true;
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL); RichText_SetMeasureFunction(ShellMeasureText, NULL);
     g_browser_application_directory = application;
-    BrowserTestClick(host, "BrowserExpand");
+    BrowserTestClick(host, "BrowserToggle");
     if (!PicoBrowser_BlocksKeyboard(host)) goto done; /* New manual page focuses its address. */
     BrowserTestClick(host, "BrowserControlUser");
     if (PicoBrowser_BlocksKeyboard(host)) goto done; /* Same-side click still leaves the field. */
@@ -5498,7 +5541,7 @@ static bool BrowserToolbarContained(void)
 {
     Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
     const char *controls[] = {"BrowserBack", "BrowserForward", "BrowserReload", "BrowserControl",
-                              "BrowserViewport", "BrowserClose", "BrowserCollapse"};
+                              "BrowserViewport", "BrowserProfile", "BrowserClose"};
     for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); ++i) {
         Clay_ElementData control = Clay_GetElementData(Clay_GetElementId((Clay_String){.chars=controls[i], .length=(int)strlen(controls[i])}));
         if (!control.found || !ShellVerticallyContains(pane, control.boundingBox) ||
@@ -5690,10 +5733,10 @@ static bool BrowserResizeBehavior(PicoHost *host, bool with_sidebar)
     float preferred = (300 + maximum.width) / 2;
     if (!BrowserTestResize(host, preferred) ||
         fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
-    BrowserTestClick(host, "BrowserCollapse");
+    BrowserTestClick(host, "BrowserToggle");
     (void)PicoHost_LayoutShell(host, 800, 0);
     if (Clay_GetElementData(CLAY_ID("BrowserResizeHandle")).found) return false;
-    BrowserTestClick(host, "BrowserExpand");
+    BrowserTestClick(host, "BrowserToggle");
     (void)PicoHost_LayoutShell(host, 800, 0);
     if (fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
     /* Other sessions have their own preferred widths, and switching mid-drag
@@ -5803,7 +5846,7 @@ static int RunBrowserViewportCase(bool with_sidebar)
     host->view_count[PICO_SLOT_SIDEBAR] = 0;
     if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
     for (int i = 0; i < 40; ++i) PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Viewport bottom-follow history");
-    BrowserTestClick(host, "BrowserExpand");
+    BrowserTestClick(host, "BrowserToggle");
     PicoComposer_SetText(host, "keep this draft");
     int messages = agent->message_count;
     BrowserTestClick(host, "BrowserViewport");
@@ -5825,9 +5868,10 @@ static int RunBrowserViewportCase(bool with_sidebar)
     /* Menu, custom fields, and validation overlay cannot resize any panes
      * during repeated bottom-follow layouts, including same-frame passes. */
     const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll", "ComposerAlign", "Footer",
-                           "ChatBrowserRow", "BrowserPane", "BrowserSurface", "BrowserToolbar", "BrowserViewport", "Sidebar"};
-    Clay_BoundingBox expected[13];
-    int count = with_sidebar ? 13 : 12;
+                           "ChatBrowserRow", "BrowserPane", "BrowserSurface", "BrowserToolbar", "BrowserViewport",
+                           "ShellStrip", "ShellSettings", "BrowserToggle", "Sidebar"};
+    Clay_BoundingBox expected[sizeof(panes) / sizeof(panes[0])];
+    int count = (int)(sizeof(panes) / sizeof(panes[0])) - !with_sidebar;
     for (int i = 0; i < count; ++i)
         expected[i] = Clay_GetElementData(Clay_GetElementId((Clay_String){.chars=panes[i], .length=(int)strlen(panes[i])})).boundingBox;
     for (int frame = 0; frame < 90; ++frame) {
@@ -5931,7 +5975,7 @@ static int TestBrowserHelperFaultRecovery(void)
         host->window_focused = true;
         Clay_SetMeasureTextFunction(ShellMeasureText, NULL); RichText_SetMeasureFunction(ShellMeasureText, NULL);
         g_browser_application_directory = application;
-        BrowserTestClick(host, "BrowserExpand");
+        BrowserTestClick(host, "BrowserToggle");
         PICO_TEST_WAIT_LOOP("classified browser fault") {
             if (!strcmp(modes[i], "queue")) BrowserTestClick(host, "BrowserBack");
             PicoBrowser_Pump(host);
@@ -17717,6 +17761,32 @@ static void InteractionFixtureFree(InteractionFixture *f)
     RmRf(f->dir); RmRf(f->cfg);
 }
 
+static int TestShellStripSettings(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    /* Settings is global chrome even without the sidebar or a selected agent. */
+    f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    PicoHost_ClearAgentSelection(f.host);
+    pico_host_request_redraw(f.host);
+    PicoHost_Frame(f.host);
+    if (!Clay_GetElementData(CLAY_ID("ShellStrip")).found ||
+        Clay_GetElementData(CLAY_ID("BrowserToggle")).found ||
+        !pico_ui_modal_push(f.host, "strip-settings-test")) goto done;
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("ShellSettings"))) ||
+        PicoSettingsUi_IsOpen(f.host) || !pico_ui_modal_is_top(f.host, "strip-settings-test")) goto done;
+    pico_ui_modal_pop(f.host, "strip-settings-test");
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("ShellSettings"))) ||
+        !PicoSettingsUi_IsOpen(f.host)) goto done;
+    PicoSettingsUi_Close(f.host);
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("persistent strip settings must open without a sidebar or selected conversation");
+    return !good;
+}
+
 static int TestSidebarInboxHeadingLifetime(void)
 {
     InteractionFixture f = {0};
@@ -17866,7 +17936,7 @@ static int RunSidebarModeShellCase(bool with_sidebar)
     InteractionFixture f = {0};
     bool good = false;
     ChatStabilitySnapshot expected, current;
-    Clay_BoundingBox sidebar_root = {0}, settings = {0};
+    Clay_BoundingBox sidebar_root = {0};
     if (!InteractionFixtureInit(&f)) goto done;
     if (!with_sidebar) f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
     PicoAgent *selected = PicoHost_FindAgent(f.host, f.agent);
@@ -17911,16 +17981,10 @@ static int RunSidebarModeShellCase(bool with_sidebar)
         {
             expected = current;
             sidebar_root = Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox;
-            settings = Clay_GetElementData(CLAY_ID("SidebarSettingsRow")).boundingBox;
         }
         else if (frame > 20 && (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
-            (with_sidebar && (!ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox) ||
-                              !ShellBoxStable(settings, Clay_GetElementData(CLAY_ID("SidebarSettingsRow")).boundingBox)))))
+            (with_sidebar && !ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox))))
         {
-            fprintf(stderr, "mode geometry frame %d chatstable=%d root old=%f new=%f settings old=%f new=%f\n", frame,
-                ChatStabilitySnapshotStable(&expected, &current, with_sidebar), sidebar_root.height,
-                Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox.height, settings.y,
-                Clay_GetElementData(CLAY_ID("SidebarSettingsRow")).boundingBox.y);
             goto done;
         }
     }
@@ -20509,6 +20573,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;
+    if (PICO_TEST_RUN(TestShellStripSettings()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_TOGGLE)) != 0 ||

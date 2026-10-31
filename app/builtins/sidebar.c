@@ -171,8 +171,6 @@ typedef struct SidebarState
     char edit_name[PICO_CATALOG_NAME_MAX];
     PicoTextField edit_field;
     char delete_label[384];
-    Texture2D settings_icon;
-    Texture2D settings_icon_hover;
     Texture2D worktree_icon;
     bool icons_tried;
     bool drag_press_pending;
@@ -1209,8 +1207,6 @@ static void EnsureFolderIcons(SidebarState *s)
     s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png", COLOR_MUTED);
     s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png", COLOR_MUTED);
     s->pen_icon = LoadFolderIcon("resources/pen.png", COLOR_TEXT);
-    s->settings_icon = LoadFolderIcon("resources/settings.png", COLOR_MUTED);
-    s->settings_icon_hover = LoadFolderIcon("resources/settings.png", COLOR_TEXT);
     s->worktree_icon = LoadFolderIcon("resources/worktree.png", COLOR_MUTED);
     s->archive_open = LoadFolderIcon("resources/archive_open.png", COLOR_MUTED);
     s->archive_closed = LoadFolderIcon("resources/archive_closed.png", COLOR_MUTED);
@@ -1234,16 +1230,6 @@ static void UnloadFolderIcons(SidebarState *s)
     }
     if (s->pen_icon.id != 0)
         UnloadTexture(s->pen_icon);
-    if (s->settings_icon.id != 0)
-    {
-        UnloadTexture(s->settings_icon);
-        memset(&s->settings_icon, 0, sizeof(s->settings_icon));
-    }
-    if (s->settings_icon_hover.id != 0)
-    {
-        UnloadTexture(s->settings_icon_hover);
-        memset(&s->settings_icon_hover, 0, sizeof(s->settings_icon_hover));
-    }
     if (s->worktree_icon.id != 0)
     {
         UnloadTexture(s->worktree_icon);
@@ -1282,23 +1268,6 @@ static void RenderFolderIcon(Texture2D *tex, const char *fallback)
         return;
     }
     RenderGlyph(fallback, COLOR_MUTED);
-}
-
-static void RenderSettingsIcon(SidebarState *s, bool hovered)
-{
-    Texture2D *tex = hovered && s->settings_icon_hover.id != 0 ? &s->settings_icon_hover
-                                                               : &s->settings_icon;
-    float size = Pico_FontPx(SIDEBAR_FOLDER_ICON);
-    if (tex->id != 0)
-    {
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
-                                            .height = CLAY_SIZING_FIXED(size)}},
-                      .image = {.imageData = tex}})
-        {
-        }
-        return;
-    }
-    RenderGlyph("*", hovered ? COLOR_TEXT : COLOR_MUTED);
 }
 
 typedef enum SidebarDotKind
@@ -2373,8 +2342,8 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                      .childGap = 6,
                      .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_PERCENT(1)}}})
     {
-        /* Keep the known-height title out of Clay's compression distribution;
-         * overflowing Inbox rows must not displace the fixed settings row. */
+        /* Keep the known-height title out of Clay's compression distribution
+         * when Inbox rows overflow the scroll area. */
         CLAY(CLAY_ID("SidebarProjectsHeader"),
              {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
@@ -2505,27 +2474,6 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                                                 .fontSize = PICO_FONT_UI,
                                                 .textColor = COLOR_TEXT,
                                                 .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
-            }
-        }
-
-        {
-            bool settings_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings")));
-            float icon = Pico_FontPx(SIDEBAR_FOLDER_ICON);
-            float row_h = icon + 12.0f;
-            CLAY(CLAY_ID("SidebarSettingsRow"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childAlignment = {.x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER},
-                             .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_FIXED(row_h)}}})
-            {
-                CLAY(CLAY_ID("SidebarSettings"),
-                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                                 .padding = {6, 6, 4, 4},
-                                 .sizing = {.width = CLAY_SIZING_FIXED(icon + 12.0f),
-                                            .height = CLAY_SIZING_FIXED(icon + 8.0f)}}})
-                {
-                    RenderSettingsIcon(s, settings_hover);
                 }
             }
         }
@@ -2944,8 +2892,7 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
     if (Clay_PointerOver(CLAY_ID("SidebarMode")) ||
         Clay_PointerOver(CLAY_ID("InboxAddProject")) || PointerOverInbox(host, s) ||
         Clay_PointerOver(CLAY_ID("SidebarStashedHeader")) ||
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))) ||
-        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings"))))
+        Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs"))))
     {
         return true;
     }
@@ -3508,11 +3455,6 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
             PicoHost_ClearAgentSelection(host);
         }
         else RequestAddWorkspace(host, s);
-        return;
-    }
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarSettings"))))
-    {
-        PicoSettingsUi_Open(host);
         return;
     }
     if (host->sidebar_inbox_mode) return;

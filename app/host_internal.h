@@ -279,7 +279,7 @@ struct PicoHost {
 };
 
 bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
-                                 bool had_complete, bool had_todo, bool had_modal);
+                                 bool had_complete, bool had_modal);
 
 /* Monotonic wall clock in seconds; used for least-recently-activity stamps. */
 double PicoClock_Monotonic(void);

@@ -936,7 +936,6 @@ static void SnapshotScrollers(bool verbose, const char *reason)
     CaptureScrollId("AskUserTextScroll", verbose);
     CaptureScrollId("AskUserBody", verbose);
     CaptureScrollId("PromptModalScroll", verbose);
-    CaptureScrollId("TodoListScroll", verbose);
     CaptureScrollId("ExtModalScroll", verbose);
     CaptureScrollId("DiffScroll", verbose);
     CaptureScrollId("FooterMenuScroll", verbose);

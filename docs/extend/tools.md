@@ -235,7 +235,7 @@ pico_set_tool_group_title(workspace, "index", "index rebuild", "index rebuilds")
 
 The header uses `1 x <singular>` or `N x <plural>`. Named buckets follow the generic tool-call count, in first-appearance order in that message, then thinking. Tools that share the same singular merge into one bucket; the first appearance supplies the plural. Individual expanded rows still show the registered tool name. These strings are UI metadata and are not sent to the model.
 
-`pico_set_tool_group_title` is init-only, looks up a tool already staged in this `workspace_init`, and requires non-empty singular and plural that outlive the generation (literals). It returns `false` and appends a `status_warn` line on failure. A second call for the same name replaces the labels. Builtin `todo_update`, `run_background`, and `subagent` use this path.
+`pico_set_tool_group_title` is init-only, looks up a tool already staged in this `workspace_init`, and requires non-empty singular and plural that outlive the generation (literals). It returns `false` and appends a `status_warn` line on failure. A second call for the same name replaces the labels. Builtin `run_background` and `subagent` use this path.
 
 ## Tool-row click
 
@@ -297,6 +297,34 @@ pico_add_tool(workspace, "stateful", "Update state", kParams, RunStateful, Apply
 ```
 
 The apply callback returns `false` to reject details. A live rejection converts the tool result to an error and omits details from persistence. A replay rejection ignores that snapshot and preserves the latest valid state. Pico replays details chronologically on session resume and after extension reload, so details should be complete snapshots and apply should be idempotent. The callback runs on the main thread and may update extension state, but should not call Clay outside a view callback.
+
+## Builtin session title
+
+The `session-title` builtin registers the sequential `set_title` tool:
+
+```json
+{"title":"Fix editor selection"}
+```
+
+It renames the **calling agent’s own session**, including a subagent session,
+regardless of which session is selected in the UI. Titles must be non-empty,
+single-line strings of at most 72 Unicode code points after trimming surrounding
+ASCII spaces. Controls, invalid UTF-8, and line separators are rejected. Empty
+or whitespace-only titles cannot clear the title. Keep titles succinct and stable
+unless the goal changes.
+
+The worker only validates and prepares structured details. Main-thread live
+apply queues the session title update before the successful tool-result record;
+the header and catalog update through normal session persistence. An unchanged
+title is a persistence no-op. Immediate write rejection, including an ephemeral
+session without durable metadata, becomes a tool error. A successful result means
+the update was accepted, not that an asynchronous disk write has completed; later
+persistence failures use Pico’s normal session warning/failure path. Resume and
+extension reload validate details without rewriting historical titles over the
+current header. No per-agent extension state or UI panel is retained.
+
+Reference: [`../../builtins/title.c`](../../builtins/title.c). See
+[contracts](contracts.md) for session persistence and replay guarantees.
 
 ## Builtin image generation
 

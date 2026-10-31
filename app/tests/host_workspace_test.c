@@ -3062,7 +3062,7 @@ static int TestChatBottomFollowClearsComposer(void)
             {
                 Fail("chat bottom spacer test needs an overflowing transcript pinned to the bottom");
             }
-            /* The todo pill and attachment strip float above the composer; the
+            /* The attachment strip floats above the composer; the
              * bottom spacer must keep the last message clear of them. Whatever
              * height the spacer is configured to, pinning to the bottom must
              * turn it into clearance between the message and the composer. */
@@ -3228,11 +3228,11 @@ static int TestChatFindTranscript(void)
     { Fail("Enter in find must navigate rather than submit the composer"); goto done; }
     g_find_key = KEY_ESCAPE;
     PicoChatFind_HandleInput(host);
-    if (host->find.open || PicoHost_AgentEscapeEnabled(host, false, false, false, false))
+    if (host->find.open || PicoHost_AgentEscapeEnabled(host, false, false, false))
     { Fail("Escape closing find must remain claimed against agent cancellation"); goto done; }
     g_find_key = 0;
     PicoChatFind_HandleInput(host);
-    if (!PicoHost_AgentEscapeEnabled(host, false, false, false, false))
+    if (!PicoHost_AgentEscapeEnabled(host, false, false, false))
     { Fail("closing find must not permanently disable agent Escape"); goto done; }
     PicoChatFind_Open(host);
     PicoChatFind_SetQuery(host, "marker");
@@ -4852,13 +4852,13 @@ static int TestSidebarDragBehavior(void)
         Fail("workspace drag should cross an adjacent row midpoint before reordering");
         return 1;
     }
-    if (!PicoHost_AgentEscapeEnabled(&host, false, false, false, false))
+    if (!PicoHost_AgentEscapeEnabled(&host, false, false, false))
     {
         Fail("agent Escape should be enabled without a competing UI interaction");
         return 1;
     }
     host.ui_drag_active = true;
-    if (PicoHost_AgentEscapeEnabled(&host, false, false, false, false))
+    if (PicoHost_AgentEscapeEnabled(&host, false, false, false))
     {
         Fail("workspace drag should own Escape instead of cancelling the active agent");
         return 1;
@@ -5789,6 +5789,85 @@ static void RmRf(const char *path)
     }
     closedir(d);
     rmdir(path);
+}
+
+static int TestSetTitlePersistence(void)
+{
+    char dir[] = "/tmp/pico-set-title-ws-XXXXXX";
+    char cfg[] = "/tmp/pico-set-title-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    char session_id[40], session_path[4096];
+    char *before = NULL, *after = NULL;
+    bool ok = false;
+    if (!mkdtemp(dir) || !mkdtemp(cfg)) return 1;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK) goto done;
+    PicoWorkspace *ws = PicoHost_FindWorkspace(host, workspace_id);
+    PicoTool *tool = NULL;
+    for (int i = 0; i < ws->tool_count; i++)
+    {
+        if (!strcmp(ws->tools[i].name, "todo_update")) goto done;
+        if (!strcmp(ws->tools[i].name, "set_title")) tool = &ws->tools[i];
+    }
+    if (!tool || !tool->run || !tool->apply) goto done;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW, .select = true};
+    if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    if (PicoSession_LogUser(host, agent, "Original request", "Original request", NULL) != PICO_SESSION_WRITE_OK)
+        goto done;
+    const char *args[] = {"{\"title\":\"First title\"}", "{\"title\":\"Current title 🚀\"}"};
+    for (int i = 0; i < 2; i++)
+    {
+        PicoToolResult result = {0};
+        const char *call_id = i == 0 ? "title-1" : "title-2";
+        bool applied = PicoSession_LogToolCall(host, agent, i, call_id, "set_title", args[i], NULL) == PICO_SESSION_WRITE_OK;
+        tool->run(NULL, args[i], &result, tool->state);
+        applied = applied && !result.is_error && result.output && result.details_json &&
+                  tool->apply(ws, agent_id, result.details_json, false, tool->state) &&
+                  PicoSession_LogToolResult(host, agent, call_id, "set_title", result.output, false,
+                                           result.details_json, NULL) == PICO_SESSION_WRITE_OK;
+        free(result.output);
+        free(result.details_json);
+        if (!applied) goto done;
+    }
+    if (!DrainSessionForAssertion(host, agent)) goto done;
+    PicoSessionHeader header;
+    if (PicoSession_ReadHeader(agent->session_path, &header) != 0 || strcmp(header.title, "Current title 🚀"))
+        goto done;
+    /* The catalog powers the sidebar and /resume, not just the JSONL header. */
+    PicoSessionInfo *listed = NULL;
+    int count = PicoSession_List(ws, &listed, true);
+    bool listed_title = false;
+    for (int i = 0; i < count; i++)
+        if (!strcmp(listed[i].id, agent->session_id) && !strcmp(listed[i].title, header.title)) listed_title = true;
+    free(listed);
+    if (!listed_title) goto done;
+    snprintf(session_id, sizeof(session_id), "%s", agent->session_id);
+    snprintf(session_path, sizeof(session_path), "%s", agent->session_path);
+    before = Pico_ReadFile(session_path, NULL);
+    if (!before || pico_agent_close(host, agent_id) != PICO_OK) goto done;
+    options.session_start = PICO_SESSION_RESUME;
+    options.session_id = session_id;
+    if (pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    agent = PicoHost_FindAgent(host, agent_id);
+    if (!DrainSessionForAssertion(host, agent)) goto done;
+    after = Pico_ReadFile(session_path, NULL);
+    char display[PICO_SESSION_TITLE_MAX_BYTES + 1];
+    PicoSession_CopyDisplayTitle(agent, display, sizeof(display));
+    ok = after && !strcmp(before, after) && !strcmp(display, "Current title 🚀");
+done:
+    free(before);
+    free(after);
+    if (host && pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN) ok = false;
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(dir);
+    RmRf(cfg);
+    if (!ok) Fail("set_title must update the catalog and survive resume without rewriting historical titles; todo_update must be absent");
+    return ok ? 0 : 1;
 }
 
 static int MkdirParents(const char *path)
@@ -7077,11 +7156,9 @@ static int TestWorkspacePluginIsolation(void)
     PicoWorkspace *ws2 = PicoHost_PrimaryWorkspace(host2);
     void *files1 = PicoPlugins_WorkspaceState(ws1, "files");
     void *diff1 = PicoPlugins_WorkspaceState(ws1, "diff");
-    void *todo1 = PicoPlugins_WorkspaceState(ws1, "todos");
     void *files2 = PicoPlugins_WorkspaceState(ws2, "files");
     void *diff2 = PicoPlugins_WorkspaceState(ws2, "diff");
-    void *todo2 = PicoPlugins_WorkspaceState(ws2, "todos");
-    if (!files1 || !diff1 || !todo1 || !files2 || !diff2 || !todo2)
+    if (!files1 || !diff1 || !files2 || !diff2)
     {
         Fail("workspace plugins must be initialized on both workspaces");
         pico_host_free(host1);
@@ -7090,7 +7167,7 @@ static int TestWorkspacePluginIsolation(void)
         rmdir(ws2_dir);
         return 1;
     }
-    if (files1 == files2 || diff1 == diff2 || todo1 == todo2)
+    if (files1 == files2 || diff1 == diff2)
     {
         Fail("workspace plugin states must be isolated per-workspace instance");
         pico_host_free(host1);
@@ -19829,6 +19906,7 @@ int main(int argc, char **argv)
         return 1;
     }
 #endif
+    if (PICO_TEST_RUN(TestSetTitlePersistence()) != 0) return 1;
     if (PICO_TEST_RUN(TestFastSelectionPersistence()) != 0)
         return 1;
     if (PICO_TEST_RUN(TestBottomFollowShellGeometryStable()) != 0)

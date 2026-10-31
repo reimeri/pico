@@ -46,7 +46,7 @@
 #define TOOL_ROW_FIXED_CHROME 46.0f
 #define TRANSCRIPT_MESSAGE_GAP 8.0f
 /* Clearance below the last message so the overlays floating above the
- * composer (todo pill, attachment strip) never cover transcript text
+ * composer (attachment strip) never cover transcript text
  * when the chat is scrolled to the bottom. */
 #define TRANSCRIPT_BOTTOM_SPACER 100.0f
 #define TRANSCRIPT_OVERSCAN_VIEWPORTS 0.75f
@@ -3747,45 +3747,6 @@ static void IntersectScissor(Clay_BoundingBox a, Clay_BoundingBox b, Rectangle *
     out->height = y2 > y1 ? y2 - y1 : 0;
 }
 
-static int RectExclude(Rectangle src, Clay_BoundingBox hole, Rectangle out[4])
-{
-    float sx1 = src.x;
-    float sy1 = src.y;
-    float sx2 = src.x + src.width;
-    float sy2 = src.y + src.height;
-    float hx1 = hole.x;
-    float hy1 = hole.y;
-    float hx2 = hole.x + hole.width;
-    float hy2 = hole.y + hole.height;
-    float ix1 = sx1 > hx1 ? sx1 : hx1;
-    float iy1 = sy1 > hy1 ? sy1 : hy1;
-    float ix2 = sx2 < hx2 ? sx2 : hx2;
-    float iy2 = sy2 < hy2 ? sy2 : hy2;
-    if (ix2 <= ix1 || iy2 <= iy1)
-    {
-        out[0] = src;
-        return 1;
-    }
-    int n = 0;
-    if (iy1 > sy1)
-    {
-        out[n++] = (Rectangle){sx1, sy1, src.width, iy1 - sy1};
-    }
-    if (iy2 < sy2)
-    {
-        out[n++] = (Rectangle){sx1, iy2, src.width, sy2 - iy2};
-    }
-    if (ix1 > sx1)
-    {
-        out[n++] = (Rectangle){sx1, iy1, ix1 - sx1, iy2 - iy1};
-    }
-    if (ix2 < sx2)
-    {
-        out[n++] = (Rectangle){ix2, iy1, sx2 - ix2, iy2 - iy1};
-    }
-    return n;
-}
-
 static bool InspectScrollClip(Clay_BoundingBox *out)
 {
     Clay_ElementData sub = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
@@ -4072,39 +4033,16 @@ static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, 
     {
         return;
     }
-    Rectangle pieces[4];
-    int piece_count = 1;
-    pieces[0] = sheen;
-    Clay_ElementData todo = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("TodoPanel")));
-    if (todo.found)
-    {
-        piece_count = RectExclude(sheen, todo.boundingBox, pieces);
-    }
-    if (piece_count <= 0)
-    {
-        return;
-    }
     Font font = Pico_FontAt(FONT_ITALIC, PICO_FONT_UI);
     float px = Pico_FontPx(PICO_FONT_UI);
     Vector2 text_pos = {roundf(box.x), roundf(box.y)};
-    for (int i = 0; i < piece_count; i++)
-    {
-        if (pieces[i].width <= 0.5f || pieces[i].height <= 0.5f)
-        {
-            continue;
-        }
-        int sx = (int)pieces[i].x;
-        int sy = (int)pieces[i].y;
-        int sw = (int)(pieces[i].width + 0.5f);
-        int sh = (int)(pieces[i].height + 0.5f);
-        Pico_Scissor(sx, sy, sw, sh);
-        BeginBlendMode(BLEND_ADDITIVE);
-        DrawRectangleGradientH((int)sheen.x, (int)sheen.y, (int)sheen.width, (int)sheen.height,
-                               (Color){255, 255, 255, 0}, (Color){255, 255, 255, 40});
-        EndBlendMode();
-        DrawTextEx(font, text, text_pos, px, 0.0f, ClayToRay(COLOR_TEXT));
-        Pico_ScissorEnd();
-    }
+    Pico_Scissor((int)sheen.x, (int)sheen.y, (int)(sheen.width + 0.5f), (int)(sheen.height + 0.5f));
+    BeginBlendMode(BLEND_ADDITIVE);
+    DrawRectangleGradientH((int)sheen.x, (int)sheen.y, (int)sheen.width, (int)sheen.height,
+                           (Color){255, 255, 255, 0}, (Color){255, 255, 255, 40});
+    EndBlendMode();
+    DrawTextEx(font, text, text_pos, px, 0.0f, ClayToRay(COLOR_TEXT));
+    Pico_ScissorEnd();
 }
 
 static void PicoChat_DrawThinkSheen(PicoHost *app)

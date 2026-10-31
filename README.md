@@ -17,7 +17,7 @@ A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI. The c
   - Charm Hyper
   - xAI
 - By default the agent gets just the `sh` tool for reading, writing, and editing
-- Built-in extensions for questionnaires, TODO tracking, and subagents
+- Built-in extensions for questionnaires, session titling, and subagents
 - [Embedded Chromium browser](docs/extend/browser.md) in a collapsible dock for smooth web dev
 - Concurrent agents across multiple workspaces in one window
 - [Image generation and editing](docs/extend/image-generation.md) using ChatGPT login

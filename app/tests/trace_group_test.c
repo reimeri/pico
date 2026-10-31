@@ -21,18 +21,18 @@ static int TestTitle(void)
         {.singular = "spawn process", .plural = "spawn processes", .count = 2},
         {.singular = "subagent", .plural = "subagents", .count = 2},
     };
-    PicoTraceGroupLabel todo_one[] = {
-        {.singular = "updated todo", .plural = "updated todos", .count = 1},
+    PicoTraceGroupLabel index_one[] = {
+        {.singular = "index rebuild", .plural = "index rebuilds", .count = 1},
     };
-    PicoTraceGroupLabel todo_many[] = {
-        {.singular = "updated todo", .plural = "updated todos", .count = 2},
+    PicoTraceGroupLabel index_many[] = {
+        {.singular = "index rebuild", .plural = "index rebuilds", .count = 2},
     };
     PicoTraceGroupLabel ordered[] = {
-        {.singular = "updated todo", .plural = "updated todos", .count = 1},
+        {.singular = "index rebuild", .plural = "index rebuilds", .count = 1},
         {.singular = "spawn process", .plural = "spawn processes", .count = 1},
     };
     PicoTraceGroupLabel skipped[] = {
-        {.singular = "updated todo", .plural = "updated todos", .count = 0},
+        {.singular = "index rebuild", .plural = "index rebuilds", .count = 0},
         {.singular = "spawn process", .plural = "spawn processes", .count = 1},
     };
 
@@ -51,18 +51,18 @@ static int TestTitle(void)
     {
         return Fail("plural named buckets were wrong");
     }
-    if (pico_trace_group_format_title(buf, sizeof(buf), 0, todo_one, 1, false, 0) <= 0 ||
-        strcmp(buf, "1 x updated todo") != 0)
+    if (pico_trace_group_format_title(buf, sizeof(buf), 0, index_one, 1, false, 0) <= 0 ||
+        strcmp(buf, "1 x index rebuild") != 0)
     {
         return Fail("single named bucket did not use singular");
     }
-    if (pico_trace_group_format_title(buf, sizeof(buf), 0, todo_many, 1, false, 0) <= 0 ||
-        strcmp(buf, "2 x updated todos") != 0)
+    if (pico_trace_group_format_title(buf, sizeof(buf), 0, index_many, 1, false, 0) <= 0 ||
+        strcmp(buf, "2 x index rebuilds") != 0)
     {
         return Fail("named bucket did not use plural");
     }
     if (pico_trace_group_format_title(buf, sizeof(buf), 1, ordered, 2, false, 0) <= 0 ||
-        strcmp(buf, "1 x tool call, 1 x updated todo, 1 x spawn process") != 0)
+        strcmp(buf, "1 x tool call, 1 x index rebuild, 1 x spawn process") != 0)
     {
         return Fail("named buckets did not keep caller order after generic tools");
     }
@@ -152,14 +152,14 @@ static int TestToolGroupLabel(void)
     const char *plural = sentinel_p;
 
     memset(tools, 0, sizeof(tools));
-    tools[0].name = "todo_update";
-    tools[0].group_singular = "updated todo";
-    tools[0].group_plural = "updated todos";
+    tools[0].name = "index";
+    tools[0].group_singular = "index rebuild";
+    tools[0].group_plural = "index rebuilds";
     tools[1].name = "sh";
     tools[2].name = "partial";
     tools[2].group_singular = "partial";
 
-    if (!pico_trace_tool_group_label(tools, 3, "todo_update", &singular, &plural) ||
+    if (!pico_trace_tool_group_label(tools, 3, "index", &singular, &plural) ||
         singular != tools[0].group_singular || plural != tools[0].group_plural)
     {
         return Fail("titled tool did not resolve its group labels");
@@ -173,7 +173,7 @@ static int TestToolGroupLabel(void)
     }
     if (pico_trace_tool_group_label(tools, 3, "missing", &singular, &plural) ||
         pico_trace_tool_group_label(tools, 3, "partial", &singular, &plural) ||
-        pico_trace_tool_group_label(NULL, 0, "todo_update", &singular, &plural))
+        pico_trace_tool_group_label(NULL, 0, "index", &singular, &plural))
     {
         return Fail("unknown or incomplete titles should stay generic");
     }

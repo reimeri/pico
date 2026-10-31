@@ -1680,18 +1680,16 @@ void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint)
 
 static int g_log_title_calls;
 static char g_logged_title[PICO_COMPLETE_LABEL_MAX + 1];
+static PicoAgentId g_logged_title_agent;
+static PicoSessionWriteResult g_log_title_result = PICO_SESSION_WRITE_OK;
 
 PicoSessionWriteResult PicoSession_LogTitle(PicoHost *app, PicoAgent *agent, const char *title)
 {
     (void)app;
-    (void)agent;
-    const char *next = title ? title : "";
-    if (strcmp(g_logged_title, next) != 0)
-    {
-        g_log_title_calls++;
-        snprintf(g_logged_title, sizeof(g_logged_title), "%s", next);
-    }
-    return PICO_SESSION_WRITE_OK;
+    g_log_title_calls++;
+    g_logged_title_agent = agent ? agent->id : 0;
+    snprintf(g_logged_title, sizeof(g_logged_title), "%s", title ? title : "");
+    return g_log_title_result;
 }
 
 PicoSessionWriteResult PicoSession_LogUnseenComplete(PicoHost *app, PicoAgent *agent, bool complete)
@@ -2675,18 +2673,9 @@ static int TestToolSchemaValidation(void)
         !pico_add_tool(ws, "utf8", "invalid", "{\"x\":\"\xC3\x28\"}", EchoTool, NULL, PICO_TOOL_SEQUENTIAL);
     PicoHost_PublishRegistration(&app, NULL);
 
-    PicoHost todo_app;
-    memset(&todo_app, 0, sizeof(todo_app));
-    (void)TestWs(&todo_app);
-    PicoExt todo = pico_ext_todo();
-    PicoWorkspace *todo_ws = PicoHost_PrimaryWorkspace(&todo_app);
-    InitExt(&todo_app, todo_ws, todo, NULL, NULL);
-    bool todo_registered = todo_ws->tool_count == 1 && todo_ws->tools[0].params_json;
-    if (todo.workspace_shutdown) todo.workspace_shutdown(todo_ws, NULL);
-    bool ok = null_schema && empty_schema && valid && rejected && ws->tool_count == 3 && todo_registered;
+    bool ok = null_schema && empty_schema && valid && rejected && ws->tool_count == 3;
     free(app.status_warn);
-    free(todo_app.status_warn);
-    return ok ? 0 : Fail(name, "invalid JSON Schema was accepted or builtin todo_update was unavailable");
+    return ok ? 0 : Fail(name, "invalid JSON Schema was accepted");
 }
 
 static bool WarnMentions(const PicoHost *app, const char *tool, const char *reason)
@@ -4893,121 +4882,121 @@ static int TestQueuedToolCallProgress(void)
     return idle_ms == 0 ? 0 : Fail(name, "live action timer did not clear after tools finished");
 }
 
-static int TestTodoAgentIsolation(void)
+static int TestSetTitleValidation(void)
 {
-    const char *name = "todo state is keyed by agent id";
-    PicoHost app;
-    memset(&app, 0, sizeof(app));
-    (void)TestWs(&app);
-    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
-    PicoExt ext = pico_ext_todo();
-    void *todo_state = NULL;
-    InitExt(&app, ws, ext, NULL, &todo_state);
-    const char *first =
-        "{\"version\":1,\"task\":\"First\",\"todos\":[{\"id\":\"a\",\"text\":\"first-agent\",\"status\":\"pending\"}]}";
-    const char *second =
-        "{\"version\":1,\"task\":\"Second\",\"todos\":[{\"id\":\"b\",\"text\":\"second-agent\",\"status\":\"in_progress\"}]}";
-    bool ok = ws->tool_count == 1 && ws->tools[0].apply &&
-              ws->tools[0].apply(ws, 11, first, true, todo_state) &&
-              ws->tools[0].apply(ws, 22, second, true, todo_state);
-
-    PicoContextEvent one = {.tools = ws->tools, .tool_count = ws->tool_count};
-    PicoContextEvent two = {.tools = ws->tools, .tool_count = ws->tool_count};
-    ws->context_hooks[0].fn(ws, 11, &one, todo_state);
-    ws->context_hooks[0].fn(ws, 22, &two, todo_state);
-    PicoContextEvent hidden = {0};
-    ws->context_hooks[0].fn(ws, 22, &hidden, todo_state);
-    ok = ok && !hidden.extra_context && one.extra_context && strstr(one.extra_context, "first-agent") &&
-         !strstr(one.extra_context, "second-agent") && two.extra_context &&
-         strstr(two.extra_context, "second-agent") && !strstr(two.extra_context, "first-agent");
-    free(one.extra_context);
-    free(two.extra_context);
-
-    PicoHookEvent reset = {.hook = PICO_HOOK_ON_SESSION_RESET, .agent_id = 11};
-    for (int i = 0; i < ws->hook_count; i++)
-    {
-        if (ws->hooks[i].hook == reset.hook)
-        {
-            ws->hooks[i].workspace_fn(ws, &reset, todo_state);
-        }
-    }
-    one = (PicoContextEvent){.tools = ws->tools, .tool_count = ws->tool_count};
-    two = (PicoContextEvent){.tools = ws->tools, .tool_count = ws->tool_count};
-    ws->context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 11, &one, todo_state);
-    ws->context_hooks[0].fn(PicoHost_PrimaryWorkspace(&app), 22, &two, todo_state);
-    ok = ok && !one.extra_context && two.extra_context && strstr(two.extra_context, "second-agent");
-    free(one.extra_context);
-    free(two.extra_context);
-    ext.workspace_shutdown(ws, todo_state);
-    pico_clear_registrations(&app);
-    return ok ? 0 : Fail(name, "apply, context, or reset crossed agent boundaries");
-}
-
-static PicoTool *FindTodoTool(PicoWorkspace *ws)
-{
-    for (int i = 0; ws && i < ws->tool_count; i++)
-    {
-        if (ws->tools[i].name && strcmp(ws->tools[i].name, "todo_update") == 0)
-        {
-            return &ws->tools[i];
-        }
-    }
-    return NULL;
-}
-
-static int TestTodoApplyRenamesSession(void)
-{
-    const char *name = "todo apply renames the session when task changes";
+    const char *name = "set_title validates succinct single-line titles";
+    ResetTest(TEST_SINGLE, 0);
     PicoHost app;
     InitApp(&app);
-    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
-    PicoExt ext = pico_ext_todo();
-    void *todo_state = NULL;
-    InitExt(&app, ws, ext, NULL, &todo_state);
-    PicoTool *tool = FindTodoTool(ws);
-    PicoAgent *agent = TestAgent(&app);
-    const char *first =
-        "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
-        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
-    const char *same =
-        "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
-        "[{\"id\":\"a\",\"text\":\"later\",\"status\":\"in_progress\"}]}";
-    const char *replayed_same =
-        "{\"version\":1,\"task\":\"Name the session\",\"todos\":"
-        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
-    const char *replayed_stale =
-        "{\"version\":1,\"task\":\"Heal replayed title\",\"todos\":"
-        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"pending\"}]}";
-    const char *renamed =
-        "{\"version\":1,\"task\":\"Rename again\",\"todos\":"
-        "[{\"id\":\"a\",\"text\":\"work\",\"status\":\"completed\"}]}";
-    g_log_title_calls = 0;
-    g_logged_title[0] = '\0';
-    bool ok = tool && tool->apply && agent && ext.workspace_on_frame &&
-              tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, first, false, todo_state) && g_log_title_calls == 0;
-    ext.workspace_on_frame(ws, todo_state, 0.0f);
-    ok = ok && g_log_title_calls == 1 && strcmp(g_logged_title, "Name the session") == 0 &&
-         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, same, false, todo_state);
-    ext.workspace_on_frame(ws, todo_state, 0.0f);
-    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_same, true, todo_state);
-    ext.workspace_on_frame(ws, todo_state, 0.0f);
-    ok = ok && g_log_title_calls == 1 && tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, replayed_stale, true, todo_state);
-    ext.workspace_on_frame(ws, todo_state, 0.0f);
-    ok = ok && g_log_title_calls == 2 && strcmp(g_logged_title, "Heal replayed title") == 0 &&
-         tool->apply(PicoHost_PrimaryWorkspace(&app), agent->id, renamed, false, todo_state) && g_log_title_calls == 2;
-    ext.workspace_on_frame(ws, todo_state, 0.0f);
-    ok = ok && g_log_title_calls == 3 && strcmp(g_logged_title, "Rename again") == 0;
-    /* The fixture owns this extension instance: drain its agent hooks before freeing state. */
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec = (time_t)(INT64_MAX / 2);
-    ok = PicoWorkspace_QuiesceBefore(ws, &deadline) && ok;
-    if (ext.workspace_shutdown)
+    PicoWorkspace *ws = TestWs(&app);
+    InitExt(&app, ws, pico_ext_title(), NULL, NULL);
+    PicoTool *tool = NULL;
+    for (int i = 0; i < ws->tool_count; i++)
+        if (!strcmp(ws->tools[i].name, "set_title")) tool = &ws->tools[i];
+    if (!tool)
     {
-        ext.workspace_shutdown(ws, todo_state);
+        PicoHost_Shutdown(&app);
+        return Fail(name, "builtin was not registered");
+    }
+    PicoToolResult result = {0};
+    tool->run(NULL, "{\"title\":\"  Fix \\u00e9ditor \\uD83D\\uDE80  \"}", &result, NULL);
+    JsonDoc doc;
+    bool ok = !result.is_error && result.output && result.details_json &&
+              JsonParse(&doc, result.details_json, strlen(result.details_json)) == 0;
+    if (ok)
+    {
+        char *title = JsonObjStr(&doc, 0, "title");
+        ok = title && !strcmp(title, "Fix éditor 🚀");
+        free(title);
+        JsonFree(&doc);
+    }
+    free(result.output);
+    free(result.details_json);
+
+    const char *invalid[] = {
+        NULL, "{", "[]", "{}", "{\"title\":null}", "{\"title\":12}", "{\"title\":true}",
+        "{\"title\":\"\"}", "{\"title\":\"   \"}", "{\"title\":\"line\\nbreak\"}",
+        "{\"title\":\"\\tTitle\"}", "{\"title\":\"cut\\u0000off\"}",
+        "{\"title\":\"bad\\u0085control\"}", "{\"title\":\"line\\u2028break\"}",
+        "{\"title\":\"bad\\uD800\"}", "{\"title\":\"bad\xC3\x28\"}",
+        "{\"title\":\"valid\"} {}", "{\"title\":\"valid\",\"session_id\":\"other\"}",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+    {
+        result = (PicoToolResult){0};
+        tool->run(NULL, invalid[i], &result, NULL);
+        ok = result.is_error && result.output && !result.details_json && ok;
+        free(result.output);
+        free(result.details_json);
+    }
+
+    /* Use the offered limit, not a test-owned copy of its configurable value.
+     * Four-byte code points must be counted as characters, not bytes. */
+    int limit = 0;
+    if (JsonParse(&doc, tool->params_json, strlen(tool->params_json)) == 0)
+    {
+        int props = JsonObjGet(&doc, 0, "properties");
+        limit = JsonObjInt(&doc, JsonObjGet(&doc, props, "title"), "maxLength", 0);
+        JsonFree(&doc);
+    }
+    ok = limit > 0 && ok;
+    for (int extra = 0; extra <= 1 && limit > 0; extra++)
+    {
+        JsonBuf args;
+        JsonBuf_Init(&args);
+        JsonBuf_Puts(&args, "{\"title\":\"");
+        for (int i = 0; i < limit + extra; i++) JsonBuf_Puts(&args, "🚀");
+        JsonBuf_Puts(&args, "\"}");
+        result = (PicoToolResult){0};
+        tool->run(NULL, args.data, &result, NULL);
+        ok = result.is_error == (extra != 0) && (result.details_json != NULL) == (extra == 0) && ok;
+        free(result.output);
+        free(result.details_json);
+        JsonBuf_Free(&args);
     }
     PicoHost_Shutdown(&app);
-    return ok ? 0 : Fail(name, "live apply did not rename on task change, or replay/unchanged task wrote a title");
+    return ok ? 0 : Fail(name, "invalid title accepted, valid title rejected, or Unicode title was altered");
+}
+
+static int TestSetTitleCall(bool subagent, PicoSessionWriteResult write_result)
+{
+    const char *name = "set_title targets caller and reports persistence rejection";
+    ResetTest(TEST_SINGLE, 1);
+    PicoHost app;
+    InitApp(&app);
+    PicoWorkspace *ws = TestWs(&app);
+    InitExt(&app, ws, pico_ext_title(), NULL, NULL);
+    PicoAgent *agent = TestAgent(&app);
+    if (subagent)
+    {
+        PicoAgentCreateOptions options = {.kind = PICO_AGENT_SUBAGENT,
+            .parent_id = agent->id, .session_start = PICO_SESSION_NONE};
+        PicoAgentId child_id = 0;
+        if (PicoWorkspace_CreateAgent(ws, &options, &child_id) != PICO_OK)
+        {
+            PicoHost_Shutdown(&app);
+            return Fail(name, "could not create child");
+        }
+        agent = PicoHost_FindAgent(&app, child_id);
+    }
+    g_log_title_calls = 0;
+    g_log_title_result = write_result;
+    g_logged_title_agent = 0;
+    g_logged_title[0] = '\0';
+    snprintf(g_test.issue_tool_name, sizeof(g_test.issue_tool_name), "set_title");
+    snprintf(g_test.issue_tool_args, sizeof(g_test.issue_tool_args), "{\"title\":\"  Session goal  \"}");
+    TestAddToolAfterHook(&app, CaptureAfter);
+    PicoAgent_StartTurn(&app, agent, "name this session");
+    PICO_TEST_WAIT(PicoAgent_IsBusy(agent)) { PicoAgent_Pump(&app, agent); }
+    bool success = write_result == PICO_SESSION_WRITE_OK;
+    bool ok = g_log_title_calls == 1 && g_logged_title_agent == agent->id &&
+              !strcmp(g_logged_title, "Session goal") && g_test.after_executed &&
+              g_test.after_is_error != success && g_test.after_seen_details &&
+              (g_test.after_seen_details[0] != '\0') == success &&
+              g_test.last_input && strstr(g_test.last_input, success ? "\"is_error\":false" : "\"is_error\":true");
+    g_log_title_result = PICO_SESSION_WRITE_OK;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail(name, "wrong caller renamed or persistence rejection reported success");
 }
 
 static bool AskUserRegistered(const PicoHost *app)
@@ -5326,14 +5315,11 @@ static int TestToolCallListArgs(void)
     const char *name = "tool call lists show item counts";
     PicoHost app;
     InitApp(&app);
-    PicoHost_AddToolCall(&app, pico_agent_active(&app), "todo_update",
-                        "{\"todos\":[{\"id\":\"1\",\"content\":\"a\",\"status\":\"pending\"},"
-                        "{\"id\":\"2\",\"content\":\"b\",\"status\":\"pending\"},"
-                        "{\"id\":\"3\",\"content\":\"c\",\"status\":\"pending\"},"
-                        "{\"id\":\"4\",\"content\":\"d\",\"status\":\"pending\"}]}");
+    PicoHost_AddToolCall(&app, pico_agent_active(&app), "index",
+                        "{\"paths\":[\"a.c\",\"b.c\",\"c.c\",\"d.c\"]}");
     PicoTraceLine *line = LastToolTrace(&app);
-    bool ok = line && line->tool_args && strcmp(line->tool_args, "todos: [4 items]") == 0 &&
-              line->tool_args_json && strstr(line->tool_args_json, "\"todos\"");
+    bool ok = line && line->tool_args && strcmp(line->tool_args, "paths: [4 items]") == 0 &&
+              line->tool_args_json && strstr(line->tool_args_json, "\"paths\"");
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "list args were not summarized as an item count");
 }
@@ -6645,8 +6631,11 @@ int main(void)
     failed |= PICO_TEST_RUN(TestUnadoptedToolImageCleanup(true));
     failed |= PICO_TEST_RUN(TestToolTraceError());
     failed |= PICO_TEST_RUN(TestQueuedToolCallProgress());
-    failed |= PICO_TEST_RUN(TestTodoAgentIsolation());
-    failed |= PICO_TEST_RUN(TestTodoApplyRenamesSession());
+    failed |= PICO_TEST_RUN(TestSetTitleValidation());
+    failed |= PICO_TEST_RUN(TestSetTitleCall(false, PICO_SESSION_WRITE_OK));
+    failed |= PICO_TEST_RUN(TestSetTitleCall(true, PICO_SESSION_WRITE_OK));
+    failed |= PICO_TEST_RUN(TestSetTitleCall(false, PICO_SESSION_WRITE_FAILED));
+    failed |= PICO_TEST_RUN(TestSetTitleCall(false, PICO_SESSION_WRITE_SKIPPED));
     failed |= PICO_TEST_RUN(TestAskUserHiddenOmitsGuidance());
     failed |= PICO_TEST_RUN(TestAskUserRegistrationReload());
     failed |= PICO_TEST_RUN(TestAskUserToolSuccess());

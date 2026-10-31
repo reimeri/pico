@@ -28,7 +28,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
 - `context` — request-only, non-persistent agent context
 - `steering` — user input queued for an active turn, delivery, persistence, and hooks
-- `tools` — image-bearing results, LLM-callable tools, parallel execution policies, and structured replayable details
+- `tools` — session titling, image-bearing results, LLM-callable tools, parallel execution policies, and structured replayable details
 - `commands` — slash commands (`/foo`)
 - `notices` — severity-labeled application feedback, transcript persistence, document origins, context exclusion
 - `completers` — composer completion, `@` files, and `#` session-reference chips
@@ -69,6 +69,7 @@ The JSON profiles are examples only. Copy or adapt them under `$XDG_CONFIG_HOME/
 
 These are the in-app implementations, shipped for reading. They are not loaded from this folder.
 
+- [`../../builtins/title.c`](../../builtins/title.c) — `set_title` (calling-agent session title)
 - [`../../builtins/image.c`](../../builtins/image.c) — `view_image` (compiled builtin, not an extension template)
 - [`../../builtins/openai_image.c`](../../builtins/openai_image.c) — `generate_image` using ChatGPT OAuth (compiled builtin)
 - [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`

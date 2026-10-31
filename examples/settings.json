@@ -81,7 +81,7 @@
   // The builtin "extensions" manager and "settings" editor cannot be disabled.
   // Explicit disable takes precedence over enabled_host_extensions.
   // Ignored in workspace .pico/settings.json.
-  // "disabled_host_extensions": ["footer", "todos", "/home/me/.config/pico/extensions/custom.c"],
+  // "disabled_host_extensions": ["footer", "session-title", "/home/me/.config/pico/extensions/custom.c"],
 
   // Opt in to built-ins that default to off (currently `cache_miss`).
   // cache_miss notes later normal main-agent responses with >=10,000 uncached input tokens.

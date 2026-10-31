@@ -64,7 +64,7 @@ static PicoExt (*kBuiltins[])(void) = {
     pico_ext_notify,
     pico_ext_cache_miss,
     pico_ext_ask_user,
-    pico_ext_todo,
+    pico_ext_title,
     pico_ext_shell,
     pico_ext_image,
     pico_ext_background,

@@ -106,7 +106,7 @@ Register these only from `workspace_init`:
 
 Workspace contextual views receive the workspace pointer and the explicit selected agent ID. They run only when the selected agent belongs to that workspace. Workspace `on_frame` runs for every `OPEN` or `RELOADING` workspace, selected or not; it must not draw with Clay or Raylib. Rendering remains a view callback.
 
-Workspace builtins include TODO state, shell tool, subagent tool, file index/completion, diff worker/model, execution commands, providers, and tool ask records.
+Workspace builtins include session-title and shell tools, subagent tool, file index/completion, diff worker/model, execution commands, providers, and tool ask records.
 
 ## Mailboxes and asks
 

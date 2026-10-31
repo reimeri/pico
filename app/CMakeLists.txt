@@ -217,8 +217,7 @@ add_executable(pico
     builtins/notify.c
     builtins/cache_miss.c
     builtins/ask_user.c
-    builtins/todo.c
-    builtins/todo_model.c
+    builtins/title.c
     builtins/background.c
     builtins/background_model.c
     builtins/shell.c
@@ -670,14 +669,6 @@ if(BUILD_TESTING)
     pico_warnings_are_errors(pico_xai_auth_tests)
     add_test(NAME pico_xai_auth_tests COMMAND pico_xai_auth_tests)
 
-    add_executable(pico_todo_tests
-        tests/todo_test.c
-        builtins/todo_model.c
-        json.c)
-    target_include_directories(pico_todo_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    pico_warnings_are_errors(pico_todo_tests)
-    add_test(NAME pico_todo_tests COMMAND pico_todo_tests)
-
     add_executable(pico_background_tests
         tests/background_test.c
         builtins/background_model.c
@@ -743,8 +734,7 @@ if(BUILD_TESTING)
         builtins/cache_miss.c
         builtins/ask_user.c
         builtins/subagent.c
-        builtins/todo.c
-        builtins/todo_model.c
+        builtins/title.c
         builtins/background_model.c
         json.c
         canonical.c
@@ -1091,8 +1081,7 @@ if(BUILD_TESTING)
         chat_sel.c
         builtins/ask_user.c
         builtins/subagent.c
-        builtins/todo.c
-        builtins/todo_model.c
+        builtins/title.c
         builtins/background.c
         builtins/background_model.c
         builtins/chat.c
@@ -1191,7 +1180,7 @@ if(BUILD_TESTING)
 endif()
 
 set(_pico_ref_builtins
-    shell.c image.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h openai_image.c openai_image.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
+    shell.c image.c title.c background.c background_model.c background_model.h openai.c openai_auth.c openai_auth.h openai_image.c openai_image.h hyper.c xai.c xai_auth.c xai_auth.h responses.c responses.h
     completions.c completions.h stream_guard.c stream_guard.h provider_retry.c provider_retry.h hyper_auth.c hyper_auth.h)
 set(_pico_runtime_commands
     COMMAND ${CMAKE_COMMAND} -E copy_directory

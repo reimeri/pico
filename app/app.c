@@ -22,7 +22,6 @@
 #include "scrollbar.h"
 #include "md_view_internal.h"
 #include "builtins/chat.h"
-#include "builtins/todo.h"
 #include "builtins/background_model.h"
 #include "host_internal.h"
 #include "http_internal.h"
@@ -4341,9 +4340,9 @@ static Clay_RenderCommandArray RecoverClayLayoutIfNeeded(PicoHost *app, Clay_Ren
 }
 
 bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
-                                 bool had_complete, bool had_todo, bool had_modal)
+                                 bool had_complete, bool had_modal)
 {
-    return host && !had_warn && !had_complete && !had_todo && !had_modal &&
+    return host && !had_warn && !had_complete && !had_modal &&
            !PicoChatFind_BlocksInput(host) && !host->ui_drag_active;
 }
 
@@ -4456,9 +4455,8 @@ void PicoHost_Frame(PicoHost *app)
 
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
-    bool had_todo = PicoTodo_IsExpanded(app);
     had_modal = had_modal || pico_ui_modal_claimed(app);
-    if (!PicoBrowser_BlocksKeyboard(app) && PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_todo, had_modal) &&
+    if (!PicoBrowser_BlocksKeyboard(app) && PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_modal) &&
         IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgent *active = PicoHost_TranscriptAgent(app);
@@ -4525,7 +4523,7 @@ void PicoHost_Frame(PicoHost *app)
      * scroll offset is a visible change even with a stationary pointer. */
     static const Clay_String scroll_ids[] = {
         CLAY_STRING("ChatScroll"), CLAY_STRING("SidebarScroll"),
-        CLAY_STRING("SubagentChatScroll"), CLAY_STRING("TodoListScroll"),
+        CLAY_STRING("SubagentChatScroll"),
         CLAY_STRING("SettingsModalScroll"), CLAY_STRING("SettingsDefaultMenuScroll"),
         CLAY_STRING("AskModalScroll"), CLAY_STRING("AskUserTextScroll"),
         CLAY_STRING("ClarificationFocus"), CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),

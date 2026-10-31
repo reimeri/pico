@@ -121,4 +121,4 @@ Workspace reload is **deferred** until that workspace's live/retired runtimes, p
 
 `/cd` opens or selects a workspace. Relative paths resolve against the command agent's workspace. The previous workspace stays open; returning to an already-open canonical path reuses it. The workspace path is immutable after open. See [workspace](workspace.md).
 
-Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `todos`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `settings`, `prompt`, `diff`. `/extensions` or F2 lists them.
+Builtins: `chat`, `composer`, `footer`, `overlay`, `ask-user`, `session-title`, `sh`, `subagent`, `commands`, `files`, `openai`, `hyper`, `xai`, `extensions`, `settings`, `prompt`, `diff`. `/extensions` or F2 lists them.

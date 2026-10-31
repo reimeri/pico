@@ -1822,16 +1822,16 @@ void PicoSettingsUi_Layout(PicoHost *app)
                          .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
             RenderButton(CLAY_ID("SettingsCancel"), "Cancel", !s_active_settings_state->save, false);
-            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+            CLAY(CLAY_ID("SettingsVersion"),
+                 {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER},
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                  .clip = {.horizontal = true}})
+            {
+                CLAY_TEXT(CLAY_STRING("v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                            .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
             RenderButton(CLAY_ID("SettingsApply"), s_active_settings_state->save ? "Saving…" : "Apply", !s_active_settings_state->save, true);
-        }
-        CLAY(CLAY_ID("SettingsVersion"),
-             {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER},
-                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
-        {
-            CLAY_TEXT(CLAY_STRING("v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
-                                        .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
         }
     }
 }

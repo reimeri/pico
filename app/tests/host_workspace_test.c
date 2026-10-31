@@ -2878,13 +2878,15 @@ static int RunSettingsPanelShellCase(bool with_sidebar)
         if (stage == 2) PicoSettingsUi_Close(host);
         ChatStabilitySnapshot expected = {0};
         Clay_BoundingBox expected_panel = {0}, expected_scroll = {0}, expected_strip = {0};
+        const Clay_ElementId controls[] = {CLAY_ID("SettingsCancel"), CLAY_ID("SettingsVersion"), CLAY_ID("SettingsApply")};
+        Clay_BoundingBox expected_controls[3] = {0};
         for (int frame = 0; frame < 100; frame++) {
             LayoutChatStabilityFrame(host, viewports[stage]);
             pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
             Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
             if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
             PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height, &scroll.scrollPosition->y);
-            (void)PicoHost_LayoutShell(host, viewports[stage].height, 0);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewports[stage].height, 0);
             PicoChat_HarvestVirtualHeights(host);
             ChatStabilitySnapshot current;
             if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
@@ -2897,12 +2899,38 @@ static int RunSettingsPanelShellCase(bool with_sidebar)
                 !ShellVerticallyContains(current.right, panel.boundingBox) ||
                 !ShellVerticallyContains(panel.boundingBox, content.boundingBox))) goto done;
             if (panel.found) {
-                const Clay_ElementId controls[] = {CLAY_ID("SettingsCancel"), CLAY_ID("SettingsApply")};
+                Clay_BoundingBox boxes[3];
                 for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
                     Clay_ElementData control = Clay_GetElementData(controls[i]);
-                    if (!control.found || !ShellVerticallyContains(panel.boundingBox, control.boundingBox) ||
-                        control.boundingBox.x < panel.boundingBox.x ||
-                        control.boundingBox.x + control.boundingBox.width > panel.boundingBox.x + panel.boundingBox.width + 0.01f) goto done;
+                    boxes[i] = control.boundingBox;
+                    if (!control.found || !ShellVerticallyContains(panel.boundingBox, boxes[i]) ||
+                        boxes[i].x < panel.boundingBox.x ||
+                        boxes[i].x + boxes[i].width > panel.boundingBox.x + panel.boundingBox.width + 0.01f) goto done;
+                    if (frame == 30) expected_controls[i] = boxes[i];
+                    else if (frame > 30 && !ShellBoxStable(expected_controls[i], boxes[i])) goto done;
+                }
+                for (int i = 1; i < 3; i++) {
+                    if (boxes[i - 1].x + boxes[i - 1].width > boxes[i].x ||
+                        fabsf(boxes[i].y + boxes[i].height / 2 - boxes[0].y - boxes[0].height / 2) > 0.01f) {
+                        Fail("settings footer must keep Cancel, version, and Apply on one vertically centered row");
+                        goto done;
+                    }
+                }
+                Clay_RenderCommand *version = FindCardText(&commands, "v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX);
+                if (!version) goto done;
+                Clay_BoundingBox visible = version->boundingBox;
+                Clay_BoundingBox clip = CardTextClip(&commands, version);
+                if (clip.width > 0) {
+                    float right = fminf(visible.x + visible.width, clip.x + clip.width);
+                    visible.x = fmaxf(visible.x, clip.x);
+                    visible.width = right - visible.x;
+                }
+                if (visible.width <= 0 || visible.x < boxes[1].x ||
+                    visible.x + visible.width > boxes[1].x + boxes[1].width + 0.01f ||
+                    !ShellVerticallyContains(boxes[1], visible) ||
+                    fabsf(visible.x + visible.width / 2 - boxes[1].x - boxes[1].width / 2) > 0.01f) {
+                    Fail("settings version must stay centered between the buttons, clipping at narrow widths");
+                    goto done;
                 }
             }
             if (frame == 30) {

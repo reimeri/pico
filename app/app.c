@@ -10,6 +10,7 @@
 #include "pico/md_view.h"
 #include "agent.h"
 #include "workspace_internal.h"
+#include "subagent_config.h"
 #include "session.h"
 #include "settings.h"
 #include "docs_path.h"
@@ -3695,6 +3696,7 @@ static void PicoHost_PumpLifecycle(PicoHost *host)
                 continue;
             }
             PicoWorkspace_Pump(workspace);
+            PicoSubagentConfig_PumpRefresh(workspace);
             if (workspace->state == PICO_WORKSPACE_RELOADING && !PicoWorkspace_BlocksReload(workspace))
             {
                 if (PicoWorkspace_Reload(workspace) && workspace->state == PICO_WORKSPACE_RELOADING)

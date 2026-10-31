@@ -2026,6 +2026,13 @@ static int CacheInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row,
     *cached = *row;
     cached->index = index;
     cached->section = InboxSectionFor(host, row);
+    if (cached->section == INBOX_WORKING)
+    {
+        PicoAgent *agent = PicoHost_FindAgent(host, row->live_id);
+        /* Working rows follow user intent, not assistant/tool writes or the
+         * catalog's changing mtime. Selection must not move a click target. */
+        if (agent) cached->activity = s->wall_clock_offset + agent->inbox_working_activity;
+    }
     return 0;
 }
 

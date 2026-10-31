@@ -96,7 +96,7 @@ static void ClearAskUi(void)
 static void RejectInvalidAsk(PicoHost *app, uint64_t id)
 {
     ClearAskUi();
-    pico_tool_answer(app, id, INVALID_ASK_ANSWER);
+    PicoHost_RejectAsk(app, id, INVALID_ASK_ANSWER);
 }
 
 static void PrepareAsk(PicoHost *app)

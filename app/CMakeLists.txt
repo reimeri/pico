@@ -243,6 +243,7 @@ add_executable(pico
     builtins/completions.c
     builtins/extensions.c
     builtins/settings.c
+    builtins/subagent_settings.c
     builtins/prompt.c
     builtins/diff.c
     third_party/tinyfiledialogs/tinyfiledialogs.c)
@@ -1115,6 +1116,7 @@ if(BUILD_TESTING)
         builtins/completions.c
         builtins/extensions.c
         builtins/settings.c
+    builtins/subagent_settings.c
         builtins/prompt.c
         builtins/diff.c
         markdown.c

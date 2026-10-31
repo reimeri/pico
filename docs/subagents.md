@@ -9,7 +9,7 @@ Pico creates this directory when it starts:
 - `$XDG_CONFIG_HOME/pico/subagents/` when `XDG_CONFIG_HOME` is set;
 - otherwise `~/.config/pico/subagents/`.
 
-Pico does not create or install profile files. Only direct, regular, non-hidden `*.json` files are discovered. The filename stem is the profile name and must match `[A-Za-z0-9][A-Za-z0-9._-]*` (at most 64 bytes).
+Pico does not install profile files automatically. Use **Settings → Subagents** (or `/subagents`) to create them, or place files in this directory yourself. Only direct, regular, non-hidden `*.json` files are discovered. The filename stem is the profile name and must match `[A-Za-z0-9][A-Za-z0-9._-]*` (at most 64 bytes).
 
 To install the bundled examples (paths from this file):
 
@@ -18,6 +18,22 @@ mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/pico/subagents"
 cp ../examples/subagents/explore.json ../examples/subagents/review.json \
   "${XDG_CONFIG_HOME:-$HOME/.config}/pico/subagents/"
 ```
+
+## Managing profiles in the GUI
+
+Open **Settings → Subagents**, or type `/subagents` to open that section directly, including while a turn is running. Profiles are user-global and shared across workspaces; this manager edits their JSON files, not running child sessions. All management actions work without an open or selected workspace.
+
+- **New profile**, **Save profile**, **Cancel edit**, **Duplicate**, and confirmed **Delete** manage the saved definitions. Profile saves are separate from General & models' **Apply** button.
+- The form edits name, description, required purpose, optional model ID and effort, Fast, parallel safety, tool allowlist, and child tool concurrency. Blank model/effort/concurrency fields retain the schema's inheritance/default behavior. Switch Tools to **allowlist** and leave its names empty to allow no tools; **all registered** omits the restriction.
+- Purpose uses a single-line editor: enter `\n` for a newline, `\t` for a tab, and `\\` for a literal backslash. Existing multiline purposes round-trip through these escapes.
+- Settings validates the JSON/schema, including field types, lengths, required purpose, tool-name duplicates, and concurrency limits. It does not require the referenced model, effort, or tools to be available in a current workspace. Each workspace checks those references against its own catalogs when loading profiles for use; an unavailable profile remains editable in Settings.
+- Edits are drafts until saved. Leaving, switching profiles, refreshing, or starting another profile asks before discarding changes. Host-extension replacement waits while a profile draft, confirmation, or save owns the editor, including explicit reloads in safe mode.
+- Renaming changes the filename and profile identity. It does **not** rename existing child sessions; continuing those sessions still requires their recorded profile name. Deleting a profile does not delete child sessions.
+- Invalid files remain listed with their errors. Edit their fields or choose **Open in text editor**, which uses the system's file association. Saving an unparseable file requires confirmation before replacing its contents; the confirmation also offers the external-editor action.
+
+Saves validate before writing and preserve comments and unknown fields in parseable JSONC where possible. Known edited values may be reformatted; removing an optional field can also remove comments inside that field. Unparseable replacement generates a fresh document. Creation, duplication, and rename refuse an existing destination. Pico checks the original bytes before save/delete to detect stale drafts, but external editors do not share a lock with Pico: avoid simultaneous edits to the same file. Use **Refresh** after editing externally.
+
+Successful GUI saves/deletes and **Refresh** queue a profile-only refresh for every open workspace. Each workspace keeps its current snapshot until its existing work, delegation jobs, asks, and retained runtimes are quiescent, then validates and replaces the snapshot on the main thread. This does not reload extensions, cancel current work, or stop accepting new work. Accepted batches and running children retain their copied policy. Newly opened workspaces read the saved files normally. Files edited outside Pico still require **Refresh**, F5, or `/reload`.
 
 ## JSONC schema
 
@@ -117,7 +133,7 @@ A child is advertised as resumable only after its session header and delegated t
 
 ## Reload and errors
 
-Profiles load at startup and on F5 or `/reload`, after extensions have registered tools. Workspace reload is queued until that workspace's live and retired workers, asks, offered tool catalogs, provider/tool events, and delegation jobs are quiescent. While queued, that workspace refuses new turns and delegations but keeps pumping current work, cancellation, and ask UI. Other workspaces are not blocked.
+Profiles load at startup and on F5 or `/reload`, after extensions have registered tools. GUI saves and **Refresh** also request the profile-only refresh described above. Workspace reload is queued until that workspace's live and retired workers, asks, offered tool catalogs, provider/tool events, and delegation jobs are quiescent. While queued, that workspace refuses new turns and delegations but keeps pumping current work, cancellation, and ask UI. Other workspaces are not blocked.
 
 After reload, Pico validates profiles against the new model/tool registries. A profile that names a missing tool or model is unavailable until the configuration or registration returns. Existing restricted agents are also revalidated. Errors appear in the warning overlay with the profile path and reason.
 

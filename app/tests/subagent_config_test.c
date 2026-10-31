@@ -324,3 +324,164 @@ static int TestProfileFastValidation(void)
     snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
     return ok ? 0 : Fail(name, "profile accepted a malformed or unsupported Fast selection");
 }
+
+static int TestSubagentProfileEditing(void)
+{
+    const char *name = "subagent profile editing preserves policy and JSONC with safe file operations";
+    char temp[] = "/tmp/pico-subagent-editor-XXXXXX";
+    if (!mkdtemp(temp)) return Fail(name, "temporary config");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    PicoHost app;
+    InitApp(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    TestAddTool(&app, "sh", "shell", "{}", EchoTool, NULL);
+    char dir[4096], path[4096], renamed[4096];
+    PicoSubagentConfig_Directory(dir, sizeof(dir));
+    Pico_MkdirP(dir);
+    PicoPath_Format(path, sizeof(path), "%s/review.json", dir);
+    PicoPath_Format(renamed, sizeof(renamed), "%s/renamed.json", dir);
+    const char *fixture = "{\n  // keep this role comment\n  \"purpose\": \"\",\n"
+        "  \"model\": \"missing-model\",\n  \"tools\": [\"sh\"],\n  \"fast\": true,\n"
+        "  \"parallel_safe\": true,\n  \"max_parallel_tools\": 1,\n"
+        "  \"custom\": {\"tag\": 7} // keep this, including the comma\n}\n";
+    bool ok = WriteConfigProfile(dir, "review.json", fixture);
+    PicoSubagentDocument *docs = NULL;
+    int count = 0;
+    char error[512] = "";
+    ok = ok && PicoSubagentConfig_List(&docs, &count, error, sizeof(error)) && count == 1 &&
+        !docs[0].valid && docs[0].parseable;
+    char *source = NULL;
+    if (ok) {
+        PicoSubagentProfileInfo repaired = docs[0].profile;
+        /* Repair required text and remove an optional field without changing policy. */
+        snprintf(repaired.purpose, sizeof(repaired.purpose), "Review only");
+        repaired.has_model = false;
+        source = PicoSubagentConfig_Build(&docs[0], &repaired, error, sizeof(error));
+        ok = source && strstr(source, "// keep this role comment") &&
+            strstr(source, "// keep this, including the comma") && strstr(source, "\"custom\": {\"tag\": 7}") &&
+            PicoSubagentConfig_Save(&docs[0], "review", source, error, sizeof(error));
+        if (ok) {
+            PicoWorkspace_LoadProfiles(ws);
+            const PicoSubagentProfileInfo *loaded = PicoSubagentConfig_Find(ws, "review");
+            ok = loaded && loaded->restricted_tools && loaded->tool_count == 1 && !strcmp(loaded->tools[0], "sh") &&
+                loaded->fast && loaded->parallel_safe && loaded->max_parallel_tools == 1 && !loaded->has_model;
+        }
+        /* Stale drafts must not overwrite or delete a newer file. */
+        ok = ok && !PicoSubagentConfig_Save(&docs[0], "review", source, error, sizeof(error)) &&
+                   !PicoSubagentConfig_Delete(&docs[0], error, sizeof(error));
+    }
+    free(source);
+    PicoSubagentConfig_FreeDocuments(docs, count);
+    docs = NULL; count = 0;
+    if (ok) {
+        ok = PicoSubagentConfig_List(&docs, &count, error, sizeof(error)) && count == 1;
+        source = ok ? PicoSubagentConfig_Build(&docs[0], &docs[0].profile, error, sizeof(error)) : NULL;
+        ok = source && !PicoSubagentConfig_Save(NULL, "review", source, error, sizeof(error)) &&
+            PicoSubagentConfig_Save(NULL, "copy", source, error, sizeof(error)) &&
+            PicoSubagentConfig_Save(&docs[0], "renamed", source, error, sizeof(error)) && access(path, F_OK) != 0;
+        free(source);
+    }
+    PicoSubagentConfig_FreeDocuments(docs, count);
+    /* Full original bytes, including NUL, remain available for confirmed repair/delete. */
+    FILE *f = fopen(path, "wb");
+    static const char binary[] = "{\"purpose\":\"prefix\"}\0trailing bytes";
+    if (f) { ok = fwrite(binary, 1, sizeof(binary) - 1, f) == sizeof(binary) - 1 && ok; fclose(f); }
+    else ok = false;
+    docs = NULL; count = 0;
+    if (ok) {
+        ok = PicoSubagentConfig_List(&docs, &count, error, sizeof(error));
+        bool deleted = false;
+        for (int i = 0; i < count; i++) if (!strcmp(docs[i].filename, "review.json")) {
+            deleted = !docs[i].valid && !docs[i].parseable && PicoSubagentConfig_Delete(&docs[i], error, sizeof(error));
+        }
+        ok = ok && deleted;
+    }
+    PicoSubagentConfig_FreeDocuments(docs, count);
+    char copy[4096];
+    PicoPath_Format(copy, sizeof(copy), "%s/copy.json", dir);
+    unlink(copy); unlink(renamed); unlink(path); rmdir(dir); rmdir(temp);
+    PicoHost_Shutdown(&app);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return ok ? 0 : Fail(name, error[0] ? error : "edit/collision/rename/binary-delete contract");
+}
+
+static int TestSubagentGlobalProfileValidation(void)
+{
+    const char *name = "global profile editing validates schema without workspace registries";
+    char temp[] = "/tmp/pico-global-profile-validation-XXXXXX";
+    if (!mkdtemp(temp)) return Fail(name, "temporary config");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    char directory[4096];
+    PicoSubagentConfig_Directory(directory, sizeof(directory));
+    Pico_MkdirP(directory);
+    const struct {
+        const char *filename;
+        const char *source;
+        bool valid;
+    } cases[] = {
+        {"future-model.json", "{\"purpose\":\"Future model\",\"model\":\"future-model\",\"effort\":\"research\"}", true},
+        {"future-tool.json", "{\"purpose\":\"Future tool\",\"tools\":[\"future-tool\"]}", true},
+        {"future-effort.json", "{\"purpose\":\"Future effort\",\"model\":\"test-model\",\"effort\":\"research\"}", true},
+        {"duplicate-tools.json", "{\"purpose\":\"Invalid schema\",\"tools\":[\"future-tool\",\"future-tool\"]}", false},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        ok = WriteConfigProfile(directory, cases[i].filename, cases[i].source) && ok;
+    /* Without a catalog lookup, oversized IDs must still be rejected instead
+     * of silently truncated into a different stored profile definition. */
+    char long_model[1024];
+    memset(long_model, 'x', sizeof(long_model) - 1);
+    long_model[sizeof(long_model) - 1] = '\0';
+    char oversized[1200];
+    snprintf(oversized, sizeof(oversized), "{\"purpose\":\"Oversized ID\",\"model\":\"%s\"}", long_model);
+    ok = WriteConfigProfile(directory, "oversized-model.json", oversized) && ok;
+    PicoSubagentDocument *documents = NULL;
+    int count = 0;
+    char error[512] = "";
+    ok = PicoSubagentConfig_List(&documents, &count, error, sizeof(error)) && count == 5 && ok;
+    for (int i = 0; i < count; i++) {
+        bool expected = false;
+        for (size_t j = 0; j < sizeof(cases) / sizeof(cases[0]); j++)
+            if (!strcmp(documents[i].filename, cases[j].filename)) expected = cases[j].valid;
+        ok = documents[i].valid == expected && ok;
+        if (expected) {
+            char *source = PicoSubagentConfig_Build(&documents[i], &documents[i].profile, error, sizeof(error));
+            ok = source && PicoSubagentConfig_Save(&documents[i], documents[i].profile.name,
+                                                    source, error, sizeof(error)) && ok;
+            free(source);
+        }
+    }
+    PicoSubagentConfig_FreeDocuments(documents, count);
+
+    PicoHost app;
+    InitApp(&app);
+    PicoWorkspace *ws = PicoHost_PrimaryWorkspace(&app);
+    PicoWorkspace_LoadProfiles(ws);
+    ok = ws->profile_count == 0 && ok;
+    PicoModel *models = realloc(ws->models, 2 * sizeof(*models));
+    if (models) {
+        ws->models = models;
+        memset(&models[1], 0, sizeof(models[1]));
+        ws->model_count = 2;
+        snprintf(models[1].id, sizeof(models[1].id), "future-model");
+        for (int i = 0; i < 2; i++) {
+            snprintf(models[i].effort[0], sizeof(models[i].effort[0]), "research");
+            models[i].effort_count = 1;
+        }
+        TestAddTool(&app, "future-tool", "future fixture", "{}", EchoTool, NULL);
+        PicoWorkspace_LoadProfiles(ws);
+        ok = PicoSubagentConfig_Find(ws, "future-model") && PicoSubagentConfig_Find(ws, "future-tool") &&
+            PicoSubagentConfig_Find(ws, "future-effort") && ws->profile_count == 3 && ok;
+    } else ok = false;
+    PicoHost_Shutdown(&app);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char path[4096];
+        PicoPath_Format(path, sizeof(path), "%s/%s", directory, cases[i].filename);
+        unlink(path);
+    }
+    char path[4096];
+    PicoPath_Format(path, sizeof(path), "%s/oversized-model.json", directory);
+    unlink(path); rmdir(directory); rmdir(temp);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    return ok ? 0 : Fail(name, error[0] ? error : "schema and workspace compatibility were not kept separate");
+}

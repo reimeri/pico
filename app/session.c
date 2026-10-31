@@ -2887,6 +2887,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->unseen_complete = false;
     agent->inbox_pending = false;
     agent->inbox_activity = 0;
+    agent->inbox_working_activity = 0;
 }
 
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,

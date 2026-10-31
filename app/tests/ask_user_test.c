@@ -97,6 +97,11 @@ bool pico_tool_answer(PicoHost *host, uint64_t id, const char *answer)
     return true;
 }
 
+bool PicoHost_RejectAsk(PicoHost *host, uint64_t id, const char *answer)
+{
+    return pico_tool_answer(host, id, answer);
+}
+
 bool IsMouseButtonPressed(int button) { (void)button; return mouse_pressed; }
 bool IsMouseButtonDown(int button) { (void)button; return false; }
 Vector2 GetMousePosition(void) { return mouse_position; }

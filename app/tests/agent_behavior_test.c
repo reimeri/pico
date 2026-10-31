@@ -6660,6 +6660,8 @@ int main(void)
     failed |= PICO_TEST_RUN(TestSubmitHookCannotRetarget());
     failed |= PICO_TEST_RUN(TestSubagentProfileResolution());
     failed |= PICO_TEST_RUN(TestSubagentProfileDiscovery());
+    failed |= PICO_TEST_RUN(TestSubagentProfileEditing());
+    failed |= PICO_TEST_RUN(TestSubagentGlobalProfileValidation());
     failed |= PICO_TEST_RUN(TestNamedSubagentDelegation());
     failed |= PICO_TEST_RUN(TestSubagentParentGuidance());
     failed |= PICO_TEST_RUN(TestSubagentParentCancellation());

@@ -1281,7 +1281,7 @@ bool pico_tool_pending_ask(const PicoHost *app, PicoToolAsk *out)
     return found;
 }
 
-bool pico_tool_answer(PicoHost *app, uint64_t id, const char *answer_json)
+static bool AnswerAsk(PicoHost *app, uint64_t id, const char *answer_json, bool user_input)
 {
     if (!app || !id)
     {
@@ -1296,13 +1296,34 @@ bool pico_tool_answer(PicoHost *app, uint64_t id, const char *answer_json)
         }
         for (int i = 0; i < workspace->count; i++)
         {
-            if (PicoAgent_AnswerAsk(workspace->agents[i], id, answer_json))
+            PicoAgent *agent = workspace->agents[i];
+            if (PicoAgent_AnswerAsk(agent, id, answer_json))
             {
+                if (user_input)
+                {
+                    /* Delegated questions belong to their main Inbox row too. */
+                    double answered = PicoClock_Monotonic();
+                    for (PicoAgent *owner = agent; owner;)
+                    {
+                        owner->inbox_working_activity = answered;
+                        owner = owner->parent_id ? PicoWorkspace_FindAgent(workspace, owner->parent_id) : NULL;
+                    }
+                }
                 return true;
             }
         }
     }
     return false;
+}
+
+bool pico_tool_answer(PicoHost *app, uint64_t id, const char *answer_json)
+{
+    return AnswerAsk(app, id, answer_json, true);
+}
+
+bool PicoHost_RejectAsk(PicoHost *app, uint64_t id, const char *answer_json)
+{
+    return AnswerAsk(app, id, answer_json, false);
 }
 
 int pico_agent_message_count(const PicoHost *app, PicoAgentId id)

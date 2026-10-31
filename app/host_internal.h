@@ -156,6 +156,7 @@ struct PicoHost {
     PicoHostPreferences preferences;
     bool sidebar_inbox_mode;
     bool sidebar_mode_loaded;
+    bool subagent_settings_reload_blocked; /* profile draft/confirmation or persistence owns Settings */
     bool settings_reload_blocked; /* save/failure modal owns its draft until applied or closed */
     struct PicoExtensionPreference *extension_preferences;
     struct PicoProjectPreference *project_preferences;
@@ -431,6 +432,8 @@ static inline const PicoWorkspace *PicoHost_SelectedWorkspaceConst(const PicoHos
 }
 
 uint64_t PicoHost_AllocAskId(PicoHost *host);
+/* Automatic builtin UI rejection, not user input for Inbox ordering. */
+bool PicoHost_RejectAsk(PicoHost *host, uint64_t id, const char *answer_json);
 int PicoHost_TotalAgentCount(const PicoHost *host);
 void PicoPlugins_CancelCompiles(PicoHost *host);
 void PicoPlugins_StopScanner(PicoHost *host);

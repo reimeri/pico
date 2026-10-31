@@ -1332,7 +1332,7 @@ static bool ReloadHostWithPolicy(PicoHost *app, bool retry_compile_failures)
         return false;
     }
 
-    if (app->settings_reload_blocked)
+    if (app->settings_reload_blocked || app->subagent_settings_reload_blocked)
     {
         app->plugin_reload_pending = true;
         app->plugin_reload_retry = retry_compile_failures;
@@ -1891,6 +1891,9 @@ void PicoPlugins_Poll(PicoHost *app)
     }
     if (app->safe_mode)
     {
+        /* Safe mode disables source scanning, not an explicit reload deferred
+         * by a settings draft or in-flight persistence. */
+        if (app->plugin_reload_pending) (void)ReloadHostWithPolicy(app, app->plugin_reload_retry);
         return;
     }
     AdvanceCompiles(app);

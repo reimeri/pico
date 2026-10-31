@@ -163,6 +163,7 @@ struct PicoWorkspace {
 
     PicoSubagentProfileInfo profiles[PICO_MAX_SUBAGENT_PROFILES];
     int profile_count;
+    bool profiles_refresh_pending;
     pthread_mutex_t delegation_mu;
     struct PicoDelegationJob *delegations;
     PicoSubagentSnapshot *snapshots;

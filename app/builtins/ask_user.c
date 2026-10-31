@@ -624,7 +624,7 @@ static void AnswerUiError(PicoHost *app, uint64_t id, const char *message)
     {
         answer = JsonDup("{\"error\":\"invalid questionnaire payload\"}");
     }
-    if (answer && pico_tool_answer(app, id, answer))
+    if (answer && PicoHost_RejectAsk(app, id, answer))
     {
         g_ui.answered = true;
     }

@@ -46,6 +46,7 @@ struct PicoAgent {
      * session commit). Drives least-recently-active eviction at the agent caps. */
     double last_activity;
     double inbox_activity; /* monotonic conversation/status activity, not selection */
+    double inbox_working_activity; /* monotonic turn start or accepted user input, never background activity */
     char profile[65];
     char purpose[1025];
     char parent_session_id[40];

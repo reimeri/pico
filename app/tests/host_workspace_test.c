@@ -15,6 +15,7 @@
 #include "sanitizer_detect.h"
 #include "workspace_internal.h"
 #include "settings.h"
+#include "subagent_config.h"
 #include "pico_build_info.h"
 #include "session.h"
 #include "session_ref.h"
@@ -17838,6 +17839,186 @@ done:
     return good ? 0 : 1;
 }
 
+/* Compare rendered session identities, independent of enumeration and catalog
+ * pagination. Allow section/order transitions to settle before comparing. */
+static bool SidebarInboxAbove(PicoHost *host, const PicoAgent *first, const PicoAgent *second)
+{
+    for (int frame = 0; frame < 20; frame++)
+        (void)PicoHost_LayoutShell(host, 800, 1.0f / 60);
+    const PicoAgent *agents[] = {first, second};
+    Clay_ElementData rows[2];
+    for (int i = 0; i < 2; i++)
+    {
+        Clay_String session_id = {.chars = agents[i]->session_id,
+                                   .length = (int)strlen(agents[i]->session_id)};
+        const char *path = PicoAgent_WorkspacePath(agents[i]);
+        Clay_String workspace = {.chars = path, .length = (int)strlen(path)};
+        uint32_t session = session_id.length ? Clay_GetElementId(session_id).id : (uint32_t)agents[i]->id;
+        rows[i] = Clay_GetElementData(CLAY_IDI("SidebarInboxSession",
+            Clay_GetElementIdWithIndex(workspace, session).id));
+    }
+    return rows[0].found && rows[1].found && rows[0].boundingBox.y < rows[1].boundingBox.y;
+}
+
+static int TestSidebarInboxWorkingOrder(void)
+{
+    InteractionFixture f = {0};
+    MatrixProviderState state;
+    MatrixStateInit(&state, MATRIX_PROVIDER_BLOCK);
+    PicoAgent *first = NULL, *second = NULL;
+    bool good = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(f.host, f.workspace);
+    if (!ConfigureMatrixWorkspace(f.host, workspace, &state, false)) goto done;
+    f.host->sidebar_inbox_mode = true;
+    first = PicoHost_FindAgent(f.host, f.agent);
+    if (!PicoSettings_SetModel(first, "matrix-model")) goto done;
+    PicoSession_Start(f.host, first, PICO_SESSION_NEW, NULL);
+    if (pico_agent_submit(f.host, first->id, "First worker", NULL) != PICO_OK) goto done;
+    PicoAgentId second_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+    if (pico_main_agent_create(f.host, f.workspace, &options, &second_id) != PICO_OK) goto done;
+    second = PicoHost_FindAgent(f.host, second_id);
+    phase = "newest request first";
+    if (pico_agent_submit(f.host, second_id, "Second worker", NULL) != PICO_OK ||
+        !SidebarInboxAbove(f.host, second, first)) goto done;
+
+    phase = "background activity and selection stay put";
+    if (PicoSession_LogAssistant(f.host, first, 0, "Still working", NULL, NULL, NULL, NULL, 0)
+            == PICO_SESSION_WRITE_FAILED ||
+        !pico_agent_select(f.host, first->id) || !SidebarInboxAbove(f.host, second, first)) goto done;
+
+    phase = "accepted steering moves to top";
+    if (pico_agent_steer(f.host, first->id, "Please also check the edge case", NULL) != PICO_OK ||
+        !SidebarInboxAbove(f.host, first, second)) goto done;
+
+    phase = "catalog recency cannot override user order";
+    if (PicoSession_LogAssistant(f.host, second, 0, "More progress", NULL, NULL, NULL, NULL, 0)
+            == PICO_SESSION_WRITE_FAILED ||
+        PicoSession_LogToolCall(f.host, second, 0, "progress", "sh", "{}", NULL)
+            == PICO_SESSION_WRITE_FAILED ||
+        PicoSession_LogToolResult(f.host, second, "progress", "sh", "done", false, NULL, NULL)
+            == PICO_SESSION_WRITE_FAILED ||
+        !DrainSessionForAssertion(f.host, first) || !DrainSessionForAssertion(f.host, second)) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1) ||
+        !SidebarInboxAbove(f.host, first, second)) goto done;
+
+    phase = "another request in an existing conversation";
+    MatrixStateRelease(&state);
+    if (!PumpUntilIdle(f.host, first) || !PumpUntilIdle(f.host, second)) goto done;
+    pthread_mutex_lock(&state.mu);
+    state.release = false;
+    pthread_mutex_unlock(&state.mu);
+    if (pico_agent_submit(f.host, first->id, "Continue first", NULL) != PICO_OK ||
+        pico_agent_submit(f.host, second->id, "Continue second", NULL) != PICO_OK ||
+        !SidebarInboxAbove(f.host, second, first)) goto done;
+    good = true;
+done:
+    MatrixStateRelease(&state);
+    if (first) (void)PumpUntilIdle(f.host, first);
+    if (second) (void)PumpUntilIdle(f.host, second);
+    InteractionFixtureFree(&f);
+    MatrixStateDestroy(&state);
+    if (!good)
+    {
+        fprintf(stderr, "Working inbox order phase: %s\n", phase);
+        Fail("Working order must follow accepted user input, not background activity or selection");
+    }
+    return !good;
+}
+
+/* A direct answer and a delegated answer can independently miss the main
+ * session's ordering update. Keep the resumed provider blocked to observe
+ * the row in Working rather than racing through Completed. */
+typedef enum InboxAnswerScenario {
+    INBOX_ANSWER_MAIN,
+    INBOX_ANSWER_DELEGATED,
+    INBOX_REJECT_QUESTIONNAIRE,
+} InboxAnswerScenario;
+
+static int TestSidebarInboxWorkingAnswerOrder(InboxAnswerScenario scenario)
+{
+    bool delegated = scenario == INBOX_ANSWER_DELEGATED;
+    bool automatic = scenario == INBOX_REJECT_QUESTIONNAIRE;
+    InteractionFixture f = {0};
+    MatrixProviderState state;
+    MatrixStateInit(&state, delegated ? MATRIX_PROVIDER_BLOCK : MATRIX_PROVIDER_ASK);
+    if (scenario == INBOX_REJECT_QUESTIONNAIRE)
+        state.ask_request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":[]}";
+    PicoAgent *first = NULL, *second = NULL, *asking = NULL;
+    bool good = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(f.host, f.workspace);
+    if (!ConfigureMatrixWorkspace(f.host, workspace, &state, true)) goto done;
+    f.host->sidebar_inbox_mode = true;
+    first = asking = PicoHost_FindAgent(f.host, f.agent);
+    if (!PicoSettings_SetModel(first, "matrix-model")) goto done;
+    PicoAgent_StartTurn(f.host, first, "First worker");
+    if (delegated)
+    {
+        PICO_TEST_WAIT(!MatrixStateFlag(&state, false)) pico_host_pump(f.host);
+        pthread_mutex_lock(&state.mu);
+        state.mode = MATRIX_PROVIDER_ASK;
+        state.calls = 0;
+        pthread_mutex_unlock(&state.mu);
+        PicoAgentId child_id = 0;
+        PicoAgentCreateOptions child = {.kind = PICO_AGENT_SUBAGENT, .parent_id = first->id,
+            .profile = "test", .purpose = "Ask for input", .session_start = PICO_SESSION_NONE};
+        if (PicoWorkspace_CreateAgent(workspace, &child, &child_id) != PICO_OK) goto done;
+        asking = PicoHost_FindAgent(f.host, child_id);
+        PicoAgent_StartTurn(f.host, asking, "Ask for input");
+    }
+    PicoAgentId second_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    if (pico_main_agent_create(f.host, f.workspace, &options, &second_id) != PICO_OK ||
+        !pico_agent_select(f.host, second_id)) goto done;
+    second = PicoHost_FindAgent(f.host, second_id);
+    PicoToolAsk ask = {0};
+    PICO_TEST_WAIT(!ask.id)
+    {
+        pico_host_pump(f.host);
+        PicoAgent_PendingAsk(asking, &ask);
+    }
+    phase = "older session needs input";
+    /* Keep the old prompt offscreen until the newer turn starts, so malformed
+     * prompts cannot be automatically rejected during this initial layout. */
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarCommandsContain(&commands, "Needs input · 1")) goto done;
+    pthread_mutex_lock(&state.mu);
+    state.mode = MATRIX_PROVIDER_BLOCK;
+    pthread_mutex_unlock(&state.mu);
+    PicoAgent_StartTurn(f.host, second, "Second worker");
+    /* A more recent turn is already Working when the older one is answered. */
+    phase = "answered session returns to Working";
+    if (automatic)
+    {
+        if (!pico_agent_select(f.host, first->id)) goto done;
+        (void)PicoHost_LayoutShell(f.host, 800, 0);
+    }
+    else if (!pico_tool_answer(f.host, ask.id, "{\"ok\":true}")) goto done;
+    PICO_TEST_WAIT(PicoAgent_AskUiOpen(asking)) pico_host_pump(f.host);
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    good = SidebarCommandsContain(&commands, "Working · 2") &&
+           (automatic ? SidebarInboxAbove(f.host, second, first) : SidebarInboxAbove(f.host, first, second));
+done:
+    if (asking) PicoAgent_Cancel(asking);
+    MatrixStateRelease(&state);
+    if (asking && asking != first) (void)PumpUntilIdle(f.host, asking);
+    if (first) (void)PumpUntilIdle(f.host, first);
+    if (second) (void)PumpUntilIdle(f.host, second);
+    InteractionFixtureFree(&f);
+    MatrixStateDestroy(&state);
+    if (!good)
+    {
+        fprintf(stderr, "Working answer order phase: %s (scenario=%d)\n", phase, scenario);
+        Fail("only a user answer, not automatic rejection, may promote a session in Working");
+    }
+    return !good;
+}
+
 static int TestChatLinkWorkspacePaths(void)
 {
     InteractionFixture f = {0};
@@ -17920,6 +18101,8 @@ static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char
     }
     return true;
 }
+
+#include "subagent_settings_test.c"
 
 typedef enum PreferenceAction
 {
@@ -19938,6 +20121,9 @@ int main(int argc, char **argv)
 #endif
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
+        return PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
+               PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload());
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
     if (argc == 2 && strcmp(argv[1], "--sidebar-modes") == 0)
@@ -19994,6 +20180,8 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
+    if (PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
+        PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload())) return 1;
     for (int action = PREF_SETTINGS; action <= PREF_WORKSPACE_EXTENSION; action++)
         if (PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, false)) ||
             PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, true))) return 1;
@@ -20008,7 +20196,10 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
         PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
-        PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder())) return 1;
+        PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
+        PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
+        PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
+        PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_TOGGLE)) != 0 ||

@@ -2817,6 +2817,7 @@ PicoResult PicoAgent_QueueSteering(PicoHost *host, PicoAgent *agent, const char 
     agent->steering_bytes += bytes;
     agent->last_activity = PicoClock_Monotonic();
     agent->workspace->last_activity = agent->last_activity;
+    agent->inbox_working_activity = agent->last_activity;
     pico_host_request_redraw(host);
     pico_run_hooks(host, PICO_HOOK_ON_STEER, agent->id);
     return PICO_OK;
@@ -4660,6 +4661,7 @@ PicoAgent *PicoAgent_Create(PicoHost *app, PicoWorkspace *workspace)
     agent->state = PICO_AGENT_IDLE;
     agent->persistence = PICO_SESSION_EPHEMERAL;
     agent->last_activity = PicoClock_Monotonic();
+    agent->inbox_working_activity = agent->last_activity;
     agent->tool_policy_valid = true;
     PicoSettings_InitAgent(agent);
     agent->runtime = CreateRt(app, agent);
@@ -4745,6 +4747,7 @@ void PicoAgent_StartTurnParts(PicoHost *app, PicoAgent *agent, const char *user_
         pico_status_warn(app, "This agent's restricted tool policy references a tool that is not currently registered.");
         return;
     }
+    agent->inbox_working_activity = PicoClock_Monotonic();
     PicoAgent_DismissError(agent);
     pthread_mutex_lock(&agent->runtime->mu);
     PicoStreamingTps_Reset(&agent->runtime->tps, PicoAgent_IsUserMain(agent));

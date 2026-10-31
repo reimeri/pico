@@ -1309,6 +1309,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
     PicoAgent agent;
     ShellTestState state = {.composer_height = 44.0f};
     Clay_BoundingBox expected_browser = {0}, expected_surface = {0}, expected_viewport_control = {0};
+    Clay_BoundingBox expected_profile_control = {0};
     Clay_BoundingBox expected_control = {0}, expected_agent_option = {0}, expected_user_option = {0};
     Clay_BoundingBox expected_content_row = {0};
     Clay_BoundingBox expected_web_toggle = {0};
@@ -1418,6 +1419,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
         Clay_ElementData browser = Clay_GetElementData(CLAY_ID("BrowserPane"));
         Clay_ElementData web_toggle = Clay_GetElementData(with_browser ? CLAY_ID("BrowserCollapse") : CLAY_ID("BrowserExpand"));
         Clay_ElementData surface = Clay_GetElementData(CLAY_ID("BrowserSurface"));
+        Clay_ElementData profile_control = Clay_GetElementData(CLAY_ID("BrowserProfile"));
         Clay_ElementData viewport_control = Clay_GetElementData(CLAY_ID("BrowserViewport"));
         Clay_ElementData control = Clay_GetElementData(CLAY_ID("BrowserControl"));
         Clay_ElementData agent_option = Clay_GetElementData(CLAY_ID("BrowserControlAgent"));
@@ -1428,7 +1430,8 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
             !ShellVerticallyContains(control.boundingBox, user_option.boundingBox))) {
             Fail("browser selector must keep Agent left and User right inside its fixed bounds"); break;
         }
-        if (with_browser && (!surface.found || !viewport_control.found ||
+        if (with_browser && (!surface.found || !viewport_control.found || !profile_control.found ||
+            !ShellVerticallyContains(browser.boundingBox, profile_control.boundingBox) ||
             !ShellVerticallyContains(browser.boundingBox, surface.boundingBox) ||
             !ShellVerticallyContains(browser.boundingBox, viewport_control.boundingBox))) {
             Fail("browser content and viewport control must remain within the shell pane"); break;
@@ -1474,6 +1477,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
         {
             expected_browser = browser.boundingBox;
             expected_web_toggle = web_toggle.boundingBox;
+            expected_profile_control = profile_control.boundingBox;
             expected_surface = surface.boundingBox; expected_viewport_control = viewport_control.boundingBox;
             expected_control = control.boundingBox;
             expected_agent_option = agent_option.boundingBox; expected_user_option = user_option.boundingBox;
@@ -1492,6 +1496,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
                  (!ShellBoxStable(expected_browser, browser.boundingBox) ||
                   !ShellBoxStable(expected_web_toggle, web_toggle.boundingBox) ||
                   (with_browser && (!ShellBoxStable(expected_surface, surface.boundingBox) ||
+                                    !ShellBoxStable(expected_profile_control, profile_control.boundingBox) ||
                                     !ShellBoxStable(expected_control, control.boundingBox) ||
                                     !ShellBoxStable(expected_agent_option, agent_option.boundingBox) ||
                                     !ShellBoxStable(expected_user_option, user_option.boundingBox) ||
@@ -4935,10 +4940,17 @@ static int BrowserFaultHelper(int argc, char **argv)
     if (write(events, &ready, sizeof(ready)) != sizeof(ready)) return 98;
     const char *log_path = getenv("PICO_TEST_BROWSER_COMMANDS");
     FILE *log = log_path ? fopen(log_path, "w") : NULL;
+    const char *profiles_path = getenv("PICO_TEST_BROWSER_PROFILES");
+    FILE *profiles = profiles_path ? fopen(profiles_path, "w") : NULL;
     PbCommand command;
     while (recv(commands, &command, sizeof(command), 0) == sizeof(command)) {
         if (log) { fprintf(log, "%u %d %d %d %d\n", command.type, command.a, command.b, command.x, command.y); fflush(log); }
-        if (command.type == PB_STOP) { if (log) fclose(log); return 0; }
+        if (profiles && (command.type == PB_OPEN || command.type == PB_CLOSE || command.type == PB_CONTROL)) {
+            fprintf(profiles, "%u %llu %s %s\n", command.type, (unsigned long long)command.token,
+                    command.type == PB_CONTROL ? (command.a ? "agent" : "user") : command.profile[0] ? command.profile : "-", command.text[0] ? command.text : "-");
+            fflush(profiles);
+        }
+        if (command.type == PB_STOP) { if (log) fclose(log); if (profiles) fclose(profiles); return 0; }
         if (command.type == PB_CLOSE) {
             PbEvent closed = {.type=PB_CLOSED, .token=command.token};
             if (write(events, &closed, sizeof(closed)) != sizeof(closed)) return 97;
@@ -4970,6 +4982,10 @@ static int BrowserFaultHelper(int argc, char **argv)
             continue;
         }
         if (write(events, &ready, sizeof(ready)) != sizeof(ready)) return 92;
+        const char *location = profiles ? "http://localhost:4321/auth" : command.text;
+        PbEvent url = {.type=PB_URL, .token=command.token, .length=(uint32_t)strlen(location)};
+        if (write(events, &url, sizeof(url)) != sizeof(url) ||
+            write(events, location, url.length) != url.length) return 90;
         if (!strcmp(mode, "queue")) {
             signal(SIGTERM, SIG_IGN); /* Recovery must escalate, not hang. */
             for (;;) pause();
@@ -4990,6 +5006,135 @@ static void BrowserTestClick(PicoHost *host, const char *name)
     g_find_input_test = g_find_press = false;
 }
 #endif
+static int TestBrowserProfiles(void)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    char dir[] = "/tmp/pico-browser-profiles-XXXXXX", cfg[] = "/tmp/pico-browser-profiles-cfg-XXXXXX";
+    char helper[4096], application[4096], executable[4096], log_path[4096], other[4096], alias[4096];
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL; int rc = 1; const char *stage = "setup";
+    Clay_SetCurrentContext(NULL);
+    if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay((Clay_Dimensions){1100,800})) goto done;
+    snprintf(application, sizeof(application), "%s/", dir);
+    snprintf(helper, sizeof(helper), "%s/browser", dir); mkdir(helper, 0700);
+    snprintf(helper, sizeof(helper), "%s/browser/runtime", dir); mkdir(helper, 0700);
+    snprintf(helper, sizeof(helper), "%s/browser/runtime/pico_browser_helper", dir);
+    ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable)-1);
+    if (length < 0) goto done;
+    executable[length] = 0;
+    if (symlink(executable, helper)) goto done;
+    snprintf(log_path, sizeof(log_path), "%s/profiles", dir);
+    snprintf(other, sizeof(other), "%s/other", dir); mkdir(other, 0700);
+    snprintf(alias, sizeof(alias), "%s/alias", cfg); if (symlink(dir, alias)) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1); setenv("PICO_TEST_BROWSER_FAILURE", "healthy", 1);
+    setenv("PICO_TEST_BROWSER_PROFILES", log_path, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace, alias_workspace, other_workspace; PicoAgentId ids[3];
+    PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .select=true, .session_start=PICO_SESSION_NEW};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_workspace_open(host, alias, &alias_workspace) != PICO_ALREADY_OPEN || workspace != alias_workspace ||
+        pico_workspace_open(host, other, &other_workspace) != PICO_OK) goto done;
+    host->window_focused = true;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL); RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_browser_application_directory = application;
+    stage = "open pages";
+    for (int i = 0; i < 3; ++i) {
+        if (pico_main_agent_create(host, i == 2 ? other_workspace : workspace, &options, &ids[i]) != PICO_OK) goto done;
+        PicoAgent *a = PicoHost_FindAgent(host, ids[i]);
+        if (PicoSession_LogUsage(host, a, 0, 0, false, "", false) != PICO_SESSION_WRITE_OK) goto done;
+        PicoSession_DrainPersist(host, a);
+        BrowserTestClick(host, "BrowserExpand");
+    }
+    if (!pico_agent_select(host, ids[0])) goto done;
+    PicoAgent *a = PicoHost_FindAgent(host, ids[0]);
+    stage = "open dialog";
+    BrowserTestClick(host, "BrowserProfile");
+    if (!pico_ui_modal_is_top(host, "browser-profile") || a->browser_isolated) goto done;
+    stage = "cancel dialog";
+    BrowserTestClick(host, "BrowserProfileCancel");
+    if (PicoUi_ModalOpen(host) || a->browser_isolated) goto done;
+    stage = "selection change";
+    /* A delayed confirmation cannot switch a newly selected conversation. */
+    BrowserTestClick(host, "BrowserProfile");
+    if (!pico_agent_select(host, ids[1])) goto done;
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    PicoBrowser_Input(host);
+    if (PicoUi_ModalOpen(host) || a->browser_isolated || PicoHost_FindAgent(host, ids[1])->browser_isolated) goto done;
+    stage = "switch modes";
+    if (!pico_agent_select(host, ids[0])) goto done;
+    PICO_TEST_WAIT_LOOP("current browser location reaches toolbar") {
+        PicoBrowser_Pump(host);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+        if (FindCardText(&commands, "http://localhost:4321/auth")) break;
+    }
+    BrowserTestClick(host, "BrowserControlAgent");
+    BrowserTestClick(host, "BrowserProfile"); BrowserTestClick(host, "BrowserProfileConfirm");
+    if (!a->browser_isolated || PicoUi_ModalOpen(host)) goto done;
+    BrowserTestClick(host, "BrowserClose"); BrowserTestClick(host, "BrowserStart");
+    BrowserTestClick(host, "BrowserProfile"); BrowserTestClick(host, "BrowserProfileConfirm");
+    if (a->browser_isolated) goto done;
+    BrowserTestClick(host, "BrowserProfile"); BrowserTestClick(host, "BrowserProfileConfirm");
+    if (!a->browser_isolated) goto done;
+    stage = "inspect commands";
+    PICO_TEST_WAIT_LOOP("profile switches reach browser helper") {
+        PicoBrowser_Pump(host);
+        FILE *log = fopen(log_path, "r"); if (!log) continue;
+        unsigned type; unsigned long long token, tokens[8] = {0};
+        char profile[80], url[2048], profiles[8][80] = {{0}};
+        int opened = 0, closed = 0;
+        unsigned long long replacement_token = 0;
+        bool retained_url = false, retained_agent_control = false, retained_user_control = false;
+        while (fscanf(log, "%u %llu %79s %2047s", &type, &token, profile, url) == 4) {
+            if (type == PB_CLOSE) closed++;
+            if (type == PB_CONTROL && token == replacement_token && !strcmp(profile, "agent")) retained_agent_control = true;
+            if (type == PB_CONTROL && opened == 7 && token == tokens[6] && !strcmp(profile, "user")) retained_user_control = true;
+            if (type == PB_OPEN) {
+                if (opened < 8) { tokens[opened] = token; snprintf(profiles[opened], sizeof(profiles[opened]), "%s", profile); }
+                if (opened == 3) { replacement_token = token; retained_url = !strcmp(url, "http://localhost:4321/auth"); }
+                opened++;
+            }
+        }
+        fclose(log);
+        if (opened < 7 || !retained_user_control) continue;
+        if (opened != 7 || closed != 4 || !retained_url || !retained_agent_control || strcmp(profiles[0], profiles[1]) ||
+            !strcmp(profiles[0], profiles[2]) || !strcmp(profiles[0], profiles[3]) ||
+            !strcmp(profiles[2], profiles[3]) || strcmp(profiles[3], profiles[4]) ||
+            strcmp(profiles[0], profiles[5]) || strcmp(profiles[3], profiles[6]) ||
+            tokens[0] == tokens[3] || tokens[3] == tokens[4] || tokens[4] == tokens[5]) goto done;
+        break;
+    }
+    stage = "resume";
+    /* Resume through the ordinary public creation path, not a private field copy. */
+    PicoSession_DrainPersist(host, a);
+    char session_id[40]; snprintf(session_id, sizeof(session_id), "%s", a->session_id);
+    if (pico_agent_close(host, a->id) != PICO_OK) goto done;
+    options.session_start = PICO_SESSION_RESUME; options.session_id = session_id;
+    PicoAgentId resumed;
+    if (pico_main_agent_create(host, workspace, &options, &resumed) != PICO_OK ||
+        !PicoHost_FindAgent(host, resumed)->browser_isolated) goto done;
+    stage = "unopened mode";
+    /* An unopened profile choice is lazy, and can return to workspace mode. */
+    PicoHost_FindAgent(host, resumed)->browser_expanded = true;
+    BrowserTestClick(host, "BrowserProfile"); BrowserTestClick(host, "BrowserProfileConfirm");
+    if (PicoHost_FindAgent(host, resumed)->browser_isolated ||
+        Clay_GetElementData(CLAY_ID("BrowserAddress")).found) goto done;
+    rc = 0;
+done:
+    g_find_input_test = g_find_press = false;
+    if (host) pico_host_free(host);
+    g_browser_application_directory = NULL;
+    Pico_FreeClay(); Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME"); unsetenv("PICO_TEST_BROWSER_FAILURE"); unsetenv("PICO_TEST_BROWSER_PROFILES");
+    RmRf(cfg); RmRf(dir);
+    if (rc) fprintf(stderr, "Browser profiles failed at %s\n", stage);
+    if (rc) Fail("browser profiles must share only within canonical workspaces, switch by confirmation, replace page identity, and persist isolation");
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static int TestBrowserControlSelector(void)
 {
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
@@ -19819,6 +19964,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestExternalLinkOpener())) return 1;
 #endif
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
+    if (argc == 2 && strcmp(argv[1], "--browser-profiles") == 0) return PICO_TEST_RUN(TestBrowserProfiles());
     if (argc == 2 && strcmp(argv[1], "--browser-controls") == 0) return PICO_TEST_RUN(TestBrowserControlSelector());
     if (argc == 2 && strcmp(argv[1], "--browser-viewport") == 0) return PICO_TEST_RUN(RunBrowserViewportCase(false)) || PICO_TEST_RUN(RunBrowserViewportCase(true));
     if (argc == 2 && strcmp(argv[1], "--clipboard") == 0) return PICO_TEST_RUN(TestClipboardPaste());
@@ -19993,6 +20139,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestBrowserUncreatedSessionNotification()) != 0) return 1;
+    if (PICO_TEST_RUN(TestBrowserProfiles()) != 0) return 1;
     if (PICO_TEST_RUN(TestBrowserControlSelector()) != 0) return 1;
     if (PICO_TEST_RUN(TestBrowserHelperFaultRecovery()) != 0) return 1;
     if (PICO_TEST_RUN(TestBrowserMainSessionPolicy()) != 0) return 1;

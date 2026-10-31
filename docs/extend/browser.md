@@ -502,15 +502,54 @@ do not depend on the logical page dimensions.
 
 Neither app startup, session creation/selection, layout, transcript replay, nor
 extension reload starts Chromium. First explicit use starts one helper process;
-each used main session gets its own CEF browser and request context. Chromium
-also creates sandboxed renderer/GPU/network subprocesses as needed.
+each used main session gets its own CEF browser/page. Pages using the same
+storage profile reuse one CEF request context, retained until helper shutdown.
+Chromium also creates sandboxed renderer/GPU/network subprocesses as needed.
 
-Cookies and local storage persist in
-`$XDG_CONFIG_HOME/pico/browser/<session-id>/` (normally
-`~/.config/pico/browser/<session-id>/`). Pages and their last URL are not restored
-automatically. No normal Chrome profile is imported. Close or session-runtime
-unload releases the page; extension reload does not. The shared helper stays
-warm until Pico exits. Disk profiles are not automatically deleted.
+### Workspace-shared site storage
+
+By default, conversations in the same **canonical workspace** share persistent
+browser site storage (cookies, local storage, IndexedDB and other profile-backed
+state). Separate workspaces, including separate Git worktrees, use different
+profiles; aliases resolving to the same canonical workspace share one. This is
+not cookie copying or an import from a normal Chrome profile.
+
+The expanded toolbar's **Workspace** / **Isolated** button shows the current mode.
+Click it to switch modes after confirmation (Cancel is initially selected; Tab
+changes the selected button, Enter/Space activates it, and Escape cancels).
+**Isolated** uses persistent storage private to that conversation; it is not an incognito/temporary profile. The choice
+is saved with the conversation and restored on resume. New conversations default
+to Workspace. Only the user can choose the mode; browser tools have no profile
+selection argument.
+
+Shared storage means logging out, changing accounts, or modifying origin storage
+can affect other conversations in that workspace, including on localhost (web
+origin/cookie rules still apply, not project-specific URL matching). Pages,
+navigation, viewport, Agent/User control, observations, page-local JavaScript and
+`sessionStorage` remain conversation-local. Existing pages may need a reload to
+reflect an app's changed authentication state.
+
+Switching closes the current page, cancels its pending tools, invalidates old
+observations and reopens its current HTTP(S) URL (or `about:blank` for a non-web
+page) using the chosen profile. Agent/User control is retained; page history,
+unsaved page-local state and viewport settings are not. Changes already made by
+input/evaluation are not undone. A profile choice can also be made before opening
+a page; that choice alone never starts Chromium. An uncreated conversation must
+first be created by sending a message.
+
+Site storage persists under `$XDG_CONFIG_HOME/pico/browser/<opaque-profile-key>/`
+(normally `~/.config/pico/browser/`). Keys are domain-separated hashes of the
+canonical workspace path, plus the durable conversation ID in Isolated mode.
+Raw workspace paths are not directory names. This credential-bearing data belongs
+to Pico's private user configuration, never the project repository or transcript. Existing
+per-conversation profiles are not copied or merged: the first workspace-shared
+profile may require one fresh login. No normal Chrome profile is imported.
+
+Pages and their last URL are not restored automatically. Close or session-runtime
+unload releases only that page; extension reload does not. Closing or deleting one
+conversation never clears a shared profile. The helper stays warm until Pico exits,
+and disk profiles are not automatically deleted. Moving a workspace to a different
+canonical path selects different profiles.
 
 Hidden pages keep running, including dev-server updates and JavaScript timers.
 Their paint cadence is reduced, display frames are not sent to Pico, and Pico
@@ -628,8 +667,8 @@ python3 app/tests/browser_integration.py \
   app/build/debug/browser/runtime/pico_browser_helper
 ```
 
-That test exercises frames, mouse/text input, hidden-page progress, profile
-isolation, resize, persistence across helper restart, and continued rendering
+That test exercises frames, mouse/text input, hidden-page progress, live profile
+sharing/logout, per-page `sessionStorage`, profile isolation, resize, persistence across helper restart, and continued rendering
 after a client-side link updates history and replaces page content. The latter
 waits for a delayed application update to catch asynchronous navigation crashes. It is separate from
 headless unit tests because locked-down build sandboxes may prohibit Chromium's
@@ -659,6 +698,18 @@ nix develop -c env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 \
   "$PWD/app/build/debug/browser/runtime/pico_browser_helper"
 ```
 
+The real registered-tool profile-switch regression uses a loopback provider and
+an isolated hardware-backed X11 display:
+
+```sh
+nix develop .#browser-tests -c env -u WAYLAND_DISPLAY timeout -k 5s 120s \
+  python3 -B app/tests/browser_agent_integration.py app/build/debug/pico --profiles
+```
+
+It switches while an evaluation is pending, verifies cancellation without rollback,
+rejects the old observation, checks that storage was not copied and the current URL
+and Agent control were retained, and exercises fresh observation/input afterward.
+
 The hardware test is deliberately not an unconditional CTest test; code 77 means
 no suitable host graphics context, not a passing GPU test. The ordinary CTest suite
 includes descriptor ownership/truncation tests and helper-failure classification.
@@ -667,8 +718,9 @@ On **native Wayland and X11**, manually check:
 
 1. Open a local dev app, navigate, type Unicode, use shortcuts, scroll, and drag
    beyond the pane before releasing. The composer must not receive page input.
-2. Collapse/expand; switch between two main sessions with different local
-   storage/login state; verify both pages keep progressing in the background.
+2. Collapse/expand; use two main sessions in one workspace and verify shared login
+   state with independent pages. Choose Isolated in one and verify separate state;
+   both pages should keep progressing in the background.
 3. In User mode, ask the agent to navigate or act; verify the tool refuses. Switch to
    Agent mode and retry. Taking control must not affect another session.
 4. Close/reopen; restart Pico and resume the same session. Storage should

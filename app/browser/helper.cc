@@ -42,6 +42,9 @@ std::string profile_root;
 class Page;
 void Command(PbCommand command);
 std::map<uint64_t, CefRefPtr<Page>> pages;
+// Storage contexts are helper-owned and retained until shutdown. Closing the
+// last page must not race Chromium's asynchronous storage teardown with reopen.
+std::map<std::string, CefRefPtr<CefRequestContext>> profiles;
 
 bool Send(uint64_t token, uint32_t type, const void* bytes = nullptr,
           size_t size = 0, int width = 0, int height = 0, const PbFds* fds = nullptr) {
@@ -750,14 +753,23 @@ void Command(PbCommand cmd) {
         // Profile names come only from the trusted host, but never accept paths.
         std::string profile(cmd.profile);
         if (profile.empty() || profile.find_first_not_of("0123456789abcdef-") != std::string::npos) {
-            Error(cmd.token, "Invalid session profile."); return;
+            Error(cmd.token, "Invalid browser profile."); return;
         }
         CefRefPtr<Page> page = new Page(cmd.token);
         page->initial_url = cmd.text;
-        CefRequestContextSettings context_settings;
-        CefString(&context_settings.cache_path) = profile_root + "/" + profile;
-        context_settings.persist_session_cookies = true;
-        page->context = CefRequestContext::CreateContext(context_settings, nullptr);
+        auto& context = profiles[profile];
+        if (!context) {
+            CefRequestContextSettings context_settings;
+            CefString(&context_settings.cache_path) = profile_root + "/" + profile;
+            context_settings.persist_session_cookies = true;
+            context = CefRequestContext::CreateContext(context_settings, nullptr);
+        }
+        if (!context) {
+            profiles.erase(profile);
+            const std::string error = "CEF could not create a storage context.";
+            Send(cmd.token, PB_STOPPED, error.data(), error.size()); return;
+        }
+        page->context = context;
         CefWindowInfo window;
         window.SetAsWindowless(0);
         window.shared_texture_enabled = true;
@@ -929,7 +941,7 @@ static int RunHelper(int argc, char** argv, const CefMainArgs& args, CefRefPtr<A
     }
     if (!PbGpuInit(&gpu, true)) {
         Error(0, std::string("Browser GPU initialization failed: ") + gpu.error);
-        PbGpuShutdown(&gpu); CefShutdown(); close(owner); return 1;
+        PbGpuShutdown(&gpu); profiles.clear(); CefShutdown(); close(owner); return 1;
     }
     Send(0, PB_RUNTIME_READY);
     std::thread reader([command_fd] {
@@ -966,6 +978,7 @@ static int RunHelper(int argc, char** argv, const CefMainArgs& args, CefRefPtr<A
     shutdown(command_fd, SHUT_RDWR);
     reader.join();
     PbGpuShutdown(&gpu);
+    profiles.clear();
     CefShutdown();
     close(owner); close(command_fd); close(events_fd);
     return 0;

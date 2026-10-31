@@ -243,6 +243,25 @@ def main():
             assert error and error[1] == 4 and b'in use' in error[-1], error
             assert second_owner.process.wait(timeout=10) != 0
             second_owner.commands.close(); second_owner.reader.join()
+            # Two independent live pages can use the same storage context. A
+            # logout in one must affect cookies/local storage in the other,
+            # while page-local sessionStorage remains separate.
+            b.send(50,1,text=url+'/?name=shared',profile='aaaa')
+            shared = report('/report','shared',browser=b)
+            assert shared['local'] == ['alpha'] and 'value=alpha' in shared['cookie'][0], shared
+            b.observe(50)
+            b.send(50,18,a=1)
+            error, result = b.inspect(50,21,{'expression':"localStorage.removeItem('value');document.cookie='value=;max-age=0;path=/';sessionStorage.setItem('private','yes');true"})
+            assert not error, result
+            b.send(1,18,a=1)
+            error, result = b.inspect(1,21,{'expression':"[localStorage.getItem('value'),document.cookie,sessionStorage.getItem('private')]"})
+            assert not error and json.loads(result)['data']['result']['value'] == [None,'',None], result
+            # Restore the original account and close just the sharing page.
+            error, result = b.inspect(1,21,{'expression':"localStorage.setItem('value','alpha');document.cookie='value=alpha;max-age=3600;path=/';true"})
+            assert not error, result
+            b.send(1,18,a=0)
+            b.send(50,2); b.wait(50,5)
+            b.observe(1)  # Closing a member does not tear down the shared page.
             b.send(2,1,text=url+'/?name=b&set=beta',profile='bbbb')
             second = report('/report','b'); assert second['local'] == [''] and second['cookie'] == ['']
             b.send(1,5,a=1) # focus
@@ -355,13 +374,16 @@ def main():
             b.send(3,2)
         finally: b.close()
         # Reopening the helper must not reopen pages; explicit navigation uses
-        # the same persisted session profile, without sharing it with session B.
+        # the same persisted session profile, without sharing it with the other profile.
         b = Browser(helper,root)
         try:
             b.send(4,1,text=url+'/?name=restarted',profile='bbbb')
             persisted = report('/report','restarted')
             assert persisted['local'] == ['beta'] and 'value=beta' in persisted['cookie'][0], persisted
+            b.send(5,1,text=url+'/?name=shared-restarted',profile='aaaa')
+            persisted = report('/report','shared-restarted',browser=b)
+            assert persisted['local'] == ['alpha'] and 'value=alpha' in persisted['cookie'][0], persisted
         finally: b.close()
     server.shutdown()
-    print('PASS: embedded frames, mouse/text, hidden progress, session isolation, resize, singleton rejection, persistent profiles, delayed SPA navigation, hidden PNG and popup composition, acknowledged input, stale identity, and cancellation')
+    print('PASS: embedded frames, mouse/text, hidden progress, live profile sharing/logout, per-page sessionStorage, profile isolation, resize, singleton rejection, persistent profiles, delayed SPA navigation, hidden PNG and popup composition, acknowledged input, stale identity, and cancellation')
 if __name__ == '__main__': main()

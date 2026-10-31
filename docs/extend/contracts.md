@@ -546,6 +546,28 @@ physical release; Escape, focus loss, minimization, a modal, selection change, o
 page/session close stops resizing without handing the held gesture to chat or
 Clay drag-scrolling. Resizing the dock never starts Chromium.
 
+Browser pages and tool/control identity are per main conversation, but persistent
+site storage is **workspace-shared by default**, keyed by canonical workspace
+path, not logical Git project. Separate worktrees remain isolated. A user-only
+Workspace/Isolated toolbar choice is durable per conversation; Isolated storage
+persists across resume and is not incognito. Shared login/logout/account and
+origin-storage changes can affect other conversations; page-local state and
+`sessionStorage` are separate. One CEF request context is reused per profile and
+retained until helper shutdown. Profile switching requires confirmation, cancels
+pending page tools, replaces page identity (invalidating observations), and
+reopens the current HTTP(S) URL or `about:blank` with the same control mode and
+reset viewport/history. Already-dispatched effects cannot be undone. A choice
+without an open page never starts Chromium. Closing/deleting a conversation does
+not erase shared storage. No existing profile is imported, copied or merged.
+Both modes include the canonical workspace identity; Isolated also includes the
+durable conversation ID. Profile directories use opaque domain-separated identity
+hashes under private user configuration, never the workspace or transcript. See [browser](browser.md)
+for storage, canonical-path and singleton-process boundaries. The session header's
+`browser_isolated` boolean supplies the initial mode; ordered `browser_profile`
+events carry later `isolated` booleans. A mode change updates live state only after
+the session writer accepts its append; acceptance is not a durable-write
+acknowledgment, and later failures use the normal session persistence warning.
+
 The core browser service is lazy and per-main-session; subagents and clarification
 helpers cannot use any browser tool, including diagnostics, inspection,
 evaluation, or viewport control. Tools

@@ -18,9 +18,10 @@ import time
 import traceback
 import re
 
+PROFILE_SWITCH = "--profiles" in sys.argv
 FAILURE = "--failure" in sys.argv
 DEVELOPER = "--developer" in sys.argv or FAILURE
-COMPLETION = "Failure loop verified." if FAILURE else "Developer loop verified." if DEVELOPER else "Visual loop verified."
+COMPLETION = "Profile switch verified." if PROFILE_SWITCH else "Failure loop verified." if FAILURE else "Developer loop verified." if DEVELOPER else "Visual loop verified."
 from PIL import Image
 
 
@@ -29,6 +30,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     done = threading.Event()
     failure = None
     first_observation = None
+    switch_requested = threading.Event()
     stage = 0
     root = None
     output_file = None
@@ -38,6 +40,10 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == '/profile-switch' and PROFILE_SWITCH:
+            Fixture.switch_requested.set()
+            self.send_response(204); self.end_headers()
+            return
         if self.path == '/kill-helper' and FAILURE:
             from browser_profile import process_tree
             helpers = []
@@ -59,6 +65,39 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
 <input id="field" aria-label="Developer field" oninput="document.body.style.background='rgb(23,45,67)'">
 <script>console.log('developer-fixture-console'); onscroll=()=>document.body.style.background='rgb(65,43,21)'</script>''')
+
+    def profile_call(self, body):
+        results = [i for i in body['input'] if i['type'] == 'function_call_output']
+        text = results[-1]['output'] if results else ''
+        stage = Fixture.stage; Fixture.stage += 1
+        url = f'http://127.0.0.1:{self.server.server_port}/app'
+        if stage == 0:
+            return 'browser_open', {'url': url}
+        if stage == 1:
+            return 'browser_observe', {}
+        if stage == 2:
+            Fixture.first_observation = json.loads(text)['observation_id']
+            return 'browser_evaluate', {'expression': "localStorage.setItem('login','workspace');new Promise(resolve=>{fetch('/profile-switch');setTimeout(()=>resolve('late'),20000)})"}
+        if stage == 3:
+            assert 'cancelled' in text.lower() and 'effects' in text.lower(), text
+            return 'browser_act', {'observation_id': Fixture.first_observation,
+                                   'actions': [{'type': 'key', 'key': 'Escape'}]}
+        if stage == 4:
+            assert 'Stale observation' in text, text
+            return 'browser_observe', {}
+        if stage == 5:
+            view = json.loads(text)
+            assert view['url'] == url and view['observation_id'] != Fixture.first_observation, view
+            Fixture.replacement_observation = view['observation_id']
+            return 'browser_evaluate', {'expression': "[localStorage.getItem('login'),location.href]"}
+        if stage == 6:
+            assert json.loads(text)['data']['result']['value'] == [None,url], text
+            return 'browser_act', {'observation_id': Fixture.replacement_observation,
+                                   'actions': [{'type': 'key', 'key': 'Escape'}]}
+        if stage == 7:
+            assert json.loads(text)['completed_actions'] == 1, text
+            return None, None
+        raise AssertionError(f'unexpected profile stage {stage}')
 
     def failure_call(self, body):
         results = [i for i in body['input'] if i['type'] == 'function_call_output']
@@ -176,7 +215,9 @@ input{position:fixed;top:10px;left:10px;width:300px;height:40px}</style>
             assert all(tool.get('strict') is False for tool in body.get('tools', [])), 'implicit strict policy'
             Fixture.round += 1
             current = Fixture.round
-            if FAILURE:
+            if PROFILE_SWITCH:
+                name, args = self.profile_call(body)
+            elif FAILURE:
                 name, args = self.failure_call(body)
             elif DEVELOPER:
                 name, args = self.developer_call(body)
@@ -286,6 +327,14 @@ def main():
                 x('keydown','Return'); time.sleep(.08); x('keyup','Return')
                 while not Fixture.done.wait(.05):
                     assert process.poll() is None, 'Pico exited before provider observation'
+                    if PROFILE_SWITCH and Fixture.switch_requested.is_set():
+                        Fixture.switch_requested.clear()
+                        def click(xpos, ypos):
+                            x('mousemove', '--window', window, xpos, ypos)
+                            x('mousedown', 1, 'sleep', '.05', 'mouseup', 1, 'sleep', '.05')
+                        click(1074, 28)  # Expand the agent's collapsed dock.
+                        click(985, 28)   # Workspace profile indicator.
+                        x('key', '--delay', 80, 'Tab', 'Return')  # Explicitly choose Switch, not default Cancel.
                 assert not Fixture.failure, Fixture.failure
                 # Wait for ordinary asynchronous persistence to adopt the terminal record.
                 while True:
@@ -303,7 +352,10 @@ def main():
                     assert Path(image['path']).parent == root/'.pico/media/browser'/sid
                     assert Path(image['path']).is_file()
                 assert not any('base64,' in json.dumps(r) for r in records), 'image bytes leaked into JSONL'
-                print('PASS: registered tools preserve helper signal cause, uncertain evaluation and explicit no-restart recovery' if FAILURE else 'PASS: non-vision developer tools, lazy lifecycle, complete large file outputs and viewport control' if DEVELOPER else 'PASS: real browser_open/observe/act, native click/type/scroll, model-visible PNG payloads, clipboard refusal, and owned history assets')
+                if PROFILE_SWITCH:
+                    assert any(r.get('type') == 'browser_profile' and r.get('isolated') is True for r in records), records
+                    print('PASS: confirmed profile switch cancels in-flight evaluation, rejects old observations, retains URL/Agent control, and permits fresh input')
+                else: print('PASS: registered tools preserve helper signal cause, uncertain evaluation and explicit no-restart recovery' if FAILURE else 'PASS: non-vision developer tools, lazy lifecycle, complete large file outputs and viewport control' if DEVELOPER else 'PASS: real browser_open/observe/act, native click/type/scroll, model-visible PNG payloads, clipboard refusal, and owned history assets')
             except BaseException:
                 log.flush(); print((root/'pico.log').read_text(),file=sys.stderr); raise
             finally:

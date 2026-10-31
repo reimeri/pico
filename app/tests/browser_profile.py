@@ -288,9 +288,13 @@ def host_trial(args, url, workload, visibility):
                 x('windowsize',window,1100,800); x('windowfocus','--sync',window)
                 while not (root/'config/pico/browser').exists():
                     click(1075,25); time.sleep(.05)
-                click(825,28); x('key','--delay',60,'ctrl+a'); x('type','--clearmodifiers','--delay',20,f'{args.width}x{args.height}'); x('key','--delay',60,'Return')
+                click(885,28); x('key','--delay',60,'Down','Return')  # Dock -> Custom.
+                for xpos, dimension in ((744,args.width),(868,args.height)):
+                    click(xpos,87); x('key','--delay',60,'ctrl+a')
+                    x('type','--clearmodifiers','--delay',20,str(dimension))
+                x('key','--delay',60,'Return')
                 name = f'host-{workload}-{visibility}'
-                click(900,60); x('key','--delay',60,'ctrl+a'); x('type','--clearmodifiers','--delay',20,f'{url}/?workload={workload}&name={name}&width={args.width}&height={args.height}'); x('key','--delay',60,'Return')
+                click(900,94); x('key','--delay',60,'ctrl+a'); x('type','--clearmodifiers','--delay',20,f'{url}/?workload={workload}&name={name}&width={args.width}&height={args.height}'); x('key','--delay',60,'Return')
                 pages = wait_reports([name],process)
                 if any(page['error'] for page in pages.values()):
                     return dict(path='pico-presented',workload=workload,sessions=1,visibility=visibility,
@@ -324,7 +328,7 @@ def host_trial(args, url, workload, visibility):
                         if presented:
                             break
                 if visibility == 'hidden':
-                    click(1075,28)
+                    click(1075,62)
                 time.sleep(args.warmup)
                 while not records() or time.monotonic()-records()[-1]['monotonic_seconds'] > 1.5:
                     x('getwindowname',window); time.sleep(.05)

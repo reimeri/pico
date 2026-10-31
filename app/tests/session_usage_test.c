@@ -142,6 +142,39 @@ static int TestLlmResponseSessionState(void)
     return replay_was_silent ? 0 : Fail("session replay must not emit response hooks or synthetic notices");
 }
 
+static int TestBrowserProfilePersistence(void)
+{
+    PicoHost host = {0}; PicoWorkspace workspace = {0};
+    PicoAgent writer = {0}, restored = {0};
+    char config[] = "/tmp/pico-browser-mode-XXXXXX";
+    if (!mkdtemp(config)) return Fail("browser mode config");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    workspace.host = &host; snprintf(workspace.path, sizeof(workspace.path), "/browser-mode-workspace");
+    host.workspaces[0] = &workspace; host.workspace_count = 1;
+    writer.workspace = restored.workspace = &workspace;
+    writer.id = 1; workspace.agents[0] = &writer; workspace.count = 1;
+    writer.persistence = restored.persistence = PICO_SESSION_DURABLE;
+    writer.kind = restored.kind = PICO_AGENT_MAIN;
+    /* A new conversation defaults to workspace storage. Appending a later
+     * override, including one before compaction, must survive resume. */
+    bool ok = PicoSession_LogUsage(&host, &writer, 0, 0, false, "", false) == PICO_SESSION_WRITE_OK &&
+        !PicoSession_Replay(&host, &restored, writer.session_path, false) && !restored.browser_isolated;
+    PicoSessionPersist_Init(&host);
+    ok = ok && PicoSession_LogBrowserProfile(&host, &writer, true) == PICO_SESSION_WRITE_OK;
+    PicoSession_DrainPersist(&host, &writer);
+    PicoSessionPersist_Shutdown(&host);
+    ok = ok && PicoSession_LogCompaction(&host, &writer, "summary", 100) == PICO_SESSION_WRITE_OK &&
+        !PicoSession_Replay(&host, &restored, writer.session_path, false) && restored.browser_isolated;
+    ok = ok && PicoSession_LogBrowserProfile(&host, &writer, false) == PICO_SESSION_WRITE_OK &&
+        !PicoSession_Replay(&host, &restored, writer.session_path, false) && !restored.browser_isolated;
+    restored.browser_isolated = true;
+    PicoSession_Reset(&host, &restored);
+    ok = ok && !restored.browser_isolated;
+    unlink(writer.session_path);
+    rmdir(config);
+    return ok ? 0 : Fail("browser mode must default to shared, persist both transitions, and reset for a new conversation");
+}
+
 static int TestToolImageReplayCompaction(void)
 {
     PicoHost host = {0}; PicoAgent writer = {0};
@@ -4691,7 +4724,7 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (PICO_TEST_RUN(TestNativeCheckpointPersistence()) != 0 || PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
+    if (PICO_TEST_RUN(TestBrowserProfilePersistence()) != 0 || PICO_TEST_RUN(TestNativeCheckpointPersistence()) != 0 || PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
         PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 || PICO_TEST_RUN(TestToolImageReplayCompaction()) != 0 || PICO_TEST_RUN(TestInterruptedImageBatch()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestMissingImageWarningPersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||

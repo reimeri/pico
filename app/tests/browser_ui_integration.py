@@ -129,20 +129,20 @@ def main():
                     click(1075, 25)
                     time.sleep(.05)
                 phase = 'address-bar navigation'
-                click(900, 60)
+                click(900, 94)
                 x('key', '--delay', 60, 'ctrl+a')
                 x('type', '--clearmodifiers', '--delay', 20, f'http://127.0.0.1:{server.server_port}/')
                 x('key', '--delay', 60, 'Return')
                 wait_page(PAGE_COLORS[0])
                 phase = 'toolbar reload'
-                click(680, 28)
+                click(738, 28)
                 wait_page(PAGE_COLORS[1])
                 phase = 'mobile-sized viewport and mapped pointer'
                 # Keep a real composer draft while applying viewport choices.
                 click(420, 706)
                 x('type', '--clearmodifiers', '--delay', 25, 'keep this draft')
-                click(825, 28)
-                click(795, 65)  # Mobile, first dropdown row.
+                click(885, 28)
+                click(855, 65)  # Mobile, first dropdown row.
 
                 def colored_bounds(image, color):
                     mask = Image.new('1', image.size)
@@ -181,15 +181,15 @@ def main():
                 target_y = (target[1]+target[3])//2
                 # Agent is the left side. Selecting it twice must not toggle
                 # back to User or let either page click through.
-                click(720, 28)
+                click(776, 28)
                 click(target_x, target_y)
-                click(720, 28)
+                click(776, 28)
                 click(target_x, target_y)
                 # Drag from Agent to User, releasing outside the track. The
                 # gesture belongs to the selector, not to the embedded page.
-                x('mousemove', '--window', window, 720, 28)
+                x('mousemove', '--window', window, 776, 28)
                 x('mousedown', 1, 'sleep', '.05')
-                x('mousemove', '--window', window, 780, 28)
+                x('mousemove', '--window', window, 836, 28)
                 x('sleep', '.05', 'mouseup', 1, 'sleep', '.05')
                 click(target_x, target_y)
                 while len(Page.clicks) < 3:
@@ -197,7 +197,7 @@ def main():
                 assert len(Page.clicks) == 3, Page.clicks
                 # Collapse/reopen preserves the page and selected control mode.
                 phase = 'web icon collapse and reopen'
-                click(1070, 28)
+                click(1070, 62)
                 collapsed = screenshot()
                 assert not colored_bounds(collapsed, PAGE_COLORS[1])
                 click(1070, 28)
@@ -206,12 +206,12 @@ def main():
                 assert Page.visits == 2, Page.visits
 
                 phase = 'custom viewport popover and Enter ownership'
-                click(825, 28)
+                click(885, 28)
                 x('key', '--delay', 60, 'Up', 'Return')  # Mobile wraps to Custom.
-                click(684, 87)   # Width.
+                click(744, 87)   # Width.
                 x('key', '--delay', 60, 'ctrl+a')
                 x('type', '--clearmodifiers', '--delay', 30, '640')
-                click(808, 87)   # Height.
+                click(868, 87)   # Height.
                 x('key', '--delay', 60, 'ctrl+a')
                 x('type', '--clearmodifiers', '--delay', 30, '480')
                 x('key', '--delay', 60, 'Return')
@@ -230,17 +230,17 @@ def main():
                 # Verify the preset has actually been presented before testing
                 # the separate transition back to remembered Custom dimensions.
                 phase = 'remembered custom viewport dimensions'
-                click(825, 28); click(795, 65)
+                click(885, 28); click(855, 65)
                 mobile_image()
-                click(825, 28)
+                click(885, 28)
                 x('key', '--delay', 60, 'Up', 'Return')  # Mobile wraps to Custom.
-                click(826, 163)  # Apply.
+                click(886, 163)  # Apply.
                 while True:
                     image = screenshot()
                     bounds_now = colored_bounds(image, PAGE_COLORS[1])
                     if bounds_now and abs((bounds_now[2]-bounds_now[0])/(bounds_now[3]-bounds_now[1]) - 640/480) < .01:
                         break
-                click(825, 28); click(795, 65)  # Restore Mobile for letterboxing checks.
+                click(885, 28); click(855, 65)  # Restore Mobile for letterboxing checks.
                 mobile_image()
 
                 phase = 'dock resize and stable letterboxing'

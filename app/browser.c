@@ -8,6 +8,8 @@
 #include "agent.h"
 #include "clarification.h"
 #include "settings.h"
+#include "session.h"
+#include <openssl/evp.h>
 #include "docs_path.h"
 #include "overlay.h"
 #include "text_field_ui.h"
@@ -123,10 +125,15 @@ typedef struct PicoBrowserService {
     bool resize_pointer_claimed; /* Through physical release, even after Escape/focus loss. */
     float resize_start_x, resize_start_width;
     uint64_t control_drag_token;
+    PicoAgentId profile_agent_id;
+    char profile_session_id[40];
+    uint64_t profile_token;
+    bool profile_isolated, profile_confirm_focus;
     bool claimed_keyboard; /* Retained until the next input pass, not the next layout. */
 } PicoBrowserService;
 
 static void Focus(PicoHost *host, BrowserSession *b, bool focus);
+static bool Over(const char *id);
 static void EndResize(PicoHost *host);
 static int WindowsKey(int key);
 static void RememberCustomViewport(BrowserSession *b)
@@ -498,11 +505,36 @@ static bool ValidUrl(const char *url)
     return url && strlen(url) < PB_URL_CAP &&
         (!strncmp(url, "http://", 7) || !strncmp(url, "https://", 8) || !strcmp(url, "about:blank"));
 }
+/* Domain separation keeps workspace and conversation identities disjoint. The
+ * canonical workspace path never leaves the host or becomes a filesystem path. */
+static bool ProfileKey(const PicoAgent *agent, char out[80])
+{
+    const char *workspace = agent->workspace->path;
+    const char *domain = agent->browser_isolated ? "conversation:" : "workspace:";
+    unsigned char digest[EVP_MAX_MD_SIZE]; unsigned int length = 0;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    bool ok = ctx && EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1 &&
+        EVP_DigestUpdate(ctx, domain, strlen(domain)) == 1 &&
+        EVP_DigestUpdate(ctx, workspace, strlen(workspace)) == 1 &&
+        (!agent->browser_isolated || (EVP_DigestUpdate(ctx, "\0", 1) == 1 &&
+            EVP_DigestUpdate(ctx, agent->session_id, strlen(agent->session_id)) == 1)) &&
+        EVP_DigestFinal_ex(ctx, digest, &length) == 1 && length == 32;
+    EVP_MD_CTX_free(ctx);
+    if (!ok) return false;
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned i = 0; i < length; ++i) { out[i*2] = hex[digest[i] >> 4]; out[i*2+1] = hex[digest[i] & 15]; }
+    out[length*2] = 0;
+    return true;
+}
 static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, char *error, size_t cap)
 {
     if (!PicoAgent_IsUserMain(agent)) { snprintf(error, cap, "Browser access is limited to main sessions."); return false; }
     if (!agent->session_id[0]) { snprintf(error, cap, "Session has no persistent identity."); return false; }
     if (!ValidUrl(url)) { snprintf(error, cap, "Use an http:// or https:// URL (or about:blank)."); return false; }
+    char profile[80];
+    if (!agent->workspace || !agent->workspace->path[0] || !ProfileKey(agent, profile)) {
+        snprintf(error, cap, "Cannot resolve browser storage profile."); return false;
+    }
     PicoBrowser_Init(host);
     PicoBrowserService *s = host->browser;
     if (!s) { snprintf(error, cap, "Out of memory."); return false; }
@@ -528,7 +560,7 @@ static bool Open(PicoHost *host, PicoAgent *agent, const char *url, bool user, c
     b->runtime = s->runtime;
     PbCommand command = {.type = PB_OPEN, .token = b->token};
     snprintf(command.text, sizeof(command.text), "%s", url);
-    snprintf(command.profile, sizeof(command.profile), "%s", agent->session_id);
+    snprintf(command.profile, sizeof(command.profile), "%s", profile);
     if (!Send(s, command)) { pthread_mutex_lock(&s->mu); FailureText(s, error, cap); pthread_mutex_unlock(&s->mu); return false; }
     if (!b->opened) {
         b->opened_at = MonotonicSeconds();
@@ -1247,12 +1279,13 @@ static void Label(const char *text)
         CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
                           .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
 }
-static void Button(const char *id, const char *text, float width)
+static void Button(const char *id, const char *text, float width, bool selected)
 {
     CLAY(Clay_GetElementId((Clay_String){.length = (int)strlen(id), .chars = id}),
         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(30)},
                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-         .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)}) { Label(text); }
+         .backgroundColor = selected || Clay_PointerOver(Clay_GetElementId((Clay_String){.length=(int)strlen(id), .chars=id})) ? COLOR_CODE_BG : COLOR_CONTENT_BG,
+         .cornerRadius = CLAY_CORNER_RADIUS(4)}) { Label(text); }
 }
 /* Load only ordinary UI textures here; drawing the collapsed affordance must
  * never start Chromium or require the browser GPU transport. */
@@ -1431,17 +1464,102 @@ static void ViewportPicker(BrowserSession *b, float width)
         }
     }
 }
+static void CloseProfileDialog(PicoHost *host)
+{
+    PicoBrowserService *s = host->browser;
+    if (s && pico_ui_modal_pop(host, "browser-profile")) s->profile_agent_id = 0;
+}
+static PicoAgent *ProfileTarget(PicoHost *host)
+{
+    PicoBrowserService *s = host->browser;
+    if (!s || !s->profile_agent_id) return NULL;
+    PicoAgent *a = PicoHost_FindAgent(host, s->profile_agent_id);
+    BrowserSession *b = Session(host, s->profile_agent_id);
+    if (!PicoAgent_IsUserMain(a) || a != PicoHost_SelectedAgent(host) ||
+        strcmp(a->session_id, s->profile_session_id) || (b ? b->token : 0) != s->profile_token) {
+        return NULL;
+    }
+    return a;
+}
+static void ProfileDialog(PicoHost *host)
+{
+    PicoBrowserService *s = host->browser;
+    if (!ProfileTarget(host) || !pico_ui_modal_is_top(host, "browser-profile")) return;
+    Clay_Dimensions viewport = Clay_GetLayoutDimensions();
+    CLAY(CLAY_ID("BrowserProfileDim"),
+        {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 50},
+         .layout = {.sizing = {.width = CLAY_SIZING_FIXED(viewport.width), .height = CLAY_SIZING_FIXED(viewport.height)},
+                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+         .backgroundColor = {0,0,0,140}}) {
+        CLAY(CLAY_ID("BrowserProfileCard"),
+            {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = CLAY_PADDING_ALL(20), .childGap = 16,
+                        .sizing = {.width = CLAY_SIZING_FIXED(fmaxf(1, fminf(480, viewport.width - 32))), .height = CLAY_SIZING_FIT(0)}},
+             .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(8)}) {
+            Label(s->profile_isolated ? "Use an isolated browser?" : "Use the workspace browser profile?");
+            const char *text = s->profile_isolated
+                ? "This conversation will use its own persistent site storage. Existing workspace logins will not be copied."
+                : "This conversation will share logins and site storage with other conversations in this workspace. Logging out or changing accounts can affect them.";
+            CLAY_TEXT(((Clay_String){.chars = text, .length = (int)strlen(text)}),
+                CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+            CLAY_TEXT(CLAY_STRING("Any open page will close and reopen. Pending browser operations will be cancelled; changes already made are not undone."),
+                CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED}));
+            CLAY(CLAY_ID("BrowserProfileButtons"),
+                {.layout = {.childGap = 12, .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)},
+                            .childAlignment = {.x = CLAY_ALIGN_X_RIGHT}}}) {
+                Button("BrowserProfileCancel", "Cancel", 80, !s->profile_confirm_focus);
+                Button("BrowserProfileConfirm", "Switch profile", 130, s->profile_confirm_focus);
+            }
+        }
+    }
+}
+static bool ProfileInput(PicoHost *host)
+{
+    PicoBrowserService *s = host->browser;
+    if (!s || !pico_ui_modal_is_top(host, "browser-profile")) return false;
+    s->claimed_keyboard = true; /* Also consume the frame that dismisses the dialog. */
+    PicoAgent *a = ProfileTarget(host);
+    if (!a) { CloseProfileDialog(host); return true; }
+    BrowserSession *b = Session(host, a->id);
+    if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
+    if (!host->window_focused || host->window_minimized) return true;
+    bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (IsKeyPressed(KEY_TAB)) { s->profile_confirm_focus = !s->profile_confirm_focus; pico_host_request_redraw(host); }
+    bool activate = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE);
+    if (IsKeyPressed(KEY_ESCAPE) || (activate && !s->profile_confirm_focus) || (click && Over("BrowserProfileCancel"))) {
+        CloseProfileDialog(host); return true;
+    }
+    if (!(activate && s->profile_confirm_focus) && !(click && Over("BrowserProfileConfirm"))) return true;
+    bool isolated = s->profile_isolated;
+    char url[PB_URL_CAP];
+    snprintf(url, sizeof(url), "%s", b && ValidUrl(b->url) ? b->url : "about:blank");
+    bool user = !b || b->user_control;
+    if (PicoSession_LogBrowserProfile(host, a, isolated) == PICO_SESSION_WRITE_FAILED) {
+        pico_status_warn(host, "Could not save the browser profile choice; profile was not changed.");
+        CloseProfileDialog(host); return true;
+    }
+    CloseProfileDialog(host);
+    PicoBrowser_CloseAgent(host, a->id);
+    a->browser_isolated = isolated;
+    if (b) {
+        char error[512];
+        if (!Open(host, a, url, user, error, sizeof(error))) pico_status_warn(host, error);
+    }
+    pico_host_request_redraw(host);
+    return true;
+}
 static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
 {
     float available = fmaxf(0, pane_width - 4);
-    float widths[] = {28, 28, 28, 70, 108, 28, 28};
-    int row[7], rows = 1;
+    float widths[] = {28, 28, 28, 70, 108, 90, 28, 28};
+    int row[8], rows = 1;
     float used = 0;
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 8; ++i) {
         widths[i] = fminf(widths[i], available);
         /* Close/Collapse remain right-aligned via a grow spacer before Close. */
-        float required = widths[i] + (used > 0 ? 4 : 0) + (i == 5 && used > 0 ? 4 : 0);
-        if (used > 0 && used + required > available) {
+        float required = widths[i] + (used > 0 ? 4 : 0) + (i == 6 && used > 0 ? 4 : 0);
+        /* Keep the two right-edge controls together across wrapping. */
+        float group = i == 6 ? widths[7] + 4 : 0;
+        if (used > 0 && used + required + group > available) {
             rows++; used = 0;
             required = widths[i];
         }
@@ -1456,9 +1574,9 @@ static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
         bool user_control = b && !b->stopped && b->user_control;
         for (int r = 0; r < rows; ++r) {
             CLAY(CLAY_IDI("BrowserToolbarRow", r),
-                {.layout = {.childGap = 4, .childAlignment = {.x = r == row[5] && row[4] != r ? CLAY_ALIGN_X_RIGHT : CLAY_ALIGN_X_LEFT},
+                {.layout = {.childGap = 4, .childAlignment = {.x = r == row[6] && row[5] != r ? CLAY_ALIGN_X_RIGHT : CLAY_ALIGN_X_LEFT},
                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)}}}) {
-                for (int i = 0; i < 7; ++i) {
+                for (int i = 0; i < 8; ++i) {
                     if (row[i] != r) continue;
                     switch (i) {
                     case 0: IconButton(host, "BrowserBack", BROWSER_ICON_BACK, user_control, widths[i]); break;
@@ -1466,14 +1584,15 @@ static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
                     case 2: IconButton(host, "BrowserReload", BROWSER_ICON_RELOAD, user_control, widths[i]); break;
                     case 3: ControlSelector(host, b, widths[i]); break;
                     case 4: ViewportPicker(b, widths[i]); break;
-                    case 5:
+                    case 5: Button("BrowserProfile", PicoHost_SelectedAgent(host)->browser_isolated ? "Isolated" : "Workspace", widths[i], false); break;
+                    case 6:
                         if (i > 0 && row[i - 1] == r) {
                             CLAY(CLAY_ID("BrowserToolbarSpace"),
                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)}}}) {}
                         }
                         IconButton(host, "BrowserClose", BROWSER_ICON_SHUTDOWN, true, widths[i]);
                         break;
-                    case 6: IconButton(host, "BrowserCollapse", BROWSER_ICON_WEB, true, widths[i]); break;
+                    case 7: IconButton(host, "BrowserCollapse", BROWSER_ICON_WEB, true, widths[i]); break;
                     }
                 }
             }
@@ -1482,6 +1601,7 @@ static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
 }
 void PicoBrowser_Layout(PicoHost *host)
 {
+    ProfileDialog(host);
     PicoAgent *a = PicoHost_SelectedAgent(host);
     if (!PicoAgent_IsUserMain(a)) return;
     BrowserSession *b = Selected(host);
@@ -1519,7 +1639,7 @@ void PicoBrowser_Layout(PicoHost *host)
             CLAY(CLAY_ID("BrowserSurface"),
                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
                  .clip = {.horizontal = true, .vertical = true}, .backgroundColor = COLOR_BG}) {
-                if (!b) Button("BrowserStart", "Open browser", 150);
+                if (!b) Button("BrowserStart", "Open browser", 150, false);
                 else {
                     /* This is presentation, not another viewport-sized pane.
                      * Floating fixed bounds cannot feed image aspect/compression
@@ -1733,6 +1853,7 @@ void PicoBrowser_Input(PicoHost *host)
         for (BrowserSession *other = s->sessions; other; other = other->next)
             if (!a || other->agent_id != a->id) CloseViewport(other);
     }
+    if (ProfileInput(host)) return;
     if (s && s->resize_agent_id &&
         (!PicoAgent_IsUserMain(a) || s->resize_agent_id != a->id || !a->browser_expanded ||
          PicoUi_ModalOpen(host) || !host->window_focused || host->window_minimized)) EndResize(host);
@@ -1771,6 +1892,20 @@ void PicoBrowser_Input(PicoHost *host)
         if (s) s->control_drag_token = 0;
         if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
         pico_host_request_redraw(host);
+    }
+    if (click && Over("BrowserProfile")) {
+        if (!a->session_id[0]) { PicoOverlay_Notify(host, "Send a message to create this session before choosing a browser profile."); return; }
+        PicoBrowser_Init(host); s = host->browser;
+        if (s && pico_ui_modal_push(host, "browser-profile")) {
+            s->profile_agent_id = a->id; s->profile_token = b ? b->token : 0;
+            snprintf(s->profile_session_id, sizeof(s->profile_session_id), "%s", a->session_id);
+            s->profile_isolated = !a->browser_isolated;
+            s->profile_confirm_focus = false;
+            s->claimed_keyboard = true;
+            s->control_drag_token = 0;
+            if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
+        }
+        return;
     }
     if (click && Over("BrowserClose")) {
         PicoBrowser_CloseAgent(host, a->id); pico_host_request_redraw(host); return;

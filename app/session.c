@@ -583,6 +583,7 @@ static bool SessionAppendChangesRecency(const char *json)
             bool bookkeeping = JsonEq(&doc, type, "inbox_pending") ||
                                JsonEq(&doc, type, "unseen_complete") ||
                                JsonEq(&doc, type, "model_change") ||
+                               JsonEq(&doc, type, "browser_profile") ||
                                JsonEq(&doc, type, "title") ||
                                JsonEq(&doc, type, "usage") ||
                                JsonEq(&doc, type, "custom");
@@ -753,6 +754,8 @@ static char *BuildSessionHeaderJson(PicoHost *app, PicoAgent *agent)
     JsonBuf_String(&b, agent->model);
     JsonBuf_Puts(&b, ",\"fast\":");
     JsonBuf_Bool(&b, agent->fast);
+    JsonBuf_Puts(&b, ",\"browser_isolated\":");
+    JsonBuf_Bool(&b, agent->browser_isolated);
     JsonBuf_Puts(&b, ",\"kind\":");
     JsonBuf_String(&b, agent->kind == PICO_AGENT_SUBAGENT ? "subagent" : "normal");
     if (agent->kind == PICO_AGENT_SUBAGENT)
@@ -940,6 +943,7 @@ static PicoSessionWriteResult AppendLine(PicoHost *app, PicoAgent *agent, const 
 
 static void ApplyHeader(PicoAgent *agent, const JsonDoc *doc, int obj)
 {
+    agent->browser_isolated = JsonEq(doc, JsonObjGet(doc, obj, "browser_isolated"), "true");
     char *profile = JsonObjStr(doc, obj, "profile");
     if (profile)
     {
@@ -1298,6 +1302,10 @@ static bool ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
             PicoAgent_PushHistoryBriefing(agent, summary ? summary : "");
             free(summary);
         }
+    }
+    else if (strcmp(type, "browser_profile") == 0)
+    {
+        agent->browser_isolated = JsonEq(doc, JsonObjGet(doc, obj, "isolated"), "true");
     }
     else if (strcmp(type, "model_change") == 0)
     {
@@ -1673,6 +1681,13 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
             {
                 free(type);
                 goto invalid;
+            }
+        }
+        int browser_mode = JsonObjGet(doc, 0, i == 0 ? "browser_isolated" : "isolated");
+        if ((i == 0 && browser_mode >= 0) || (type && !strcmp(type, "browser_profile"))) {
+            if (JsonIsString(doc, browser_mode) ||
+                (!JsonEq(doc, browser_mode, "true") && !JsonEq(doc, browser_mode, "false"))) {
+                free(type); goto invalid;
             }
         }
         bool requires_group = type && strcmp(type, "tool_call") == 0;
@@ -2864,6 +2879,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->turn_user_request = NULL;
     free(agent->originating_user_request);
     agent->originating_user_request = NULL;
+    agent->browser_isolated = false;
     agent->session_id[0] = '\0';
     agent->session_path[0] = '\0';
     agent->accepted_submit = false;
@@ -3245,6 +3261,19 @@ PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *age
         PicoSession_CheckpointRelease(checkpoint); return NULL;
     }
     return checkpoint;
+}
+
+PicoSessionWriteResult PicoSession_LogBrowserProfile(PicoHost *app, PicoAgent *agent, bool isolated)
+{
+    char *prefix = EventPrefix("browser_profile");
+    if (!prefix) return PICO_SESSION_WRITE_FAILED;
+    JsonBuf b; JsonBuf_Init(&b);
+    JsonBuf_Puts(&b, prefix); free(prefix);
+    JsonBuf_Puts(&b, ",\"isolated\":"); JsonBuf_Bool(&b, isolated); JsonBuf_Putc(&b, '}');
+    char *line = JsonBuf_Steal(&b);
+    PicoSessionWriteResult result = AppendLine(app, agent, line);
+    free(line);
+    return result;
 }
 
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,

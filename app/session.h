@@ -273,6 +273,8 @@ PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *age
     const char *history_json, const char *summary, int tokens_before);
 void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint);
 
+/* Main-thread user preference. Only mutate the live mode after the append is accepted. */
+PicoSessionWriteResult PicoSession_LogBrowserProfile(PicoHost *app, PicoAgent *agent, bool isolated);
 PicoSessionWriteResult PicoSession_LogModelChange(PicoHost *app, PicoAgent *agent,
                                                   const char *model, const char *effort);
 PicoSessionWriteResult PicoSession_LogCustom(PicoHost *app, PicoAgent *agent,

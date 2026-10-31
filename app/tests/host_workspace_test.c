@@ -18289,7 +18289,11 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     {
         PicoSettingsUi_Open(host);
         PicoHost_Frame(host);
-        if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsResumeLast")))) goto done;
+        if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsResumeLast"))) ||
+            !SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsSubagentsTab"))) ||
+            !SubagentSettingsClick(host, CLAY_ID("SubagentNew")) ||
+            !SubagentSettingsText(host, 0, 0, "shared-save") || !SubagentSettingsText(host, 0, 2, "Shared save draft") ||
+            !SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsGeneralTab")))) goto done;
     }
     else if (action == PREF_RENAME || action == PREF_STASH)
     {
@@ -18334,7 +18338,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     {
         Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
         if (!PicoSettingsUi_IsOpen(host) || !SidebarCommandsContain(&commands, "Saving…") ||
-            workspace->settings.resume_last) goto done;
+            workspace->settings.resume_last || SubagentSettingsStoredProfile("shared-save", NULL)) goto done;
         /* Editing/cancel must not replace the snapshot already being saved. */
         if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsResumeLast")))) goto done;
         g_find_key = KEY_ESCAPE; PicoHost_Frame(host); g_find_key = -1;
@@ -18376,7 +18380,8 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     InteractionOmitDrawHooks(host);
     if (action == PREF_SETTINGS)
     {
-        if (PicoSettingsUi_IsOpen(host) != fail || workspace->settings.resume_last != !fail) goto done;
+        if (PicoSettingsUi_IsOpen(host) != fail || workspace->settings.resume_last != !fail ||
+            SubagentSettingsStoredProfile("shared-save", NULL) != !fail) goto done;
         if (fail)
         {
             Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
@@ -20281,7 +20286,10 @@ int main(int argc, char **argv)
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
-        return PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
+        return PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
+               PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
+               PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
+               PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
                PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload());
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
@@ -20339,7 +20347,10 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
-    if (PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
+    if (PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
+        PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
+        PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
+        PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
         PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload())) return 1;
     for (int action = PREF_SETTINGS; action <= PREF_WORKSPACE_EXTENSION; action++)
         if (PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, false)) ||

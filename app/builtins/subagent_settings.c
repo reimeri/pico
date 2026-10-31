@@ -63,6 +63,12 @@ static bool SaDirty(const PicoSubagentSettings *s)
 static void SaSyncReload(PicoSubagentSettings *s)
 {
     s->host->subagent_settings_reload_blocked = SaDirty(s) || s->confirm != SA_CONFIRM_NONE;
+    if (s->confirm != SA_CONFIRM_NONE) {
+        if (!pico_ui_modal_has(s->host, "settings-confirm"))
+            (void)pico_ui_modal_push(s->host, "settings-confirm");
+    } else {
+        (void)pico_ui_modal_pop(s->host, "settings-confirm");
+    }
 }
 
 static Clay_String SaString(const char *s)
@@ -643,8 +649,8 @@ void PicoSubagentSettings_AfterLayout(PicoSubagentSettings *s)
     {
         Clay_ElementData target = Clay_GetElementData(CLAY_IDI("SubagentError", s->reveal_card));
         if (!target.found) target = Clay_GetElementData(CLAY_IDI("SubagentRow", s->reveal_card));
-        Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("SettingsModalScroll"));
-        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+        Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("SettingsPanelScroll"));
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
         if (target.found && viewport.found && scroll.found && scroll.scrollPosition)
         {
             float bottom = target.boundingBox.y + target.boundingBox.height;

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "browser.h"
+#include "settings_ui.h"
 #include "clarification.h"
 #include "pico/plugin.h"
 #include "canonical.h"
@@ -1736,7 +1737,7 @@ static void PasteClipboard(PicoComposer *c)
 
 void PicoComposer_HandleInput(PicoHost *app)
 {
-    if (PicoBrowser_BlocksKeyboard(app)) return;
+    if (PicoBrowser_BlocksKeyboard(app) || PicoSettingsUi_BlocksKeyboard(app)) return;
     s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
     if (!s_active_composer_state || PicoUi_QuestionnaireOpen(app) || PicoUi_ModalOpen(app) || PicoChatFind_BlocksInput(app))
     {
@@ -2556,7 +2557,7 @@ static void ConsumeDroppedFiles(PicoHost *app)
         return;
     }
     FilePathList files = LoadDroppedFiles();
-    bool attach = app && !PicoBrowser_BlocksKeyboard(app) && !PicoClarification_View(app) && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
+    bool attach = app && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoClarification_View(app) && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
     if (attach && files.paths)
     {
         for (unsigned int i = 0; i < files.count; i++)

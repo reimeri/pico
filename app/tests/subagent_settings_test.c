@@ -3,8 +3,8 @@
 static bool SubagentSettingsClick(PicoHost *host, Clay_ElementId id)
 {
     Clay_ElementData element = Clay_GetElementData(id);
-    Clay_ElementData view = Clay_GetElementData(CLAY_ID("SettingsModalScroll"));
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    Clay_ElementData view = Clay_GetElementData(CLAY_ID("SettingsPanelScroll"));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
     if (!element.found) return false;
     if (view.found && scroll.found && scroll.scrollPosition &&
         (element.boundingBox.y < view.boundingBox.y ||
@@ -321,7 +321,7 @@ static int TestSettingsTabs(void)
     InteractionFixture f = {0};
     bool good = false;
     const char *phase = "setup";
-    const int widths[] = {1100, 390};
+    const int widths[] = {1100, 900};
     const char *labels[] = {"General & models", "Subagents"};
     Clay_ElementId ids[] = {CLAY_ID("SettingsGeneralTab"), CLAY_ID("SettingsSubagentsTab")};
     if (!InteractionFixtureInit(&f)) goto done;
@@ -341,7 +341,7 @@ static int TestSettingsTabs(void)
             g_find_pointer = (Vector2){0};
             Clay_SetPointerState((Clay_Vector2){0}, false);
             Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
-            Clay_ElementData card = Clay_GetElementData(CLAY_ID("SettingsModalCard"));
+            Clay_ElementData card = Clay_GetElementData(CLAY_ID("SettingsPane"));
             Clay_RenderCommand *title = FindCardText(&commands, "Settings");
             Clay_ElementData tabs[] = {Clay_GetElementData(ids[0]), Clay_GetElementData(ids[1])};
             Clay_Color colors[2] = {0};
@@ -429,7 +429,7 @@ static int TestSubagentSettingsPresentation(void)
         fabsf(toggle.boundingBox.x - name.boundingBox.x) > 0.01f ||
         fabsf(toggle.boundingBox.width - name.boundingBox.width) > 0.01f) goto done;
 
-    phase = "actions stay inside the expanded card; Apply stays in the modal footer";
+    phase = "actions stay inside the expanded card; Apply stays in the panel footer";
     Clay_ElementData card = Clay_GetElementData(CLAY_IDI("SubagentCard", 0));
     Clay_ElementData duplicate = Clay_GetElementData(CLAY_IDI("SubagentDuplicate", 0));
     Clay_ElementData remove = Clay_GetElementData(CLAY_IDI("SubagentDelete", 0));
@@ -443,9 +443,9 @@ static int TestSubagentSettingsPresentation(void)
         Clay_GetElementData(CLAY_ID("SubagentSave")).found || Clay_GetElementData(CLAY_ID("SubagentCancel")).found) goto done;
 
     phase = "narrow card actions stay within the form";
-    g_clay_frame_width = 390;
+    g_clay_frame_width = 900;
     for (int pass = 0; pass < 3; pass++) {
-        Clay_SetLayoutDimensions((Clay_Dimensions){390, 800});
+        Clay_SetLayoutDimensions((Clay_Dimensions){900, 800});
         pico_host_request_redraw(host);
         PicoHost_Frame(host);
     }

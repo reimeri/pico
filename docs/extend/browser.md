@@ -3,6 +3,8 @@
 Pico renders Chromium inside a right-side dock. There is no external browser
 window. This is a core-owned service, not a general pane/texture extension API.
 
+The global Settings sidepanel shares the browser dock. Opening settings hides the browser pane without closing its page or cancelling agent browser work. Closing settings restores an expanded browser. Opening the browser from the strip dismisses settings only after any unsaved-profile confirmation; a pending settings save cannot be cancelled. See [contracts](contracts.md).
+
 ## GPU rendering requirements
 
 Continuous presentation is **GPU-only on Linux**, with no software-pixel fallback.

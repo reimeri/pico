@@ -807,6 +807,9 @@ void PicoExts_Open(PicoHost *host);
 void PicoExts_Close(PicoHost *host);
 void PicoExts_Toggle(PicoHost *host);
 bool PicoExts_IsOpen(const PicoHost *host);
+/* Host-global, non-modal shell panel. Close acts as Cancel and may defer for
+ * an unsaved-profile confirmation or an in-flight save. Escape does not close
+ * the panel; IsOpen stays true while dismissal is deferred. */
 void PicoSettingsUi_Open(PicoHost *host);
 void PicoSettingsUi_Close(PicoHost *host);
 bool PicoSettingsUi_IsOpen(const PicoHost *host);

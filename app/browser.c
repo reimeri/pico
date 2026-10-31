@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "browser.h"
+#include "settings_ui.h"
 #include "browser/protocol.h"
 #include "browser/gpu.h"
 #include "rlgl.h"
@@ -1163,7 +1164,7 @@ void PicoBrowser_Pump(PicoHost *host)
         next = b->next;
         PicoAgent *a = PicoHost_FindAgent(host, b->agent_id);
         if (!a || strcmp(a->session_id, b->session_id)) { PicoBrowser_CloseAgent(host, b->agent_id); continue; }
-        bool visible = host->selected_agent_id == a->id && a->browser_expanded && !host->window_minimized;
+        bool visible = host->selected_agent_id == a->id && a->browser_expanded && !PicoSettingsUi_IsOpen(host) && !host->window_minimized;
         if (b->opened && visible != b->visible) {
             if (Send(s, (PbCommand){.type = PB_VISIBLE, .token = b->token, .a = visible})) b->visible = visible;
             if (!visible) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
@@ -1267,7 +1268,7 @@ static float ClampShellWidth(const PicoHost *host, float width)
 float PicoBrowser_ShellWidth(const PicoHost *host)
 {
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
-    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded) return 0;
+    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded || PicoSettingsUi_IsOpen(host)) return 0;
     float width = Clay_GetLayoutDimensions().width;
     float pane = a->browser_width > 0 ? a->browser_width : fminf(width * 0.44f, 720);
     return ClampShellWidth(host, pane);
@@ -1598,7 +1599,7 @@ void PicoBrowser_Layout(PicoHost *host)
 {
     ProfileDialog(host);
     PicoAgent *a = PicoHost_SelectedAgent(host);
-    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded) return;
+    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded || PicoSettingsUi_IsOpen(host)) return;
     BrowserSession *b = Selected(host);
     EnsureIcons(host);
     CLAY(CLAY_ID("BrowserPane"),
@@ -1668,7 +1669,7 @@ bool PicoBrowser_BlocksPointer(const PicoHost *host)
 static bool ResizeEdgeAvailable(const PicoHost *host)
 {
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
-    return PicoAgent_IsUserMain(a) && a->browser_expanded && host->window_focused &&
+    return !PicoSettingsUi_IsOpen(host) && PicoAgent_IsUserMain(a) && a->browser_expanded && host->window_focused &&
            !host->window_minimized && !PicoUi_ModalOpen(host);
 }
 static bool Resizing(const PicoHost *host)
@@ -1826,9 +1827,31 @@ bool PicoBrowser_BlocksKeyboard(const PicoHost *host)
 {
     BrowserSession *b = Selected((PicoHost *)host);
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
+    if (PicoSettingsUi_IsOpen(host)) return false;
     return (host && host->browser && host->browser->claimed_keyboard) ||
            (b && a->browser_expanded && b->user_control && (b->focus || b->address_focus || b->viewport_menu || b->viewport_custom));
 }
+void PicoBrowser_OpenPanel(PicoHost *host)
+{
+    PicoAgent *a = PicoHost_SelectedAgent(host);
+    if (!PicoAgent_IsUserMain(a)) return;
+    if (!a->session_id[0]) {
+        PicoOverlay_Notify(host, "Send a message to create this session before opening its browser.");
+        return;
+    }
+    if (!PicoSettingsUi_CloseForBrowser(host)) return;
+    a->browser_expanded = true;
+    BrowserSession *b = Selected(host);
+    if (!b) {
+        char error[512];
+        if (!Open(host, a, "about:blank", true, error, sizeof(error))) pico_status_warn(host, error);
+        b = Selected(host);
+        if (b) { b->address_focus = true; PicoTextField_SelectAll(&b->field); }
+    }
+    host->ui_relayout_requested = true;
+    pico_host_request_redraw(host);
+}
+
 void PicoBrowser_Input(PicoHost *host)
 {
     PicoAgent *a = PicoHost_SelectedAgent(host);
@@ -1841,7 +1864,7 @@ void PicoBrowser_Input(PicoHost *host)
     }
     if (ProfileInput(host)) return;
     if (s && s->resize_agent_id &&
-        (!PicoAgent_IsUserMain(a) || s->resize_agent_id != a->id || !a->browser_expanded ||
+        (!PicoAgent_IsUserMain(a) || s->resize_agent_id != a->id || !a->browser_expanded || PicoSettingsUi_IsOpen(host) ||
          PicoUi_ModalOpen(host) || !host->window_focused || host->window_minimized)) EndResize(host);
     if (!PicoAgent_IsUserMain(a)) {
         if (s) s->control_drag_token = 0;
@@ -1855,8 +1878,14 @@ void PicoBrowser_Input(PicoHost *host)
         if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
         return;
     }
-    if (s && s->resize_pointer_claimed && !s->resize_agent_id) return;
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (PicoSettingsUi_IsOpen(host)) {
+        if (s) s->control_drag_token = 0;
+        if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
+        if (click && Over("BrowserToggle") && !PicoSettingsUi_BlocksPointer(host)) PicoBrowser_OpenPanel(host);
+        return;
+    }
+    if (s && s->resize_pointer_claimed && !s->resize_agent_id) return;
     if (ResizeInput(host, a, b, click)) return;
     if (click && Over("BrowserToggle") && a->browser_expanded) {
         a->browser_expanded = false;
@@ -1866,18 +1895,7 @@ void PicoBrowser_Input(PicoHost *host)
         return;
     }
     if (click && (Over("BrowserToggle") || Over("BrowserStart"))) {
-        if (!a->session_id[0]) {
-            PicoOverlay_Notify(host, "Send a message to create this session before opening its browser.");
-            return;
-        }
-        a->browser_expanded = true;
-        if (!b) {
-            char error[512];
-            if (!Open(host, a, "about:blank", true, error, sizeof(error))) pico_status_warn(host, error);
-            b = Selected(host);
-            if (b) { b->address_focus = true; PicoTextField_SelectAll(&b->field); }
-        }
-        pico_host_request_redraw(host);
+        PicoBrowser_OpenPanel(host);
         return;
     }
     if (click && Over("BrowserProfile")) {

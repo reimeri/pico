@@ -2841,8 +2841,92 @@ done:
     return rc;
 }
 
+static int RunSettingsPanelShellCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewports[] = {{1714, 1392}, {800, 800}, {1714, 1392}};
+    char dir[] = "/tmp/pico-settings-shell-XXXXXX", cfg[] = "/tmp/pico-settings-shell-cfg-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    ShellTestState state = {.composer_height = 56.003f};
+    bool good = false;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = host->view_count[PICO_SLOT_FOOTER] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    ShellTestAddView(host, PICO_SLOT_FOOTER, ShellTestFooter, NULL);
+    PicoWorkspaceId workspace;
+    PicoAgentId id;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true, .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    for (int i = 0; i < 80; i++) PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Settings panel bottom-follow history");
+    agent->browser_expanded = true;
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory), viewports[0], (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    host->chat_follow_bottom = true;
+    PicoSettingsUi_Open(host);
+    for (int stage = 0; stage < 3; stage++) {
+        if (stage == 2) PicoSettingsUi_Close(host);
+        ChatStabilitySnapshot expected = {0};
+        Clay_BoundingBox expected_panel = {0}, expected_scroll = {0}, expected_strip = {0};
+        for (int frame = 0; frame < 100; frame++) {
+            LayoutChatStabilityFrame(host, viewports[stage]);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
+            Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+            if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
+            PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height, &scroll.scrollPosition->y);
+            (void)PicoHost_LayoutShell(host, viewports[stage].height, 0);
+            PicoChat_HarvestVirtualHeights(host);
+            ChatStabilitySnapshot current;
+            if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
+            Clay_ElementData panel = Clay_GetElementData(CLAY_ID("SettingsPane"));
+            Clay_ElementData content = Clay_GetElementData(CLAY_ID("SettingsPanelScroll"));
+            Clay_BoundingBox strip = Clay_GetElementData(CLAY_ID("ShellStrip")).boundingBox;
+            if (panel.found != (stage < 2) || Clay_GetElementData(CLAY_ID("BrowserPane")).found != (stage == 2)) goto done;
+            if (panel.found && (!content.found || panel.boundingBox.x < current.main.x + current.main.width ||
+                panel.boundingBox.x + panel.boundingBox.width > strip.x || current.main.width <= 0 ||
+                !ShellVerticallyContains(current.right, panel.boundingBox) ||
+                !ShellVerticallyContains(panel.boundingBox, content.boundingBox))) goto done;
+            if (panel.found) {
+                const Clay_ElementId controls[] = {CLAY_ID("SettingsCancel"), CLAY_ID("SettingsApply")};
+                for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
+                    Clay_ElementData control = Clay_GetElementData(controls[i]);
+                    if (!control.found || !ShellVerticallyContains(panel.boundingBox, control.boundingBox) ||
+                        control.boundingBox.x < panel.boundingBox.x ||
+                        control.boundingBox.x + control.boundingBox.width > panel.boundingBox.x + panel.boundingBox.width + 0.01f) goto done;
+                }
+            }
+            if (frame == 30) {
+                expected = current; expected_panel = panel.boundingBox;
+                expected_scroll = content.boundingBox; expected_strip = strip;
+            } else if (frame > 30 && (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+                !ShellBoxStable(expected_strip, strip) ||
+                (panel.found && (!ShellBoxStable(expected_panel, panel.boundingBox) ||
+                                 !ShellBoxStable(expected_scroll, content.boundingBox))))) goto done;
+        }
+    }
+    good = true;
+done:
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
+    if (!good) Fail("settings panel must preserve repeated bottom-follow shell bounds, including narrow layouts and browser restoration");
+    return !good;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
+    if (RunSettingsPanelShellCase(false) || RunSettingsPanelShellCase(true)) return 1;
     if (RunShellStabilityCase(false, false, 1714) != 0)
     {
         return 1;
@@ -7588,9 +7672,9 @@ static int TestHostPluginIsolation(void)
     }
     PicoSettingsUi_Open(host1);
     if (!PicoSettingsUi_IsOpen(host1) || PicoSettingsUi_IsOpen(host2) ||
-        !pico_ui_modal_is_top(host1, "settings") || pico_ui_modal_claimed(host2))
+        pico_ui_modal_claimed(host1) || pico_ui_modal_claimed(host2))
     {
-        Fail("settings modal must route open state to the requested host");
+        Fail("settings panel must route open state to the requested host");
         pico_host_free(host1);
         pico_host_free(host2);
         return 1;
@@ -7598,7 +7682,7 @@ static int TestHostPluginIsolation(void)
     PicoSettingsUi_Close(host1);
     if (pico_ui_modal_claimed(host1))
     {
-        Fail("settings modal must close on the requested host");
+        Fail("settings panel must close on the requested host");
         pico_host_free(host1);
         pico_host_free(host2);
         return 1;
@@ -7615,7 +7699,7 @@ static int TestHostPluginIsolation(void)
     return 0;
 }
 
-static int TestSettingsModal(bool wheel_over_field)
+static int TestSettingsPanel(bool wheel_over_field)
 {
     const Clay_Dimensions viewport = {1100, 800};
     char cfg[] = "/tmp/pico-cfg-settings-wheel-XXXXXX";
@@ -7689,9 +7773,9 @@ static int TestSettingsModal(bool wheel_over_field)
     g_clay_frame_test = true;
 #endif
     PicoSettingsUi_Open(host);
-    if (!PicoSettingsUi_IsOpen(host) || !pico_ui_modal_is_top(host, "settings"))
+    if (!PicoSettingsUi_IsOpen(host) || pico_ui_modal_claimed(host))
     {
-        Fail("settings modal must open");
+        Fail("settings panel must open");
         goto done;
     }
 
@@ -7702,7 +7786,7 @@ static int TestSettingsModal(bool wheel_over_field)
     {
         if (!FindCardText(&commands, "v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX))
         {
-            Fail("settings modal must display the version and available build revision");
+            Fail("settings panel must display the version and available build revision");
             goto done;
         }
         rc = 0;
@@ -7710,15 +7794,15 @@ static int TestSettingsModal(bool wheel_over_field)
     }
 
     field = Clay_GetElementData(CLAY_ID("SettingsContextLimit"));
-    scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
     if (!field.found || !scroll.found || !scroll.scrollPosition)
     {
-        Fail("settings modal field and scroller were not laid out");
+        Fail("settings panel field and scroller were not laid out");
         goto done;
     }
     if (scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height + 0.5f)
     {
-        Fail("settings modal must overflow so a wheel can move it");
+        Fail("settings panel must overflow so a wheel can move it");
         goto done;
     }
 
@@ -7726,7 +7810,7 @@ static int TestSettingsModal(bool wheel_over_field)
                                         field.boundingBox.y + field.boundingBox.height / 2.0f},
                          false);
     (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
-    scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
     if (!scroll.found || !scroll.scrollPosition)
     {
         Fail("settings scroller disappeared after hover layout");
@@ -7736,7 +7820,7 @@ static int TestSettingsModal(bool wheel_over_field)
     if (!PicoSettingsUi_ScrollHovered(host, -3.0f) ||
         scroll.scrollPosition->y >= before_y - 0.5f)
     {
-        Fail("hovering a settings text field must still scroll the modal");
+        Fail("hovering a settings text field must still scroll the panel");
         goto done;
     }
     rc = 0;
@@ -7753,14 +7837,14 @@ done:
     return rc;
 }
 
-static int TestSettingsModalBuildVersion(void)
+static int TestSettingsPanelBuildVersion(void)
 {
-    return TestSettingsModal(false);
+    return TestSettingsPanel(false);
 }
 
-static int TestSettingsModalWheelOverField(void)
+static int TestSettingsPanelWheelOverField(void)
 {
-    return TestSettingsModal(true);
+    return TestSettingsPanel(true);
 }
 
 static int FindHostExtensionIndex(PicoHost *host, const char *name)
@@ -18345,6 +18429,7 @@ static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char
 }
 
 #include "subagent_settings_test.c"
+#include "settings_panel_test.c"
 
 typedef enum PreferenceAction
 {
@@ -20494,6 +20579,10 @@ int main(int argc, char **argv)
 #endif
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--settings-panel") == 0)
+        return PICO_TEST_RUN(TestSettingsPanelInteraction()) || PICO_TEST_RUN(TestSettingsPanelResize()) ||
+               PICO_TEST_RUN(TestSettingsPanelBrowserSwitch()) || PICO_TEST_RUN(RunSettingsPanelShellCase(false)) ||
+               PICO_TEST_RUN(RunSettingsPanelShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
         return PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
                PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
@@ -20584,7 +20673,8 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;
-    if (PICO_TEST_RUN(TestShellStripSettings()) != 0) return 1;
+    if (PICO_TEST_RUN(TestShellStripSettings()) || PICO_TEST_RUN(TestSettingsPanelInteraction()) ||
+        PICO_TEST_RUN(TestSettingsPanelResize()) || PICO_TEST_RUN(TestSettingsPanelBrowserSwitch())) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarSameFrameControls()) != 0) return 1;
     if (PICO_TEST_RUN(TestSidebarCollapseSaveDoesNotBlock(SIDEBAR_COLLAPSE_TOGGLE)) != 0 ||
@@ -20811,11 +20901,11 @@ int main(int argc, char **argv)
     {
         return 1;
     }
-    if (PICO_TEST_RUN(TestSettingsModalBuildVersion()) != 0)
+    if (PICO_TEST_RUN(TestSettingsPanelBuildVersion()) != 0)
     {
         return 1;
     }
-    if (PICO_TEST_RUN(TestSettingsModalWheelOverField()) != 0)
+    if (PICO_TEST_RUN(TestSettingsPanelWheelOverField()) != 0)
     {
         return 1;
     }

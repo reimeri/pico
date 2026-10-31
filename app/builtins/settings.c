@@ -4,6 +4,8 @@
 #include "host_internal.h"
 #include "overlay.h"
 #include "settings.h"
+#include "settings_ui.h"
+#include "browser.h"
 #include "theme_internal.h"
 
 #include "clay/clay.h"
@@ -49,6 +51,9 @@ typedef struct SettingsSave {
 typedef struct SettingsState {
     PicoHost *host;
     bool open;
+    bool focused, resizing, pointer_claimed;
+    float resize_start_x, resize_start_width;
+    PicoAgentId pending_browser;
     int section; /* 0: general/models, 1: subagents */
     PicoSubagentSettings *subagents;
     SettingsSave *save;
@@ -212,7 +217,7 @@ static bool Claim(void)
     {
         return true;
     }
-    if (!g_host || !pico_ui_modal_push(g_host, "settings"))
+    if (!g_host)
     {
         return false;
     }
@@ -220,7 +225,6 @@ static bool Claim(void)
     s_active_settings_state->section = 0;
     if (!LoadDraft(s_active_settings_state))
     {
-        (void)pico_ui_modal_pop(g_host, "settings");
         g_open = false;
         PicoOverlay_Notify(g_host, g_error[0] ? g_error : "Could not load settings.json: out of memory or too many models.");
         DiscardDraft(s_active_settings_state);
@@ -235,11 +239,12 @@ static bool Unclaim(void)
     {
         return true;
     }
-    if (g_host && !pico_ui_modal_pop(g_host, "settings"))
-    {
-        return false;
-    }
+    if (s_active_settings_state->resizing) g_host->ui_drag_active = false;
+    s_active_settings_state->resizing = false;
+    s_active_settings_state->focused = false;
     g_open = false;
+    g_host->ui_relayout_requested = true;
+    pico_host_request_redraw(g_host);
     g_host->settings_reload_blocked = false;
     DiscardDraft(s_active_settings_state);
     return true;
@@ -258,14 +263,38 @@ void PicoSettingsUi_Close(PicoHost *host)
         return;
     }
     SettingsState *s = s_active_settings_state;
-    if (s->save) return;
+    if (s->save || (pico_ui_modal_has(host, "settings-confirm") &&
+                    !pico_ui_modal_is_top(host, "settings-confirm"))) return;
     if (!PicoSubagentSettings_RequestLeave(s->subagents)) {
+        s->focused = true;
         ClearFocus(s);
         CancelModelDrag(s);
         host->ui_relayout_requested = true;
         return;
     }
+    PicoAgentId browser = s->pending_browser;
+    s->pending_browser = 0;
     (void)Unclaim();
+    if (browser && host->selected_agent_id == browser) PicoBrowser_OpenPanel(host);
+}
+
+bool PicoSettingsUi_CloseForBrowser(PicoHost *host)
+{
+    if (!SelectHost(host) || !g_open) return true;
+    SettingsState *s = s_active_settings_state;
+    if (s->save) return false;
+    s->pending_browser = host->selected_agent_id;
+    /* The caller opens immediately if no confirmation is necessary. */
+    if (PicoSubagentSettings_RequestLeave(s->subagents)) {
+        s->pending_browser = 0;
+        (void)Unclaim();
+        return true;
+    }
+    s->focused = true;
+    ClearFocus(s);
+    CancelModelDrag(s);
+    host->ui_relayout_requested = true;
+    return false;
 }
 
 void PicoSettingsUi_Open(PicoHost *host)
@@ -277,7 +306,11 @@ void PicoSettingsUi_Open(PicoHost *host)
     PicoPrompt_Close(host);
     PicoExts_Close(host);
     SelectHost(host);
-    Claim();
+    if (Claim()) {
+        s_active_settings_state->focused = true;
+        host->ui_relayout_requested = true;
+        pico_host_request_redraw(host);
+    }
 }
 
 static void OpenSubagents(SettingsState *s)
@@ -287,7 +320,7 @@ static void OpenSubagents(SettingsState *s)
     CancelModelDrag(s);
     s->section = 1;
     PicoSubagentSettings_Open(s->subagents);
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
     if (scroll.found && scroll.scrollPosition) scroll.scrollPosition->y = 0;
     s->host->ui_relayout_requested = true;
 }
@@ -298,14 +331,97 @@ bool PicoSettingsUi_IsOpen(const PicoHost *host)
     return s && s->open;
 }
 
+static float ClampPanelWidth(const PicoHost *host, float width)
+{
+    return fminf(PicoHost_RightColumnWidth(host) * 0.5f, fmaxf(300, width));
+}
+
+float PicoSettingsUi_ShellWidth(const PicoHost *host)
+{
+    if (!PicoSettingsUi_IsOpen(host)) return 0;
+    return ClampPanelWidth(host, host->settings_panel_width > 0 ? host->settings_panel_width : 640);
+}
+
+static bool PointerIn(Clay_ElementId id)
+{
+    Clay_ElementData e = Clay_GetElementData(id);
+    return e.found && CheckCollisionPointRec(GetMousePosition(),
+        (Rectangle){e.boundingBox.x, e.boundingBox.y, e.boundingBox.width, e.boundingBox.height});
+}
+
+bool PicoSettingsUi_BlocksKeyboard(const PicoHost *host)
+{
+    SettingsState *s = host ? PicoPlugins_HostState(host, "settings") : NULL;
+    return s && ((s->open && s->focused) || s->pointer_claimed);
+}
+
+bool PicoSettingsUi_BlocksPointer(const PicoHost *host)
+{
+    SettingsState *s = host ? PicoPlugins_HostState(host, "settings") : NULL;
+    return s && s->pointer_claimed;
+}
+
+bool PicoSettingsUi_ResizeHovered(const PicoHost *host)
+{
+    SettingsState *s = host ? PicoPlugins_HostState(host, "settings") : NULL;
+    return s && s->open && host->window_focused && !host->window_minimized && !PicoUi_ModalOpen(host) &&
+           (s->resizing || (!host->ui_drag_active && PointerIn(CLAY_ID("SettingsResizeHandle"))));
+}
+
+/* Run before global shortcuts and builtin frame callbacks, so a panel click
+ * owns that frame's keyboard regardless of extension callback ordering. */
+void PicoSettingsUi_Input(PicoHost *host)
+{
+    if (!SelectHost(host)) return;
+    SettingsState *s = s_active_settings_state;
+    bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || click) s->pointer_claimed = false;
+    if (!s->open) return;
+    bool available = host->window_focused && !host->window_minimized && !PicoUi_ModalOpen(host);
+    if (!available) {
+        if (s->resizing) { s->resizing = false; host->ui_drag_active = false; }
+        CancelModelDrag(s);
+        return;
+    }
+    if (s->resizing || (click && PicoSettingsUi_ResizeHovered(host))) {
+        if (!s->resizing) {
+            s->resizing = true;
+            s->resize_start_x = GetMousePosition().x;
+            s->resize_start_width = PicoSettingsUi_ShellWidth(host);
+            ClearFocus(s);
+            PicoSubagentSettings_Blur(s->subagents);
+            host->ui_drag_active = true;
+        }
+        s->focused = s->pointer_claimed = true;
+        if (!IsKeyPressed(KEY_ESCAPE))
+            host->settings_panel_width = ClampPanelWidth(host, s->resize_start_width + s->resize_start_x - GetMousePosition().x);
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ESCAPE)) {
+            s->resizing = false;
+            host->ui_drag_active = false;
+        }
+        host->ui_relayout_requested = true;
+        pico_host_request_redraw(host);
+        return;
+    }
+    if (click) {
+        s->focused = PointerIn(CLAY_ID("SettingsPane")) || PointerIn(CLAY_ID("SettingsDefaultMenu"));
+        if (!s->focused) {
+            FlushModelContext(s);
+            ClearFocus(s);
+            PicoSubagentSettings_Blur(s->subagents);
+            CancelModelDrag(s);
+        }
+    }
+}
+
 bool PicoSettingsUi_ScrollHovered(PicoHost *host, float wheel_y)
 {
     Clay_ScrollContainerData data;
     float overflow;
     float min_y;
     float y;
-    if (!host || !pico_ui_modal_is_top(host, "settings") ||
-        !Clay_PointerOver(CLAY_ID("SettingsModalScroll")) ||
+    if (!PicoSettingsUi_IsOpen(host) || PicoUi_ModalOpen(host) ||
+        !Clay_PointerOver(CLAY_ID("SettingsPanelScroll")) ||
         Clay_PointerOver(CLAY_ID("SettingsDefaultMenu")))
     {
         return false;
@@ -314,7 +430,7 @@ bool PicoSettingsUi_ScrollHovered(PicoHost *host, float wheel_y)
     {
         return true;
     }
-    data = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    data = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
     if (!data.found || !data.scrollPosition || !data.config.vertical)
     {
         return true;
@@ -776,7 +892,7 @@ static int ModelDragTarget(const SettingsState *s, float y)
     int source;
     int target;
     Clay_ElementData list = Clay_GetElementData(CLAY_ID("SettingsModelList"));
-    if (!s || !s->is_dragging || !Clay_PointerOver(CLAY_ID("SettingsModalScroll")) ||
+    if (!s || !s->is_dragging || !Clay_PointerOver(CLAY_ID("SettingsPanelScroll")) ||
         !list.found || y < list.boundingBox.y)
     {
         return -1;
@@ -815,8 +931,8 @@ static int ModelDragTarget(const SettingsState *s, float y)
 
 static void ScrollModelDrag(float mouse_y, float mouse_x, float dt)
 {
-    Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("SettingsModalScroll"));
-    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+    Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("SettingsPanelScroll"));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
     const float edge = 32.0f;
     const float speed = 420.0f;
     float bottom;
@@ -1623,132 +1739,108 @@ static void RenderModelDragPreview(SettingsState *s)
     }
 }
 
-static void SettingsRender(PicoHost *app, void *state)
+void PicoSettingsUi_Layout(PicoHost *app)
 {
-    float sw;
-    float sh;
-    float card_w;
-    float card_h;
-    const uint16_t card_pad_x = 20;
-    int i;
-    s_active_settings_state =
-        state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
-    if (!s_active_settings_state || !g_open)
-    {
-        return;
-    }
+    if (!SelectHost(app) || !g_open) return;
     EnsureTrashIcon(s_active_settings_state);
-    sw = (float)GetScreenWidth();
-    sh = (float)GetScreenHeight();
-    card_w = sw < 720.0f ? sw - 48.0f : 640.0f;
-    if (card_w < 280.0f)
+    int i;
+    CLAY(CLAY_ID("SettingsPane"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .padding = {12, 12, 12, 12}, .childGap = 12,
+                     .sizing = {.width = CLAY_SIZING_FIXED(PicoSettingsUi_ShellWidth(app)),
+                                .height = CLAY_SIZING_PERCENT(1)}},
+          .backgroundColor = COLOR_CONTENT_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
-        card_w = 280.0f;
-    }
-    card_h = sh * 0.82f;
-    if (card_h < 280.0f)
-    {
-        card_h = 280.0f;
-    }
-    if (card_h > 760.0f)
-    {
-        card_h = 760.0f;
-    }
-    CLAY(CLAY_ID("SettingsModalDim"),
-         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
-                       .zIndex = 40,
-                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
-                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
-          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                     .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
-          .backgroundColor = {0, 0, 0, 140}})
-    {
-        CLAY(CLAY_ID("SettingsModalCard"),
-             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .padding = {card_pad_x, card_pad_x, 16, 16},
-                         .childGap = 12,
-                         .sizing = {.width = CLAY_SIZING_FIXED(card_w), .height = CLAY_SIZING_FIXED(card_h)}},
-              .backgroundColor = COLOR_CONTENT_BG,
-              .cornerRadius = CLAY_CORNER_RADIUS(8)})
+        CLAY(CLAY_ID("SettingsResizeHandle"),
+             {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .offset = {.x = -4}, .zIndex = 1},
+              .layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_PERCENT(1)}}}) {}
+        CLAY(CLAY_ID("SettingsHeader"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)},
+                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}}})
         {
             CLAY_TEXT(CLAY_STRING("Settings"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
-            CLAY(CLAY_ID("SettingsTabs"),
-                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
-                                       .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI_LINE) + 16)}}})
+        }
+        CLAY(CLAY_ID("SettingsTabs"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                   .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI_LINE) + 16)}}})
+        {
+            RenderTab(CLAY_ID("SettingsGeneralTab"), "General & models", s_active_settings_state->section == 0);
+            RenderTab(CLAY_ID("SettingsSubagentsTab"), "Subagents", s_active_settings_state->section == 1);
+        }
+        CLAY(CLAY_ID("SettingsPanelScrollRow"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = SCROLLBAR_GAP,
+                         .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY(CLAY_ID("SettingsPanelScroll"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .childGap = 10,
+                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+                  .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
             {
-                RenderTab(CLAY_ID("SettingsGeneralTab"), "General & models", s_active_settings_state->section == 0);
-                RenderTab(CLAY_ID("SettingsSubagentsTab"), "Subagents", s_active_settings_state->section == 1);
-            }
-            CLAY(CLAY_ID("SettingsModalScrollRow"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = SCROLLBAR_GAP,
-                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}})
-            {
-                CLAY(CLAY_ID("SettingsModalScroll"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = 10,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                      .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
-                {
-                    if (s_active_settings_state->section == 1) {
-                        PicoSubagentSettings_Render(s_active_settings_state->subagents);
-                    } else {
-                        RenderGeneral(s_active_settings_state);
-                        CLAY_TEXT(CLAY_STRING("Models"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                                          .fontSize = PICO_FONT_UI,
-                                                                          .textColor = COLOR_TEXT}));
-                        CLAY(CLAY_ID("SettingsModelList"),
-                             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                         .childGap = 14,
-                                         .padding = {.bottom = 8},
-                                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                if (s_active_settings_state->section == 1) {
+                    PicoSubagentSettings_Render(s_active_settings_state->subagents);
+                } else {
+                    RenderGeneral(s_active_settings_state);
+                    CLAY_TEXT(CLAY_STRING("Models"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                                      .fontSize = PICO_FONT_UI,
+                                                                      .textColor = COLOR_TEXT}));
+                    CLAY(CLAY_ID("SettingsModelList"),
+                         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .childGap = 14,
+                                     .padding = {.bottom = 8},
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    {
+                        for (i = 0; i < g_draft.model_count; i++)
                         {
-                            for (i = 0; i < g_draft.model_count; i++)
-                            {
-                                RenderModelRow(s_active_settings_state, i);
-                            }
+                            RenderModelRow(s_active_settings_state, i);
                         }
-                        RenderButton(CLAY_ID("SettingsAddModel"), "Add model", true, false);
                     }
-                }
-                RenderModelDragPreview(s_active_settings_state);
-                if (g_overflow)
-                {
-                    PicoScrollbar_Render(CLAY_STRING("SettingsModalScroll"), CLAY_STRING("SettingsModalScrollTrack"),
-                                         CLAY_STRING("SettingsModalScrollHandle"));
+                    RenderButton(CLAY_ID("SettingsAddModel"), "Add model", true, false);
                 }
             }
-            if (g_error[0])
+            RenderModelDragPreview(s_active_settings_state);
+            if (g_overflow)
             {
-                CLAY_TEXT(CStr(g_error), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                          .fontSize = PICO_FONT_CAPTION,
-                                                          .textColor = COLOR_STATUS_ERR,
-                                                          .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            }
-            CLAY(CLAY_ID("SettingsModalButtons"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = 8,
-                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
-            {
-                RenderButton(CLAY_ID("SettingsCancel"), "Cancel", !s_active_settings_state->save, false);
-                CLAY_AUTO_ID({.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER,
-                                                            .y = CLAY_ALIGN_Y_CENTER},
-                                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
-                {
-                    CLAY_TEXT(CLAY_STRING("v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = PICO_FONT_CAPTION,
-                                                .textColor = COLOR_MUTED,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
-                RenderButton(CLAY_ID("SettingsApply"), s_active_settings_state->save ? "Saving…" : "Apply", !s_active_settings_state->save, true);
+                PicoScrollbar_Render(CLAY_STRING("SettingsPanelScroll"), CLAY_STRING("SettingsPanelScrollTrack"),
+                                     CLAY_STRING("SettingsPanelScrollHandle"));
             }
         }
+        if (g_error[0])
+        {
+            CLAY_TEXT(CStr(g_error), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                      .fontSize = PICO_FONT_CAPTION,
+                                                      .textColor = COLOR_STATUS_ERR,
+                                                      .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+        }
+        CLAY(CLAY_ID("SettingsPanelButtons"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childGap = 8,
+                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            RenderButton(CLAY_ID("SettingsCancel"), "Cancel", !s_active_settings_state->save, false);
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+            RenderButton(CLAY_ID("SettingsApply"), s_active_settings_state->save ? "Saving…" : "Apply", !s_active_settings_state->save, true);
+        }
+        CLAY(CLAY_ID("SettingsVersion"),
+             {.layout = {.childAlignment = {.x = CLAY_ALIGN_X_CENTER},
+                         .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            CLAY_TEXT(CLAY_STRING("v" PICO_VERSION PICO_BUILD_VERSION_SUFFIX),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                        .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+        }
     }
-    PicoSubagentSettings_RenderConfirmation(s_active_settings_state->subagents);
+}
+
+static void SettingsOverlay(PicoHost *app, void *state)
+{
+    SettingsState *s = state;
+    if (s && s->open && pico_ui_modal_is_top(app, "settings-confirm"))
+        PicoSubagentSettings_RenderConfirmation(s->subagents);
 }
 
 static void KeepDefaultModelSelectionVisible(SettingsState *s)
@@ -1894,12 +1986,12 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     (void)event;
     s_active_settings_state =
         state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
-    if (!s_active_settings_state || !g_open || !pico_ui_modal_is_top(app, "settings"))
+    if (!s_active_settings_state || !g_open || (PicoUi_ModalOpen(app) && !pico_ui_modal_is_top(app, "settings-confirm")))
     {
         return;
     }
     if (s_active_settings_state->save) return;
-    g_overflow = PicoScrollbar_Overflows(CLAY_STRING("SettingsModalScroll"));
+    g_overflow = PicoScrollbar_Overflows(CLAY_STRING("SettingsPanelScroll"));
     if (s_active_settings_state->model_dropdown_ensure_visible)
     {
         KeepDefaultModelSelectionVisible(s_active_settings_state);
@@ -1918,22 +2010,6 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         HoveredClickable(s_active_settings_state))
     {
         app->hovered_clickable = true;
-    }
-    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-    {
-        return;
-    }
-    if (s_active_settings_state->model_dropdown_click_block)
-    {
-        return;
-    }
-    if (OverId(CLAY_STRING("SettingsModalCard")))
-    {
-        return;
-    }
-    if (OverId(CLAY_STRING("SettingsModalDim")))
-    {
-        PicoSettingsUi_Close(app);
     }
 }
 
@@ -2142,7 +2218,7 @@ static bool HandleClicks(SettingsState *s)
             return true;
         }
     }
-    if (OverId(CLAY_STRING("SettingsModalCard")))
+    if (OverId(CLAY_STRING("SettingsPane")))
     {
         SetFocus(s, FOCUS_NONE, -1);
         s->model_dropdown = false;
@@ -2155,7 +2231,7 @@ static void SettingsDrawFieldOverlay(PicoHost *app, const PicoHookEvent *event, 
 {
     SettingsState *s = state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
     (void)event;
-    if (!s || !s->open || !pico_ui_modal_is_top(app, "settings"))
+    if (!s || !s->open || !s->focused || (PicoUi_ModalOpen(app) && !pico_ui_modal_is_top(app, "settings-confirm")))
     {
         return;
     }
@@ -2180,17 +2256,21 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
     s = s_active_settings_state;
     if (s->save)
     {
-        while (GetCharPressed() != 0) {}
+        if (s->focused) while (GetCharPressed() != 0) {}
         pico_host_request_redraw_after(app, 1.0 / 30.0);
         return;
     }
-    if (!pico_ui_modal_is_top(app, "settings"))
+    if (PicoUi_ModalOpen(app) && !pico_ui_modal_is_top(app, "settings-confirm"))
     {
         CancelModelDrag(s);
         return;
     }
+    if (pico_ui_modal_is_top(app, "settings-confirm")) s->focused = true;
+    if (!s->focused || s->pointer_claimed) return;
     bool consumed = PicoSubagentSettings_Frame(s->subagents);
-    if (PicoSubagentSettings_TakeLeaveDecision(s->subagents) > 0)
+    int leave = PicoSubagentSettings_TakeLeaveDecision(s->subagents);
+    if (leave < 0) s->pending_browser = 0;
+    if (leave > 0)
     {
         PicoSettingsUi_Close(app);
         return;
@@ -2208,22 +2288,22 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsGeneralTab")) && s->section == 1) {
         PicoSubagentSettings_Blur(s->subagents);
         s->section = 0;
-        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsModalScroll"));
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
         if (scroll.found && scroll.scrollPosition) scroll.scrollPosition->y = 0;
         s->host->ui_relayout_requested = true;
         return;
     }
     if (s->section == 1) {
-        PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("SettingsModalScroll"), CLAY_STRING("SettingsModalScrollHandle"));
-        if (IsKeyPressed(KEY_ESCAPE) || (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsCancel"))))
+        PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("SettingsPanelScroll"), CLAY_STRING("SettingsPanelScrollHandle"));
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsCancel")))
             PicoSettingsUi_Close(app);
         else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsApply")))
             (void)ApplyDraft(s);
         return;
     }
     s->model_dropdown_click_block = false;
-    PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("SettingsModalScroll"),
-                             CLAY_STRING("SettingsModalScrollHandle"));
+    PicoScrollbar_UpdateDrag(&g_scrollbar, CLAY_STRING("SettingsPanelScroll"),
+                             CLAY_STRING("SettingsPanelScrollHandle"));
     if (s->model_dropdown)
     {
         PicoScrollbar_UpdateDrag(&s->model_dropdown_scrollbar, CLAY_STRING("SettingsDefaultMenuScroll"),
@@ -2294,11 +2374,6 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
         CancelModelDrag(s);
         return;
     }
-    if (IsKeyPressed(KEY_ESCAPE))
-    {
-        PicoSettingsUi_Close(app);
-        return;
-    }
     HandleKeys(s);
     if (s->focus_kind != FOCUS_NONE && s->field.bound && !IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
@@ -2323,6 +2398,10 @@ static void CmdSettings(PicoHost *app, PicoAgentId agent_id, const char *args, v
     (void)args;
     (void)agent_id;
     PicoSettingsUi_Open(app);
+    if (SelectHost(app) && g_open && !s_active_settings_state->save) {
+        PicoSubagentSettings_Blur(s_active_settings_state->subagents);
+        s_active_settings_state->section = 0;
+    }
     PicoComposer_SetText(app, "");
     PicoHost_RequestSubmitCancel(app);
 }
@@ -2356,7 +2435,7 @@ static int SettingsInit(PicoHost *app, void **state_out)
     pico_host_command_allow_while_busy(app, "settings");
     pico_host_add_command(app, "subagents", "Manage subagent profiles in Settings", CmdSubagents);
     pico_host_command_allow_while_busy(app, "subagents");
-    pico_host_add_view(app, PICO_SLOT_OVERLAY, 12, SettingsRender);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 12, SettingsOverlay);
     pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, SettingsAfterLayout);
     pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, SettingsDrawFieldOverlay);
     return 0;

@@ -13,6 +13,7 @@
 #include "pico/plugin.h"
 #include "session.h"
 #include "settings.h"
+#include "settings_ui.h"
 #include "subagent_config.h"
 #include "usage.h"
 #include "host_internal.h"
@@ -2014,6 +2015,10 @@ void PicoAuth_Free(PicoHost *app)
     (void)app;
     g_auth_frees++;
 }
+
+/* This agent-only harness has no settings panel. */
+bool PicoSettingsUi_IsOpen(const PicoHost *host) { (void)host; return false; }
+float PicoSettingsUi_ShellWidth(const PicoHost *host) { (void)host; return 0; }
 
 float Pico_ChatColumnMaxPx(const PicoHost *app) { (void)app; return 0; }
 bool PicoChatSel_HasSelection(const PicoHost *app) { (void)app; return false; }

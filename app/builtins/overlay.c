@@ -1,3 +1,4 @@
+#include "settings_ui.h"
 #include "pico/plugin.h"
 #include "host_internal.h"
 #include "render_scale.h"
@@ -381,7 +382,7 @@ void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
             pico_host_request_redraw(app);
         }
     }
-    if (pico_ui_modal_claimed(app) || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
+    if (PicoSettingsUi_BlocksKeyboard(app) || pico_ui_modal_claimed(app) || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }
@@ -429,7 +430,7 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     }
 
     PicoAgent *agent = PicoHost_SelectedAgent(app);
-    if (PicoExts_IsOpen(app) || PicoSettingsUi_IsOpen(app) || PicoPrompt_IsOpen(app) ||
+    if (PicoUi_ModalOpen(app) ||
         (!app->status_warn && !(agent && agent->error)))
     {
         return;

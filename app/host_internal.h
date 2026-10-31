@@ -151,6 +151,7 @@ typedef enum PicoShellIcon {
 struct PicoHost {
     Texture2D shell_icons[PICO_SHELL_ICON_COUNT][2];
     bool shell_icons_tried;
+    float settings_panel_width; /* App-run preference, retained across host reload. */
     struct PicoBrowserService *browser; /* Lazy core-owned CEF service; survives extension reload. */
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
     int workspace_count;

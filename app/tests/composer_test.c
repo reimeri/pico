@@ -3,6 +3,11 @@
 #include "session_ref.h"
 #include "json.h"
 #include "host_internal.h"
+#include "settings_ui.h"
+
+/* This isolated harness has no settings panel. */
+bool PicoSettingsUi_IsOpen(const PicoHost *host) { (void)host; return false; }
+bool PicoSettingsUi_BlocksKeyboard(const PicoHost *host) { (void)host; return false; }
 
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
 const char *MdView_HoveredImagePath(void) { return NULL; }

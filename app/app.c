@@ -2195,6 +2195,7 @@ static PicoResult SubmitPreparedTurn(PicoHost *host, PicoAgent *agent, const cha
     agent->accepted_submit = true;
     PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, shown);
     PicoSession_LogUser(host, agent, text ? text : "", shown, parts);
+    (void)PicoSession_LogUserAction(host, agent);
     PicoAgent_StartTurnParts(host, agent, text, parts);
     free(normalized);
     return PICO_OK;

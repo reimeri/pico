@@ -2818,6 +2818,7 @@ PicoResult PicoAgent_QueueSteering(PicoHost *host, PicoAgent *agent, const char 
     agent->last_activity = PicoClock_Monotonic();
     agent->workspace->last_activity = agent->last_activity;
     agent->inbox_working_activity = agent->last_activity;
+    (void)PicoSession_LogUserAction(host, agent);
     pico_host_request_redraw(host);
     pico_run_hooks(host, PICO_HOOK_ON_STEER, agent->id);
     return PICO_OK;

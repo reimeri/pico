@@ -1306,6 +1306,7 @@ static bool AnswerAsk(PicoHost *app, uint64_t id, const char *answer_json, bool 
                     for (PicoAgent *owner = agent; owner;)
                     {
                         owner->inbox_working_activity = answered;
+                        (void)PicoSession_LogUserAction(app, owner);
                         owner = owner->parent_id ? PicoWorkspace_FindAgent(workspace, owner->parent_id) : NULL;
                     }
                 }

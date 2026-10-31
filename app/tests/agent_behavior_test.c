@@ -1601,6 +1601,13 @@ char *PicoSteering_NotDelivered(const char *display, const char *reason)
     return JsonBuf_Steal(&b);
 }
 
+PicoSessionWriteResult PicoSession_LogUserAction(PicoHost *app, PicoAgent *agent)
+{
+    if (!app || !agent) return PICO_SESSION_WRITE_FAILED;
+    agent->last_user_action = (int64_t)time(NULL);
+    return PICO_SESSION_WRITE_OK;
+}
+
 PicoSessionWriteResult PicoSession_LogUser(PicoHost *app, PicoAgent *agent, const char *content,
                                            const char *display, const char *parts_json)
 {

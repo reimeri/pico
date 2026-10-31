@@ -129,6 +129,9 @@ Vector2 __wrap_GetMouseWheelMoveV(void)
 }
 
 static bool g_clay_frame_test;
+static double g_frame_time;
+double __real_GetTime(void);
+double __wrap_GetTime(void) { return g_frame_time > 0 ? g_frame_time : __real_GetTime(); }
 static bool g_browser_resize_frame;
 static bool g_chat_link_test;
 static int g_chat_link_launches;
@@ -17886,6 +17889,9 @@ static int RunSidebarModeShellCase(bool with_sidebar)
             PicoAgent *agent = PicoHost_FindAgent(f.host, ids[i]);
             if (!agent) goto done;
             agent->inbox_pending = frame < 120 || frame >= 160;
+            /* Age width/unit changes must not feed residue into bottom-follow. */
+            const int ages[] = {9, 59, 60, 3599, 3600, 3 * 86400};
+            agent->last_user_action = (int64_t)time(NULL) - ages[(i + frame / 20) % 6];
             agent->state = frame < 80 ? PICO_AGENT_IDLE :
                            frame < 120 ? (i % 2 ? PICO_AGENT_ERROR : PICO_AGENT_LLM_WAIT) : PICO_AGENT_IDLE;
         }
@@ -18044,13 +18050,18 @@ static int TestSidebarInboxWorkingOrder(void)
         !SidebarInboxAbove(f.host, second, first)) goto done;
 
     phase = "background activity and selection stay put";
+    if (!first->last_user_action || !second->last_user_action) goto done;
+    int64_t submitted = first->last_user_action;
     if (PicoSession_LogAssistant(f.host, first, 0, "Still working", NULL, NULL, NULL, NULL, 0)
             == PICO_SESSION_WRITE_FAILED ||
-        !pico_agent_select(f.host, first->id) || !SidebarInboxAbove(f.host, second, first)) goto done;
+        !pico_agent_select(f.host, first->id) || !SidebarInboxAbove(f.host, second, first) ||
+        first->last_user_action != submitted) goto done;
 
     phase = "accepted steering moves to top";
+    PicoTestClock_SetWallTime((time_t)submitted + 60);
     if (pico_agent_steer(f.host, first->id, "Please also check the edge case", NULL) != PICO_OK ||
-        !SidebarInboxAbove(f.host, first, second)) goto done;
+        !SidebarInboxAbove(f.host, first, second) || first->last_user_action != submitted + 60) goto done;
+    PicoTestClock_SetWallTime(0);
 
     phase = "catalog recency cannot override user order";
     if (PicoSession_LogAssistant(f.host, second, 0, "More progress", NULL, NULL, NULL, NULL, 0)
@@ -18085,6 +18096,7 @@ done:
         fprintf(stderr, "Working inbox order phase: %s\n", phase);
         Fail("Working order must follow accepted user input, not background activity or selection");
     }
+    PicoTestClock_SetWallTime(0);
     return !good;
 }
 
@@ -18152,6 +18164,9 @@ static int TestSidebarInboxWorkingAnswerOrder(InboxAnswerScenario scenario)
     PicoAgent_StartTurn(f.host, second, "Second worker");
     /* A more recent turn is already Working when the older one is answered. */
     phase = "answered session returns to Working";
+    int64_t before_answer = (int64_t)time(NULL) - 120;
+    first->last_user_action = asking->last_user_action = before_answer;
+    PicoTestClock_SetWallTime((time_t)before_answer + 120);
     if (automatic)
     {
         if (!pico_agent_select(f.host, first->id)) goto done;
@@ -18161,8 +18176,12 @@ static int TestSidebarInboxWorkingAnswerOrder(InboxAnswerScenario scenario)
     PICO_TEST_WAIT(PicoAgent_AskUiOpen(asking)) pico_host_pump(f.host);
     commands = PicoHost_LayoutShell(f.host, 800, 0);
     good = SidebarCommandsContain(&commands, "Working · 2") &&
-           (automatic ? SidebarInboxAbove(f.host, second, first) : SidebarInboxAbove(f.host, first, second));
+           (automatic ? SidebarInboxAbove(f.host, second, first) : SidebarInboxAbove(f.host, first, second)) &&
+           (automatic ? first->last_user_action == before_answer :
+                        first->last_user_action == before_answer + 120 &&
+                        asking->last_user_action == before_answer + 120);
 done:
+    PicoTestClock_SetWallTime(0);
     if (asking) PicoAgent_Cancel(asking);
     MatrixStateRelease(&state);
     if (asking && asking != first) (void)PumpUntilIdle(f.host, asking);
@@ -18466,6 +18485,132 @@ static Clay_RenderCommand *FindSidebarTextIn(Clay_RenderCommandArray *commands, 
 static Clay_RenderCommand *FindSidebarSessionTitle(Clay_RenderCommandArray *commands, const char *title)
 {
     return FindSidebarTextIn(commands, title, CLAY_ID("SidebarScroll"));
+}
+
+/* Exercise rendered labels, idle refresh, and persisted/offline rows rather
+ * than a formatter in isolation. Absolute timestamps are independent of mtime. */
+static int TestSidebarInboxAge(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    const char *phase = "fixture";
+    const time_t start = 1800000000;
+    float old_scale = Pico_FontScale();
+    if (!InteractionFixtureInit(&f)) goto done;
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    f.host->sidebar_inbox_mode = true;
+    PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
+    agent->inbox_pending = true;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (FindSidebarSessionTitle(&commands, "0s")) goto done;
+
+    PicoTestClock_SetWallTime(start);
+    PicoSession_Start(f.host, agent, PICO_SESSION_NEW, NULL);
+    if (PicoSession_LogUser(f.host, agent, "Age row", "Age row", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogUserAction(f.host, agent) != PICO_SESSION_WRITE_OK ||
+        PicoSession_LogInboxPending(f.host, agent, true) != PICO_SESSION_WRITE_OK) goto done;
+    struct { int elapsed; const char *label; } cases[] = {
+        {-60, "0s"}, {0, "0s"}, {59, "59s"}, {60, "1m"}, {300, "5m"},
+        {3599, "59m"}, {3600, "1h"}, {7200, "2h"}, {86399, "23h"},
+        {86400, "1d"}, {3 * 86400, "3d"}, {400 * 86400, "400d"},
+    };
+    phase = "units and same-line alignment";
+    float right = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        PicoTestClock_SetWallTime(start + cases[i].elapsed);
+        commands = PicoHost_LayoutShell(f.host, 800, 0);
+        Clay_RenderCommand *age = FindSidebarSessionTitle(&commands, cases[i].label);
+        Clay_RenderCommand *project = FindSidebarSessionTitle(&commands, "Original");
+        if (!age || !project || fabsf(age->boundingBox.y - project->boundingBox.y) > 0.01f ||
+            project->boundingBox.x + project->boundingBox.width >= age->boundingBox.x ||
+            memcmp(&age->renderData.text.textColor, &project->renderData.text.textColor, sizeof(Clay_Color))) goto done;
+        float edge = age->boundingBox.x + age->boundingBox.width;
+        if (i && fabsf(edge - right) > 0.01f) goto done;
+        right = edge;
+    }
+
+    phase = "long workspace names leave room for the age at larger font sizes";
+    Pico_SetFontScale(1.5f);
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_RenderCommand *age = FindSidebarSessionTitle(&commands, "400d");
+    if (!age) goto done;
+    right = age->boundingBox.x + age->boundingBox.width;
+    const char *long_name = "Workspace-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz";
+    if (PicoCatalog_SetProjectName(f.dir, long_name) != 0) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    age = FindSidebarSessionTitle(&commands, "400d");
+    Clay_RenderCommand *project = FindTrimmedCardText(&commands, long_name);
+    if (!age || !project || project->boundingBox.x + project->boundingBox.width >= age->boundingBox.x ||
+        fabsf(age->boundingBox.y - project->boundingBox.y) > 0.01f ||
+        fabsf(age->boundingBox.x + age->boundingBox.width - right) > 0.01f) goto done;
+    Pico_SetFontScale(old_scale);
+
+    phase = "idle labels advance without input";
+    if (!DrainSessionForAssertion(f.host, agent) || !WaitHostTasks(f.host)) goto done;
+    g_frame_time = GetTime() + 1.0; /* Settle row animation without sleeping. */
+    PicoTestClock_SetWallTime(start + 59);
+    PicoHost_Frame(f.host);
+    PicoHost_Frame(f.host);
+    int frames = g_presented_frames;
+    PicoHost_Frame(f.host);
+    if (g_presented_frames != frames) goto done;
+    PicoTestClock_SetWallTime(start + 60);
+    PicoHost_Frame(f.host);
+    if (g_presented_frames <= frames) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindSidebarSessionTitle(&commands, "1m")) goto done;
+    g_frame_time = 0;
+
+    phase = "offline catalog retains the action despite later assistant writes";
+    char path[4096], id[40];
+    snprintf(path, sizeof(path), "%s", agent->session_path);
+    snprintf(id, sizeof(id), "%s", agent->session_id);
+    if (PicoSession_LogAssistant(f.host, agent, 0, "Later assistant activity", NULL, NULL, NULL, NULL, 0)
+            != PICO_SESSION_WRITE_OK || !DrainSessionForAssertion(f.host, agent) ||
+        pico_agent_close(f.host, agent->id) != PICO_OK) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    PicoTestClock_SetWallTime(start + 7200);
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindSidebarSessionTitle(&commands, "2h")) goto done;
+
+    phase = "reconciliation reads action events from the transcript";
+    FILE *file = fopen(path, "ab");
+    if (!file) goto done;
+    fprintf(file, "{\"type\":\"user_action\",\"at\":%lld}\n", (long long)(start + 3600));
+    if (fclose(file) != 0) goto done;
+    PicoCatalogWorkspace *catalog = NULL;
+    int count = PicoCatalog_ScanGrouped(&catalog);
+    bool found = false;
+    for (int w = 0; w < count; w++)
+        for (int i = 0; i < catalog[w].inbox_count; i++)
+            if (!strcmp(catalog[w].inbox_sessions[i].id, id))
+                found = catalog[w].inbox_sessions[i].last_user_action == start + 3600;
+    PicoCatalog_Free(catalog, count);
+    if (!found) goto done;
+
+    phase = "reopen and reset";
+    PicoAgentId reopened = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_RESUME,
+                                      .session_id = id, .select = true};
+    if (pico_main_agent_create(f.host, f.workspace, &options, &reopened) != PICO_OK) goto done;
+    agent = PicoHost_FindAgent(f.host, reopened);
+    if (!agent || agent->last_user_action != start + 3600) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindSidebarSessionTitle(&commands, "1h")) goto done;
+    PicoSession_Reset(f.host, agent);
+    if (agent->last_user_action) goto done;
+    good = true;
+done:
+    g_frame_time = 0;
+    PicoTestClock_SetWallTime(0);
+    Pico_SetFontScale(old_scale);
+    InteractionFixtureFree(&f);
+    if (!good) { fprintf(stderr, "Inbox age phase: %s\n", phase); Fail("Inbox age display and persistence"); }
+    return !good;
 }
 
 /* Live saved sessions remain ordinary catalog rows even when activity pushes
@@ -20283,6 +20428,11 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
         return PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
                PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload());
+    if (argc == 2 && strcmp(argv[1], "--sidebar-age") == 0)
+        return PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
+               PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
+               PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
+               PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE));
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
     if (argc == 2 && strcmp(argv[1], "--sidebar-modes") == 0)
@@ -20355,7 +20505,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
         PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
-        PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
+        PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;

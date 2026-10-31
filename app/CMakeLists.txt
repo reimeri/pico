@@ -1157,7 +1157,7 @@ if(BUILD_TESTING)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(pico_host_workspace_tests PRIVATE tests/test_clock.c tests/test_io.c)
         target_compile_definitions(pico_host_workspace_tests PRIVATE PICO_TEST_CLOCK=1 PICO_TEST_IO=1)
-        target_link_options(pico_host_workspace_tests PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait -Wl,--wrap=fopen -Wl,--wrap=sqlite3_open_v2)
+        target_link_options(pico_host_workspace_tests PRIVATE -Wl,--wrap=GetTime -Wl,--wrap=time -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait -Wl,--wrap=fopen -Wl,--wrap=sqlite3_open_v2)
         target_compile_definitions(pico_host_workspace_tests PRIVATE
             PICO_CLAY_FRAME_FAULT_TESTS=1 PICO_OPENAI_LOGIN_TESTS=1)
         target_link_options(pico_host_workspace_tests PRIVATE

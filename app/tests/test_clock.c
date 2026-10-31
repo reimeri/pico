@@ -98,3 +98,19 @@ int __wrap_pthread_cond_timedwait(pthread_cond_t *cv, pthread_mutex_t *mu,
     pthread_mutex_unlock(&expiry_mu);
     return ETIMEDOUT;
 }
+
+static atomic_int_fast64_t wall_seconds;
+void PicoTestClock_SetWallTime(time_t seconds) { atomic_store(&wall_seconds, seconds); }
+
+time_t __wrap_time(time_t *out)
+{
+    time_t now = (time_t)atomic_load(&wall_seconds);
+    if (!now)
+    {
+        struct timespec real;
+        if (__real_clock_gettime(CLOCK_REALTIME, &real) != 0) return (time_t)-1;
+        now = real.tv_sec;
+    }
+    if (out) *out = now;
+    return now;
+}

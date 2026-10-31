@@ -88,6 +88,10 @@ the selected conversation open and other sessions running.
 - **Inbox** groups active and undismissed sessions under **Needs input** (questions,
   approvals, and errors), **Working**, and **Completed** (finished or stopped turns).
   Rows include their project name and move between sections as work progresses.
+  A muted age beside the name (`12s`, `5m`, `2h`, `3d`) shows time since the last
+  message, steering input, or question/approval answer—not selection or assistant
+  activity. It updates automatically and survives restarts; sessions without a
+  recorded user action show no age.
 - The checkmark beside **Completed** dismisses those sessions from Inbox, including
   unread completions. Their history remains available in Projects.
 - In Inbox, **+** opens a centered project picker without stopping ongoing work.

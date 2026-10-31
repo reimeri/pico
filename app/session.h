@@ -28,6 +28,7 @@ typedef struct PicoSessionInfo {
     uint64_t size;
     bool unseen_complete;
     bool inbox_pending;
+    int64_t last_user_action; /* Unix seconds, zero when no action has been recorded. */
 } PicoSessionInfo;
 
 #define PICO_CATALOG_NAME_MAX 128
@@ -52,6 +53,7 @@ typedef struct PicoCatalogSession {
     uint64_t size;
     bool unseen_complete;
     bool inbox_pending;
+    int64_t last_user_action; /* Unix seconds, zero when no action has been recorded. */
     PicoAgentKind kind;
 } PicoCatalogSession;
 
@@ -231,6 +233,8 @@ int PicoSession_Replay(PicoHost *app, PicoAgent *agent, const char *path,
 void PicoSession_AppendInterrupted(PicoHost *app, PicoAgent *agent);
 void PicoSession_Reset(PicoHost *app, PicoAgent *agent);
 void PicoSession_ReplayToolDetails(PicoHost *app, PicoAgent *agent);
+/* Record accepted user intent independently of selection and background writes. */
+PicoSessionWriteResult PicoSession_LogUserAction(PicoHost *app, PicoAgent *agent);
 PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
                                             PicoNoticeSeverity severity, const char *content, const char *base_dir);
 PicoSessionWriteResult PicoSession_LogSteering(PicoHost *app, PicoAgent *agent, uint64_t id,

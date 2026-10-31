@@ -111,6 +111,7 @@ typedef struct InboxVisit
     bool missing;
     int index;
     double activity;
+    int64_t last_user_action;
     InboxSection section;
 } InboxVisit;
 
@@ -120,6 +121,7 @@ typedef struct SidebarState
     double wall_clock_offset;
     uint64_t inbox_layout_signature;
     double inbox_transition_until;
+    int64_t inbox_age_now, inbox_age_redraw_at;
     SidebarLiveAgent live[PICO_MAX_TOTAL_AGENTS];
     int live_count;
     bool live_snapshot_valid;
@@ -557,6 +559,7 @@ static bool SidebarCatalogEqual(const SidebarState *s, const SidebarScanWorker *
                 strcmp(x->checkout_name, y->checkout_name) || x->worktree != y->worktree ||
                 x->missing_checkout != y->missing_checkout ||
                 x->unseen_complete != y->unseen_complete || x->inbox_pending != y->inbox_pending ||
+                x->last_user_action != y->last_user_action ||
                 x->kind != y->kind || x->mtime != y->mtime || x->mtime_nsec != y->mtime_nsec)
                 return false;
         }
@@ -1971,6 +1974,7 @@ static int EnumerateInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void
                 for (int k = 0; k < drafts; k++)
                     if (DraftAt(s, ws, k) == id) { row.slot = k; break; }
                 row.unseen = agent->unseen_complete;
+                row.last_user_action = agent->last_user_action;
                 row.activity = s->wall_clock_offset + (agent->inbox_activity > 0 ? agent->inbox_activity : agent->last_activity);
                 row.worktree = agent->workspace && agent->workspace->worktree;
                 if (fn(host, s, &row, index, ctx))
@@ -1997,6 +2001,7 @@ static int EnumerateInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void
                 row.slot = drafts + j;
                 row.unseen = session->unseen_complete;
                 PicoAgent *agent = live ? PicoHost_FindAgent(host, live) : NULL;
+                row.last_user_action = agent ? agent->last_user_action : session->last_user_action;
                 row.activity = (double)session->mtime + session->mtime_nsec / 1e9;
                 if (agent && agent->inbox_activity > 0)
                     row.activity = fmax(row.activity, s->wall_clock_offset + agent->inbox_activity);
@@ -2069,6 +2074,24 @@ static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ct
     return s->inbox_count;
 }
 
+/* Borrow frame-owned text, just like titles. Scheduling the next displayed
+ * unit boundary keeps completed/offline rows fresh without continuous redraws. */
+static Clay_String InboxAgeLabel(SidebarState *s, int64_t at)
+{
+    if (at <= 0) return CLAY_STRING("");
+    int64_t age = s->inbox_age_now > at ? s->inbox_age_now - at : 0;
+    int64_t unit = age < 60 ? 1 : age < 3600 ? 60 : age < 86400 ? 3600 : 86400;
+    const char *suffix = unit == 1 ? "s" : unit == 60 ? "m" : unit == 3600 ? "h" : "d";
+    /* Future timestamps (a clock adjustment) display 0s until time catches up. */
+    int64_t next = s->inbox_age_now + unit - age % unit;
+    if (!s->inbox_age_redraw_at || next < s->inbox_age_redraw_at)
+        s->inbox_age_redraw_at = next;
+    char *label = SidebarNextLabel(s);
+    if (!label) return CLAY_STRING("");
+    snprintf(label, SIDEBAR_LABEL_CAPACITY, "%lld%s", (long long)(age / unit), suffix);
+    return CStr(label);
+}
+
 static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
 {
     if (row->section != *(InboxSection *)ctx) return 0;
@@ -2076,7 +2099,9 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
     bool selected = SessionIsSelected(host, row->path, row->session_id, row->live_id);
     float width = SidebarLabelWidth(s->row_width, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0);
     Clay_String title = SidebarDisplayTitle(s, row->title, width);
-    Clay_String project = SidebarDisplayTitle(s, s->workspaces[row->ws_index].name, width);
+    Clay_String age = InboxAgeLabel(s, row->last_user_action);
+    float age_width = age.length ? SidebarTextWidth(age.chars, age.length) + SIDEBAR_ROW_GAP : 0;
+    Clay_String project = SidebarDisplayTitle(s, s->workspaces[row->ws_index].name, width - age_width);
     float height = Pico_FontPx(PICO_FONT_UI) + Pico_FontPx(PICO_FONT_CAPTION) + 14;
     const char *loading_path = NULL, *loading_id = NULL;
     bool loading = PicoSession_LoadTarget(host, &loading_path, &loading_id) &&
@@ -2096,12 +2121,24 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
             RenderSessionDot(s, SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen),
                              (int)(id.id & 0x7fffffff), row->worktree, loading, !row->live_id);
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
-                                     .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                                     .sizing = {.width = CLAY_SIZING_GROW(0),
+                                                .height = CLAY_SIZING_FIXED(height - 10)}}})
             {
                 CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
                     .textColor = row->missing ? COLOR_STATUS_ERR : COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                CLAY_TEXT(project, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
-                    .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .sizing = {.width = CLAY_SIZING_GROW(0),
+                               .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_CAPTION))}}})
+                {
+                    CLAY_TEXT(project, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                        .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    if (age.length)
+                    {
+                        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+                        CLAY_TEXT(age, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                            .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
+                }
             }
         }
     }
@@ -2204,6 +2241,8 @@ static int ClickInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row,
 static void RenderInbox(PicoHost *host, SidebarState *s)
 {
     int counts[INBOX_SECTION_COUNT] = {0};
+    s->inbox_age_now = (int64_t)time(NULL);
+    s->inbox_age_redraw_at = 0;
     VisitInbox(host, s, NULL, NULL);
     uint64_t signature = 0;
     for (int i = 0; i < s->inbox_count; i++)
@@ -3561,6 +3600,13 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
     if (!s)
     {
         return;
+    }
+    int64_t wall_now = (int64_t)time(NULL);
+    if (host->sidebar_inbox_mode && s->inbox_age_redraw_at &&
+        (wall_now >= s->inbox_age_redraw_at || wall_now < s->inbox_age_now))
+    {
+        s->inbox_age_redraw_at = 0;
+        pico_host_request_redraw(host);
     }
     if (s->inbox_transition_until > 0)
     {
